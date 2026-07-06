@@ -727,6 +727,19 @@ export function getAgentShortCode(agentType: string): string {
   );
 }
 
+/** Map of agent name → interactive launcher binary, for agents where they differ */
+const AGENT_EXECUTABLES: Record<string, string> = Object.fromEntries(
+  BUILTIN_AGENTS.filter((a) => a.executable).map((a) => [
+    a.name,
+    a.executable!,
+  ]),
+);
+
+/** The binary an agent launches (e.g. cursor → cursor-agent), for PATH detection */
+export function getAgentExecutable(agentType: string): string {
+  return AGENT_EXECUTABLES[agentType] ?? agentType;
+}
+
 export function findAgentForProcess(
   command: string,
   agents: AgentDef[],

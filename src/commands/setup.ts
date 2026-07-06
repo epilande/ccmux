@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { isDaemonRunningAsync } from "../daemon";
 import { createBuiltinHookAdapters } from "../daemon/adapters";
 import type { HookAdapter, HookAdapterOutcome } from "../daemon/hook-adapter";
-import { BUILTIN_AGENTS } from "../lib/agents";
+import { getAgentExecutable } from "../lib/agents";
 
 function appendAgent(value: string, prev: string[]): string[] {
   return [...prev, value];
@@ -51,27 +51,17 @@ function plural(word: string, n: number): string {
 }
 
 /**
- * The binary an adapter's agent actually launches, for PATH detection.
- * Falls back to the agentType itself when no matching AgentDef exists
- * (shouldn't happen for built-in adapters, but keeps this total).
- */
-export function agentExecutable(agentType: string): string {
-  const def = BUILTIN_AGENTS.find((a) => a.name === agentType);
-  return def?.executable ?? def?.name ?? agentType;
-}
-
-/**
  * agentTypes whose executable isn't found on PATH. Used to skip installing
  * hooks for agents the user doesn't have, unless explicitly named via
  * `--agent`.
  */
 export function findMissingAgents(
   adapters: HookAdapter[],
-  which: (cmd: string) => string | null = (cmd) => Bun.which(cmd),
+  which: (cmd: string) => string | null = Bun.which,
 ): Set<string> {
   const missing = new Set<string>();
   for (const adapter of adapters) {
-    if (which(agentExecutable(adapter.agentType)) === null) {
+    if (which(getAgentExecutable(adapter.agentType)) === null) {
       missing.add(adapter.agentType);
     }
   }
@@ -81,7 +71,7 @@ export function findMissingAgents(
 interface AdapterCommand {
   banner: string;
   run: (adapter: HookAdapter) => Promise<HookAdapterOutcome>;
-  summarize: (changed: number, total: number) => string;
+  summarize: (changed: number, skipped: number, total: number) => string;
 }
 
 async function runAdapterCommand(
@@ -90,6 +80,7 @@ async function runAdapterCommand(
 ): Promise<void> {
   console.log(`${command.banner}\n`);
   let changed = 0;
+  let skipped = 0;
   for (const adapter of adapters) {
     console.log(`${adapter.agentType}:`);
     // One adapter's failure must not abort the rest: a combined run
@@ -98,6 +89,7 @@ async function runAdapterCommand(
       const outcome = await command.run(adapter);
       for (const line of outcome.lines) console.log(`  ${line}`);
       if (outcome.changed) changed += 1;
+      if (outcome.skipped) skipped += 1;
     } catch (error) {
       console.log(
         `  Failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -106,49 +98,43 @@ async function runAdapterCommand(
     }
     console.log();
   }
-  console.log(command.summarize(changed, adapters.length));
+  console.log(command.summarize(changed, skipped, adapters.length));
   await printDaemonRestartHint();
 }
 
-function runInstall(
-  adapters: HookAdapter[],
-  skipped: Set<string>,
-): Promise<void> {
+function runInstall(adapters: HookAdapter[], skip: Set<string>): Promise<void> {
   return runAdapterCommand(adapters, {
     banner: "Setting up ccmux hooks...",
     run: (adapter) => {
-      if (skipped.has(adapter.agentType)) {
+      if (skip.has(adapter.agentType)) {
         return Promise.resolve({
           changed: false,
+          skipped: true,
           lines: [
-            `Skipped: '${agentExecutable(adapter.agentType)}' not found on PATH (use --agent ${adapter.agentType} to install anyway)`,
+            `Skipped: '${getAgentExecutable(adapter.agentType)}' not found on PATH (use --agent ${adapter.agentType} to install anyway)`,
           ],
         });
       }
       return adapter.install();
     },
-    summarize: (changed, total) => {
-      const skippedCount = skipped.size;
-      const attempted = total - skippedCount;
-      if (skippedCount === 0) {
-        if (changed === 0) {
-          return `No changes (${total} ${plural("agent", total)} already set up).`;
-        }
-        if (changed === total) {
-          return `Setup complete for ${total} ${plural("agent", total)}. Restart sessions to pick up hooks.`;
-        }
-        return `Setup complete: ${changed} of ${total} ${plural("agent", total)} newly configured (others already set up).`;
-      }
+    summarize: (changed, skipped, total) => {
+      const attempted = total - skipped;
+      const skipNote =
+        skipped > 0 ? ` (${skipped} skipped: not found on PATH)` : "";
       if (attempted === 0) {
         return "No agents set up: no supported agent executables found on PATH. Use --agent <name> to force install.";
       }
       if (changed === 0) {
-        return `No changes (${attempted} ${plural("agent", attempted)} already set up, ${skippedCount} skipped: not found on PATH).`;
+        const skipDetail =
+          skipped > 0 ? `, ${skipped} skipped: not found on PATH` : "";
+        return `No changes (${attempted} ${plural("agent", attempted)} already set up${skipDetail}).`;
       }
       if (changed === attempted) {
-        return `Setup complete for ${changed} ${plural("agent", changed)} (${skippedCount} skipped: not found on PATH). Restart sessions to pick up hooks.`;
+        return `Setup complete for ${changed} ${plural("agent", changed)}${skipNote}. Restart sessions to pick up hooks.`;
       }
-      return `Setup complete: ${changed} of ${attempted} ${plural("agent", attempted)} newly configured (${skippedCount} skipped: not found on PATH).`;
+      return `Setup complete: ${changed} of ${attempted} ${plural("agent", attempted)} newly configured${
+        skipped > 0 ? skipNote : " (others already set up)"
+      }.`;
     },
   });
 }
@@ -157,7 +143,7 @@ function runUninstall(adapters: HookAdapter[]): Promise<void> {
   return runAdapterCommand(adapters, {
     banner: "Removing ccmux hooks...",
     run: (adapter) => adapter.uninstall(),
-    summarize: (changed, total) => {
+    summarize: (changed, _skipped, total) => {
       if (changed === 0) return "No changes made (see messages above).";
       if (changed === total) return "Hooks fully removed.";
       return `Removed hooks for ${changed} of ${total} ${plural("agent", total)} (see messages above for skipped).`;

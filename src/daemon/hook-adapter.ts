@@ -48,6 +48,12 @@ export interface HookManagerContext {
 export interface HookAdapterOutcome {
   lines: string[];
   changed: boolean;
+  /**
+   * True when the operation was skipped before running (e.g., the agent's
+   * executable isn't on PATH), as opposed to an idempotent no-op. Lets the
+   * CLI summary count skips separately from "already set up".
+   */
+  skipped?: boolean;
 }
 
 /**
