@@ -58,7 +58,7 @@ bun link
 ccmux setup
 ```
 
-`ccmux setup` installs agent hooks for authoritative session matching. ccmux works without it, but it's recommended; see [Session Matching with Hooks](#-session-matching-with-hooks).
+`ccmux setup` installs agent hooks for authoritative session matching. ccmux works without it, but it's recommended; see [Session Matching with Hooks](#-session-matching-with-hooks). Bare `ccmux setup` only configures agents whose executable is found on PATH; use `ccmux setup --agent <name>` to install for a specific agent even if it isn't detected.
 
 ## 🚀 Quick Start
 
@@ -86,38 +86,38 @@ ccmux setup
 
 ### CLI Commands
 
-| Command                                     | Description                                                                       |
-| :------------------------------------------ | :-------------------------------------------------------------------------------- |
-| `ccmux`                                     | Launch interactive TUI picker (default)                                           |
-| `ccmux picker`                              | Launch TUI with options (`--preview`, `--icons <style>`)                          |
-| `ccmux picker --persistent`                 | Dashboard mode (stay open after switching sessions)                               |
-| `ccmux spawn [agent]`                       | Spawn a new agent session in a tmux pane                                          |
-| `ccmux invoke [agent] "prompt"`             | Run a single agent turn and write the response to stdout ([docs](docs/invoke.md)) |
-| `ccmux invoke list`                         | List active and recently-finished invocations (`-j` for JSON)                     |
-| `ccmux invoke cancel <id>`                  | Cancel a running invocation by id (idempotent)                                    |
-| `ccmux invoke result <id>`                  | Print an invocation's full captured output (subprocess agents only)               |
-| `ccmux show`                                | List all active sessions                                                          |
-| `ccmux show --json`                         | Output sessions as JSON                                                           |
-| `ccmux status`                              | Show daemon and session overview                                                  |
-| `ccmux switch <id>`                         | Switch tmux client to a session's pane                                            |
-| `ccmux kill <id>`                           | Kill a session's process                                                          |
-| `ccmux restart <id>`                        | Kill and resume a session                                                         |
-| `ccmux send <id> <text>`                    | Send text to a session's tmux pane                                                |
-| `ccmux screen [id]`                         | Capture pane content                                                              |
-| `ccmux screen --grep <pattern>`             | Search across all session panes                                                   |
-| `ccmux dismiss <id>`                        | Remove a session from tracking                                                    |
-| `ccmux daemon start\|stop\|restart\|status` | Manage the background daemon                                                      |
-| `ccmux config set <key> <value>`            | Set a preference                                                                  |
-| `ccmux config get <key>`                    | Get a single preference value                                                     |
-| `ccmux config list`                         | List all preferences                                                              |
-| `ccmux config themes`                       | List built-in themes (marks the active one)                                       |
-| `ccmux setup`                               | Install hooks for every supported agent (Claude + Codex + Cursor + OpenCode + Pi) |
-| `ccmux setup --agent <name>`                | Limit install/uninstall/status to specific agent(s)                               |
-| `ccmux setup --status`                      | Report install state without writing anything                                     |
-| `ccmux setup --uninstall`                   | Remove hooks (preserves user-owned hook entries)                                  |
-| `ccmux debug`                               | Diagnose session tracking discrepancies                                           |
-| `ccmux sidebar`                             | Launch narrow sidebar TUI (no preview/footer)                                     |
-| `ccmux sidebar --toggle`                    | Smart toggle: spawn/kill sidebars in every window across all tmux sessions        |
+| Command                                     | Description                                                                                     |
+| :------------------------------------------ | :---------------------------------------------------------------------------------------------- |
+| `ccmux`                                     | Launch interactive TUI picker (default)                                                         |
+| `ccmux picker`                              | Launch TUI with options (`--preview`, `--icons <style>`)                                        |
+| `ccmux picker --persistent`                 | Dashboard mode (stay open after switching sessions)                                             |
+| `ccmux spawn [agent]`                       | Spawn a new agent session in a tmux pane                                                        |
+| `ccmux invoke [agent] "prompt"`             | Run a single agent turn and write the response to stdout ([docs](docs/invoke.md))               |
+| `ccmux invoke list`                         | List active and recently-finished invocations (`-j` for JSON)                                   |
+| `ccmux invoke cancel <id>`                  | Cancel a running invocation by id (idempotent)                                                  |
+| `ccmux invoke result <id>`                  | Print an invocation's full captured output (subprocess agents only)                             |
+| `ccmux show`                                | List all active sessions                                                                        |
+| `ccmux show --json`                         | Output sessions as JSON                                                                         |
+| `ccmux status`                              | Show daemon and session overview                                                                |
+| `ccmux switch <id>`                         | Switch tmux client to a session's pane                                                          |
+| `ccmux kill <id>`                           | Kill a session's process                                                                        |
+| `ccmux restart <id>`                        | Kill and resume a session                                                                       |
+| `ccmux send <id> <text>`                    | Send text to a session's tmux pane                                                              |
+| `ccmux screen [id]`                         | Capture pane content                                                                            |
+| `ccmux screen --grep <pattern>`             | Search across all session panes                                                                 |
+| `ccmux dismiss <id>`                        | Remove a session from tracking                                                                  |
+| `ccmux daemon start\|stop\|restart\|status` | Manage the background daemon                                                                    |
+| `ccmux config set <key> <value>`            | Set a preference                                                                                |
+| `ccmux config get <key>`                    | Get a single preference value                                                                   |
+| `ccmux config list`                         | List all preferences                                                                            |
+| `ccmux config themes`                       | List built-in themes (marks the active one)                                                     |
+| `ccmux setup`                               | Install hooks for every supported agent found on PATH (Claude + Codex + Cursor + OpenCode + Pi) |
+| `ccmux setup --agent <name>`                | Limit install/uninstall/status to specific agent(s); forces install even if not found on PATH   |
+| `ccmux setup --status`                      | Report install state without writing anything                                                   |
+| `ccmux setup --uninstall`                   | Remove hooks (preserves user-owned hook entries)                                                |
+| `ccmux debug`                               | Diagnose session tracking discrepancies                                                         |
+| `ccmux sidebar`                             | Launch narrow sidebar TUI (no preview/footer)                                                   |
+| `ccmux sidebar --toggle`                    | Smart toggle: spawn/kill sidebars in every window across all tmux sessions                      |
 
 The daemon starts automatically the first time you run a ccmux command (picker, show, invoke, etc.). It runs on `127.0.0.1:2269` and provides both a REST API and SSE event stream.
 
@@ -370,8 +370,8 @@ An unknown base name falls back to the default theme; an invalid hex value or un
 For reliable session-to-pane mapping (especially with multiple sessions of the same agent in the same project), install hooks:
 
 ```bash
-ccmux setup                    # Install hooks for every supported agent
-ccmux setup --agent codex      # Limit to a single agent
+ccmux setup                    # Install hooks for every supported agent found on PATH
+ccmux setup --agent codex      # Limit to a single agent (installs even if not on PATH)
 ccmux setup --status           # Report install state without writing
 ccmux setup --uninstall        # Remove hooks
 ```
