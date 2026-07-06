@@ -122,7 +122,7 @@ Custom agents via `agents` key in `~/.config/ccmux/ccmux.json` (types in `src/li
 
 ### Session Matching
 
-For reliable multi-session matching, install hooks via `ccmux setup` (all agents) or `ccmux setup --agent <name>`. Currently supported: Claude Code, Codex, Cursor, OpenCode, and Pi.
+For reliable multi-session matching, install hooks via `ccmux setup` (all agents detected on PATH) or `ccmux setup --agent <name>`. Currently supported: Claude Code, Codex, Cursor, OpenCode, and Pi.
 
 **Hook-driven flow:**
 
