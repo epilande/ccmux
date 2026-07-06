@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { isDaemonRunningAsync } from "../daemon";
 import { createBuiltinHookAdapters } from "../daemon/adapters";
 import type { HookAdapter, HookAdapterOutcome } from "../daemon/hook-adapter";
+import { BUILTIN_AGENTS } from "../lib/agents";
 
 function appendAgent(value: string, prev: string[]): string[] {
   return [...prev, value];
@@ -49,6 +50,34 @@ function plural(word: string, n: number): string {
   return n === 1 ? word : `${word}s`;
 }
 
+/**
+ * The binary an adapter's agent actually launches, for PATH detection.
+ * Falls back to the agentType itself when no matching AgentDef exists
+ * (shouldn't happen for built-in adapters, but keeps this total).
+ */
+export function agentExecutable(agentType: string): string {
+  const def = BUILTIN_AGENTS.find((a) => a.name === agentType);
+  return def?.executable ?? def?.name ?? agentType;
+}
+
+/**
+ * agentTypes whose executable isn't found on PATH. Used to skip installing
+ * hooks for agents the user doesn't have, unless explicitly named via
+ * `--agent`.
+ */
+export function findMissingAgents(
+  adapters: HookAdapter[],
+  which: (cmd: string) => string | null = (cmd) => Bun.which(cmd),
+): Set<string> {
+  const missing = new Set<string>();
+  for (const adapter of adapters) {
+    if (which(agentExecutable(adapter.agentType)) === null) {
+      missing.add(adapter.agentType);
+    }
+  }
+  return missing;
+}
+
 interface AdapterCommand {
   banner: string;
   run: (adapter: HookAdapter) => Promise<HookAdapterOutcome>;
@@ -81,18 +110,45 @@ async function runAdapterCommand(
   await printDaemonRestartHint();
 }
 
-function runInstall(adapters: HookAdapter[]): Promise<void> {
+function runInstall(
+  adapters: HookAdapter[],
+  skipped: Set<string>,
+): Promise<void> {
   return runAdapterCommand(adapters, {
     banner: "Setting up ccmux hooks...",
-    run: (adapter) => adapter.install(),
+    run: (adapter) => {
+      if (skipped.has(adapter.agentType)) {
+        return Promise.resolve({
+          changed: false,
+          lines: [
+            `Skipped: '${agentExecutable(adapter.agentType)}' not found on PATH (use --agent ${adapter.agentType} to install anyway)`,
+          ],
+        });
+      }
+      return adapter.install();
+    },
     summarize: (changed, total) => {
+      const skippedCount = skipped.size;
+      const attempted = total - skippedCount;
+      if (skippedCount === 0) {
+        if (changed === 0) {
+          return `No changes (${total} ${plural("agent", total)} already set up).`;
+        }
+        if (changed === total) {
+          return `Setup complete for ${total} ${plural("agent", total)}. Restart sessions to pick up hooks.`;
+        }
+        return `Setup complete: ${changed} of ${total} ${plural("agent", total)} newly configured (others already set up).`;
+      }
+      if (attempted === 0) {
+        return "No agents set up: no supported agent executables found on PATH. Use --agent <name> to force install.";
+      }
       if (changed === 0) {
-        return `No changes (${total} ${plural("agent", total)} already set up).`;
+        return `No changes (${attempted} ${plural("agent", attempted)} already set up, ${skippedCount} skipped: not found on PATH).`;
       }
-      if (changed === total) {
-        return `Setup complete for ${total} ${plural("agent", total)}. Restart sessions to pick up hooks.`;
+      if (changed === attempted) {
+        return `Setup complete for ${changed} ${plural("agent", changed)} (${skippedCount} skipped: not found on PATH). Restart sessions to pick up hooks.`;
       }
-      return `Setup complete: ${changed} of ${total} ${plural("agent", total)} newly configured (others already set up).`;
+      return `Setup complete: ${changed} of ${attempted} ${plural("agent", attempted)} newly configured (${skippedCount} skipped: not found on PATH).`;
     },
   });
 }
@@ -115,7 +171,7 @@ export function createSetupCommand(): Command {
     .option("--uninstall", "Remove hooks and clean agent settings")
     .option(
       "--agent <name>",
-      "Limit to a specific agent (repeatable)",
+      "Limit to a specific agent (repeatable; forces install even if the agent is not on PATH)",
       appendAgent,
       [] as string[],
     )
@@ -148,7 +204,11 @@ export function createSetupCommand(): Command {
       if (options.uninstall) {
         await runUninstall(selected);
       } else {
-        await runInstall(selected);
+        const explicit = (options.agent ?? []).length > 0;
+        const missing = explicit
+          ? new Set<string>()
+          : findMissingAgents(selected);
+        await runInstall(selected, missing);
       }
     });
 }
