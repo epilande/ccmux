@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img alt="ccmux picker showing live agent sessions grouped by project" src="TODO-REUPLOAD-ASSET" width="900">
+  <img alt="ccmux picker showing live agent sessions grouped by project" src="https://github.com/user-attachments/assets/e4c41e9c-9221-47e2-86d4-362dd799651a" width="900">
 </p>
 
 ## ❓ Why?
@@ -125,14 +125,14 @@ The daemon starts automatically the first time you run a ccmux command (picker, 
 
 Press <kbd>P</kbd> to split the picker and preview the highlighted session's live pane content side by side. Press <kbd>Tab</kbd> to focus the preview and act in place: your keystrokes go straight to that agent's pane, so you can approve a permission, answer a question, or type a follow-up without ever leaving ccmux.
 
-TODO-REUPLOAD-ASSET
+https://github.com/user-attachments/assets/7e0d42b3-4e7b-43b8-8d06-72a2d69dd694
 
 ### Sidebar Mode
 
 A compact, always-visible session list that lives alongside your working panes. No preview panel, no footer, just status icons and project names.
 
 <p align="center">
-  <img alt="ccmux sidebar alongside working panes" src="TODO-REUPLOAD-ASSET" width="900">
+  <img alt="ccmux sidebar alongside working panes" src="https://github.com/user-attachments/assets/742642cf-b90b-445d-bc9a-38b6cfa0ab79" width="900">
 </p>
 
 ```bash
