@@ -481,6 +481,171 @@ export function rowHasPrompt(row: ResolvedRow): boolean {
   );
 }
 
+/** Max rendered width of an attention label before it is ellipsized. */
+export const ATTENTION_LABEL_MAX = 12;
+
+/**
+ * The row-1 attention label for a session (pending tool name, "Plan",
+ * "Permission", "Question"), or null when the row needs no attention marker.
+ * Pure and layout-owned so the shared column budget can reserve its width;
+ * the theme-dependent color stays in SessionItem (`getAttentionColor`).
+ */
+export function getAttentionLabel(session: EnrichedSession): string | null {
+  if (session.pendingTool) return session.pendingTool;
+  if (session.inPlanMode || session.attentionType === "plan_approval") {
+    return "Plan";
+  }
+  if (session.status !== "waiting") return null;
+  if (session.attentionType === "permission") return "Permission";
+  if (session.attentionType === "question") return "Question";
+  return null;
+}
+
+/**
+ * The row-1 "N Agent" subagent-count label, or null when it should not show.
+ * Hidden while a tool/plan attention marker is up (that takes the slot), and
+ * only present when the session has live subagents.
+ */
+export function subagentCountLabel(session: EnrichedSession): string | null {
+  if (
+    !session.pendingTool &&
+    !session.inPlanMode &&
+    session.subagents &&
+    session.subagents.length > 0
+  ) {
+    return `${session.subagents.length} Agent`;
+  }
+  return null;
+}
+
+/**
+ * Rendered width of row 1's trailing labels (attention + subagent count) for
+ * a session. SessionList folds this to a list-wide max so every row reserves
+ * an identical fixed-width cell and the path column can't misalign on waiting
+ * rows. Sidebar collapses the attention label to a single "!" and hides the
+ * subagent count.
+ */
+export function trailingLabelsWidth(
+  session: EnrichedSession,
+  sidebar: boolean,
+): number {
+  const attn = getAttentionLabel(session);
+  if (sidebar) return attn ? 1 : 0;
+  const sub = subagentCountLabel(session);
+  const attnW = attn ? Math.min(attn.length, ATTENTION_LABEL_MAX) : 0;
+  const subW = sub ? sub.length : 0;
+  const gap = attn && sub ? 1 : 0; // the space between the two labels
+  return attnW + subW + gap;
+}
+
+/** Split cwd parts plus branch state, fed to {@link fitProjectCell}. */
+export interface ProjectCellInput {
+  /** Path prefix (e.g. "epilande/"); pass "" in compact/dirname mode. */
+  prefix: string;
+  dirname: string;
+  branch: string | null;
+  isWorktree: boolean;
+}
+
+/** Display strings for the project cell after fitting to a width budget. */
+export interface ProjectCellDisplay {
+  prefix: string;
+  dirname: string;
+  /** ":"-prefixed branch (with the `~`/`+` conventions), or "" when no branch. */
+  branchLabel: string;
+}
+
+/** Slice `text` to at most `maxLen` chars, marking any cut with a trailing "…". */
+function sliceEllipsis(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return text.slice(0, Math.max(1, maxLen - 1)) + "…";
+}
+
+/**
+ * The `:branch` label with the existing conventions: capped at `maxBranchLen`
+ * with a trailing `~`, worktree `+` appended.
+ */
+function branchLabelFor(
+  branch: string,
+  isWorktree: boolean,
+  maxBranchLen: number,
+): string {
+  const shown =
+    branch.length > maxBranchLen
+      ? branch.slice(0, maxBranchLen - 1) + "~"
+      : branch;
+  return ":" + shown + (isWorktree ? "+" : "");
+}
+
+/** Shorten a branch label to `avail` chars using the `~` marker; "" if too tight. */
+function shortenBranchLabel(
+  branch: string,
+  isWorktree: boolean,
+  avail: number,
+): string {
+  if (avail < 3) return ""; // no room for ":" plus a usable char
+  const wt = isWorktree ? "+" : "";
+  const bodyLen = Math.max(1, avail - 1 /* colon */ - 1 /* ~ */ - wt.length);
+  if (branch.length <= bodyLen) return ":" + branch + wt;
+  return ":" + branch.slice(0, bodyLen) + "~" + wt;
+}
+
+/**
+ * Fit the project (path:branch) cell into `budget` chars, never silently
+ * clipping: any shortening shows `…` (or the existing `~` for the branch).
+ * Shrink order matches the design: prefix first (drop it under 2 usable
+ * chars), then the dirname (kept to a small floor), then the branch as a last
+ * resort. When everything already fits, the rendering is unchanged.
+ */
+export function fitProjectCell(
+  input: ProjectCellInput,
+  budget: number,
+  maxBranchLen: number,
+): ProjectCellDisplay {
+  const { prefix, dirname, branch, isWorktree } = input;
+  let branchLabel = branch
+    ? branchLabelFor(branch, isWorktree, maxBranchLen)
+    : "";
+  const branchWidth = branchLabel.length;
+
+  if (prefix.length + dirname.length + branchWidth <= budget) {
+    return { prefix, dirname, branchLabel };
+  }
+
+  // 1. Shrink the prefix first: give it whatever is left after dirname+branch.
+  const availForPrefix = budget - dirname.length - branchWidth;
+  let outPrefix: string;
+  if (availForPrefix < 2) {
+    outPrefix = "";
+  } else if (prefix.length > availForPrefix) {
+    outPrefix = sliceEllipsis(prefix, availForPrefix);
+  } else {
+    outPrefix = prefix;
+  }
+  if (outPrefix.length + dirname.length + branchWidth <= budget) {
+    return { prefix: outPrefix, dirname, branchLabel };
+  }
+
+  // 2. Prefix minimal but dirname+branch still overflow: truncate the dirname,
+  //    keeping a small floor so it stays identifiable.
+  const DIRNAME_FLOOR = 5;
+  const availForDirname = budget - outPrefix.length - branchWidth;
+  const outDirname =
+    dirname.length <= availForDirname
+      ? dirname
+      : sliceEllipsis(dirname, Math.max(DIRNAME_FLOOR, availForDirname));
+  if (outPrefix.length + outDirname.length + branchWidth <= budget) {
+    return { prefix: outPrefix, dirname: outDirname, branchLabel };
+  }
+
+  // 3. Last resort: shorten the branch further with the `~` marker.
+  if (branch) {
+    const availForBranch = budget - outPrefix.length - outDirname.length;
+    branchLabel = shortenBranchLabel(branch, isWorktree, availForBranch);
+  }
+  return { prefix: outPrefix, dirname: outDirname, branchLabel };
+}
+
 /** Width allocated to a resolved entry on a "right side" (right-aligned column). */
 export function entryRightWidth(entry: ResolvedEntry): number {
   switch (entry.field) {

@@ -31,6 +31,11 @@ import {
   rowHasContent,
   rowHasPrompt,
   entryRightWidth,
+  getAttentionLabel,
+  subagentCountLabel,
+  trailingLabelsWidth,
+  fitProjectCell,
+  ATTENTION_LABEL_MAX,
 } from "./session-columns";
 import { theme } from "../theme";
 import { formatRelativeTime, formatVersion, shortenCwd } from "../utils/format";
@@ -94,27 +99,48 @@ function formatProjectPath(
 }
 
 /**
- * Rendered char width of the `project` cell, used to budget an inline prompt
- * that shares row 1 with it. Mirrors the project FieldCell: dirname (plus the
- * path prefix in `full` mode) and the `:branch` suffix (branch truncated to
- * `maxBranchLen`, `+` appended for worktrees).
+ * The project cell's path parts fit to a width budget. The compact/dirname
+ * mode drops the prefix, so pass "" for it. Computed off the same
+ * `fitProjectCell` the FieldCell renders from, so the render and the width
+ * budget can never diverge.
  */
-function projectCellWidth(
+function fittedProjectCell(
   session: EnrichedSession,
   mode: string | undefined,
+  budget: number,
   maxBranchLen: number,
-): number {
+) {
   const { prefix, dirname } = formatProjectPath(
     session.paneCwd ?? session.cwd,
     2,
   );
-  let width = dirname.length;
-  if (mode === "full") width += prefix.length;
-  if (session.gitBranch) {
-    const shown = Math.min(session.gitBranch.length, maxBranchLen);
-    width += 1 + shown + (session.isWorktree ? 1 : 0);
-  }
-  return width;
+  return fitProjectCell(
+    {
+      prefix: mode === "full" ? prefix : "",
+      dirname,
+      branch: session.gitBranch,
+      isWorktree: session.isWorktree,
+    },
+    budget,
+    maxBranchLen,
+  );
+}
+
+/**
+ * Rendered char width of the `project` cell, used to budget an inline prompt
+ * that shares row 1 with it. Derived from {@link fittedProjectCell} so it
+ * reflects the truncated (`…`) rendering, not the natural width.
+ */
+function projectCellWidth(
+  session: EnrichedSession,
+  mode: string | undefined,
+  budget: number,
+  maxBranchLen: number,
+): number {
+  const fitted = fittedProjectCell(session, mode, budget, maxBranchLen);
+  return (
+    fitted.prefix.length + fitted.dirname.length + fitted.branchLabel.length
+  );
 }
 
 const Bold: Component<{ when: boolean; children: string }> = (p) => (
@@ -122,17 +148,6 @@ const Bold: Component<{ when: boolean; children: string }> = (p) => (
     <b>{p.children}</b>
   </Show>
 );
-
-function getAttentionLabel(session: EnrichedSession): string | null {
-  if (session.pendingTool) return session.pendingTool;
-  if (session.inPlanMode || session.attentionType === "plan_approval") {
-    return "Plan";
-  }
-  if (session.status !== "waiting") return null;
-  if (session.attentionType === "permission") return "Permission";
-  if (session.attentionType === "question") return "Question";
-  return null;
-}
 
 function getAttentionColor(session: EnrichedSession): string {
   if (session.pendingTool) return theme.yellow;
@@ -197,6 +212,8 @@ interface FieldRenderContext {
   maxBranchLen: number;
   /** Char budget for the prompt cell; keeps it from overflowing its row. */
   maxPromptLen: number;
+  /** Char budget for the project cell; drives its `…` truncation. */
+  maxProjectLen: number;
 }
 
 function dimColor(ctx: FieldRenderContext, color?: string): string | undefined {
@@ -290,17 +307,31 @@ const FieldCell: Component<{
       const compact = entry.mode !== "full";
       // Functions, not consts: this component body runs once per mount,
       // and rows stay mounted across SSE deltas — a const here would
-      // freeze the cell on its mount-time value.
-      const path = () =>
-        formatProjectPath(ctx.session.paneCwd ?? ctx.session.cwd, 2);
+      // freeze the cell on its mount-time value. `fitted` applies the `…`
+      // truncation for the non-highlighted path; the search-highlight path
+      // stays untruncated (its markup can't be sliced by char count, same
+      // documented tradeoff as the prompt cell).
+      const fitted = () =>
+        fittedProjectCell(
+          ctx.session,
+          entry.mode,
+          ctx.maxProjectLen,
+          ctx.maxBranchLen,
+        );
       const dirnameColor = () =>
         ctx.isActiveSession && !ctx.selected
           ? dimColor(ctx, theme.text)
           : dimColor(ctx, undefined);
       return (
+        // When a prompt shares this row (inline mode), the prompt is the
+        // flexible filler and the project must NOT shrink below its fitted
+        // width, else flex squeezes the path into a mid-word clip (the `…`
+        // and gap artifacts). The prompt (flexShrink=1) absorbs the squeeze
+        // instead. When the project is the filler (no prompt), keep
+        // flexShrink=1 as the backstop behind `fitProjectCell`.
         <box
           flexGrow={props.promptOnRow ? 0 : 1}
-          flexShrink={1}
+          flexShrink={props.promptOnRow ? 0 : 1}
           flexDirection="row"
         >
           <Show
@@ -313,12 +344,12 @@ const FieldCell: Component<{
               />
             }
           >
-            <Show when={!compact}>
-              <text fg={dimColor(ctx, theme.subtext)}>{path().prefix}</text>
+            <Show when={!compact && fitted().prefix}>
+              <text fg={dimColor(ctx, theme.subtext)}>{fitted().prefix}</text>
             </Show>
             <text fg={dirnameColor()}>
               <Bold when={ctx.selected || !!ctx.isActiveSession}>
-                {path().dirname}
+                {fitted().dirname}
               </Bold>
             </text>
           </Show>
@@ -331,11 +362,7 @@ const FieldCell: Component<{
                 }
                 fallback={
                   <text fg={dimColor(ctx, theme.blue)}>
-                    :
-                    {branch().length > ctx.maxBranchLen
-                      ? branch().slice(0, ctx.maxBranchLen - 1) + "~"
-                      : branch()}
-                    {ctx.session.isWorktree ? "+" : ""}
+                    {fitted().branchLabel}
                   </text>
                 }
               >
@@ -469,8 +496,12 @@ function row2LeadingIndent(row1Left: ResolvedEntry[]): number {
 const RowRender: Component<{
   row: ResolvedRow;
   ctx: FieldRenderContext;
-  /** Render attention indicator + subagent count after row.left (row 1 only). */
+  /** Render the trailing attention/subagent cell after row.left (row 1 only). */
   showAttention?: boolean;
+  /** This row's own trailing-labels width (attention + subagent count). The
+   * cell is sized to exactly its content, so an unlabeled row reserves 0 and
+   * its prompt runs all the way to the right-side metadata. */
+  attentionWidth?: number;
   /** Optional fixed-width spacer prepended after the active indicator. */
   leadingIndent?: number;
 }> = (props) => {
@@ -478,6 +509,16 @@ const RowRender: Component<{
   // so the standalone spacer would double up and split the space. Drop it, and
   // tell the project cell to give up its own flex-grow.
   const hasPrompt = createMemo(() => rowHasPrompt(props.row));
+  // The project cell also flex-grows (when no prompt shares its row), so it is
+  // the filler and the standalone spacer is redundant. Rendering both splits
+  // the slack and squeezes the project cell by ~1 column, which drops its `…`.
+  // Only add the spacer when the row has no flexible filler of its own.
+  const hasFlexFiller = createMemo(
+    () =>
+      hasPrompt() ||
+      props.row.left.some((e) => e.field === "project") ||
+      props.row.right.some((e) => e.field === "project"),
+  );
   return (
     <box flexDirection="row" gap={1} width="100%" height={1}>
       <Show when={(props.leadingIndent ?? 0) > 0}>
@@ -493,27 +534,40 @@ const RowRender: Component<{
           />
         )}
       </For>
-      <Show when={!hasPrompt()}>
+      <Show when={!hasFlexFiller()}>
         <box flexGrow={1} flexShrink={1} />
       </Show>
-      <Show when={props.showAttention && props.ctx.attentionLabel}>
-        <text fg={props.ctx.attentionColor}>
-          {props.ctx.sidebar ? "!" : props.ctx.attentionLabel}
-        </text>
-      </Show>
-      <Show
-        when={
-          props.showAttention &&
-          !props.ctx.sidebar &&
-          !props.ctx.session.pendingTool &&
-          !props.ctx.session.inPlanMode &&
-          props.ctx.session.subagents &&
-          props.ctx.session.subagents.length > 0
-        }
-      >
-        <text fg={props.ctx.dimmed ? theme.border : theme.teal}>
-          {props.ctx.session.subagents.length} Agent
-        </text>
+      {/* Per-row trailing-labels cell, sized to exactly its own content
+          (`attentionWidth`), so an unlabeled row reserves nothing and its
+          prompt extends into this space. `width` + `flexShrink={0}` keep the
+          rendered width identical to the value the prompt/project budgets
+          subtract, so the truncation `…` lands right before the label. */}
+      <Show when={props.showAttention && (props.attentionWidth ?? 0) > 0}>
+        <box
+          width={props.attentionWidth}
+          flexShrink={0}
+          flexDirection="row"
+          gap={1}
+        >
+          <Show when={props.ctx.attentionLabel}>
+            {(label: () => string) => (
+              <text fg={props.ctx.attentionColor}>
+                {props.ctx.sidebar
+                  ? "!"
+                  : truncateText(label(), ATTENTION_LABEL_MAX)}
+              </text>
+            )}
+          </Show>
+          <Show
+            when={!props.ctx.sidebar && subagentCountLabel(props.ctx.session)}
+          >
+            {(label: () => string) => (
+              <text fg={props.ctx.dimmed ? theme.border : theme.teal}>
+                {label()}
+              </text>
+            )}
+          </Show>
+        </box>
       </Show>
       <For each={props.row.right}>
         {(entry) => (
@@ -565,12 +619,72 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     return 60;
   };
 
+  // This row's own trailing-labels cell width. Per-row (not a list-wide max),
+  // so an unlabeled row reserves nothing and its prompt runs to the right-side
+  // metadata; a labeled row's prompt/project budgets subtract exactly this so
+  // the truncation `…` lands right before the label.
+  const attentionWidth = () =>
+    trailingLabelsWidth(props.session, !!props.sidebar);
+
+  // The project cell renders inside SessionList's scrollbox, whose scrollbar
+  // (and content inset) consume a couple of columns the terminal width does
+  // not reflect. Without reserving them, `fitProjectCell` fills right up to a
+  // box that is a hair narrower than budgeted and OpenTUI hard-clips the
+  // trailing char, dropping the very `…` we added. A direct mount (tests, no
+  // scrollbox) still needs a 1-char cushion so content never exactly equals
+  // its box (OpenTUI clips on an exact fit too). `props.layout` is supplied
+  // only by SessionList, so it distinguishes the two contexts.
+  const scrollbarReserve = () => (props.layout ? 3 : 1);
+
+  // Prompt-floor budgeting shorthand: how many chars an inline prompt is
+  // guaranteed on row 1 before the project cell starts yielding width. The
+  // prompt truncates down to this floor first; only then does the path give
+  // up space. Bounded by data length so a short prompt reserves less.
+  const PROMPT_MIN = 16;
+
+  // Budget for the project cell's `…` truncation. Full width minus the item
+  // padding, every row-1 sibling except project (and the prompt, budgeted via
+  // its floor below), the reserved attention cell, and a small margin. Reads
+  // only the raw prompt length (capped at PROMPT_MIN), never maxPromptLen, so
+  // maxPromptLen can depend on the fitted project width without a cycle.
+  const maxProjectLen = () => {
+    const cols = columns();
+    const promptOnRow1 = rowHasPrompt(cols.row1);
+    const siblings = [...cols.row1.left, ...cols.row1.right].filter(
+      (e) => e.field !== "project" && e.field !== "prompt",
+    );
+    const cells = siblings.reduce((acc, e) => {
+      const w =
+        e.field === "pr"
+          ? prLabel(props.session, e.mode).length
+          : entryRightWidth(e);
+      return acc + (w > 0 ? w + 1 : 0); // +1 for the inter-cell gap
+    }, 0);
+    const attn = attentionWidth();
+    const promptFloor =
+      promptOnRow1 && hasFieldData(props.session, "prompt")
+        ? Math.min(
+            normalizePrompt(props.session.lastPrompt ?? "").length,
+            PROMPT_MIN,
+          ) + 1
+        : 0;
+    const reserved =
+      2 + // item paddingLeft/paddingRight
+      cells +
+      (attn > 0 ? attn + 1 : 0) +
+      promptFloor +
+      2 + // small margin so the truncated content sits inside its flex box
+      scrollbarReserve(); // scrollbox eats width the terminal size hides
+    return Math.max(12, effectiveWidth() - reserved);
+  };
+
   // Budget for the prompt cell: full width minus the item's horizontal
   // padding, the leading indent, every sibling cell on the prompt's row, and
   // the inter-cell gaps. The prompt rides row 1 when inline (sharing it with
-  // project) and row 2 otherwise; budget against whichever row it landed on
-  // so the `…` truncation lands just before the right-aligned metadata.
-  // Conservative floor so tiny viewports still show something identifiable.
+  // project, and with the reserved attention cell) and row 2 otherwise; budget
+  // against whichever row it landed on so the `…` truncation lands just before
+  // the right-aligned metadata. Conservative floor so tiny viewports still
+  // show something identifiable.
   const maxPromptLen = () => {
     const cols = columns();
     const onRow1 = rowHasPrompt(cols.row1);
@@ -583,14 +697,23 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
         e.field === "pr"
           ? prLabel(props.session, e.mode).length
           : e.field === "project"
-            ? projectCellWidth(props.session, e.mode, maxBranchLen())
+            ? projectCellWidth(
+                props.session,
+                e.mode,
+                maxProjectLen(),
+                maxBranchLen(),
+              )
             : entryRightWidth(e);
       return acc + (w > 0 ? w + 1 : 0); // +1 for the inter-cell gap
     }, 0);
+    // The reserved attention cell only exists on row 1, so it eats into the
+    // prompt budget only when the prompt shares that row (inline mode).
+    const attn = onRow1 ? attentionWidth() : 0;
     const reserved =
       2 + // item paddingLeft/paddingRight
       (onRow1 ? 0 : row2LeadingIndent(cols.row1.left)) +
       cells +
+      (attn > 0 ? attn + 1 : 0) +
       2; // small margin so the `…` lands inside the flexed box, not clipped
     return Math.max(16, effectiveWidth() - reserved);
   };
@@ -681,6 +804,9 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     get maxPromptLen() {
       return maxPromptLen();
     },
+    get maxProjectLen() {
+      return maxProjectLen();
+    },
   };
 
   const row2HasContent = createMemo(() =>
@@ -726,7 +852,12 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
           }
         }}
       >
-        <RowRender row={row1()} ctx={ctx} showAttention />
+        <RowRender
+          row={row1()}
+          ctx={ctx}
+          showAttention
+          attentionWidth={attentionWidth()}
+        />
         <Show when={row2HasContent()}>
           <RowRender
             row={row2()}

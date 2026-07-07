@@ -235,6 +235,39 @@ describe("SessionItem", () => {
     expect(frame).toContain("2 Agent");
   });
 
+  it("ellipsizes an attention label longer than the cap", async () => {
+    const frame = await renderItem(
+      {
+        session: mockEnrichedSession({
+          status: "waiting",
+          attentionType: "permission",
+          pendingTool: "Bash(git status --porcelain)",
+        }),
+      },
+      160,
+    );
+    // Capped to 12 chars with an ellipsis; the full tool string never shows.
+    expect(frame).toContain("…");
+    expect(frame).not.toContain("Bash(git status --porcelain)");
+  });
+
+  it("ellipsizes a long path instead of clipping it mid-word", async () => {
+    // At a narrow width the dirname no longer fits; it must show `…`, not a
+    // silent hard clip like "claude-tool".
+    const frame = await renderItem(
+      {
+        session: mockEnrichedSession({
+          cwd: "/Users/epilande/Code/epilande/claude-toolkit",
+          gitBranch: "main",
+        }),
+      },
+      40,
+    );
+    expect(frame).toContain("…");
+    expect(frame).toContain("claude-to");
+    expect(frame).not.toContain("claude-toolkit");
+  });
+
   it("shows agent column at wide width", async () => {
     const frame = await renderItem(
       { session: mockEnrichedSession({ agentType: "claude" }) },
