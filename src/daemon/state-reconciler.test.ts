@@ -2022,6 +2022,7 @@ describe("collectPaneTrackedSources (wiring)", () => {
       attentionState: null,
       lastSeenAt: null,
       lastPrompt: null,
+      prompts: [],
       ...overrides,
     };
   }

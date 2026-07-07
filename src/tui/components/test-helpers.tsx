@@ -35,6 +35,7 @@ export function mockEnrichedSession(
     attentionState: null,
     lastSeenAt: null,
     lastPrompt: null,
+    prompts: [],
     ...overrides,
   };
 }

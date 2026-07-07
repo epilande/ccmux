@@ -28,6 +28,7 @@ const mockSession: Session = {
   attentionState: null,
   lastSeenAt: null,
   lastPrompt: null,
+  prompts: [],
 };
 
 let mockMarkerMap: Map<string, SessionPidMarker | null> | null = null;
@@ -108,6 +109,97 @@ describe("SessionManager", () => {
     const session2 = manager.getSession("test-id");
     expect(session2?.statusChangedAt).toBe(changedAt);
     expect(session2?.previousStatus).toBe("idle");
+  });
+
+  it("initializes prompts as an empty array", () => {
+    const manager = new SessionManager();
+    const session = manager.createSession(
+      "test-id",
+      "/some/path/test-id.jsonl",
+    );
+    expect(session.prompts).toEqual([]);
+  });
+
+  it("replaces prompts and flips changed when the array differs", () => {
+    const manager = new SessionManager();
+    manager.createSession("test-id", "/some/path/test-id.jsonl");
+
+    const changed = manager.updateSession("test-id", {
+      prompts: ["first", "second"],
+    });
+    expect(changed).toBe(true);
+    expect(manager.getSession("test-id")?.prompts).toEqual(["first", "second"]);
+
+    // An identical array is a no-op (shallow-equal replace guard).
+    const again = manager.updateSession("test-id", {
+      prompts: ["first", "second"],
+    });
+    expect(again).toBe(false);
+  });
+
+  it("appends to prompts on a marker-style update (lastPrompt only, no state.prompts)", () => {
+    const manager = new SessionManager();
+    manager.createSession("test-id", "/some/path/test-id.jsonl");
+
+    // Marker-driven agents (Cursor/Pi/OpenCode) set lastPrompt but not prompts.
+    manager.updateSession("test-id", { lastPrompt: "first turn" });
+    manager.updateSession("test-id", { lastPrompt: "second turn" });
+    expect(manager.getSession("test-id")?.prompts).toEqual([
+      "first turn",
+      "second turn",
+    ]);
+
+    // A re-fire of the same lastPrompt does not change it, so no double-append.
+    manager.updateSession("test-id", { lastPrompt: "second turn" });
+    expect(manager.getSession("test-id")?.prompts).toEqual([
+      "first turn",
+      "second turn",
+    ]);
+  });
+
+  it("replaces (does not double) prompts on a log-style update (both fields)", () => {
+    const manager = new SessionManager();
+    manager.createSession("test-id", "/some/path/test-id.jsonl");
+
+    // Claude/Codex set prompts alongside lastPrompt: the replace branch owns
+    // the index, so the marker-style append must not also fire.
+    manager.updateSession("test-id", {
+      lastPrompt: "hello",
+      prompts: ["hello"],
+    });
+    expect(manager.getSession("test-id")?.prompts).toEqual(["hello"]);
+
+    manager.updateSession("test-id", {
+      lastPrompt: "hello world",
+      prompts: ["hello", "hello world"],
+    });
+    expect(manager.getSession("test-id")?.prompts).toEqual([
+      "hello",
+      "hello world",
+    ]);
+  });
+
+  it("clears prompts when a pane-tracked row is reused by a new process", () => {
+    const manager = new SessionManager();
+    manager.createPaneTrackedSession({
+      agentType: "cursor",
+      paneId: "%1",
+      cwd: "/tmp/proj",
+      pid: 100,
+    });
+    manager.updateSession("cursor_pane1", { lastPrompt: "old run prompt" });
+    expect(manager.getSession("cursor_pane1")?.prompts).toEqual([
+      "old run prompt",
+    ]);
+
+    // A new pid in the same pane is a new run: identity (incl. prompts) resets.
+    manager.createPaneTrackedSession({
+      agentType: "cursor",
+      paneId: "%1",
+      cwd: "/tmp/proj",
+      pid: 200,
+    });
+    expect(manager.getSession("cursor_pane1")?.prompts).toEqual([]);
   });
 
   it("should initialize statusChangedAt and previousStatus as null", () => {

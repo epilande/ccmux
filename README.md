@@ -26,7 +26,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 👁️ **Live Preview**: Split-pane view of the selected session's pane content
 - ⚡ **Act in Place**: Tab into the preview to approve, answer, or type, keys go straight to that pane
 - 📊 **Sidebar Mode**: Compact always-visible session rail docked beside your working panes
-- 🔍 **Fuzzy Search**: Find sessions by project, branch, path, last prompt, or pane content
+- 🔍 **Fuzzy Search**: Fuzzy-match sessions by project, branch, or path; substring-match any recent prompt (not just the last), captured pane content, and on-demand live Claude/Codex transcripts (user and assistant text)
 - 📂 **Session Grouping**: Collapsible project groups with reordering and pinning
 - 🌿 **Git & PR Aware**: Branch and worktree detection, open PRs with live CI and review status
 - 🤖 **Background Agents & Subagents**: Claude Code background agents get rows too; nested Task agent waiting states surface
@@ -258,20 +258,24 @@ ccmux config get <key>
 ccmux config list
 ```
 
-| Key                 | Values                                                                       | Default            | Description                                                     |
-| :------------------ | :--------------------------------------------------------------------------- | :----------------- | :-------------------------------------------------------------- |
-| `iconStyle`         | `dot`, `emoji`, `nerdfont`, `none`                                           | `dot`              | Status icon style                                               |
-| `theme`             | `catppuccin-*`, `tokyo-night*`, `dracula`, `gruvbox-*`, `nord`, `rose-pine*` | `catppuccin-mocha` | TUI color theme (resolved at launch; see [Theme](#-theme))      |
-| `showPreview`       | `true`, `false`                                                              | `false`            | Show preview panel on launch                                    |
-| `previewWidth`      | `20`–`80`                                                                    | `40`               | Preview panel width (percentage)                                |
-| `command`           | any non-blank string                                                         | `claude`           | CLI command used for session restart                            |
-| `groupBy`           | `project`, `cwd`, `session`, `window`, `none`                                | `project`          | How sessions are grouped in the TUI                             |
-| `promptDisplay`     | `inline`, `row2`, `off`                                                      | `inline`           | Prompt display: inline on row 1, its own row, or hidden         |
-| `backgroundAgents`  | `true`, `false`                                                              | `true`             | Show Claude background agents as rows (daemon restart required) |
-| `searchPaneContent` | `true`, `false`                                                              | `true`             | Include captured pane content in TUI search                     |
-| `persistent`        | `true`, `false`                                                              | `false`            | Keep picker open after switching sessions (dashboard mode)      |
-| `sidebar.width`     | `10`–`80`                                                                    | `30`               | Sidebar pane width in columns                                   |
-| `sidebar.position`  | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                   |
+| Key                 | Values                                                                       | Default            | Description                                                                         |
+| :------------------ | :--------------------------------------------------------------------------- | :----------------- | :---------------------------------------------------------------------------------- |
+| `iconStyle`         | `dot`, `emoji`, `nerdfont`, `none`                                           | `dot`              | Status icon style                                                                   |
+| `theme`             | `catppuccin-*`, `tokyo-night*`, `dracula`, `gruvbox-*`, `nord`, `rose-pine*` | `catppuccin-mocha` | TUI color theme (resolved at launch; see [Theme](#-theme))                          |
+| `showPreview`       | `true`, `false`                                                              | `false`            | Show preview panel on launch                                                        |
+| `previewWidth`      | `20`–`80`                                                                    | `40`               | Preview panel width (percentage)                                                    |
+| `command`           | any non-blank string                                                         | `claude`           | CLI command used for session restart                                                |
+| `groupBy`           | `project`, `cwd`, `session`, `window`, `none`                                | `project`          | How sessions are grouped in the TUI                                                 |
+| `promptDisplay`     | `inline`, `row2`, `off`                                                      | `inline`           | Prompt display: inline on row 1, its own row, or hidden                             |
+| `backgroundAgents`  | `true`, `false`                                                              | `true`             | Show Claude background agents as rows (daemon restart required)                     |
+| `searchPaneContent` | `true`, `false`                                                              | `true`             | Include captured pane content in TUI search                                         |
+| `searchPaneLines`   | `10`–`500`                                                                   | `100`              | Lines of pane content scanned in TUI search                                         |
+| `searchTranscript`  | `true`, `false`                                                              | `true`             | Search live Claude/Codex transcripts (full history + assistant text) via the daemon |
+| `persistent`        | `true`, `false`                                                              | `false`            | Keep picker open after switching sessions (dashboard mode)                          |
+| `sidebar.width`     | `10`–`80`                                                                    | `30`               | Sidebar pane width in columns                                                       |
+| `sidebar.position`  | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                                       |
+
+> **Note:** Prompt search uses the daemon's in-memory prompt index, which is tail-bounded for Claude sessions after a daemon restart (only recent prompts are re-read). `searchTranscript` reads the transcript file on demand and covers the full session history (plus assistant text), so it fills that gap.
 
 ### 📊 Column Configuration
 

@@ -33,18 +33,30 @@ import {
   entryRightWidth,
 } from "./session-columns";
 import { theme } from "../theme";
-import { formatRelativeTime, formatVersion, shortenCwd } from "../utils/format";
+import {
+  formatRelativeTime,
+  formatVersion,
+  shortenCwd,
+  truncateText,
+  truncateHighlighted,
+} from "../utils/format";
+
+export interface SessionItemHighlights {
+  project?: string | null;
+  cwd?: string | null;
+  gitBranch?: string | null;
+  lastPrompt?: string | null;
+  prompts?: string | null;
+}
 
 interface SessionItemProps {
   session: EnrichedSession;
   selected: boolean;
   index: number;
-  highlights?: {
-    project?: string | null;
-    cwd?: string | null;
-    gitBranch?: string | null;
-    lastPrompt?: string | null;
-  } | null;
+  highlights?: SessionItemHighlights | null;
+  /** Live transcript-search snippet, shown dim in the prompt cell to explain
+   * why the row matched when no prompt highlight applies. */
+  transcriptSnippet?: string;
   iconStyle?: IconStyle;
   showPreview?: boolean;
   previewWidth: number;
@@ -142,11 +154,6 @@ function getAttentionColor(session: EnrichedSession): string {
   return theme.mauve;
 }
 
-function truncateText(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  return text.slice(0, Math.max(1, maxLen - 1)) + "…";
-}
-
 /** Agent dot/label color by agent type. A function (not a module const) so it
  * reads the live `theme` after `applyTheme`, rather than freezing the default
  * palette at import time. */
@@ -186,6 +193,7 @@ interface FieldRenderContext {
   selected: boolean;
   dimmed?: boolean;
   sidebar?: boolean;
+  transcriptSnippet?: string;
   agentColor: string;
   attentionColor: string;
   attentionLabel: string | null;
@@ -405,18 +413,67 @@ const FieldCell: Component<{
               ctx.maxPromptLen,
             )
           : "";
+      // A matched OLDER prompt: when the newest prompt (`lastPrompt`) didn't
+      // itself match, surface the older one that did so the row shows why it
+      // matched. `highlights.prompts` is a single highlighted prompt line.
+      const promptMatchLine = (): string | null => {
+        if (ctx.highlights?.lastPrompt || !ctx.highlights?.prompts) return null;
+        return ctx.highlights.prompts;
+      };
+      // A transcript-only match (no prompt highlight to show): surface the
+      // matched snippet so the user sees why the row matched. Truncated to the
+      // same budget as a normal prompt.
+      const transcriptLine = (): string | null => {
+        if (ctx.highlights?.lastPrompt || promptMatchLine()) return null;
+        if (!ctx.transcriptSnippet) return null;
+        return truncateText(
+          normalizePrompt(ctx.transcriptSnippet),
+          ctx.maxPromptLen,
+        );
+      };
       // The prompt is the row's flexible filler: its box grows into the
       // gap between the identity cells and the right-aligned metadata,
       // shrinking (and letting OpenTUI clip) before it can shove a sibling
       // off-row. Pre-truncation adds the `…`; the box is the hard backstop.
+      // `flexDirection="row"` so HighlightedText's sibling <text> segments lay
+      // out left-to-right instead of stacking/overlapping (matches the project
+      // cell); without it a multi-span highlight renders as garbled overlap.
       return (
-        <box flexGrow={1} flexShrink={1}>
+        <box flexGrow={1} flexShrink={1} flexDirection="row">
           <Show
             when={ctx.highlights?.lastPrompt}
-            fallback={<text fg={dimColor(ctx, theme.overlay)}>{text()}</text>}
+            fallback={
+              <Show
+                when={promptMatchLine()}
+                fallback={
+                  <Show
+                    when={transcriptLine()}
+                    fallback={
+                      <text fg={dimColor(ctx, theme.overlay)}>{text()}</text>
+                    }
+                  >
+                    <text fg={dimColor(ctx, theme.overlay)}>
+                      {transcriptLine()}
+                    </text>
+                  </Show>
+                }
+              >
+                <HighlightedText
+                  text={truncateHighlighted(
+                    promptMatchLine()!,
+                    ctx.maxPromptLen,
+                  )}
+                  highlightColor={dimColor(ctx, theme.yellow)}
+                  baseColor={dimColor(ctx, theme.overlay)}
+                />
+              </Show>
+            }
           >
             <HighlightedText
-              text={ctx.highlights!.lastPrompt!}
+              text={truncateHighlighted(
+                ctx.highlights!.lastPrompt!,
+                ctx.maxPromptLen,
+              )}
               highlightColor={dimColor(ctx, theme.yellow)}
               baseColor={dimColor(ctx, theme.overlay)}
             />
@@ -648,6 +705,9 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     },
     get sidebar() {
       return props.sidebar;
+    },
+    get transcriptSnippet() {
+      return props.transcriptSnippet;
     },
     get agentColor() {
       return agentColor();

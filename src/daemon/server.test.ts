@@ -1,4 +1,4 @@
-import { describe, it, expect, spyOn } from "bun:test";
+import { describe, it, expect, spyOn, afterAll } from "bun:test";
 import {
   DaemonServer,
   rejectCrossOriginBrowser,
@@ -16,6 +16,9 @@ import { InvocationManager } from "./invocation-manager";
 import { InvocationRegistry } from "./invokers/registry";
 import { stubInvoker } from "./invokers/test-helpers";
 import type { HookAdapter } from "./hook-adapter";
+import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 /**
  * Access private methods/fields on DaemonServer for unit testing.
@@ -35,6 +38,7 @@ type ServerInternals = {
     url: URL,
     headers: Record<string, string>,
   ): Promise<Response>;
+  handleSearch(url: URL, headers: Record<string, string>): Promise<Response>;
   handleHealth(headers: Record<string, string>): Response;
   handleRestartSession(
     sessionId: string,
@@ -166,6 +170,7 @@ function fakeSession(id: string, tmuxPane: string | null = null): Session {
     attentionState: null,
     lastSeenAt: null,
     lastPrompt: null,
+    prompts: [],
   };
 }
 
@@ -389,6 +394,81 @@ describe("DaemonServer", () => {
       expect(data.sessions).toHaveLength(1);
       expect(data.sessions[0].id).toBe("sup1");
       expect(data.sessions[0].trackingMode).toBe("background");
+    });
+  });
+
+  describe("handleSearch", () => {
+    const searchDir = mkdtempSync(join(tmpdir(), "ccmux-server-search-"));
+    afterAll(() => rmSync(searchDir, { recursive: true, force: true }));
+
+    function claudeLog(id: string, ...userTexts: string[]): string {
+      const logPath = join(searchDir, `${id}.jsonl`);
+      const lines = userTexts.map((text, i) => ({
+        type: "user",
+        uuid: `${id}-u${i}`,
+        parentUuid: null,
+        timestamp: `2024-01-01T12:0${i}:00Z`,
+        message: { role: "user", content: text },
+      }));
+      writeFileSync(
+        logPath,
+        lines.map((l) => JSON.stringify(l)).join("\n") + "\n",
+      );
+      return logPath;
+    }
+
+    it("returns per-session snippets from transcript fixtures", async () => {
+      const { manager, internals } = createServer();
+      const matchLog = claudeLog("hit", "wire up the invoke pipeline");
+      const missLog = claudeLog("miss", "totally unrelated content");
+      manager.createSession("hit", matchLog);
+      manager.createSession("miss", missLog);
+
+      const url = new URL("http://localhost/search?q=invoke%20pipeline");
+      const response = await internals.handleSearch(url, {});
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as {
+        query: string;
+        results: {
+          sessionId: string;
+          matches: { role: string; snippet: string }[];
+        }[];
+      };
+
+      expect(data.query).toBe("invoke pipeline");
+      expect(data.results).toHaveLength(1);
+      expect(data.results[0].sessionId).toBe("hit");
+      expect(data.results[0].matches[0].role).toBe("user");
+      expect(data.results[0].matches[0].snippet).toContain("invoke pipeline");
+    });
+
+    it("400s on a query shorter than the minimum", async () => {
+      const { internals } = createServer();
+      const response = await internals.handleSearch(
+        new URL("http://localhost/search?q=a"),
+        {},
+      );
+      expect(response.status).toBe(400);
+      const data = (await response.json()) as { error: string };
+      expect(data.error).toBe("query too short");
+    });
+
+    it("omits sessions whose agent has no parseable transcript", async () => {
+      const { manager, internals } = createServer();
+      // A gemini pane session is visible (has a pane) but unsupported by the
+      // transcript searcher, so it never appears in results.
+      manager.createPaneTrackedSession({
+        agentType: "gemini",
+        paneId: "%7",
+        cwd: "/Users/test/proj",
+        pid: 7,
+      });
+      manager.setLogPath("gemini_pane7", claudeLog("gem", "invoke pipeline"));
+
+      const url = new URL("http://localhost/search?q=invoke%20pipeline");
+      const response = await internals.handleSearch(url, {});
+      const data = (await response.json()) as { results: unknown[] };
+      expect(data.results).toHaveLength(0);
     });
   });
 

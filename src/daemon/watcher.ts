@@ -44,6 +44,7 @@ function sessionToState(session: Session): SessionState {
     version: session.version ?? undefined,
     gitBranch: session.gitBranch ?? undefined,
     lastPrompt: session.lastPrompt ?? undefined,
+    prompts: session.prompts,
   };
 }
 

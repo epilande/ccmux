@@ -5,7 +5,13 @@ import {
   deriveStateFromEntries,
   resolveDeadProcessState,
   getEffectiveStatus,
+  appendPrompt,
 } from "./status-machine";
+import {
+  MAX_SESSION_PROMPTS,
+  MAX_PROMPT_CHARS,
+  MAX_PROMPTS_TOTAL_BYTES,
+} from "../lib/config";
 import {
   clearPermissionCache,
   _setGlobalSettingsDir,
@@ -901,6 +907,7 @@ describe("status-machine", () => {
       attentionState: null,
       lastSeenAt: null,
       lastPrompt: null,
+      prompts: [],
     };
 
     it("should return session status when no subagents are waiting", () => {
@@ -1004,6 +1011,129 @@ describe("status-machine", () => {
       const state = processEntry(entry, workingState);
       expect(state.status).toBe("working");
       expect(state.lastActivityAt).toBe("2024-01-01T12:00:00Z");
+    });
+  });
+
+  describe("appendPrompt", () => {
+    it("appends to an undefined array, oldest to newest", () => {
+      const one = appendPrompt(undefined, "first");
+      expect(one).toEqual(["first"]);
+      const two = appendPrompt(one, "second");
+      expect(two).toEqual(["first", "second"]);
+    });
+
+    it("returns a new array on append (does not mutate input)", () => {
+      const input = ["first"];
+      const result = appendPrompt(input, "second");
+      expect(result).not.toBe(input);
+      expect(input).toEqual(["first"]);
+    });
+
+    it("trims and truncates to MAX_PROMPT_CHARS", () => {
+      const long = "x".repeat(MAX_PROMPT_CHARS + 50);
+      const result = appendPrompt([], `  ${long}  `);
+      expect(result[0]!.length).toBe(MAX_PROMPT_CHARS);
+    });
+
+    it("skips empty/whitespace-only text, returning the same array reference", () => {
+      const input = ["first"];
+      expect(appendPrompt(input, "")).toBe(input);
+      expect(appendPrompt(input, "   \n\t")).toBe(input);
+    });
+
+    it("caps the count at MAX_SESSION_PROMPTS, dropping oldest", () => {
+      let prompts: string[] = [];
+      for (let i = 0; i < MAX_SESSION_PROMPTS + 5; i++) {
+        prompts = appendPrompt(prompts, `prompt-${i}`);
+      }
+      expect(prompts.length).toBe(MAX_SESSION_PROMPTS);
+      // The oldest survivor is prompt-5 (0..4 dropped), newest is the last.
+      expect(prompts[0]).toBe("prompt-5");
+      expect(prompts[prompts.length - 1]).toBe(
+        `prompt-${MAX_SESSION_PROMPTS + 4}`,
+      );
+    });
+
+    it("caps the total bytes at MAX_PROMPTS_TOTAL_BYTES, dropping oldest and keeping newest", () => {
+      // 20 prompts x 240 chars = 4800 bytes > 4096, so the byte cap must drop
+      // the oldest entries even though the count cap (20) is not exceeded.
+      let prompts: string[] = [];
+      for (let i = 0; i < MAX_SESSION_PROMPTS; i++) {
+        // Unique prefix so oldest/newest are identifiable; padded to the max.
+        prompts = appendPrompt(prompts, `p${i}-`.padEnd(MAX_PROMPT_CHARS, "y"));
+      }
+      const totalBytes = prompts.reduce(
+        (sum, p) => sum + Buffer.byteLength(p, "utf-8"),
+        0,
+      );
+      // The byte cap actually bit: fewer than the count cap survive.
+      expect(prompts.length).toBeLessThan(MAX_SESSION_PROMPTS);
+      expect(totalBytes).toBeLessThanOrEqual(MAX_PROMPTS_TOTAL_BYTES);
+      // Oldest dropped, newest kept.
+      expect(prompts[0]).not.toStartWith("p0-");
+      expect(prompts[prompts.length - 1]).toStartWith(
+        `p${MAX_SESSION_PROMPTS - 1}-`,
+      );
+    });
+
+    it("returns the array unchanged for non-string text (defensive)", () => {
+      const input = ["first"];
+      // A malformed but JSON-valid log entry can deliver a non-string here.
+      expect(appendPrompt(input, null as unknown as string)).toBe(input);
+      expect(appendPrompt(input, 42 as unknown as string)).toBe(input);
+      expect(appendPrompt(input, {} as unknown as string)).toBe(input);
+    });
+
+    it("does not slice a surrogate pair in half when truncating", () => {
+      // A string of astral emoji (each a surrogate pair) longer than the cap.
+      const emoji = "😀".repeat(MAX_PROMPT_CHARS);
+      const [result] = appendPrompt([], emoji);
+      // No lone/unpaired surrogate at the boundary.
+      expect(result).not.toMatch(/[\uD800-\uDBFF]$/);
+      expect(result!.length).toBeLessThanOrEqual(MAX_PROMPT_CHARS);
+    });
+  });
+
+  describe("processUserEntry - prompt accumulation", () => {
+    it("accumulates each user message prompt oldest to newest", () => {
+      const mkUser = (text: string, ts: string): UserLogEntry => ({
+        type: "user",
+        uuid: ts,
+        parentUuid: null,
+        timestamp: ts,
+        message: { role: "user", content: text },
+      });
+
+      let state = createInitialState();
+      state = processEntry(
+        mkUser("first prompt", "2024-01-01T12:00:00Z"),
+        state,
+      );
+      state = processEntry(
+        mkUser("second prompt", "2024-01-01T12:01:00Z"),
+        state,
+      );
+
+      expect(state.prompts).toEqual(["first prompt", "second prompt"]);
+      expect(state.lastPrompt).toBe("second prompt");
+    });
+
+    it("does not throw on a malformed user entry with content: null", () => {
+      const entry = {
+        type: "user",
+        uuid: "u1",
+        parentUuid: null,
+        timestamp: "2024-01-01T12:00:00Z",
+        message: { role: "user", content: null },
+      } as unknown as UserLogEntry;
+
+      let state = createInitialState();
+      // Would previously throw inside appendPrompt (becoming an unhandled
+      // rejection under the daemon's `void this.processFile`).
+      expect(() => {
+        state = processEntry(entry, state);
+      }).not.toThrow();
+      expect(state.prompts).toEqual([]);
     });
   });
 });

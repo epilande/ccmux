@@ -29,6 +29,8 @@ import type {
 import { DEFAULT_PROMPT_DISPLAY } from "../lib/preferences";
 import { setUIState, type UIState } from "../lib/state";
 import { getDaemonUrl } from "../lib/config";
+import type { TranscriptMatch } from "../daemon/transcript-search";
+import { normalizePrompt } from "./components/session-columns";
 import { capturePane } from "./utils/tmux";
 import { isSameServerCached } from "./utils/server-guard";
 import { stripAnsi } from "../lib/strip-ansi";
@@ -84,6 +86,8 @@ interface TUIStoreOptions {
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   searchPaneContent?: boolean;
+  searchPaneLines?: number;
+  searchTranscript?: boolean;
   groupBy?: GroupBy;
   collapsedGroups?: string[];
   pinnedGroups?: string[];
@@ -181,12 +185,26 @@ export function fabricateInvokeSession(
     attentionState: null,
     lastSeenAt: null,
     lastPrompt: null,
+    prompts: [],
     tmuxTarget: null,
     paneCwd: null,
     isWorktree: false,
     originInvocationId: event.invocationId,
     originInvocationStatus: "running",
   };
+}
+
+/**
+ * Wrap the first case-insensitive occurrence of `lowerQuery` in `text` with a
+ * single `<b>...</b>` span (the same markup fuzzysort's `.highlight()` emits,
+ * which `HighlightedText` renders). Returns `text` unchanged when absent.
+ * Used for prompt matches, which are substring-based (not fuzzy).
+ */
+function wrapFirstMatch(text: string, lowerQuery: string): string {
+  const idx = text.toLowerCase().indexOf(lowerQuery);
+  if (idx === -1) return text;
+  const end = idx + lowerQuery.length;
+  return `${text.slice(0, idx)}<b>${text.slice(idx, end)}</b>${text.slice(end)}`;
 }
 
 const PROMPT_DISPLAY_LABEL: Record<PromptDisplay, string> = {
@@ -198,10 +216,21 @@ const PROMPT_DISPLAY_LABEL: Record<PromptDisplay, string> = {
 export function createTUIStore(options: TUIStoreOptions = {}) {
   const [tick, setTick] = createSignal(0);
   const searchPaneContentEnabled = options.searchPaneContent ?? true;
+  const searchPaneLines = options.searchPaneLines ?? 100;
+  const searchTranscriptEnabled = options.searchTranscript ?? true;
+  /** Shortest query that triggers the transcript search (matches the daemon's
+   *  MIN_QUERY_LEN; kept local so the TUI bundle doesn't import daemon code). */
+  const MIN_TRANSCRIPT_QUERY_LEN = 2;
 
   const [paneCache, setPaneCache] = createSignal<Map<string, string>>(
     new Map(),
   );
+
+  // Live transcript matches keyed by session id, populated by the debounced
+  // /search effect below.
+  const [transcriptCache, setTranscriptCache] = createSignal<
+    Map<string, TranscriptMatch[]>
+  >(new Map());
 
   // Signals for state that can't live in solid-js store (Set, nullable selection)
   const [collapsedGroups, setCollapsedGroups] = createSignal<Set<string>>(
@@ -335,11 +364,61 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           .filter((s) => s.tmuxPane)
           .map(async (s) => {
             // A gone pane has nothing to match; capturePane throws, treat as empty.
-            const content = await capturePane(s.tmuxPane!, 30).catch(() => "");
+            const content = await capturePane(
+              s.tmuxPane!,
+              searchPaneLines,
+            ).catch(() => "");
             cache.set(s.id, stripAnsi(content));
           }),
       );
       setPaneCache(cache);
+    }, 250);
+
+    onCleanup(() => clearTimeout(timer));
+  });
+
+  // Effect: fetch live transcript matches for search (debounced). Mirrors the
+  // pane-content effect but hits the daemon's /search endpoint, so it can match
+  // full Claude/Codex history (user + assistant text), not just the in-memory
+  // prompt index. No cross-server guard is needed: /search results are keyed by
+  // the same daemon's session ids the SSE stream produced (unlike pane ids,
+  // which can collide across tmux servers).
+  //
+  // Every effect run (including the short-query clear branch) bumps a
+  // generation counter; the async body drops its result if a newer run has
+  // started. Without this, a slow response for query A could overwrite the
+  // cache after fast query B already responded, or a response landing after
+  // the query was cleared could repopulate stale rows.
+  let transcriptSearchGen = 0;
+  createEffect(() => {
+    const query = state.searchQuery.trim();
+    const gen = ++transcriptSearchGen;
+    if (!searchTranscriptEnabled || query.length < MIN_TRANSCRIPT_QUERY_LEN) {
+      if (transcriptCache().size > 0) setTranscriptCache(new Map());
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `${getDaemonUrl()}/search?q=${encodeURIComponent(query)}`,
+        );
+        if (gen !== transcriptSearchGen) return; // superseded by a newer run
+        if (!res.ok) {
+          setTranscriptCache(new Map());
+          return;
+        }
+        const data = (await res.json()) as {
+          results: { sessionId: string; matches: TranscriptMatch[] }[];
+        };
+        if (gen !== transcriptSearchGen) return; // superseded during json parse
+        const map = new Map<string, TranscriptMatch[]>();
+        for (const r of data.results) map.set(r.sessionId, r.matches);
+        setTranscriptCache(map);
+      } catch {
+        if (gen !== transcriptSearchGen) return;
+        setTranscriptCache(new Map());
+      }
     }, 250);
 
     onCleanup(() => clearTimeout(timer));
@@ -412,18 +491,44 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       return emptyQueryResult;
     }
 
-    // Metadata matches (instant, synchronous)
+    const lowerQuery = query.toLowerCase();
+
+    // Metadata matches (instant, synchronous, fuzzy over the four identity
+    // fields). Prompts are deliberately NOT a fuzzysort key: fuzzy over a
+    // joined multi-prompt haystack is far too permissive (nearly any query
+    // scatter-matches as a subsequence, so the filter stops filtering).
+    // Recent prompts match by substring instead, consistent with how pane
+    // and transcript content match.
     const results = fuzzysort.go(query, sorted, {
       keys: ["project", "cwd", "gitBranch", "lastPrompt"],
       threshold: -10000,
     });
     const metadataMap = new Map(results.map((r) => [r.obj.id, r]));
 
+    // Prompt matches (substring over the in-memory prompt index). Scan each
+    // session's prompts newest-first and keep the newest one that contains the
+    // query, highlighted with a single `<b>` span around the first occurrence.
+    // Each prompt is normalized to a single line FIRST (same reduction the
+    // lastPrompt subtitle uses), both so a multi-line prompt (task
+    // notifications, teammate messages) can't render embedded newlines that
+    // overlap in the height-1 row, and so a spaced query can match across what
+    // was a newline.
+    const promptMatches = new Map<string, string>();
+    for (const s of sorted) {
+      const prompts = s.prompts ?? [];
+      for (let i = prompts.length - 1; i >= 0; i--) {
+        const norm = normalizePrompt(prompts[i]);
+        if (norm.toLowerCase().includes(lowerQuery)) {
+          promptMatches.set(s.id, wrapFirstMatch(norm, lowerQuery));
+          break;
+        }
+      }
+    }
+
     // Pane content matches (from async cache)
     const cache = paneCache();
     const paneMatches = new Set<string>();
     if (cache.size > 0) {
-      const lowerQuery = query.toLowerCase();
       for (const [id, content] of cache) {
         if (content.toLowerCase().includes(lowerQuery)) {
           paneMatches.add(id);
@@ -431,10 +536,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       }
     }
 
-    // Union: sessions matching metadata OR pane content
+    // Transcript matches (from async /search cache)
+    const transcript = transcriptCache();
+
+    // Union: sessions matching metadata OR prompt OR pane content OR transcript
     const allMatchIds = new Set([
       ...results.map((r) => r.obj.id),
+      ...promptMatches.keys(),
       ...paneMatches,
+      ...transcript.keys(),
     ]);
 
     // Build results preserving original sort order
@@ -442,17 +552,40 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       .filter((s) => allMatchIds.has(s.id))
       .map((s) => {
         const fzResult = metadataMap.get(s.id);
+        const promptMatch = promptMatches.get(s.id);
+        const tMatches = transcript.get(s.id);
+        // `lastPrompt` renders as a substring highlight on normalized text
+        // (like `prompts`), NOT fuzzysort markup: a fuzzy scatter-match over a
+        // long prompt produces dozens of single-char <b> fragments that
+        // HighlightedText can't lay out (dropped/mispositioned chars), and a
+        // multi-line prompt would render raw newlines. Fuzzy still controls
+        // MEMBERSHIP via the four keys; this only changes what renders. A
+        // scatter-only hit shows the plain truncated lastPrompt (null here,
+        // via SessionItem's text() fallback).
+        const lpNorm = normalizePrompt(s.lastPrompt ?? "");
+        const lastPromptHl = lpNorm.toLowerCase().includes(lowerQuery)
+          ? wrapFirstMatch(lpNorm, lowerQuery)
+          : null;
+        // Build highlights when EITHER a metadata field or a prompt matched;
+        // a prompt-substring-only match still needs to carry highlights.prompts
+        // (with the four metadata fields null). project/cwd/gitBranch keep
+        // fuzzysort markup (short strings, few segments, render fine).
+        const highlights =
+          fzResult || promptMatch
+            ? {
+                project: fzResult?.[0]?.highlight("<b>", "</b>") || null,
+                cwd: fzResult?.[1]?.highlight("<b>", "</b>") || null,
+                gitBranch: fzResult?.[2]?.highlight("<b>", "</b>") || null,
+                lastPrompt: lastPromptHl,
+                prompts: promptMatch ?? null,
+              }
+            : null;
         return {
           session: s,
-          highlights: fzResult
-            ? {
-                project: fzResult[0]?.highlight("<b>", "</b>") || null,
-                cwd: fzResult[1]?.highlight("<b>", "</b>") || null,
-                gitBranch: fzResult[2]?.highlight("<b>", "</b>") || null,
-                lastPrompt: fzResult[3]?.highlight("<b>", "</b>") || null,
-              }
-            : null,
+          highlights,
           paneMatch: paneMatches.has(s.id),
+          transcriptMatch: tMatches !== undefined && tMatches.length > 0,
+          transcriptSnippet: tMatches?.[0]?.snippet,
         };
       });
   });

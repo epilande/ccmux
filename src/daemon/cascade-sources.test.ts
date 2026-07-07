@@ -47,6 +47,7 @@ function mkSession(overrides: Partial<Session> = {}): Session {
     attentionState: null,
     lastSeenAt: null,
     lastPrompt: null,
+    prompts: [],
     ...overrides,
   };
 }
