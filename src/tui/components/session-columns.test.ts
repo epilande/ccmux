@@ -1021,4 +1021,30 @@ describe("fitProjectCell", () => {
     );
     expect(out.branchLabel).toBe("");
   });
+
+  it("shortens the branch as a last resort with a ~ marker", () => {
+    // Tight budget: even after dropping the prefix and flooring the dirname to
+    // its 5-char minimum, the branch still overflows, so step 3 truncates it
+    // with `~` rather than dropping it to "". Exercises the positive
+    // shortenBranchLabel path (avail >= 3), not the zero-budget drop.
+    const out = fitProjectCell(
+      {
+        prefix: "epilande/",
+        dirname: "claude-toolkit",
+        branch: "feature-x",
+        isWorktree: false,
+      },
+      12,
+      24,
+    );
+    expect(out.prefix).toBe("");
+    expect(out.dirname.endsWith("…")).toBe(true);
+    // Branch truncated with the `~` marker: neither dropped to "" nor left whole.
+    expect(out.branchLabel).toBe(":featu~");
+    expect(out.branchLabel.endsWith("~")).toBe(true);
+    // The cascade never overshoots its budget.
+    expect(
+      out.prefix.length + out.dirname.length + out.branchLabel.length,
+    ).toBeLessThanOrEqual(12);
+  });
 });

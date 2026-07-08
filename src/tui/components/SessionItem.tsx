@@ -305,19 +305,22 @@ const FieldCell: Component<{
     }
     case "project": {
       const compact = entry.mode !== "full";
-      // Functions, not consts: this component body runs once per mount,
-      // and rows stay mounted across SSE deltas — a const here would
-      // freeze the cell on its mount-time value. `fitted` applies the `…`
-      // truncation for the non-highlighted path; the search-highlight path
+      // A createMemo, not a plain const: this component body runs once per
+      // mount and rows stay mounted across SSE deltas, so a const would freeze
+      // the cell on its mount-time value. The memo instead recomputes reactively
+      // when the budget changes, while collapsing the cell's several JSX reads
+      // (prefix/dirname/branchLabel) into one fit per pass. `fitted` applies the
+      // `…` truncation for the non-highlighted path; the search-highlight path
       // stays untruncated (its markup can't be sliced by char count, same
       // documented tradeoff as the prompt cell).
-      const fitted = () =>
+      const fitted = createMemo(() =>
         fittedProjectCell(
           ctx.session,
           entry.mode,
           ctx.maxProjectLen,
           ctx.maxBranchLen,
-        );
+        ),
+      );
       const dirnameColor = () =>
         ctx.isActiveSession && !ctx.selected
           ? dimColor(ctx, theme.text)
@@ -623,8 +626,9 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   // so an unlabeled row reserves nothing and its prompt runs to the right-side
   // metadata; a labeled row's prompt/project budgets subtract exactly this so
   // the truncation `…` lands right before the label.
-  const attentionWidth = () =>
-    trailingLabelsWidth(props.session, !!props.sidebar);
+  const attentionWidth = createMemo(() =>
+    trailingLabelsWidth(props.session, !!props.sidebar),
+  );
 
   // The project cell renders inside SessionList's scrollbox, whose scrollbar
   // (and content inset) consume a couple of columns the terminal width does
@@ -647,7 +651,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   // its floor below), the reserved attention cell, and a small margin. Reads
   // only the raw prompt length (capped at PROMPT_MIN), never maxPromptLen, so
   // maxPromptLen can depend on the fitted project width without a cycle.
-  const maxProjectLen = () => {
+  const maxProjectLen = createMemo(() => {
     const cols = columns();
     const promptOnRow1 = rowHasPrompt(cols.row1);
     const siblings = [...cols.row1.left, ...cols.row1.right].filter(
@@ -676,7 +680,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
       2 + // small margin so the truncated content sits inside its flex box
       scrollbarReserve(); // scrollbox eats width the terminal size hides
     return Math.max(12, effectiveWidth() - reserved);
-  };
+  });
 
   // Budget for the prompt cell: full width minus the item's horizontal
   // padding, the leading indent, every sibling cell on the prompt's row, and
@@ -685,7 +689,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   // against whichever row it landed on so the `…` truncation lands just before
   // the right-aligned metadata. Conservative floor so tiny viewports still
   // show something identifiable.
-  const maxPromptLen = () => {
+  const maxPromptLen = createMemo(() => {
     const cols = columns();
     const onRow1 = rowHasPrompt(cols.row1);
     const row = onRow1 ? cols.row1 : cols.row2;
@@ -716,7 +720,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
       (attn > 0 ? attn + 1 : 0) +
       2; // small margin so the `…` lands inside the flexed box, not clipped
     return Math.max(16, effectiveWidth() - reserved);
-  };
+  });
 
   const agentColor = () => agentColorFor(props.session.agentType);
 

@@ -520,10 +520,13 @@ export function subagentCountLabel(session: EnrichedSession): string | null {
 
 /**
  * Rendered width of row 1's trailing labels (attention + subagent count) for
- * a session. SessionList folds this to a list-wide max so every row reserves
- * an identical fixed-width cell and the path column can't misalign on waiting
- * rows. Sidebar collapses the attention label to a single "!" and hides the
- * subagent count.
+ * a session. Consumed per-row (see `attentionWidth` in SessionItem): each row
+ * reserves a cell sized to exactly its own labels, so an unlabeled row reserves
+ * nothing and its prompt runs to the right-side metadata, while a labeled row's
+ * prompt/project budgets subtract this width so the `…` truncation lands just
+ * before the label. Right-side column alignment is preserved by those columns'
+ * fixed widths, not by a uniform trailing cell. Sidebar collapses the attention
+ * label to a single "!" and hides the subagent count.
  */
 export function trailingLabelsWidth(
   session: EnrichedSession,
