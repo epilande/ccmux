@@ -499,9 +499,16 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     // scatter-matches as a subsequence, so the filter stops filtering).
     // Recent prompts match by substring instead, consistent with how pane
     // and transcript content match.
+    //
+    // threshold is on fuzzysort v3's 0..1 scale (1 = exact). 0.3 kills
+    // scatter-matches over long lastPrompt text (a content word like
+    // "MERGEABLE" admitted a third of all sessions at no threshold) while
+    // keeping genuinely fuzzy identity lookups ("fjump" -> FlashJump,
+    // "ccmx" -> ccmux; 0.5 already rejects the latter). The v2-era -10000
+    // this replaces filtered nothing on the v3 scale.
     const results = fuzzysort.go(query, sorted, {
       keys: ["project", "cwd", "gitBranch", "lastPrompt"],
-      threshold: -10000,
+      threshold: 0.3,
     });
     const metadataMap = new Map(results.map((r) => [r.obj.id, r]));
 
