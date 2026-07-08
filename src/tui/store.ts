@@ -1036,7 +1036,6 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         setPinnedGroups([]);
       });
       persistUIState({ groupBy: next, collapsedGroups: [], pinnedGroups: [] });
-      this.showToast(`Group: ${next}`);
     },
 
     enterPreviewFocus() {
