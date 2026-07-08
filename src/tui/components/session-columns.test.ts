@@ -15,7 +15,13 @@ import {
   rowHasContent,
   rowHasPrompt,
   SIDEBAR_DEFAULT_COLUMNS,
+  trailingLabelsWidth,
+  fitProjectCell,
+  getAttentionLabel,
+  subagentCountLabel,
+  ATTENTION_LABEL_MAX,
 } from "./session-columns";
+import type { SubagentState } from "../../types";
 import { DEFAULT_BREAKPOINTS, type Responsive } from "../../lib/preferences";
 import { mockEnrichedSession } from "./test-helpers";
 
@@ -798,5 +804,247 @@ describe("prColorState", () => {
     expect(
       prColorState(mockEnrichedSession({ branchPRs: [approved, approved] })),
     ).toBe("green");
+  });
+});
+
+const mockSubagent = (
+  overrides: Partial<SubagentState> = {},
+): SubagentState => ({
+  agentId: "sub",
+  status: "working",
+  attentionType: null,
+  pendingTool: null,
+  lastActivityAt: null,
+  ...overrides,
+});
+
+describe("getAttentionLabel", () => {
+  it("returns the pending tool name when present", () => {
+    expect(
+      getAttentionLabel(
+        mockEnrichedSession({ pendingTool: "Bash(git status)" }),
+      ),
+    ).toBe("Bash(git status)");
+  });
+
+  it("returns Plan in plan mode", () => {
+    expect(getAttentionLabel(mockEnrichedSession({ inPlanMode: true }))).toBe(
+      "Plan",
+    );
+  });
+
+  it("returns Permission / Question by attention type when waiting", () => {
+    expect(
+      getAttentionLabel(
+        mockEnrichedSession({ status: "waiting", attentionType: "permission" }),
+      ),
+    ).toBe("Permission");
+    expect(
+      getAttentionLabel(
+        mockEnrichedSession({ status: "waiting", attentionType: "question" }),
+      ),
+    ).toBe("Question");
+  });
+
+  it("returns null for an idle session with no signal", () => {
+    expect(getAttentionLabel(mockEnrichedSession())).toBeNull();
+  });
+});
+
+describe("subagentCountLabel", () => {
+  it("counts live subagents when no tool/plan marker is up", () => {
+    expect(
+      subagentCountLabel(
+        mockEnrichedSession({ subagents: [mockSubagent(), mockSubagent()] }),
+      ),
+    ).toBe("2 Agent");
+  });
+
+  it("is hidden while a pending tool or plan takes the slot", () => {
+    expect(
+      subagentCountLabel(
+        mockEnrichedSession({
+          pendingTool: "Edit",
+          subagents: [mockSubagent()],
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      subagentCountLabel(
+        mockEnrichedSession({ inPlanMode: true, subagents: [mockSubagent()] }),
+      ),
+    ).toBeNull();
+  });
+
+  it("is null with no subagents", () => {
+    expect(subagentCountLabel(mockEnrichedSession())).toBeNull();
+  });
+});
+
+describe("trailingLabelsWidth", () => {
+  it("is 0 for an idle, label-less session", () => {
+    expect(trailingLabelsWidth(mockEnrichedSession(), false)).toBe(0);
+  });
+
+  it("is the attention label width (capped) in the picker", () => {
+    expect(
+      trailingLabelsWidth(
+        mockEnrichedSession({ status: "waiting", attentionType: "permission" }),
+        false,
+      ),
+    ).toBe("Permission".length);
+  });
+
+  it("caps a long attention label at ATTENTION_LABEL_MAX", () => {
+    const long = "Bash(git status --porcelain --untracked)";
+    expect(
+      trailingLabelsWidth(mockEnrichedSession({ pendingTool: long }), false),
+    ).toBe(ATTENTION_LABEL_MAX);
+  });
+
+  it("sums attention + subagent + the inter-label gap", () => {
+    // pendingTool suppresses the subagent count, so use a waiting session with
+    // subagents but no pending tool.
+    const s = mockEnrichedSession({
+      status: "waiting",
+      attentionType: "question",
+      subagents: [mockSubagent(), mockSubagent()],
+    });
+    // "Question"(8) + gap(1) + "2 Agent"(7) = 16
+    expect(trailingLabelsWidth(s, false)).toBe(8 + 1 + 7);
+  });
+
+  it("collapses to a single '!' in the sidebar and hides the subagent count", () => {
+    const s = mockEnrichedSession({
+      status: "waiting",
+      attentionType: "question",
+      subagents: [mockSubagent()],
+    });
+    expect(trailingLabelsWidth(s, true)).toBe(1);
+    expect(trailingLabelsWidth(mockEnrichedSession(), true)).toBe(0);
+  });
+});
+
+describe("fitProjectCell", () => {
+  const base = {
+    prefix: "epilande/",
+    dirname: "ccmux",
+    branch: "main" as string | null,
+    isWorktree: false,
+  };
+
+  it("renders everything unchanged when it fits", () => {
+    const out = fitProjectCell(base, 40, 24);
+    expect(out).toEqual({
+      prefix: "epilande/",
+      dirname: "ccmux",
+      branchLabel: ":main",
+    });
+  });
+
+  it("appends the worktree marker and caps the branch with ~", () => {
+    const out = fitProjectCell(
+      { ...base, branch: "feature/really-long-branch", isWorktree: true },
+      60,
+      8,
+    );
+    // 8-char cap: 7 chars + "~", then "+"
+    expect(out.branchLabel).toBe(":feature~+");
+  });
+
+  it("shrinks the prefix with an ellipsis before touching the dirname", () => {
+    // budget forces the prefix to give up chars; dirname + branch stay whole
+    const out = fitProjectCell(base, 12, 24);
+    expect(out.dirname).toBe("ccmux");
+    expect(out.branchLabel).toBe(":main");
+    expect(out.prefix.endsWith("…")).toBe(true);
+    expect(
+      out.prefix.length + out.dirname.length + out.branchLabel.length,
+    ).toBe(12);
+  });
+
+  it("drops the prefix entirely when under 2 usable chars remain", () => {
+    // dirname(5) + branch(5) = 10 already fills the budget, no prefix room
+    const out = fitProjectCell(base, 10, 24);
+    expect(out.prefix).toBe("");
+    expect(out.dirname).toBe("ccmux");
+    expect(out.branchLabel).toBe(":main");
+  });
+
+  it("truncates the dirname with an ellipsis, keeping a floor", () => {
+    const out = fitProjectCell(
+      {
+        prefix: "",
+        dirname: "claude-toolkit",
+        branch: null,
+        isWorktree: false,
+      },
+      8,
+      24,
+    );
+    expect(out.dirname.endsWith("…")).toBe(true);
+    expect(out.dirname).not.toBe("claude-toolkit");
+    // floor keeps it identifiable, never a negative slice
+    expect(out.dirname.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("never produces negative slices on a zero/negative budget", () => {
+    const out = fitProjectCell(
+      {
+        prefix: "a/b/c/",
+        dirname: "very-long-dirname",
+        branch: "main",
+        isWorktree: false,
+      },
+      0,
+      24,
+    );
+    // Prefix collapses, dirname holds at its floor with an ellipsis (not a
+    // raw mid-word clip), and no slice went negative.
+    expect(out.prefix).toBe("");
+    expect(out.dirname.endsWith("…")).toBe(true);
+    expect(out.dirname.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("keeps a short dirname whole even when the budget is exhausted", () => {
+    const out = fitProjectCell(base, 0, 24);
+    // "ccmux" already sits at the floor, so it is shown in full (no fake `…`).
+    expect(out.dirname).toBe("ccmux");
+    expect(out.prefix).toBe("");
+  });
+
+  it("leaves a branch-less cell without a stray colon", () => {
+    const out = fitProjectCell(
+      { prefix: "", dirname: "app", branch: null, isWorktree: false },
+      20,
+      24,
+    );
+    expect(out.branchLabel).toBe("");
+  });
+
+  it("shortens the branch as a last resort with a ~ marker", () => {
+    // Tight budget: even after dropping the prefix and flooring the dirname to
+    // its 5-char minimum, the branch still overflows, so step 3 truncates it
+    // with `~` rather than dropping it to "". Exercises the positive
+    // shortenBranchLabel path (avail >= 3), not the zero-budget drop.
+    const out = fitProjectCell(
+      {
+        prefix: "epilande/",
+        dirname: "claude-toolkit",
+        branch: "feature-x",
+        isWorktree: false,
+      },
+      12,
+      24,
+    );
+    expect(out.prefix).toBe("");
+    expect(out.dirname.endsWith("…")).toBe(true);
+    // Branch truncated with the `~` marker: neither dropped to "" nor left whole.
+    expect(out.branchLabel).toBe(":featu~");
+    expect(out.branchLabel.endsWith("~")).toBe(true);
+    // The cascade never overshoots its budget.
+    expect(
+      out.prefix.length + out.dirname.length + out.branchLabel.length,
+    ).toBeLessThanOrEqual(12);
   });
 });

@@ -44,6 +44,7 @@ async function renderList(
   items: FlatItem[],
   selectedIndex = 0,
   columns?: import("../../lib/preferences").ColumnsConfig,
+  width = 80,
 ) {
   const [tick] = createSignal(0);
   setup = await testRender(
@@ -57,7 +58,7 @@ async function renderList(
         />
       </TickContext.Provider>
     ),
-    { width: 80, height: 20 },
+    { width, height: 20 },
   );
   await setup.renderOnce();
   return setup.captureCharFrame();
@@ -67,6 +68,76 @@ describe("SessionList", () => {
   it("renders empty state message", async () => {
     const frame = await renderList([]);
     expect(frame).toContain("No sessions found");
+  });
+
+  it("aligns the agent column across waiting and idle rows", async () => {
+    // The waiting row carries an attention label the idle row does not. The
+    // right-side metadata (agent) is fixed-width at the row end, so it stays
+    // aligned regardless: the label eats into the flexible middle, not the
+    // right columns.
+    const items: FlatItem[] = [
+      makeSessionItem("s1", "proj", {
+        cwd: "/code/app-one",
+        gitBranch: "main",
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash(git status)",
+      }),
+      makeSessionItem("s2", "proj", {
+        cwd: "/code/app-two",
+        gitBranch: "main",
+      }),
+    ];
+    // Wide enough that both paths fit with room to spare, so the label eats
+    // slack, not the path.
+    const frame = await renderList(items, 0, undefined, 120);
+    const agentLines = frame.split("\n").filter((l) => l.includes("Claude"));
+    expect(agentLines.length).toBe(2);
+    const cols = agentLines.map((l) => l.indexOf("Claude"));
+    expect(cols[0]).toBe(cols[1]);
+    // Both rows keep their full path:branch (no clipped mid-word).
+    expect(frame).toContain("app-one:main");
+    expect(frame).toContain("app-two:main");
+  });
+
+  it("lets an unlabeled row's prompt extend into the label's space", async () => {
+    // Per-row label width (not a list-wide reservation): the idle row has no
+    // trailing label, so its inline prompt runs further right than the waiting
+    // sibling's, whose prompt truncates earlier to leave room for the label.
+    const prompt =
+      "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda";
+    const items: FlatItem[] = [
+      makeSessionItem("s1", "proj", {
+        cwd: "/code/app",
+        gitBranch: "main",
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash(git status)",
+        lastPrompt: prompt,
+      }),
+      makeSessionItem("s2", "proj", {
+        cwd: "/code/app",
+        gitBranch: "main",
+        lastPrompt: prompt,
+      }),
+    ];
+    // Default prompt display is inline, so the prompt rides row 1.
+    const frame = await renderList(items, 0, undefined, 90);
+    const lines = frame.split("\n");
+    const waitingLine = lines.find((l) => l.includes("Bash(git"))!;
+    const idleLine = lines.find(
+      (l) => l.includes("alpha") && !l.includes("Bash(git"),
+    )!;
+    expect(waitingLine).toBeDefined();
+    expect(idleLine).toBeDefined();
+    // Count how many prompt words survive on each row. The idle row has no
+    // trailing label, so more of the prompt fits before it truncates.
+    const words = prompt.split(" ");
+    const shown = (l: string) => words.filter((w) => l.includes(w)).length;
+    expect(shown(idleLine)).toBeGreaterThan(shown(waitingLine));
+    // Concretely: the idle row reaches "gamma"; the waiting row stops before it.
+    expect(idleLine).toContain("gamma");
+    expect(waitingLine).not.toContain("gamma");
   });
 
   it("renders group header", async () => {
