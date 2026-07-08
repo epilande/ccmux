@@ -1,4 +1,12 @@
-import { readFileSync, unlinkSync, existsSync, openSync, closeSync } from "fs";
+import {
+  readFileSync,
+  unlinkSync,
+  existsSync,
+  openSync,
+  closeSync,
+  mkdirSync,
+} from "fs";
+import { dirname } from "path";
 import { spawn } from "child_process";
 import {
   LOG_FILE,
@@ -201,6 +209,7 @@ export function isStandaloneBinary(
  * Spawn daemon process in background (detached)
  */
 export function spawnDaemonBackground(): void {
+  mkdirSync(dirname(LOG_FILE), { recursive: true });
   const logFd = openSync(LOG_FILE, "a");
   const daemonArgs = isStandaloneBinary(process.argv[1])
     ? ["daemon", "start"]
