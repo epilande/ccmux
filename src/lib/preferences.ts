@@ -1,4 +1,4 @@
-import { mkdirSync } from "fs";
+import { mkdirSync, readFileSync } from "fs";
 import { dirname } from "path";
 import { PREFS_FILE } from "./config";
 import type { IconStyle } from "./icons";
@@ -263,6 +263,19 @@ export async function getPreferences(): Promise<Preferences> {
     // Ignore malformed file
   }
   return {};
+}
+
+/**
+ * Synchronous preferences read for the few callers that can't be async
+ * (e.g. `HookAdapter.isInstalled`). Returns an empty object if the file is
+ * missing or malformed, matching {@link getPreferences}.
+ */
+export function getPreferencesSync(): Preferences {
+  try {
+    return JSON.parse(readFileSync(PREFS_FILE, "utf-8"));
+  } catch {
+    return {};
+  }
 }
 
 /**

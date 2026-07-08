@@ -20,6 +20,13 @@ const projectsDir = join(claudeDir, "projects");
 const settingsFile = join(claudeDir, "settings.json");
 const markersDir = join(tempRoot, "markers");
 
+// A second configured Claude config dir (e.g. ~/.claude-personal), used by the
+// fan-out tests. `mockedConfigDirs` is what the adapter sees; tests mutate it
+// and beforeEach resets it to just the primary dir.
+const claudeDir2 = join(tempRoot, ".claude-personal");
+const settingsFile2 = join(claudeDir2, "settings.json");
+let mockedConfigDirs = [claudeDir];
+
 const actualConfig = await import("../../../lib/config");
 mock.module("../../../lib/config", () => ({
   ...actualConfig,
@@ -28,6 +35,13 @@ mock.module("../../../lib/config", () => ({
   PROJECTS_DIR: projectsDir,
   SETTINGS_FILE: settingsFile,
   MARKERS_DIR: markersDir,
+  // The adapter resolves its target dirs through these helpers, whose real
+  // implementations close over the real CLAUDE_DIR (unaffected by the
+  // constant overrides above). Pin them to temp dirs so install/uninstall
+  // never touch the real ~/.claude (or configured extra dirs).
+  resolveClaudeConfigDirs: () => mockedConfigDirs,
+  resolveClaudeProjectDirs: () =>
+    mockedConfigDirs.map((d) => join(d, "projects")),
 }));
 
 import { ClaudeHookAdapter } from "./hook-adapter";
@@ -43,6 +57,7 @@ describe("ClaudeHookAdapter", () => {
   beforeEach(() => {
     rmSync(tempRoot, { recursive: true, force: true });
     mkdirSync(tempRoot, { recursive: true });
+    mockedConfigDirs = [claudeDir];
     adapter = new ClaudeHookAdapter();
   });
 
@@ -207,6 +222,47 @@ describe("ClaudeHookAdapter", () => {
       mkdirSync(claudeDir, { recursive: true });
       writeFileSync(settingsFile, "{ not valid json");
       expect(adapter.isInstalled()).toBe(false);
+    });
+  });
+
+  describe("multiple config dirs", () => {
+    function ccmuxInstalledIn(file: string): boolean {
+      if (!existsSync(file)) return false;
+      const settings = JSON.parse(readFileSync(file, "utf-8"));
+      const start = settings?.hooks?.SessionStart ?? [];
+      return start.some((g: { hooks?: { command?: string }[] }) =>
+        g.hooks?.some((h) => h.command?.includes("ccmux-session-start.sh")),
+      );
+    }
+
+    it("install fans out hooks to every configured config dir", async () => {
+      mockedConfigDirs = [claudeDir, claudeDir2];
+      await adapter.install();
+      expect(ccmuxInstalledIn(settingsFile)).toBe(true);
+      expect(ccmuxInstalledIn(settingsFile2)).toBe(true);
+      expect(
+        existsSync(join(claudeDir2, "hooks", "ccmux-session-start.sh")),
+      ).toBe(true);
+    });
+
+    it("uninstall removes hooks from every configured config dir", async () => {
+      mockedConfigDirs = [claudeDir, claudeDir2];
+      await adapter.install();
+      await adapter.uninstall();
+      expect(ccmuxInstalledIn(settingsFile)).toBe(false);
+      expect(ccmuxInstalledIn(settingsFile2)).toBe(false);
+    });
+
+    it("isInstalled tracks only the primary dir; extras surface as anomalies", async () => {
+      // Only the primary dir has hooks installed.
+      mockedConfigDirs = [claudeDir];
+      await adapter.install();
+      // Now a second dir is configured but not yet set up.
+      mockedConfigDirs = [claudeDir, claudeDir2];
+      expect(adapter.isInstalled()).toBe(true);
+      const anomalies = adapter.describeInstallAnomalies?.() ?? [];
+      expect(anomalies.length).toBe(1);
+      expect(anomalies[0]).toContain(claudeDir2);
     });
   });
 

@@ -384,12 +384,18 @@ ccmux config set claudeConfigDirs '["~/.claude-personal"]'
 ccmux daemon restart
 ```
 
+Then install hooks into every configured dir so sessions from each account are matched authoritatively:
+
+```bash
+ccmux setup --agent claude   # fans out to ~/.claude and every claudeConfigDirs entry
+```
+
 Notes:
 
 - `~/.claude` is always watched; entries here are **additional** Claude config dirs (their `projects` subdir is watched). Paths may start with `~`.
 - The `CLAUDE_CONFIG_DIR` environment variable, if set, is honored too and added automatically.
 - Sessions are keyed by their (globally unique) session ID, so the same project opened under two accounts coexists without collision.
-- Install the Claude hooks (`ccmux setup`) for each config dir you want authoritative session matching in — hooks are resolved per `CLAUDE_CONFIG_DIR`.
+- `ccmux setup` installs the hook scripts and `settings.json` entries into **all** configured Claude dirs. Configure `claudeConfigDirs` first, then run setup. If you add a dir later, re-run setup — the daemon warns at startup about any configured dir still missing hooks.
 
 ## 🔗 Session Matching with Hooks
 
