@@ -23,6 +23,7 @@ async function renderItem(
     isActiveSession?: boolean;
     columns?: import("../../lib/preferences").ColumnsConfig;
     promptDisplay?: import("../../lib/preferences").PromptDisplay;
+    highlights?: import("../utils/grouping").FilteredSession["highlights"];
   },
   width = 100,
   height = 3,
@@ -41,6 +42,7 @@ async function renderItem(
           isActiveSession={props.isActiveSession}
           columns={props.columns}
           promptDisplay={props.promptDisplay}
+          highlights={props.highlights}
         />
       </TickContext.Provider>
     ),
@@ -273,6 +275,21 @@ describe("SessionItem", () => {
       { session: mockEnrichedSession({ agentType: "claude" }) },
       160,
     );
+    expect(frame).toContain("Claude");
+  });
+
+  it("keeps sibling columns on the row when a search highlight overflows the project cell", async () => {
+    // A search highlight renders untruncated, so the cell must flex-clip it
+    // instead of shoving siblings off-row (see SessionItem's `highlightUnbounded`).
+    const longPath = "/Users/epilande/Code/" + "a".repeat(180);
+    const frame = await renderItem(
+      {
+        session: mockEnrichedSession({ agentType: "claude", cwd: longPath }),
+        highlights: { project: longPath },
+      },
+      160,
+    );
+    // The agent column survives at the row's right edge.
     expect(frame).toContain("Claude");
   });
 

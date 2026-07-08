@@ -35,6 +35,7 @@ import {
   subagentCountLabel,
   trailingLabelsWidth,
   fitProjectCell,
+  sliceEllipsis,
   ATTENTION_LABEL_MAX,
 } from "./session-columns";
 import { theme } from "../theme";
@@ -155,11 +156,6 @@ function getAttentionColor(session: EnrichedSession): string {
     return theme.teal;
   }
   return theme.mauve;
-}
-
-function truncateText(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  return text.slice(0, Math.max(1, maxLen - 1)) + "…";
 }
 
 /** Agent dot/label color by agent type. A function (not a module const) so it
@@ -311,8 +307,8 @@ const FieldCell: Component<{
       // when the budget changes, while collapsing the cell's several JSX reads
       // (prefix/dirname/branchLabel) into one fit per pass. `fitted` applies the
       // `…` truncation for the non-highlighted path; the search-highlight path
-      // stays untruncated (its markup can't be sliced by char count, same
-      // documented tradeoff as the prompt cell).
+      // stays untruncated and is clipped by flex instead (see
+      // `highlightUnbounded`), the same tradeoff the prompt cell makes.
       const fitted = createMemo(() =>
         fittedProjectCell(
           ctx.session,
@@ -321,6 +317,13 @@ const FieldCell: Component<{
           ctx.maxBranchLen,
         ),
       );
+      // A search highlight renders the FULL matched path/branch untruncated
+      // (its markup is clipped by flex rather than char-sliced), so
+      // `fitProjectCell` never bounds it. Both fields matter: a project match
+      // overflows directly, and a branch match can exceed the cell's width
+      // budget even while fitting `maxBranchLen`.
+      const highlightUnbounded = () =>
+        !!(ctx.highlights?.project || ctx.highlights?.gitBranch);
       const dirnameColor = () =>
         ctx.isActiveSession && !ctx.selected
           ? dimColor(ctx, theme.text)
@@ -331,10 +334,12 @@ const FieldCell: Component<{
         // width, else flex squeezes the path into a mid-word clip (the `…`
         // and gap artifacts). The prompt (flexShrink=1) absorbs the squeeze
         // instead. When the project is the filler (no prompt), keep
-        // flexShrink=1 as the backstop behind `fitProjectCell`.
+        // flexShrink=1 as the backstop behind `fitProjectCell`. An unbounded
+        // highlight also needs that backstop, else the overflowing string
+        // shoves the row's other columns off the edge.
         <box
           flexGrow={props.promptOnRow ? 0 : 1}
-          flexShrink={props.promptOnRow ? 0 : 1}
+          flexShrink={props.promptOnRow && !highlightUnbounded() ? 0 : 1}
           flexDirection="row"
         >
           <Show
@@ -430,7 +435,7 @@ const FieldCell: Component<{
       // markup can't be sliced by char count.
       const text = () =>
         ctx.session.lastPrompt
-          ? truncateText(
+          ? sliceEllipsis(
               normalizePrompt(ctx.session.lastPrompt),
               ctx.maxPromptLen,
             )
@@ -557,7 +562,7 @@ const RowRender: Component<{
               <text fg={props.ctx.attentionColor}>
                 {props.ctx.sidebar
                   ? "!"
-                  : truncateText(label(), ATTENTION_LABEL_MAX)}
+                  : sliceEllipsis(label(), ATTENTION_LABEL_MAX)}
               </text>
             )}
           </Show>

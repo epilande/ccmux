@@ -559,7 +559,7 @@ export interface ProjectCellDisplay {
 }
 
 /** Slice `text` to at most `maxLen` chars, marking any cut with a trailing "…". */
-function sliceEllipsis(text: string, maxLen: number): string {
+export function sliceEllipsis(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
   return text.slice(0, Math.max(1, maxLen - 1)) + "…";
 }
