@@ -210,6 +210,15 @@ export interface Preferences {
   previewWidth?: number;
   command?: string;
   agents?: Record<string, AgentConfig>;
+  /**
+   * Additional Claude Code config directories to watch beyond the default
+   * `~/.claude`. Each entry contributes its `<dir>/projects` session tree,
+   * letting a single ccmux instance surface sessions from multiple Claude
+   * accounts started via `CLAUDE_CONFIG_DIR` (e.g. `~/.claude` +
+   * `~/.claude-personal`). The default `~/.claude` is always watched. Paths
+   * may start with `~`. See `resolveClaudeProjectDirs`.
+   */
+  claudeConfigDirs?: string[];
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   /** Default prompt display mode (default "inline"). The runtime `p`-key

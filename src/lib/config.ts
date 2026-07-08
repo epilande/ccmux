@@ -1,4 +1,4 @@
-import { join } from "path";
+import { join, resolve } from "path";
 import { homedir } from "os";
 
 /**
@@ -8,6 +8,44 @@ export const CLAUDE_DIR = join(homedir(), ".claude");
 export const PROJECTS_DIR = join(CLAUDE_DIR, "projects");
 export const SETTINGS_FILE = join(CLAUDE_DIR, "settings.json");
 export const CLAUDE_HOOKS_DIR = join(CLAUDE_DIR, "hooks");
+
+/** Expand a leading `~` / `~/` to the user's home directory. */
+function expandHome(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  return p;
+}
+
+/**
+ * Resolve the set of Claude `projects` directories ccmux should watch.
+ *
+ * Claude Code writes session transcripts to `$CLAUDE_CONFIG_DIR/projects`
+ * (default `~/.claude/projects`). A user running a second account via
+ * `CLAUDE_CONFIG_DIR=~/.claude-personal claude` produces sessions under a
+ * *different* projects tree that the default single-root watcher never
+ * sees. This returns every tree to watch so one ccmux instance can surface
+ * sessions from multiple Claude config dirs — the same way it already fans
+ * out across multiple agents.
+ *
+ * Sources, in order: the default `~/.claude/projects` (always first), the
+ * `CLAUDE_CONFIG_DIR` env var (matches Claude's own resolution), then the
+ * `claudeConfigDirs` preference. Each extra entry is a Claude *config* dir
+ * whose `projects` subdir is watched. Paths may start with `~`. The result
+ * is absolute and de-duplicated, order-preserving, so the default behavior
+ * is unchanged when nothing extra is configured.
+ */
+export function resolveClaudeProjectDirs(configDirs?: string[]): string[] {
+  const dirs = [PROJECTS_DIR];
+  const extraConfigDirs = [
+    ...(process.env.CLAUDE_CONFIG_DIR ? [process.env.CLAUDE_CONFIG_DIR] : []),
+    ...(configDirs ?? []),
+  ];
+  for (const dir of extraConfigDirs) {
+    if (!dir) continue;
+    dirs.push(join(resolve(expandHome(dir)), "projects"));
+  }
+  return [...new Set(dirs)];
+}
 
 /**
  * Claude Code's background/background-agent state, written by Claude's own
