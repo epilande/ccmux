@@ -12,6 +12,12 @@ import type { SessionPidMarker } from "./session-markers";
 export interface HookManagerContext {
   sessionManager: SessionManager;
   getLogWatcher(agentType: string): LogWatcher | undefined;
+  /**
+   * All log watchers for `agentType`. Claude may run several (one per
+   * configured config dir); every other agent has exactly one. Adapters use
+   * this to route marker events to the watcher that owns the session.
+   */
+  getLogWatchers(agentType: string): LogWatcher[];
   listProcesses(): Promise<ProcessInfo[]>;
   listPanes(): Promise<TmuxPane[]>;
 

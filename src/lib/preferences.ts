@@ -1,4 +1,4 @@
-import { mkdirSync } from "fs";
+import { mkdirSync, readFileSync } from "fs";
 import { dirname } from "path";
 import { PREFS_FILE } from "./config";
 import type { IconStyle } from "./icons";
@@ -210,6 +210,15 @@ export interface Preferences {
   previewWidth?: number;
   command?: string;
   agents?: Record<string, AgentConfig>;
+  /**
+   * Additional Claude Code config directories to watch beyond the default
+   * `~/.claude`. Each entry contributes its `<dir>/projects` session tree,
+   * letting a single ccmux instance surface sessions from multiple Claude
+   * accounts started via `CLAUDE_CONFIG_DIR` (e.g. `~/.claude` +
+   * `~/.claude-personal`). The default `~/.claude` is always watched. Paths
+   * may start with `~`. See `resolveClaudeProjectDirs`.
+   */
+  claudeConfigDirs?: string[];
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   /** Default prompt display mode (default "inline"). The runtime `p`-key
@@ -254,6 +263,19 @@ export async function getPreferences(): Promise<Preferences> {
     // Ignore malformed file
   }
   return {};
+}
+
+/**
+ * Synchronous preferences read for the few callers that can't be async
+ * (e.g. `HookAdapter.isInstalled`). Returns an empty object if the file is
+ * missing or malformed, matching {@link getPreferences}.
+ */
+export function getPreferencesSync(): Preferences {
+  try {
+    return JSON.parse(readFileSync(PREFS_FILE, "utf-8"));
+  } catch {
+    return {};
+  }
 }
 
 /**

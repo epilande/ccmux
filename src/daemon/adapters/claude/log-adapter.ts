@@ -52,7 +52,7 @@ function capStaleWorking(state: SessionState): SessionState {
  */
 export class ClaudeLogAdapter implements LogAdapter {
   readonly agentType = "claude";
-  readonly logDirGlob = PROJECTS_DIR;
+  readonly logDirGlob: string;
   readonly watchDepth = 1;
 
   private sessionManager: SessionManager;
@@ -61,8 +61,16 @@ export class ClaudeLogAdapter implements LogAdapter {
   private watchedSubagentDirs = new Set<string>();
   private subagentFileOffsets = new Map<string, number>();
 
-  constructor(sessionManager: SessionManager) {
+  // `projectsDir` defaults to the primary `~/.claude/projects`. A second
+  // instance pointed at another Claude config dir's `projects` tree (e.g.
+  // `~/.claude-personal/projects`) lets one daemon watch multiple accounts;
+  // see `resolveClaudeProjectDirs`.
+  constructor(
+    sessionManager: SessionManager,
+    projectsDir: string = PROJECTS_DIR,
+  ) {
     this.sessionManager = sessionManager;
+    this.logDirGlob = projectsDir;
   }
 
   resolveSessionIdFromPath(path: string): string | null {

@@ -9,11 +9,8 @@ import {
   writeFileSync,
 } from "fs";
 import { join } from "path";
-import {
-  CLAUDE_HOOKS_DIR as HOOKS_DIR,
-  MARKERS_DIR,
-  SETTINGS_FILE,
-} from "../../../lib/config";
+import { MARKERS_DIR, resolveClaudeConfigDirs } from "../../../lib/config";
+import { getPreferences, getPreferencesSync } from "../../../lib/preferences";
 import {
   SESSION_END_HOOK_SCRIPT,
   SESSION_START_HOOK_SCRIPT,
@@ -25,6 +22,15 @@ import type {
   HookManagerContext,
 } from "../../hook-adapter";
 import type { SessionPidMarker } from "../../session-markers";
+import type { LogWatcher } from "../../watcher";
+
+/** Per-config-dir paths ccmux reads/writes for Claude hook integration. */
+function hooksDirFor(configDir: string): string {
+  return join(configDir, "hooks");
+}
+function settingsFileFor(configDir: string): string {
+  return join(configDir, "settings.json");
+}
 
 const SESSION_START_SCRIPT = "ccmux-session-start.sh";
 const SESSION_END_SCRIPT = "ccmux-session-end.sh";
@@ -62,8 +68,33 @@ export class ClaudeHookAdapter implements HookAdapter {
     const lines: string[] = [];
     let changed = false;
 
-    mkdirSync(HOOKS_DIR, { recursive: true });
     mkdirSync(MARKERS_DIR, { recursive: true });
+
+    // Fan out across every configured Claude config dir so a second account
+    // (via CLAUDE_CONFIG_DIR / the `claudeConfigDirs` preference) gets hooks
+    // too, not just the default ~/.claude.
+    const configDirs = resolveClaudeConfigDirs(
+      (await getPreferences()).claudeConfigDirs,
+    );
+    for (const dir of configDirs) {
+      // Isolate each dir: a malformed settings.json in one must not abort the
+      // fan-out (which would leave orphan scripts and skip later dirs).
+      try {
+        changed = this.installIntoDir(dir, lines) || changed;
+      } catch (error) {
+        lines.push(`Failed to install hooks in ${dir}: ${errorMessage(error)}`);
+      }
+    }
+
+    return { lines, changed };
+  }
+
+  private installIntoDir(configDir: string, lines: string[]): boolean {
+    let changed = false;
+    const hooksDir = hooksDirFor(configDir);
+    const settingsFile = settingsFileFor(configDir);
+
+    mkdirSync(hooksDir, { recursive: true });
 
     const scripts = [
       { name: SESSION_START_SCRIPT, content: SESSION_START_HOOK_SCRIPT },
@@ -71,7 +102,7 @@ export class ClaudeHookAdapter implements HookAdapter {
       { name: STATE_NOTIFY_SCRIPT, content: STATE_NOTIFY_HOOK_SCRIPT },
     ] as const;
     for (const { name, content } of scripts) {
-      const path = join(HOOKS_DIR, name);
+      const path = join(hooksDir, name);
       const existed = existsSync(path);
       const current = existed ? readFileSync(path, "utf-8") : null;
       if (current === content) {
@@ -85,9 +116,9 @@ export class ClaudeHookAdapter implements HookAdapter {
     }
 
     let settings: ClaudeSettings = {};
-    const settingsExisted = existsSync(SETTINGS_FILE);
+    const settingsExisted = existsSync(settingsFile);
     if (settingsExisted) {
-      settings = JSON.parse(readFileSync(SETTINGS_FILE, "utf-8"));
+      settings = JSON.parse(readFileSync(settingsFile, "utf-8"));
     }
 
     const hookSlots: Array<{
@@ -110,7 +141,7 @@ export class ClaudeHookAdapter implements HookAdapter {
         settings,
         slot,
         matcher,
-        join(HOOKS_DIR, script),
+        join(hooksDir, script),
         lines,
       );
       settingsChanged ||= added;
@@ -118,61 +149,32 @@ export class ClaudeHookAdapter implements HookAdapter {
 
     if (settingsChanged) {
       if (settingsExisted) {
-        const backupPath = `${SETTINGS_FILE}.backup`;
-        copyFileSync(SETTINGS_FILE, backupPath);
+        const backupPath = `${settingsFile}.backup`;
+        copyFileSync(settingsFile, backupPath);
         lines.push(`Backed up settings to ${backupPath}`);
       }
-      writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2) + "\n");
-      lines.push(`Updated ${SETTINGS_FILE}`);
+      writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + "\n");
+      lines.push(`Updated ${settingsFile}`);
       changed = true;
     }
 
-    return { lines, changed };
+    return changed;
   }
 
   async uninstall(): Promise<HookAdapterOutcome> {
     const lines: string[] = [];
     let changed = false;
 
-    if (existsSync(SETTINGS_FILE)) {
-      const settings: ClaudeSettings = JSON.parse(
-        readFileSync(SETTINGS_FILE, "utf-8"),
-      );
-
-      const removedStart = removeHook(
-        settings,
-        "SessionStart",
-        SESSION_START_SCRIPT,
-      );
-      const removedEnd = removeHook(settings, "SessionEnd", SESSION_END_SCRIPT);
-      const removedNotify = removeHook(
-        settings,
-        "Notification",
-        STATE_NOTIFY_SCRIPT,
-      );
-      const removed = removedStart || removedEnd || removedNotify;
-
-      if (settings.hooks && Object.keys(settings.hooks).length === 0) {
-        delete settings.hooks;
-      }
-
-      if (removed) {
-        writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2) + "\n");
-        lines.push(`Removed hooks from ${SETTINGS_FILE}`);
-        changed = true;
-      }
-    }
-
-    for (const script of [
-      SESSION_START_SCRIPT,
-      SESSION_END_SCRIPT,
-      STATE_NOTIFY_SCRIPT,
-    ]) {
-      const scriptPath = join(HOOKS_DIR, script);
-      if (existsSync(scriptPath)) {
-        unlinkSync(scriptPath);
-        lines.push(`Removed ${scriptPath}`);
-        changed = true;
+    const configDirs = resolveClaudeConfigDirs(
+      (await getPreferences()).claudeConfigDirs,
+    );
+    for (const dir of configDirs) {
+      // Isolate each dir so one malformed settings.json can't skip the others
+      // or the marker cleanup below.
+      try {
+        changed = this.uninstallFromDir(dir, lines) || changed;
+      } catch (error) {
+        lines.push(`Failed to remove hooks in ${dir}: ${errorMessage(error)}`);
       }
     }
 
@@ -196,18 +198,80 @@ export class ClaudeHookAdapter implements HookAdapter {
     return { lines, changed };
   }
 
-  isInstalled(): boolean {
-    if (!existsSync(SETTINGS_FILE)) return false;
-    try {
-      const settings = JSON.parse(readFileSync(SETTINGS_FILE, "utf-8"));
-      const startHooks = settings?.hooks?.SessionStart;
-      if (!Array.isArray(startHooks)) return false;
-      return startHooks.some((h: { hooks?: { command?: string }[] }) =>
-        h.hooks?.some((hook) => hook.command?.includes(SESSION_START_SCRIPT)),
+  private uninstallFromDir(configDir: string, lines: string[]): boolean {
+    let changed = false;
+    const settingsFile = settingsFileFor(configDir);
+    const hooksDir = hooksDirFor(configDir);
+
+    if (existsSync(settingsFile)) {
+      const settings: ClaudeSettings = JSON.parse(
+        readFileSync(settingsFile, "utf-8"),
       );
-    } catch {
-      return false;
+
+      const removedStart = removeHook(
+        settings,
+        "SessionStart",
+        SESSION_START_SCRIPT,
+      );
+      const removedEnd = removeHook(settings, "SessionEnd", SESSION_END_SCRIPT);
+      const removedNotify = removeHook(
+        settings,
+        "Notification",
+        STATE_NOTIFY_SCRIPT,
+      );
+      const removed = removedStart || removedEnd || removedNotify;
+
+      if (settings.hooks && Object.keys(settings.hooks).length === 0) {
+        delete settings.hooks;
+      }
+
+      if (removed) {
+        writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + "\n");
+        lines.push(`Removed hooks from ${settingsFile}`);
+        changed = true;
+      }
     }
+
+    for (const script of [
+      SESSION_START_SCRIPT,
+      SESSION_END_SCRIPT,
+      STATE_NOTIFY_SCRIPT,
+    ]) {
+      const scriptPath = join(hooksDir, script);
+      if (existsSync(scriptPath)) {
+        unlinkSync(scriptPath);
+        lines.push(`Removed ${scriptPath}`);
+        changed = true;
+      }
+    }
+
+    return changed;
+  }
+
+  // Installed status tracks the primary `~/.claude` dir, which drives the
+  // daemon's single global runtime mode; keying it off an unconfigured extra
+  // dir could flip the whole daemon to no-hooks. Coverage gaps in extra
+  // configured dirs surface via `describeInstallAnomalies` instead.
+  isInstalled(): boolean {
+    const [primary] = resolveClaudeConfigDirs(
+      getPreferencesSync().claudeConfigDirs,
+    );
+    return isInstalledInDir(primary);
+  }
+
+  // Warn (at daemon startup and in `ccmux setup` status) when a configured
+  // Claude dir beyond the primary is missing hooks — those sessions won't be
+  // tracked authoritatively until `ccmux setup` is re-run.
+  describeInstallAnomalies(): string[] {
+    const [, ...extra] = resolveClaudeConfigDirs(
+      getPreferencesSync().claudeConfigDirs,
+    );
+    return extra
+      .filter((dir) => !isInstalledInDir(dir))
+      .map(
+        (dir) =>
+          `configured Claude dir missing hooks: ${dir} — run \`ccmux setup --agent claude\``,
+      );
   }
 
   // Claude does not write the per-session JSONL until the user submits the
@@ -222,14 +286,48 @@ export class ClaudeHookAdapter implements HookAdapter {
     marker: SessionPidMarker,
     ctx: HookManagerContext,
   ): Promise<void> {
-    ctx.getLogWatcher(this.agentType)?.handleMarkerAdded(marker);
+    this.ownerFor(marker, ctx)?.handleMarkerAdded(marker);
   }
 
   async onMarkerRemoved(
     marker: SessionPidMarker,
     ctx: HookManagerContext,
   ): Promise<void> {
-    ctx.getLogWatcher(this.agentType)?.handleMarkerRemoved(marker);
+    this.ownerFor(marker, ctx)?.handleMarkerRemoved(marker);
+  }
+
+  // Route a marker to the Claude watcher whose log tree owns the session, so
+  // a second-account session (in an extra config dir) re-arms / tears down on
+  // its own watcher instead of no-oping against the primary. Falls back to the
+  // primary watcher for sessions no tree has discovered yet (e.g. pane-migrated
+  // with no transcript on disk), preserving single-dir behavior.
+  private ownerFor(
+    marker: SessionPidMarker,
+    ctx: HookManagerContext,
+  ): LogWatcher | undefined {
+    const watchers = ctx.getLogWatchers(this.agentType);
+    return (
+      watchers.find((w) => w.ownsSession(marker.session_id)) ?? watchers[0]
+    );
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isInstalledInDir(configDir: string): boolean {
+  const settingsFile = settingsFileFor(configDir);
+  if (!existsSync(settingsFile)) return false;
+  try {
+    const settings = JSON.parse(readFileSync(settingsFile, "utf-8"));
+    const startHooks = settings?.hooks?.SessionStart;
+    if (!Array.isArray(startHooks)) return false;
+    return startHooks.some((h: { hooks?: { command?: string }[] }) =>
+      h.hooks?.some((hook) => hook.command?.includes(SESSION_START_SCRIPT)),
+    );
+  } catch {
+    return false;
   }
 }
 
