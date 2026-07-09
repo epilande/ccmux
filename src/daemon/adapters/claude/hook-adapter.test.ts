@@ -266,6 +266,53 @@ describe("ClaudeHookAdapter", () => {
     });
   });
 
+  describe("marker routing across watchers", () => {
+    function fakeWatcher(ownedId: string | null) {
+      return {
+        ownsSession: (id: string) => id === ownedId,
+        added: [] as string[],
+        removed: [] as string[],
+        handleMarkerAdded(m: { session_id: string }) {
+          this.added.push(m.session_id);
+        },
+        handleMarkerRemoved(m: { session_id: string }) {
+          this.removed.push(m.session_id);
+        },
+      };
+    }
+    function ctxWith(watchers: unknown[]) {
+      return { getLogWatchers: () => watchers } as never;
+    }
+    const marker = { session_id: "sess-personal" } as never;
+
+    it("routes to the watcher whose tree owns the session", async () => {
+      const primary = fakeWatcher(null);
+      const secondary = fakeWatcher("sess-personal");
+      const ctx = ctxWith([primary, secondary]);
+
+      await adapter.onMarkerAdded(marker, ctx);
+      await adapter.onMarkerRemoved(marker, ctx);
+
+      expect(secondary.added).toEqual(["sess-personal"]);
+      expect(secondary.removed).toEqual(["sess-personal"]);
+      expect(primary.added).toEqual([]);
+      expect(primary.removed).toEqual([]);
+    });
+
+    it("falls back to the primary watcher when no tree owns the session yet", async () => {
+      const primary = fakeWatcher(null);
+      const secondary = fakeWatcher(null);
+      const ctx = ctxWith([primary, secondary]);
+
+      await adapter.onMarkerAdded(marker, ctx);
+      await adapter.onMarkerRemoved(marker, ctx);
+
+      expect(primary.added).toEqual(["sess-personal"]);
+      expect(primary.removed).toEqual(["sess-personal"]);
+      expect(secondary.added).toEqual([]);
+    });
+  });
+
   describe("uninstall preserves user-owned hooks", () => {
     it("removes ccmux entries but leaves user-authored entries in the same slot", async () => {
       await adapter.install();

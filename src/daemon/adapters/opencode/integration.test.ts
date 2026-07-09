@@ -140,6 +140,7 @@ describe("OpenCode plugin → HookManager → adapter pipeline", () => {
     ctx = {
       sessionManager,
       getLogWatcher: () => undefined,
+      getLogWatchers: () => [],
       listProcesses: async () => [],
       listPanes: async () => [pane],
       getPaneHostingPid: async (pid: number) =>

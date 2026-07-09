@@ -22,6 +22,7 @@ import type {
   HookManagerContext,
 } from "../../hook-adapter";
 import type { SessionPidMarker } from "../../session-markers";
+import type { LogWatcher } from "../../watcher";
 
 /** Per-config-dir paths ccmux reads/writes for Claude hook integration. */
 function hooksDirFor(configDir: string): string {
@@ -76,7 +77,13 @@ export class ClaudeHookAdapter implements HookAdapter {
       (await getPreferences()).claudeConfigDirs,
     );
     for (const dir of configDirs) {
-      changed = this.installIntoDir(dir, lines) || changed;
+      // Isolate each dir: a malformed settings.json in one must not abort the
+      // fan-out (which would leave orphan scripts and skip later dirs).
+      try {
+        changed = this.installIntoDir(dir, lines) || changed;
+      } catch (error) {
+        lines.push(`Failed to install hooks in ${dir}: ${errorMessage(error)}`);
+      }
     }
 
     return { lines, changed };
@@ -162,7 +169,13 @@ export class ClaudeHookAdapter implements HookAdapter {
       (await getPreferences()).claudeConfigDirs,
     );
     for (const dir of configDirs) {
-      changed = this.uninstallFromDir(dir, lines) || changed;
+      // Isolate each dir so one malformed settings.json can't skip the others
+      // or the marker cleanup below.
+      try {
+        changed = this.uninstallFromDir(dir, lines) || changed;
+      } catch (error) {
+        lines.push(`Failed to remove hooks in ${dir}: ${errorMessage(error)}`);
+      }
     }
 
     if (existsSync(MARKERS_DIR)) {
@@ -273,15 +286,34 @@ export class ClaudeHookAdapter implements HookAdapter {
     marker: SessionPidMarker,
     ctx: HookManagerContext,
   ): Promise<void> {
-    ctx.getLogWatcher(this.agentType)?.handleMarkerAdded(marker);
+    this.ownerFor(marker, ctx)?.handleMarkerAdded(marker);
   }
 
   async onMarkerRemoved(
     marker: SessionPidMarker,
     ctx: HookManagerContext,
   ): Promise<void> {
-    ctx.getLogWatcher(this.agentType)?.handleMarkerRemoved(marker);
+    this.ownerFor(marker, ctx)?.handleMarkerRemoved(marker);
   }
+
+  // Route a marker to the Claude watcher whose log tree owns the session, so
+  // a second-account session (in an extra config dir) re-arms / tears down on
+  // its own watcher instead of no-oping against the primary. Falls back to the
+  // primary watcher for sessions no tree has discovered yet (e.g. pane-migrated
+  // with no transcript on disk), preserving single-dir behavior.
+  private ownerFor(
+    marker: SessionPidMarker,
+    ctx: HookManagerContext,
+  ): LogWatcher | undefined {
+    const watchers = ctx.getLogWatchers(this.agentType);
+    return (
+      watchers.find((w) => w.ownsSession(marker.session_id)) ?? watchers[0]
+    );
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isInstalledInDir(configDir: string): boolean {

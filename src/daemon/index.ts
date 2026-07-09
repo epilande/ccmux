@@ -5,7 +5,6 @@ import {
   readFileSync,
   mkdirSync,
 } from "fs";
-import { join } from "path";
 import {
   PID_FILE,
   SCAN_INTERVAL_MS,
@@ -19,6 +18,7 @@ import {
   decideMigrationBindings,
   decideCodexRolloutLinks,
   decideMarkerLinks,
+  resolveExistingLogPath,
   type CodexLinkCandidate,
 } from "./binder";
 import { SessionManager } from "./sessions";
@@ -62,7 +62,6 @@ import {
 import {
   matchSessionsToPanes,
   cleanupStaleSessions,
-  encodeProjectPath,
 } from "./session-pane-match";
 import { sweepOrphanInvokeSessions } from "./detached-session";
 import { ProcessTree } from "./process-tree";
@@ -173,6 +172,11 @@ export class Daemon {
     this.hookManager.setContext({
       sessionManager: this.sessionManager,
       getLogWatcher: (agentType) => this.logWatchers.get(agentType),
+      getLogWatchers: (agentType) => {
+        if (agentType === "claude") return this.claudeWatchers();
+        const single = this.logWatchers.get(agentType);
+        return single ? [single] : [];
+      },
       listProcesses: () => discoverAgentProcesses(this.agents),
       listPanes: () => listTmuxPanes(),
       getPaneHostingPid: (pid) => this.resolvePaneHostingPid(pid),
@@ -642,18 +646,15 @@ export class Daemon {
     }
   }
 
-  // A session's transcript may live under any watched Claude config dir
-  // (e.g. a `~/.claude-personal` account), so probe each `projects` tree and
-  // return the first that exists. Falls back to the primary tree's path when
-  // none is found yet (the file may not have been written), preserving the
-  // original single-root behavior.
+  // Locate a session's transcript across every watched Claude config dir
+  // (e.g. a `~/.claude-personal` account). See `resolveExistingLogPath`.
   private buildLogPath(cwd: string, sessionId: string): string {
-    const rel = join(encodeProjectPath(cwd), `${sessionId}.jsonl`);
-    for (const dir of this.claudeProjectDirs) {
-      const candidate = join(dir, rel);
-      if (existsSync(candidate)) return candidate;
-    }
-    return join(PROJECTS_DIR, rel);
+    return resolveExistingLogPath(
+      this.claudeProjectDirs,
+      cwd,
+      sessionId,
+      existsSync,
+    );
   }
 
   /** Primary Claude watcher plus any extra config-dir watchers. */

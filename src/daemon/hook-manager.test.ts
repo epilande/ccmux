@@ -26,6 +26,7 @@ function trivialContext() {
   return {
     sessionManager: {} as never,
     getLogWatcher: () => undefined,
+    getLogWatchers: () => [],
     listProcesses: async () => [],
     listPanes: async () => [],
     getPaneHostingPid: async () => null,
@@ -94,6 +95,7 @@ describe("HookManager", () => {
       const ctx = {
         sessionManager: {} as never,
         getLogWatcher: () => undefined,
+        getLogWatchers: () => [],
         listProcesses: async () => [],
         listPanes: async () => [],
         getPaneHostingPid: async () => null,
@@ -429,6 +431,7 @@ describe("HookManager", () => {
       manager.setContext({
         sessionManager: {} as never,
         getLogWatcher: () => undefined,
+        getLogWatchers: () => [],
         listProcesses: async () => [],
         listPanes: async () => [],
         getPaneHostingPid: async () => null,

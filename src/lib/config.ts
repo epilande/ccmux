@@ -6,8 +6,6 @@ import { homedir } from "os";
  */
 export const CLAUDE_DIR = join(homedir(), ".claude");
 export const PROJECTS_DIR = join(CLAUDE_DIR, "projects");
-export const SETTINGS_FILE = join(CLAUDE_DIR, "settings.json");
-export const CLAUDE_HOOKS_DIR = join(CLAUDE_DIR, "hooks");
 
 /** Expand a leading `~` / `~/` to the user's home directory. */
 function expandHome(p: string): string {
@@ -36,7 +34,13 @@ export function resolveClaudeConfigDirs(configDirs?: string[]): string[] {
   const dirs = [CLAUDE_DIR];
   const extraConfigDirs = [
     ...(process.env.CLAUDE_CONFIG_DIR ? [process.env.CLAUDE_CONFIG_DIR] : []),
-    ...(configDirs ?? []),
+    // `configDirs` comes from unvalidated ccmux.json; a bare string (e.g.
+    // `"claudeConfigDirs": "~/.claude-personal"`) would otherwise spread into
+    // single characters and have hooks written into `~`, `/`, and cwd. Only
+    // accept an array of strings.
+    ...(Array.isArray(configDirs)
+      ? configDirs.filter((d) => typeof d === "string")
+      : []),
   ];
   for (const dir of extraConfigDirs) {
     if (!dir) continue;

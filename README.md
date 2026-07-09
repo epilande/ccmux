@@ -258,21 +258,21 @@ ccmux config get <key>
 ccmux config list
 ```
 
-| Key                 | Values                                                                       | Default            | Description                                                     |
-| :------------------ | :--------------------------------------------------------------------------- | :----------------- | :-------------------------------------------------------------- |
-| `iconStyle`         | `dot`, `emoji`, `nerdfont`, `none`                                           | `dot`              | Status icon style                                               |
-| `theme`             | `catppuccin-*`, `tokyo-night*`, `dracula`, `gruvbox-*`, `nord`, `rose-pine*` | `catppuccin-mocha` | TUI color theme (resolved at launch; see [Theme](#-theme))      |
-| `showPreview`       | `true`, `false`                                                              | `false`            | Show preview panel on launch                                    |
-| `previewWidth`      | `20`–`80`                                                                    | `40`               | Preview panel width (percentage)                                |
-| `command`           | any non-blank string                                                         | `claude`           | CLI command used for session restart                            |
-| `groupBy`           | `project`, `cwd`, `session`, `window`, `none`                                | `project`          | How sessions are grouped in the TUI                             |
-| `promptDisplay`     | `inline`, `row2`, `off`                                                      | `inline`           | Prompt display: inline on row 1, its own row, or hidden         |
-| `backgroundAgents`  | `true`, `false`                                                              | `true`             | Show Claude background agents as rows (daemon restart required) |
+| Key                 | Values                                                                       | Default            | Description                                                                                                                                      |
+| :------------------ | :--------------------------------------------------------------------------- | :----------------- | :----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `iconStyle`         | `dot`, `emoji`, `nerdfont`, `none`                                           | `dot`              | Status icon style                                                                                                                                |
+| `theme`             | `catppuccin-*`, `tokyo-night*`, `dracula`, `gruvbox-*`, `nord`, `rose-pine*` | `catppuccin-mocha` | TUI color theme (resolved at launch; see [Theme](#-theme))                                                                                       |
+| `showPreview`       | `true`, `false`                                                              | `false`            | Show preview panel on launch                                                                                                                     |
+| `previewWidth`      | `20`–`80`                                                                    | `40`               | Preview panel width (percentage)                                                                                                                 |
+| `command`           | any non-blank string                                                         | `claude`           | CLI command used for session restart                                                                                                             |
+| `groupBy`           | `project`, `cwd`, `session`, `window`, `none`                                | `project`          | How sessions are grouped in the TUI                                                                                                              |
+| `promptDisplay`     | `inline`, `row2`, `off`                                                      | `inline`           | Prompt display: inline on row 1, its own row, or hidden                                                                                          |
+| `backgroundAgents`  | `true`, `false`                                                              | `true`             | Show Claude background agents as rows (daemon restart required)                                                                                  |
 | `claudeConfigDirs`  | array of paths                                                               | `[]`               | Extra Claude config dirs to watch beyond `~/.claude` (daemon restart required; see [Multiple Claude Config Dirs](#-multiple-claude-config-dirs)) |
-| `searchPaneContent` | `true`, `false`                                                              | `true`             | Include captured pane content in TUI search                     |
-| `persistent`        | `true`, `false`                                                              | `false`            | Keep picker open after switching sessions (dashboard mode)      |
-| `sidebar.width`     | `10`–`80`                                                                    | `30`               | Sidebar pane width in columns                                   |
-| `sidebar.position`  | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                   |
+| `searchPaneContent` | `true`, `false`                                                              | `true`             | Include captured pane content in TUI search                                                                                                      |
+| `persistent`        | `true`, `false`                                                              | `false`            | Keep picker open after switching sessions (dashboard mode)                                                                                       |
+| `sidebar.width`     | `10`–`80`                                                                    | `30`               | Sidebar pane width in columns                                                                                                                    |
+| `sidebar.position`  | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                                                                                                    |
 
 ### 📊 Column Configuration
 
@@ -370,24 +370,17 @@ An unknown base name falls back to the default theme; an invalid hex value or un
 
 Claude Code writes its session transcripts to `$CLAUDE_CONFIG_DIR/projects` (default `~/.claude/projects`). If you run more than one Claude account — e.g. a work login in `~/.claude` and a personal one launched with `CLAUDE_CONFIG_DIR=~/.claude-personal` — sessions from the non-default account land in a separate `projects` tree that ccmux doesn't watch by default, so they never show up in the TUI even though their hooks fire correctly.
 
-Add the extra config dirs to `claudeConfigDirs` and ccmux watches every `<dir>/projects` tree from a single daemon, the same way it fans out across agents:
+Add the extra config dirs to `claudeConfigDirs` in `~/.config/ccmux/ccmux.json` and ccmux watches every `<dir>/projects` tree from a single daemon, the same way it fans out across agents:
 
-```jsonc
-// ~/.config/ccmux/ccmux.json
-{
-  "claudeConfigDirs": ["~/.claude-personal"]
-}
+```json
+{ "claudeConfigDirs": ["~/.claude-personal"] }
 ```
 
-```bash
-ccmux config set claudeConfigDirs '["~/.claude-personal"]'
-ccmux daemon restart
-```
-
-Then install hooks into every configured dir so sessions from each account are matched authoritatively:
+Then install hooks into every configured dir so sessions from each account are matched authoritatively, and restart the daemon to pick up the new dirs:
 
 ```bash
 ccmux setup --agent claude   # fans out to ~/.claude and every claudeConfigDirs entry
+ccmux daemon restart
 ```
 
 Notes:
