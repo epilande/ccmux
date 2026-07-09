@@ -89,6 +89,19 @@ import {
 type ClaudeRuntimeMode = "claude-with-hooks" | "claude-no-hooks";
 
 /**
+ * Fold the debounce check across every Claude watcher: an extra config-dir
+ * watcher records freshness on its own `lastProcessedAt`, so consulting only
+ * the primary would let second-account sessions bypass the reconciler's
+ * just-processed guard.
+ */
+export function isRecentlyProcessedByAny(
+  watchers: ReadonlyArray<{ isRecentlyProcessed: (id: string) => boolean }>,
+  sessionId: string,
+): boolean {
+  return watchers.some((w) => w.isRecentlyProcessed(sessionId));
+}
+
+/**
  * Main daemon class
  */
 export class Daemon {
@@ -902,7 +915,7 @@ export class Daemon {
       // the reconciler's just-processed guard.
       watcher: {
         isRecentlyProcessed: (id) =>
-          this.claudeWatchers().some((w) => w.isRecentlyProcessed(id)),
+          isRecentlyProcessedByAny(this.claudeWatchers(), id),
       },
       hookManager: this.hookManager,
       attentionTracker: this.attentionTracker,
