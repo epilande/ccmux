@@ -75,7 +75,7 @@ describe("runHunkReview", () => {
     expect(calls).toEqual(["suspend", "resume"]);
     expect(spawnCalls).toEqual([
       [
-        ["/opt/homebrew/bin/hunk", ...HUNK_DIFF_ARGS],
+        ["hunk", ...HUNK_DIFF_ARGS],
         {
           cwd: "/repo",
           stdin: "inherit",

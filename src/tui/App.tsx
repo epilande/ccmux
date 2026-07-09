@@ -91,7 +91,9 @@ export function App(props: AppProps) {
   // installed mid-session): gates the footer hint and help row. `d` itself
   // re-probes live so a hunk installed after launch works without restart.
   const hunkAtLaunch = isHunkAvailable();
-  const reviewEnabled = () => !props.sidebar && hunkAtLaunch;
+  // Both operands are fixed for the component's lifetime, so this is a plain
+  // constant, not a reactive accessor.
+  const reviewEnabled = !props.sidebar && hunkAtLaunch;
   const store = createTUIStore({
     initialPreview: props.initialPreview,
     iconStyle: props.iconStyle,
@@ -347,7 +349,7 @@ export function App(props: AppProps) {
     const session = cm
       ? store.state.sessions.find((s) => s.id === cm.sessionId)
       : undefined;
-    const reviewItem: ContextMenuItem[] = reviewEnabled()
+    const reviewItem: ContextMenuItem[] = reviewEnabled
       ? [
           {
             label: "Review diff",
@@ -1165,7 +1167,7 @@ export function App(props: AppProps) {
             previewFocused={store.state.previewFocused}
             persistent={props.persistent}
             groupBy={store.state.groupBy}
-            reviewable={reviewEnabled()}
+            reviewable={reviewEnabled}
           />
         </Show>
 
@@ -1178,7 +1180,7 @@ export function App(props: AppProps) {
         <Show when={store.state.showHelp}>
           <HelpOverlay
             sidebar={props.sidebar}
-            reviewable={reviewEnabled()}
+            reviewable={reviewEnabled}
             onScrollboxRef={(ref) => (helpScrollbox = ref)}
           />
         </Show>

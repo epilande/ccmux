@@ -30,6 +30,23 @@ export interface RunHunkReviewDeps {
 }
 
 /**
+ * Spawn `hunk diff --watch` in `root` with inherited stdio (`hunk` resolved via
+ * PATH). Shared by the CLI `review` command and the in-picker review action;
+ * both verify `hunk` is on PATH (`isHunkAvailable`) before calling.
+ */
+export function spawnHunkDiff(
+  root: string,
+  spawn: SpawnHunk = Bun.spawn as unknown as SpawnHunk,
+): { exited: Promise<number> } {
+  return spawn(["hunk", ...HUNK_DIFF_ARGS], {
+    cwd: root,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+}
+
+/**
  * Suspend the picker's renderer, run `hunk diff --watch` in `cwd`'s repo root
  * with inherited stdio, then resume. Pre-flight checks (hunk on PATH, git
  * repo root) run before `suspend()` so error toasts render without a flicker.
@@ -59,12 +76,7 @@ export async function runHunkReview(
   }
 
   try {
-    const proc = spawn([hunk, ...HUNK_DIFF_ARGS], {
-      cwd: root,
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-    });
+    const proc = spawnHunkDiff(root, spawn);
     const exitCode = await proc.exited;
     if (exitCode !== 0) {
       return { ok: false, error: `hunk exited with code ${exitCode}` };

@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { getDaemonUrl } from "../lib/config";
 import { resolveRepoRoot } from "../lib/git";
-import { HUNK_DIFF_ARGS, HUNK_INSTALL_HINT } from "../tui/utils/review";
+import { HUNK_INSTALL_HINT, spawnHunkDiff } from "../tui/utils/review";
 import { ensureDaemon } from "./shared";
 
 export function createReviewCommand(): Command {
@@ -9,8 +9,9 @@ export function createReviewCommand(): Command {
     .description("Review a session's diff with hunk")
     .argument("[session-id]", "Session ID (defaults to the current directory)")
     .action(async (sessionId?: string) => {
-      const hunk = Bun.which("hunk");
-      if (!hunk) {
+      // `Bun.which` directly (not the `isHunkAvailable` helper) so this stays
+      // immune to App.test.tsx's process-wide `mock.module("./utils/review")`.
+      if (!Bun.which("hunk")) {
         console.error(HUNK_INSTALL_HINT);
         process.exit(1);
       }
@@ -52,12 +53,7 @@ export function createReviewCommand(): Command {
         process.exit(1);
       }
 
-      const proc = Bun.spawn([hunk, ...HUNK_DIFF_ARGS], {
-        cwd: root,
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
-      });
+      const proc = spawnHunkDiff(root);
       process.exit(await proc.exited);
     });
 }

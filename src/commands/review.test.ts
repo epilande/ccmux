@@ -153,7 +153,7 @@ describe("ccmux review", () => {
       expect(exit?.code).toBe(0);
       expect(spawn.calls).toEqual([
         {
-          cmd: ["/opt/homebrew/bin/hunk", "diff", "--watch"],
+          cmd: ["hunk", "diff", "--watch"],
           opts: {
             cwd: "/repo/root",
             stdin: "inherit",
