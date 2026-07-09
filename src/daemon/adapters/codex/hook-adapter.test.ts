@@ -424,6 +424,8 @@ describe("CodexHookAdapter", () => {
         } as never,
         getLogWatcher: (agentType: string) =>
           agentType === "codex" ? (logWatcherSpy as never) : undefined,
+        getLogWatchers: (agentType: string) =>
+          agentType === "codex" ? [logWatcherSpy as never] : [],
         listProcesses: async () => [] as never,
         listPanes: async () => panes as never,
         getPaneHostingPid: async () => null,
@@ -608,6 +610,7 @@ describe("CodexHookAdapter", () => {
           ({
             processPath: async (p: string) => void processed.push(p),
           }) as never,
+        getLogWatchers: () => [] as never,
         listProcesses: async () => [] as never,
         listPanes: async () => {
           listPanesCalls++;

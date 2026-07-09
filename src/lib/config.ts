@@ -1,4 +1,4 @@
-import { join } from "path";
+import { join, resolve } from "path";
 import { homedir } from "os";
 
 /**
@@ -6,8 +6,61 @@ import { homedir } from "os";
  */
 export const CLAUDE_DIR = join(homedir(), ".claude");
 export const PROJECTS_DIR = join(CLAUDE_DIR, "projects");
-export const SETTINGS_FILE = join(CLAUDE_DIR, "settings.json");
-export const CLAUDE_HOOKS_DIR = join(CLAUDE_DIR, "hooks");
+
+/** Expand a leading `~` / `~/` to the user's home directory. */
+function expandHome(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  return p;
+}
+
+/**
+ * Resolve the set of Claude *config* directories ccmux should treat as
+ * active (the dirs that hold `settings.json`, `hooks/`, and `projects/`).
+ *
+ * A user running a second account via `CLAUDE_CONFIG_DIR=~/.claude-personal
+ * claude` keeps its state under a *different* config dir that the default
+ * single-root code never touches. This returns every config dir so one
+ * ccmux instance can watch — and install hooks into — them all, the same
+ * way it already fans out across multiple agents.
+ *
+ * Sources, in order: the default `~/.claude` (always first), the
+ * `CLAUDE_CONFIG_DIR` env var (matches Claude's own resolution), then the
+ * `additionalClaudeConfigDirs` preference. Paths may start with `~`. The result is
+ * absolute and de-duplicated, order-preserving, so the default behavior is
+ * unchanged when nothing extra is configured.
+ */
+export function resolveClaudeConfigDirs(configDirs?: string[]): string[] {
+  const dirs = [CLAUDE_DIR];
+  const extraConfigDirs = [
+    ...(process.env.CLAUDE_CONFIG_DIR ? [process.env.CLAUDE_CONFIG_DIR] : []),
+    // `configDirs` comes from unvalidated ccmux.json; a bare string (e.g.
+    // `"additionalClaudeConfigDirs": "~/.claude-personal"`) would otherwise spread into
+    // single characters and have hooks written into `~`, `/`, and cwd. Only
+    // accept an array of strings.
+    ...(Array.isArray(configDirs)
+      ? configDirs.filter((d) => typeof d === "string")
+      : []),
+  ];
+  for (const dir of extraConfigDirs) {
+    if (!dir) continue;
+    dirs.push(resolve(expandHome(dir)));
+  }
+  return [...new Set(dirs)];
+}
+
+/**
+ * Resolve the set of Claude `projects` directories ccmux should watch — the
+ * `projects` subdir of every configured Claude config dir. Claude Code
+ * writes session transcripts to `$CLAUDE_CONFIG_DIR/projects`; watching all
+ * of them lets one ccmux instance surface sessions from multiple accounts.
+ * See {@link resolveClaudeConfigDirs}.
+ */
+export function resolveClaudeProjectDirs(configDirs?: string[]): string[] {
+  return resolveClaudeConfigDirs(configDirs).map((dir) =>
+    join(dir, "projects"),
+  );
+}
 
 /**
  * Claude Code's background/background-agent state, written by Claude's own
