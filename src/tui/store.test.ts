@@ -1,7 +1,21 @@
-import { describe, it, expect } from "bun:test";
-import { createTUIStore as _createTUIStore } from "./store";
+import { describe, it, expect, mock } from "bun:test";
 import type { FlatItem } from "./utils/grouping";
 import { mockEnrichedSession } from "./components/test-helpers";
+
+// capturePane is mocked (process-wide, per Bun's mock.module) so the
+// searchPaneLines tests can assert what the store passes it, without
+// shelling out to a real `tmux capture-pane`. Spread the real module so
+// other exports (unused here) stay intact. Must be mocked BEFORE "./store"
+// is (dynamically) imported below, so the store's own import of capturePane
+// resolves to this mock.
+const realTmux = await import("./utils/tmux");
+const capturePaneSpy = mock(async (_pane: string, _lines: number) => "");
+mock.module("./utils/tmux", () => ({
+  ...realTmux,
+  capturePane: capturePaneSpy,
+}));
+
+const { createTUIStore: _createTUIStore } = await import("./store");
 
 function headerLabels(items: FlatItem[]): string[] {
   return items
@@ -1321,6 +1335,79 @@ describe("store", () => {
       } finally {
         globalThis.fetch = origFetch;
       }
+    });
+
+    it("does not fetch /search when searchTranscript is disabled", async () => {
+      const origFetch = globalThis.fetch;
+      let fetchCalled = false;
+      globalThis.fetch = (async () => {
+        fetchCalled = true;
+        return {
+          ok: true,
+          json: async () => ({
+            results: [
+              {
+                sessionId: "s1",
+                matches: [{ role: "user", snippet: "matched transcript text" }],
+              },
+            ],
+          }),
+        } as unknown as Response;
+      }) as unknown as typeof fetch;
+      try {
+        const store = createTUIStore({
+          groupBy: "none",
+          searchTranscript: false,
+        });
+        store.actions.setSessions([
+          // Metadata doesn't match "transcript"; only the (disabled) /search
+          // path could match it.
+          createMockSession({ id: "s1", project: "zzz", gitBranch: null }),
+        ]);
+        store.actions.setSearchQuery("transcript");
+        await waitForDebounce();
+
+        expect(fetchCalled).toBe(false);
+        // The transcript cache never got populated, so s1 has no match path.
+        const filtered = store.filteredSessions();
+        expect(filtered.some((f) => f.session.id === "s1")).toBe(false);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("passes the configured searchPaneLines through to capturePane", async () => {
+      capturePaneSpy.mockClear();
+      const store = createTUIStore({ groupBy: "none", searchPaneLines: 250 });
+      store.actions.setSessions([
+        createMockSession({
+          id: "s1",
+          project: "zzz",
+          gitBranch: null,
+          tmuxPane: "%1",
+        }),
+      ]);
+      store.actions.setSearchQuery("zzz");
+      await waitForDebounce();
+
+      expect(capturePaneSpy).toHaveBeenCalledWith("%1", 250);
+    });
+
+    it("defaults searchPaneLines to 100 when omitted", async () => {
+      capturePaneSpy.mockClear();
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "s1",
+          project: "zzz",
+          gitBranch: null,
+          tmuxPane: "%1",
+        }),
+      ]);
+      store.actions.setSearchQuery("zzz");
+      await waitForDebounce();
+
+      expect(capturePaneSpy).toHaveBeenCalledWith("%1", 100);
     });
 
     it("matches an older prompt by substring with a single-span highlight when lastPrompt did not match", () => {
