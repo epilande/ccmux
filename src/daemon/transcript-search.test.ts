@@ -182,6 +182,32 @@ describe("transcript-search", () => {
       );
     });
 
+    it("matches a query containing a JSON-escaped char (raw pre-filter skipped)", async () => {
+      // The raw file stores `"` escaped as `\"`, so a raw-bytes pre-filter
+      // would false-negative on a query containing `"`. The escaped-char guard
+      // must skip the pre-filter and let the parse find the match in the
+      // unescaped text.
+      const logPath = join(dir, "claude.jsonl");
+      writeFileSync(
+        logPath,
+        JSON.stringify({
+          type: "user",
+          uuid: "u1",
+          parentUuid: null,
+          timestamp: "2024-01-01T12:00:00Z",
+          message: { role: "user", content: 'he said "yes" to the plan' },
+        }) + "\n",
+      );
+
+      const result = await searchTranscript(
+        { id: "s1", agentType: "claude", logPath },
+        'said "yes',
+      );
+      expect(result).not.toBeNull();
+      expect(result!.matches.length).toBe(1);
+      expect(result!.matches[0].snippet).toContain('said "yes"');
+    });
+
     it("keeps a deep match near the snippet start (asymmetric window)", async () => {
       const logPath = join(dir, "claude.jsonl");
       // The query sits ~200 chars into the text; a symmetric 80-char lead

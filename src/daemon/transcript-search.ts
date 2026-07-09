@@ -154,12 +154,30 @@ async function readTranscriptTail(
 }
 
 /**
+ * True when the query contains a character that JSON escapes into a longer
+ * sequence in the raw transcript file: a double-quote, a backslash, or a C0
+ * control (U+0000-U+001F). A raw-bytes substring scan would false-negative
+ * against the parsed/unescaped text the matcher uses for those, so the
+ * pre-filter is skipped and the full parse runs instead. Default serializers
+ * (Claude JSON.stringify, Codex serde_json) emit non-ASCII and "/" literally,
+ * so those stay eligible for the fast path.
+ */
+function queryHasJsonEscapedChar(query: string): boolean {
+  for (let i = 0; i < query.length; i++) {
+    const c = query.charCodeAt(i);
+    if (c === 0x22 || c === 0x5c || c <= 0x1f) return true;
+  }
+  return false;
+}
+
+/**
  * Search a single session's transcript for `query` (already lowercased by the
  * caller). Returns up to `maxMatches` snippets, or null when the session isn't
  * a supported transcript-backed agent, has no log path, or the read/parse
  * fails. A session with a log path but no textual match returns an empty
  * `matches` array.
  */
+
 export async function searchTranscript(
   sess: { id: string; agentType: string; logPath: string | null },
   query: string,
@@ -180,6 +198,22 @@ export async function searchTranscript(
 
   try {
     const content = await readTranscriptTail(sess.logPath, maxBytes);
+
+    // Cheap pre-filter: skip the full per-line JSON.parse when the raw tail
+    // can't contain the query at all. Matching runs on parsed/unescaped text,
+    // so a raw-bytes `includes` is only sound when the query holds no chars
+    // that JSON escapes (`"`, `\`, C0 controls): those serialize to a
+    // multi-char escape in the raw file, so a raw scan could false-negative a
+    // real match. When the query does contain one, fall through to the parse.
+    // (A false positive from a raw hit in JSON keys/tool output is harmless:
+    // the parse then finds no textual match and returns [].)
+    if (
+      !queryHasJsonEscapedChar(query) &&
+      !content.toLowerCase().includes(query)
+    ) {
+      return { sessionId: sess.id, matches: [] };
+    }
+
     const matches: TranscriptMatch[] = [];
 
     if (sess.agentType === "claude") {
