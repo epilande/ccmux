@@ -1540,6 +1540,29 @@ describe("App review (d)", () => {
     expect(runHunkReviewSpy.mock.calls[0]?.[1]).toBe("/code/myapp");
   });
 
+  it("drops a second d-press while a review is in flight", async () => {
+    // Hold runHunkReview pending so reviewInFlight stays true across the
+    // second press. A rapid double-d must not race two suspend/spawn/resume
+    // cycles against the same renderer.
+    let resolveReview!: (
+      r: { ok: true } | { ok: false; error: string },
+    ) => void;
+    runHunkReviewSpy.mockImplementation(
+      () =>
+        new Promise<{ ok: true } | { ok: false; error: string }>((resolve) => {
+          resolveReview = resolve;
+        }),
+    );
+    await renderWithSession();
+    setup.mockInput.pressKey("d");
+    await setup.renderOnce();
+    setup.mockInput.pressKey("d");
+    await setup.renderOnce();
+    expect(runHunkReviewSpy).toHaveBeenCalledTimes(1);
+    // Release the in-flight review so the guard clears (and no dangling promise).
+    resolveReview({ ok: true });
+  });
+
   it("does not call runHunkReview when a group header is selected", async () => {
     // Default groupBy puts a header at flat-index 0.
     await renderApp(120, 20, { groupBy: "project" });
