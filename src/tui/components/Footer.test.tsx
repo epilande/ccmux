@@ -17,6 +17,7 @@ async function renderFooter(props: {
   previewFocused?: boolean;
   persistent?: boolean;
   groupBy?: GroupBy;
+  reviewable?: boolean;
 }) {
   setup = await testRender(
     () => (
@@ -27,6 +28,7 @@ async function renderFooter(props: {
         previewFocused={props.previewFocused}
         persistent={props.persistent}
         groupBy={props.groupBy}
+        reviewable={props.reviewable}
       />
     ),
     { width: 120, height: 4 },
@@ -98,5 +100,15 @@ describe("Footer", () => {
     const frame = await renderFooter({ confirmMode: true, searchMode: true });
     expect(frame).toContain("y confirm");
     expect(frame).not.toContain("type to search");
+  });
+
+  it("shows the review hint when reviewable", async () => {
+    const frame = await renderFooter({ reviewable: true });
+    expect(frame).toContain("d review");
+  });
+
+  it("omits the review hint when not reviewable", async () => {
+    const frame = await renderFooter({ reviewable: false });
+    expect(frame).not.toContain("d review");
   });
 });

@@ -146,3 +146,25 @@ describe("HelpOverlay sidebar mode", () => {
     expect(frame).toContain("Other");
   });
 });
+
+describe("HelpOverlay reviewable", () => {
+  it("shows the review diff row when reviewable", async () => {
+    setup = await testRender(() => <HelpOverlay reviewable />, {
+      width: 100,
+      height: 30,
+    });
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Review diff (hunk)");
+  });
+
+  it("omits the review diff row when not reviewable", async () => {
+    setup = await testRender(() => <HelpOverlay />, {
+      width: 100,
+      height: 30,
+    });
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("Review diff (hunk)");
+  });
+});

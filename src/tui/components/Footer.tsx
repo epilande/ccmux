@@ -10,6 +10,7 @@ interface FooterProps {
   previewFocused?: boolean;
   persistent?: boolean;
   groupBy?: GroupBy;
+  reviewable?: boolean;
 }
 
 export const Footer: Component<FooterProps> = (props) => {
@@ -43,7 +44,8 @@ export const Footer: Component<FooterProps> = (props) => {
           <text fg={theme.overlay}>
             j/k nav · enter {props.persistent ? "switch" : "select"} · / search
             · b group:{props.groupBy ?? DEFAULT_GROUP_BY} · P preview · r
-            restart · x kill · ? help · q quit
+            restart · x kill{props.reviewable ? " · d review" : ""} · ? help · q
+            quit
           </text>
         </Match>
       </Switch>
