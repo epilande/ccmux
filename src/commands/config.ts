@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { isAbsolute } from "node:path";
 import {
   getPreferences,
   setPreferences,
@@ -16,7 +17,7 @@ import { VALID_ICON_STYLES, type IconStyle } from "../lib/icons";
 import { BUILTIN_THEME_NAMES, DEFAULT_THEME_NAME } from "../tui/themes";
 import { resolveThemeVerbose } from "../tui/theme";
 
-const KNOWN_KEYS: Record<
+export const KNOWN_KEYS: Record<
   string,
   {
     validate: (v: string) => boolean;
@@ -65,6 +66,26 @@ const KNOWN_KEYS: Record<
     description:
       "Show Claude background agents as rows (true, false; default true, daemon restart required)",
     note: "Takes effect after a daemon restart (ccmux daemon restart)",
+  },
+  additionalClaudeConfigDirs: {
+    validate: (v) => {
+      try {
+        const parsed = JSON.parse(v);
+        return (
+          Array.isArray(parsed) &&
+          parsed.every(
+            (d) =>
+              typeof d === "string" && (isAbsolute(d) || d.startsWith("~/")),
+          )
+        );
+      } catch {
+        return false;
+      }
+    },
+    parse: (v) => JSON.parse(v) as string[],
+    description:
+      "Additional Claude config dirs to watch, as a JSON array of absolute or ~/-prefixed paths (e.g. '[\"~/.claude-personal\"]')",
+    note: "Run `ccmux setup --agent claude` to install hooks into the new dirs, then restart the daemon (ccmux daemon restart)",
   },
   searchPaneContent: {
     validate: (v) => v === "true" || v === "false",

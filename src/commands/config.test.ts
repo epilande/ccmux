@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { getNestedValue, flattenObject } from "./config";
+import { getNestedValue, flattenObject, KNOWN_KEYS } from "./config";
 import type { Preferences } from "../lib/preferences";
 
 describe("getNestedValue", () => {
@@ -126,5 +126,31 @@ describe("flattenObject", () => {
 
   it("skips arrays without recursing into elements", () => {
     expect(flattenObject({ items: [1, 2, 3] })).toEqual([["items", "[1,2,3]"]]);
+  });
+});
+
+describe("KNOWN_KEYS.additionalClaudeConfigDirs", () => {
+  const spec = KNOWN_KEYS.additionalClaudeConfigDirs!;
+
+  it("validate accepts absolute and ~/-prefixed path arrays", () => {
+    expect(spec.validate('["~/.claude-personal"]')).toBe(true);
+    expect(spec.validate('["/abs/path"]')).toBe(true);
+    expect(spec.validate('["~/a","/b"]')).toBe(true);
+    expect(spec.validate("[]")).toBe(true);
+  });
+
+  it("validate rejects non-JSON, non-array, and non-conforming entries", () => {
+    expect(spec.validate("~/.claude-personal")).toBe(false);
+    expect(spec.validate('"~/.claude-personal"')).toBe(false);
+    expect(spec.validate("5")).toBe(false);
+    expect(spec.validate('{"a":1}')).toBe(false);
+    expect(spec.validate('["personal"]')).toBe(false);
+    expect(spec.validate('["~"]')).toBe(false);
+    expect(spec.validate('[""]')).toBe(false);
+    expect(spec.validate('["~/x", 5]')).toBe(false);
+  });
+
+  it("parse returns the parsed array", () => {
+    expect(spec.parse('["~/a","~/b"]')).toEqual(["~/a", "~/b"]);
   });
 });
