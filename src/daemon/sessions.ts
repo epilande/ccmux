@@ -524,7 +524,23 @@ export class SessionManager extends EventEmitter {
       // enclosing guard (lastPrompt actually changed) also dedups a marker
       // re-firing the same prompt.
       if (state.prompts === undefined && typeof state.lastPrompt === "string") {
-        session.prompts = appendPrompt(session.prompts, state.lastPrompt);
+        const appended = appendPrompt(session.prompts, state.lastPrompt);
+        // OpenCode aggregated rows flip `lastPrompt` between sibling sessions
+        // on any status event (newest-by-activity wins), re-delivering an older
+        // prompt that the "changed" guard alone can't catch. When a real append
+        // happened, drop any earlier copy of the just-added entry so a repeat
+        // refreshes recency instead of filling the capped index with
+        // [pa,pb,pa,pb,...] dupes that evict distinct history. `appendPrompt`
+        // returns the same reference on a no-op, so guard on identity to avoid
+        // pruning a legitimate pre-existing duplicate.
+        if (appended !== session.prompts) {
+          const newest = appended[appended.length - 1];
+          session.prompts = appended.filter(
+            (p, i) => i === appended.length - 1 || p !== newest,
+          );
+        } else {
+          session.prompts = appended;
+        }
       }
     }
 

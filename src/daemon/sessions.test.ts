@@ -157,6 +157,44 @@ describe("SessionManager", () => {
     ]);
   });
 
+  it("dedups a flip-flopping marker lastPrompt instead of churning the index", () => {
+    const manager = new SessionManager();
+    manager.createSession("test-id", "/some/path/test-id.jsonl");
+
+    // OpenCode aggregated rows flip lastPrompt between sibling prompts (pa/pb)
+    // as activity alternates. Each flip is a real "changed", so it appends;
+    // without dedup the index churns to [pa, pb, pa, pb, ...] and the caps
+    // evict older distinct prompts. The dedup must keep one copy each, ordered
+    // by most-recent delivery.
+    manager.updateSession("test-id", { lastPrompt: "prompt A" });
+    manager.updateSession("test-id", { lastPrompt: "prompt B" });
+    manager.updateSession("test-id", { lastPrompt: "prompt A" });
+    manager.updateSession("test-id", { lastPrompt: "prompt B" });
+
+    expect(manager.getSession("test-id")?.prompts).toEqual([
+      "prompt A",
+      "prompt B",
+    ]);
+  });
+
+  it("preserves a distinct earlier prompt across a flip-flop (no eviction)", () => {
+    const manager = new SessionManager();
+    manager.createSession("test-id", "/some/path/test-id.jsonl");
+
+    // A distinct older prompt must survive the A/B churn: with dedup the index
+    // stays [older, A, B] rather than filling with A/B duplicates.
+    manager.updateSession("test-id", { lastPrompt: "older distinct" });
+    manager.updateSession("test-id", { lastPrompt: "prompt A" });
+    manager.updateSession("test-id", { lastPrompt: "prompt B" });
+    manager.updateSession("test-id", { lastPrompt: "prompt A" });
+
+    expect(manager.getSession("test-id")?.prompts).toEqual([
+      "older distinct",
+      "prompt B",
+      "prompt A",
+    ]);
+  });
+
   it("replaces (does not double) prompts on a log-style update (both fields)", () => {
     const manager = new SessionManager();
     manager.createSession("test-id", "/some/path/test-id.jsonl");
