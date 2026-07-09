@@ -35,7 +35,6 @@ import {
   subagentCountLabel,
   trailingLabelsWidth,
   fitProjectCell,
-  sliceEllipsis,
   ATTENTION_LABEL_MAX,
 } from "./session-columns";
 import { theme } from "../theme";
@@ -444,11 +443,12 @@ const FieldCell: Component<{
     case "prompt": {
       // Pre-truncate in JS (the idiom used by project/branch): rendered
       // text never overflows its row, so right-aligned siblings (the `pr`
-      // field) keep their spot. Search highlights render untruncated; the
-      // markup can't be sliced by char count.
+      // field) keep their spot. Search highlights are windowed the same way by
+      // `truncateHighlighted`, which trims to a visible-char budget while
+      // keeping the matched span whole.
       const text = () =>
         ctx.session.lastPrompt
-          ? sliceEllipsis(
+          ? truncateText(
               normalizePrompt(ctx.session.lastPrompt),
               ctx.maxPromptLen,
             )
@@ -624,7 +624,7 @@ const RowRender: Component<{
               <text fg={props.ctx.attentionColor}>
                 {props.ctx.sidebar
                   ? "!"
-                  : sliceEllipsis(label(), ATTENTION_LABEL_MAX)}
+                  : truncateText(label(), ATTENTION_LABEL_MAX)}
               </text>
             )}
           </Show>

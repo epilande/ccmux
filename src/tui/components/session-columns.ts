@@ -16,6 +16,7 @@ import {
   DEFAULT_BREAKPOINTS,
 } from "../../lib/preferences";
 import type { EnrichedSession, BranchPR } from "../../types";
+import { truncateText } from "../utils/format";
 
 const RESPONSIVE_KEYS = new Set([
   "default",
@@ -558,12 +559,6 @@ export interface ProjectCellDisplay {
   branchLabel: string;
 }
 
-/** Slice `text` to at most `maxLen` chars, marking any cut with a trailing "…". */
-export function sliceEllipsis(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  return text.slice(0, Math.max(1, maxLen - 1)) + "…";
-}
-
 /**
  * The `:branch` label with the existing conventions: capped at `maxBranchLen`
  * with a trailing `~`, worktree `+` appended.
@@ -621,7 +616,7 @@ export function fitProjectCell(
   if (availForPrefix < 2) {
     outPrefix = "";
   } else if (prefix.length > availForPrefix) {
-    outPrefix = sliceEllipsis(prefix, availForPrefix);
+    outPrefix = truncateText(prefix, availForPrefix);
   } else {
     outPrefix = prefix;
   }
@@ -636,7 +631,7 @@ export function fitProjectCell(
   const outDirname =
     dirname.length <= availForDirname
       ? dirname
-      : sliceEllipsis(dirname, Math.max(DIRNAME_FLOOR, availForDirname));
+      : truncateText(dirname, Math.max(DIRNAME_FLOOR, availForDirname));
   if (outPrefix.length + outDirname.length + branchWidth <= budget) {
     return { prefix: outPrefix, dirname: outDirname, branchLabel };
   }
