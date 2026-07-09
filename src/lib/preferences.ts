@@ -218,7 +218,7 @@ export interface Preferences {
    * `~/.claude-personal`). The default `~/.claude` is always watched. Paths
    * may start with `~`. See `resolveClaudeProjectDirs`.
    */
-  claudeConfigDirs?: string[];
+  additionalClaudeConfigDirs?: string[];
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   /** Default prompt display mode (default "inline"). The runtime `p`-key

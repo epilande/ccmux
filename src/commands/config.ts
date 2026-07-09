@@ -66,6 +66,22 @@ const KNOWN_KEYS: Record<
       "Show Claude background agents as rows (true, false; default true, daemon restart required)",
     note: "Takes effect after a daemon restart (ccmux daemon restart)",
   },
+  additionalClaudeConfigDirs: {
+    validate: (v) => {
+      try {
+        const parsed = JSON.parse(v);
+        return (
+          Array.isArray(parsed) && parsed.every((d) => typeof d === "string")
+        );
+      } catch {
+        return false;
+      }
+    },
+    parse: (v) => JSON.parse(v) as string[],
+    description:
+      "Additional Claude config dirs to watch, as a JSON array of paths (e.g. '[\"~/.claude-personal\"]')",
+    note: "Run `ccmux setup --agent claude` to install hooks into the new dirs, then restart the daemon (ccmux daemon restart)",
+  },
   searchPaneContent: {
     validate: (v) => v === "true" || v === "false",
     parse: (v) => v === "true",

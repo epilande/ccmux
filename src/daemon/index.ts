@@ -94,8 +94,9 @@ type ClaudeRuntimeMode = "claude-with-hooks" | "claude-no-hooks";
 export class Daemon {
   private sessionManager: SessionManager;
   private watcher: LogWatcher;
-  /** Extra Claude watchers for additional config dirs (`claudeConfigDirs` /
-   * `CLAUDE_CONFIG_DIR`), one per non-default `projects` tree. Empty unless
+  /** Extra Claude watchers for additional config dirs
+   * (`additionalClaudeConfigDirs` / `CLAUDE_CONFIG_DIR`), one per non-default
+   * `projects` tree. Empty unless
    * configured. The primary `watcher` above stays authoritative for
    * marker-driven, path-agnostic `processPath` routing; these add file
    * discovery for their own trees, all feeding the shared SessionManager. */
@@ -669,7 +670,7 @@ export class Daemon {
   // this only adds the extras.
   private setupExtraClaudeWatchers(preferences: Preferences): void {
     this.claudeProjectDirs = resolveClaudeProjectDirs(
-      preferences.claudeConfigDirs,
+      preferences.additionalClaudeConfigDirs,
     );
     for (const dir of this.claudeProjectDirs) {
       if (dir === PROJECTS_DIR) continue;
@@ -895,7 +896,14 @@ export class Daemon {
   private buildReconcilerDeps(): ReconcilerDeps {
     return {
       sessionManager: this.sessionManager,
-      watcher: this.watcher,
+      // Fold the debounce check across every Claude watcher: an extra
+      // config-dir watcher records freshness on its own `lastProcessedAt`, so
+      // consulting only the primary would let second-account sessions bypass
+      // the reconciler's just-processed guard.
+      watcher: {
+        isRecentlyProcessed: (id) =>
+          this.claudeWatchers().some((w) => w.isRecentlyProcessed(id)),
+      },
       hookManager: this.hookManager,
       attentionTracker: this.attentionTracker,
       agents: this.agents,

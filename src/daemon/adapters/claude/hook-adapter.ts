@@ -71,10 +71,10 @@ export class ClaudeHookAdapter implements HookAdapter {
     mkdirSync(MARKERS_DIR, { recursive: true });
 
     // Fan out across every configured Claude config dir so a second account
-    // (via CLAUDE_CONFIG_DIR / the `claudeConfigDirs` preference) gets hooks
-    // too, not just the default ~/.claude.
+    // (via CLAUDE_CONFIG_DIR / the `additionalClaudeConfigDirs` preference)
+    // gets hooks too, not just the default ~/.claude.
     const configDirs = resolveClaudeConfigDirs(
-      (await getPreferences()).claudeConfigDirs,
+      (await getPreferences()).additionalClaudeConfigDirs,
     );
     for (const dir of configDirs) {
       // Isolate each dir: a malformed settings.json in one must not abort the
@@ -166,7 +166,7 @@ export class ClaudeHookAdapter implements HookAdapter {
     let changed = false;
 
     const configDirs = resolveClaudeConfigDirs(
-      (await getPreferences()).claudeConfigDirs,
+      (await getPreferences()).additionalClaudeConfigDirs,
     );
     for (const dir of configDirs) {
       // Isolate each dir so one malformed settings.json can't skip the others
@@ -254,7 +254,7 @@ export class ClaudeHookAdapter implements HookAdapter {
   // configured dirs surface via `describeInstallAnomalies` instead.
   isInstalled(): boolean {
     const [primary] = resolveClaudeConfigDirs(
-      getPreferencesSync().claudeConfigDirs,
+      getPreferencesSync().additionalClaudeConfigDirs,
     );
     return isInstalledInDir(primary);
   }
@@ -264,7 +264,7 @@ export class ClaudeHookAdapter implements HookAdapter {
   // tracked authoritatively until `ccmux setup` is re-run.
   describeInstallAnomalies(): string[] {
     const [, ...extra] = resolveClaudeConfigDirs(
-      getPreferencesSync().claudeConfigDirs,
+      getPreferencesSync().additionalClaudeConfigDirs,
     );
     return extra
       .filter((dir) => !isInstalledInDir(dir))

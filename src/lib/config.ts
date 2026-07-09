@@ -26,7 +26,7 @@ function expandHome(p: string): string {
  *
  * Sources, in order: the default `~/.claude` (always first), the
  * `CLAUDE_CONFIG_DIR` env var (matches Claude's own resolution), then the
- * `claudeConfigDirs` preference. Paths may start with `~`. The result is
+ * `additionalClaudeConfigDirs` preference. Paths may start with `~`. The result is
  * absolute and de-duplicated, order-preserving, so the default behavior is
  * unchanged when nothing extra is configured.
  */
@@ -35,7 +35,7 @@ export function resolveClaudeConfigDirs(configDirs?: string[]): string[] {
   const extraConfigDirs = [
     ...(process.env.CLAUDE_CONFIG_DIR ? [process.env.CLAUDE_CONFIG_DIR] : []),
     // `configDirs` comes from unvalidated ccmux.json; a bare string (e.g.
-    // `"claudeConfigDirs": "~/.claude-personal"`) would otherwise spread into
+    // `"additionalClaudeConfigDirs": "~/.claude-personal"`) would otherwise spread into
     // single characters and have hooks written into `~`, `/`, and cwd. Only
     // accept an array of strings.
     ...(Array.isArray(configDirs)
