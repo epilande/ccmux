@@ -197,7 +197,13 @@ export async function discoverAgentProcesses(
 
 /**
  * Batch get working directories for multiple processes in a single lsof call
- * Parses lsof -Fn output format: p<pid>, fcwd, n<path>
+ * Parses lsof -Ffn output format: p<pid>, fcwd, n<path>
+ *
+ * The `f` field selector is required: lsof 4.99+ (e.g. the Nix build) emits no
+ * fd-type lines for a bare `-Fn`, so `fcwd` never appears and every cwd lookup
+ * silently fails (0 sessions ever get a cwd → nothing binds to a pane). Older
+ * builds (macOS system lsof) include `f` even with `-Fn`, which is why this
+ * only bites on some setups. `-Ffn` is correct on both.
  */
 async function batchGetProcessCwds(
   pids: number[],
@@ -208,7 +214,7 @@ async function batchGetProcessCwds(
   try {
     const pidList = pids.join(",");
     DaemonPerf.incSubprocessSpawn("lsof-cwds");
-    const proc = Bun.spawn(["lsof", "-p", pidList, "-Fn"], {
+    const proc = Bun.spawn(["lsof", "-p", pidList, "-Ffn"], {
       stdout: "pipe",
       stderr: "pipe",
     });
