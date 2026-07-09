@@ -24,6 +24,7 @@ async function renderItem(
     columns?: import("../../lib/preferences").ColumnsConfig;
     promptDisplay?: import("../../lib/preferences").PromptDisplay;
     highlights?: import("./SessionItem").SessionItemHighlights | null;
+    transcriptSnippet?: string;
   },
   width = 100,
   height = 3,
@@ -43,6 +44,7 @@ async function renderItem(
           columns={props.columns}
           promptDisplay={props.promptDisplay}
           highlights={props.highlights}
+          transcriptSnippet={props.transcriptSnippet}
         />
       </TickContext.Provider>
     ),
@@ -708,6 +710,39 @@ describe("SessionItem row 2 (subtitle)", () => {
     expect(frame).toContain("please refactor the parser");
     expect(frame).not.toContain("the newest message");
     expect(frame).not.toContain("<b>");
+  });
+
+  it("renders the transcript snippet when a transcript-only match has no prompt highlight", async () => {
+    const frame = await renderItem({
+      session: mockEnrichedSession({
+        lastPrompt: "the newest message",
+      }),
+      // No lastPrompt and no prompts highlight: the transcript snippet is the
+      // only signal for why the row matched, so it renders in the prompt cell.
+      highlights: { lastPrompt: null },
+      // Distinctive head token: the cell truncates to its budget, so assert on
+      // the leading text that survives the clip rather than the whole snippet.
+      transcriptSnippet: "ZZHIT from the assistant transcript",
+    });
+    expect(frame).toContain("ZZHIT");
+    expect(frame).not.toContain("the newest message");
+  });
+
+  it("prefers a prompt highlight over the transcript snippet when both are present", async () => {
+    const frame = await renderItem({
+      session: mockEnrichedSession({
+        lastPrompt: "the newest message",
+        prompts: ["please refactor the parser", "the newest message"],
+      }),
+      highlights: {
+        lastPrompt: null,
+        prompts: "please <b>refactor the parser</b>",
+      },
+      transcriptSnippet: "unrelated transcript snippet",
+    });
+    // The prompt-match line wins the ladder; the transcript snippet stays hidden.
+    expect(frame).toContain("please refactor the parser");
+    expect(frame).not.toContain("unrelated transcript snippet");
   });
 
   it("windows a highlight whose match sits beyond the prompt budget (leading ellipsis)", async () => {

@@ -1272,6 +1272,57 @@ describe("store", () => {
       }
     });
 
+    it("discards a superseded /search response that resolves out of order (generation guard)", async () => {
+      const origFetch = globalThis.fetch;
+      // Each query's fetch is held open until we resolve it by hand, so we can
+      // land query A's response AFTER query B's and prove the gen guard drops
+      // the stale one.
+      const resolvers: Record<string, () => void> = {};
+      const resultsFor: Record<string, unknown> = {
+        alpha: [{ sessionId: "sa", matches: [{ role: "user", snippet: "A" }] }],
+        beta: [{ sessionId: "sb", matches: [{ role: "user", snippet: "B" }] }],
+      };
+      globalThis.fetch = ((url: string) => {
+        const q = new URL(url).searchParams.get("q") ?? "";
+        return new Promise((resolve) => {
+          resolvers[q] = () =>
+            resolve({
+              ok: true,
+              json: async () => ({ results: resultsFor[q] }),
+            } as unknown as Response);
+        });
+      }) as unknown as typeof fetch;
+
+      const settle = () => new Promise((r) => setTimeout(r, 20));
+
+      try {
+        const store = createTUIStore({ groupBy: "none" });
+        store.actions.setSessions([
+          createMockSession({ id: "sa", project: "zzz", gitBranch: null }),
+          createMockSession({ id: "sb", project: "yyy", gitBranch: null }),
+        ]);
+
+        // Query A fires and its fetch is now in flight (held open).
+        store.actions.setSearchQuery("alpha");
+        await waitForDebounce();
+        // Query B supersedes A; B's fetch fires and we resolve it first.
+        store.actions.setSearchQuery("beta");
+        await waitForDebounce();
+        resolvers.beta();
+        await settle();
+        // A resolves LATE. The gen guard must drop it (query is now "beta").
+        resolvers.alpha();
+        await settle();
+
+        const filtered = store.filteredSessions();
+        // Cache reflects B, not the stale A response.
+        expect(filtered.some((f) => f.session.id === "sb")).toBe(true);
+        expect(filtered.some((f) => f.session.id === "sa")).toBe(false);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
     it("matches an older prompt by substring with a single-span highlight when lastPrompt did not match", () => {
       const store = createTUIStore({ groupBy: "none" });
       store.actions.setSessions([
