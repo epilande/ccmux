@@ -38,8 +38,9 @@ export interface FilteredSession {
     cwd?: string | null;
     gitBranch?: string | null;
     lastPrompt?: string | null;
-    /** Highlighted `\n`-joined prompt index; a matched older prompt renders
-     * from here when `lastPrompt` (the newest) did not itself match. */
+    /** A single normalized, highlighted prompt line: the newest older prompt
+     * whose text matched, rendered here when `lastPrompt` (the newest) did not
+     * itself match. Not the whole index, and never multi-line. */
     prompts?: string | null;
   } | null;
   paneMatch?: boolean;
