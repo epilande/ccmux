@@ -63,6 +63,10 @@ export function claudeEntryTexts(entry: LogEntry): RoleText[] {
   // entry with no `message`, a non-array assistant `content`, etc.) must
   // yield [] rather than throw, so one bad line can't drop a whole session's
   // matches in `searchTranscript`.
+  // A JSON primitive line (a bare `null`, number, or boolean) parses to a
+  // non-object entry; guard before reading `entry.type` so one such line
+  // yields [] rather than throwing and dropping the whole session.
+  if (!entry || typeof entry !== "object") return [];
   if (entry.type === "user") {
     const message = (entry as UserLogEntry).message;
     const content = message?.content;

@@ -297,6 +297,52 @@ describe("transcript-search", () => {
       ]);
     });
 
+    it("survives a bare null line, keeping other matches", async () => {
+      const logPath = join(dir, "claude.jsonl");
+      writeFileSync(
+        logPath,
+        jsonl(
+          {
+            type: "user",
+            uuid: "u1",
+            parentUuid: null,
+            timestamp: "2024-01-01T12:00:00Z",
+            message: { role: "user", content: "first match here" },
+          },
+          {
+            type: "user",
+            uuid: "u2",
+            parentUuid: null,
+            timestamp: "2024-01-01T12:01:00Z",
+            message: { role: "user", content: "second match here" },
+          },
+        ) +
+          "null\n" +
+          jsonl({
+            type: "user",
+            uuid: "u3",
+            parentUuid: null,
+            timestamp: "2024-01-01T12:02:00Z",
+            message: { role: "user", content: "third match here" },
+          }),
+      );
+
+      const result = await searchTranscript(
+        { id: "s1", agentType: "claude", logPath },
+        "match",
+      );
+      // The bare `null` line is a JSON primitive, not an object; it must be
+      // skipped without dropping the whole session (which the outer catch
+      // in `searchTranscript` would otherwise do).
+      expect(result).not.toBeNull();
+      expect(result!.matches.length).toBe(3);
+      expect(result!.matches.map((m) => m.snippet)).toEqual([
+        "first match here",
+        "second match here",
+        "third match here",
+      ]);
+    });
+
     it("respects maxMatches", async () => {
       const logPath = join(dir, "claude.jsonl");
       // Five user turns all containing the query.
