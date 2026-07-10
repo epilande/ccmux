@@ -378,6 +378,7 @@ describe("CursorHookAdapter", () => {
           },
         } as never,
         getLogWatcher: () => undefined,
+        getLogWatchers: () => [],
         listProcesses: async () => [] as never,
         listPanes: async () => [] as never,
         getPaneHostingPid: async (pid: number) =>

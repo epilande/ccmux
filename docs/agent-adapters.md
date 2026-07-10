@@ -56,7 +56,7 @@ The startup-race closer for markers written before the first scan created the pa
 
 ### Agent-owned (read-only except during `ccmux setup`)
 
-- Claude Code logs: `~/.claude/projects/<encoded-path>/<sessionId>.jsonl`
+- Claude Code logs: `~/.claude/projects/<encoded-path>/<sessionId>.jsonl` (plus any extra config dirs from the `additionalClaudeConfigDirs` preference / `CLAUDE_CONFIG_DIR`, each watched at `<dir>/projects`)
 - Claude Code history: `~/.claude/history.jsonl`
 - Claude Code settings: `~/.claude/settings.json` (written by `ccmux setup --agent claude`)
 - Claude Code hooks: `~/.claude/hooks/ccmux-session-start.sh`, `ccmux-session-end.sh`, `ccmux-state-notify.sh`

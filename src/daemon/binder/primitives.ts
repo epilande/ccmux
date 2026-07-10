@@ -1,3 +1,4 @@
+import { join } from "path";
 import type { ProcessInfo, TmuxPane } from "../../types/session";
 import { normalizeTty } from "../pane-discovery";
 import type { ProcPaneMatch } from "./types";
@@ -18,6 +19,31 @@ import type { ProcPaneMatch } from "./types";
  */
 export function encodeProjectPath(path: string): string {
   return path.replace(/[^a-zA-Z0-9]/g, "-");
+}
+
+/**
+ * Locate a Claude session's transcript across one or more `projects` trees.
+ *
+ * A session started under a non-default `CLAUDE_CONFIG_DIR` writes its
+ * transcript to that account's `projects` tree, so probe each dir in order and
+ * return the first whose `<encoded-cwd>/<sessionId>.jsonl` exists. Falls back to
+ * the first (primary) dir's path when none exists yet — the transcript may not
+ * be written until the first turn — preserving single-dir behavior.
+ *
+ * Pure: `fileExists` is injected so it can be unit-tested without a filesystem.
+ */
+export function resolveExistingLogPath(
+  projectDirs: string[],
+  cwd: string,
+  sessionId: string,
+  fileExists: (path: string) => boolean,
+): string {
+  const rel = join(encodeProjectPath(cwd), `${sessionId}.jsonl`);
+  for (const dir of projectDirs) {
+    const candidate = join(dir, rel);
+    if (fileExists(candidate)) return candidate;
+  }
+  return join(projectDirs[0] ?? "", rel);
 }
 
 /**
