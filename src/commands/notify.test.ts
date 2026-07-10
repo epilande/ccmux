@@ -1,77 +1,98 @@
-import { describe, it, expect, spyOn, mock } from "bun:test";
+import { describe, it, expect, spyOn, afterAll } from "bun:test";
 import type { Preferences } from "../lib/preferences";
+import type { Backend } from "../lib/notify";
+import * as preferencesMod from "../lib/preferences";
+import * as notifyMod from "../lib/notify";
+import * as tmuxClientMod from "../lib/tmux-client";
+import * as focusMod from "../daemon/focus";
+import { DbusNotifier } from "../lib/notify-dbus";
+import { createNotifyCommand, resolveSenderBundleId } from "./notify";
 
-// Neutralize preferences I/O so tests never touch the real ccmux.json.
-// Spread the real module (mock.module replaces the whole namespace, and other
-// test files sharing this process import other exports from it).
+// Deliberately NOT `mock.module`: Bun's module mocks are process-global with
+// no per-file restore, so they leak into sibling test files that exercise the
+// real implementations (`lib/notify.test.ts`, `lib/notify-dbus.test.ts`,
+// `lib/tmux-client.test.ts`, `daemon/focus.test.ts`), failing them when this
+// file loads first (order-dependent: Linux CI, not macOS). And the obvious
+// restore recipe — capture the real module at top level and swap it back in
+// `afterAll` — deadlocks Bun 1.3.x when the poisoned order actually occurs
+// (a top-level `await import()`/`require()` of a module that this file also
+// `mock.module`s hangs the whole run).
+//
+// `spyOn(namespace, name)` sidesteps both: it patches the export in place on
+// the shared module record (so `notify.ts`'s static imports observe the fake
+// at call time), and `mockRestore()` in `afterAll` puts the genuine
+// implementation back before any sibling file loads. The dbus path is
+// stubbed at `DbusNotifier.prototype` (probe/notify/close) instead of
+// replacing the class — the real constructor is inert (it connects lazily),
+// so instances created by the command are safe to construct for real.
 let prefs: Preferences = {};
-const realPreferences = await import("../lib/preferences");
-mock.module("../lib/preferences", () => ({
-  ...realPreferences,
-  getPreferences: async () => prefs,
-}));
 
-// Stand in for the locked src/lib/notify.ts module: resolveBackend/probeBackend
-// are the only failure signals the command can observe (deliver is void, so
-// there is no delivery-failure path to test - see notify.ts's plan).
-let resolvedBackend: string | null = "terminal-notifier";
+let resolvedBackend: Backend | null = "terminal-notifier";
 let probeOk = true;
 const resolveBackendCalls: unknown[] = [];
 const probeBackendCalls: string[] = [];
 const deliverCalls: Array<{ backend: string; payload: unknown }> = [];
-mock.module("../lib/notify", () => ({
-  resolveBackend: (config: unknown) => {
-    resolveBackendCalls.push(config);
-    return resolvedBackend;
-  },
-  probeBackend: async (backend: string) => {
-    probeBackendCalls.push(backend);
-    return probeOk;
-  },
-  deliver: async (backend: string, payload: unknown) => {
-    deliverCalls.push({ backend, payload });
-  },
-}));
 
-// Stand in for src/lib/notify-dbus.ts: the dbus backend is one-shot
-// (connect/probe/notify/close) and routes through `DbusNotifier` entirely,
-// bypassing resolveBackend/probeBackend/deliver above.
 let dbusProbeOk = true;
 let dbusNotifyId: number | null = 1;
 const dbusProbeCalls: number[] = [];
 const dbusNotifyCalls: unknown[] = [];
 const dbusCloseCalls: number[] = [];
-mock.module("../lib/notify-dbus", () => ({
-  DbusNotifier: class {
-    async probe() {
-      dbusProbeCalls.push(dbusProbeCalls.length);
-      return dbusProbeOk;
-    }
-    async notify(payload: unknown) {
-      dbusNotifyCalls.push(payload);
-      return dbusNotifyId;
-    }
-    async close() {
-      dbusCloseCalls.push(dbusCloseCalls.length);
-    }
-  },
-}));
 
-// The "terminal" icon's bundle-id resolution depends on real tmux/platform
-// state (`$TMUX`, darwin, an actual `.app`-hosted client) - deterministically
-// mocked here rather than left to whatever environment happens to run the
-// test (a real tmux session on the test runner's machine would otherwise
-// make "no sender" assertions flaky).
 let clientPid: number | null = null;
 let terminalBundleId: string | null = null;
-mock.module("../lib/tmux-client", () => ({
-  getActiveTmuxClientPid: async () => clientPid,
-}));
-mock.module("../daemon/focus", () => ({
-  resolveTerminalBundleId: async () => terminalBundleId,
-}));
 
-const { createNotifyCommand, resolveSenderBundleId } = await import("./notify");
+const spies = [
+  // Neutralize preferences I/O so tests never touch the real ccmux.json.
+  spyOn(preferencesMod, "getPreferences").mockImplementation(async () => prefs),
+  // Stand in for src/lib/notify.ts: resolveBackend/probeBackend are the only
+  // failure signals the command can observe (deliver is void, so there is no
+  // delivery-failure path to test - see notify.ts's plan).
+  spyOn(notifyMod, "resolveBackend").mockImplementation((config) => {
+    resolveBackendCalls.push(config);
+    return resolvedBackend;
+  }),
+  spyOn(notifyMod, "probeBackend").mockImplementation(async (backend) => {
+    probeBackendCalls.push(backend);
+    return probeOk;
+  }),
+  spyOn(notifyMod, "deliver").mockImplementation(async (backend, payload) => {
+    deliverCalls.push({ backend, payload });
+  }),
+  // Stand in for src/lib/notify-dbus.ts: the dbus backend is one-shot
+  // (probe/notify/close) and routes through `DbusNotifier` entirely,
+  // bypassing resolveBackend/probeBackend/deliver above.
+  spyOn(DbusNotifier.prototype, "probe").mockImplementation(async () => {
+    dbusProbeCalls.push(dbusProbeCalls.length);
+    return dbusProbeOk;
+  }),
+  spyOn(DbusNotifier.prototype, "notify").mockImplementation(
+    async (payload) => {
+      dbusNotifyCalls.push(payload);
+      return dbusNotifyId;
+    },
+  ),
+  spyOn(DbusNotifier.prototype, "close").mockImplementation(async () => {
+    dbusCloseCalls.push(dbusCloseCalls.length);
+  }),
+  // The "terminal" icon's bundle-id resolution depends on real tmux/platform
+  // state (`$TMUX`, darwin, an actual `.app`-hosted client) - deterministically
+  // mocked here rather than left to whatever environment happens to run the
+  // test (a real tmux session on the test runner's machine would otherwise
+  // make "no sender" assertions flaky).
+  spyOn(tmuxClientMod, "getActiveTmuxClientPid").mockImplementation(
+    async () => clientPid,
+  ),
+  spyOn(focusMod, "resolveTerminalBundleId").mockImplementation(
+    async () => terminalBundleId,
+  ),
+];
+
+// Hand every export back to its real implementation once this file's tests
+// complete, so sibling files loaded afterwards see real behavior.
+afterAll(() => {
+  for (const spy of spies) spy.mockRestore();
+});
 
 /**
  * Sentinel for process.exit: a no-op mock wouldn't halt execution, so a
