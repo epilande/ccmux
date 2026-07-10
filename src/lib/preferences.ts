@@ -234,6 +234,8 @@ export interface Preferences {
   groupBy?: GroupBy;
   /** Keep picker open after switching sessions (default false) */
   persistent?: boolean;
+  /** Hunk review note delivery: confirm first (default), send automatically, or fill without submitting. */
+  reviewHandback?: "auto" | "confirm" | "fill";
   /**
    * Surface Claude Code background agents (`claude --bg` / the agent view)
    * as rows (default true; only an explicit `false` disables). Gated

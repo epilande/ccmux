@@ -169,6 +169,7 @@ export function createSidebarCommand(): Command {
           hideIdle: uiState.hideIdle,
           promptDisplay: resolvePromptDisplay(uiState, prefs.promptDisplay),
           sidebar: true,
+          reviewHandback: prefs.reviewHandback,
           theme: prefs.theme,
         });
       },

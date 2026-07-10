@@ -131,7 +131,19 @@ https://github.com/user-attachments/assets/7e0d42b3-4e7b-43b8-8d06-72a2d69dd694
 
 ### Diff Review with Hunk
 
-[hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's working-tree diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the right-click context menu.
+[hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's working-tree diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the right-click context menu. If the working tree has no changes, ccmux reports that instead of opening an empty review.
+
+To send review feedback back to the agent:
+
+1. Press <kbd>c</kbd> in hunk to annotate a line, then <kbd>Ctrl+S</kbd> to save the note.
+2. Add any other review notes and quit hunk.
+3. Confirm **Send review comments** when the picker resumes. ccmux sends all captured notes, including short source snippets, to the agent as one prompt and stays in the picker so you can watch its status.
+
+The `reviewHandback` preference controls what happens when hunk exits:
+
+- `confirm` (default) asks before sending the prompt.
+- `auto` sends and submits the prompt immediately without a dialog.
+- `fill` pastes the prompt into the agent's composer without submitting it. The text remains there until you jump to the session and submit or edit it; a later send or invoke may find it prepended.
 
 The review also runs from the CLI:
 
@@ -239,7 +251,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Reconnect             | <kbd>R</kbd>                                                                       | Reconnect to the daemon SSE stream                                                                 |
 | Kill session          | <kbd>x</kbd>                                                                       | Kill the selected session's process                                                                |
 | Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions                                                                          |
-| Review diff           | <kbd>d</kbd>                                                                       | Review the session's diff with [hunk](https://github.com/modem-dev/hunk) (requires `hunk` on PATH) |
+| Review and hand back  | <kbd>d</kbd>                                                                       | Review with [hunk](https://github.com/modem-dev/hunk), then offer to send notes to the agent (requires `hunk` on PATH) |
 | Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state                                                                       |
 | Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)                                                                |
 | Move group top/bottom | <kbd><</kbd> / <kbd>></kbd>                                                        | Pin group to top / bottom                                                                          |
@@ -300,6 +312,7 @@ ccmux config list
 | `searchPaneLines`            | `10`–`500`                                                                   | `100`              | Lines of pane content scanned in TUI search                                                                                        |
 | `searchTranscript`           | `true`, `false`                                                              | `true`             | Search live Claude/Codex transcripts (full history + assistant text) via the daemon                                                |
 | `persistent`                 | `true`, `false`                                                              | `false`            | Keep picker open after switching sessions (dashboard mode)                                                                         |
+| `reviewHandback`             | `confirm`, `auto`, `fill`                                                     | `confirm`          | After a hunk review, confirm delivery, send immediately, or fill the agent composer without submitting                             |
 | `sidebar.width`              | `10`–`80`                                                                    | `30`               | Sidebar pane width in columns                                                                                                      |
 | `sidebar.position`           | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                                                                                      |
 

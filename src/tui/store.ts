@@ -47,7 +47,12 @@ import {
   type FilteredSession,
 } from "./utils/grouping";
 
-export type ConfirmAction = "kill" | "kill-all" | "kill-group" | "restart";
+export type ConfirmAction =
+  | "kill"
+  | "kill-all"
+  | "kill-group"
+  | "restart"
+  | "send-review";
 
 interface TUIState {
   sessions: EnrichedSession[];

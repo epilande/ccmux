@@ -12,6 +12,7 @@ import type {
   BreakpointConfig,
   PromptDisplay,
   ThemeConfig,
+  Preferences,
 } from "../lib/preferences";
 import { applyTheme } from "./theme";
 import type { GroupBy } from "./utils/grouping";
@@ -36,6 +37,7 @@ interface TUIOptions {
   persistent?: boolean;
   sidebar?: boolean;
   theme?: ThemeConfig;
+  reviewHandback?: Preferences["reviewHandback"];
 }
 
 /** Quiet-period after the last CAPABILITIES event before we restore focus.
@@ -127,6 +129,7 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
         promptDisplay={options.promptDisplay}
         persistent={options.persistent}
         sidebar={options.sidebar}
+        reviewHandback={options.reviewHandback}
       />
     ),
     rendererOrConfig,

@@ -60,6 +60,16 @@ describe("ConfirmationDialog", () => {
     expect(frame).toContain("Restart Session?");
   });
 
+  it("shows review count and agent for send-review", async () => {
+    const frame = await renderDialog({
+      action: "send-review",
+      session: mockSession({ agentType: "codex" }),
+      sessionCount: 2,
+    });
+    expect(frame).toContain("Send review comments");
+    expect(frame).toContain("Send 2 comments to codex?");
+  });
+
   it("shows session project in kill subtitle", async () => {
     const frame = await renderDialog({
       action: "kill",

@@ -100,6 +100,7 @@ export function createPickerCommand(): Command {
           hideIdle: uiState.hideIdle,
           promptDisplay: resolvePromptDisplay(uiState, prefs.promptDisplay),
           persistent,
+          reviewHandback: prefs.reviewHandback,
           theme: prefs.theme,
         });
       },

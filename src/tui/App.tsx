@@ -19,9 +19,11 @@ import type { EnrichedSession } from "../types/session";
 import { createTUIStore, TickContext } from "./store";
 import { killActionPath, restartActionPath } from "./utils/invoke-actions";
 import {
+  formatReviewPrompt,
   HUNK_INSTALL_HINT,
   isHunkAvailable,
   runHunkReview,
+  type HunkReviewNote,
 } from "./utils/review";
 import { SSEClient } from "./utils/sse";
 import {
@@ -61,6 +63,7 @@ import type {
   ColumnsConfig,
   BreakpointConfig,
   PromptDisplay,
+  Preferences,
 } from "../lib/preferences";
 import type { FlatItem, GroupBy } from "./utils/grouping";
 import {
@@ -85,6 +88,7 @@ interface AppProps {
   promptDisplay?: PromptDisplay;
   persistent?: boolean;
   sidebar?: boolean;
+  reviewHandback?: Preferences["reviewHandback"];
 }
 
 export function App(props: AppProps) {
@@ -211,6 +215,46 @@ export function App(props: AppProps) {
   /** Drops re-activations while a review is pending: a rapid double-`d` would
    * otherwise race two suspend/spawn/resume cycles against the same renderer. */
   let reviewInFlight = false;
+  let pendingReviewNotes: {
+    sessionId: string;
+    notes: HunkReviewNote[];
+  } | null = null;
+
+  const pendingReviewNoteCount = () => pendingReviewNotes?.notes.length ?? 0;
+
+  async function deliverReviewNotes(
+    sessionId: string,
+    notes: HunkReviewNote[],
+    mode: "auto" | "confirm" | "fill",
+  ) {
+    const session = store.state.sessions.find((item) => item.id === sessionId);
+    const agent = session?.agentType ?? "agent";
+    try {
+      const response = await fetch(
+        `${getDaemonUrl()}/sessions/${sessionId}/send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: formatReviewPrompt(notes),
+            enter: mode !== "fill",
+          }),
+        },
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (mode === "fill") {
+        store.actions.showToast(
+          `Prompt filled in ${agent}'s composer, press Enter to jump`,
+        );
+      } else {
+        store.actions.showToast(
+          `Sent ${notes.length} comment${notes.length === 1 ? "" : "s"} to ${agent}`,
+        );
+      }
+    } catch {
+      store.actions.showToast(`Failed to send review comments to ${agent}`);
+    }
+  }
 
   function reviewSession(session: EnrichedSession) {
     if (reviewInFlight) return;
@@ -230,6 +274,21 @@ export function App(props: AppProps) {
       reviewInFlight = false;
       if (!result.ok) {
         store.actions.showToast(`Review failed: ${result.error}`);
+        return;
+      }
+      if (result.notes.length === 0) return;
+      if (session.trackingMode === "background" || session.tmuxPane == null) {
+        store.actions.showToast(
+          `${result.notes.length} review notes captured (no pane to send to)`,
+        );
+        return;
+      }
+      const mode = props.reviewHandback ?? "confirm";
+      if (mode === "confirm") {
+        pendingReviewNotes = { sessionId: session.id, notes: result.notes };
+        store.actions.showConfirmDialog(session.id, "send-review");
+      } else {
+        void deliverReviewNotes(session.id, result.notes, mode);
       }
     });
   }
@@ -448,7 +507,13 @@ export function App(props: AppProps) {
   function confirmDialogAction() {
     const action = store.state.confirmAction;
     const sessionId = store.state.confirmSessionId;
-    if (action === "kill-all") {
+    if (action === "send-review" && sessionId) {
+      const pending = pendingReviewNotes;
+      pendingReviewNotes = null;
+      if (pending?.sessionId === sessionId) {
+        void deliverReviewNotes(sessionId, pending.notes, "confirm");
+      }
+    } else if (action === "kill-all") {
       // The daemon reaps in-flight invoke workers itself (it owns the
       // authoritative in-flight set); the client only needs to ask once.
       fetch(`${getDaemonUrl()}/sessions/kill-all`, { method: "POST" });
@@ -725,6 +790,7 @@ export function App(props: AppProps) {
         return;
       }
       if (key === "n" || key === "N" || key === "escape") {
+        pendingReviewNotes = null;
         store.actions.hideConfirmDialog();
         event.preventDefault();
         return;
@@ -1194,13 +1260,18 @@ export function App(props: AppProps) {
             session={getSessionById(store.state.confirmSessionId || "")}
             action={store.state.confirmAction}
             sessionCount={
-              store.state.confirmAction === "kill-group"
+              store.state.confirmAction === "send-review"
+                ? pendingReviewNoteCount()
+                : store.state.confirmAction === "kill-group"
                 ? store.state.confirmSessionIds.length
                 : store.filteredSessions().length
             }
             groupLabel={store.selectedGroupHeader()?.label}
             onConfirm={confirmDialogAction}
-            onCancel={store.actions.hideConfirmDialog}
+            onCancel={() => {
+              pendingReviewNotes = null;
+              store.actions.hideConfirmDialog();
+            }}
           />
         </Show>
 
