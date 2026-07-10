@@ -115,6 +115,23 @@ function withExitSentinel(): () => void {
   };
 }
 
+/**
+ * Pins `process.platform` so assertions on `printFailureHints`' output are
+ * deterministic. Those hints branch on the platform (the icon-impersonation
+ * advice is macOS-only), so a test asserting the darwin text would otherwise
+ * fail on a Linux runner - the exact break that only surfaced on CI.
+ */
+function withPlatform(platform: NodeJS.Platform): () => void {
+  const original = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", {
+    value: platform,
+    configurable: true,
+  });
+  return () => {
+    if (original) Object.defineProperty(process, "platform", original);
+  };
+}
+
 async function runNotify(message?: string): Promise<ExitError | null> {
   try {
     await createNotifyCommand().parseAsync(message ? [message] : [], {
@@ -171,6 +188,9 @@ describe("ccmux notify", () => {
   it("exits 1 with a hint when the probe fails", async () => {
     reset();
     probeOk = false;
+    // The `notifications.icon none` hint is macOS-only; pin the platform so
+    // this assertion holds regardless of the runner's OS.
+    const restorePlatform = withPlatform("darwin");
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     const restoreExit = withExitSentinel();
     try {
@@ -191,6 +211,7 @@ describe("ccmux notify", () => {
     } finally {
       restoreExit();
       errorSpy.mockRestore();
+      restorePlatform();
     }
   });
 
