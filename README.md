@@ -29,6 +29,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 🔍 **Fuzzy Search**: Fuzzy-match sessions by project, branch, or path; substring-match any recent prompt, captured pane content, and on-demand live transcripts
 - 📂 **Session Grouping**: Collapsible project groups with reordering and pinning
 - 🌿 **Git & PR Aware**: Branch and worktree detection, open PRs with live CI and review status
+- 📝 **Diff Review**: Press <kbd>d</kbd> to review a session's working-tree diff with [hunk](https://github.com/modem-dev/hunk), right in the pane
 - 🤖 **Background Agents & Subagents**: Claude Code background agents get rows too; nested Task agent waiting states surface
 - 🔁 **Session Control**: Spawn, kill, and restart sessions from the TUI; `ccmux invoke` for scripted one-shot agent turns
 - ⌨️ **Keyboard-First, Mouse-Friendly**: Vim keys and number jumps, plus click-to-switch and right-click context actions
@@ -100,6 +101,7 @@ ccmux setup
 | `ccmux show --json`                         | Output sessions as JSON                                                                         |
 | `ccmux status`                              | Show daemon and session overview                                                                |
 | `ccmux switch <id>`                         | Switch tmux client to a session's pane                                                          |
+| `ccmux review [id]`                         | Review a session's diff with [hunk](https://github.com/modem-dev/hunk) (defaults to cwd)        |
 | `ccmux kill <id>`                           | Kill a session's process                                                                        |
 | `ccmux restart <id>`                        | Kill and resume a session                                                                       |
 | `ccmux send <id> <text>`                    | Send text to a session's tmux pane                                                              |
@@ -126,6 +128,19 @@ The daemon starts automatically the first time you run a ccmux command (picker, 
 Press <kbd>P</kbd> to split the picker and preview the highlighted session's live pane content side by side. Press <kbd>Tab</kbd> to focus the preview and act in place: your keystrokes go straight to that agent's pane, so you can approve a permission, answer a question, or type a follow-up without ever leaving ccmux.
 
 https://github.com/user-attachments/assets/7e0d42b3-4e7b-43b8-8d06-72a2d69dd694
+
+### Diff Review with Hunk
+
+[hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's working-tree diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the right-click context menu.
+
+The review also runs from the CLI:
+
+```bash
+ccmux review          # Review the current directory's repository
+ccmux review <id>     # Review a session's repository by id
+```
+
+Install hunk with `brew install modem-dev/tap/hunk`. The <kbd>d</kbd> footer hint and help entry appear only when hunk is detected on `PATH` at launch.
 
 ### Sidebar Mode
 
@@ -209,30 +224,31 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 
 ## ⌨️ Keyboard Controls
 
-| Action                | Key                                                                                | Description                            |
-| :-------------------- | :--------------------------------------------------------------------------------- | :------------------------------------- |
-| Navigate              | <kbd>j</kbd> / <kbd>k</kbd> or <kbd>↑</kbd> / <kbd>↓</kbd>                         | Move through session list              |
-| Jump to first/last    | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd>                                            | Go to top / bottom                     |
-| Jump to session       | <kbd>1</kbd>–<kbd>9</kbd>                                                          | Switch directly to session N           |
-| Switch to session     | <kbd>Enter</kbd>                                                                   | Switch tmux to the selected pane       |
-| Search                | <kbd>/</kbd>                                                                       | Enter fuzzy search mode                |
-| Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel            |
-| Scroll preview        | <kbd>Ctrl+D</kbd> / <kbd>Ctrl+U</kbd>                                              | Half-page scroll in preview            |
-| Resize preview        | <kbd>Alt+H</kbd> / <kbd>Alt+L</kbd>                                                | Increase/decrease preview width        |
-| Focus preview         | <kbd>Tab</kbd>                                                                     | Send keys directly to tmux pane        |
-| Restart session       | <kbd>r</kbd>                                                                       | Kill and resume the selected session   |
-| Reconnect             | <kbd>R</kbd>                                                                       | Reconnect to the daemon SSE stream     |
-| Kill session          | <kbd>x</kbd>                                                                       | Kill the selected session's process    |
-| Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions              |
-| Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state           |
-| Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)    |
-| Move group top/bottom | <kbd><</kbd> / <kbd>></kbd>                                                        | Pin group to top / bottom              |
-| Collapse/expand all   | <kbd>z</kbd><kbd>M</kbd> / <kbd>z</kbd><kbd>R</kbd> or <kbd>-</kbd> / <kbd>=</kbd> | Collapse or expand all groups          |
-| Hide idle             | <kbd>f</kbd>                                                                       | Toggle hiding idle sessions            |
-| Cycle prompt          | <kbd>p</kbd>                                                                       | Prompt display: inline → own row → off |
-| Cycle group-by        | <kbd>b</kbd>                                                                       | Cycle through group-by modes           |
-| Help                  | <kbd>?</kbd>                                                                       | Show keyboard shortcuts overlay        |
-| Quit                  | <kbd>q</kbd> / <kbd>Esc</kbd>                                                      | Exit the picker                        |
+| Action                | Key                                                                                | Description                                                                                        |
+| :-------------------- | :--------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------- |
+| Navigate              | <kbd>j</kbd> / <kbd>k</kbd> or <kbd>↑</kbd> / <kbd>↓</kbd>                         | Move through session list                                                                          |
+| Jump to first/last    | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd>                                            | Go to top / bottom                                                                                 |
+| Jump to session       | <kbd>1</kbd>–<kbd>9</kbd>                                                          | Switch directly to session N                                                                       |
+| Switch to session     | <kbd>Enter</kbd>                                                                   | Switch tmux to the selected pane                                                                   |
+| Search                | <kbd>/</kbd>                                                                       | Enter fuzzy search mode                                                                            |
+| Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel                                                                        |
+| Scroll preview        | <kbd>Ctrl+D</kbd> / <kbd>Ctrl+U</kbd>                                              | Half-page scroll in preview                                                                        |
+| Resize preview        | <kbd>Alt+H</kbd> / <kbd>Alt+L</kbd>                                                | Increase/decrease preview width                                                                    |
+| Focus preview         | <kbd>Tab</kbd>                                                                     | Send keys directly to tmux pane                                                                    |
+| Restart session       | <kbd>r</kbd>                                                                       | Kill and resume the selected session                                                               |
+| Reconnect             | <kbd>R</kbd>                                                                       | Reconnect to the daemon SSE stream                                                                 |
+| Kill session          | <kbd>x</kbd>                                                                       | Kill the selected session's process                                                                |
+| Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions                                                                          |
+| Review diff           | <kbd>d</kbd>                                                                       | Review the session's diff with [hunk](https://github.com/modem-dev/hunk) (requires `hunk` on PATH) |
+| Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state                                                                       |
+| Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)                                                                |
+| Move group top/bottom | <kbd><</kbd> / <kbd>></kbd>                                                        | Pin group to top / bottom                                                                          |
+| Collapse/expand all   | <kbd>z</kbd><kbd>M</kbd> / <kbd>z</kbd><kbd>R</kbd> or <kbd>-</kbd> / <kbd>=</kbd> | Collapse or expand all groups                                                                      |
+| Hide idle             | <kbd>f</kbd>                                                                       | Toggle hiding idle sessions                                                                        |
+| Cycle prompt          | <kbd>p</kbd>                                                                       | Prompt display: inline → own row → off                                                             |
+| Cycle group-by        | <kbd>b</kbd>                                                                       | Cycle through group-by modes                                                                       |
+| Help                  | <kbd>?</kbd>                                                                       | Show keyboard shortcuts overlay                                                                    |
+| Quit                  | <kbd>q</kbd> / <kbd>Esc</kbd>                                                      | Exit the picker                                                                                    |
 
 <details>
 <summary><strong>Search mode keys</strong></summary>
@@ -269,22 +285,23 @@ ccmux config get <key>
 ccmux config list
 ```
 
-| Key                 | Values                                                                       | Default            | Description                                                                         |
-| :------------------ | :--------------------------------------------------------------------------- | :----------------- | :---------------------------------------------------------------------------------- |
-| `iconStyle`         | `dot`, `emoji`, `nerdfont`, `none`                                           | `dot`              | Status icon style                                                                   |
-| `theme`             | `catppuccin-*`, `tokyo-night*`, `dracula`, `gruvbox-*`, `nord`, `rose-pine*` | `catppuccin-mocha` | TUI color theme (resolved at launch; see [Theme](#-theme))                          |
-| `showPreview`       | `true`, `false`                                                              | `false`            | Show preview panel on launch                                                        |
-| `previewWidth`      | `20`–`80`                                                                    | `40`               | Preview panel width (percentage)                                                    |
-| `command`           | any non-blank string                                                         | `claude`           | CLI command used for session restart                                                |
-| `groupBy`           | `project`, `cwd`, `session`, `window`, `none`                                | `project`          | How sessions are grouped in the TUI                                                 |
-| `promptDisplay`     | `inline`, `row2`, `off`                                                      | `inline`           | Prompt display: inline on row 1, its own row, or hidden                             |
-| `backgroundAgents`  | `true`, `false`                                                              | `true`             | Show Claude background agents as rows (daemon restart required)                     |
-| `searchPaneContent` | `true`, `false`                                                              | `true`             | Include captured pane content in TUI search                                         |
-| `searchPaneLines`   | `10`–`500`                                                                   | `100`              | Lines of pane content scanned in TUI search                                         |
-| `searchTranscript`  | `true`, `false`                                                              | `true`             | Search live Claude/Codex transcripts (full history + assistant text) via the daemon |
-| `persistent`        | `true`, `false`                                                              | `false`            | Keep picker open after switching sessions (dashboard mode)                          |
-| `sidebar.width`     | `10`–`80`                                                                    | `30`               | Sidebar pane width in columns                                                       |
-| `sidebar.position`  | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                                       |
+| Key                          | Values                                                                       | Default            | Description                                                                                                                        |
+| :--------------------------- | :--------------------------------------------------------------------------- | :----------------- | :--------------------------------------------------------------------------------------------------------------------------------- |
+| `iconStyle`                  | `dot`, `emoji`, `nerdfont`, `none`                                           | `dot`              | Status icon style                                                                                                                  |
+| `theme`                      | `catppuccin-*`, `tokyo-night*`, `dracula`, `gruvbox-*`, `nord`, `rose-pine*` | `catppuccin-mocha` | TUI color theme (resolved at launch; see [Theme](#-theme))                                                                         |
+| `showPreview`                | `true`, `false`                                                              | `false`            | Show preview panel on launch                                                                                                       |
+| `previewWidth`               | `20`–`80`                                                                    | `40`               | Preview panel width (percentage)                                                                                                   |
+| `command`                    | any non-blank string                                                         | `claude`           | CLI command used for session restart                                                                                               |
+| `groupBy`                    | `project`, `cwd`, `session`, `window`, `none`                                | `project`          | How sessions are grouped in the TUI                                                                                                |
+| `promptDisplay`              | `inline`, `row2`, `off`                                                      | `inline`           | Prompt display: inline on row 1, its own row, or hidden                                                                            |
+| `backgroundAgents`           | `true`, `false`                                                              | `true`             | Show Claude background agents as rows (daemon restart required)                                                                    |
+| `additionalClaudeConfigDirs` | array of paths                                                               | `[]`               | Additional Claude config dirs to watch (daemon restart required; see [Multiple Claude Config Dirs](#-multiple-claude-config-dirs)) |
+| `searchPaneContent`          | `true`, `false`                                                              | `true`             | Include captured pane content in TUI search                                                                                        |
+| `searchPaneLines`            | `10`–`500`                                                                   | `100`              | Lines of pane content scanned in TUI search                                                                                        |
+| `searchTranscript`           | `true`, `false`                                                              | `true`             | Search live Claude/Codex transcripts (full history + assistant text) via the daemon                                                |
+| `persistent`                 | `true`, `false`                                                              | `false`            | Keep picker open after switching sessions (dashboard mode)                                                                         |
+| `sidebar.width`              | `10`–`80`                                                                    | `30`               | Sidebar pane width in columns                                                                                                      |
+| `sidebar.position`           | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                                                                                      |
 
 For how these search knobs interact, see [Search Mode](#search-mode).
 
@@ -379,6 +396,21 @@ An unknown base name falls back to the default theme; an invalid hex value or un
 
 > [!NOTE]
 > ccmux paints no background fill, so theme colors sit on your terminal's own background. The light palettes (`catppuccin-latte`, `tokyo-night-day`, `gruvbox-light`, `rose-pine-dawn`) assume a light terminal; pair them with a light background. Every other palette assumes a dark one.
+
+### 🗂️ Multiple Claude Config Dirs
+
+Claude Code writes session transcripts to `$CLAUDE_CONFIG_DIR/projects` (default `~/.claude/projects`), so sessions from a second account (e.g. a personal login launched with `CLAUDE_CONFIG_DIR=~/.claude-personal`) land in a tree ccmux doesn't watch by default. List those dirs in `additionalClaudeConfigDirs` and a single daemon watches every `<dir>/projects` tree:
+
+```bash
+ccmux config set additionalClaudeConfigDirs '["~/.claude-personal"]'
+ccmux setup --agent claude   # installs hooks into every configured dir
+ccmux daemon restart
+```
+
+`~/.claude` is always watched; entries are additional config dirs (`~` paths supported), and a set `CLAUDE_CONFIG_DIR` environment variable is picked up automatically. Sessions are keyed by their globally unique session ID, so the same project opened under two accounts coexists without collision.
+
+> [!NOTE]
+> If you add a dir later, re-run `ccmux setup --agent claude`. The daemon warns at startup about any configured dir still missing hooks.
 
 ## 🔗 Session Matching with Hooks
 

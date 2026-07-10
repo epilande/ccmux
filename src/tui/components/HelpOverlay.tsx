@@ -9,7 +9,7 @@ const MAX_WIDTH = COL_WIDTH * 2 + COL_GAP + 4 + 2; // cols + padding(2+2) + bord
 
 type Group = { section: string; items: { key: string; desc: string }[] };
 
-const leftGroups = (sidebar?: boolean): Group[] => [
+const leftGroups = (sidebar?: boolean, reviewable?: boolean): Group[] => [
   {
     section: "Navigation",
     items: [
@@ -29,6 +29,7 @@ const leftGroups = (sidebar?: boolean): Group[] => [
       { key: "r", desc: "Restart session" },
       { key: "R", desc: "Reconnect" },
       { key: "x / X", desc: "Kill session / all" },
+      ...(reviewable ? [{ key: "d", desc: "Review diff (hunk)" }] : []),
     ],
   },
   {
@@ -137,6 +138,7 @@ const HelpLayout: ParentComponent<{
 
 interface HelpOverlayProps {
   sidebar?: boolean;
+  reviewable?: boolean;
   onScrollboxRef?: (ref: ScrollBoxRenderable) => void;
 }
 
@@ -146,7 +148,7 @@ export const HelpOverlay: Component<HelpOverlayProps> = (props) => {
       ? rightGroups.filter((g) => g.section !== "Preview")
       : rightGroups;
 
-  const groups = leftGroups(props.sidebar);
+  const groups = leftGroups(props.sidebar, props.reviewable);
 
   if (props.sidebar) {
     const allGroups = [...groups, ...filteredRightGroups()];

@@ -5,12 +5,12 @@ import {
   readFileSync,
   mkdirSync,
 } from "fs";
-import { join } from "path";
 import {
   PID_FILE,
   SCAN_INTERVAL_MS,
   PROJECTS_DIR,
   CCMUX_DIR,
+  resolveClaudeProjectDirs,
 } from "../lib/config";
 import { readFirstLine } from "./parser";
 import { reconcileSessionMarkerLinks } from "./adapters/link";
@@ -18,6 +18,7 @@ import {
   decideMigrationBindings,
   decideCodexRolloutLinks,
   decideMarkerLinks,
+  resolveExistingLogPath,
   type CodexLinkCandidate,
 } from "./binder";
 import { SessionManager } from "./sessions";
@@ -31,7 +32,7 @@ import { DaemonServer } from "./server";
 import { HookManager } from "./hook-manager";
 import type { AgentDef } from "../lib/agents";
 import { getAgents } from "../lib/agents";
-import { getPreferences } from "../lib/preferences";
+import { getPreferences, type Preferences } from "../lib/preferences";
 import { VersionResolver, parseShellTokens } from "./version-resolver";
 import { readClaudeHistory } from "./adapters/claude/history";
 import {
@@ -61,7 +62,6 @@ import {
 import {
   matchSessionsToPanes,
   cleanupStaleSessions,
-  encodeProjectPath,
 } from "./session-pane-match";
 import { sweepOrphanInvokeSessions } from "./detached-session";
 import { ProcessTree } from "./process-tree";
@@ -89,11 +89,34 @@ import {
 type ClaudeRuntimeMode = "claude-with-hooks" | "claude-no-hooks";
 
 /**
+ * Fold the debounce check across every Claude watcher: an extra config-dir
+ * watcher records freshness on its own `lastProcessedAt`, so consulting only
+ * the primary would let second-account sessions bypass the reconciler's
+ * just-processed guard.
+ */
+export function isRecentlyProcessedByAny(
+  watchers: ReadonlyArray<{ isRecentlyProcessed: (id: string) => boolean }>,
+  sessionId: string,
+): boolean {
+  return watchers.some((w) => w.isRecentlyProcessed(sessionId));
+}
+
+/**
  * Main daemon class
  */
 export class Daemon {
   private sessionManager: SessionManager;
   private watcher: LogWatcher;
+  /** Extra Claude watchers for additional config dirs
+   * (`additionalClaudeConfigDirs` / `CLAUDE_CONFIG_DIR`), one per non-default
+   * `projects` tree. Empty unless
+   * configured. The primary `watcher` above stays authoritative for
+   * marker-driven, path-agnostic `processPath` routing; these add file
+   * discovery for their own trees, all feeding the shared SessionManager. */
+  private extraClaudeWatchers: LogWatcher[] = [];
+  /** All Claude `projects` dirs watched this run (primary first). Used by
+   * `buildLogPath` to locate a session's transcript across accounts. */
+  private claudeProjectDirs: string[] = [PROJECTS_DIR];
   private codexWatcher: LogWatcher;
   private codexAdapter: CodexLogAdapter;
   private logAdapters: Map<string, LogAdapter> = new Map();
@@ -163,6 +186,11 @@ export class Daemon {
     this.hookManager.setContext({
       sessionManager: this.sessionManager,
       getLogWatcher: (agentType) => this.logWatchers.get(agentType),
+      getLogWatchers: (agentType) => {
+        if (agentType === "claude") return this.claudeWatchers();
+        const single = this.logWatchers.get(agentType);
+        return single ? [single] : [];
+      },
       listProcesses: () => discoverAgentProcesses(this.agents),
       listPanes: () => listTmuxPanes(),
       getPaneHostingPid: (pid) => this.resolvePaneHostingPid(pid),
@@ -204,8 +232,13 @@ export class Daemon {
     // Load supported agents (builtins + user overrides/custom agents)
     const preferences = await getPreferences();
     this.agents = getAgents(preferences);
+    // Build extra Claude watchers for any additional config dirs before
+    // runtime-mode propagation and session migration so every tree is live
+    // from boot.
+    this.setupExtraClaudeWatchers(preferences);
     this.claudeRuntimeMode = this.resolveClaudeRuntimeMode();
-    this.watcher.setRuntimeMode(this.claudeRuntimeMode);
+    for (const w of this.claudeWatchers())
+      w.setRuntimeMode(this.claudeRuntimeMode);
     this.checkHooksInstalled();
 
     // Reap detached `ccmux-invoke-*` tmux sessions from a previous
@@ -253,10 +286,13 @@ export class Daemon {
       this.backgroundSource = new ClaudeBackgroundSource(this.sessionManager);
       await this.backgroundSource.start();
     }
-    this.watcher.start();
+    for (const w of this.claudeWatchers()) w.start();
     this.codexWatcher.start();
 
-    await Promise.all([this.watcher.ready, this.codexWatcher.ready]);
+    await Promise.all([
+      ...this.claudeWatchers().map((w) => w.ready),
+      this.codexWatcher.ready,
+    ]);
 
     // Initial scan - also matches existing sessions to panes
     DaemonPerf.startReporter(5);
@@ -291,7 +327,7 @@ export class Daemon {
       this.scanInterval = null;
     }
 
-    await this.watcher.stop();
+    await Promise.all(this.claudeWatchers().map((w) => w.stop()));
     await this.codexWatcher.stop();
     await this.hookManager.stop();
     await this.backgroundSource?.stop();
@@ -587,7 +623,7 @@ export class Daemon {
   private async migrateExistingSessions(): Promise<void> {
     try {
       if (this.claudeRuntimeMode === "claude-no-hooks") return;
-      if (!existsSync(PROJECTS_DIR)) return;
+      if (!this.claudeProjectDirs.some((dir) => existsSync(dir))) return;
 
       const claudeProcs = await discoverAgentProcesses(
         this.agents.filter((a) => a.name === "claude"),
@@ -624,8 +660,43 @@ export class Daemon {
     }
   }
 
+  // Locate a session's transcript across every watched Claude config dir
+  // (e.g. a `~/.claude-personal` account). See `resolveExistingLogPath`.
   private buildLogPath(cwd: string, sessionId: string): string {
-    return join(PROJECTS_DIR, encodeProjectPath(cwd), `${sessionId}.jsonl`);
+    return resolveExistingLogPath(
+      this.claudeProjectDirs,
+      cwd,
+      sessionId,
+      existsSync,
+    );
+  }
+
+  /** Primary Claude watcher plus any extra config-dir watchers. */
+  private claudeWatchers(): LogWatcher[] {
+    return [this.watcher, ...this.extraClaudeWatchers];
+  }
+
+  // Resolve the configured Claude `projects` dirs and stand up one extra
+  // adapter+watcher per non-default tree, all feeding the shared
+  // SessionManager — mirroring how each agent is a separate adapter+watcher.
+  // The primary `~/.claude/projects` watcher is built in the constructor;
+  // this only adds the extras.
+  private setupExtraClaudeWatchers(preferences: Preferences): void {
+    this.claudeProjectDirs = resolveClaudeProjectDirs(
+      preferences.additionalClaudeConfigDirs,
+    );
+    for (const dir of this.claudeProjectDirs) {
+      if (dir === PROJECTS_DIR) continue;
+      const adapter = new ClaudeLogAdapter(this.sessionManager, dir);
+      this.extraClaudeWatchers.push(
+        new LogWatcher(adapter, this.sessionManager),
+      );
+    }
+    if (this.extraClaudeWatchers.length > 0) {
+      console.log(
+        `Watching ${this.claudeProjectDirs.length} Claude projects dirs: ${this.claudeProjectDirs.join(", ")}`,
+      );
+    }
   }
 
   /**
@@ -838,7 +909,14 @@ export class Daemon {
   private buildReconcilerDeps(): ReconcilerDeps {
     return {
       sessionManager: this.sessionManager,
-      watcher: this.watcher,
+      // Fold the debounce check across every Claude watcher: an extra
+      // config-dir watcher records freshness on its own `lastProcessedAt`, so
+      // consulting only the primary would let second-account sessions bypass
+      // the reconciler's just-processed guard.
+      watcher: {
+        isRecentlyProcessed: (id) =>
+          isRecentlyProcessedByAny(this.claudeWatchers(), id),
+      },
       hookManager: this.hookManager,
       attentionTracker: this.attentionTracker,
       agents: this.agents,

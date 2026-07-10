@@ -165,6 +165,16 @@ export class LogWatcher {
    * next jsonl write is picked up immediately. No-op for non-Claude
    * adapters and for the Claude no-hooks runtime mode.
    */
+  /**
+   * Whether this watcher's log tree is the one that discovered `sessionId`
+   * (its transcript lives under this watcher's `logDirGlob`). With multiple
+   * Claude config dirs, marker events route to the owning watcher so the
+   * tree holding the transcript is the one that re-arms / tears down.
+   */
+  ownsSession(sessionId: string): boolean {
+    return this.knownLogPaths.has(sessionId);
+  }
+
   handleMarkerAdded(marker: SessionPidMarker): void {
     if (this.adapter.agentType !== "claude") return;
     if (this.runtimeMode === "claude-no-hooks") return;

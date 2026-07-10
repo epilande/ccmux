@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, mock, beforeEach } from "bun:test";
 import { testRender } from "@opentui/solid";
+import { MouseButtons } from "@opentui/core/testing";
 import type { SSECallbacks } from "./utils/sse";
 import { mockEnrichedSession } from "./components/test-helpers";
 
@@ -62,6 +63,25 @@ mock.module("./utils/tmux", () => ({
   openAgentsWindow: openAgentsWindowSpy,
 }));
 
+// mock.module is process-wide and keyed by resolved path, which
+// src/tui/utils/review.test.ts's own "./review" specifier shares. That file
+// dodges this mock via a "?real"-suffixed dynamic import (a distinct module
+// cache entry) so its real-implementation tests aren't corrupted.
+const realReview = await import("./utils/review");
+let hunkAvailable = true;
+const runHunkReviewSpy = mock(
+  async (
+    ..._args: unknown[]
+  ): Promise<{ ok: true } | { ok: false; error: string }> => ({ ok: true }),
+);
+const HUNK_INSTALL_HINT_TEST = realReview.HUNK_INSTALL_HINT;
+
+mock.module("./utils/review", () => ({
+  ...realReview,
+  isHunkAvailable: () => hunkAvailable,
+  runHunkReview: runHunkReviewSpy,
+}));
+
 mock.module("../lib/startup-timing", () => ({
   markStartup: () => {},
   reportStartup: () => {},
@@ -89,6 +109,9 @@ beforeEach(() => {
   openAgentAttachWindowSpy.mockImplementation(async () => ({ ok: true }));
   openAgentsWindowSpy.mockClear();
   openAgentsWindowSpy.mockImplementation(async () => ({ ok: true }));
+  hunkAvailable = true;
+  runHunkReviewSpy.mockClear();
+  runHunkReviewSpy.mockImplementation(async () => ({ ok: true }));
 });
 
 afterEach(() => {
@@ -1476,5 +1499,141 @@ describe("App invoke row rendering", () => {
     expect(doneFrame).toContain("✓");
     expect(doneFrame).toContain("done");
     expect(doneFrame).not.toContain("working");
+  });
+});
+
+describe("App review (d)", () => {
+  // groupBy:"none" puts the lone session at flat-index 0 (no group header),
+  // so the default selection already lands on it without navigation.
+  async function renderWithSession(
+    props: Record<string, unknown> = {},
+    sessionOverrides: Record<string, unknown> = {},
+  ) {
+    await renderApp(120, 20, { groupBy: "none", ...props });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "s1",
+          project: "myapp",
+          cwd: "/code/myapp",
+          ...sessionOverrides,
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+  }
+
+  it("calls runHunkReview with paneCwd when d is pressed on a session", async () => {
+    await renderWithSession({}, { paneCwd: "/code/myapp/pane-cwd" });
+    setup.mockInput.pressKey("d");
+    await setup.renderOnce();
+    expect(runHunkReviewSpy).toHaveBeenCalledTimes(1);
+    expect(runHunkReviewSpy.mock.calls[0]?.[1]).toBe("/code/myapp/pane-cwd");
+  });
+
+  it("falls back to cwd when paneCwd is null", async () => {
+    await renderWithSession();
+    setup.mockInput.pressKey("d");
+    await setup.renderOnce();
+    expect(runHunkReviewSpy).toHaveBeenCalledTimes(1);
+    expect(runHunkReviewSpy.mock.calls[0]?.[1]).toBe("/code/myapp");
+  });
+
+  it("drops a second d-press while a review is in flight", async () => {
+    // Hold runHunkReview pending so reviewInFlight stays true across the
+    // second press. A rapid double-d must not race two suspend/spawn/resume
+    // cycles against the same renderer.
+    let resolveReview!: (
+      r: { ok: true } | { ok: false; error: string },
+    ) => void;
+    runHunkReviewSpy.mockImplementation(
+      () =>
+        new Promise<{ ok: true } | { ok: false; error: string }>((resolve) => {
+          resolveReview = resolve;
+        }),
+    );
+    await renderWithSession();
+    setup.mockInput.pressKey("d");
+    await setup.renderOnce();
+    setup.mockInput.pressKey("d");
+    await setup.renderOnce();
+    expect(runHunkReviewSpy).toHaveBeenCalledTimes(1);
+    // Release the in-flight review so the guard clears (and no dangling promise).
+    resolveReview({ ok: true });
+  });
+
+  it("does not call runHunkReview when a group header is selected", async () => {
+    // Default groupBy puts a header at flat-index 0.
+    await renderApp(120, 20, { groupBy: "project" });
+    sseCallbacks!.onInit(
+      [mockEnrichedSession({ id: "s1", project: "myapp", cwd: "/code/myapp" })],
+      null,
+    );
+    await setup.renderOnce();
+    setup.mockInput.pressKey("d");
+    await setup.renderOnce();
+    expect(runHunkReviewSpy).not.toHaveBeenCalled();
+  });
+
+  it("shows the install hint and does not call runHunkReview when hunk is missing", async () => {
+    hunkAvailable = false;
+    await renderWithSession();
+    setup.mockInput.pressKey("d");
+    await setup.renderOnce();
+    expect(runHunkReviewSpy).not.toHaveBeenCalled();
+    expect(setup.captureCharFrame()).toContain(HUNK_INSTALL_HINT_TEST);
+  });
+
+  it("does not call runHunkReview in sidebar mode", async () => {
+    await renderWithSession({ sidebar: true });
+    setup.mockInput.pressKey("d");
+    await setup.renderOnce();
+    expect(runHunkReviewSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not call runHunkReview on ctrl+d", async () => {
+    await renderWithSession();
+    setup.mockInput.pressKey("d", { ctrl: true });
+    await setup.renderOnce();
+    expect(runHunkReviewSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not call runHunkReview when d is typed into an active search query", async () => {
+    await renderWithSession();
+    setup.mockInput.pressKey("/");
+    await setup.renderOnce();
+    setup.mockInput.pressKey("d");
+    await setup.renderOnce();
+    expect(runHunkReviewSpy).not.toHaveBeenCalled();
+  });
+
+  it("shows a Review failed toast when runHunkReview resolves ok:false", async () => {
+    runHunkReviewSpy.mockImplementation(async () => ({
+      ok: false,
+      error: "boom",
+    }));
+    await renderWithSession();
+    setup.mockInput.pressKey("d");
+    await setup.renderOnce();
+    // reviewSession's .then() runs on a microtask after runHunkReview resolves.
+    await new Promise((r) => setTimeout(r, 0));
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("Review failed: boom");
+  });
+
+  it("shows Review diff in the context menu when reviewable", async () => {
+    await renderWithSession();
+    await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("Review diff");
+  });
+
+  it("hides Review diff in the context menu when hunk is unavailable", async () => {
+    hunkAvailable = false;
+    await renderWithSession();
+    await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).not.toContain("Review diff");
   });
 });

@@ -86,6 +86,7 @@ function makeCtx(
       },
     } as unknown as HookManagerContext["sessionManager"],
     getLogWatcher: () => undefined,
+    getLogWatchers: () => [],
     listProcesses: async () => [],
     listPanes: async () => panes,
     getPaneHostingPid: async (pid: number) => {

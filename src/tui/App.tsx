@@ -15,8 +15,14 @@ import {
   useTerminalDimensions,
 } from "@opentui/solid";
 import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
+import type { EnrichedSession } from "../types/session";
 import { createTUIStore, TickContext } from "./store";
 import { killActionPath, restartActionPath } from "./utils/invoke-actions";
+import {
+  HUNK_INSTALL_HINT,
+  isHunkAvailable,
+  runHunkReview,
+} from "./utils/review";
 import { SSEClient } from "./utils/sse";
 import {
   switchToPane,
@@ -82,6 +88,14 @@ interface AppProps {
 }
 
 export function App(props: AppProps) {
+  const renderer = useRenderer();
+  // Probed once at launch (cheap `which`, no need to react to hunk being
+  // installed mid-session): gates the footer hint and help row. `d` itself
+  // re-probes live so a hunk installed after launch works without restart.
+  const hunkAtLaunch = isHunkAvailable();
+  // Both operands are fixed for the component's lifetime, so this is a plain
+  // constant, not a reactive accessor.
+  const reviewEnabled = !props.sidebar && hunkAtLaunch;
   const store = createTUIStore({
     initialPreview: props.initialPreview,
     iconStyle: props.iconStyle,
@@ -194,6 +208,32 @@ export function App(props: AppProps) {
     });
   }
 
+  /** Drops re-activations while a review is pending: a rapid double-`d` would
+   * otherwise race two suspend/spawn/resume cycles against the same renderer. */
+  let reviewInFlight = false;
+
+  function reviewSession(session: EnrichedSession) {
+    if (reviewInFlight) return;
+    const cwd = session.paneCwd ?? session.cwd;
+    if (!cwd) {
+      store.actions.showToast("Review failed: no working directory");
+      return;
+    }
+    // Re-probe live (not the launch-time `hunkAtLaunch`) so a hunk installed
+    // after the picker started works without a restart.
+    if (!isHunkAvailable()) {
+      store.actions.showToast(HUNK_INSTALL_HINT);
+      return;
+    }
+    reviewInFlight = true;
+    runHunkReview(renderer, cwd).then((result) => {
+      reviewInFlight = false;
+      if (!result.ok) {
+        store.actions.showToast(`Review failed: ${result.error}`);
+      }
+    });
+  }
+
   function handleRowActivate(item: FlatItem, index: number) {
     if (
       store.state.showHelp ||
@@ -297,6 +337,14 @@ export function App(props: AppProps) {
     }
   }
 
+  function contextMenuReview() {
+    const cm = store.state.contextMenu;
+    if (!cm) return;
+    const session = store.state.sessions.find((s) => s.id === cm.sessionId);
+    store.actions.hideContextMenu();
+    if (session) reviewSession(session);
+  }
+
   function sessionMenuItems(): ContextMenuItem[] {
     // Paneless read-only background rows get the launch actions (per-agent
     // attach + the global agent view); Kill/Restart are pane-session
@@ -305,6 +353,16 @@ export function App(props: AppProps) {
     const session = cm
       ? store.state.sessions.find((s) => s.id === cm.sessionId)
       : undefined;
+    const reviewItem: ContextMenuItem[] = reviewEnabled
+      ? [
+          {
+            label: "Review diff",
+            hint: "d",
+            color: theme.text,
+            action: contextMenuReview,
+          },
+        ]
+      : [];
     if (session?.trackingMode === "background") {
       return [
         {
@@ -319,6 +377,7 @@ export function App(props: AppProps) {
           color: theme.text,
           action: contextMenuOpenAgentView,
         },
+        ...reviewItem,
       ];
     }
     return [
@@ -340,6 +399,7 @@ export function App(props: AppProps) {
         color: theme.peach,
         action: () => contextMenuConfirm("restart"),
       },
+      ...reviewItem,
     ];
   }
 
@@ -615,7 +675,6 @@ export function App(props: AppProps) {
 
   // Performance metrics (only when CCMUX_PERF=1)
   if (PERF_ENABLED) {
-    const renderer = useRenderer();
     startPerfReporter(renderer);
   }
 
@@ -907,6 +966,10 @@ export function App(props: AppProps) {
           const delta = key === "d" ? halfPage : -halfPage;
           previewScrollbox.scrollTo(previewScrollbox.scrollTop + delta);
           event.preventDefault();
+        } else if (key === "d" && !event.ctrl && !props.sidebar) {
+          const session = store.selectedSession();
+          if (session) reviewSession(session);
+          event.preventDefault();
         }
         break;
 
@@ -1108,6 +1171,7 @@ export function App(props: AppProps) {
             previewFocused={store.state.previewFocused}
             persistent={props.persistent}
             groupBy={store.state.groupBy}
+            reviewable={reviewEnabled}
           />
         </Show>
 
@@ -1120,6 +1184,7 @@ export function App(props: AppProps) {
         <Show when={store.state.showHelp}>
           <HelpOverlay
             sidebar={props.sidebar}
+            reviewable={reviewEnabled}
             onScrollboxRef={(ref) => (helpScrollbox = ref)}
           />
         </Show>
