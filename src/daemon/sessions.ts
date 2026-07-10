@@ -10,6 +10,7 @@ import type {
   BackgroundInFlight,
 } from "../types/session";
 import { extractProjectInfo } from "./parser";
+import { appendPrompt } from "./status-machine";
 import { getSessionPidMarker } from "./session-markers";
 import { findSoftEvictTargets } from "./binder/primitives";
 
@@ -81,6 +82,15 @@ function backgroundInFlightEqual(
   const bKinds = b?.kinds ?? [];
   if (aKinds.length !== bKinds.length) return false;
   return aKinds.every((kind, i) => kind === bKinds[i]);
+}
+
+/** Shallow element-wise equality for two string arrays. */
+function arraysShallowEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
 
 export function isPaneTrackedSession(session: Session): boolean {
@@ -212,6 +222,12 @@ export class SessionManager extends EventEmitter {
       session.lastPrompt = null;
       changed = true;
     }
+    if (session.prompts.length > 0) {
+      // Drop the dead run's prompt history so the reused row isn't searchable
+      // by the previous session's prompts.
+      session.prompts = [];
+      changed = true;
+    }
 
     return changed;
   }
@@ -251,6 +267,7 @@ export class SessionManager extends EventEmitter {
       attentionState: null,
       lastSeenAt: null,
       lastPrompt: null,
+      prompts: [],
     };
 
     this.sessions.set(sessionId, session);
@@ -354,6 +371,7 @@ export class SessionManager extends EventEmitter {
       attentionState: null,
       lastSeenAt: null,
       lastPrompt: null,
+      prompts: [],
     };
 
     this.sessions.set(session.id, session);
@@ -396,6 +414,7 @@ export class SessionManager extends EventEmitter {
       attentionState: null,
       lastSeenAt: null,
       lastPrompt: input.lastPrompt,
+      prompts: input.lastPrompt ? [input.lastPrompt] : [],
       backgroundDetail: input.backgroundDetail,
       backgroundResult: input.backgroundResult,
       backgroundChildren: input.backgroundChildren,
@@ -496,6 +515,42 @@ export class SessionManager extends EventEmitter {
       state.lastPrompt !== session.lastPrompt
     ) {
       session.lastPrompt = state.lastPrompt ?? null;
+      changed = true;
+      // Marker-driven agents (Cursor/Pi/OpenCode) update `lastPrompt` without
+      // maintaining the prompt index (`state.prompts` stays undefined), so
+      // append here to keep their prompt history searchable. Claude/Codex set
+      // `state.prompts` alongside `lastPrompt` (the replace branch below owns
+      // their index), so this is skipped for them: no double-append. The
+      // enclosing guard (lastPrompt actually changed) also dedups a marker
+      // re-firing the same prompt.
+      if (state.prompts === undefined && typeof state.lastPrompt === "string") {
+        const appended = appendPrompt(session.prompts, state.lastPrompt);
+        // OpenCode aggregated rows flip `lastPrompt` between sibling sessions
+        // on any status event (newest-by-activity wins), re-delivering an older
+        // prompt that the "changed" guard alone can't catch. When a real append
+        // happened, drop any earlier copy of the just-added entry so a repeat
+        // refreshes recency instead of filling the capped index with
+        // [pa,pb,pa,pb,...] dupes that evict distinct history. `appendPrompt`
+        // returns the same reference on a no-op, so guard on identity to avoid
+        // pruning a legitimate pre-existing duplicate.
+        if (appended !== session.prompts) {
+          const newest = appended[appended.length - 1];
+          session.prompts = appended.filter(
+            (p, i) => i === appended.length - 1 || p !== newest,
+          );
+        } else {
+          session.prompts = appended;
+        }
+      }
+    }
+
+    // `appendPrompt` produces the full capped array, so this is a wholesale
+    // replace, not a merge.
+    if (
+      state.prompts !== undefined &&
+      !arraysShallowEqual(state.prompts, session.prompts)
+    ) {
+      session.prompts = state.prompts;
       changed = true;
     }
 

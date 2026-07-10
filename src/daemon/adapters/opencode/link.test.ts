@@ -100,6 +100,7 @@ function makeUnlinkedSession(paneId: string): Session {
     attentionState: null,
     lastSeenAt: null,
     lastPrompt: null,
+    prompts: [],
   };
 }
 

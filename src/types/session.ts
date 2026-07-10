@@ -146,6 +146,13 @@ export interface Session {
   /** Last user prompt text */
   lastPrompt: string | null;
   /**
+   * Recent user prompts, oldest to newest, capped in count and total bytes
+   * (see MAX_SESSION_PROMPTS / MAX_PROMPTS_TOTAL_BYTES). Always present
+   * (defaults to `[]`); the newest entry mirrors `lastPrompt`. Powers
+   * whole-session search over every prompt, not just the last.
+   */
+  prompts: string[];
+  /**
    * Background-only: the Haiku-class one-line `detail` (falls back to
    * `name`) from `state.json`. Rendered as the row subtitle / peek heading.
    * Distinct from `lastPrompt`, which holds the raw `intent`.
@@ -196,6 +203,11 @@ export interface SessionState {
   /** Last user prompt text. `null` is the explicit "clear" signal that
    * SessionManager.updateSession honors; `undefined` means "leave alone". */
   lastPrompt?: string | null;
+  /** Recent user prompts (oldest to newest), already capped by
+   * `appendPrompt`. `undefined` means "leave alone"; a defined array
+   * replaces the session's prompts wholesale (the fold is a full re-derive,
+   * not a merge). Mirrors the `lastPrompt` non-clear convention. */
+  prompts?: string[];
   /** Background-only: row subtitle from `state.json` `detail`/`name`.
    * Non-null (undefined = "leave alone") to mirror `Session.backgroundDetail`
    * so `Partial<SessionState>` stays assignable to `Partial<Session>`. */

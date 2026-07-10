@@ -26,6 +26,8 @@ interface TUIOptions {
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   searchPaneContent?: boolean;
+  searchPaneLines?: number;
+  searchTranscript?: boolean;
   groupBy?: GroupBy;
   collapsedGroups?: string[];
   pinnedGroups?: string[];
@@ -116,6 +118,8 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
         columns={options.columns}
         breakpoints={options.breakpoints}
         searchPaneContent={options.searchPaneContent}
+        searchPaneLines={options.searchPaneLines}
+        searchTranscript={options.searchTranscript}
         groupBy={options.groupBy}
         collapsedGroups={options.collapsedGroups}
         pinnedGroups={options.pinnedGroups}

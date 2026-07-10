@@ -144,6 +144,11 @@ export const SessionList: Component<SessionListProps> = (props) => {
         selected={index === props.selectedIndex}
         index={getSessionIndex(props.items, index)}
         highlights={item.filteredSession.highlights}
+        transcriptSnippet={
+          item.filteredSession.transcriptMatch
+            ? item.filteredSession.transcriptSnippet
+            : undefined
+        }
         iconStyle={props.iconStyle}
         showPreview={props.showPreview}
         previewWidth={props.previewWidth}

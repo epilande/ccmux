@@ -92,6 +92,8 @@ export function createPickerCommand(): Command {
           columns: prefs.columns,
           breakpoints: prefs.breakpoints,
           searchPaneContent: prefs.searchPaneContent,
+          searchPaneLines: prefs.searchPaneLines,
+          searchTranscript: prefs.searchTranscript,
           groupBy: uiState.groupBy ?? prefs.groupBy,
           collapsedGroups: uiState.collapsedGroups,
           pinnedGroups: uiState.pinnedGroups,

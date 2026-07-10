@@ -207,6 +207,15 @@ export const BACKGROUND_FRESH_THRESHOLD_MS = 10_000;
 export const MAX_LOG_ENTRIES = 100;
 
 /**
+ * Per-session prompt index caps. The daemon keeps the last N user prompts
+ * (each truncated) in memory so TUI search can match any prompt, not just
+ * the most recent one, bounded so the index can't grow without limit.
+ */
+export const MAX_SESSION_PROMPTS = 20; // last N prompts kept in memory / SSE
+export const MAX_PROMPT_CHARS = 240; // per-prompt truncation
+export const MAX_PROMPTS_TOTAL_BYTES = 4096; // drop-oldest ceiling
+
+/**
  * Check if a tool requires permission (settings-aware)
  */
 export { toolRequiresPermission } from "./permission-resolver";

@@ -38,8 +38,16 @@ export interface FilteredSession {
     cwd?: string | null;
     gitBranch?: string | null;
     lastPrompt?: string | null;
+    /** A single normalized, highlighted prompt line: the newest older prompt
+     * whose text matched, rendered here when `lastPrompt` (the newest) did not
+     * itself match. Not the whole index, and never multi-line. */
+    prompts?: string | null;
   } | null;
   paneMatch?: boolean;
+  /** The session matched a live transcript search (daemon `/search`). */
+  transcriptMatch?: boolean;
+  /** First transcript match snippet, shown to explain why the row matched. */
+  transcriptSnippet?: string;
 }
 
 /** Discriminated union for items in the flat render list */

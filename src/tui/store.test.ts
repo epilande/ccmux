@@ -1,7 +1,21 @@
-import { describe, it, expect } from "bun:test";
-import { createTUIStore as _createTUIStore } from "./store";
+import { describe, it, expect, mock } from "bun:test";
 import type { FlatItem } from "./utils/grouping";
 import { mockEnrichedSession } from "./components/test-helpers";
+
+// capturePane is mocked (process-wide, per Bun's mock.module) so the
+// searchPaneLines tests can assert what the store passes it, without
+// shelling out to a real `tmux capture-pane`. Spread the real module so
+// other exports (unused here) stay intact. Must be mocked BEFORE "./store"
+// is (dynamically) imported below, so the store's own import of capturePane
+// resolves to this mock.
+const realTmux = await import("./utils/tmux");
+const capturePaneSpy = mock(async (_pane: string, _lines: number) => "");
+mock.module("./utils/tmux", () => ({
+  ...realTmux,
+  capturePane: capturePaneSpy,
+}));
+
+const { createTUIStore: _createTUIStore } = await import("./store");
 
 function headerLabels(items: FlatItem[]): string[] {
   return items
@@ -1234,6 +1248,299 @@ describe("store", () => {
 
       expect(filtered.length).toBe(1);
       expect(filtered[0].paneMatch).toBe(false);
+    });
+
+    it("unions transcript matches from /search and sets transcriptMatch/transcriptSnippet", async () => {
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        ({
+          ok: true,
+          json: async () => ({
+            results: [
+              {
+                sessionId: "s1",
+                matches: [{ role: "user", snippet: "matched transcript text" }],
+              },
+            ],
+          }),
+        }) as unknown as Response) as unknown as typeof fetch;
+      try {
+        const store = createTUIStore({ groupBy: "none" });
+        store.actions.setSessions([
+          // Neither session matches the query on metadata; only s1 matches via
+          // the mocked transcript search.
+          createMockSession({ id: "s1", project: "zzz", gitBranch: null }),
+          createMockSession({ id: "s2", project: "yyy", gitBranch: null }),
+        ]);
+        store.actions.setSearchQuery("transcript");
+        await waitForDebounce();
+
+        const filtered = store.filteredSessions();
+        const s1 = filtered.find((f) => f.session.id === "s1");
+        expect(s1).toBeDefined();
+        expect(s1!.transcriptMatch).toBe(true);
+        expect(s1!.transcriptSnippet).toBe("matched transcript text");
+        expect(filtered.some((f) => f.session.id === "s2")).toBe(false);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("discards a superseded /search response that resolves out of order (generation guard)", async () => {
+      const origFetch = globalThis.fetch;
+      // Each query's fetch is held open until we resolve it by hand, so we can
+      // land query A's response AFTER query B's and prove the gen guard drops
+      // the stale one.
+      const resolvers: Record<string, () => void> = {};
+      const resultsFor: Record<string, unknown> = {
+        alpha: [{ sessionId: "sa", matches: [{ role: "user", snippet: "A" }] }],
+        beta: [{ sessionId: "sb", matches: [{ role: "user", snippet: "B" }] }],
+      };
+      globalThis.fetch = ((url: string) => {
+        const q = new URL(url).searchParams.get("q") ?? "";
+        return new Promise((resolve) => {
+          resolvers[q] = () =>
+            resolve({
+              ok: true,
+              json: async () => ({ results: resultsFor[q] }),
+            } as unknown as Response);
+        });
+      }) as unknown as typeof fetch;
+
+      const settle = () => new Promise((r) => setTimeout(r, 20));
+
+      try {
+        const store = createTUIStore({ groupBy: "none" });
+        store.actions.setSessions([
+          createMockSession({ id: "sa", project: "zzz", gitBranch: null }),
+          createMockSession({ id: "sb", project: "yyy", gitBranch: null }),
+        ]);
+
+        // Query A fires and its fetch is now in flight (held open).
+        store.actions.setSearchQuery("alpha");
+        await waitForDebounce();
+        // Query B supersedes A; B's fetch fires and we resolve it first.
+        store.actions.setSearchQuery("beta");
+        await waitForDebounce();
+        resolvers.beta();
+        await settle();
+        // A resolves LATE. The gen guard must drop it (query is now "beta").
+        resolvers.alpha();
+        await settle();
+
+        const filtered = store.filteredSessions();
+        // Cache reflects B, not the stale A response.
+        expect(filtered.some((f) => f.session.id === "sb")).toBe(true);
+        expect(filtered.some((f) => f.session.id === "sa")).toBe(false);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("does not fetch /search when searchTranscript is disabled", async () => {
+      const origFetch = globalThis.fetch;
+      let fetchCalled = false;
+      globalThis.fetch = (async () => {
+        fetchCalled = true;
+        return {
+          ok: true,
+          json: async () => ({
+            results: [
+              {
+                sessionId: "s1",
+                matches: [{ role: "user", snippet: "matched transcript text" }],
+              },
+            ],
+          }),
+        } as unknown as Response;
+      }) as unknown as typeof fetch;
+      try {
+        const store = createTUIStore({
+          groupBy: "none",
+          searchTranscript: false,
+        });
+        store.actions.setSessions([
+          // Metadata doesn't match "transcript"; only the (disabled) /search
+          // path could match it.
+          createMockSession({ id: "s1", project: "zzz", gitBranch: null }),
+        ]);
+        store.actions.setSearchQuery("transcript");
+        await waitForDebounce();
+
+        expect(fetchCalled).toBe(false);
+        // The transcript cache never got populated, so s1 has no match path.
+        const filtered = store.filteredSessions();
+        expect(filtered.some((f) => f.session.id === "s1")).toBe(false);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("passes the configured searchPaneLines through to capturePane", async () => {
+      capturePaneSpy.mockClear();
+      const store = createTUIStore({ groupBy: "none", searchPaneLines: 250 });
+      store.actions.setSessions([
+        createMockSession({
+          id: "s1",
+          project: "zzz",
+          gitBranch: null,
+          tmuxPane: "%1",
+        }),
+      ]);
+      store.actions.setSearchQuery("zzz");
+      await waitForDebounce();
+
+      expect(capturePaneSpy).toHaveBeenCalledWith("%1", 250);
+    });
+
+    it("defaults searchPaneLines to 100 when omitted", async () => {
+      capturePaneSpy.mockClear();
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "s1",
+          project: "zzz",
+          gitBranch: null,
+          tmuxPane: "%1",
+        }),
+      ]);
+      store.actions.setSearchQuery("zzz");
+      await waitForDebounce();
+
+      expect(capturePaneSpy).toHaveBeenCalledWith("%1", 100);
+    });
+
+    it("matches an older prompt by substring with a single-span highlight when lastPrompt did not match", () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "s1",
+          project: "proj",
+          cwd: "/tmp/s1",
+          gitBranch: null,
+          // The query is absent from the newest prompt ("deploy"), so only
+          // the older prompt matches (by substring, not fuzzy).
+          lastPrompt: "deploy",
+          prompts: ["please refactor the parser", "deploy"],
+        }),
+      ]);
+
+      store.actions.setSearchQuery("refactor the parser");
+      const filtered = store.filteredSessions();
+
+      expect(filtered.length).toBe(1);
+      expect(filtered[0].session.id).toBe("s1");
+      // Substring match: exactly one contiguous <b> span around the query,
+      // not scattered fuzzy characters.
+      expect(filtered[0].highlights?.prompts).toBe(
+        "please <b>refactor the parser</b>",
+      );
+      // The newest prompt itself did not match the query.
+      expect(filtered[0].highlights?.lastPrompt).toBeNull();
+    });
+
+    it("normalizes a multi-line prompt to a single line before matching/highlighting", () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "s1",
+          project: "proj",
+          cwd: "/tmp/s1",
+          gitBranch: null,
+          lastPrompt: "unrelated newest",
+          prompts: ["line one\nfind MERGEABLE here\nline three"],
+        }),
+      ]);
+
+      store.actions.setSearchQuery("mergeable");
+      const filtered = store.filteredSessions();
+
+      expect(filtered.length).toBe(1);
+      const highlighted = filtered[0].highlights?.prompts;
+      // Single line (embedded newlines collapsed) with the <b> span intact,
+      // so it can't wrap/overlap in the height-1 row.
+      expect(highlighted).toBe(
+        "line one find <b>MERGEABLE</b> here line three",
+      );
+      expect(highlighted).not.toContain("\n");
+    });
+
+    it("highlights a lastPrompt substring hit as a single normalized span", () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "s1",
+          project: "proj",
+          cwd: "/tmp/s1",
+          gitBranch: null,
+          // Multi-line lastPrompt (task notification): normalized to one line.
+          lastPrompt: "review this\nMERGEABLE check\ndone",
+          prompts: ["review this\nMERGEABLE check\ndone"],
+        }),
+      ]);
+
+      store.actions.setSearchQuery("mergeable");
+      const hl = store.filteredSessions()[0].highlights?.lastPrompt;
+      // One clean bold span on normalized text, not fuzzysort scatter markup.
+      expect(hl).toBe("review this <b>MERGEABLE</b> check done");
+      expect(hl).not.toContain("\n");
+    });
+
+    it("renders no lastPrompt highlight for a scatter-only fuzzy match (membership only)", () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "s1",
+          project: "proj",
+          cwd: "/tmp/s1",
+          gitBranch: null,
+          // Contains m,e,r,g,e,a,b,l,e as a scattered subsequence (fuzzysort
+          // matches it, so the row is a member) but NOT the substring
+          // "mergeable", so nothing should render highlighted.
+          lastPrompt: "make every rug generate a big lovely edge",
+          prompts: ["make every rug generate a big lovely edge"],
+        }),
+      ]);
+
+      store.actions.setSearchQuery("mergeable");
+      const filtered = store.filteredSessions();
+      // Fuzzy match still makes it a member...
+      expect(filtered.map((f) => f.session.id)).toEqual(["s1"]);
+      // ...but the scatter-only hit renders no highlight (plain lastPrompt).
+      expect(filtered[0].highlights?.lastPrompt).toBeNull();
+      expect(filtered[0].highlights?.prompts).toBeNull();
+    });
+
+    it("does not scatter-match a prompt (substring, not fuzzy, over the prompt index)", () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "hit",
+          project: "proj",
+          cwd: "/tmp/hit",
+          gitBranch: null,
+          lastPrompt: "is this mergeable now",
+          prompts: ["is this mergeable now"],
+        }),
+        createMockSession({
+          id: "scatter",
+          project: "proj",
+          cwd: "/tmp/scatter",
+          gitBranch: null,
+          // lastPrompt (a fuzzy key) has no relation to the query; the only
+          // link is the prompt "merge available table", which contains
+          // m,e,r,g,e,a,b,l,e as a scattered subsequence but NOT the contiguous
+          // substring "mergeable". Fuzzy over a joined haystack would have
+          // matched it; substring must not.
+          lastPrompt: "zzz",
+          prompts: ["merge available table"],
+        }),
+      ]);
+
+      store.actions.setSearchQuery("mergeable");
+      const filtered = store.filteredSessions();
+
+      expect(filtered.map((f) => f.session.id)).toEqual(["hit"]);
     });
   });
 

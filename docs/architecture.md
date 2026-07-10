@@ -154,6 +154,13 @@ Fail-soft: a thrown spawn disables the resolver for the daemon's lifetime only w
 
 The lookup also fetches `reviewDecision` and `statusCheckRollup`, folding the rollup daemon-side via `foldChecks` (mirrors gh's PR-status rollup as shown by `gh pr view` / `gh pr status`; empty rollup = `"none"`, never `"passing"`) into the `reviewDecision` / `ciStatus` fields on each `BranchPR` that drive the TUI's PR-cell color. `samePRs` compares these, so a CI or review flip re-broadcasts the session even when id and href are unchanged. Feeds `EnrichedSession.branchPRs`; the TUI's `pr` field prefers background rows' authoritative `backgroundChildren` and falls back to this.
 
+## Whole-session search
+
+TUI search unions four sources so a query can match more than the last prompt. Three are instant and client-side (fuzzy over the four identity fields; substring over an in-memory prompt index; substring over captured pane content); the fourth reads live transcripts on demand via the daemon.
+
+- **Prompt index.** Each `Session` carries a `prompts` array (oldest→newest), maintained by `appendPrompt` (`status-machine.ts`) and capped by count / per-prompt chars / total bytes (`MAX_SESSION_PROMPTS`, `MAX_PROMPT_CHARS`, `MAX_PROMPTS_TOTAL_BYTES` in `config.ts`). Claude/Codex derive it from the log (replace branch in `SessionManager.updateSession`); marker-driven agents append from `lastPrompt`. It rides the SSE `Session` payload, so it is tail-bounded after a daemon restart.
+- **Transcript search.** `GET /search?q=` (`server.ts` → `transcript-search.ts`) tail-reads each visible Claude/Codex transcript (2 MB cap, 8-way concurrency), extracts user + assistant text (tool calls / results / thinking skipped), and returns windowed snippets. A cheap raw-content pre-filter skips the full parse for non-matching sessions when the query holds no JSON-escaped chars. The TUI fetches it debounced, guarded by a generation counter against out-of-order responses.
+
 ## Background agents (paneless Claude)
 
 A third tracking mode, `background`, is owned solely by `sources/claude-background.ts` and is excluded from every reconciler arm (`reconcileOne`, `reconcileAttentionStates`, `cleanupStaleSessions`, `matchSessionsToPanes`) and from the kill paths (`handleKillSession` / `handleKillAllSessions`). These rows are Claude Code background agents (`claude --bg` / the agent view): paneless (PID + cwd + JSONL transcript, no tmux pane) and read-only (removed via `claude rm`, not killed).
@@ -192,6 +199,9 @@ The Server (`server.ts`) starts at the top of `Daemon.start()`, before session m
 | Adapter factory (single source of truth)                                                                                | `src/daemon/adapters/index.ts`                |
 | SessionManager (EventEmitter)                                                                                           | `src/daemon/sessions.ts`                      |
 | HTTP REST + SSE on port 2269                                                                                            | `src/daemon/server.ts`                        |
+| Whole-session transcript search (`GET /search`)                                                                         | `src/daemon/transcript-search.ts`             |
+| Codex rollout line parsing (shared by adapter + search)                                                                 | `src/daemon/adapters/codex/parse.ts`          |
+| In-memory per-session prompt index (`appendPrompt`, caps in `config.ts`)                                                | `src/daemon/status-machine.ts`                |
 | `(cwd, branch)` → open-PR lookup                                                                                        | `src/daemon/pr-resolver.ts`                   |
 | Paneless Claude background-agent source                                                                                 | `src/daemon/sources/claude-background.ts`     |
 | `/invoke` request lifecycle                                                                                             | `src/daemon/invocation-manager.ts`            |

@@ -25,6 +25,12 @@ import { capabilitiesFor } from "./invokers/invoker";
 import type { InvokeInput, InvokeResult } from "./invokers/types";
 import type { HookAdapter } from "./hook-adapter";
 import { PRResolver } from "./pr-resolver";
+import {
+  searchTranscript,
+  MIN_QUERY_LEN,
+  SEARCH_CONCURRENCY,
+  type SessionMatches,
+} from "./transcript-search";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -530,6 +536,10 @@ export class DaemonServer {
       return await this.handleGetSessions(url, corsHeaders);
     }
 
+    if (path === "/search" && req.method === "GET") {
+      return await this.handleSearch(url, corsHeaders);
+    }
+
     // Suffixed GET routes must come before the generic GET /sessions/{id} catch-all
     if (
       path.startsWith("/sessions/") &&
@@ -713,6 +723,50 @@ export class DaemonServer {
       { sessions: await this.enrichSessions(sessions) },
       { headers },
     );
+  }
+
+  /**
+   * On-demand transcript search across the visible Claude/Codex sessions.
+   * Reads each session's live transcript (tail-bounded) and returns per-session
+   * snippets so the TUI can match text the in-memory prompt index doesn't cover
+   * (full history, plus assistant turns). Runs in bounded concurrent batches.
+   */
+  private async handleSearch(
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    const q = url.searchParams.get("q")?.trim() ?? "";
+    if (q.length < MIN_QUERY_LEN) {
+      return Response.json(
+        { error: "query too short" },
+        { status: 400, headers },
+      );
+    }
+
+    const query = q.toLowerCase();
+    const sessions = this.sessionManager
+      .getSessions()
+      .filter((s) => this.isVisibleSession(s));
+
+    const results: SessionMatches[] = [];
+    for (let i = 0; i < sessions.length; i += SEARCH_CONCURRENCY) {
+      const batch = sessions.slice(i, i + SEARCH_CONCURRENCY);
+      const settled = await Promise.all(
+        batch.map((s) =>
+          searchTranscript(
+            { id: s.id, agentType: s.agentType, logPath: s.logPath },
+            query,
+          ),
+        ),
+      );
+      for (const match of settled) {
+        // Drop nulls (unsupported agent / no log / read failure) and sessions
+        // with no textual hit, so the response carries only genuine matches.
+        if (match && match.matches.length > 0) results.push(match);
+      }
+    }
+
+    return Response.json({ query: q, results }, { headers });
   }
 
   private async handleGetSession(

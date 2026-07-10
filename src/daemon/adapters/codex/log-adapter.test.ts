@@ -126,9 +126,36 @@ describe("CodexLogAdapter", () => {
       expect(state.version).toBe("0.57.0");
       expect(state.gitBranch).toBe("main");
       expect(state.lastPrompt).toBe("hello world");
+      expect(state.prompts).toEqual(["hello world"]);
       expect(state.lastUserInputAt).toBe("2026-04-01T12:00:02Z");
       expect(state.lastActivityAt).toBe("2026-04-01T12:00:04Z");
       expect(newOffset).toBeGreaterThan(0);
+    });
+
+    it("accumulates every user_message into the prompt index, oldest to newest", async () => {
+      writeFileSync(
+        logPath,
+        jsonl(
+          sessionMeta(),
+          eventMsg("2026-04-01T12:00:01Z", {
+            type: "user_message",
+            message: "first prompt",
+          }),
+          eventMsg("2026-04-01T12:00:02Z", {
+            type: "agent_message",
+            message: "ack",
+          }),
+          eventMsg("2026-04-01T12:00:03Z", {
+            type: "user_message",
+            message: "second prompt",
+          }),
+        ),
+      );
+
+      const { state } = await adapter.deriveFullState(logPath);
+
+      expect(state.prompts).toEqual(["first prompt", "second prompt"]);
+      expect(state.lastPrompt).toBe("second prompt");
     });
   });
 

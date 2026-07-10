@@ -93,6 +93,21 @@ export const KNOWN_KEYS: Record<
     description:
       "Search pane content in TUI search (true, false; default true)",
   },
+  searchPaneLines: {
+    validate: (v) => {
+      const n = Number(v);
+      return Number.isInteger(n) && n >= 10 && n <= 500;
+    },
+    parse: (v) => Number(v),
+    description:
+      "Lines of pane content to scan in TUI search (10–500, default 100)",
+  },
+  searchTranscript: {
+    validate: (v) => v === "true" || v === "false",
+    parse: (v) => v === "true",
+    description:
+      "Search live Claude/Codex transcripts via the daemon (true, false; default true)",
+  },
   persistent: {
     validate: (v) => v === "true" || v === "false",
     parse: (v) => v === "true",

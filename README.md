@@ -26,7 +26,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 👁️ **Live Preview**: Split-pane view of the selected session's pane content
 - ⚡ **Act in Place**: Tab into the preview to approve, answer, or type, keys go straight to that pane
 - 📊 **Sidebar Mode**: Compact always-visible session rail docked beside your working panes
-- 🔍 **Fuzzy Search**: Find sessions by project, branch, path, last prompt, or pane content
+- 🔍 **Fuzzy Search**: Fuzzy-match sessions by project, branch, or path; substring-match any recent prompt, captured pane content, and on-demand live transcripts
 - 📂 **Session Grouping**: Collapsible project groups with reordering and pinning
 - 🌿 **Git & PR Aware**: Branch and worktree detection, open PRs with live CI and review status
 - 📝 **Diff Review**: Press <kbd>d</kbd> to review a session's working-tree diff with [hunk](https://github.com/modem-dev/hunk), right in the pane
@@ -172,6 +172,17 @@ ccmux config set sidebar.position right
 bind-key S run-shell "ccmux sidebar --toggle"
 ```
 
+### Search Mode
+
+Press <kbd>/</kbd> to filter the list as you type. ccmux searches several sources at once and highlights why each row matched:
+
+- **Metadata** (project, branch, path) matches fuzzily, so `ccmx` still finds `ccmux`.
+- **Recent prompts, captured pane content, and live transcripts** match by substring, so a content word matches only where it actually appears.
+
+Prompts come from the daemon's in-memory index, which keeps the most recent prompts per session and is tail-bounded after a daemon restart (only recent prompts are re-read from disk). Transcript search closes that gap: it reads each session's transcript file on demand and covers the full session history, including assistant replies (Claude and Codex).
+
+Three toggles control what gets scanned: `searchPaneContent`, `searchPaneLines`, and `searchTranscript` (see [Configuration](#-configuration)).
+
 ### Spawning Sessions
 
 Launch new agent sessions directly from the CLI:
@@ -286,9 +297,13 @@ ccmux config list
 | `backgroundAgents`           | `true`, `false`                                                              | `true`             | Show Claude background agents as rows (daemon restart required)                                                                    |
 | `additionalClaudeConfigDirs` | array of paths                                                               | `[]`               | Additional Claude config dirs to watch (daemon restart required; see [Multiple Claude Config Dirs](#-multiple-claude-config-dirs)) |
 | `searchPaneContent`          | `true`, `false`                                                              | `true`             | Include captured pane content in TUI search                                                                                        |
+| `searchPaneLines`            | `10`–`500`                                                                   | `100`              | Lines of pane content scanned in TUI search                                                                                        |
+| `searchTranscript`           | `true`, `false`                                                              | `true`             | Search live Claude/Codex transcripts (full history + assistant text) via the daemon                                                |
 | `persistent`                 | `true`, `false`                                                              | `false`            | Keep picker open after switching sessions (dashboard mode)                                                                         |
 | `sidebar.width`              | `10`–`80`                                                                    | `30`               | Sidebar pane width in columns                                                                                                      |
 | `sidebar.position`           | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                                                                                      |
+
+For how these search knobs interact, see [Search Mode](#search-mode).
 
 ### 📊 Column Configuration
 

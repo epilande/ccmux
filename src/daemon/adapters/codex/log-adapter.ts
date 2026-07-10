@@ -1,6 +1,7 @@
 import { join, basename } from "path";
 import { CODEX_SESSION_FILE_PATTERN } from "../../../lib/agents";
 import { CODEX_DIR } from "../../../lib/config";
+import { appendPrompt } from "../../status-machine";
 import type { SessionState } from "../../../types/session";
 import type {
   FullDerivation,
@@ -8,79 +9,17 @@ import type {
   LogAdapter,
   SessionMetadata,
 } from "../../log-adapter";
-
-/**
- * Top-level Codex rollout entry envelope.
- *
- * Codex writes one JSON object per line. The first line is always a
- * `session_meta` entry; subsequent lines are `event_msg`, `response_item`,
- * or `turn_context`. Only `session_meta` and `event_msg` carry signals
- * relevant to session state; the others are kept for `lastActivityAt`
- * tracking only.
- */
-type CodexEntry =
-  | {
-      type: "session_meta";
-      timestamp: string;
-      payload: CodexSessionMetaPayload;
-    }
-  | { type: "event_msg"; timestamp: string; payload: CodexEventPayload }
-  | { type: "response_item"; timestamp: string; payload: unknown }
-  | { type: "turn_context"; timestamp: string; payload: unknown };
-
-interface CodexSessionMetaPayload {
-  id: string;
-  cwd: string;
-  timestamp: string;
-  cli_version?: string;
-  git?: { branch?: string };
-}
-
-/**
- * Discriminated union of `event_msg.payload` variants the adapter consumes.
- * Codex emits many other event types (token_count, agent_reasoning, etc.);
- * the trailing `{ type: string }` variant accepts those without an index
- * signature so narrowing on a literal `payload.type` still pins the known
- * variants.
- */
-type CodexEventPayload =
-  | { type: "task_started" }
-  | { type: "task_complete" }
-  | { type: "turn_aborted" }
-  | { type: "user_message"; message?: string }
-  | { type: string };
+import {
+  parseLine,
+  parseEntries,
+  type CodexEntry,
+  type CodexSessionMetaPayload,
+  type CodexEventPayload,
+} from "./parse";
 
 // Derived from CODEX_DIR so rollout discovery honors `$CODEX_HOME`, like the
 // hooks/config paths.
 const CODEX_SESSIONS_DIR = join(CODEX_DIR, "sessions");
-
-function parseLine(line: string): CodexEntry | null {
-  const trimmed = line.trim();
-  if (!trimmed) return null;
-  try {
-    const parsed = JSON.parse(trimmed) as CodexEntry;
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      typeof parsed.type !== "string"
-    ) {
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function parseEntries(content: string): CodexEntry[] {
-  if (!content) return [];
-  const entries: CodexEntry[] = [];
-  for (const line of content.split("\n")) {
-    const entry = parseLine(line);
-    if (entry) entries.push(entry);
-  }
-  return entries;
-}
 
 function applySessionMeta(
   state: SessionState,
@@ -109,6 +48,7 @@ function applyEventMsg(
       const next: SessionState = { ...state, lastUserInputAt: timestamp };
       if ("message" in payload && typeof payload.message === "string") {
         next.lastPrompt = payload.message;
+        next.prompts = appendPrompt(state.prompts, payload.message);
       }
       return next;
     }

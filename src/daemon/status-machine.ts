@@ -16,7 +16,59 @@ import type {
   SessionStatus,
   AttentionType,
 } from "../types/session";
-import { toolRequiresPermission } from "../lib/config";
+import {
+  toolRequiresPermission,
+  MAX_SESSION_PROMPTS,
+  MAX_PROMPT_CHARS,
+  MAX_PROMPTS_TOTAL_BYTES,
+} from "../lib/config";
+
+/**
+ * Append a user prompt to the capped prompt index. Trims and truncates the
+ * text, pushes it as the newest entry, then drops oldest entries until both
+ * the count (MAX_SESSION_PROMPTS) and total UTF-8 byte (MAX_PROMPTS_TOTAL_BYTES)
+ * ceilings hold. Empty/whitespace-only text (or a non-string, e.g. a
+ * JSON-valid log entry with `content: null`) is a no-op: the existing array is
+ * returned unchanged (same reference) so callers detect "nothing to append".
+ * Returns a new array on a real append.
+ */
+export function appendPrompt(
+  prompts: string[] | undefined,
+  text: string,
+): string[] {
+  const existing = prompts ?? [];
+  // Defensive: a malformed but JSON-valid log entry can deliver a non-string
+  // here; returning unchanged keeps the daemon's incremental read from
+  // throwing (an unhandled rejection under `void this.processFile`).
+  if (typeof text !== "string") return existing;
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return existing;
+
+  let entry = trimmed;
+  if (entry.length > MAX_PROMPT_CHARS) {
+    let cut = MAX_PROMPT_CHARS;
+    // Don't slice a surrogate pair in half (would leave a lone surrogate).
+    const code = entry.charCodeAt(cut - 1);
+    if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
+    entry = entry.slice(0, cut);
+  }
+
+  const next = [...existing, entry];
+  // Drop oldest until within the count cap.
+  while (next.length > MAX_SESSION_PROMPTS) {
+    next.shift();
+  }
+  // Drop oldest until within the total-bytes cap (keep at least the newest).
+  let totalBytes = next.reduce(
+    (sum, p) => sum + Buffer.byteLength(p, "utf-8"),
+    0,
+  );
+  while (next.length > 1 && totalBytes > MAX_PROMPTS_TOTAL_BYTES) {
+    const dropped = next.shift()!;
+    totalBytes -= Buffer.byteLength(dropped, "utf-8");
+  }
+  return next;
+}
 
 /**
  * Initial session state
@@ -375,6 +427,7 @@ function processUserEntry(
     lastActivityAt: entry.timestamp,
     lastUserInputAt: entry.timestamp,
     lastPrompt: content as string,
+    prompts: appendPrompt(currentState.prompts, content as string),
   };
 }
 

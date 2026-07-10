@@ -76,6 +76,8 @@ interface AppProps {
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   searchPaneContent?: boolean;
+  searchPaneLines?: number;
+  searchTranscript?: boolean;
   groupBy?: GroupBy;
   collapsedGroups?: string[];
   pinnedGroups?: string[];
@@ -101,6 +103,8 @@ export function App(props: AppProps) {
     columns: props.columns,
     breakpoints: props.breakpoints,
     searchPaneContent: props.searchPaneContent,
+    searchPaneLines: props.searchPaneLines,
+    searchTranscript: props.searchTranscript,
     groupBy: props.groupBy,
     collapsedGroups: props.collapsedGroups,
     pinnedGroups: props.pinnedGroups,

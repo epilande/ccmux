@@ -226,6 +226,10 @@ export interface Preferences {
   promptDisplay?: PromptDisplay;
   /** Search pane content in TUI search (default true) */
   searchPaneContent?: boolean;
+  /** Lines of pane content to scan in TUI search (default 100) */
+  searchPaneLines?: number;
+  /** Search live transcripts (Claude/Codex) via the daemon (default true) */
+  searchTranscript?: boolean;
   /** Group sessions by (default "project") */
   groupBy?: GroupBy;
   /** Keep picker open after switching sessions (default false) */
