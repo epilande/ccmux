@@ -118,6 +118,7 @@ ccmux setup
 | `ccmux setup --status`                      | Report install state without writing anything                                                   |
 | `ccmux setup --uninstall`                   | Remove hooks (preserves user-owned hook entries)                                                |
 | `ccmux debug`                               | Diagnose session tracking discrepancies                                                         |
+| `ccmux notify [message]`                    | Send a notification via the configured backend (bare: test message + diagnostics)               |
 | `ccmux sidebar`                             | Launch narrow sidebar TUI (no preview/footer)                                                   |
 | `ccmux sidebar --toggle`                    | Smart toggle: spawn/kill sidebars in every window across all tmux sessions                      |
 
@@ -411,6 +412,42 @@ ccmux daemon restart
 
 > [!NOTE]
 > If you add a dir later, re-run `ccmux setup --agent claude`. The daemon warns at startup about any configured dir still missing hooks.
+
+### 🔔 Notifications
+
+Desktop notifications on `waiting`/`finished` transitions, disabled by default. Enable and grant the macOS permission:
+
+```bash
+ccmux config set notifications.enabled true
+ccmux notify   # sends a test notification through the configured backend
+```
+
+`ccmux notify` matters for the first run: macOS only shows its notification-permission dialog on the first notification sent, so triggering that first send yourself (rather than a real transition firing while you're away) is what surfaces the dialog instead of silently dropping every notification after it.
+
+Configure further with `ccmux config set notifications.<key> <value>`, or edit `~/.config/ccmux/ccmux.json` directly:
+
+```jsonc
+{
+  "notifications": {
+    "enabled": true, // default false (opt-in)
+    "events": ["waiting", "finished"], // default both
+    "sound": "Glass", // false (default) | true (platform default sound) | macOS sound name
+    "delayMs": 1000, // debounce for "finished" only; "waiting" always fires immediately
+    "backend": "auto", // "auto" | "terminal-notifier" | "osascript" | "notify-send" | "dbus" | "command"
+    "command": "ntfy publish agents \"$CCMUX_TITLE: $CCMUX_BODY\"", // used when backend = "command"
+    "icon": "terminal", // macOS: "terminal" (borrow terminal app icon) | "none" | bundle id
+  },
+}
+```
+
+`backend: "auto"` resolves to `terminal-notifier` if it's on `PATH`, else `osascript` on macOS; on Linux it talks to `org.freedesktop.Notifications` over D-Bus directly (`dbus`, no extra binary to install), falling back to `notify-send` for that delivery if the D-Bus session bus isn't reachable.
+
+> [!NOTE]
+> Without `terminal-notifier` (`brew install terminal-notifier`), macOS falls back to `osascript`, which attributes notifications to Script Editor, can't group notifications per session, and can't click-to-jump to the pane. Installing `terminal-notifier` gets you all three.
+
+- On Linux, `dbus` groups notifications per session and supports click-to-jump (clicking focuses the pane, or opens the picker popup for paneless background agents) — no extra binary needed, and the same fallback covers a daemon that can't reach the bus. A daemon started outside the graphical session (over SSH, as a systemd service, etc.) needs `DBUS_SESSION_BUS_ADDRESS` set in its environment for `dbus` to connect, and `DISPLAY`/`DBUS_SESSION_BUS_ADDRESS` for the `notify-send` fallback to deliver.
+- With `backend: "command"`, the shell command runs with `CCMUX_EVENT`, `CCMUX_SESSION_ID`, `CCMUX_AGENT`, `CCMUX_PROJECT`, `CCMUX_BRANCH`, `CCMUX_TITLE`, `CCMUX_BODY`, and `CCMUX_PANE` set in its environment, for routing to ntfy, Pushover, or anything else ccmux doesn't integrate directly.
+- Frontmost detection is app-level: a different window of the same terminal app counts as viewing, so a notification can be suppressed even when the agent's actual pane isn't visible.
 
 ## 🔗 Session Matching with Hooks
 

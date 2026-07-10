@@ -18,6 +18,7 @@ import { createConfigCommand } from "./commands/config";
 import { createSpawnCommand } from "./commands/spawn";
 import { createInvokeCommand } from "./commands/invoke";
 import { createSidebarCommand } from "./commands/sidebar";
+import { createNotifyCommand } from "./commands/notify";
 
 const program = new Command();
 
@@ -46,5 +47,6 @@ program.addCommand(createConfigCommand());
 program.addCommand(createSpawnCommand());
 program.addCommand(createInvokeCommand());
 program.addCommand(createSidebarCommand());
+program.addCommand(createNotifyCommand());
 
 program.parse();

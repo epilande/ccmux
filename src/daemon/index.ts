@@ -68,6 +68,7 @@ import { ProcessTree } from "./process-tree";
 import { DaemonPerf } from "./perf";
 import { isProcessAlive } from "./lifecycle";
 import {
+  getActivePaneId,
   readLogFileMtime,
   reconcileAll,
   reconcileOne,
@@ -76,6 +77,19 @@ import {
 import { AttentionTracker } from "./attention-tracker";
 import { redirectStdioToLogFile } from "./log-redirect";
 import { InvocationManager } from "./invocation-manager";
+import { Notifier } from "./notifier";
+import { createDeliverFn } from "./notify-delivery";
+import { DbusNotifier } from "../lib/notify-dbus";
+import { isTerminalFrontmost, resolveTerminalBundleId } from "./focus";
+import {
+  getActiveTmuxClientPid,
+  resolveActiveTmuxClientTty,
+} from "../lib/tmux-client";
+import {
+  deliver as libDeliver,
+  probeBackend,
+  resolveBackend,
+} from "../lib/notify";
 import {
   ClaudeInvoker,
   defaultClaudeInvokerDeps,
@@ -147,6 +161,7 @@ export class Daemon {
   /** Created in start() only when `backgroundAgents !== false`; null = the
    * feature is gated off (no watchers, no resync, zero overhead). */
   private backgroundSource: ClaudeBackgroundSource | null = null;
+  private notifier: Notifier;
 
   constructor() {
     this.sessionManager = new SessionManager();
@@ -207,6 +222,45 @@ export class Daemon {
         this.attentionTracker.removeSession(event.sessionId);
       }
     });
+
+    this.notifier = new Notifier({
+      sessionManager: this.sessionManager,
+      getActivePaneId,
+      isTerminalFrontmost: () => isTerminalFrontmost(getActiveTmuxClientPid),
+      getPrefs: getPreferences,
+      deliver: createDeliverFn(this.buildNotifyDeliveryDeps()),
+    });
+  }
+
+  /**
+   * Resolves everything the notification click-action wrapper needs once,
+   * at daemon construction: the daemon's own `PATH` (Notification Center
+   * invokes click actions in a minimal-PATH shell) and the absolute paths of
+   * `ccmux`/`tmux` (mirroring how the daemon already resolves its own
+   * binaries — `Bun.which`, the same mechanism `resolveBackend`'s auto
+   * ladder and `lifecycle.ts`'s hook installers use — rather than assuming a
+   * fixed install location). `ccmux` not being on PATH degrades gracefully:
+   * `notify-delivery.ts` omits the click action entirely rather than
+   * building a broken one.
+   */
+  private buildNotifyDeliveryDeps() {
+    return {
+      getPrefs: getPreferences,
+      getClientPid: getActiveTmuxClientPid,
+      resolveTerminalBundleId,
+      resolveActiveClientTty: resolveActiveTmuxClientTty,
+      resolveBackend,
+      probeBackend,
+      deliver: libDeliver,
+      ccmuxPath: Bun.which("ccmux"),
+      tmuxPath: Bun.which("tmux") ?? "tmux",
+      path: process.env.PATH ?? "",
+      // `notify-delivery.ts` constructs at most one of these per daemon run,
+      // lazily on the first "dbus" delivery (only relevant on Linux with the
+      // dbus backend resolved); `dbus-next` itself is loaded even later,
+      // inside `DbusNotifier.connect()`.
+      createDbusNotifier: () => new DbusNotifier(),
+    };
   }
 
   /**
@@ -262,6 +316,7 @@ export class Daemon {
     // hydrate live via session_created/session_updated broadcasts, which
     // the constructor wires before this line.
     this.server.start();
+    this.notifier.start();
 
     // Migrate/discover existing sessions before starting watcher
     await this.migrateExistingSessions();
@@ -331,6 +386,7 @@ export class Daemon {
     await this.codexWatcher.stop();
     await this.hookManager.stop();
     await this.backgroundSource?.stop();
+    this.notifier.stop();
     this.server.stop();
 
     // Remove PID file

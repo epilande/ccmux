@@ -34,6 +34,11 @@ class Ccmux < Formula
   license "MIT"
 
   on_macos do
+    # Notification backend: gives the daemon's notifications and \`ccmux
+    # notify\` click-to-jump, per-session grouping, and the terminal's icon
+    # out of the box (ccmux falls back to osascript without it).
+    depends_on "terminal-notifier"
+
     if Hardware::CPU.arm?
       url "https://github.com/${REPO}/releases/download/v${VERSION}/ccmux-macos-arm64"
       sha256 "${SHA_MACOS_ARM64}"

@@ -52,6 +52,7 @@
     "anser": "^2.3.5",
     "chokidar": "^4.0.0",
     "commander": "^14.0.0",
+    "dbus-next": "^0.10.2",
     "fuzzysort": "^3.0.0",
     "solid-js": "^1.9.0"
   },

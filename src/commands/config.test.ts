@@ -1,6 +1,53 @@
-import { describe, expect, it } from "bun:test";
-import { getNestedValue, flattenObject, KNOWN_KEYS } from "./config";
+import { describe, expect, it, spyOn, mock } from "bun:test";
 import type { Preferences } from "../lib/preferences";
+
+// In-memory preferences store so `config set`/`config get` tests never touch
+// the real ~/.config/ccmux/ccmux.json. Spread the real module (types are
+// erased, but VALID_*/BREAKPOINT_NAMES/COLUMN_FIELDS constants are runtime
+// values config.ts imports) and override only the I/O functions.
+let store: Preferences = {};
+const realPreferences = await import("../lib/preferences");
+mock.module("../lib/preferences", () => ({
+  ...realPreferences,
+  getPreferences: async () => structuredClone(store),
+  setPreferences: async (updates: Partial<Preferences>) => {
+    store = { ...structuredClone(store), ...structuredClone(updates) };
+  },
+}));
+
+const { createConfigCommand, getNestedValue, flattenObject, KNOWN_KEYS } =
+  await import("./config");
+
+class ExitError extends Error {
+  constructor(public code?: number) {
+    super(`process.exit(${code})`);
+  }
+}
+
+function withExitSentinel(): () => void {
+  const original = process.exit;
+  process.exit = ((code?: number) => {
+    throw new ExitError(code);
+  }) as never;
+  return () => {
+    process.exit = original;
+  };
+}
+
+async function runConfigSet(
+  key: string,
+  value: string,
+): Promise<ExitError | null> {
+  try {
+    await createConfigCommand().parseAsync(["set", key, value], {
+      from: "user",
+    });
+    return null;
+  } catch (err) {
+    if (err instanceof ExitError) return err;
+    throw err;
+  }
+}
 
 describe("getNestedValue", () => {
   const prefs: Preferences = {
@@ -127,6 +174,24 @@ describe("flattenObject", () => {
   it("skips arrays without recursing into elements", () => {
     expect(flattenObject({ items: [1, 2, 3] })).toEqual([["items", "[1,2,3]"]]);
   });
+
+  it("flattens notifications config (config get notifications)", () => {
+    expect(
+      flattenObject({
+        notifications: {
+          enabled: true,
+          events: ["waiting", "finished"],
+          backend: "auto",
+          delayMs: 1000,
+        },
+      }),
+    ).toEqual([
+      ["notifications.enabled", "true"],
+      ["notifications.events", '["waiting","finished"]'],
+      ["notifications.backend", '"auto"'],
+      ["notifications.delayMs", "1000"],
+    ]);
+  });
 });
 
 describe("KNOWN_KEYS.additionalClaudeConfigDirs", () => {
@@ -152,5 +217,155 @@ describe("KNOWN_KEYS.additionalClaudeConfigDirs", () => {
 
   it("parse returns the parsed array", () => {
     expect(spec.parse('["~/a","~/b"]')).toEqual(["~/a", "~/b"]);
+  });
+});
+
+describe("config set notifications.*", () => {
+  it("sets notifications.enabled and prints the ccmux notify note", async () => {
+    store = {};
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runConfigSet("notifications.enabled", "true");
+
+      expect(exit).toBeNull();
+      expect(store.notifications?.enabled).toBe(true);
+      expect(
+        logSpy.mock.calls.some((c) => String(c[0]).includes("ccmux notify")),
+      ).toBe(true);
+    } finally {
+      restoreExit();
+      logSpy.mockRestore();
+    }
+  });
+
+  it("does not print the note when disabling", async () => {
+    store = {};
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runConfigSet("notifications.enabled", "false");
+
+      expect(exit).toBeNull();
+      expect(store.notifications?.enabled).toBe(false);
+      expect(
+        logSpy.mock.calls.some((c) => String(c[0]).includes("ccmux notify")),
+      ).toBe(false);
+    } finally {
+      restoreExit();
+      logSpy.mockRestore();
+    }
+  });
+
+  it("merges nested keys without clobbering previously set ones", async () => {
+    store = { notifications: { enabled: true, sound: "Glass" } };
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runConfigSet("notifications.delayMs", "500");
+      expect(exit).toBeNull();
+      expect(store.notifications).toEqual({
+        enabled: true,
+        sound: "Glass",
+        delayMs: 500,
+      });
+    } finally {
+      restoreExit();
+    }
+  });
+
+  it("rejects an invalid backend", async () => {
+    store = {};
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runConfigSet("notifications.backend", "bogus");
+      expect(exit?.code).toBe(1);
+      expect(store.notifications?.backend).toBeUndefined();
+    } finally {
+      restoreExit();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("rejects events outside waiting/finished", async () => {
+    store = {};
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runConfigSet("notifications.events", "waiting,bogus");
+      expect(exit?.code).toBe(1);
+      expect(store.notifications?.events).toBeUndefined();
+    } finally {
+      restoreExit();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("rejects a negative delayMs", async () => {
+    store = {};
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runConfigSet("notifications.delayMs", "-5");
+      expect(exit?.code).toBe(1);
+      expect(store.notifications?.delayMs).toBeUndefined();
+    } finally {
+      restoreExit();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("rejects a non-integer delayMs", async () => {
+    store = {};
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runConfigSet("notifications.delayMs", "1.5");
+      expect(exit?.code).toBe(1);
+    } finally {
+      restoreExit();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("accepts a valid comma-separated events list", async () => {
+    store = {};
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runConfigSet("notifications.events", "waiting");
+      expect(exit).toBeNull();
+      expect(store.notifications?.events).toEqual(["waiting"]);
+    } finally {
+      restoreExit();
+    }
+  });
+
+  it("accepts sound as boolean or a sound name", async () => {
+    store = {};
+    const restoreExit = withExitSentinel();
+    try {
+      let exit = await runConfigSet("notifications.sound", "true");
+      expect(exit).toBeNull();
+      expect(store.notifications?.sound).toBe(true);
+
+      exit = await runConfigSet("notifications.sound", "Glass");
+      expect(exit).toBeNull();
+      expect(store.notifications?.sound).toBe("Glass");
+    } finally {
+      restoreExit();
+    }
+  });
+
+  it("rejects an unknown notifications key", async () => {
+    store = {};
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runConfigSet("notifications.bogus", "x");
+      expect(exit?.code).toBe(1);
+    } finally {
+      restoreExit();
+      errorSpy.mockRestore();
+    }
   });
 });
