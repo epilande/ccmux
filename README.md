@@ -29,6 +29,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 🔍 **Fuzzy Search**: Find sessions by project, branch, path, last prompt, or pane content
 - 📂 **Session Grouping**: Collapsible project groups with reordering and pinning
 - 🌿 **Git & PR Aware**: Branch and worktree detection, open PRs with live CI and review status
+- 📝 **Diff Review**: Press <kbd>d</kbd> to review a session's working-tree diff with [hunk](https://github.com/modem-dev/hunk), right in the pane
 - 🤖 **Background Agents & Subagents**: Claude Code background agents get rows too; nested Task agent waiting states surface
 - 🔁 **Session Control**: Spawn, kill, and restart sessions from the TUI; `ccmux invoke` for scripted one-shot agent turns
 - ⌨️ **Keyboard-First, Mouse-Friendly**: Vim keys and number jumps, plus click-to-switch and right-click context actions
@@ -196,6 +197,19 @@ This repo ships a `dispatch` [Agent Skill](https://agentskills.io) that teaches 
 ```
 
 Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the same skill by copying it into their skills directory. The skill is additive glue for the ccmux CLI, which must be installed and on your `PATH`. See [`plugins/ccmux/README.md`](plugins/ccmux/README.md) for details.
+
+### Diff Review with Hunk
+
+[hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's working-tree diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the right-click context menu.
+
+The review also runs from the CLI:
+
+```bash
+ccmux review          # Review the current directory's repository
+ccmux review <id>     # Review a session's repository by id
+```
+
+Install hunk with `brew install modem-dev/tap/hunk`. The <kbd>d</kbd> footer hint and help entry appear only when hunk is detected on `PATH` at launch.
 
 ## ⌨️ Keyboard Controls
 
