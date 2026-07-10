@@ -29,6 +29,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 🔍 **Fuzzy Search**: Find sessions by project, branch, path, last prompt, or pane content
 - 📂 **Session Grouping**: Collapsible project groups with reordering and pinning
 - 🌿 **Git & PR Aware**: Branch and worktree detection, open PRs with live CI and review status
+- 📝 **Diff Review**: Press <kbd>d</kbd> to review a session's working-tree diff with [hunk](https://github.com/modem-dev/hunk), right in the pane
 - 🤖 **Background Agents & Subagents**: Claude Code background agents get rows too; nested Task agent waiting states surface
 - 🔁 **Session Control**: Spawn, kill, and restart sessions from the TUI; `ccmux invoke` for scripted one-shot agent turns
 - ⌨️ **Keyboard-First, Mouse-Friendly**: Vim keys and number jumps, plus click-to-switch and right-click context actions
@@ -100,6 +101,7 @@ ccmux setup
 | `ccmux show --json`                         | Output sessions as JSON                                                                         |
 | `ccmux status`                              | Show daemon and session overview                                                                |
 | `ccmux switch <id>`                         | Switch tmux client to a session's pane                                                          |
+| `ccmux review [id]`                         | Review a session's diff with [hunk](https://github.com/modem-dev/hunk) (defaults to cwd)        |
 | `ccmux kill <id>`                           | Kill a session's process                                                                        |
 | `ccmux restart <id>`                        | Kill and resume a session                                                                       |
 | `ccmux send <id> <text>`                    | Send text to a session's tmux pane                                                              |
@@ -126,6 +128,19 @@ The daemon starts automatically the first time you run a ccmux command (picker, 
 Press <kbd>P</kbd> to split the picker and preview the highlighted session's live pane content side by side. Press <kbd>Tab</kbd> to focus the preview and act in place: your keystrokes go straight to that agent's pane, so you can approve a permission, answer a question, or type a follow-up without ever leaving ccmux.
 
 https://github.com/user-attachments/assets/7e0d42b3-4e7b-43b8-8d06-72a2d69dd694
+
+### Diff Review with Hunk
+
+[hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's working-tree diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the right-click context menu.
+
+The review also runs from the CLI:
+
+```bash
+ccmux review          # Review the current directory's repository
+ccmux review <id>     # Review a session's repository by id
+```
+
+Install hunk with `brew install modem-dev/tap/hunk`. The <kbd>d</kbd> footer hint and help entry appear only when hunk is detected on `PATH` at launch.
 
 ### Sidebar Mode
 
@@ -198,30 +213,31 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 
 ## ⌨️ Keyboard Controls
 
-| Action                | Key                                                                                | Description                            |
-| :-------------------- | :--------------------------------------------------------------------------------- | :------------------------------------- |
-| Navigate              | <kbd>j</kbd> / <kbd>k</kbd> or <kbd>↑</kbd> / <kbd>↓</kbd>                         | Move through session list              |
-| Jump to first/last    | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd>                                            | Go to top / bottom                     |
-| Jump to session       | <kbd>1</kbd>–<kbd>9</kbd>                                                          | Switch directly to session N           |
-| Switch to session     | <kbd>Enter</kbd>                                                                   | Switch tmux to the selected pane       |
-| Search                | <kbd>/</kbd>                                                                       | Enter fuzzy search mode                |
-| Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel            |
-| Scroll preview        | <kbd>Ctrl+D</kbd> / <kbd>Ctrl+U</kbd>                                              | Half-page scroll in preview            |
-| Resize preview        | <kbd>Alt+H</kbd> / <kbd>Alt+L</kbd>                                                | Increase/decrease preview width        |
-| Focus preview         | <kbd>Tab</kbd>                                                                     | Send keys directly to tmux pane        |
-| Restart session       | <kbd>r</kbd>                                                                       | Kill and resume the selected session   |
-| Reconnect             | <kbd>R</kbd>                                                                       | Reconnect to the daemon SSE stream     |
-| Kill session          | <kbd>x</kbd>                                                                       | Kill the selected session's process    |
-| Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions              |
-| Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state           |
-| Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)    |
-| Move group top/bottom | <kbd><</kbd> / <kbd>></kbd>                                                        | Pin group to top / bottom              |
-| Collapse/expand all   | <kbd>z</kbd><kbd>M</kbd> / <kbd>z</kbd><kbd>R</kbd> or <kbd>-</kbd> / <kbd>=</kbd> | Collapse or expand all groups          |
-| Hide idle             | <kbd>f</kbd>                                                                       | Toggle hiding idle sessions            |
-| Cycle prompt          | <kbd>p</kbd>                                                                       | Prompt display: inline → own row → off |
-| Cycle group-by        | <kbd>b</kbd>                                                                       | Cycle through group-by modes           |
-| Help                  | <kbd>?</kbd>                                                                       | Show keyboard shortcuts overlay        |
-| Quit                  | <kbd>q</kbd> / <kbd>Esc</kbd>                                                      | Exit the picker                        |
+| Action                | Key                                                                                | Description                                                                                        |
+| :-------------------- | :--------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------- |
+| Navigate              | <kbd>j</kbd> / <kbd>k</kbd> or <kbd>↑</kbd> / <kbd>↓</kbd>                         | Move through session list                                                                          |
+| Jump to first/last    | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd>                                            | Go to top / bottom                                                                                 |
+| Jump to session       | <kbd>1</kbd>–<kbd>9</kbd>                                                          | Switch directly to session N                                                                       |
+| Switch to session     | <kbd>Enter</kbd>                                                                   | Switch tmux to the selected pane                                                                   |
+| Search                | <kbd>/</kbd>                                                                       | Enter fuzzy search mode                                                                            |
+| Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel                                                                        |
+| Scroll preview        | <kbd>Ctrl+D</kbd> / <kbd>Ctrl+U</kbd>                                              | Half-page scroll in preview                                                                        |
+| Resize preview        | <kbd>Alt+H</kbd> / <kbd>Alt+L</kbd>                                                | Increase/decrease preview width                                                                    |
+| Focus preview         | <kbd>Tab</kbd>                                                                     | Send keys directly to tmux pane                                                                    |
+| Restart session       | <kbd>r</kbd>                                                                       | Kill and resume the selected session                                                               |
+| Reconnect             | <kbd>R</kbd>                                                                       | Reconnect to the daemon SSE stream                                                                 |
+| Kill session          | <kbd>x</kbd>                                                                       | Kill the selected session's process                                                                |
+| Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions                                                                          |
+| Review diff           | <kbd>d</kbd>                                                                       | Review the session's diff with [hunk](https://github.com/modem-dev/hunk) (requires `hunk` on PATH) |
+| Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state                                                                       |
+| Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)                                                                |
+| Move group top/bottom | <kbd><</kbd> / <kbd>></kbd>                                                        | Pin group to top / bottom                                                                          |
+| Collapse/expand all   | <kbd>z</kbd><kbd>M</kbd> / <kbd>z</kbd><kbd>R</kbd> or <kbd>-</kbd> / <kbd>=</kbd> | Collapse or expand all groups                                                                      |
+| Hide idle             | <kbd>f</kbd>                                                                       | Toggle hiding idle sessions                                                                        |
+| Cycle prompt          | <kbd>p</kbd>                                                                       | Prompt display: inline → own row → off                                                             |
+| Cycle group-by        | <kbd>b</kbd>                                                                       | Cycle through group-by modes                                                                       |
+| Help                  | <kbd>?</kbd>                                                                       | Show keyboard shortcuts overlay                                                                    |
+| Quit                  | <kbd>q</kbd> / <kbd>Esc</kbd>                                                      | Exit the picker                                                                                    |
 
 <details>
 <summary><strong>Search mode keys</strong></summary>
