@@ -202,6 +202,13 @@ export const ZOMBIE_STALE_MS = 5 * 60 * 1000;
 export const BACKGROUND_FRESH_THRESHOLD_MS = 10_000;
 
 /**
+ * Maximum text length accepted by the daemon's `POST /sessions/:id/send`
+ * endpoint. The review hand-back prompt cap (`MAX_REVIEW_PROMPT_CHARS`)
+ * derives from this so the client never builds a prompt the daemon rejects.
+ */
+export const MAX_SEND_TEXT_CHARS = 10_000;
+
+/**
  * Log parsing configuration
  */
 export const MAX_LOG_ENTRIES = 100;

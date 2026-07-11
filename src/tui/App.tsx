@@ -270,27 +270,35 @@ export function App(props: AppProps) {
       return;
     }
     reviewInFlight = true;
-    runHunkReview(renderer, cwd).then((result) => {
-      reviewInFlight = false;
-      if (!result.ok) {
-        store.actions.showToast(`Review failed: ${result.error}`);
-        return;
-      }
-      if (result.notes.length === 0) return;
-      if (session.trackingMode === "background" || session.tmuxPane == null) {
-        store.actions.showToast(
-          `${result.notes.length} review notes captured (no pane to send to)`,
-        );
-        return;
-      }
-      const mode = props.reviewHandback ?? "confirm";
-      if (mode === "confirm") {
-        pendingReviewNotes = { sessionId: session.id, notes: result.notes };
-        store.actions.showConfirmDialog(session.id, "send-review");
-      } else {
-        void deliverReviewNotes(session.id, result.notes, mode);
-      }
-    });
+    runHunkReview(renderer, cwd)
+      .then((result) => {
+        reviewInFlight = false;
+        if (!result.ok) {
+          store.actions.showToast(`Review failed: ${result.error}`);
+          return;
+        }
+        if (result.notes.length === 0) return;
+        if (session.trackingMode === "background" || session.tmuxPane == null) {
+          store.actions.showToast(
+            `${result.notes.length} review note${result.notes.length === 1 ? "" : "s"} captured (no pane to send to)`,
+          );
+          return;
+        }
+        const mode = props.reviewHandback ?? "confirm";
+        if (mode === "confirm") {
+          pendingReviewNotes = { sessionId: session.id, notes: result.notes };
+          store.actions.showConfirmDialog(session.id, "send-review");
+        } else {
+          void deliverReviewNotes(session.id, result.notes, mode);
+        }
+      })
+      .catch(() => {
+        // runHunkReview resolves on every expected failure; this guards an
+        // unexpected reject (e.g. resume() throwing in its finally) so a stuck
+        // reviewInFlight flag can't disable `d` for the rest of the session.
+        reviewInFlight = false;
+        store.actions.showToast("Review failed");
+      });
   }
 
   function handleRowActivate(item: FlatItem, index: number) {
@@ -1263,8 +1271,8 @@ export function App(props: AppProps) {
               store.state.confirmAction === "send-review"
                 ? pendingReviewNoteCount()
                 : store.state.confirmAction === "kill-group"
-                ? store.state.confirmSessionIds.length
-                : store.filteredSessions().length
+                  ? store.state.confirmSessionIds.length
+                  : store.filteredSessions().length
             }
             groupLabel={store.selectedGroupHeader()?.label}
             onConfirm={confirmDialogAction}

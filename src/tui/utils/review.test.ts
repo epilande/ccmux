@@ -349,6 +349,38 @@ describe("runHunkReview", () => {
     expect(result).toEqual({ ok: false, error: "hunk exited with code 2" });
   });
 
+  it("parses comments missing noteId/hunkIndex (schema drift)", async () => {
+    const { renderer } = fakeRenderer();
+    let resolveExit!: (code: number) => void;
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "%1",
+      spawn: () => ({
+        exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+      }),
+      runHunkJson: async (args) =>
+        args[1] === "list"
+          ? {
+              sessions: [
+                {
+                  sessionId: "h1",
+                  terminal: {
+                    locations: [{ source: "tmux", paneId: "%1" }],
+                  },
+                },
+              ],
+            }
+          : { comments: [{ filePath: "src/x.ts", body: "drifted note" }] },
+      sleep: async () => resolveExit(0),
+    });
+    expect(result).toEqual({
+      ok: true,
+      notes: [{ filePath: "src/x.ts", body: "drifted note" }],
+    });
+  });
+
   it("leaves snippet undefined when reading the working tree fails", async () => {
     const { renderer } = fakeRenderer();
     let resolveExit!: (code: number) => void;
@@ -390,7 +422,71 @@ describe("runHunkReview", () => {
     });
     expect(result).toEqual({
       ok: true,
-      notes: [{ noteId: "n1", filePath: "x", hunkIndex: 0, newRange: [1, 1], body: "note" }],
+      notes: [
+        {
+          noteId: "n1",
+          filePath: "x",
+          hunkIndex: 0,
+          newRange: [1, 1],
+          body: "note",
+        },
+      ],
+    });
+  });
+
+  it("skips snippets for paths that escape the repo root", async () => {
+    const { renderer } = fakeRenderer();
+    let resolveExit!: (code: number) => void;
+    const readPaths: string[] = [];
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "%1",
+      spawn: () => ({
+        exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+      }),
+      runHunkJson: async (args) =>
+        args[1] === "list"
+          ? {
+              sessions: [
+                {
+                  sessionId: "h1",
+                  terminal: {
+                    locations: [{ source: "tmux", paneId: "%1" }],
+                  },
+                },
+              ],
+            }
+          : {
+              comments: [
+                {
+                  noteId: "n1",
+                  filePath: "../../etc/passwd",
+                  hunkIndex: 0,
+                  newRange: [1, 1],
+                  body: "note",
+                },
+              ],
+            },
+      sleep: async () => resolveExit(0),
+      readFileLines: async (path) => {
+        readPaths.push(path);
+        return ["secret"];
+      },
+    });
+    expect(readPaths).toEqual([]);
+    expect(result).toEqual({
+      ok: true,
+      notes: [
+        {
+          noteId: "n1",
+          filePath: "../../etc/passwd",
+          hunkIndex: 0,
+          newRange: [1, 1],
+          body: "note",
+        },
+      ],
     });
   });
 });
@@ -416,13 +512,37 @@ describe("formatReviewPrompt", () => {
         },
       ]),
     ).toBe(
-      'I reviewed your changes in hunk and left 2 review comments:\n\n1. src/foo.ts:12-14\n   > const token = getToken();\n   > if (!token) return;\n   Check the token.\n2. src/bar.ts:old 7\n   Preserve this behavior.\n\nPlease address each comment.',
+      "I reviewed your changes in hunk and left 2 review comments:\n\n1. src/foo.ts:12-14\n   > const token = getToken();\n   > if (!token) return;\n   Check the token.\n2. src/bar.ts:old 7\n   Preserve this behavior.\n\nPlease address each comment.",
     );
+  });
+
+  it("strips control sequences that could break bracketed paste, keeping \\n and \\t", () => {
+    const prompt = formatReviewPrompt([
+      {
+        filePath: "src/x.ts",
+        newRange: [1, 1],
+        body: "before\x1b[201~evil\rmore",
+        snippet: "a\tb\nc\x1b[201~evil\rmore",
+      },
+    ]);
+    expect(prompt).toContain("evil");
+    expect(prompt).toContain("more");
+    expect(prompt).not.toContain("\x1b");
+    expect(prompt).not.toContain("\r");
+    // Tabs and newlines inside snippets survive the sanitizer.
+    expect(prompt).toContain("\t");
+    expect(prompt).toContain("\n");
   });
 
   it("caps the prompt below the daemon limit with a truncation marker", () => {
     const prompt = formatReviewPrompt([
-      { noteId: "n1", filePath: "x", hunkIndex: 0, newRange: [1, 1], body: "x".repeat(12_000) },
+      {
+        noteId: "n1",
+        filePath: "x",
+        hunkIndex: 0,
+        newRange: [1, 1],
+        body: "x".repeat(12_000),
+      },
     ]);
     expect(prompt.length).toBe(MAX_REVIEW_PROMPT_CHARS);
     expect(prompt).toEndWith("(truncated)");

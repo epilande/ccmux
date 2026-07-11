@@ -1557,9 +1557,7 @@ describe("App review (d)", () => {
     // second press. A rapid double-d must not race two suspend/spawn/resume
     // cycles against the same renderer.
     let resolveReview!: (
-      r:
-        | { ok: true; notes: typeof reviewNotes }
-        | { ok: false; error: string },
+      r: { ok: true; notes: typeof reviewNotes } | { ok: false; error: string },
     ) => void;
     runHunkReviewSpy.mockImplementation(
       () =>
@@ -1638,6 +1636,24 @@ describe("App review (d)", () => {
     expect(setup.captureCharFrame()).toContain("Review failed: boom");
   });
 
+  it("recovers when runHunkReview rejects unexpectedly", async () => {
+    runHunkReviewSpy.mockImplementation(() =>
+      Promise.reject(new Error("resume blew up")),
+    );
+    await renderWithSession();
+    setup.mockInput.pressKey("d");
+    await setup.renderOnce();
+    await new Promise((r) => setTimeout(r, 0));
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("Review failed");
+    // reviewInFlight was reset by the catch handler, so `d` still works.
+    runHunkReviewSpy.mockClear();
+    runHunkReviewSpy.mockImplementation(async () => ({ ok: true, notes: [] }));
+    setup.mockInput.pressKey("d");
+    await setup.renderOnce();
+    expect(runHunkReviewSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("defaults to a confirmation dialog with the note count and agent label", async () => {
     runHunkReviewSpy.mockImplementation(async () => ({
       ok: true,
@@ -1687,6 +1703,31 @@ describe("App review (d)", () => {
     }
   });
 
+  it("shows a failure toast when review delivery returns a non-ok status", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async () => {
+      return new Response(null, { status: 500 });
+    }) as unknown as typeof fetch;
+    try {
+      runHunkReviewSpy.mockImplementation(async () => ({
+        ok: true,
+        notes: reviewNotes,
+      }));
+      await renderWithSession({}, { agentType: "claude", tmuxPane: "%1" });
+      setup.mockInput.pressKey("d");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await setup.renderOnce();
+      setup.mockInput.pressKey("y");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain(
+        "Failed to send review comments to claude",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("drops pending notes when confirmation is cancelled", async () => {
     const originalFetch = globalThis.fetch;
     const urls: string[] = [];
@@ -1718,15 +1759,12 @@ describe("App review (d)", () => {
       ok: true,
       notes: reviewNotes,
     }));
-    await renderWithSession(
-      {},
-      { trackingMode: "background", tmuxPane: null },
-    );
+    await renderWithSession({}, { trackingMode: "background", tmuxPane: null });
     setup.mockInput.pressKey("d");
     await new Promise((resolve) => setTimeout(resolve, 0));
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("1 review notes captured (no pane to send to)");
+    expect(frame).toContain("1 review note captured (no pane to send to)");
     expect(frame).not.toContain("Send review comments");
   });
 
@@ -1746,7 +1784,10 @@ describe("App review (d)", () => {
       return new Response(null, { status: 200 });
     }) as unknown as typeof fetch;
     try {
-      runHunkReviewSpy.mockImplementation(async () => ({ ok: true, notes: reviewNotes }));
+      runHunkReviewSpy.mockImplementation(async () => ({
+        ok: true,
+        notes: reviewNotes,
+      }));
       await renderWithSession({ reviewHandback: "auto" }, { tmuxPane: "%1" });
       setup.mockInput.pressKey("d");
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1766,8 +1807,14 @@ describe("App review (d)", () => {
       return new Response(null, { status: 200 });
     }) as unknown as typeof fetch;
     try {
-      runHunkReviewSpy.mockImplementation(async () => ({ ok: true, notes: reviewNotes }));
-      await renderWithSession({ reviewHandback: "fill" }, { agentType: "codex", tmuxPane: "%1" });
+      runHunkReviewSpy.mockImplementation(async () => ({
+        ok: true,
+        notes: reviewNotes,
+      }));
+      await renderWithSession(
+        { reviewHandback: "fill" },
+        { agentType: "codex", tmuxPane: "%1" },
+      );
       setup.mockInput.pressKey("d");
       await new Promise((resolve) => setTimeout(resolve, 0));
       await setup.renderOnce();

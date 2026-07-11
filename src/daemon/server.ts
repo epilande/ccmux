@@ -3,14 +3,11 @@ import {
   DAEMON_PORT,
   DAEMON_HOST,
   HEARTBEAT_INTERVAL_MS,
+  MAX_SEND_TEXT_CHARS,
   isCcmuxPane,
 } from "../lib/config";
 import { getPreferences } from "../lib/preferences";
-import {
-  capturePane,
-  sendLiteralToPane,
-  sendPromptToPane,
-} from "./pane-io";
+import { capturePane, sendLiteralToPane, sendPromptToPane } from "./pane-io";
 import type { AgentDef } from "../lib/agents";
 import {
   getMarkerKey,
@@ -1170,9 +1167,11 @@ export class DaemonServer {
       );
     }
 
-    if (text.length > 10_000) {
+    if (text.length > MAX_SEND_TEXT_CHARS) {
       return Response.json(
-        { error: "Text exceeds maximum length of 10,000 characters" },
+        {
+          error: `Text exceeds maximum length of ${MAX_SEND_TEXT_CHARS.toLocaleString("en-US")} characters`,
+        },
         { status: 400, headers },
       );
     }

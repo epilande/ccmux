@@ -154,3 +154,22 @@ describe("KNOWN_KEYS.additionalClaudeConfigDirs", () => {
     expect(spec.parse('["~/a","~/b"]')).toEqual(["~/a", "~/b"]);
   });
 });
+
+describe("KNOWN_KEYS.reviewHandback", () => {
+  const spec = KNOWN_KEYS.reviewHandback!;
+
+  it("validate accepts the known delivery modes", () => {
+    expect(spec.validate("auto")).toBe(true);
+    expect(spec.validate("confirm")).toBe(true);
+    expect(spec.validate("fill")).toBe(true);
+  });
+
+  it("validate rejects unknown values", () => {
+    expect(spec.validate("bogus")).toBe(false);
+    expect(spec.validate("")).toBe(false);
+  });
+
+  it("parse returns the value unchanged", () => {
+    expect(spec.parse("auto")).toBe("auto");
+  });
+});

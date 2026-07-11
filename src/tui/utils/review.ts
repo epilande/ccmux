@@ -1,6 +1,7 @@
 import { appendFileSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import type { CliRenderer } from "@opentui/core";
-import { LOG_FILE } from "../../lib/config";
+import { LOG_FILE, MAX_SEND_TEXT_CHARS } from "../../lib/config";
 import { resolveRepoRoot } from "../../lib/git";
 
 export const HUNK_DIFF_ARGS = ["diff", "--watch"] as const;
@@ -12,15 +13,16 @@ const DISCOVERY_DELAY_MS = 500;
 const HARVEST_DELAY_MS = 1_000;
 const FINAL_READ_ATTEMPTS = 3;
 const FINAL_READ_DELAY_MS = 500;
+const HUNK_JSON_TIMEOUT_MS = 5_000;
 const MAX_SNIPPET_LINES = 6;
 const MAX_SNIPPET_CHARS = 300;
-export const MAX_REVIEW_PROMPT_CHARS = 10_000;
+export const MAX_REVIEW_PROMPT_CHARS = MAX_SEND_TEXT_CHARS;
 const TRUNCATION_MARKER = "\n\n(truncated)";
 
 export interface HunkReviewNote {
-  noteId: string;
+  noteId?: string;
   filePath: string;
-  hunkIndex: number;
+  hunkIndex?: number;
   newRange?: [number, number];
   oldRange?: [number, number];
   body: string;
@@ -73,11 +75,33 @@ async function defaultRunHunkJson(args: string[]): Promise<unknown | null> {
       stdout: "pipe",
       stderr: "pipe",
     });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
+    // A hung child would otherwise pin the poll loop forever and keep the
+    // picker's renderer suspended. Kill it after a timeout; the killed child
+    // exits non-zero and closes its pipes, so the exitCode branch below returns
+    // null and the seam degrades to no-notes as designed. The hard deadline
+    // race covers the pathological remainder (a child that traps SIGTERM, or
+    // a leaked pipe held open past its exit): give up unconditionally one
+    // second after the SIGTERM and escalate to SIGKILL.
+    const timer = setTimeout(() => proc.kill(), HUNK_JSON_TIMEOUT_MS);
+    let result: [string, string, number] | null;
+    try {
+      result = await Promise.race([
+        Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited,
+        ]),
+        Bun.sleep(HUNK_JSON_TIMEOUT_MS + 1_000).then(() => null),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (result === null) {
+      proc.kill(9);
+      debugLog(`${args.join(" ")} timed out`);
+      return null;
+    }
+    const [stdout, stderr, exitCode] = result;
     if (stderr.trim()) debugLog(`${args.join(" ")}: ${stderr.trim()}`);
     if (exitCode !== 0) {
       debugLog(`${args.join(" ")} exited ${exitCode}`);
@@ -138,20 +162,18 @@ function asNotes(value: unknown): HunkReviewNote[] | null {
   for (const entry of comments) {
     if (typeof entry !== "object" || entry === null) return null;
     const note = entry as Record<string, unknown>;
-    if (
-      typeof note.noteId !== "string" ||
-      typeof note.filePath !== "string" ||
-      typeof note.hunkIndex !== "number" ||
-      typeof note.body !== "string"
-    ) {
+    // Only filePath and body are genuinely required (formatting depends on
+    // them). noteId and hunkIndex are never consumed, so tolerate their
+    // absence rather than rejecting the whole batch on benign schema drift.
+    if (typeof note.filePath !== "string" || typeof note.body !== "string") {
       return null;
     }
     const parsed: HunkReviewNote = {
-      noteId: note.noteId,
       filePath: note.filePath,
-      hunkIndex: note.hunkIndex,
       body: note.body,
     };
+    if (typeof note.noteId === "string") parsed.noteId = note.noteId;
+    if (typeof note.hunkIndex === "number") parsed.hunkIndex = note.hunkIndex;
     if (isRange(note.newRange)) parsed.newRange = note.newRange;
     if (isRange(note.oldRange)) parsed.oldRange = note.oldRange;
     notes.push(parsed);
@@ -176,11 +198,18 @@ async function addSnippets(
   return Promise.all(
     notes.map(async (note) => {
       if (!note.newRange) return note;
+      // hunk output is treated as untrusted elsewhere (asNotes), so don't
+      // let a stray filePath escape the repo root either.
+      const path = resolve(root, note.filePath);
+      if (path !== root && !path.startsWith(root + sep)) return note;
       try {
-        const lines = await readFileLines(`${root}/${note.filePath}`);
+        const lines = await readFileLines(path);
         const [start, end] = note.newRange;
         const snippet = lines
-          .slice(Math.max(0, start - 1), Math.min(end, start + MAX_SNIPPET_LINES - 1))
+          .slice(
+            Math.max(0, start - 1),
+            Math.min(end, start + MAX_SNIPPET_LINES - 1),
+          )
           .join("\n")
           .slice(0, MAX_SNIPPET_CHARS);
         return snippet ? { ...note, snippet } : note;
@@ -195,7 +224,8 @@ function formatRange(note: HunkReviewNote): string {
   const range = note.newRange ?? note.oldRange;
   if (!range) return note.filePath;
   const prefix = note.newRange ? "" : "old ";
-  const lines = range[0] === range[1] ? `${range[0]}` : `${range[0]}-${range[1]}`;
+  const lines =
+    range[0] === range[1] ? `${range[0]}` : `${range[0]}-${range[1]}`;
   return `${note.filePath}:${prefix}${lines}`;
 }
 
@@ -210,7 +240,13 @@ export function formatReviewPrompt(notes: HunkReviewNote[]): string {
       : "";
     return `${index + 1}. ${formatRange(note)}${snippet}\n   ${note.body}`;
   });
-  const prompt = `I reviewed your changes in hunk and left ${count} review comment${count === 1 ? "" : "s"}:\n\n${blocks.join("\n")}\n\nPlease address each comment.`;
+  const assembled = `I reviewed your changes in hunk and left ${count} review comment${count === 1 ? "" : "s"}:\n\n${blocks.join("\n")}\n\nPlease address each comment.`;
+  // The prompt is delivered via `tmux paste-buffer -p` (bracketed paste), so
+  // strip C0 controls (except \n and \t), DEL, and C1 before capping. This
+  // removes ESC, killing any embedded [200~/[201~ markers (inert without their
+  // escape byte) so they can never terminate the paste early and leak bytes as
+  // live keystrokes. Sanitize first so the length cap stays exact.
+  const prompt = assembled.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
   if (prompt.length <= MAX_REVIEW_PROMPT_CHARS) return prompt;
   return `${prompt.slice(0, MAX_REVIEW_PROMPT_CHARS - TRUNCATION_MARKER.length)}${TRUNCATION_MARKER}`;
 }
@@ -221,6 +257,11 @@ export function isHunkAvailable(
   return which("hunk") !== null;
 }
 
+/**
+ * Spawn `hunk diff --watch` in `root` with inherited stdio (`hunk` resolved via
+ * PATH). Shared by the CLI `review` command and the in-picker review action;
+ * both verify `hunk` is on PATH (`isHunkAvailable`) before calling.
+ */
 export function spawnHunkDiff(
   root: string,
   spawn: SpawnHunk = Bun.spawn as unknown as SpawnHunk,
@@ -233,6 +274,18 @@ export function spawnHunkDiff(
   });
 }
 
+/**
+ * Suspend the picker's renderer, run `hunk diff --watch` in `cwd`'s repo root
+ * with inherited stdio, then resume. Pre-flight checks (hunk on PATH, git
+ * repo root) run before `suspend()` so error toasts render without a flicker.
+ * `suspend()` has its own try/catch: if it throws, `resume()` is never
+ * called (nothing to undo). Once suspended, `resume()` always runs via
+ * try/finally, even if the spawn itself throws.
+ *
+ * While hunk runs, the picker polls hunk's session JSON to find the session
+ * bound to this pane and harvest the user comments left during review,
+ * returning them so the caller can hand them back to the agent.
+ */
 export async function runHunkReview(
   renderer: Pick<CliRenderer, "suspend" | "resume">,
   cwd: string,
@@ -271,20 +324,32 @@ export async function runHunkReview(
     let sessionId: string | null = null;
     let latestNotes: HunkReviewNote[] = [];
 
+    // Discovery loop: find the hunk session whose tmux location matches this
+    // pane, so we harvest comments from the right review and not a sibling.
     if (paneId) {
-      for (let attempt = 0; attempt < DISCOVERY_ATTEMPTS && !exited; attempt++) {
-        const sessions = asSessions(await runHunkJson(["session", "list", "--json"]));
+      for (
+        let attempt = 0;
+        attempt < DISCOVERY_ATTEMPTS && !exited;
+        attempt++
+      ) {
+        const sessions = asSessions(
+          await runHunkJson(["session", "list", "--json"]),
+        );
         sessionId =
           sessions.find((session) =>
             session.terminal?.locations?.some(
-              (location) => location.source === "tmux" && location.paneId === paneId,
+              (location) =>
+                location.source === "tmux" && location.paneId === paneId,
             ),
           )?.sessionId ?? null;
         if (sessionId) break;
-        if (!exited) await Promise.race([sleep(DISCOVERY_DELAY_MS), exitPromise]);
+        if (!exited)
+          await Promise.race([sleep(DISCOVERY_DELAY_MS), exitPromise]);
       }
     }
 
+    // Harvest loop: re-read comments every second. Each await races the sleep
+    // against exitPromise so we bail out the moment hunk exits.
     while (sessionId && !exited) {
       const snapshot = asNotes(
         await runHunkJson([
@@ -306,6 +371,9 @@ export async function runHunkReview(
       return { ok: false, error: `hunk exited with code ${exitCode}` };
     }
 
+    // Post-exit final read: a comment saved just before quitting can land after
+    // the harvest loop's last read. hunk keeps serving session JSON for a short
+    // teardown window, so retry a few times to catch it.
     if (sessionId) {
       for (let attempt = 0; attempt < FINAL_READ_ATTEMPTS; attempt++) {
         const snapshot = asNotes(

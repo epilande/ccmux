@@ -84,6 +84,15 @@ export type PromptDisplay = (typeof VALID_PROMPT_DISPLAYS)[number];
 /** Prompt display mode applied when neither config nor runtime state sets one. */
 export const DEFAULT_PROMPT_DISPLAY: PromptDisplay = "inline";
 
+/**
+ * How harvested hunk review comments are delivered back to the agent.
+ * - `confirm`: show a confirmation dialog before sending (default).
+ * - `auto`: send immediately with no dialog.
+ * - `fill`: fill the composer without submitting.
+ */
+export const VALID_REVIEW_HANDBACK = ["auto", "confirm", "fill"] as const;
+export type ReviewHandback = (typeof VALID_REVIEW_HANDBACK)[number];
+
 /** All field identifiers placeable in a row's left or right side */
 export const COLUMN_FIELDS = [
   "index",
@@ -235,7 +244,7 @@ export interface Preferences {
   /** Keep picker open after switching sessions (default false) */
   persistent?: boolean;
   /** Hunk review note delivery: confirm first (default), send automatically, or fill without submitting. */
-  reviewHandback?: "auto" | "confirm" | "fill";
+  reviewHandback?: ReviewHandback;
   /**
    * Surface Claude Code background agents (`claude --bg` / the agent view)
    * as rows (default true; only an explicit `false` disables). Gated
