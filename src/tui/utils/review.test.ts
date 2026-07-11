@@ -12,7 +12,6 @@ const {
   HUNK_INSTALL_HINT,
   MAX_REVIEW_PROMPT_CHARS,
   formatReviewPrompt,
-  hunkApiPayload,
   isHunkAvailable,
   runHunkReview,
 } = (await import(REAL_REVIEW_SPECIFIER)) as typeof import("./review");
@@ -42,6 +41,26 @@ function fakeSpawn(exitCode: number) {
 }
 
 const dirtyGitStatus = async () => " M file\n";
+
+function paneSession(sessionId: string, paneId: string) {
+  return { sessionId, terminal: { locations: [{ source: "tmux", paneId }] } };
+}
+
+function ttySession(sessionId: string, tty: string, launchedAt?: string) {
+  return {
+    sessionId,
+    launchedAt,
+    terminal: { locations: [{ source: "tty", tty }] },
+  };
+}
+
+/** A source with one pane-matched session (`h1` on `%1`) and fixed comments. */
+function hunkJsonWithComments(comments: unknown[]) {
+  return {
+    listSessions: async () => ({ sessions: [paneSession("h1", "%1")] }),
+    listUserComments: async () => ({ comments }),
+  };
+}
 
 describe("isHunkAvailable", () => {
   it("is true when which resolves the binary", () => {
@@ -173,43 +192,34 @@ describe("runHunkReview", () => {
       exited: new Promise<number>((resolve) => (resolveExit = resolve)),
     }));
     let commentReads = 0;
-    const runHunkJson = mock(async (args: string[]) => {
-      if (args[1] === "list") {
-        return {
-          sessions: [
-            {
-              sessionId: "wrong",
-              terminal: { locations: [{ source: "tmux", paneId: "%8" }] },
-            },
-            {
-              sessionId: "hunk-1",
-              terminal: { locations: [{ source: "tmux", paneId: "%7" }] },
-            },
-          ],
-        };
-      }
-      commentReads++;
-      return commentReads === 1
-        ? { comments: [] }
-        : {
-            comments: [
-              {
-                noteId: "n1",
-                filePath: "src/foo.ts",
-                hunkIndex: 0,
-                newRange: [2, 10],
-                body: "Handle this case.",
-              },
-              {
-                noteId: "n2",
-                filePath: "src/old.ts",
-                hunkIndex: 1,
-                oldRange: [4, 4],
-                body: "Deleted behavior matters.",
-              },
-            ],
-          };
-    });
+    const hunkJson = {
+      listSessions: async () => ({
+        sessions: [paneSession("wrong", "%8"), paneSession("hunk-1", "%7")],
+      }),
+      listUserComments: async () => {
+        commentReads++;
+        return commentReads === 1
+          ? { comments: [] }
+          : {
+              comments: [
+                {
+                  noteId: "n1",
+                  filePath: "src/foo.ts",
+                  hunkIndex: 0,
+                  newRange: [2, 10],
+                  body: "Handle this case.",
+                },
+                {
+                  noteId: "n2",
+                  filePath: "src/old.ts",
+                  hunkIndex: 1,
+                  oldRange: [4, 4],
+                  body: "Deleted behavior matters.",
+                },
+              ],
+            };
+      },
+    };
     const sleep = mock(async (ms: number) => {
       if (ms === HARVEST_DELAY_MS) resolveExit(0);
     });
@@ -231,7 +241,7 @@ describe("runHunkReview", () => {
       gitStatus: dirtyGitStatus,
       paneId: "%7",
       spawn,
-      runHunkJson,
+      hunkJson,
       sleep,
       readFileLines,
     });
@@ -262,28 +272,20 @@ describe("runHunkReview", () => {
   it("discovers by tty when there is no paneId (display-popup)", async () => {
     const { renderer } = fakeRenderer();
     let resolveExit!: (code: number) => void;
-    const runHunkJson = mock(async (args: string[]) => {
-      if (args[1] === "list") {
-        return {
-          sessions: [
-            {
-              sessionId: "other",
-              terminal: { locations: [{ source: "tty", tty: "/dev/ttys1" }] },
-            },
-            {
-              // Popup session: hunk records a tty location but no tmux paneId.
-              sessionId: "popup",
-              terminal: { locations: [{ source: "tty", tty: "/dev/ttys9" }] },
-            },
-          ],
-        };
-      }
-      return {
+    const hunkJson = {
+      listSessions: async () => ({
+        sessions: [
+          ttySession("other", "/dev/ttys1"),
+          // Popup session: hunk records a tty location but no tmux paneId.
+          ttySession("popup", "/dev/ttys9"),
+        ],
+      }),
+      listUserComments: async () => ({
         comments: [
           { noteId: "n1", filePath: "src/foo.ts", hunkIndex: 0, body: "Fix." },
         ],
-      };
-    });
+      }),
+    };
     const result = await runHunkReview(renderer, "/repo", {
       which: () => "hunk",
       resolveRoot: async () => "/repo",
@@ -293,7 +295,7 @@ describe("runHunkReview", () => {
       spawn: () => ({
         exited: new Promise<number>((resolve) => (resolveExit = resolve)),
       }),
-      runHunkJson,
+      hunkJson,
       sleep: async (ms: number) => {
         if (ms === HARVEST_DELAY_MS) resolveExit(0);
       },
@@ -310,26 +312,18 @@ describe("runHunkReview", () => {
     const { renderer } = fakeRenderer();
     let resolveExit!: (code: number) => void;
     let queriedSessionId: string | undefined;
-    const runHunkJson = mock(async (args: string[]) => {
-      if (args[1] === "list") {
-        return {
-          sessions: [
-            {
-              sessionId: "stale",
-              launchedAt: "2026-07-10T00:00:00Z",
-              terminal: { locations: [{ source: "tty", tty: "/dev/ttys9" }] },
-            },
-            {
-              sessionId: "fresh",
-              launchedAt: "2026-07-11T00:00:00Z",
-              terminal: { locations: [{ source: "tty", tty: "/dev/ttys9" }] },
-            },
-          ],
-        };
-      }
-      queriedSessionId = args[3];
-      return { comments: [] };
-    });
+    const hunkJson = {
+      listSessions: async () => ({
+        sessions: [
+          ttySession("stale", "/dev/ttys9", "2026-07-10T00:00:00Z"),
+          ttySession("fresh", "/dev/ttys9", "2026-07-11T00:00:00Z"),
+        ],
+      }),
+      listUserComments: async (sessionId: string) => {
+        queriedSessionId = sessionId;
+        return { comments: [] };
+      },
+    };
     const result = await runHunkReview(renderer, "/repo", {
       which: () => "hunk",
       resolveRoot: async () => "/repo",
@@ -339,7 +333,7 @@ describe("runHunkReview", () => {
       spawn: () => ({
         exited: new Promise<number>((resolve) => (resolveExit = resolve)),
       }),
-      runHunkJson,
+      hunkJson,
       sleep: async (ms: number) => {
         if (ms === HARVEST_DELAY_MS) resolveExit(0);
       },
@@ -369,19 +363,12 @@ describe("runHunkReview", () => {
         spawn: () => ({
           exited: new Promise<number>((resolve) => (resolveExit = resolve)),
         }),
-        runHunkJson: async (args) => {
-          if (args[1] === "list") {
-            return {
-              sessions: [
-                {
-                  sessionId: "h1",
-                  terminal: { locations: [{ source: "tmux", paneId: "%1" }] },
-                },
-              ],
-            };
-          }
-          events.push("comment-read");
-          return { comments: [] };
+        hunkJson: {
+          listSessions: async () => ({ sessions: [paneSession("h1", "%1")] }),
+          listUserComments: async () => {
+            events.push("comment-read");
+            return { comments: [] };
+          },
         },
         sleep: async (ms) => {
           if (ms === HARVEST_DELAY_MS) resolveExit(0);
@@ -412,27 +399,20 @@ describe("runHunkReview", () => {
       hunkIndex: 0,
       body: "Keep me.",
     };
-    const runHunkJson = mock(async (args: string[]) => {
-      if (args[1] === "list") {
-        return {
-          sessions: [
-            {
-              sessionId: "h1",
-              terminal: { locations: [{ source: "tmux", paneId: "%1" }] },
-            },
-          ],
-        };
-      }
-      commentReads++;
-      return commentReads === 1 ? { comments: [note] } : null;
-    });
+    const hunkJson = {
+      listSessions: async () => ({ sessions: [paneSession("h1", "%1")] }),
+      listUserComments: async () => {
+        commentReads++;
+        return commentReads === 1 ? { comments: [note] } : null;
+      },
+    };
     const result = await runHunkReview(renderer, "/repo", {
       which: () => "hunk",
       resolveRoot: async () => "/repo",
       gitStatus: dirtyGitStatus,
       paneId: "%1",
       spawn,
-      runHunkJson,
+      hunkJson,
       sleep: async (ms) => {
         if (ms === HARVEST_DELAY_MS) resolveExit(0);
       },
@@ -454,7 +434,10 @@ describe("runHunkReview", () => {
       spawn: () => ({
         exited: new Promise<number>((resolve) => (resolveExit = resolve)),
       }),
-      runHunkJson: async () => ({ sessions: [] }),
+      hunkJson: {
+        listSessions: async () => ({ sessions: [] }),
+        listUserComments: async () => null,
+      },
       sleep: async () => resolveExit(0),
     });
     expect(result).toEqual({ ok: true, notes: [] });
@@ -471,23 +454,9 @@ describe("runHunkReview", () => {
       spawn: () => ({
         exited: new Promise<number>((resolve) => (resolveExit = resolve)),
       }),
-      runHunkJson: async (args) =>
-        args[1] === "list"
-          ? {
-              sessions: [
-                {
-                  sessionId: "h1",
-                  terminal: {
-                    locations: [{ source: "tmux", paneId: "%1" }],
-                  },
-                },
-              ],
-            }
-          : {
-              comments: [
-                { noteId: "n1", filePath: "x", hunkIndex: 0, body: "note" },
-              ],
-            },
+      hunkJson: hunkJsonWithComments([
+        { noteId: "n1", filePath: "x", hunkIndex: 0, body: "note" },
+      ]),
       sleep: async () => resolveExit(2),
     });
     expect(result).toEqual({ ok: false, error: "hunk exited with code 2" });
@@ -504,19 +473,9 @@ describe("runHunkReview", () => {
       spawn: () => ({
         exited: new Promise<number>((resolve) => (resolveExit = resolve)),
       }),
-      runHunkJson: async (args) =>
-        args[1] === "list"
-          ? {
-              sessions: [
-                {
-                  sessionId: "h1",
-                  terminal: {
-                    locations: [{ source: "tmux", paneId: "%1" }],
-                  },
-                },
-              ],
-            }
-          : { comments: [{ filePath: "src/x.ts", body: "drifted note" }] },
+      hunkJson: hunkJsonWithComments([
+        { filePath: "src/x.ts", body: "drifted note" },
+      ]),
       sleep: async () => resolveExit(0),
     });
     expect(result).toEqual({
@@ -536,29 +495,15 @@ describe("runHunkReview", () => {
       spawn: () => ({
         exited: new Promise<number>((resolve) => (resolveExit = resolve)),
       }),
-      runHunkJson: async (args) =>
-        args[1] === "list"
-          ? {
-              sessions: [
-                {
-                  sessionId: "h1",
-                  terminal: {
-                    locations: [{ source: "tmux", paneId: "%1" }],
-                  },
-                },
-              ],
-            }
-          : {
-              comments: [
-                {
-                  noteId: "n1",
-                  filePath: "x",
-                  hunkIndex: 0,
-                  newRange: [1, 1],
-                  body: "note",
-                },
-              ],
-            },
+      hunkJson: hunkJsonWithComments([
+        {
+          noteId: "n1",
+          filePath: "x",
+          hunkIndex: 0,
+          newRange: [1, 1],
+          body: "note",
+        },
+      ]),
       sleep: async () => resolveExit(0),
       readFileLines: async () => {
         throw new Error("missing");
@@ -590,29 +535,15 @@ describe("runHunkReview", () => {
       spawn: () => ({
         exited: new Promise<number>((resolve) => (resolveExit = resolve)),
       }),
-      runHunkJson: async (args) =>
-        args[1] === "list"
-          ? {
-              sessions: [
-                {
-                  sessionId: "h1",
-                  terminal: {
-                    locations: [{ source: "tmux", paneId: "%1" }],
-                  },
-                },
-              ],
-            }
-          : {
-              comments: [
-                {
-                  noteId: "n1",
-                  filePath: "../../etc/passwd",
-                  hunkIndex: 0,
-                  newRange: [1, 1],
-                  body: "note",
-                },
-              ],
-            },
+      hunkJson: hunkJsonWithComments([
+        {
+          noteId: "n1",
+          filePath: "../../etc/passwd",
+          hunkIndex: 0,
+          newRange: [1, 1],
+          body: "note",
+        },
+      ]),
       sleep: async () => resolveExit(0),
       readFileLines: async (path) => {
         readPaths.push(path);
@@ -632,37 +563,6 @@ describe("runHunkReview", () => {
         },
       ],
     });
-  });
-});
-
-describe("hunkApiPayload", () => {
-  it("maps session list to the daemon's list action", () => {
-    expect(hunkApiPayload(["session", "list", "--json"])).toEqual({
-      action: "list",
-    });
-  });
-
-  it("maps comment list to comment-list with a sessionId selector", () => {
-    expect(
-      hunkApiPayload([
-        "session",
-        "comment",
-        "list",
-        "sid-1",
-        "--type",
-        "user",
-        "--json",
-      ]),
-    ).toEqual({
-      action: "comment-list",
-      selector: { sessionId: "sid-1" },
-      type: "user",
-    });
-  });
-
-  it("returns null for unmapped commands so they go through the CLI", () => {
-    expect(hunkApiPayload(["session", "comment", "rm", "sid-1"])).toBeNull();
-    expect(hunkApiPayload(["daemon", "serve"])).toBeNull();
   });
 });
 

@@ -51,7 +51,7 @@ export interface RunHunkReviewDeps {
   which?: (cmd: string) => string | null;
   spawn?: SpawnHunk;
   resolveRoot?: (cwd: string) => Promise<string | null>;
-  runHunkJson?: (args: string[]) => Promise<unknown | null>;
+  hunkJson?: HunkJsonSource;
   paneId?: string;
   /**
    * Resolve our own controlling tty (e.g. `/dev/ttys084`), or null if stdin
@@ -83,53 +83,38 @@ function debugLog(message: string): void {
 }
 
 /**
- * Map the CLI arg encoding of the two reads we do onto the hunk daemon's
- * HTTP session API (`POST /session-api`, the same endpoint the hunk CLI
- * itself calls). Returns null for arg shapes we don't map; those go through
- * the CLI.
+ * The two reads runHunkReview does against hunk's session daemon. Both return
+ * the daemon's raw JSON (`{sessions: [...]}` / `{comments: [...]}`) or null
+ * on failure; parsing stays with the caller (asSessions/asNotes) so injected
+ * test sources exercise the same validation as the real one.
  */
-export function hunkApiPayload(args: string[]): object | null {
-  if (args[0] === "session" && args[1] === "list") return { action: "list" };
-  if (
-    args[0] === "session" &&
-    args[1] === "comment" &&
-    args[2] === "list" &&
-    typeof args[3] === "string"
-  ) {
-    return {
-      action: "comment-list",
-      selector: { sessionId: args[3] },
-      type: "user",
-    };
-  }
-  return null;
+export interface HunkJsonSource {
+  listSessions(): Promise<unknown | null>;
+  listUserComments(sessionId: string): Promise<unknown | null>;
 }
-
-function hunkApiOrigin(): string {
-  const host = process.env.HUNK_MCP_HOST?.trim() || "127.0.0.1";
-  const port = Number(process.env.HUNK_MCP_PORT) || 47657;
-  return `http://${host}:${port}`;
-}
-
-// Flips true after the first successful session-api response in this process.
-// From then on a JSON error from the API (e.g. "No active session matches" on
-// the post-exit read) is definitive and skips the CLI fallback: the hunk CLI
-// is itself a client of this same endpoint, so it can only repeat the answer,
-// ~300ms slower. Until proven, every HTTP failure still falls back to the CLI
-// so a hunk that moved or reshaped the API degrades to slow-but-correct.
-let hunkApiProven = false;
 
 /**
- * Read hunk session JSON, preferring the daemon's HTTP API over spawning the
- * `hunk` CLI: a fetch answers in ~1ms where a CLI spawn costs ~300ms, which is
- * what makes the tight harvest cadence viable. HTTP failures fall back to the
- * CLI, which stays the compatibility authority (see hunkApiProven).
+ * Default source: prefer the daemon's HTTP session API (`POST /session-api`,
+ * the same endpoint the hunk CLI itself wraps) — a fetch answers in ~1ms
+ * where a CLI spawn costs ~300ms, which is what makes the tight harvest
+ * cadence viable. HTTP failures fall back to the CLI, which stays the
+ * compatibility authority: until the API has answered once this run
+ * (`apiProven`), any HTTP failure degrades to slow-but-correct. After that,
+ * a JSON error from the API (e.g. "No active session matches" on the
+ * post-exit read) is definitive and skips the fallback — the CLI is a client
+ * of this same endpoint and could only repeat the answer, ~300ms later.
  */
-async function defaultRunHunkJson(args: string[]): Promise<unknown | null> {
-  const payload = hunkApiPayload(args);
-  if (payload) {
+function createHunkJsonSource(): HunkJsonSource {
+  let apiProven = false;
+
+  const read = async (
+    payload: object,
+    cliArgs: string[],
+  ): Promise<unknown | null> => {
     try {
-      const response = await fetch(`${hunkApiOrigin()}/session-api`, {
+      const host = process.env.HUNK_MCP_HOST?.trim() || "127.0.0.1";
+      const port = Number(process.env.HUNK_MCP_PORT) || 47657;
+      const response = await fetch(`http://${host}:${port}/session-api`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
@@ -139,19 +124,37 @@ async function defaultRunHunkJson(args: string[]): Promise<unknown | null> {
       // throw here and drop through to the CLI fallback below.
       const body: unknown = await response.json();
       if (response.ok) {
-        hunkApiProven = true;
+        apiProven = true;
         return body;
       }
       const error =
         typeof body === "object" && body !== null && "error" in body
           ? String((body as { error: unknown }).error)
           : `HTTP ${response.status}`;
-      debugLog(`session api ${args.join(" ")}: ${error}`);
-      if (hunkApiProven) return null;
+      debugLog(`session api ${cliArgs.join(" ")}: ${error}`);
+      if (apiProven) return null;
     } catch (err) {
       debugLog(`session api unreachable (${err}); falling back to hunk CLI`);
     }
-  }
+    return runHunkCli(cliArgs);
+  };
+
+  return {
+    listSessions: () => read({ action: "list" }, ["session", "list", "--json"]),
+    listUserComments: (sessionId) =>
+      read({ action: "comment-list", selector: { sessionId }, type: "user" }, [
+        "session",
+        "comment",
+        "list",
+        sessionId,
+        "--type",
+        "user",
+        "--json",
+      ]),
+  };
+}
+
+async function runHunkCli(args: string[]): Promise<unknown | null> {
   try {
     const proc = Bun.spawn(["hunk", ...args], {
       stdin: "ignore",
@@ -450,7 +453,7 @@ export async function runHunkReview(
   const which = deps.which ?? Bun.which;
   const spawn = deps.spawn ?? (Bun.spawn as unknown as SpawnHunk);
   const resolveRoot = deps.resolveRoot ?? resolveRepoRoot;
-  const runHunkJson = deps.runHunkJson ?? defaultRunHunkJson;
+  const hunkJson = deps.hunkJson ?? createHunkJsonSource();
   const paneId = deps.paneId ?? process.env.TMUX_PANE;
   const readTty = deps.readTty ?? defaultReadTty;
   const sleep = deps.sleep ?? Bun.sleep;
@@ -502,9 +505,7 @@ export async function runHunkReview(
         attempt < DISCOVERY_ATTEMPTS && !exited;
         attempt++
       ) {
-        const sessions = asSessions(
-          await runHunkJson(["session", "list", "--json"]),
-        );
+        const sessions = asSessions(await hunkJson.listSessions());
         const matches = sessions.filter((session) =>
           sessionMatchesTerminal(session, paneId, tty),
         );
@@ -518,26 +519,14 @@ export async function runHunkReview(
       }
     }
 
-    // Harvest loop: re-read comments every second. Each await races the sleep
-    // against exitPromise so we bail out the moment hunk exits.
+    // Harvest loop: re-read comments every HARVEST_DELAY_MS. Each await races
+    // the sleep against exitPromise so we bail out the moment hunk exits.
     while (sessionId && !exited) {
-      const snapshot = asNotes(
-        await runHunkJson([
-          "session",
-          "comment",
-          "list",
-          sessionId,
-          "--type",
-          "user",
-          "--json",
-        ]),
-      );
-      if (snapshot) {
-        if (snapshot.length !== latestNotes.length) {
-          debugLog(`harvest snapshot: ${snapshot.length} note(s)`);
-        }
-        latestNotes = snapshot;
+      const snapshot = asNotes(await hunkJson.listUserComments(sessionId));
+      if (snapshot && snapshot.length !== latestNotes.length) {
+        debugLog(`harvest snapshot: ${snapshot.length} note(s)`);
       }
+      if (snapshot) latestNotes = snapshot;
       if (!exited) await Promise.race([sleep(HARVEST_DELAY_MS), exitPromise]);
     }
 
@@ -558,17 +547,7 @@ export async function runHunkReview(
     // picker coming back and the hand-back dialog. The real safeguard for
     // last-second comments is the tight HARVEST_DELAY_MS cadence above.
     if (sessionId) {
-      const snapshot = asNotes(
-        await runHunkJson([
-          "session",
-          "comment",
-          "list",
-          sessionId,
-          "--type",
-          "user",
-          "--json",
-        ]),
-      );
+      const snapshot = asNotes(await hunkJson.listUserComments(sessionId));
       if (snapshot) latestNotes = snapshot;
     }
     debugLog(`review done: ${latestNotes.length} note(s) harvested`);
