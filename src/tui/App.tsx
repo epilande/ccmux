@@ -293,12 +293,21 @@ export function App(props: AppProps) {
           );
           return;
         }
-        const mode = props.reviewHandback ?? "confirm";
-        if (mode === "confirm") {
+        // Only an explicit auto/fill skips the dialog; every other value
+        // (undefined, or an unvalidated config typo like "Fill") falls through
+        // to confirm rather than silently auto-submitting to the agent.
+        if (
+          props.reviewHandback === "auto" ||
+          props.reviewHandback === "fill"
+        ) {
+          void deliverReviewNotes(
+            session.id,
+            result.notes,
+            props.reviewHandback,
+          );
+        } else {
           pendingReviewNotes = { sessionId: session.id, notes: result.notes };
           store.actions.showConfirmDialog(session.id, "send-review");
-        } else {
-          void deliverReviewNotes(session.id, result.notes, mode);
         }
       })
       .catch(() => {

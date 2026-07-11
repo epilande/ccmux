@@ -1828,6 +1828,31 @@ describe("App review (d)", () => {
     }
   });
 
+  it("falls back to the confirm dialog for an unrecognized reviewHandback value", async () => {
+    // An unvalidated config typo (e.g. "Fill") must degrade to the confirm
+    // dialog, never silently auto-submit the review to the agent.
+    const originalFetch = globalThis.fetch;
+    const urls: string[] = [];
+    globalThis.fetch = mock(async (url: string | URL) => {
+      urls.push(String(url));
+      return new Response(null, { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      runHunkReviewSpy.mockImplementation(async () => ({
+        ok: true,
+        notes: reviewNotes,
+      }));
+      await renderWithSession({ reviewHandback: "Fill" }, { tmuxPane: "%1" });
+      setup.mockInput.pressKey("d");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Send review comments");
+      expect(urls.some((url) => url.endsWith("/sessions/s1/send"))).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("shows Review diff in the context menu when reviewable", async () => {
     await renderWithSession();
     await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
