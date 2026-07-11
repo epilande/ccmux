@@ -163,6 +163,39 @@ describe("Preview pane capture", () => {
     expect(frame).not.toContain("AAA_STALE_CONTENT");
   });
 
+  it("re-captures on a refreshKey bump even when unfocused", async () => {
+    // An unfocused preview is a single snapshot: it must NOT pick up pane
+    // changes on its own, but a refreshKey bump (e.g. after review notes are
+    // delivered to the agent's composer) forces one re-capture.
+    let content = "BEFORE_FILL";
+    captureImpl = async () => content;
+    const [refreshKey, setRefreshKey] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <Preview
+            session={mockEnrichedSession({ tmuxPane: "%1" })}
+            width={40}
+            focused={false}
+            refreshKey={refreshKey()}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 100, height: 15 },
+    );
+    await setup.renderOnce();
+    expect(await pollFrame(5)).toContain("BEFORE_FILL");
+
+    content = "AFTER_FILL";
+    // Unfocused and un-bumped: the stale snapshot stays.
+    expect(await pollFrame(5)).toContain("BEFORE_FILL");
+
+    setRefreshKey(1);
+    const frame = await pollFrame(5);
+    expect(frame).toContain("AFTER_FILL");
+    expect(frame).not.toContain("BEFORE_FILL");
+  });
+
   it("renders the failure state when a capture throws (dead pane)", async () => {
     captureImpl = async () => {
       throw new Error("pane gone");

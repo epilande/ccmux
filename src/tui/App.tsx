@@ -242,9 +242,18 @@ export function App(props: AppProps) {
         },
       );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      // Re-capture the preview so the delivered prompt is visible in the
+      // agent's pane; an unfocused preview never polls, so without this the
+      // only feedback would be the transient toast. Bump twice: the paste has
+      // landed when /send resolves, but the agent's TUI paints it a beat
+      // later, so an immediate-only capture usually still shows the empty
+      // composer (observed live with Claude Code).
+      setPreviewRefreshKey((key) => key + 1);
+      setTimeout(() => setPreviewRefreshKey((key) => key + 1), 500);
       if (mode === "fill") {
         store.actions.showToast(
           `Prompt filled in ${agent}'s composer, press Enter to jump`,
+          3_000,
         );
       } else {
         store.actions.showToast(
