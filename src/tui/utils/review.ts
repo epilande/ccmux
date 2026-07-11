@@ -8,12 +8,15 @@ export const HUNK_DIFF_ARGS = ["diff", "--watch"] as const;
 export const HUNK_INSTALL_HINT =
   "hunk not found: install it to review diffs (see github.com/modem-dev/hunk)";
 
-const DISCOVERY_ATTEMPTS = 10;
-const DISCOVERY_DELAY_MS = 500;
-const HARVEST_DELAY_MS = 1_000;
-const FINAL_READ_ATTEMPTS = 3;
-const FINAL_READ_DELAY_MS = 500;
+const DISCOVERY_ATTEMPTS = 20;
+const DISCOVERY_DELAY_MS = 250;
+// Comments live only in the hunk daemon's memory and vanish the instant the
+// TUI exits, so a note saved just before quitting is only ever seen by the
+// poll that lands between save and quit. Keep the cadence tight: reads go
+// through the daemon's HTTP API (~ms each), so fast polling is nearly free.
+export const HARVEST_DELAY_MS = 250;
 const HUNK_JSON_TIMEOUT_MS = 5_000;
+const HUNK_API_TIMEOUT_MS = 1_000;
 const MAX_SNIPPET_LINES = 6;
 const MAX_SNIPPET_CHARS = 300;
 export const MAX_REVIEW_PROMPT_CHARS = MAX_SEND_TEXT_CHARS;
@@ -79,7 +82,76 @@ function debugLog(message: string): void {
   }
 }
 
+/**
+ * Map the CLI arg encoding of the two reads we do onto the hunk daemon's
+ * HTTP session API (`POST /session-api`, the same endpoint the hunk CLI
+ * itself calls). Returns null for arg shapes we don't map; those go through
+ * the CLI.
+ */
+export function hunkApiPayload(args: string[]): object | null {
+  if (args[0] === "session" && args[1] === "list") return { action: "list" };
+  if (
+    args[0] === "session" &&
+    args[1] === "comment" &&
+    args[2] === "list" &&
+    typeof args[3] === "string"
+  ) {
+    return {
+      action: "comment-list",
+      selector: { sessionId: args[3] },
+      type: "user",
+    };
+  }
+  return null;
+}
+
+function hunkApiOrigin(): string {
+  const host = process.env.HUNK_MCP_HOST?.trim() || "127.0.0.1";
+  const port = Number(process.env.HUNK_MCP_PORT) || 47657;
+  return `http://${host}:${port}`;
+}
+
+// Flips true after the first successful session-api response in this process.
+// From then on a JSON error from the API (e.g. "No active session matches" on
+// the post-exit read) is definitive and skips the CLI fallback: the hunk CLI
+// is itself a client of this same endpoint, so it can only repeat the answer,
+// ~300ms slower. Until proven, every HTTP failure still falls back to the CLI
+// so a hunk that moved or reshaped the API degrades to slow-but-correct.
+let hunkApiProven = false;
+
+/**
+ * Read hunk session JSON, preferring the daemon's HTTP API over spawning the
+ * `hunk` CLI: a fetch answers in ~1ms where a CLI spawn costs ~300ms, which is
+ * what makes the tight harvest cadence viable. HTTP failures fall back to the
+ * CLI, which stays the compatibility authority (see hunkApiProven).
+ */
 async function defaultRunHunkJson(args: string[]): Promise<unknown | null> {
+  const payload = hunkApiPayload(args);
+  if (payload) {
+    try {
+      const response = await fetch(`${hunkApiOrigin()}/session-api`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(HUNK_API_TIMEOUT_MS),
+      });
+      // Non-JSON bodies (e.g. a plain 404 from a hunk that moved the route)
+      // throw here and drop through to the CLI fallback below.
+      const body: unknown = await response.json();
+      if (response.ok) {
+        hunkApiProven = true;
+        return body;
+      }
+      const error =
+        typeof body === "object" && body !== null && "error" in body
+          ? String((body as { error: unknown }).error)
+          : `HTTP ${response.status}`;
+      debugLog(`session api ${args.join(" ")}: ${error}`);
+      if (hunkApiProven) return null;
+    } catch (err) {
+      debugLog(`session api unreachable (${err}); falling back to hunk CLI`);
+    }
+  }
   try {
     const proc = Bun.spawn(["hunk", ...args], {
       stdin: "ignore",
@@ -359,8 +431,12 @@ export function spawnHunkDiff(
  * with inherited stdio, then resume. Pre-flight checks (hunk on PATH, git
  * repo root) run before `suspend()` so error toasts render without a flicker.
  * `suspend()` has its own try/catch: if it throws, `resume()` is never
- * called (nothing to undo). Once suspended, `resume()` always runs via
- * try/finally, even if the spawn itself throws.
+ * called (nothing to undo). Once suspended, `resume()` is guaranteed via
+ * try/finally, even if the spawn itself throws — but it fires the moment
+ * hunk exits, not after the whole harvest: the post-exit comment reads and
+ * snippet extraction below all run against piped-stdio children that never
+ * touch the terminal, and leaving the renderer suspended through them showed
+ * the user seconds of blank screen after quitting hunk.
  *
  * While hunk runs, the picker polls hunk's session JSON to find the session
  * bound to this pane and harvest the user comments left during review,
@@ -400,6 +476,13 @@ export async function runHunkReview(
     return { ok: false, error: `suspend failed: ${err}` };
   }
 
+  let resumed = false;
+  const resumeOnce = () => {
+    if (resumed) return;
+    resumed = true;
+    renderer.resume();
+  };
+
   try {
     const proc = spawnHunkDiff(root, spawn);
     let exited = false;
@@ -426,7 +509,10 @@ export async function runHunkReview(
           sessionMatchesTerminal(session, paneId, tty),
         );
         sessionId = pickFreshest(matches)?.sessionId ?? null;
-        if (sessionId) break;
+        if (sessionId) {
+          debugLog(`discovered session ${sessionId} (attempt ${attempt})`);
+          break;
+        }
         if (!exited)
           await Promise.race([sleep(DISCOVERY_DELAY_MS), exitPromise]);
       }
@@ -446,38 +532,46 @@ export async function runHunkReview(
           "--json",
         ]),
       );
-      if (snapshot) latestNotes = snapshot;
+      if (snapshot) {
+        if (snapshot.length !== latestNotes.length) {
+          debugLog(`harvest snapshot: ${snapshot.length} note(s)`);
+        }
+        latestNotes = snapshot;
+      }
       if (!exited) await Promise.race([sleep(HARVEST_DELAY_MS), exitPromise]);
     }
 
     const exitCode = await exitPromise;
+    // hunk has restored the terminal: bring the picker back NOW. The final
+    // read and snippet extraction below don't touch the terminal, and waiting
+    // on them here is what left the screen blank for seconds after quitting.
+    resumeOnce();
     if (exitCode !== 0) {
       return { ok: false, error: `hunk exited with code ${exitCode}` };
     }
 
-    // Post-exit final read: a comment saved just before quitting can land after
-    // the harvest loop's last read. hunk keeps serving session JSON for a short
-    // teardown window, so retry a few times to catch it.
+    // Post-exit final read, one attempt only: a comment saved in the last
+    // harvest interval can land after the loop's final read, and this catches
+    // it IF the session is still readable. Usually it isn't — hunk drops the
+    // session the instant the TUI exits (every logged post-exit read fails
+    // with "No active session") — so retrying is pure latency between the
+    // picker coming back and the hand-back dialog. The real safeguard for
+    // last-second comments is the tight HARVEST_DELAY_MS cadence above.
     if (sessionId) {
-      for (let attempt = 0; attempt < FINAL_READ_ATTEMPTS; attempt++) {
-        const snapshot = asNotes(
-          await runHunkJson([
-            "session",
-            "comment",
-            "list",
-            sessionId,
-            "--type",
-            "user",
-            "--json",
-          ]),
-        );
-        if (snapshot) {
-          latestNotes = snapshot;
-          break;
-        }
-        if (attempt < FINAL_READ_ATTEMPTS - 1) await sleep(FINAL_READ_DELAY_MS);
-      }
+      const snapshot = asNotes(
+        await runHunkJson([
+          "session",
+          "comment",
+          "list",
+          sessionId,
+          "--type",
+          "user",
+          "--json",
+        ]),
+      );
+      if (snapshot) latestNotes = snapshot;
     }
+    debugLog(`review done: ${latestNotes.length} note(s) harvested`);
 
     return {
       ok: true,
@@ -486,6 +580,6 @@ export async function runHunkReview(
   } catch (err) {
     return { ok: false, error: `${err}` };
   } finally {
-    renderer.resume();
+    resumeOnce();
   }
 }

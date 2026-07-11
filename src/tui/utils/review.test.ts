@@ -7,10 +7,12 @@ import { describe, it, expect, mock } from "bun:test";
 // attempt (and fail) to resolve the suffixed specifier on disk.
 const REAL_REVIEW_SPECIFIER = "./review" + "?real";
 const {
+  HARVEST_DELAY_MS,
   HUNK_DIFF_ARGS,
   HUNK_INSTALL_HINT,
   MAX_REVIEW_PROMPT_CHARS,
   formatReviewPrompt,
+  hunkApiPayload,
   isHunkAvailable,
   runHunkReview,
 } = (await import(REAL_REVIEW_SPECIFIER)) as typeof import("./review");
@@ -209,7 +211,7 @@ describe("runHunkReview", () => {
           };
     });
     const sleep = mock(async (ms: number) => {
-      if (ms === 1_000) resolveExit(0);
+      if (ms === HARVEST_DELAY_MS) resolveExit(0);
     });
     const readFileLines = mock(async () => [
       "one",
@@ -293,7 +295,7 @@ describe("runHunkReview", () => {
       }),
       runHunkJson,
       sleep: async (ms: number) => {
-        if (ms === 1_000) resolveExit(0);
+        if (ms === HARVEST_DELAY_MS) resolveExit(0);
       },
     });
     expect(result).toEqual({
@@ -339,14 +341,65 @@ describe("runHunkReview", () => {
       }),
       runHunkJson,
       sleep: async (ms: number) => {
-        if (ms === 1_000) resolveExit(0);
+        if (ms === HARVEST_DELAY_MS) resolveExit(0);
       },
     });
     expect(result).toEqual({ ok: true, notes: [] });
     expect(queriedSessionId).toBe("fresh");
   });
 
-  it("falls back to the last snapshot when every final read fails", async () => {
+  it("resumes the renderer the moment hunk exits, before the final reads", async () => {
+    const events: string[] = [];
+    let resolveExit!: (code: number) => void;
+    const result = await runHunkReview(
+      {
+        suspend: () => {
+          events.push("suspend");
+        },
+        resume: () => {
+          events.push("resume");
+        },
+      },
+      "/repo",
+      {
+        which: () => "hunk",
+        resolveRoot: async () => "/repo",
+        gitStatus: dirtyGitStatus,
+        paneId: "%1",
+        spawn: () => ({
+          exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+        }),
+        runHunkJson: async (args) => {
+          if (args[1] === "list") {
+            return {
+              sessions: [
+                {
+                  sessionId: "h1",
+                  terminal: { locations: [{ source: "tmux", paneId: "%1" }] },
+                },
+              ],
+            };
+          }
+          events.push("comment-read");
+          return { comments: [] };
+        },
+        sleep: async (ms) => {
+          if (ms === HARVEST_DELAY_MS) resolveExit(0);
+        },
+      },
+    );
+    expect(result).toEqual({ ok: true, notes: [] });
+    // One harvest read while hunk runs, then resume immediately on exit, and
+    // only then the post-exit final read. resume must fire exactly once.
+    expect(events).toEqual([
+      "suspend",
+      "comment-read",
+      "resume",
+      "comment-read",
+    ]);
+  });
+
+  it("falls back to the last snapshot when the single final read fails", async () => {
     const { renderer } = fakeRenderer();
     let resolveExit!: (code: number) => void;
     const spawn = mock(() => ({
@@ -381,11 +434,13 @@ describe("runHunkReview", () => {
       spawn,
       runHunkJson,
       sleep: async (ms) => {
-        if (ms === 1_000) resolveExit(0);
+        if (ms === HARVEST_DELAY_MS) resolveExit(0);
       },
     });
     expect(result).toEqual({ ok: true, notes: [note] });
-    expect(commentReads).toBe(4);
+    // One harvest read plus exactly one post-exit final read: the session
+    // dies with the TUI, so retrying the final read only delays the dialog.
+    expect(commentReads).toBe(2);
   });
 
   it("degrades to no notes when discovery never matches", async () => {
@@ -577,6 +632,37 @@ describe("runHunkReview", () => {
         },
       ],
     });
+  });
+});
+
+describe("hunkApiPayload", () => {
+  it("maps session list to the daemon's list action", () => {
+    expect(hunkApiPayload(["session", "list", "--json"])).toEqual({
+      action: "list",
+    });
+  });
+
+  it("maps comment list to comment-list with a sessionId selector", () => {
+    expect(
+      hunkApiPayload([
+        "session",
+        "comment",
+        "list",
+        "sid-1",
+        "--type",
+        "user",
+        "--json",
+      ]),
+    ).toEqual({
+      action: "comment-list",
+      selector: { sessionId: "sid-1" },
+      type: "user",
+    });
+  });
+
+  it("returns null for unmapped commands so they go through the CLI", () => {
+    expect(hunkApiPayload(["session", "comment", "rm", "sid-1"])).toBeNull();
+    expect(hunkApiPayload(["daemon", "serve"])).toBeNull();
   });
 });
 
