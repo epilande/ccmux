@@ -47,7 +47,12 @@ import {
   type FilteredSession,
 } from "./utils/grouping";
 
-export type ConfirmAction = "kill" | "kill-all" | "kill-group" | "restart";
+export type ConfirmAction =
+  | "kill"
+  | "kill-all"
+  | "kill-group"
+  | "restart"
+  | "send-review";
 
 interface TUIState {
   sessions: EnrichedSession[];
@@ -1082,13 +1087,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       });
     },
 
-    showToast(message: string) {
+    showToast(message: string, durationMs = 1500) {
       setState("toastMessage", message);
       if (toastTimer) clearTimeout(toastTimer);
       toastTimer = setTimeout(() => {
         setState("toastMessage", null);
         toastTimer = null;
-      }, 1500);
+      }, durationMs);
     },
 
     reloadUIState(freshState: UIState) {

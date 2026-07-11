@@ -6,8 +6,15 @@ import { describe, it, expect, mock } from "bun:test";
 // that mock instead of this real implementation. Non-literal so tsc doesn't
 // attempt (and fail) to resolve the suffixed specifier on disk.
 const REAL_REVIEW_SPECIFIER = "./review" + "?real";
-const { HUNK_DIFF_ARGS, HUNK_INSTALL_HINT, isHunkAvailable, runHunkReview } =
-  (await import(REAL_REVIEW_SPECIFIER)) as typeof import("./review");
+const {
+  HARVEST_DELAY_MS,
+  HUNK_DIFF_ARGS,
+  HUNK_INSTALL_HINT,
+  MAX_REVIEW_PROMPT_CHARS,
+  formatReviewPrompt,
+  isHunkAvailable,
+  runHunkReview,
+} = (await import(REAL_REVIEW_SPECIFIER)) as typeof import("./review");
 
 function fakeRenderer() {
   const calls: string[] = [];
@@ -33,6 +40,28 @@ function fakeSpawn(exitCode: number) {
   return { spawn, calls };
 }
 
+const dirtyGitStatus = async () => " M file\n";
+
+function paneSession(sessionId: string, paneId: string) {
+  return { sessionId, terminal: { locations: [{ source: "tmux", paneId }] } };
+}
+
+function ttySession(sessionId: string, tty: string, launchedAt?: string) {
+  return {
+    sessionId,
+    launchedAt,
+    terminal: { locations: [{ source: "tty", tty }] },
+  };
+}
+
+/** A source with one pane-matched session (`h1` on `%1`) and fixed comments. */
+function hunkJsonWithComments(comments: unknown[]) {
+  return {
+    listSessions: async () => ({ sessions: [paneSession("h1", "%1")] }),
+    listUserComments: async () => ({ comments }),
+  };
+}
+
 describe("isHunkAvailable", () => {
   it("is true when which resolves the binary", () => {
     expect(isHunkAvailable(() => "/opt/homebrew/bin/hunk")).toBe(true);
@@ -48,6 +77,8 @@ describe("runHunkReview", () => {
     const { renderer } = fakeRenderer();
     const result = await runHunkReview(renderer, "/repo", {
       which: () => null,
+      gitStatus: dirtyGitStatus,
+      paneId: "",
     });
     expect(result).toEqual({ ok: false, error: HUNK_INSTALL_HINT });
     expect(renderer.suspend).not.toHaveBeenCalled();
@@ -58,6 +89,8 @@ describe("runHunkReview", () => {
     const result = await runHunkReview(renderer, "/repo", {
       which: () => "/opt/homebrew/bin/hunk",
       resolveRoot: async () => null,
+      gitStatus: dirtyGitStatus,
+      paneId: "",
     });
     expect(result).toEqual({ ok: false, error: "not a git repository" });
     expect(renderer.suspend).not.toHaveBeenCalled();
@@ -69,9 +102,11 @@ describe("runHunkReview", () => {
     const result = await runHunkReview(renderer, "/repo/sub", {
       which: () => "/opt/homebrew/bin/hunk",
       resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "",
       spawn,
     });
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, notes: [] });
     expect(calls).toEqual(["suspend", "resume"]);
     expect(spawnCalls).toEqual([
       [
@@ -92,6 +127,8 @@ describe("runHunkReview", () => {
     const result = await runHunkReview(renderer, "/repo", {
       which: () => "/opt/homebrew/bin/hunk",
       resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "",
       spawn,
     });
     expect(result.ok).toBe(false);
@@ -107,6 +144,8 @@ describe("runHunkReview", () => {
     const result = await runHunkReview(renderer, "/repo", {
       which: () => "/opt/homebrew/bin/hunk",
       resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "",
       spawn: spawn as never,
     });
     expect(result.ok).toBe(false);
@@ -122,10 +161,465 @@ describe("runHunkReview", () => {
     const result = await runHunkReview({ suspend, resume }, "/repo", {
       which: () => "/opt/homebrew/bin/hunk",
       resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "",
       spawn,
     });
     expect(result.ok).toBe(false);
     expect(resume).not.toHaveBeenCalled();
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("returns before suspending when there are no changes to review", async () => {
+    const { renderer } = fakeRenderer();
+    const { spawn } = fakeSpawn(0);
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "/opt/homebrew/bin/hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: async () => "",
+      paneId: "",
+      spawn,
+    });
+    expect(result).toEqual({ ok: false, error: "no changes to review" });
+    expect(renderer.suspend).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("discovers by pane id, harvests the final snapshot, and extracts snippets", async () => {
+    const { renderer } = fakeRenderer();
+    let resolveExit!: (code: number) => void;
+    const spawn = mock(() => ({
+      exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+    }));
+    let commentReads = 0;
+    const hunkJson = {
+      listSessions: async () => ({
+        sessions: [paneSession("wrong", "%8"), paneSession("hunk-1", "%7")],
+      }),
+      listUserComments: async () => {
+        commentReads++;
+        return commentReads === 1
+          ? { comments: [] }
+          : {
+              comments: [
+                {
+                  noteId: "n1",
+                  filePath: "src/foo.ts",
+                  hunkIndex: 0,
+                  newRange: [2, 10],
+                  body: "Handle this case.",
+                },
+                {
+                  noteId: "n2",
+                  filePath: "src/old.ts",
+                  hunkIndex: 1,
+                  oldRange: [4, 4],
+                  body: "Deleted behavior matters.",
+                },
+              ],
+            };
+      },
+    };
+    const sleep = mock(async (ms: number) => {
+      if (ms === HARVEST_DELAY_MS) resolveExit(0);
+    });
+    const readFileLines = mock(async () => [
+      "one",
+      "two",
+      "three",
+      "four",
+      "five",
+      "six",
+      "seven",
+      "eight",
+      "nine",
+    ]);
+
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "/opt/homebrew/bin/hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "%7",
+      spawn,
+      hunkJson,
+      sleep,
+      readFileLines,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      notes: [
+        {
+          noteId: "n1",
+          filePath: "src/foo.ts",
+          hunkIndex: 0,
+          newRange: [2, 10],
+          body: "Handle this case.",
+          snippet: "two\nthree\nfour\nfive\nsix\nseven",
+        },
+        {
+          noteId: "n2",
+          filePath: "src/old.ts",
+          hunkIndex: 1,
+          oldRange: [4, 4],
+          body: "Deleted behavior matters.",
+        },
+      ],
+    });
+    expect(readFileLines).toHaveBeenCalledTimes(1);
+  });
+
+  it("discovers by tty when there is no paneId (display-popup)", async () => {
+    const { renderer } = fakeRenderer();
+    let resolveExit!: (code: number) => void;
+    const hunkJson = {
+      listSessions: async () => ({
+        sessions: [
+          ttySession("other", "/dev/ttys1"),
+          // Popup session: hunk records a tty location but no tmux paneId.
+          ttySession("popup", "/dev/ttys9"),
+        ],
+      }),
+      listUserComments: async () => ({
+        comments: [
+          { noteId: "n1", filePath: "src/foo.ts", hunkIndex: 0, body: "Fix." },
+        ],
+      }),
+    };
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: undefined,
+      readTty: async () => "/dev/ttys9",
+      spawn: () => ({
+        exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+      }),
+      hunkJson,
+      sleep: async (ms: number) => {
+        if (ms === HARVEST_DELAY_MS) resolveExit(0);
+      },
+    });
+    expect(result).toEqual({
+      ok: true,
+      notes: [
+        { noteId: "n1", filePath: "src/foo.ts", hunkIndex: 0, body: "Fix." },
+      ],
+    });
+  });
+
+  it("prefers the freshest session when multiple match the same tty", async () => {
+    const { renderer } = fakeRenderer();
+    let resolveExit!: (code: number) => void;
+    let queriedSessionId: string | undefined;
+    const hunkJson = {
+      listSessions: async () => ({
+        sessions: [
+          ttySession("stale", "/dev/ttys9", "2026-07-10T00:00:00Z"),
+          ttySession("fresh", "/dev/ttys9", "2026-07-11T00:00:00Z"),
+        ],
+      }),
+      listUserComments: async (sessionId: string) => {
+        queriedSessionId = sessionId;
+        return { comments: [] };
+      },
+    };
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: undefined,
+      readTty: async () => "/dev/ttys9",
+      spawn: () => ({
+        exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+      }),
+      hunkJson,
+      sleep: async (ms: number) => {
+        if (ms === HARVEST_DELAY_MS) resolveExit(0);
+      },
+    });
+    expect(result).toEqual({ ok: true, notes: [] });
+    expect(queriedSessionId).toBe("fresh");
+  });
+
+  it("resumes the renderer the moment hunk exits, before the final reads", async () => {
+    const events: string[] = [];
+    let resolveExit!: (code: number) => void;
+    const result = await runHunkReview(
+      {
+        suspend: () => {
+          events.push("suspend");
+        },
+        resume: () => {
+          events.push("resume");
+        },
+      },
+      "/repo",
+      {
+        which: () => "hunk",
+        resolveRoot: async () => "/repo",
+        gitStatus: dirtyGitStatus,
+        paneId: "%1",
+        spawn: () => ({
+          exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+        }),
+        hunkJson: {
+          listSessions: async () => ({ sessions: [paneSession("h1", "%1")] }),
+          listUserComments: async () => {
+            events.push("comment-read");
+            return { comments: [] };
+          },
+        },
+        sleep: async (ms) => {
+          if (ms === HARVEST_DELAY_MS) resolveExit(0);
+        },
+      },
+    );
+    expect(result).toEqual({ ok: true, notes: [] });
+    // One harvest read while hunk runs, then resume immediately on exit, and
+    // only then the post-exit final read. resume must fire exactly once.
+    expect(events).toEqual([
+      "suspend",
+      "comment-read",
+      "resume",
+      "comment-read",
+    ]);
+  });
+
+  it("falls back to the last snapshot when the single final read fails", async () => {
+    const { renderer } = fakeRenderer();
+    let resolveExit!: (code: number) => void;
+    const spawn = mock(() => ({
+      exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+    }));
+    let commentReads = 0;
+    const note = {
+      noteId: "n1",
+      filePath: "src/foo.ts",
+      hunkIndex: 0,
+      body: "Keep me.",
+    };
+    const hunkJson = {
+      listSessions: async () => ({ sessions: [paneSession("h1", "%1")] }),
+      listUserComments: async () => {
+        commentReads++;
+        return commentReads === 1 ? { comments: [note] } : null;
+      },
+    };
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "%1",
+      spawn,
+      hunkJson,
+      sleep: async (ms) => {
+        if (ms === HARVEST_DELAY_MS) resolveExit(0);
+      },
+    });
+    expect(result).toEqual({ ok: true, notes: [note] });
+    // One harvest read plus exactly one post-exit final read: the session
+    // dies with the TUI, so retrying the final read only delays the dialog.
+    expect(commentReads).toBe(2);
+  });
+
+  it("degrades to no notes when discovery never matches", async () => {
+    const { renderer } = fakeRenderer();
+    let resolveExit!: (code: number) => void;
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "%1",
+      spawn: () => ({
+        exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+      }),
+      hunkJson: {
+        listSessions: async () => ({ sessions: [] }),
+        listUserComments: async () => null,
+      },
+      sleep: async () => resolveExit(0),
+    });
+    expect(result).toEqual({ ok: true, notes: [] });
+  });
+
+  it("drops harvested notes when hunk exits non-zero", async () => {
+    const { renderer } = fakeRenderer();
+    let resolveExit!: (code: number) => void;
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "%1",
+      spawn: () => ({
+        exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+      }),
+      hunkJson: hunkJsonWithComments([
+        { noteId: "n1", filePath: "x", hunkIndex: 0, body: "note" },
+      ]),
+      sleep: async () => resolveExit(2),
+    });
+    expect(result).toEqual({ ok: false, error: "hunk exited with code 2" });
+  });
+
+  it("parses comments missing noteId/hunkIndex (schema drift)", async () => {
+    const { renderer } = fakeRenderer();
+    let resolveExit!: (code: number) => void;
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "%1",
+      spawn: () => ({
+        exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+      }),
+      hunkJson: hunkJsonWithComments([
+        { filePath: "src/x.ts", body: "drifted note" },
+      ]),
+      sleep: async () => resolveExit(0),
+    });
+    expect(result).toEqual({
+      ok: true,
+      notes: [{ filePath: "src/x.ts", body: "drifted note" }],
+    });
+  });
+
+  it("leaves snippet undefined when reading the working tree fails", async () => {
+    const { renderer } = fakeRenderer();
+    let resolveExit!: (code: number) => void;
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "%1",
+      spawn: () => ({
+        exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+      }),
+      hunkJson: hunkJsonWithComments([
+        {
+          noteId: "n1",
+          filePath: "x",
+          hunkIndex: 0,
+          newRange: [1, 1],
+          body: "note",
+        },
+      ]),
+      sleep: async () => resolveExit(0),
+      readFileLines: async () => {
+        throw new Error("missing");
+      },
+    });
+    expect(result).toEqual({
+      ok: true,
+      notes: [
+        {
+          noteId: "n1",
+          filePath: "x",
+          hunkIndex: 0,
+          newRange: [1, 1],
+          body: "note",
+        },
+      ],
+    });
+  });
+
+  it("skips snippets for paths that escape the repo root", async () => {
+    const { renderer } = fakeRenderer();
+    let resolveExit!: (code: number) => void;
+    const readPaths: string[] = [];
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "%1",
+      spawn: () => ({
+        exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+      }),
+      hunkJson: hunkJsonWithComments([
+        {
+          noteId: "n1",
+          filePath: "../../etc/passwd",
+          hunkIndex: 0,
+          newRange: [1, 1],
+          body: "note",
+        },
+      ]),
+      sleep: async () => resolveExit(0),
+      readFileLines: async (path) => {
+        readPaths.push(path);
+        return ["secret"];
+      },
+    });
+    expect(readPaths).toEqual([]);
+    expect(result).toEqual({
+      ok: true,
+      notes: [
+        {
+          noteId: "n1",
+          filePath: "../../etc/passwd",
+          hunkIndex: 0,
+          newRange: [1, 1],
+          body: "note",
+        },
+      ],
+    });
+  });
+});
+
+describe("formatReviewPrompt", () => {
+  it("formats new and old ranges, snippets, singular count, and omitted snippets", () => {
+    expect(
+      formatReviewPrompt([
+        {
+          noteId: "n1",
+          filePath: "src/foo.ts",
+          hunkIndex: 0,
+          newRange: [12, 14],
+          body: "Check the token.",
+          snippet: "const token = getToken();\nif (!token) return;",
+        },
+        {
+          noteId: "n2",
+          filePath: "src/bar.ts",
+          hunkIndex: 1,
+          oldRange: [7, 7],
+          body: "Preserve this behavior.",
+        },
+      ]),
+    ).toBe(
+      "I reviewed your changes in hunk and left 2 review comments:\n\n1. src/foo.ts:12-14\n   > const token = getToken();\n   > if (!token) return;\n   Check the token.\n2. src/bar.ts:old 7\n   Preserve this behavior.\n\nPlease address each comment.",
+    );
+  });
+
+  it("strips control sequences that could break bracketed paste, keeping \\n and \\t", () => {
+    const prompt = formatReviewPrompt([
+      {
+        filePath: "src/x.ts",
+        newRange: [1, 1],
+        body: "before\x1b[201~evil\rmore",
+        snippet: "a\tb\nc\x1b[201~evil\rmore",
+      },
+    ]);
+    expect(prompt).toContain("evil");
+    expect(prompt).toContain("more");
+    expect(prompt).not.toContain("\x1b");
+    expect(prompt).not.toContain("\r");
+    // Tabs and newlines inside snippets survive the sanitizer.
+    expect(prompt).toContain("\t");
+    expect(prompt).toContain("\n");
+  });
+
+  it("caps the prompt below the daemon limit with a truncation marker", () => {
+    const prompt = formatReviewPrompt([
+      {
+        noteId: "n1",
+        filePath: "x",
+        hunkIndex: 0,
+        newRange: [1, 1],
+        body: "x".repeat(12_000),
+      },
+    ]);
+    expect(prompt.length).toBe(MAX_REVIEW_PROMPT_CHARS);
+    expect(prompt).toEndWith("(truncated)");
   });
 });

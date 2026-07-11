@@ -19,9 +19,11 @@ import type { EnrichedSession } from "../types/session";
 import { createTUIStore, TickContext } from "./store";
 import { killActionPath, restartActionPath } from "./utils/invoke-actions";
 import {
+  formatReviewPrompt,
   HUNK_INSTALL_HINT,
   isHunkAvailable,
   runHunkReview,
+  type HunkReviewNote,
 } from "./utils/review";
 import { SSEClient } from "./utils/sse";
 import {
@@ -61,6 +63,7 @@ import type {
   ColumnsConfig,
   BreakpointConfig,
   PromptDisplay,
+  Preferences,
 } from "../lib/preferences";
 import type { FlatItem, GroupBy } from "./utils/grouping";
 import {
@@ -85,6 +88,7 @@ interface AppProps {
   promptDisplay?: PromptDisplay;
   persistent?: boolean;
   sidebar?: boolean;
+  reviewHandback?: Preferences["reviewHandback"];
 }
 
 export function App(props: AppProps) {
@@ -211,6 +215,55 @@ export function App(props: AppProps) {
   /** Drops re-activations while a review is pending: a rapid double-`d` would
    * otherwise race two suspend/spawn/resume cycles against the same renderer. */
   let reviewInFlight = false;
+  let pendingReviewNotes: {
+    sessionId: string;
+    notes: HunkReviewNote[];
+  } | null = null;
+
+  const pendingReviewNoteCount = () => pendingReviewNotes?.notes.length ?? 0;
+
+  async function deliverReviewNotes(
+    sessionId: string,
+    notes: HunkReviewNote[],
+    mode: "auto" | "confirm" | "fill",
+  ) {
+    const session = store.state.sessions.find((item) => item.id === sessionId);
+    const agent = session?.agentType ?? "agent";
+    try {
+      const response = await fetch(
+        `${getDaemonUrl()}/sessions/${sessionId}/send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: formatReviewPrompt(notes),
+            enter: mode !== "fill",
+          }),
+        },
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      // Re-capture the preview so the delivered prompt is visible in the
+      // agent's pane; an unfocused preview never polls, so without this the
+      // only feedback would be the transient toast. Bump twice: the paste has
+      // landed when /send resolves, but the agent's TUI paints it a beat
+      // later, so an immediate-only capture usually still shows the empty
+      // composer (observed live with Claude Code).
+      setPreviewRefreshKey((key) => key + 1);
+      setTimeout(() => setPreviewRefreshKey((key) => key + 1), 500);
+      if (mode === "fill") {
+        store.actions.showToast(
+          `Prompt filled in ${agent}'s composer, press Enter to jump`,
+          3_000,
+        );
+      } else {
+        store.actions.showToast(
+          `Sent ${notes.length} comment${notes.length === 1 ? "" : "s"} to ${agent}`,
+        );
+      }
+    } catch {
+      store.actions.showToast(`Failed to send review comments to ${agent}`);
+    }
+  }
 
   function reviewSession(session: EnrichedSession) {
     if (reviewInFlight) return;
@@ -226,12 +279,44 @@ export function App(props: AppProps) {
       return;
     }
     reviewInFlight = true;
-    runHunkReview(renderer, cwd).then((result) => {
-      reviewInFlight = false;
-      if (!result.ok) {
-        store.actions.showToast(`Review failed: ${result.error}`);
-      }
-    });
+    runHunkReview(renderer, cwd)
+      .then((result) => {
+        reviewInFlight = false;
+        if (!result.ok) {
+          store.actions.showToast(`Review failed: ${result.error}`);
+          return;
+        }
+        if (result.notes.length === 0) return;
+        if (session.trackingMode === "background" || session.tmuxPane == null) {
+          store.actions.showToast(
+            `${result.notes.length} review note${result.notes.length === 1 ? "" : "s"} captured (no pane to send to)`,
+          );
+          return;
+        }
+        // Only an explicit auto/fill skips the dialog; every other value
+        // (undefined, or an unvalidated config typo like "Fill") falls through
+        // to confirm rather than silently auto-submitting to the agent.
+        if (
+          props.reviewHandback === "auto" ||
+          props.reviewHandback === "fill"
+        ) {
+          void deliverReviewNotes(
+            session.id,
+            result.notes,
+            props.reviewHandback,
+          );
+        } else {
+          pendingReviewNotes = { sessionId: session.id, notes: result.notes };
+          store.actions.showConfirmDialog(session.id, "send-review");
+        }
+      })
+      .catch(() => {
+        // runHunkReview resolves on every expected failure; this guards an
+        // unexpected reject (e.g. resume() throwing in its finally) so a stuck
+        // reviewInFlight flag can't disable `d` for the rest of the session.
+        reviewInFlight = false;
+        store.actions.showToast("Review failed");
+      });
   }
 
   function handleRowActivate(item: FlatItem, index: number) {
@@ -448,7 +533,13 @@ export function App(props: AppProps) {
   function confirmDialogAction() {
     const action = store.state.confirmAction;
     const sessionId = store.state.confirmSessionId;
-    if (action === "kill-all") {
+    if (action === "send-review" && sessionId) {
+      const pending = pendingReviewNotes;
+      pendingReviewNotes = null;
+      if (pending?.sessionId === sessionId) {
+        void deliverReviewNotes(sessionId, pending.notes, "confirm");
+      }
+    } else if (action === "kill-all") {
       // The daemon reaps in-flight invoke workers itself (it owns the
       // authoritative in-flight set); the client only needs to ask once.
       fetch(`${getDaemonUrl()}/sessions/kill-all`, { method: "POST" });
@@ -725,6 +816,7 @@ export function App(props: AppProps) {
         return;
       }
       if (key === "n" || key === "N" || key === "escape") {
+        pendingReviewNotes = null;
         store.actions.hideConfirmDialog();
         event.preventDefault();
         return;
@@ -1194,13 +1286,18 @@ export function App(props: AppProps) {
             session={getSessionById(store.state.confirmSessionId || "")}
             action={store.state.confirmAction}
             sessionCount={
-              store.state.confirmAction === "kill-group"
-                ? store.state.confirmSessionIds.length
-                : store.filteredSessions().length
+              store.state.confirmAction === "send-review"
+                ? pendingReviewNoteCount()
+                : store.state.confirmAction === "kill-group"
+                  ? store.state.confirmSessionIds.length
+                  : store.filteredSessions().length
             }
             groupLabel={store.selectedGroupHeader()?.label}
             onConfirm={confirmDialogAction}
-            onCancel={store.actions.hideConfirmDialog}
+            onCancel={() => {
+              pendingReviewNotes = null;
+              store.actions.hideConfirmDialog();
+            }}
           />
         </Show>
 

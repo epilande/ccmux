@@ -5,6 +5,7 @@ import {
   setPreferences,
   VALID_GROUP_BY,
   VALID_PROMPT_DISPLAYS,
+  VALID_REVIEW_HANDBACK,
   BREAKPOINT_NAMES,
   COLUMN_FIELDS,
   type BreakpointConfig,
@@ -113,6 +114,11 @@ export const KNOWN_KEYS: Record<
     parse: (v) => v === "true",
     description:
       "Keep picker open after switching sessions (true, false; default false)",
+  },
+  reviewHandback: {
+    validate: (v) => (VALID_REVIEW_HANDBACK as readonly string[]).includes(v),
+    parse: (v) => v,
+    description: `Hunk review note delivery (${VALID_REVIEW_HANDBACK.join(", ")}; default confirm)`,
   },
   theme: {
     validate: (v) => BUILTIN_THEME_NAMES.includes(v),

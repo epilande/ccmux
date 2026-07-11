@@ -4,6 +4,7 @@ import {
   createEffect,
   createMemo,
   For,
+  on,
   Show,
   onCleanup,
 } from "solid-js";
@@ -249,11 +250,21 @@ export const Preview: Component<PreviewProps> = (props) => {
     await refreshPane();
   });
 
-  createEffect(() => {
-    void props.refreshKey; // track reactive dependency
-    if (!props.focused || !props.session?.tmuxPane) return;
-    refreshPane();
-  });
+  // Forced re-capture: the parent bumps refreshKey when it knows the pane
+  // just changed underneath us (e.g. review notes delivered to the agent's
+  // composer), so the user sees the outcome without focusing the preview.
+  // `on(..., {defer})` tracks only the key: mount and selection changes are
+  // already captured by the effects above, and an unfocused preview stays a
+  // single snapshot otherwise.
+  createEffect(
+    on(
+      () => props.refreshKey,
+      () => {
+        if (props.session?.tmuxPane) refreshPane();
+      },
+      { defer: true },
+    ),
+  );
 
   // Background refresh while focused (catches external output). Polls at
   // 500ms while the pane is changing, doubling up to 2s while it is quiet
