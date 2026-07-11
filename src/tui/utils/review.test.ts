@@ -257,6 +257,95 @@ describe("runHunkReview", () => {
     expect(readFileLines).toHaveBeenCalledTimes(1);
   });
 
+  it("discovers by tty when there is no paneId (display-popup)", async () => {
+    const { renderer } = fakeRenderer();
+    let resolveExit!: (code: number) => void;
+    const runHunkJson = mock(async (args: string[]) => {
+      if (args[1] === "list") {
+        return {
+          sessions: [
+            {
+              sessionId: "other",
+              terminal: { locations: [{ source: "tty", tty: "/dev/ttys1" }] },
+            },
+            {
+              // Popup session: hunk records a tty location but no tmux paneId.
+              sessionId: "popup",
+              terminal: { locations: [{ source: "tty", tty: "/dev/ttys9" }] },
+            },
+          ],
+        };
+      }
+      return {
+        comments: [
+          { noteId: "n1", filePath: "src/foo.ts", hunkIndex: 0, body: "Fix." },
+        ],
+      };
+    });
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: undefined,
+      readTty: async () => "/dev/ttys9",
+      spawn: () => ({
+        exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+      }),
+      runHunkJson,
+      sleep: async (ms: number) => {
+        if (ms === 1_000) resolveExit(0);
+      },
+    });
+    expect(result).toEqual({
+      ok: true,
+      notes: [
+        { noteId: "n1", filePath: "src/foo.ts", hunkIndex: 0, body: "Fix." },
+      ],
+    });
+  });
+
+  it("prefers the freshest session when multiple match the same tty", async () => {
+    const { renderer } = fakeRenderer();
+    let resolveExit!: (code: number) => void;
+    let queriedSessionId: string | undefined;
+    const runHunkJson = mock(async (args: string[]) => {
+      if (args[1] === "list") {
+        return {
+          sessions: [
+            {
+              sessionId: "stale",
+              launchedAt: "2026-07-10T00:00:00Z",
+              terminal: { locations: [{ source: "tty", tty: "/dev/ttys9" }] },
+            },
+            {
+              sessionId: "fresh",
+              launchedAt: "2026-07-11T00:00:00Z",
+              terminal: { locations: [{ source: "tty", tty: "/dev/ttys9" }] },
+            },
+          ],
+        };
+      }
+      queriedSessionId = args[3];
+      return { comments: [] };
+    });
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: undefined,
+      readTty: async () => "/dev/ttys9",
+      spawn: () => ({
+        exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+      }),
+      runHunkJson,
+      sleep: async (ms: number) => {
+        if (ms === 1_000) resolveExit(0);
+      },
+    });
+    expect(result).toEqual({ ok: true, notes: [] });
+    expect(queriedSessionId).toBe("fresh");
+  });
+
   it("falls back to the last snapshot when every final read fails", async () => {
     const { renderer } = fakeRenderer();
     let resolveExit!: (code: number) => void;

@@ -50,6 +50,14 @@ export interface RunHunkReviewDeps {
   resolveRoot?: (cwd: string) => Promise<string | null>;
   runHunkJson?: (args: string[]) => Promise<unknown | null>;
   paneId?: string;
+  /**
+   * Resolve our own controlling tty (e.g. `/dev/ttys084`), or null if stdin
+   * isn't a tty. hunk spawned with inherited stdio shares this tty, so matching
+   * on it finds the review session even when `paneId` discovery can't — notably
+   * inside a tmux `display-popup`, where hunk registers only a `tty` location
+   * and no `{source:"tmux", paneId}` (a popup is not a real pane).
+   */
+  readTty?: () => Promise<string | null>;
   sleep?: (ms: number) => Promise<void>;
   readFileLines?: (path: string) => Promise<string[]>;
   gitStatus?: (root: string) => Promise<string | null>;
@@ -57,7 +65,10 @@ export interface RunHunkReviewDeps {
 
 interface HunkSessionListEntry {
   sessionId: string;
-  terminal?: { locations?: Array<{ source?: string; paneId?: string }> };
+  launchedAt?: string;
+  terminal?: {
+    locations?: Array<{ source?: string; paneId?: string; tty?: string }>;
+  };
 }
 
 function debugLog(message: string): void {
@@ -136,6 +147,75 @@ async function defaultGitStatus(root: string): Promise<string | null> {
     debugLog(`git status --porcelain failed: ${err}`);
     return null;
   }
+}
+
+async function defaultReadTty(): Promise<string | null> {
+  try {
+    // `tty` reports the pathname of the terminal on stdin (fd 0). Resolve this
+    // before the renderer suspends, while fd 0 is still our interactive tty; it
+    // matches the `tty` location hunk records for the child we spawn with
+    // inherited stdio. Exits non-zero ("not a tty") when stdin is redirected.
+    const proc = Bun.spawn(["tty"], {
+      stdin: "inherit",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const [stdout, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    if (exitCode !== 0) return null;
+    const tty = stdout.trim();
+    return tty.startsWith("/dev/") ? tty : null;
+  } catch (err) {
+    debugLog(`tty resolution failed: ${err}`);
+    return null;
+  }
+}
+
+/**
+ * Does this hunk session's terminal match the pane we're launched in or the tty
+ * we share with the hunk child? Either signal is enough; the tty path is what
+ * makes discovery work inside a `display-popup` (no paneId there).
+ */
+function sessionMatchesTerminal(
+  session: HunkSessionListEntry,
+  paneId: string | null | undefined,
+  tty: string | null,
+): boolean {
+  return (
+    session.terminal?.locations?.some(
+      (location) =>
+        (paneId != null &&
+          location.source === "tmux" &&
+          location.paneId === paneId) ||
+        (tty != null && location.source === "tty" && location.tty === tty),
+    ) ?? false
+  );
+}
+
+/**
+ * Pick the newest session by `launchedAt`, so the review we just spawned wins
+ * over any stale session lingering on the same pane or tty (a reused
+ * `/dev/ttysNNN` or a repeat review in the same popup pane). Entries without a
+ * parseable `launchedAt` sort oldest so a dated match always wins.
+ */
+function pickFreshest(
+  sessions: HunkSessionListEntry[],
+): HunkSessionListEntry | null {
+  let best: HunkSessionListEntry | null = null;
+  let bestTime = Number.NEGATIVE_INFINITY;
+  for (const session of sessions) {
+    const parsed = session.launchedAt
+      ? Date.parse(session.launchedAt)
+      : Number.NaN;
+    const time = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+    if (best === null || time >= bestTime) {
+      best = session;
+      bestTime = time;
+    }
+  }
+  return best;
 }
 
 function asSessions(value: unknown): HunkSessionListEntry[] {
@@ -296,6 +376,7 @@ export async function runHunkReview(
   const resolveRoot = deps.resolveRoot ?? resolveRepoRoot;
   const runHunkJson = deps.runHunkJson ?? defaultRunHunkJson;
   const paneId = deps.paneId ?? process.env.TMUX_PANE;
+  const readTty = deps.readTty ?? defaultReadTty;
   const sleep = deps.sleep ?? Bun.sleep;
   const readFileLines =
     deps.readFileLines ??
@@ -307,6 +388,11 @@ export async function runHunkReview(
   if (!root) return { ok: false, error: "not a git repository" };
   const status = await gitStatus(root);
   if (status === "") return { ok: false, error: "no changes to review" };
+
+  // Resolve our tty while fd 0 is still the interactive terminal (before
+  // suspend). This is the discovery fallback when there's no paneId to match,
+  // e.g. inside a display-popup.
+  const tty = await readTty();
 
   try {
     renderer.suspend();
@@ -324,9 +410,10 @@ export async function runHunkReview(
     let sessionId: string | null = null;
     let latestNotes: HunkReviewNote[] = [];
 
-    // Discovery loop: find the hunk session whose tmux location matches this
-    // pane, so we harvest comments from the right review and not a sibling.
-    if (paneId) {
+    // Discovery loop: find the hunk session whose terminal matches this pane or
+    // (in a popup, where there's no paneId) the tty we share with the hunk
+    // child, so we harvest comments from the right review and not a sibling.
+    if (paneId || tty) {
       for (
         let attempt = 0;
         attempt < DISCOVERY_ATTEMPTS && !exited;
@@ -335,13 +422,10 @@ export async function runHunkReview(
         const sessions = asSessions(
           await runHunkJson(["session", "list", "--json"]),
         );
-        sessionId =
-          sessions.find((session) =>
-            session.terminal?.locations?.some(
-              (location) =>
-                location.source === "tmux" && location.paneId === paneId,
-            ),
-          )?.sessionId ?? null;
+        const matches = sessions.filter((session) =>
+          sessionMatchesTerminal(session, paneId, tty),
+        );
+        sessionId = pickFreshest(matches)?.sessionId ?? null;
         if (sessionId) break;
         if (!exited)
           await Promise.race([sleep(DISCOVERY_DELAY_MS), exitPromise]);
