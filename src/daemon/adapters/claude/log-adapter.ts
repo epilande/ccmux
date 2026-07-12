@@ -47,6 +47,31 @@ function capStaleWorking(
   };
 }
 
+/**
+ * Subagent-seeding variant of `capStaleWorking` that also caps `waiting`.
+ * A killed or finished subagent's log commonly ends with an unresolved
+ * tool_use (derives `waiting`), and subagent waiting counts as activity in
+ * `getEffectiveStatus` — replaying an old file must not resurrect it. The
+ * parent path deliberately keeps `waiting` on seed (a real prompt persists
+ * however old it is); this is for subagents only.
+ */
+function capStaleSubagentSeed(state: SessionState): SessionState {
+  if (
+    (state.status !== "working" && state.status !== "waiting") ||
+    !state.lastActivityAt
+  ) {
+    return state;
+  }
+  const age = Date.now() - new Date(state.lastActivityAt).getTime();
+  if (age <= SUBAGENT_STALE_TIMEOUT_MS) return state;
+  return {
+    ...state,
+    status: "idle",
+    attentionType: null,
+    pendingTool: null,
+  };
+}
+
 /** How long a subagents-dir activity probe result stays cached. Parent log
  * parses can arrive many times per second while the lead streams; the probe
  * (readdir + per-file stat) must not run on every one of them. */
@@ -386,9 +411,9 @@ export class ClaudeLogAdapter implements LogAdapter {
     if (offset === 0) {
       const seeded = await this.seedStateFromTail(path);
       // Seeding often replays finished logs (attach fires `add` for every
-      // existing file). Cap silent `working` to idle so they don't come
-      // back to life; idle entries are filtered out by updateSubagent.
-      state = capStaleWorking(seeded.state, SUBAGENT_STALE_TIMEOUT_MS);
+      // existing file). Cap silent working/waiting to idle so they don't
+      // come back to life; idle entries are filtered out by updateSubagent.
+      state = capStaleSubagentSeed(seeded.state);
       this.subagentFileOffsets.set(path, seeded.newOffset);
     } else {
       const { entries, newOffset } = await readLogIncremental(path, offset);

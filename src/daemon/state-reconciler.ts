@@ -128,21 +128,26 @@ export function tickLogAdapters(deps: ReconcilerDeps): void {
 }
 
 /**
- * Downgrade `working` subagents whose logs have gone silent past
- * SUBAGENT_STALE_TIMEOUT_MS. Background teammates (`Agent` tool) never write
- * a terminal `end_turn` to their transcripts, so silence is the only
- * completion signal; without this sweep a finished teammate would keep its
- * parent lifted to `working` forever (see `getEffectiveStatus`). Setting a
- * subagent to idle also removes it: `SessionManager.updateSubagent` filters
- * idle entries out, which is what lets the Claude log adapter tear down its
- * subagents-dir watch on a later parent parse.
+ * Downgrade active (`working` or `waiting`) subagents whose logs have gone
+ * silent past SUBAGENT_STALE_TIMEOUT_MS. Background teammates (`Agent`
+ * tool) never write a terminal `end_turn` to their transcripts, so silence
+ * is the only completion signal; without this sweep a finished teammate
+ * would keep its parent lifted to `working` forever (see
+ * `getEffectiveStatus`). `waiting` is swept by the same rule because a
+ * subagent's waiting is an unresolved tool_use, which both a killed agent
+ * and one mid-tool-call exhibit — and since `getEffectiveStatus` counts
+ * waiting subagents as activity, a frozen one would otherwise lift its
+ * parent forever. Setting a subagent to idle also removes it:
+ * `SessionManager.updateSubagent` filters idle entries out, which is what
+ * lets the Claude log adapter tear down its subagents-dir watch on a later
+ * parent parse.
  */
 export function capStaleSubagents(deps: ReconcilerDeps): void {
   const now = deps.now();
   for (const session of deps.sessionManager.getSessions()) {
     // Iterate a copy: updateSubagent replaces the array as it filters.
     for (const sub of [...session.subagents]) {
-      if (sub.status !== "working") continue;
+      if (sub.status !== "working" && sub.status !== "waiting") continue;
       if (!sub.lastActivityAt) continue;
       const age = now - new Date(sub.lastActivityAt).getTime();
       if (age <= SUBAGENT_STALE_TIMEOUT_MS) continue;

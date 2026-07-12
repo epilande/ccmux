@@ -3055,7 +3055,10 @@ describe("capStaleSubagents", () => {
     expect(subs.map((s) => s.agentId)).toEqual(["sub-fresh"]);
   });
 
-  it("leaves waiting subagents alone regardless of age", () => {
+  it("downgrades stale waiting subagents like working ones", () => {
+    // A subagent's waiting is an unresolved tool_use, which a killed agent
+    // exhibits forever; since waiting counts as activity in
+    // getEffectiveStatus, a frozen one must not lift its parent forever.
     const manager = new SessionManager();
     const id = makeSession(manager, {
       status: "idle",
@@ -3071,9 +3074,26 @@ describe("capStaleSubagents", () => {
 
     capStaleSubagents(makeDeps(manager));
 
-    const subs = manager.getSession(id)!.subagents;
-    expect(subs).toHaveLength(1);
-    expect(subs[0].status).toBe("waiting");
+    expect(manager.getSession(id)!.subagents).toHaveLength(0);
+  });
+
+  it("keeps a recently active waiting subagent", () => {
+    const manager = new SessionManager();
+    const id = makeSession(manager, {
+      status: "idle",
+      subagents: [
+        subagent({
+          status: "waiting",
+          attentionType: "permission",
+          pendingTool: "Bash",
+          lastActivityAt: FRESH,
+        }),
+      ],
+    });
+
+    capStaleSubagents(makeDeps(manager));
+
+    expect(manager.getSession(id)!.subagents).toHaveLength(1);
   });
 
   it("leaves working subagents without lastActivityAt alone", () => {

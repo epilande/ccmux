@@ -313,7 +313,15 @@ function processAssistantEntry(
     };
   }
 
-  if (entry.message.stop_reason === "end_turn") {
+  // `stop_sequence` is terminal like `end_turn`: the model stopped at a
+  // configured stop string, so the turn is over. Background agents commonly
+  // end their transcripts with it (observed live), and treating it as
+  // terminal makes their completion instant instead of waiting out the
+  // silence-based stale sweep.
+  if (
+    entry.message.stop_reason === "end_turn" ||
+    entry.message.stop_reason === "stop_sequence"
+  ) {
     return {
       ...newState,
       status: "idle",
@@ -535,42 +543,33 @@ interface EffectiveStatus {
 
 /**
  * Get the effective status of a session, considering subagent states.
- * Subagent waiting states take precedence (permission > question).
+ *
+ * Active subagents (working OR waiting) lift an idle parent to `working`:
+ * a lead sitting at its prompt while its agents run must never render as
+ * idle/"done", because the session's work provably isn't finished. The
+ * parent reading `idle` is the NORMAL background-agent state, not an
+ * anomaly: the `Agent` tool acks instantly and the lead genuinely ends its
+ * turn while its agents keep working in their own logs.
+ *
+ * A subagent's `waiting` deliberately does NOT surface as waiting on the
+ * row. It is log-derived (an unresolved tool_use reads as permission-
+ * pending), so a subagent simply executing a long tool call looks
+ * identical to one blocked on approval — a red badge here would false-
+ * alarm on every long Bash run under bypassPermissions. Genuine
+ * permission prompts surface in the lead's own pane and reach the row
+ * through the higher-fidelity marker/terminal signals as the parent's own
+ * `waiting`.
+ *
+ * Staleness is bounded by the reconciler: idle subagents self-evict via
+ * updateSubagent, and silent active ones are downgraded by the stale
+ * sweep (SUBAGENT_STALE_TIMEOUT_MS).
  */
 export function getEffectiveStatus(session: Session): EffectiveStatus {
-  let hasWaitingQuestion = false;
-
-  for (const sub of session.subagents) {
-    if (sub.status === "waiting") {
-      if (sub.attentionType === "permission") {
-        return {
-          status: "waiting",
-          attentionType: "permission",
-          fromSubagent: true,
-        };
-      }
-      if (sub.attentionType === "question") {
-        hasWaitingQuestion = true;
-      }
-    }
-  }
-
-  if (hasWaitingQuestion) {
-    return { status: "waiting", attentionType: "question", fromSubagent: true };
-  }
-
-  // A working subagent means the session's work provably isn't finished, so
-  // it must never render as idle/"done" while agents run. The parent reading
-  // `idle` here is the NORMAL background-agent state, not an anomaly: the
-  // `Agent` tool acks instantly and the lead genuinely ends its turn
-  // (`end_turn` in its own transcript) while its agents keep working in
-  // their own logs. Lift the parent back to `working`. Staleness is bounded
-  // by the reconciler: idle subagents self-evict via updateSubagent, and
-  // silent `working` ones are downgraded by the stale sweep
-  // (SUBAGENT_STALE_TIMEOUT_MS).
   if (
     session.status === "idle" &&
-    session.subagents.some((sub) => sub.status === "working")
+    session.subagents.some(
+      (sub) => sub.status === "working" || sub.status === "waiting",
+    )
   ) {
     return { status: "working", attentionType: null, fromSubagent: true };
   }

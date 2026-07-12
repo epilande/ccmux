@@ -146,13 +146,14 @@ export function computeStatusSummary(
     idle: 0,
   };
   for (const { session } of sessions) {
-    const status = session.status;
+    // Effective status, not raw: a lead idle at its prompt with subagents
+    // running counts as working, matching what the row renders.
+    const { status, attentionType } = getEffectiveStatus(session);
     if (status === "working") {
       summary.working++;
     } else if (status === "idle") {
       summary.idle++;
     } else if (status === "waiting") {
-      const { attentionType } = getEffectiveStatus(session);
       if (attentionType === "permission") {
         summary.waitingPermission++;
       } else if (attentionType === "plan_approval") {

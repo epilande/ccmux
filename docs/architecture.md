@@ -71,7 +71,7 @@ Because a transcript lives in exactly one tree, marker events route to the watch
 
 ## Subagent tracking (Claude)
 
-Claude Code writes per-subagent transcripts to `<projects>/<encoded>/<sessionId>/subagents/agent-*.jsonl`; `ClaudeLogAdapter` owns a private chokidar instance for that layer and folds each file's derived state into `Session.subagents`. `getEffectiveStatus` (used by every TUI consumer) then lifts the parent: a waiting subagent makes the parent `waiting`, and a working subagent lifts an `idle` parent to `working` so a lead sitting at its prompt never renders as done while its agents run.
+Claude Code writes per-subagent transcripts to `<projects>/<encoded>/<sessionId>/subagents/agent-*.jsonl`; `ClaudeLogAdapter` owns a private chokidar instance for that layer and folds each file's derived state into `Session.subagents`. `getEffectiveStatus` (used by every TUI consumer) then lifts the parent: any active subagent (working or waiting) lifts an `idle` parent to `working` (rendered as "agents"), so a lead sitting at its prompt never renders as done while its agents run. A subagent's `waiting` deliberately does NOT surface as row-level waiting: it is log-derived from an unresolved tool_use, which a tool mid-execution and a genuine approval prompt exhibit identically, so it would false-alarm under bypassPermissions. Genuine permission prompts surface in the lead's own pane and reach the row through marker/terminal signals as the parent's own `waiting`.
 
 Subagents come in two flavors with different lifecycles, and the adapter must handle both:
 
