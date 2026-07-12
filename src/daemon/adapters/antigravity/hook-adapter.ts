@@ -9,10 +9,7 @@ import {
 } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import {
-  PREINVOCATION_HOOK_SCRIPT,
-  STOP_HOOK_SCRIPT,
-} from "./hook-scripts";
+import { PREINVOCATION_HOOK_SCRIPT, STOP_HOOK_SCRIPT } from "./hook-scripts";
 import {
   findPaneTrackedSession,
   type HookAdapter,
@@ -53,7 +50,10 @@ export class AntigravityHookAdapter implements HookAdapter {
       // Never add PreToolUse or PostToolUse. In agy v1.1.1, an empty
       // PreToolUse response silently denies the user's tool call.
       PreInvocation: [
-        { type: "command", command: join(this.scriptsDir, PREINVOCATION_SCRIPT) },
+        {
+          type: "command",
+          command: join(this.scriptsDir, PREINVOCATION_SCRIPT),
+        },
       ],
       Stop: [{ type: "command", command: join(this.scriptsDir, STOP_SCRIPT) }],
     };
@@ -75,7 +75,9 @@ export class AntigravityHookAdapter implements HookAdapter {
       } catch (error) {
         return {
           changed: false,
-          lines: [`Refused to modify ${this.hooksFile}: ${errorMessage(error)}`],
+          lines: [
+            `Refused to modify ${this.hooksFile}: ${errorMessage(error)}`,
+          ],
         };
       }
     }
@@ -93,7 +95,9 @@ export class AntigravityHookAdapter implements HookAdapter {
         const wasPresent = existsSync(path);
         writeFileSync(path, content);
         chmodSync(path, 0o755);
-        lines.push(`${wasPresent ? "Updated" : "Created"} hook script: ${path}`);
+        lines.push(
+          `${wasPresent ? "Updated" : "Created"} hook script: ${path}`,
+        );
         changed = true;
       }
     }
@@ -128,7 +132,9 @@ export class AntigravityHookAdapter implements HookAdapter {
           changed = true;
         }
       } catch (error) {
-        lines.push(`Refused to modify ${this.hooksFile}: ${errorMessage(error)}`);
+        lines.push(
+          `Refused to modify ${this.hooksFile}: ${errorMessage(error)}`,
+        );
       }
     }
     for (const name of [PREINVOCATION_SCRIPT, STOP_SCRIPT]) {
@@ -165,8 +171,13 @@ export class AntigravityHookAdapter implements HookAdapter {
     if (!this.isInstalled()) return [];
     for (const name of [PREINVOCATION_SCRIPT, STOP_SCRIPT]) {
       const path = join(this.scriptsDir, name);
-      if (!existsSync(path) || !readFileSync(path, "utf-8").includes(SENTINEL)) {
-        return [`antigravity: hook script missing or version-skewed at ${path}`];
+      if (
+        !existsSync(path) ||
+        !readFileSync(path, "utf-8").includes(SENTINEL)
+      ) {
+        return [
+          `antigravity: hook script missing or version-skewed at ${path}`,
+        ];
       }
     }
     return [];
@@ -203,13 +214,6 @@ export class AntigravityHookAdapter implements HookAdapter {
       return;
     }
     ctx.sessionManager.updateSession(session.id, stateFromMarker(marker));
-  }
-
-  async onMarkerChanged(
-    marker: SessionPidMarker,
-    ctx: HookManagerContext,
-  ): Promise<void> {
-    await this.onMarkerAdded(marker, ctx);
   }
 
   async onMarkerRemoved(
