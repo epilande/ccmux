@@ -67,3 +67,9 @@ export function emptySummary(): StatusSummary {
     idle: 0,
   };
 }
+
+// Strip single-border box chars and whitespace from a captured frame so an
+// assertion matches a message regardless of where word-wrap split it.
+export function squish(s: string): string {
+  return s.replace(/[│┌┐└┘─\s]/g, "");
+}
