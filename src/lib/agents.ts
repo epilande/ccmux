@@ -305,6 +305,56 @@ export const CODEX_SESSION_FILE_PATTERN =
 
 export const BUILTIN_AGENTS: AgentDef[] = [
   {
+    name: "antigravity",
+    displayName: "Antigravity",
+    shortCode: "ag",
+    processMatch: /^agy$/i,
+    // Path form only (like gemini): the argv[0] basename match above covers
+    // bare `agy ...`, and a bare-word pattern would false-positive on `agy`
+    // appearing as an argument. Must not match the desktop IDE launcher
+    // (.../Antigravity.app/Contents/Resources/app/bin/antigravity).
+    commandPatterns: [/\/agy(?:\s|$)/i],
+    versionCommand: "agy --version",
+    terminalRules: [
+      {
+        matchAny: ["requesting permission for:", "do you want to proceed?"],
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Command",
+      },
+      {
+        // The footer is present only while a turn is active. Captions can
+        // also occur in transcript text, so they are not detection keys.
+        matchAny: ["esc to cancel"],
+        status: "working",
+        attentionType: null,
+        pendingTool: null,
+      },
+    ],
+    errorRules: [
+      {
+        match:
+          /(?:rate|usage|message|hourly|daily|weekly)\s*limit\s+(?:was\s+)?(?:reached|exceeded|exhausted)/i,
+        kind: "rate_limit",
+      },
+      {
+        match:
+          /Authentication required\. Please visit the URL to log in|Error: authentication failed or timed out/i,
+        kind: "agent_error",
+      },
+    ],
+    resumeCommand: "agy --conversation {id}",
+    executable: "agy",
+    invokeMode: {
+      args: ["agy", "-p", "{prompt}"],
+      output: { kind: "stdout" },
+    },
+    // The idle footer line also carries the model name right-aligned
+    // ("? for shortcuts        Gemini 3.5 Flash (Medium)"), so no end anchor.
+    readyPattern: /^\? for shortcuts\b/i,
+    hooks: { markerDir: MARKERS_DIR, type: "antigravity" },
+  },
+  {
     name: "claude",
     shortCode: "cc",
     processMatch: /\bclaude\b/i,

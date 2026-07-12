@@ -16,12 +16,12 @@ When running multiple AI coding agent sessions across tmux panes, it's hard to k
 
 It works with your existing tmux workflow. You don't change how you launch or run your agents; ccmux discovers what's already running in your panes, so as long as you're in tmux with a supported agent, it just works.
 
-**Built-in support for:** Claude Code, Codex, Cursor, OpenCode, Pi, Gemini CLI, plus [custom agent definitions](#-custom-agents) via config.
+**Built-in support for:** Antigravity, Claude Code, Codex, Cursor, OpenCode, Pi, Gemini CLI, plus [custom agent definitions](#-custom-agents) via config.
 
 ## ✨ Features
 
 - 🎯 **Live Session States**: Every agent tracked as idle, working, or waiting (permission / plan approval / question), flagged the moment one needs you
-- 🧩 **Multi-Agent**: Claude Code, Codex, Cursor, OpenCode, Pi, Gemini CLI, plus custom agents via config
+- 🧩 **Multi-Agent**: Antigravity, Claude Code, Codex, Cursor, OpenCode, Pi, Gemini CLI, plus custom agents via config
 - 🔄 **Real-Time**: Background daemon streams state changes instantly over SSE, no polling, no refresh
 - 👁️ **Live Preview**: Split-pane view of the selected session's pane content
 - ⚡ **Act in Place**: Tab into the preview to approve, answer, or type, keys go straight to that pane
@@ -113,7 +113,7 @@ ccmux setup
 | `ccmux config get <key>`                    | Get a single preference value                                                                   |
 | `ccmux config list`                         | List all preferences                                                                            |
 | `ccmux config themes`                       | List built-in themes (marks the active one)                                                     |
-| `ccmux setup`                               | Install hooks for every supported agent found on PATH (Claude + Codex + Cursor + OpenCode + Pi) |
+| `ccmux setup`                               | Install hooks for every supported agent found on PATH (Antigravity + Claude + Codex + Cursor + OpenCode + Pi) |
 | `ccmux setup --agent <name>`                | Limit install/uninstall/status to specific agent(s); forces install even if not found on PATH   |
 | `ccmux setup --status`                      | Report install state without writing anything                                                   |
 | `ccmux setup --uninstall`                   | Remove hooks (preserves user-owned hook entries)                                                |
@@ -221,7 +221,7 @@ echo "what is 2 + 2" | ccmux invoke claude
 git diff main | ccmux invoke claude "Review this diff"
 ```
 
-Claude runs interactively in a dedicated tmux session and returns clean text parsed from the transcript JSONL. Codex, Cursor, OpenCode, Pi, and Gemini run as non-interactive subprocesses (`codex exec -o`, `cursor-agent --print`, `opencode run --format json`, `pi -p`, `gemini -p`) and return the agent's clean response text.
+Claude runs interactively in a dedicated tmux session and returns clean text parsed from the transcript JSONL. Antigravity, Codex, Cursor, OpenCode, Pi, and Gemini run as non-interactive subprocesses (`agy -p`, `codex exec -o`, `cursor-agent --print`, `opencode run --format json`, `pi -p`, `gemini -p`) and return the agent's clean response text.
 
 For orchestration, name an invocation with `--id <id>`, then use `ccmux invoke list`, `ccmux invoke cancel <id>`, and `ccmux invoke result <id>` to watch, cancel, or read its full captured output by that id. See [`docs/invoke.md`](docs/invoke.md#fire-and-poll---id-list-cancel-result) for the fire-and-poll reference.
 
@@ -438,9 +438,18 @@ ccmux setup --status           # Report install state without writing
 ccmux setup --uninstall        # Remove hooks
 ```
 
-Hooks write PID marker files under `~/.config/ccmux/session-pids/` whenever a session starts, a turn completes, or the agent asks the user to approve a tool. The daemon picks up the markers in real time via a filesystem watcher. See [`docs/architecture.md#hook-lifecycle`](./docs/architecture.md#hook-lifecycle) for the full flow (marker writes, chokidar dispatch, per-agent correlation).
+Hooks write PID marker files under `~/.config/ccmux/session-pids/` whenever a session starts or begins its first invocation, a turn completes, or the agent asks the user to approve a tool. The daemon picks up the markers in real time via a filesystem watcher. See [`docs/architecture.md#hook-lifecycle`](./docs/architecture.md#hook-lifecycle) for the full flow (marker writes, chokidar dispatch, per-agent correlation).
 
 Gemini CLI is tracked through process detection and terminal pattern matching, so it needs no setup.
+
+### Antigravity CLI
+
+Uses Antigravity's global named-hook config at `~/.gemini/config/hooks.json` with two scripts under `~/.gemini/config/hooks/`:
+
+- `ccmux-preinvocation.sh`: creates or refreshes the marker as `working` before each model invocation
+- `ccmux-stop.sh`: refreshes the marker as `idle` when the execution loop stops
+
+Antigravity exposes no session-start hook, so a fresh idle session remains pane-tracked until its first prompt. ccmux deliberately does not install `PreToolUse`: in Antigravity v1.1.1, an empty `{}` response silently denies the tool call. Permission attention instead comes from the native permission dialog detected in pane content.
 
 ### Claude Code
 
