@@ -979,6 +979,67 @@ describe("status-machine", () => {
       expect(result.attentionType).toBe("permission");
       expect(result.fromSubagent).toBe(true);
     });
+
+    it("should lift an idle parent to working when a subagent is still working", () => {
+      const session: Session = {
+        ...baseSession,
+        status: "idle",
+        attentionState: "unread",
+        subagents: [
+          {
+            agentId: "sub1",
+            status: "working",
+            attentionType: null,
+            pendingTool: null,
+            lastActivityAt: null,
+          },
+        ],
+      };
+      const result = getEffectiveStatus(session);
+      expect(result.status).toBe("working");
+      expect(result.attentionType).toBe(null);
+      expect(result.fromSubagent).toBe(true);
+    });
+
+    it("should keep an idle parent idle when all subagents are idle", () => {
+      const session: Session = {
+        ...baseSession,
+        status: "idle",
+        subagents: [
+          {
+            agentId: "sub1",
+            status: "idle",
+            attentionType: null,
+            pendingTool: null,
+            lastActivityAt: null,
+          },
+        ],
+      };
+      const result = getEffectiveStatus(session);
+      expect(result.status).toBe("idle");
+      expect(result.fromSubagent).toBe(false);
+    });
+
+    it("should not override a waiting parent when a subagent is working", () => {
+      const session: Session = {
+        ...baseSession,
+        status: "waiting",
+        attentionType: "permission",
+        subagents: [
+          {
+            agentId: "sub1",
+            status: "working",
+            attentionType: null,
+            pendingTool: null,
+            lastActivityAt: null,
+          },
+        ],
+      };
+      const result = getEffectiveStatus(session);
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("permission");
+      expect(result.fromSubagent).toBe(false);
+    });
   });
 
   describe("Coverage: unknown entry types", () => {

@@ -1,9 +1,13 @@
-import { PANE_IDLE_THRESHOLD_MS } from "../lib/config";
+import {
+  PANE_IDLE_THRESHOLD_MS,
+  SUBAGENT_STALE_TIMEOUT_MS,
+} from "../lib/config";
 import type { AgentDef } from "../lib/agents";
 import type {
   ProcessInfo,
   Session,
   SessionState,
+  SubagentState,
   TmuxPane,
 } from "../types/session";
 import {
@@ -31,6 +35,7 @@ export interface ReconcilerDeps {
   sessionManager: {
     getSessions(): Readonly<Session>[];
     updateSession(sessionId: string, updates: Partial<Session>): boolean;
+    updateSubagent(sessionId: string, subagent: SubagentState): boolean;
     setAttentionState(
       sessionId: string,
       state: "unread" | "read" | null,
@@ -87,8 +92,10 @@ export interface ScanSnapshot {
  * Ordering matters:
  * 1. Tool execution detection (upgrades waiting-on-Bash to working)
  * 2. Native Claude state resolution (PID liveness + pane inspection)
- * 3. Pane-tracked session reconciliation (pane inspection + hooks)
- * 4. Attention state reconciliation (unread/read/null inbox tracking)
+ * 3. Stale subagent sweep (silent working subagents count as finished)
+ * 4. Log adapter tick (subagent-dir watch sync independent of parses)
+ * 5. Pane-tracked session reconciliation (pane inspection + hooks)
+ * 6. Attention state reconciliation (unread/read/null inbox tracking)
  */
 export async function reconcileAll(
   deps: ReconcilerDeps,
@@ -100,9 +107,53 @@ export async function reconcileAll(
 
   detectToolExecution(deps, claudeProcesses, snapshot);
   await resolveNativeClaudeStates(deps, claudeProcesses, snapshot);
+  capStaleSubagents(deps);
+  tickLogAdapters(deps);
   await reconcileNativeCascadeSessions(deps);
   await reconcilePaneTrackedSessions(deps, snapshot.panes);
   await reconcileAttentionStates(deps);
+}
+
+/**
+ * Give each session's log adapter a per-tick nudge (`onReconcileTick`).
+ * Parent-log-parse hooks stop firing the moment a session's transcript goes
+ * quiet, but background teammates keep writing their own transcripts — the
+ * tick lets the Claude adapter attach to (or tear down) a subagents dir
+ * whose activity changed after the parent's last parse.
+ */
+export function tickLogAdapters(deps: ReconcilerDeps): void {
+  for (const session of deps.sessionManager.getSessions()) {
+    deps.logAdapters.get(session.agentType)?.onReconcileTick?.(session);
+  }
+}
+
+/**
+ * Downgrade `working` subagents whose logs have gone silent past
+ * SUBAGENT_STALE_TIMEOUT_MS. Background teammates (`Agent` tool) never write
+ * a terminal `end_turn` to their transcripts, so silence is the only
+ * completion signal; without this sweep a finished teammate would keep its
+ * parent lifted to `working` forever (see `getEffectiveStatus`). Setting a
+ * subagent to idle also removes it: `SessionManager.updateSubagent` filters
+ * idle entries out, which is what lets the Claude log adapter tear down its
+ * subagents-dir watch on a later parent parse.
+ */
+export function capStaleSubagents(deps: ReconcilerDeps): void {
+  const now = deps.now();
+  for (const session of deps.sessionManager.getSessions()) {
+    // Iterate a copy: updateSubagent replaces the array as it filters.
+    for (const sub of [...session.subagents]) {
+      if (sub.status !== "working") continue;
+      if (!sub.lastActivityAt) continue;
+      const age = now - new Date(sub.lastActivityAt).getTime();
+      if (age <= SUBAGENT_STALE_TIMEOUT_MS) continue;
+      deps.sessionManager.updateSubagent(session.id, {
+        ...sub,
+        status: "idle",
+        attentionType: null,
+        pendingTool: null,
+      });
+    }
+  }
 }
 
 /**

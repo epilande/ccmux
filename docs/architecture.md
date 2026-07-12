@@ -69,6 +69,22 @@ Claude Code writes transcripts to `$CLAUDE_CONFIG_DIR/projects`, so a second acc
 
 Because a transcript lives in exactly one tree, marker events route to the watcher that owns the session: `LogWatcher.ownsSession(id)` reports whether that tree has discovered the session's log, and the Claude adapter's `ownerFor` (`getLogWatchers("claude")` → `find(ownsSession) ?? watchers[0]`) picks the owning watcher, falling back to the primary for sessions no tree has discovered yet (e.g. a marker written before the first turn). For the same reason, per-watcher freshness state (`isRecentlyProcessed`) is folded across all Claude watchers in the reconciler, so a second-account session isn't invisible to the just-processed debounce guard.
 
+## Subagent tracking (Claude)
+
+Claude Code writes per-subagent transcripts to `<projects>/<encoded>/<sessionId>/subagents/agent-*.jsonl`; `ClaudeLogAdapter` owns a private chokidar instance for that layer and folds each file's derived state into `Session.subagents`. `getEffectiveStatus` (used by every TUI consumer) then lifts the parent: a waiting subagent makes the parent `waiting`, and a working subagent lifts an `idle` parent to `working` so a lead sitting at its prompt never renders as done while its agents run.
+
+Subagents come in two flavors with different lifecycles, and the adapter must handle both:
+
+- **Blocking `Task` tools**: the parent transcript records the tool_use, so the status machine tracks pending task IDs (`hasActiveSubagent`), and the subagent's own log ends with `end_turn` (it self-reports idle, and idle entries self-evict via `SessionManager.updateSubagent`).
+- **Background teammates** (`Agent` tool, `taskKind: in_process_teammate`): the tool_result acks in milliseconds and the parent ends its turn, so the parent log carries **no** subagent bookkeeping, and the teammate's transcript never records a terminal `end_turn`. Filenames embed the agent name (`agent-areviewer-functionality-<hex>.jsonl`), not just hex.
+
+That forces four design points:
+
+1. **Discovery keys off the directory, not the parent log**: the adapter attaches when `hasActiveSubagent` is set _or_ when any `agent-*.jsonl` in the subagents dir was written within `SUBAGENT_STALE_TIMEOUT_MS` (probe result cached ~15s, since parent parses are frequent).
+2. **Evaluation cannot be parse-driven alone**: parent log parses stop at `end_turn`, and teammates often start writing only after the parent's last parse (verified live). `LogAdapter.onReconcileTick`, called from `tickLogAdapters` every reconciler scan, re-evaluates attach/teardown independent of parent activity.
+3. **Completion is inferred from silence**: the reconciler's `capStaleSubagents` sweep downgrades `working` subagents whose logs have been silent past `SUBAGENT_STALE_TIMEOUT_MS`; the downgrade to idle also removes the entry. The threshold is deliberately generous (a subagent inside one long Bash call appends nothing while genuinely working).
+4. **Teardown requires all signals gone**: the dir watch is dropped only when the subagents array is empty, the parent has no pending tasks, and the dir is inactive. The parent reading `idle` is explicitly _not_ an exit signal — it's the normal background-agent state. Sharing the staleness threshold between the attach probe, the seed cap (`capStaleWorking` on re-attach seeding), and the sweep is what prevents attach/teardown loops.
+
 ## Hook lifecycle
 
 <picture>

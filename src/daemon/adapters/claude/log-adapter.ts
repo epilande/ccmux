@@ -1,10 +1,11 @@
 import { watch, type FSWatcher } from "chokidar";
-import { existsSync } from "fs";
+import { existsSync, readdirSync, statSync } from "fs";
 import { join, dirname } from "path";
 import {
   PROJECTS_DIR,
   MAX_LOG_ENTRIES,
   PANE_IDLE_THRESHOLD_MS,
+  SUBAGENT_STALE_TIMEOUT_MS,
 } from "../../../lib/config";
 import {
   extractSessionIdFromPath,
@@ -28,11 +29,16 @@ import type {
  * When a Claude log's last activity is older than the idle threshold, a
  * `working` status cannot be genuine — the session just went silent.
  * Cap it to idle to prevent phantom working→idle flaps on daemon restart.
+ * Subagent seeding passes SUBAGENT_STALE_TIMEOUT_MS instead, so re-watching
+ * a dir of finished subagent logs doesn't resurrect them as `working`.
  */
-function capStaleWorking(state: SessionState): SessionState {
+function capStaleWorking(
+  state: SessionState,
+  thresholdMs: number = PANE_IDLE_THRESHOLD_MS,
+): SessionState {
   if (state.status !== "working" || !state.lastActivityAt) return state;
   const age = Date.now() - new Date(state.lastActivityAt).getTime();
-  if (age <= PANE_IDLE_THRESHOLD_MS) return state;
+  if (age <= thresholdMs) return state;
   return {
     ...state,
     status: "idle",
@@ -41,14 +47,29 @@ function capStaleWorking(state: SessionState): SessionState {
   };
 }
 
+/** How long a subagents-dir activity probe result stays cached. Parent log
+ * parses can arrive many times per second while the lead streams; the probe
+ * (readdir + per-file stat) must not run on every one of them. */
+const DIR_ACTIVITY_CACHE_TTL_MS = 15_000;
+
 /**
  * Claude Code log adapter.
  *
  * Wraps the existing Claude-specific parser and status machine, and owns
- * a private chokidar instance for Task-tool subagent log files. The main
- * `LogWatcher` watches Claude session files at `PROJECTS_DIR/<encoded>/*.jsonl`
- * (depth:1); this adapter watches the deeper `<session>/subagents/agent-*.jsonl`
- * layer that holds per-subagent log output.
+ * a private chokidar instance for subagent log files. The main `LogWatcher`
+ * watches Claude session files at `PROJECTS_DIR/<encoded>/*.jsonl` (depth:1);
+ * this adapter watches the deeper `<session>/subagents/agent-*.jsonl` layer
+ * that holds per-subagent log output.
+ *
+ * Subagents come in two flavors with different lifecycles:
+ * - Blocking `Task` tools: the parent log tracks pending task IDs
+ *   (`hasActiveSubagent`), and the subagent's own log ends with `end_turn`.
+ * - Background teammates (`Agent` tool, `taskKind: in_process_teammate`):
+ *   the tool_result acks instantly and the parent ends its turn, so the
+ *   parent log carries no subagent bookkeeping and the teammate's log never
+ *   records `end_turn`. Discovery keys off write activity in the subagents
+ *   dir, and completion is inferred from silence (the reconciler's stale
+ *   sweep, SUBAGENT_STALE_TIMEOUT_MS).
  */
 export class ClaudeLogAdapter implements LogAdapter {
   readonly agentType = "claude";
@@ -60,6 +81,10 @@ export class ClaudeLogAdapter implements LogAdapter {
   private subagentWatcher: FSWatcher | null = null;
   private watchedSubagentDirs = new Set<string>();
   private subagentFileOffsets = new Map<string, number>();
+  private dirActivityCache = new Map<
+    string,
+    { checkedAt: number; active: boolean }
+  >();
 
   // `projectsDir` defaults to the primary `~/.claude/projects`. A second
   // instance pointed at another Claude config dir's `projects` tree (e.g.
@@ -132,14 +157,34 @@ export class ClaudeLogAdapter implements LogAdapter {
     }
     this.watchedSubagentDirs.clear();
     this.subagentFileOffsets.clear();
+    this.dirActivityCache.clear();
   }
 
   onSessionStateUpdated(sessionId: string, state: SessionState): void {
+    this.syncSubagentWatch(sessionId, state.hasActiveSubagent === true);
+  }
+
+  /**
+   * Reconciler-driven re-evaluation. Parent log parses stop at `end_turn`,
+   * but background teammates keep writing their own transcripts afterwards
+   * — without this tick, a subagents dir that becomes active after the
+   * parent's last parse would never be picked up (and a watched dir would
+   * never be torn down once everything went quiet).
+   */
+  onReconcileTick(session: Readonly<Session>): void {
+    if (session.agentType !== "claude") return;
+    // `hasActiveSubagent` is parse-state, not persisted on Session; the
+    // tick only contributes the dir-activity signal. Blocking-Task attach
+    // still comes from the parse path.
+    this.syncSubagentWatch(session.id, false);
+  }
+
+  private syncSubagentWatch(
+    sessionId: string,
+    hasActiveSubagent: boolean,
+  ): void {
     const session = this.sessionManager.getSession(sessionId);
     if (!session || !session.logPath) return;
-
-    // Fast path: no active subagent and no existing subagents → nothing to do.
-    if (!state.hasActiveSubagent && session.subagents.length === 0) return;
 
     const subagentDir = this.getSubagentDir(
       session.logPath,
@@ -147,28 +192,69 @@ export class ClaudeLogAdapter implements LogAdapter {
     );
     const isWatching = this.watchedSubagentDirs.has(subagentDir);
 
-    if (state.hasActiveSubagent && !isWatching) {
-      this.startWatchingSubagents(sessionId);
+    if (!isWatching) {
+      // Attach on either subagent signal:
+      // - `hasActiveSubagent`: the parent log recorded a blocking `Task`
+      //   tool_use whose result hasn't arrived yet.
+      // - recent write activity in the subagents dir: background teammates
+      //   (`Agent` tool) ack instantly and the parent ends its turn, so the
+      //   parent log carries no Task bookkeeping at all. The files being
+      //   actively written is the only signal they exist.
+      if (hasActiveSubagent || this.subagentDirRecentlyActive(subagentDir)) {
+        this.startWatchingSubagents(sessionId);
+      }
       return;
     }
 
-    if (session.subagents.length > 0) {
-      const allSubagentsIdle = session.subagents.every(
-        (s) => s.status === "idle",
-      );
-      const shouldClear =
-        state.status === "idle" ||
-        !state.hasActiveSubagent ||
-        (state.status === "waiting" && allSubagentsIdle);
+    // Watching: decide whether the run is over. Idle subagents remove
+    // themselves (SessionManager.updateSubagent filters them out), so a
+    // non-empty array means live subagents — never tear down under those,
+    // even when the parent reads idle (a lead sitting at its prompt while
+    // teammates work is the normal background-agent state, not an exit
+    // signal). Working entries whose logs went silent are downgraded by the
+    // reconciler's stale sweep, which empties the array and lets this
+    // teardown fire on a later tick or parse.
+    if (
+      session.subagents.length === 0 &&
+      !hasActiveSubagent &&
+      !this.subagentDirRecentlyActive(subagentDir)
+    ) {
+      this.stopWatchingSubagents(sessionId);
+    }
+  }
 
-      if (shouldClear) {
-        if (isWatching) {
-          this.stopWatchingSubagents(sessionId);
-        } else {
-          this.sessionManager.clearSubagents(sessionId);
+  /**
+   * True when any `agent-*.jsonl` in the dir was modified within
+   * SUBAGENT_STALE_TIMEOUT_MS. Results are cached briefly (see
+   * DIR_ACTIVITY_CACHE_TTL_MS) because this runs on parent log parses.
+   * Sharing the staleness threshold with the reconciler sweep is what
+   * prevents an attach/teardown loop: any file old enough to fail this
+   * probe also seeds/caps to idle rather than `working`.
+   */
+  private subagentDirRecentlyActive(subagentDir: string): boolean {
+    const cached = this.dirActivityCache.get(subagentDir);
+    const now = Date.now();
+    if (cached && now - cached.checkedAt <= DIR_ACTIVITY_CACHE_TTL_MS) {
+      return cached.active;
+    }
+
+    let active = false;
+    try {
+      for (const name of readdirSync(subagentDir)) {
+        if (!name.startsWith("agent-") || !name.endsWith(".jsonl")) continue;
+        const { mtimeMs } = statSync(join(subagentDir, name));
+        if (now - mtimeMs <= SUBAGENT_STALE_TIMEOUT_MS) {
+          active = true;
+          break;
         }
       }
+    } catch {
+      // Missing dir or race with file removal → treat as inactive.
+      active = false;
     }
+
+    this.dirActivityCache.set(subagentDir, { checkedAt: now, active });
+    return active;
   }
 
   onSessionRemoved(sessionId: string): void {
@@ -179,6 +265,9 @@ export class ClaudeLogAdapter implements LogAdapter {
       session.logPath,
       this.getSessionLogKey(session),
     );
+    // Unconditional: onReconcileTick probes (and caches) every session, so
+    // even one that never spawned subagents has an entry to drop here.
+    this.dirActivityCache.delete(subagentDir);
     if (!this.watchedSubagentDirs.has(subagentDir)) return;
 
     this.subagentWatcher?.unwatch(subagentDir);
@@ -202,8 +291,12 @@ export class ClaudeLogAdapter implements LogAdapter {
   private extractSubagentInfo(
     path: string,
   ): { sessionId: string; agentId: string } | null {
+    // Agent IDs come in two shapes: bare hex for anonymous Task subagents
+    // (`agent-a3a022...jsonl`) and name-prefixed for named agents/teammates
+    // (`agent-areviewer-functionality-962e7b...jsonl`), so accept anything
+    // between `agent-` and `.jsonl`.
     const match = path.match(
-      /\/([0-9a-f-]{36})\/subagents\/agent-([a-f0-9]+)\.jsonl$/,
+      /\/([0-9a-f-]{36})\/subagents\/agent-([^/]+)\.jsonl$/,
     );
     return match ? { sessionId: match[1], agentId: match[2] } : null;
   }
@@ -267,6 +360,7 @@ export class ClaudeLogAdapter implements LogAdapter {
 
     this.subagentWatcher?.unwatch(subagentDir);
     this.watchedSubagentDirs.delete(subagentDir);
+    this.dirActivityCache.delete(subagentDir);
 
     for (const path of this.subagentFileOffsets.keys()) {
       if (path.startsWith(subagentDir)) {
@@ -291,7 +385,10 @@ export class ClaudeLogAdapter implements LogAdapter {
 
     if (offset === 0) {
       const seeded = await this.seedStateFromTail(path);
-      state = seeded.state;
+      // Seeding often replays finished logs (attach fires `add` for every
+      // existing file). Cap silent `working` to idle so they don't come
+      // back to life; idle entries are filtered out by updateSubagent.
+      state = capStaleWorking(seeded.state, SUBAGENT_STALE_TIMEOUT_MS);
       this.subagentFileOffsets.set(path, seeded.newOffset);
     } else {
       const { entries, newOffset } = await readLogIncremental(path, offset);

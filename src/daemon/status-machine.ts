@@ -559,6 +559,22 @@ export function getEffectiveStatus(session: Session): EffectiveStatus {
     return { status: "waiting", attentionType: "question", fromSubagent: true };
   }
 
+  // A working subagent means the session's work provably isn't finished, so
+  // it must never render as idle/"done" while agents run. The parent reading
+  // `idle` here is the NORMAL background-agent state, not an anomaly: the
+  // `Agent` tool acks instantly and the lead genuinely ends its turn
+  // (`end_turn` in its own transcript) while its agents keep working in
+  // their own logs. Lift the parent back to `working`. Staleness is bounded
+  // by the reconciler: idle subagents self-evict via updateSubagent, and
+  // silent `working` ones are downgraded by the stale sweep
+  // (SUBAGENT_STALE_TIMEOUT_MS).
+  if (
+    session.status === "idle" &&
+    session.subagents.some((sub) => sub.status === "working")
+  ) {
+    return { status: "working", attentionType: null, fromSubagent: true };
+  }
+
   return {
     status: session.status,
     attentionType: session.attentionType,
