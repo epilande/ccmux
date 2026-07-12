@@ -1,5 +1,8 @@
 <div align="center">
-  <h1>ccmux 🔮</h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img alt="ccmux" src="assets/logo.svg" width="160">
+  </picture>
 </div>
 
 <p align="center">
