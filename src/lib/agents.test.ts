@@ -2,6 +2,36 @@ import { describe, expect, it } from "bun:test";
 import { BUILTIN_AGENTS, findAgentForProcess, getAgents } from "./agents";
 
 describe("findAgentForProcess", () => {
+  it("matches Antigravity CLI commands without matching the IDE launcher", () => {
+    for (const command of [
+      "agy",
+      "/Users/x/.local/bin/agy",
+      "agy -c",
+      "agy --conversation abc",
+    ]) {
+      expect(findAgentForProcess(command, BUILTIN_AGENTS)?.name).toBe(
+        "antigravity",
+      );
+    }
+    expect(
+      findAgentForProcess(
+        "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity",
+        BUILTIN_AGENTS,
+      ),
+    ).toBeNull();
+    expect(findAgentForProcess("antigravity", BUILTIN_AGENTS)).toBeNull();
+  });
+
+  it("matches agy via commandPatterns when argv[0] is a wrapper", () => {
+    const agent = findAgentForProcess(
+      "sh -c /Users/x/.local/bin/agy",
+      BUILTIN_AGENTS,
+    );
+    expect(agent?.name).toBe("antigravity");
+    expect(
+      findAgentForProcess("claude --agy-flavored-flag", BUILTIN_AGENTS)?.name,
+    ).toBe("claude");
+  });
   it("matches claude executable", () => {
     const agent = findAgentForProcess("claude --resume abc", BUILTIN_AGENTS);
     expect(agent?.name).toBe("claude");

@@ -8,6 +8,7 @@ describe("terminal-detector", () => {
   const claude = getBuiltinAgent("claude");
   const gemini = getBuiltinAgent("gemini");
   const cursor = getBuiltinAgent("cursor");
+  const antigravity = getBuiltinAgent("antigravity");
 
   it("detects waiting/permission prompts for Codex", () => {
     const result = detectTerminalStatus(
@@ -195,6 +196,51 @@ Hi! Let me know whenever you'd like to dive into something with FlashJump.
       const result = detectTerminalStatus(padded, cursor);
       expect(result.status).toBe("waiting");
       expect(result.attentionType).toBe("permission");
+    });
+  });
+
+  describe("antigravity", () => {
+    it("detects 'Requesting permission for:' prompts", () => {
+      const result = detectTerminalStatus(
+        `Requesting permission for:
+  Command: rm -rf build/`,
+        antigravity,
+      );
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("permission");
+      expect(result.pendingTool).toBe("Command");
+    });
+
+    it("detects 'Do you want to proceed?' prompts", () => {
+      const result = detectTerminalStatus(
+        `Command: rm -rf build/
+
+Do you want to proceed?`,
+        antigravity,
+      );
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("permission");
+      expect(result.pendingTool).toBe("Command");
+    });
+
+    it("detects the working footer", () => {
+      const result = detectTerminalStatus(
+        "Thinking about the next step...\nesc to cancel",
+        antigravity,
+      );
+      expect(result.status).toBe("working");
+      expect(result.attentionType).toBeNull();
+    });
+
+    it("does not treat the CSAT survey line as a permission prompt", () => {
+      const result = matchTerminalRule(
+        `Session complete.
+
+How's the CLI experience so far?
+1. Great  2. Okay  3. Poor`,
+        antigravity,
+      );
+      expect(result).toBeNull();
     });
   });
 });
