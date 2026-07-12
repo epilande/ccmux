@@ -22,6 +22,6 @@ export const Toast: Component<ToastProps> = (props) => (
     paddingLeft={1}
     paddingRight={1}
   >
-    <text fg={theme.text}>{props.message}</text>
+    <text fg={theme.subtext}>{props.message}</text>
   </box>
 );
