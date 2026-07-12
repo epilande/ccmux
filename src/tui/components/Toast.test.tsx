@@ -19,11 +19,8 @@ async function renderAt(width: number, message: string): Promise<string> {
   return setup.captureCharFrame();
 }
 
-/**
- * Each captured frame line is `width` cells; a card that overflows the left
- * edge shows up as a border row starting in column 0 with no `┌`/`└` corner.
- * A card that fits always has its top-left corner somewhere within the row.
- */
+// A card clipped off the left edge loses its corners; a card that fits keeps
+// them. This is the "nothing clipped on the left" check.
 function hasLeftCorner(frame: string): boolean {
   return frame.includes("┌") && frame.includes("└");
 }
@@ -33,9 +30,7 @@ describe("Toast", () => {
 
   it("keeps the full card on-screen at the default sidebar width (30)", async () => {
     const frame = await renderAt(30, LONG);
-    // The whole message survives despite word-wrap...
     expect(squish(frame)).toContain(squish(LONG));
-    // ...and both left corners are present, i.e. nothing clipped off the left.
     expect(hasLeftCorner(frame)).toBe(true);
   });
 

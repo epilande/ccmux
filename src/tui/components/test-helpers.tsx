@@ -68,10 +68,8 @@ export function emptySummary(): StatusSummary {
   };
 }
 
-// A message wider than a bordered box word-wraps inside it, so it can straddle
-// a line break (even mid-token) in the captured frame. Strip single-border box
-// chars and all whitespace so an assertion matches the message regardless of
-// where the wrap fell.
+// Strip single-border box chars and whitespace from a captured frame so an
+// assertion matches a message regardless of where word-wrap split it.
 export function squish(s: string): string {
   return s.replace(/[│┌┐└┘─\s]/g, "");
 }
