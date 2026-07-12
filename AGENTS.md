@@ -4,7 +4,7 @@
 
 ccmux is a CLI tool for tracking AI coding agent sessions running in tmux panes and jumping to the one that needs you. It uses a background daemon that detects agent processes, watches log files, and scans terminal output to derive session state. An interactive TUI shows live session states at a glance.
 
-**Built-in agents:** Claude Code, Codex, Cursor, OpenCode, Pi, Gemini CLI, plus custom agent definitions via config.
+**Built-in agents:** Claude Code, Codex, Cursor, OpenCode, Pi, Antigravity, Gemini CLI, plus custom agent definitions via config.
 
 ## Tech Stack
 
@@ -122,14 +122,14 @@ Custom agents via `agents` key in `~/.config/ccmux/ccmux.json` (types in `src/li
 
 ### Session Matching
 
-For reliable multi-session matching, install hooks via `ccmux setup` (all agents detected on PATH) or `ccmux setup --agent <name>`. Currently supported: Claude Code, Codex, Cursor, OpenCode, and Pi.
+For reliable multi-session matching, install hooks via `ccmux setup` (all agents detected on PATH) or `ccmux setup --agent <name>`. Currently supported: Claude Code, Codex, Cursor, OpenCode, Pi, and Antigravity.
 
 **Hook-driven flow:**
 
-1. The agent fires its `SessionStart` hook (or, for OpenCode, the plugin reacts to a `session.created` bus event; for Pi, the extension reacts to a `session_start` lifecycle event), which writes a marker file to `~/.config/ccmux/session-pids/<agent_type>-<session_id>.json` via tmp+rename.
+1. The agent fires its `SessionStart` hook (or, for OpenCode, the plugin reacts to a `session.created` bus event; for Pi, the extension reacts to a `session_start` lifecycle event; for Antigravity, the first `PreInvocation` creates the marker because no session-start event exists), which writes a marker file to `~/.config/ccmux/session-pids/<agent_type>-<session_id>.json` via tmp+rename.
 2. `HookManager`'s chokidar watcher observes the new marker and dispatches to the registered `HookAdapter.onMarkerAdded`.
-3. The adapter finds the matching pane-tracked session (TTY-based for Codex, TTY match with PID fallback for Claude, PID-ancestry for OpenCode, Cursor, and Pi) and enriches it with `nativeSessionId`, `logPath`, etc.
-4. Per-turn signals (Claude `Notification`, Codex `Stop` / `PermissionRequest`, Cursor `beforeSubmitPrompt` / `stop`, OpenCode `session.status` / `permission.asked` / `permission.replied`, Pi `agent_start` / `agent_end` / `before_agent_start`) refresh the marker's state. The reconciler then runs the `CascadeEvaluator` over the available sources (marker, log, terminal) and picks the freshest one, breaking ties as `marker > log > terminal`. This applies uniformly to native Claude/Codex and to pane-tracked sessions, so log-driven and marker-driven status converge through the same fold.
+3. The adapter finds the matching pane-tracked session (TTY-based for Codex, TTY match with PID fallback for Claude, PID-ancestry for OpenCode, Cursor, and Pi, and TTY match with PID fallback for Antigravity) and enriches it with `nativeSessionId`, `logPath`, etc.
+4. Per-turn signals (Claude `Notification`, Codex `Stop` / `PermissionRequest`, Cursor `beforeSubmitPrompt` / `stop`, OpenCode `session.status` / `permission.asked` / `permission.replied`, Pi `agent_start` / `agent_end` / `before_agent_start`, Antigravity `PreInvocation` / `Stop`) refresh the marker's state. The reconciler then runs the `CascadeEvaluator` over the available sources (marker, log, terminal) and picks the freshest one, breaking ties as `marker > log > terminal`. This applies uniformly to native Claude/Codex and to pane-tracked sessions, so log-driven and marker-driven status converge through the same fold.
 
 **Matching priority (binder policy):** Marker claims settle first and are authoritative (re-verified every scan, so a mis-bind heals). Panes markers don't claim are solved as a same-cwd optimal assignment gated by direction skew, a 600s tolerance cap, and an ambiguity refusal (a near-tie stays visibly unbound rather than guessing). See [`docs/architecture.md#session-to-pane-binding-the-binder`](docs/architecture.md#session-to-pane-binding-the-binder) for the full policy (D1/D2/D3 guards, boot-migration fallback).
 
@@ -153,7 +153,7 @@ Precedence: deny > ask > allow > defaultMode. Supports argument matching (e.g., 
 
 Agent-owned files (logs, hooks, settings, sessions, per-agent install paths) are catalogued in [`docs/agent-adapters.md#file-paths`](docs/agent-adapters.md#file-paths). ccmux treats them as read-only except during `ccmux setup`.
 
-ccmux-owned markers: `~/.config/ccmux/session-pids/<agent_type>-<session_id>.json` (written by hook scripts for Claude/Codex/Cursor, the bundled plugin for OpenCode, or the bundled extension for Pi; consumed by the daemon's `HookManager`).
+ccmux-owned markers: `~/.config/ccmux/session-pids/<agent_type>-<session_id>.json` (written by hook scripts for Claude/Codex/Cursor/Antigravity, the bundled plugin for OpenCode, or the bundled extension for Pi; consumed by the daemon's `HookManager`).
 
 ### Column Configuration
 

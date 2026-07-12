@@ -417,6 +417,7 @@ export class Daemon {
       await this.linkOpenCodeSessions(processStartTimeByPid);
       await this.linkCursorSessions(processStartTimeByPid);
       await this.linkPiSessions(processStartTimeByPid);
+      await this.linkAntigravitySessions(processStartTimeByPid);
       await reconcileAll(this.buildReconcilerDeps(), {
         processes,
         panes,
@@ -830,6 +831,16 @@ export class Daemon {
     processStartTimeByPid: ReadonlyMap<number, number | null>,
   ): Promise<void> {
     const adapter = this.hookManager.getAdapter("pi");
+    if (!adapter) return;
+    const ctx = this.hookManager.getContext();
+    if (!ctx) return;
+    await reconcileSessionMarkerLinks(adapter, ctx, processStartTimeByPid);
+  }
+
+  private async linkAntigravitySessions(
+    processStartTimeByPid: ReadonlyMap<number, number | null>,
+  ): Promise<void> {
+    const adapter = this.hookManager.getAdapter("antigravity");
     if (!adapter) return;
     const ctx = this.hookManager.getContext();
     if (!ctx) return;
