@@ -265,11 +265,13 @@ export class ClaudeLogAdapter implements LogAdapter {
       session.logPath,
       this.getSessionLogKey(session),
     );
+    // Unconditional: onReconcileTick probes (and caches) every session, so
+    // even one that never spawned subagents has an entry to drop here.
+    this.dirActivityCache.delete(subagentDir);
     if (!this.watchedSubagentDirs.has(subagentDir)) return;
 
     this.subagentWatcher?.unwatch(subagentDir);
     this.watchedSubagentDirs.delete(subagentDir);
-    this.dirActivityCache.delete(subagentDir);
     for (const path of this.subagentFileOffsets.keys()) {
       if (path.startsWith(subagentDir)) {
         this.subagentFileOffsets.delete(path);
