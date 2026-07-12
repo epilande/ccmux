@@ -1318,8 +1318,8 @@ export function App(props: AppProps) {
         </Show>
 
         {/* Transient feedback, rendered in every mode: the one-shot and persistent
-            pickers need the switch-failure toast too, not just the sidebar. Last
-            child so the floating pill paints above every other overlay. */}
+            pickers need the switch-failure toast too, not just the sidebar. The
+            pill paints above every other overlay via its own zIndex. */}
         <Show when={store.state.toastMessage}>
           <Toast message={store.state.toastMessage!} />
         </Show>

@@ -32,6 +32,9 @@ export const Toast: Component<ToastProps> = (props) => {
       position="absolute"
       top={1}
       right={1}
+      // Float above every other overlay (help, confirm, context menus)
+      // regardless of sibling paint order.
+      zIndex={1}
       maxWidth={width()}
       backgroundColor={theme.surface}
       borderStyle="single"

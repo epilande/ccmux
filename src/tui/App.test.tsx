@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, mock, beforeEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import type { SSECallbacks } from "./utils/sse";
-import { mockEnrichedSession } from "./components/test-helpers";
+import { mockEnrichedSession, squish } from "./components/test-helpers";
 
 // Capture SSE callbacks so tests can fire events
 let sseCallbacks: SSECallbacks | null = null;
@@ -78,11 +78,6 @@ const runHunkReviewSpy = mock(
 );
 const HUNK_INSTALL_HINT_TEST = realReview.HUNK_INSTALL_HINT;
 
-// A toast wider than its 40-col cap word-wraps inside the pill, so a long
-// message can straddle a line break (even mid-token, e.g. a hyphenated URL) in
-// the captured frame. Strip box borders and all whitespace from both sides so
-// an assertion matches the message regardless of where the wrap fell.
-const squish = (s: string): string => s.replace(/[│┌┐└┘─\s]/g, "");
 const reviewNotes = [
   {
     noteId: "n1",

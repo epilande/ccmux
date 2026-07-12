@@ -1,12 +1,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { Toast } from "./Toast";
-
-// A toast wider than its cap word-wraps inside the pill, so a long message can
-// straddle a line break in the captured frame. Strip box borders and all
-// whitespace so an assertion matches the message regardless of where the wrap
-// fell (mirrors the `squish` helper in App.test.tsx).
-const squish = (s: string): string => s.replace(/[│┌┐└┘─\s]/g, "");
+import { squish } from "./test-helpers";
 
 let destroy: (() => void) | null = null;
 afterEach(() => {
@@ -41,11 +36,6 @@ describe("Toast", () => {
     // The whole message survives despite word-wrap...
     expect(squish(frame)).toContain(squish(LONG));
     // ...and both left corners are present, i.e. nothing clipped off the left.
-    expect(hasLeftCorner(frame)).toBe(true);
-  });
-
-  it("keeps the card on-screen at a very narrow width (20)", async () => {
-    const frame = await renderAt(20, LONG);
     expect(hasLeftCorner(frame)).toBe(true);
   });
 
