@@ -77,6 +77,12 @@ const runHunkReviewSpy = mock(
   > => ({ ok: true, notes: [] }),
 );
 const HUNK_INSTALL_HINT_TEST = realReview.HUNK_INSTALL_HINT;
+
+// A toast wider than its 40-col cap word-wraps inside the pill, so a long
+// message can straddle a line break (even mid-token, e.g. a hyphenated URL) in
+// the captured frame. Strip box borders and all whitespace from both sides so
+// an assertion matches the message regardless of where the wrap fell.
+const squish = (s: string): string => s.replace(/[│┌┐└┘─\s]/g, "");
 const reviewNotes = [
   {
     noteId: "n1",
@@ -1380,7 +1386,9 @@ describe("App pane-switch feedback and server scoping", () => {
 
       await selectFirstRowAndEnter();
 
-      expect(setup.captureCharFrame()).toContain("different tmux server");
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("different tmux server"),
+      );
       // The guard returns before touching tmux: no switch, no flash, no exit.
       expect(switchToPaneSpy).not.toHaveBeenCalled();
       expect(flashPaneDetachedSpy).not.toHaveBeenCalled();
@@ -1414,7 +1422,9 @@ describe("App pane-switch feedback and server scoping", () => {
       setup.mockInput.pressKey("a");
       await setup.renderOnce();
 
-      expect(setup.captureCharFrame()).toContain("different tmux server");
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("different tmux server"),
+      );
       expect(sendKeysSpy).not.toHaveBeenCalled();
     } finally {
       restoreExit();
@@ -1462,7 +1472,9 @@ describe("App pane-switch feedback and server scoping", () => {
 
       await selectFirstRowAndEnter();
 
-      expect(setup.captureCharFrame()).toContain("different tmux server");
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("different tmux server"),
+      );
       expect(switchToPaneSpy).not.toHaveBeenCalled();
     } finally {
       restoreExit();
@@ -1596,7 +1608,9 @@ describe("App review (d)", () => {
     setup.mockInput.pressKey("d");
     await setup.renderOnce();
     expect(runHunkReviewSpy).not.toHaveBeenCalled();
-    expect(setup.captureCharFrame()).toContain(HUNK_INSTALL_HINT_TEST);
+    expect(squish(setup.captureCharFrame())).toContain(
+      squish(HUNK_INSTALL_HINT_TEST),
+    );
   });
 
   it("does not call runHunkReview in sidebar mode", async () => {
@@ -1720,8 +1734,8 @@ describe("App review (d)", () => {
       setup.mockInput.pressKey("y");
       await new Promise((resolve) => setTimeout(resolve, 0));
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain(
-        "Failed to send review comments to claude",
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("Failed to send review comments to claude"),
       );
     } finally {
       globalThis.fetch = originalFetch;
@@ -1764,7 +1778,9 @@ describe("App review (d)", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("1 review note captured (no pane to send to)");
+    expect(squish(frame)).toContain(
+      squish("1 review note captured (no pane to send to)"),
+    );
     expect(frame).not.toContain("Send review comments");
   });
 
@@ -1819,8 +1835,8 @@ describe("App review (d)", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       await setup.renderOnce();
       expect(sentBody).toMatchObject({ enter: false });
-      expect(setup.captureCharFrame()).toContain(
-        "Prompt filled in codex's composer, press Enter to jump",
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("Prompt filled in codex's composer, press Enter to jump"),
       );
       expect(setup.captureCharFrame()).not.toContain("Send review comments");
     } finally {
