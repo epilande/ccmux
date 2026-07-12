@@ -1267,12 +1267,6 @@ export function App(props: AppProps) {
           />
         </Show>
 
-        {/* Transient feedback, rendered in every mode: the one-shot and persistent
-            pickers need the switch-failure toast too, not just the sidebar. */}
-        <Show when={store.state.toastMessage}>
-          <Toast message={store.state.toastMessage!} />
-        </Show>
-
         <Show when={store.state.showHelp}>
           <HelpOverlay
             sidebar={props.sidebar}
@@ -1321,6 +1315,13 @@ export function App(props: AppProps) {
               onClose={store.actions.hideGroupContextMenu}
             />
           )}
+        </Show>
+
+        {/* Transient feedback, rendered in every mode: the one-shot and persistent
+            pickers need the switch-failure toast too, not just the sidebar. Last
+            child so the floating pill paints above every other overlay. */}
+        <Show when={store.state.toastMessage}>
+          <Toast message={store.state.toastMessage!} />
         </Show>
       </box>
     </TickContext.Provider>
