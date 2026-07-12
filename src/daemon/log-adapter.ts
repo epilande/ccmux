@@ -1,4 +1,4 @@
-import type { SessionState } from "../types/session";
+import type { Session, SessionState } from "../types/session";
 
 /**
  * Claude-specific runtime mode. Currently the only agent with a runtime-mode
@@ -136,6 +136,16 @@ export interface LogAdapter {
    * (subagent watchers, cached offsets) for this session.
    */
   onSessionRemoved?(sessionId: string): void;
+
+  /**
+   * Called by the reconciler once per scan tick for each of this adapter's
+   * sessions. Exists because `onSessionStateUpdated` only fires on parent
+   * log parses, and those stop the moment the parent ends its turn — while
+   * background teammates keep writing their own transcripts. Claude uses
+   * this to (re-)evaluate subagent-dir watching when no parent parse will
+   * ever come. Must be cheap: it runs every SCAN_INTERVAL_MS.
+   */
+  onReconcileTick?(session: Readonly<Session>): void;
 
   /**
    * Optional runtime-mode setter. Claude uses this to switch between

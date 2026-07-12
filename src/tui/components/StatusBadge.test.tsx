@@ -3,6 +3,7 @@ import { testRender } from "@opentui/solid";
 import { StatusBadge, getStatusColor } from "./StatusBadge";
 import { theme } from "../theme";
 import type { AttentionState } from "../../types";
+import { mockSession } from "./test-helpers";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup;
@@ -116,6 +117,41 @@ describe("StatusBadge", () => {
     });
     expect(frame).toContain("working");
     expect(frame).not.toContain("done");
+  });
+
+  it("shows working (not done) when an idle parent has a working subagent", async () => {
+    // Regression: background agents keep working after the parent ends its
+    // turn (parent legitimately idle by its own log); the row must render
+    // working, not the bogus "done"/idle badge.
+    const session = mockSession({
+      status: "idle",
+      attentionState: "unread",
+      subagents: [
+        {
+          agentId: "sub1",
+          status: "working",
+          attentionType: null,
+          pendingTool: null,
+          lastActivityAt: null,
+        },
+      ],
+    });
+    setup = await testRender(
+      () => (
+        <StatusBadge
+          status={session.status}
+          attentionState={session.attentionState}
+          session={session}
+          mode="full"
+        />
+      ),
+      { width: 20, height: 3 },
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("working");
+    expect(frame).not.toContain("done");
+    expect(frame).not.toContain("idle");
   });
 
   it("renders nothing with none icon style", async () => {

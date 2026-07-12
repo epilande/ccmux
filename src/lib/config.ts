@@ -188,6 +188,18 @@ export const HEALTH_CHECK_TIMEOUT_MS = 100;
 export const PANE_IDLE_THRESHOLD_MS = 30_000;
 
 /**
+ * Subagent staleness threshold — a subagent still at `working` whose log has
+ * been silent longer than this counts as finished. Needed because background
+ * teammates (`Agent` tool, `taskKind: in_process_teammate`) never write a
+ * final `end_turn` to their transcripts, so silence is the only completion
+ * signal. Deliberately longer than PANE_IDLE_THRESHOLD_MS: a subagent inside
+ * one long tool call (e.g. a multi-minute Bash run) appends nothing while
+ * still genuinely working, and a false idle here re-surfaces the "done while
+ * subagents work" bug this threshold exists to fix.
+ */
+export const SUBAGENT_STALE_TIMEOUT_MS = 3 * 60 * 1000;
+
+/**
  * Zombie session threshold — soft-evicted sessions (no pane, no PID) older than this are removed
  */
 export const ZOMBIE_STALE_MS = 5 * 60 * 1000;
