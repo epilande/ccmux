@@ -18,7 +18,7 @@ export const Toast: Component<ToastProps> = (props) => (
     maxWidth="100%"
     backgroundColor={theme.surface}
     borderStyle="single"
-    borderColor={theme.overlay}
+    borderColor={theme.border}
     paddingLeft={1}
     paddingRight={1}
   >
