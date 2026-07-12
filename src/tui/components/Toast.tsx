@@ -14,22 +14,14 @@ export const Toast: Component<ToastProps> = (props) => (
   <box
     position="absolute"
     top={1}
-    left={0}
-    width="100%"
-    height={3}
-    flexDirection="row"
-    justifyContent="flex-end"
+    right={1}
+    maxWidth="100%"
+    backgroundColor={theme.surface}
+    borderStyle="single"
+    borderColor={theme.overlay}
+    paddingLeft={1}
     paddingRight={1}
   >
-    <box
-      maxWidth="100%"
-      backgroundColor={theme.surface}
-      borderStyle="single"
-      borderColor={theme.overlay}
-      paddingLeft={1}
-      paddingRight={1}
-    >
-      <text fg={theme.text}>{props.message}</text>
-    </box>
+    <text fg={theme.text}>{props.message}</text>
   </box>
 );
