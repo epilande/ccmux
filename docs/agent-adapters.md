@@ -8,28 +8,14 @@ For the general hook flow (marker shape, per-agent pane-correlation strategy, in
 
 | Agent       | Adapter + primitives                                                                                                                                                     |
 | :---------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Antigravity | `adapters/antigravity/hook-adapter.ts`, `hook-scripts.ts` (bash generators)                                                                                              |
 | Claude      | `adapters/claude/hook-adapter.ts`                                                                                                                                        |
 | Codex       | `adapters/codex/hook-adapter.ts`, `hook-scripts.ts` (bash generators), `toml.ts` (hand-rolled `[features]` flag editor)                                                  |
 | Cursor      | `adapters/cursor/hook-adapter.ts`, `hook-scripts.ts` (bash generators), `version.ts` (`cursor-agent --version` gate)                                                     |
 | OpenCode    | `adapters/opencode/plugin-adapter.ts`, `plugin-script.ts` (install-time renderer), `aggregate.ts` (pure many→one fold), authored plugin `src/plugins/opencode/plugin.js` |
 | Pi          | `adapters/pi/hook-adapter.ts`, `extension-script.ts` (install-time renderer), authored extension `src/plugins/pi/ccmux.js`                                               |
+| Antigravity | `adapters/antigravity/hook-adapter.ts`, `hook-scripts.ts` (bash generators)                                                                                              |
 
-The startup-race closer for markers written before the first scan created the pane-tracked session is the shared, agent-agnostic `reconcileSessionMarkerLinks()` in `adapters/link.ts` (keyed off `adapter.agentType`; it also re-derives native-id ownership each scan so a mis-linked id heals). Used by Antigravity, Cursor, OpenCode, and Pi (`Daemon.linkPiSessions` / `Daemon.linkAntigravitySessions`).
-
-## Antigravity-specific caveats
-
-- Antigravity CLI v1.1.1 exposes exactly five configurable hook events: `PreToolUse`, `PostToolUse`, `PreInvocation`, `PostInvocation`, and `Stop`. It does not expose `SessionStart`, `UserPromptSubmit`, or `PermissionRequest`. The first `PreInvocation` therefore creates the marker if it does not already exist; an untouched idle session remains pane-tracked until its first prompt.
-- `PreToolUse` is a deny footgun. Its `decision` output key is required, and `{}` silently denies the tool call. ccmux installs only `PreInvocation` and `Stop`, where `{}` is inert, and never registers `PreToolUse` or `PostToolUse` handlers.
-- Hooks run synchronously and block the agent loop, with a 30-second default timeout per handler. The ccmux scripts only read stdin, write one marker with tmp+rename, print `{}`, and exit 0.
-- Antigravity v1.1.1 passes the full parent environment to hook commands, including `GEMINI_API_KEY`. Hook scripts must never print or log the environment. The ccmux scripts extract only the camelCase payload fields they need.
-- The reliable global hook file is `~/.gemini/config/hooks.json`. Its top-level keys are named hooks; ccmux owns exactly the `ccmux` key and preserves every other key. Hook names dedupe across files with last-one-wins behavior, so another global or workspace hook named `ccmux` can shadow this entry.
-- Workspace `.agents/hooks.json` discovery is unreliable in v1.1.1. Despite the embedded documentation claiming a repository-root walk, the file loads only when `--new-project` is passed on that specific invocation. A previously registered project is not enough, so ccmux installs into the global config file instead.
-- Conversations are stored in SQLite, so Antigravity has no log adapter in v1. The per-conversation JSONL at `~/.gemini/antigravity-cli/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl` is a future log-adapter candidate.
-- The `agy` name can also be a symlink to the desktop Antigravity.app launcher, whose resolved binary basename is `antigravity`. Process detection keys on the exact `agy` basename and the `/agy` command path form, so the desktop launcher is not treated as a CLI agent.
-- `~/.gemini/google_accounts.json` remains `{"active": null}` even while the CLI is authenticated, so it is not an authentication signal.
-- Each `agy` invocation writes a new `~/.gemini/antigravity-cli/log/cli-YYYYMMDD_HHMMSS.log`. Hook execution appears there as `jsonhook__<name>_<Event>_<i>_<j>` activity. Headless `agy -p` invocations fire the same hooks, so they briefly create markers that the PID-liveness sweep removes after the process exits.
-- The installed scripts write only `working` and `idle`. The adapter also maps `waiting_permission` for forward compatibility, but current permission attention comes from terminal rules matching `Requesting permission for:` or `Do you want to proceed?`. Those specific strings avoid misclassifying Antigravity's unrelated CSAT survey (`How's the CLI experience so far?`) as a permission prompt.
+The startup-race closer for markers written before the first scan created the pane-tracked session is the shared, agent-agnostic `reconcileSessionMarkerLinks()` in `adapters/link.ts` (keyed off `adapter.agentType`; it also re-derives native-id ownership each scan so a mis-linked id heals). Used by Cursor, OpenCode, Pi, and Antigravity (`Daemon.linkPiSessions` / `Daemon.linkAntigravitySessions`).
 
 ## Codex-specific caveats
 
@@ -67,13 +53,24 @@ The startup-race closer for markers written before the first scan created the pa
 - Pi auto-discovers both `*.ts` and `*.js` extensions (loaded via jiti), so ccmux installs a `.js` file. That keeps the authored template out of ccmux's own TypeScript build (mirrors the OpenCode plugin) while still being picked up by Pi.
 - `ccmux invoke pi` shells `pi -p "<prompt>"` (print mode → final assistant text on stdout). `--session <id>` resume in print mode is unverified, so `resumeArgs` is not exposed (sessionId resume is rejected at the daemon, like gemini).
 
+## Antigravity-specific caveats
+
+- Antigravity CLI v1.1.1 exposes exactly five configurable hook events: `PreToolUse`, `PostToolUse`, `PreInvocation`, `PostInvocation`, and `Stop`. It does not expose `SessionStart`, `UserPromptSubmit`, or `PermissionRequest`. The first `PreInvocation` therefore creates the marker if it does not already exist; an untouched idle session remains pane-tracked until its first prompt.
+- `PreToolUse` is a deny footgun. Its `decision` output key is required, and `{}` silently denies the tool call. ccmux installs only `PreInvocation` and `Stop`, where `{}` is inert, and never registers `PreToolUse` or `PostToolUse` handlers.
+- Hooks run synchronously and block the agent loop, with a 30-second default timeout per handler. The ccmux scripts only read stdin, write one marker with tmp+rename, print `{}`, and exit 0.
+- Antigravity v1.1.1 passes the full parent environment to hook commands, including `GEMINI_API_KEY`. Hook scripts must never print or log the environment. The ccmux scripts extract only the camelCase payload fields they need.
+- The reliable global hook file is `~/.gemini/config/hooks.json`. Its top-level keys are named hooks; ccmux owns exactly the `ccmux` key and preserves every other key. Hook names dedupe across files with last-one-wins behavior, so another global or workspace hook named `ccmux` can shadow this entry.
+- Workspace `.agents/hooks.json` discovery is unreliable in v1.1.1. Despite the embedded documentation claiming a repository-root walk, the file loads only when `--new-project` is passed on that specific invocation. A previously registered project is not enough, so ccmux installs into the global config file instead.
+- Conversations are stored in SQLite, so Antigravity has no log adapter in v1. The per-conversation JSONL at `~/.gemini/antigravity-cli/brain/<conversationId>/.system_generated/logs/transcript_full.jsonl` is a future log-adapter candidate.
+- The `agy` name can also be a symlink to the desktop Antigravity.app launcher, whose resolved binary basename is `antigravity`. Process detection keys on the exact `agy` basename and the `/agy` command path form, so the desktop launcher is not treated as a CLI agent.
+- `~/.gemini/google_accounts.json` remains `{"active": null}` even while the CLI is authenticated, so it is not an authentication signal.
+- Each `agy` invocation writes a new `~/.gemini/antigravity-cli/log/cli-YYYYMMDD_HHMMSS.log`. Hook execution appears there as `jsonhook__<name>_<Event>_<i>_<j>` activity. Headless `agy -p` invocations fire the same hooks, so they briefly create markers that the PID-liveness sweep removes after the process exits.
+- The installed scripts write only `working` and `idle`. The adapter also maps `waiting_permission` for forward compatibility, but current permission attention comes from terminal rules matching `Requesting permission for:` or `Do you want to proceed?`. Those specific strings avoid misclassifying Antigravity's unrelated CSAT survey (`How's the CLI experience so far?`) as a permission prompt.
+
 ## File paths
 
 ### Agent-owned (read-only except during `ccmux setup`)
 
-- Antigravity hooks.json: `~/.gemini/config/hooks.json` (merged by `ccmux setup --agent antigravity`; existing files are backed up to `hooks.json.backup` before modification)
-- Antigravity hooks: `~/.gemini/config/hooks/ccmux-preinvocation.sh`, `ccmux-stop.sh`
-- Antigravity app data: `~/.gemini/antigravity-cli/` (read-only; conversations, transcripts, settings, and per-invocation logs)
 - Claude Code logs: `~/.claude/projects/<encoded-path>/<sessionId>.jsonl` (plus any extra config dirs from the `additionalClaudeConfigDirs` preference / `CLAUDE_CONFIG_DIR`, each watched at `<dir>/projects`)
 - Claude Code history: `~/.claude/history.jsonl`
 - Claude Code settings: `~/.claude/settings.json` (written by `ccmux setup --agent claude`)
@@ -89,8 +86,11 @@ The startup-race closer for markers written before the first scan created the pa
 - Cursor transcripts: `~/.cursor/projects/<workspace-slug>/agent-transcripts/<conversation_id>/<conversation_id>.jsonl` (ccmux does not parse these in v1)
 - Pi sessions: `~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<uuidv7>.jsonl` (ccmux does not parse these in v1; Pi appends-and-closes per entry, so the lsof discovery path never fires, same constraint as Claude)
 - Pi extension: `~/.pi/agent/extensions/ccmux.js` (written by `ccmux setup --agent pi`; Pi resolves `~/.pi/agent` with no XDG/env override)
+- Antigravity hooks.json: `~/.gemini/config/hooks.json` (merged by `ccmux setup --agent antigravity`; existing files are backed up to `hooks.json.backup` before modification)
+- Antigravity hooks: `~/.gemini/config/hooks/ccmux-preinvocation.sh`, `ccmux-stop.sh`
+- Antigravity app data: `~/.gemini/antigravity-cli/` (read-only; conversations, transcripts, settings, and per-invocation logs)
 
 ### ccmux-owned
 
 - Antigravity marker: `~/.config/ccmux/session-pids/antigravity-<conversationId>.json`
-- Markers: `~/.config/ccmux/session-pids/<agent_type>-<session_id>.json` (written by hook scripts for Antigravity/Claude/Codex/Cursor, the bundled plugin for OpenCode, or the bundled extension for Pi; consumed by the daemon's `HookManager`)
+- Markers: `~/.config/ccmux/session-pids/<agent_type>-<session_id>.json` (written by hook scripts for Claude/Codex/Cursor/Antigravity, the bundled plugin for OpenCode, or the bundled extension for Pi; consumed by the daemon's `HookManager`)

@@ -17,11 +17,11 @@ import type { HookAdapter } from "../hook-adapter";
  */
 export function createBuiltinHookAdapters(): HookAdapter[] {
   return [
-    new AntigravityHookAdapter(),
     new ClaudeHookAdapter(),
     new CodexHookAdapter(),
     new OpenCodePluginAdapter(),
     new CursorHookAdapter(),
     new PiHookAdapter(),
+    new AntigravityHookAdapter(),
   ];
 }
