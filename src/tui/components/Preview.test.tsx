@@ -128,6 +128,7 @@ describe("Preview", () => {
             attentionType: null,
             pendingTool: null,
             lastActivityAt: "2024-01-15T12:00:00Z",
+            startedAt: null,
           },
           {
             agentId: "a3a022751130cff19",
@@ -135,6 +136,7 @@ describe("Preview", () => {
             attentionType: "permission",
             pendingTool: "Bash",
             lastActivityAt: null,
+            startedAt: null,
           },
         ],
       }),
@@ -148,9 +150,7 @@ describe("Preview", () => {
 
   it("shows runtime since spawn, anchored to startedAt (not last activity)", async () => {
     // The agent wrote to its transcript 2s ago but spawned 2m14s ago; the
-    // row must show the spawn-anchored runtime (matching Claude's own
-    // agent panel), with seconds precision so concurrent rows stay
-    // distinguishable.
+    // divergent timestamps prove the row anchors to the spawn.
     const now = Date.now();
     const frame = await renderPreview(
       mockEnrichedSession({
@@ -173,7 +173,7 @@ describe("Preview", () => {
 
   it("renders no duration when startedAt is unknown", async () => {
     // Without a spawn time we render nothing rather than silently swapping
-    // in the last-activity metric (the confusion this column replaced).
+    // in the last-activity metric.
     const now = Date.now();
     const frame = await renderPreview(
       mockEnrichedSession({
@@ -186,6 +186,7 @@ describe("Preview", () => {
             attentionType: null,
             pendingTool: null,
             lastActivityAt: new Date(now - 2_000).toISOString(),
+            startedAt: null,
           },
         ],
       }),
@@ -204,6 +205,7 @@ describe("Preview", () => {
       attentionType: null,
       pendingTool: null,
       lastActivityAt: null,
+      startedAt: null,
     }));
     const frame = await renderPreview(
       mockEnrichedSession({ status: "idle", tmuxPane: "%1", subagents }),

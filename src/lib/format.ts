@@ -1,9 +1,7 @@
 /**
  * Compact elapsed-duration label with seconds precision: `42s`, `2m14s`,
- * `1h5m`. Unlike {@link formatRelativeTime} (which rounds to whole
- * minutes), this keeps sub-minute detail so concurrent durations stay
- * distinguishable — e.g. agents spawned seconds apart in a fan-out.
- * Negative input (clock skew) clamps to `0s`.
+ * `1h5m`. Seconds drop at an hour and above; negative input (clock skew)
+ * clamps to `0s`.
  */
 export function formatDuration(ms: number): string {
   const totalSecs = Math.max(0, Math.floor(ms / 1000));

@@ -96,7 +96,7 @@ invalid json
         JSON.stringify({ uuid: "u1", timestamp: "2024-01-01T00:05:00Z" }),
       ];
       await Bun.write(path, lines.join("\n") + "\n");
-      expect(await readFirstEntryTimestamp(path)).toBe("2024-01-01T00:00:00Z");
+      expect(readFirstEntryTimestamp(path)).toBe("2024-01-01T00:00:00Z");
     });
 
     it("skips leading lines without a timestamp", async () => {
@@ -106,16 +106,14 @@ invalid json
         JSON.stringify({ uuid: "u0", timestamp: "2024-01-01T00:00:00Z" }),
       ];
       await Bun.write(path, lines.join("\n") + "\n");
-      expect(await readFirstEntryTimestamp(path)).toBe("2024-01-01T00:00:00Z");
+      expect(readFirstEntryTimestamp(path)).toBe("2024-01-01T00:00:00Z");
     });
 
     it("returns null for an empty or missing file", async () => {
       const empty = join(testDir, "empty.jsonl");
       await Bun.write(empty, "");
-      expect(await readFirstEntryTimestamp(empty)).toBeNull();
-      expect(
-        await readFirstEntryTimestamp(join(testDir, "nope.jsonl")),
-      ).toBeNull();
+      expect(readFirstEntryTimestamp(empty)).toBeNull();
+      expect(readFirstEntryTimestamp(join(testDir, "nope.jsonl"))).toBeNull();
     });
   });
 

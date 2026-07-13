@@ -1355,6 +1355,7 @@ describe("reconcileAll", () => {
             attentionType: null,
             pendingTool: null,
             lastActivityAt: null,
+            startedAt: null,
           },
         ],
       });
@@ -3007,6 +3008,7 @@ describe("capStaleSubagents", () => {
       attentionType: null,
       pendingTool: null,
       lastActivityAt: FRESH,
+      startedAt: null,
       ...overrides,
     };
   }

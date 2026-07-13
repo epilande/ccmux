@@ -456,6 +456,7 @@ describe("SessionManager", () => {
       attentionType: null,
       pendingTool: "Task",
       lastActivityAt: new Date().toISOString(),
+      startedAt: null,
     });
 
     manager.createPaneTrackedSession({

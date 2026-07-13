@@ -67,33 +67,15 @@ export async function readLogTail(
 
 /**
  * Read the timestamp of the first entry in a JSONL log (the head), used to
- * derive a subagent's spawn time. Reads only the leading chunk and returns
- * the first parsed entry that carries a `timestamp`. Returns null on any
- * read/parse failure or if no timestamped entry is found in the head.
+ * derive a subagent's spawn time. Returns null when no early entry carries
+ * a `timestamp` or on read error.
  */
-export async function readFirstEntryTimestamp(
-  path: string,
-): Promise<string | null> {
-  try {
-    const file = Bun.file(path);
-    const size = file.size;
-    if (size === 0) return null;
-
-    const CHUNK_SIZE = 64 * 1024;
-    const content = await file.slice(0, Math.min(CHUNK_SIZE, size)).text();
-    for (const line of content.split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const entry = JSON.parse(line) as { timestamp?: string };
-        if (entry.timestamp) return entry.timestamp;
-      } catch {
-        // Skip malformed lines (including a possibly truncated tail line).
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
+export function readFirstEntryTimestamp(path: string): string | null {
+  return scanTranscriptHead(path, 64 * 1024, (entry) =>
+    typeof entry.timestamp === "string" && entry.timestamp.length > 0
+      ? entry.timestamp
+      : null,
+  );
 }
 
 /**
@@ -175,6 +157,26 @@ export function readTranscriptCwd(
   path: string,
   maxBytes = 256 * 1024,
 ): string | null {
+  return scanTranscriptHead(path, maxBytes, (entry) =>
+    typeof entry.cwd === "string" && entry.cwd.length > 0 ? entry.cwd : null,
+  );
+}
+
+/**
+ * Scan a transcript's bounded head for the first entry `extract` accepts.
+ * Reads a single page of the file, drops a trailing partial line, and
+ * tolerates malformed lines. Returns null when no early entry matches or
+ * on read error.
+ *
+ * Sync by design: callers need a single bounded page-in of a local file
+ * (the binder consumes `readTranscriptCwd` through a pure observation
+ * callback).
+ */
+function scanTranscriptHead<T>(
+  path: string,
+  maxBytes: number,
+  extract: (entry: Record<string, unknown>) => T | null,
+): T | null {
   let fd: number;
   try {
     fd = openSync(path, "r");
@@ -191,10 +193,8 @@ export function readTranscriptCwd(
     for (const line of complete.slice(0, 50)) {
       if (!line.trim()) continue;
       try {
-        const entry = JSON.parse(line) as { cwd?: unknown };
-        if (typeof entry.cwd === "string" && entry.cwd.length > 0) {
-          return entry.cwd;
-        }
+        const value = extract(JSON.parse(line) as Record<string, unknown>);
+        if (value !== null) return value;
       } catch {
         // Skip malformed lines.
       }

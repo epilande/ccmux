@@ -133,6 +133,7 @@ describe("StatusBadge", () => {
           attentionType: null,
           pendingTool: null,
           lastActivityAt: null,
+          startedAt: null,
         },
       ],
     });
@@ -165,6 +166,7 @@ describe("StatusBadge", () => {
           attentionType: null,
           pendingTool: null,
           lastActivityAt: null,
+          startedAt: null,
         },
       ],
     });

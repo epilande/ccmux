@@ -114,10 +114,8 @@ describe("ClaudeLogAdapter subagent watching", () => {
   });
 
   it("records startedAt from the first transcript entry (runtime since spawn)", async () => {
-    // The preview shows runtime since spawn, so the subagent's startedAt
-    // must come from the head of the transcript, not the latest (tail)
-    // activity. Fresh timestamps so the stale-seed cap keeps the working
-    // subagent; the spawn (head) is earlier than the latest (tail) write.
+    // Fresh timestamps so the stale-seed cap keeps the working subagent;
+    // the spawn (head) is earlier than the latest (tail) write.
     const now = Date.now();
     const spawn = new Date(now - 5 * 60_000).toISOString();
     const latest = new Date(now).toISOString();

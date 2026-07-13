@@ -39,13 +39,9 @@ import {
 /**
  * One row of the preview's Agents section: activity spinner, the agent's
  * human name (parsed from its transcript filename), and runtime since spawn.
- * The duration is spawn-anchored (`startedAt`, the transcript's first
- * entry), NOT last-activity — last-activity is jittery near-zero noise for
- * a working agent, while runtime matches the clock Claude's own agent panel
- * shows. It also fills the glance gap for background agents, whose pane
- * hides per-agent times behind an interaction. No `startedAt` (head read
- * failed) renders no duration rather than silently swapping metrics.
- * Both `working` and `waiting` subagents render as activity — a subagent's
+ * The duration is anchored to `startedAt`, never last-activity; a null
+ * `startedAt` renders no duration rather than silently swapping metrics.
+ * Both `working` and `waiting` subagents render as activity; a subagent's
  * `waiting` is an unresolved tool_use (usually a tool mid-execution), not a
  * prompt for the user (see `getEffectiveStatus`).
  */
@@ -60,8 +56,7 @@ const SubagentRow: Component<{
     () => props.iconStyle,
     () => undefined,
   );
-  // Memoized on the 1s tick so the runtime counts up live; string equality
-  // means the text re-renders only when the label actually flips.
+  // Re-evaluated on the 1s tick so the runtime counts up live.
   const runtime = createMemo((): string => {
     void tick();
     return props.sub.startedAt

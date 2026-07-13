@@ -92,12 +92,10 @@ export interface SubagentState {
   /** Last activity timestamp */
   lastActivityAt: string | null;
   /**
-   * Spawn timestamp (first entry in the subagent's transcript). Drives the
-   * runtime-since-spawn duration in the preview's Agents section, matching
-   * the clock Claude's own agent panel displays. Best-effort: absent if the
-   * head read failed, in which case no duration renders.
+   * Spawn timestamp (first entry in the subagent's transcript). Null when
+   * the head read failed, in which case the preview renders no duration.
    */
-  startedAt?: string | null;
+  startedAt: string | null;
 }
 
 /**

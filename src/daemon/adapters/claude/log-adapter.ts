@@ -402,12 +402,10 @@ export class ClaudeLogAdapter implements LogAdapter {
     if (!session) return;
 
     const existing = session.subagents.find((s) => s.agentId === agentId);
-    // Spawn time = first transcript entry; read once and carry it forward so
-    // the preview can show runtime-since-spawn (the clock Claude's own agent
-    // panel displays). The head is immutable, so a re-read after eviction or
-    // a daemon restart derives the same value.
-    const startedAt =
-      existing?.startedAt ?? (await readFirstEntryTimestamp(path));
+    // Spawn time comes from the immutable transcript head, so a successful
+    // read is carried forward; a failed (null) read retries on the next
+    // change event.
+    const startedAt = existing?.startedAt ?? readFirstEntryTimestamp(path);
 
     const offset = this.subagentFileOffsets.get(path) ?? 0;
     let state: SessionState;
