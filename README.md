@@ -36,7 +36,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 📂 **Session Grouping**: Collapsible project groups with reordering and pinning
 - 🌿 **Git & PR Aware**: Branch and worktree detection, open PRs with live CI and review status
 - 📝 **Diff Review**: Press <kbd>d</kbd> to review a session's working-tree diff with [hunk](https://github.com/modem-dev/hunk), right in the pane
-- 🤖 **Background Agents & Subagents**: Claude Code background agents get rows too; a lead whose subagents run shows as `agents`, and the preview lists each live agent with its runtime
+- 🤖 **Background Agents & Subagents**: Claude Code background agents get rows too; running subagents show as `agents` with a live list in the preview
 - 🔁 **Session Control**: Spawn, kill, and restart sessions from the TUI; `ccmux invoke` for scripted one-shot agent turns
 - ⌨️ **Keyboard-First, Mouse-Friendly**: Vim keys and number jumps, plus click-to-switch and right-click context actions
 
@@ -133,7 +133,7 @@ The daemon starts automatically the first time you run a ccmux command (picker, 
 
 Press <kbd>P</kbd> to split the picker and preview the highlighted session's live pane content side by side. Press <kbd>Tab</kbd> to focus the preview and act in place: your keystrokes go straight to that agent's pane, so you can approve a permission, answer a question, or type a follow-up without ever leaving ccmux.
 
-When the selected session has agents running (Task subagents or background teammates), an **Agents** section above the pane content lists each live agent by name with its runtime since spawn, capped at four rows with a `+N more` overflow. Finished agents drop off the list; the count reflects what's running now, not everything that was spawned.
+When the session has agents running, an **Agents** section lists each one with its runtime. Finished agents drop off the list.
 
 https://github.com/user-attachments/assets/7e0d42b3-4e7b-43b8-8d06-72a2d69dd694
 
