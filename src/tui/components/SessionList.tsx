@@ -129,7 +129,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
             count={item.count}
             collapsed={item.collapsed}
             selected={index === props.selectedIndex}
-            statusSummary={item.statusSummary}
+            members={item.members}
             iconStyle={props.iconStyle}
             dimmed={props.dimmed}
             onActivate={onActivate}

@@ -29,16 +29,11 @@ import type {
  * When a Claude log's last activity is older than the idle threshold, a
  * `working` status cannot be genuine — the session just went silent.
  * Cap it to idle to prevent phantom working→idle flaps on daemon restart.
- * Subagent seeding passes SUBAGENT_STALE_TIMEOUT_MS instead, so re-watching
- * a dir of finished subagent logs doesn't resurrect them as `working`.
  */
-function capStaleWorking(
-  state: SessionState,
-  thresholdMs: number = PANE_IDLE_THRESHOLD_MS,
-): SessionState {
+function capStaleWorking(state: SessionState): SessionState {
   if (state.status !== "working" || !state.lastActivityAt) return state;
   const age = Date.now() - new Date(state.lastActivityAt).getTime();
-  if (age <= thresholdMs) return state;
+  if (age <= PANE_IDLE_THRESHOLD_MS) return state;
   return {
     ...state,
     status: "idle",

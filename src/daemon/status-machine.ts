@@ -558,7 +558,10 @@ interface EffectiveStatus {
  * alarm on every long Bash run under bypassPermissions. Genuine
  * permission prompts surface in the lead's own pane and reach the row
  * through the higher-fidelity marker/terminal signals as the parent's own
- * `waiting`.
+ * `waiting`. This intentionally includes `question` (AskUserQuestion):
+ * the old question-surfacing path was removed on purpose, not by
+ * accident, because a subagent's prompt is answered in the lead's pane,
+ * where the parent's own signals already turn the row red.
  *
  * Staleness is bounded by the reconciler: idle subagents self-evict via
  * updateSubagent, and silent active ones are downgraded by the stale

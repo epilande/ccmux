@@ -393,6 +393,24 @@ describe("status-machine", () => {
       expect(state.attentionType).toBeNull();
     });
 
+    it("should handle assistant stop_sequence with no tools as idle", () => {
+      const entry: AssistantLogEntry = {
+        type: "assistant",
+        uuid: "123",
+        parentUuid: null,
+        timestamp: "2024-01-01T00:00:00Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Here is my response" }],
+          stop_reason: "stop_sequence",
+        },
+      };
+
+      const state = processEntry(entry, createInitialState());
+      expect(state.status).toBe("idle");
+      expect(state.attentionType).toBeNull();
+    });
+
     it("should handle summary entry as idle", () => {
       const entry: SummaryLogEntry = {
         type: "summary",
