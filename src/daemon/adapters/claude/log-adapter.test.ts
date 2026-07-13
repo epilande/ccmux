@@ -113,6 +113,38 @@ describe("ClaudeLogAdapter subagent watching", () => {
     expect(sub.status).toBe("working");
   });
 
+  it("records startedAt from the first transcript entry (runtime since spawn)", async () => {
+    // The preview shows runtime since spawn, so the subagent's startedAt
+    // must come from the head of the transcript, not the latest (tail)
+    // activity. Fresh timestamps so the stale-seed cap keeps the working
+    // subagent; the spawn (head) is earlier than the latest (tail) write.
+    const now = Date.now();
+    const spawn = new Date(now - 5 * 60_000).toISOString();
+    const latest = new Date(now).toISOString();
+    const head = JSON.stringify({
+      type: "user",
+      uuid: "head",
+      parentUuid: null,
+      timestamp: spawn,
+      message: { role: "user", content: "go" },
+    });
+    const file = join(subagentDir, "agent-astarted.jsonl");
+    writeFileSync(file, `${head}\n${workingLogContent(latest)}`);
+
+    adapter.onSessionStateUpdated(
+      SESSION_ID,
+      parentState({ hasActiveSubagent: false }),
+    );
+
+    const populated = await waitFor(
+      () => manager.getSession(SESSION_ID)!.subagents.length === 1,
+    );
+    expect(populated).toBe(true);
+    const sub = manager.getSession(SESSION_ID)!.subagents[0];
+    expect(sub.startedAt).toBe(spawn);
+    expect(sub.lastActivityAt).toBe(latest);
+  });
+
   it("tracks named teammate files (agent-a<name>-<hex>.jsonl)", async () => {
     // Teammates embed the agent name in the filename; the extraction regex
     // must accept more than bare hex (regression: named teammates were

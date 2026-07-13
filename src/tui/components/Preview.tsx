@@ -27,7 +27,9 @@ import { getStatusColor } from "./StatusBadge";
 import { getEffectiveStatus } from "../../daemon/status-machine";
 import { useStatusIcon } from "../utils/useStatusIcon";
 import { theme } from "../theme";
+import { useTick } from "../store";
 import {
+  formatDuration,
   formatRelativeTime,
   formatSubagentName,
   formatVersion,
@@ -35,12 +37,14 @@ import {
 } from "../utils/format";
 
 /**
- * One row of the preview's Agents section: activity spinner and the agent's
- * human name (parsed from its transcript filename). Deliberately no time
- * column — last-activity is jittery noise for a working agent, and runtime
- * since spawn duplicates the lead's own agent panel in the pane capture
- * right below. Presence in the list is the liveness signal (dead agents
- * are evicted by the stale sweep).
+ * One row of the preview's Agents section: activity spinner, the agent's
+ * human name (parsed from its transcript filename), and runtime since spawn.
+ * The duration is spawn-anchored (`startedAt`, the transcript's first
+ * entry), NOT last-activity — last-activity is jittery near-zero noise for
+ * a working agent, while runtime matches the clock Claude's own agent panel
+ * shows. It also fills the glance gap for background agents, whose pane
+ * hides per-agent times behind an interaction. No `startedAt` (head read
+ * failed) renders no duration rather than silently swapping metrics.
  * Both `working` and `waiting` subagents render as activity — a subagent's
  * `waiting` is an unresolved tool_use (usually a tool mid-execution), not a
  * prompt for the user (see `getEffectiveStatus`).
@@ -49,18 +53,28 @@ const SubagentRow: Component<{
   sub: SubagentState;
   iconStyle?: IconStyle;
 }> = (props) => {
+  const { tick } = useTick();
   const icon = useStatusIcon(
     () => "working",
     () => null,
     () => props.iconStyle,
     () => undefined,
   );
+  // Memoized on the 1s tick so the runtime counts up live; string equality
+  // means the text re-renders only when the label actually flips.
+  const runtime = createMemo((): string => {
+    void tick();
+    return props.sub.startedAt
+      ? formatDuration(Date.now() - new Date(props.sub.startedAt).getTime())
+      : "";
+  });
   return (
     <box flexDirection="row">
       <text fg={theme.peach}>{"  " + icon()}</text>
       <box flexGrow={1} paddingLeft={1}>
         <text fg={theme.text}>{formatSubagentName(props.sub.agentId)}</text>
       </box>
+      <text fg={theme.overlay}>{runtime()}</text>
     </box>
   );
 };

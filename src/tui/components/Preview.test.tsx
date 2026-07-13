@@ -144,8 +144,52 @@ describe("Preview", () => {
     expect(frame).toContain("3a0227");
     // Lifted status label in the header, not raw idle/working
     expect(frame).toContain("agents");
-    // No time column: last-activity is jitter for a working agent, and
-    // runtime duplicates the lead's agent panel in the pane capture below.
+  });
+
+  it("shows runtime since spawn, anchored to startedAt (not last activity)", async () => {
+    // The agent wrote to its transcript 2s ago but spawned 2m14s ago; the
+    // row must show the spawn-anchored runtime (matching Claude's own
+    // agent panel), with seconds precision so concurrent rows stay
+    // distinguishable.
+    const now = Date.now();
+    const frame = await renderPreview(
+      mockEnrichedSession({
+        status: "idle",
+        tmuxPane: "%1",
+        subagents: [
+          {
+            agentId: "areviewer-quality-4e04b65eee350afe",
+            status: "working",
+            attentionType: null,
+            pendingTool: null,
+            lastActivityAt: new Date(now - 2_000).toISOString(),
+            startedAt: new Date(now - 134_000).toISOString(),
+          },
+        ],
+      }),
+    );
+    expect(frame).toMatch(/2m1[45]s/);
+  });
+
+  it("renders no duration when startedAt is unknown", async () => {
+    // Without a spawn time we render nothing rather than silently swapping
+    // in the last-activity metric (the confusion this column replaced).
+    const now = Date.now();
+    const frame = await renderPreview(
+      mockEnrichedSession({
+        status: "idle",
+        tmuxPane: "%1",
+        subagents: [
+          {
+            agentId: "areviewer-quality-4e04b65eee350afe",
+            status: "working",
+            attentionType: null,
+            pendingTool: null,
+            lastActivityAt: new Date(now - 2_000).toISOString(),
+          },
+        ],
+      }),
+    );
     const row = frame
       .split("\n")
       .find((line) => line.includes("reviewer-quality"));

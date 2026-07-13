@@ -91,6 +91,13 @@ export interface SubagentState {
   pendingTool: string | null;
   /** Last activity timestamp */
   lastActivityAt: string | null;
+  /**
+   * Spawn timestamp (first entry in the subagent's transcript). Drives the
+   * runtime-since-spawn duration in the preview's Agents section, matching
+   * the clock Claude's own agent panel displays. Best-effort: absent if the
+   * head read failed, in which case no duration renders.
+   */
+  startedAt?: string | null;
 }
 
 /**

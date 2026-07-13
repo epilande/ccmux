@@ -11,6 +11,7 @@ import {
   extractSessionIdFromPath,
   readLogTail,
   readLogIncremental,
+  readFirstEntryTimestamp,
 } from "../../parser";
 import {
   deriveStateFromEntries,
@@ -400,6 +401,14 @@ export class ClaudeLogAdapter implements LogAdapter {
       this.sessionManager.getSessionByNativeSessionId(sessionId) ?? null;
     if (!session) return;
 
+    const existing = session.subagents.find((s) => s.agentId === agentId);
+    // Spawn time = first transcript entry; read once and carry it forward so
+    // the preview can show runtime-since-spawn (the clock Claude's own agent
+    // panel displays). The head is immutable, so a re-read after eviction or
+    // a daemon restart derives the same value.
+    const startedAt =
+      existing?.startedAt ?? (await readFirstEntryTimestamp(path));
+
     const offset = this.subagentFileOffsets.get(path) ?? 0;
     let state: SessionState;
 
@@ -414,7 +423,6 @@ export class ClaudeLogAdapter implements LogAdapter {
       const { entries, newOffset } = await readLogIncremental(path, offset);
       this.subagentFileOffsets.set(path, newOffset);
 
-      const existing = session.subagents.find((s) => s.agentId === agentId);
       const currentState: SessionState = existing
         ? {
             status: existing.status,
@@ -442,6 +450,7 @@ export class ClaudeLogAdapter implements LogAdapter {
       attentionType: state.attentionType,
       pendingTool: state.pendingTool,
       lastActivityAt: state.lastActivityAt ?? null,
+      startedAt,
     });
 
     // Propagate subagent activity to parent session to keep it fresh

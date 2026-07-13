@@ -66,6 +66,37 @@ export async function readLogTail(
 }
 
 /**
+ * Read the timestamp of the first entry in a JSONL log (the head), used to
+ * derive a subagent's spawn time. Reads only the leading chunk and returns
+ * the first parsed entry that carries a `timestamp`. Returns null on any
+ * read/parse failure or if no timestamped entry is found in the head.
+ */
+export async function readFirstEntryTimestamp(
+  path: string,
+): Promise<string | null> {
+  try {
+    const file = Bun.file(path);
+    const size = file.size;
+    if (size === 0) return null;
+
+    const CHUNK_SIZE = 64 * 1024;
+    const content = await file.slice(0, Math.min(CHUNK_SIZE, size)).text();
+    for (const line of content.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line) as { timestamp?: string };
+        if (entry.timestamp) return entry.timestamp;
+      } catch {
+        // Skip malformed lines (including a possibly truncated tail line).
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Extract session ID (UUID) from log file path
  * Path format: ~/.claude/projects/<encoded-path>/<uuid>.jsonl
  */

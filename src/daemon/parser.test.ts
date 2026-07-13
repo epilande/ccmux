@@ -10,6 +10,7 @@ import {
   extractProjectInfo,
   readLogIncremental,
   readLogTail,
+  readFirstEntryTimestamp,
 } from "./parser";
 
 describe("parser", () => {
@@ -84,6 +85,37 @@ invalid json
       const path = join(testDir, "tail-zero.jsonl");
       await Bun.write(path, line(1) + "\n");
       expect(await readLogTail(path, 10, 0)).toEqual([]);
+    });
+  });
+
+  describe("readFirstEntryTimestamp", () => {
+    it("returns the timestamp of the first entry (the head)", async () => {
+      const path = join(testDir, "head.jsonl");
+      const lines = [
+        JSON.stringify({ uuid: "u0", timestamp: "2024-01-01T00:00:00Z" }),
+        JSON.stringify({ uuid: "u1", timestamp: "2024-01-01T00:05:00Z" }),
+      ];
+      await Bun.write(path, lines.join("\n") + "\n");
+      expect(await readFirstEntryTimestamp(path)).toBe("2024-01-01T00:00:00Z");
+    });
+
+    it("skips leading lines without a timestamp", async () => {
+      const path = join(testDir, "head-skip.jsonl");
+      const lines = [
+        JSON.stringify({ type: "summary" }),
+        JSON.stringify({ uuid: "u0", timestamp: "2024-01-01T00:00:00Z" }),
+      ];
+      await Bun.write(path, lines.join("\n") + "\n");
+      expect(await readFirstEntryTimestamp(path)).toBe("2024-01-01T00:00:00Z");
+    });
+
+    it("returns null for an empty or missing file", async () => {
+      const empty = join(testDir, "empty.jsonl");
+      await Bun.write(empty, "");
+      expect(await readFirstEntryTimestamp(empty)).toBeNull();
+      expect(
+        await readFirstEntryTimestamp(join(testDir, "nope.jsonl")),
+      ).toBeNull();
     });
   });
 
