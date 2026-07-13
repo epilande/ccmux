@@ -35,8 +35,12 @@ import {
 } from "../utils/format";
 
 /**
- * One row of the preview's Agents section: activity spinner, the agent's
- * human name (parsed from its transcript filename), and last-activity age.
+ * One row of the preview's Agents section: activity spinner and the agent's
+ * human name (parsed from its transcript filename). Deliberately no time
+ * column — last-activity is jittery noise for a working agent, and runtime
+ * since spawn duplicates the lead's own agent panel in the pane capture
+ * right below. Presence in the list is the liveness signal (dead agents
+ * are evicted by the stale sweep).
  * Both `working` and `waiting` subagents render as activity — a subagent's
  * `waiting` is an unresolved tool_use (usually a tool mid-execution), not a
  * prompt for the user (see `getEffectiveStatus`).
@@ -51,17 +55,12 @@ const SubagentRow: Component<{
     () => props.iconStyle,
     () => undefined,
   );
-  const age = () =>
-    props.sub.lastActivityAt
-      ? formatRelativeTime(new Date(props.sub.lastActivityAt))
-      : "";
   return (
     <box flexDirection="row">
       <text fg={theme.peach}>{"  " + icon()}</text>
       <box flexGrow={1} paddingLeft={1}>
         <text fg={theme.text}>{formatSubagentName(props.sub.agentId)}</text>
       </box>
-      <text fg={theme.overlay}>{age()}</text>
     </box>
   );
 };

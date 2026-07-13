@@ -144,6 +144,13 @@ describe("Preview", () => {
     expect(frame).toContain("3a0227");
     // Lifted status label in the header, not raw idle/working
     expect(frame).toContain("agents");
+    // No time column: last-activity is jitter for a working agent, and
+    // runtime duplicates the lead's agent panel in the pane capture below.
+    const row = frame
+      .split("\n")
+      .find((line) => line.includes("reviewer-quality"));
+    expect(row).toBeDefined();
+    expect(row!).not.toMatch(/\d+[smh]\s*$/);
   });
 
   it("caps the agents list and shows an overflow line", async () => {
