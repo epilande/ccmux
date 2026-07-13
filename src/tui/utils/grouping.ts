@@ -58,7 +58,12 @@ export type FlatItem =
       label: string;
       count: number;
       collapsed: boolean;
-      statusSummary: StatusSummary;
+      /** Raw member references, not a precomputed summary. The status summary
+       * is derived downstream in the header's own reactive scope so this memo
+       * never reads `session.subagents`: subagent churn (one write per fold
+       * during a fan-out) would otherwise rebuild every FlatItem and force the
+       * reference-keyed row list to recreate every row. */
+      members: FilteredSession[];
     }
   | {
       type: "session";
@@ -146,13 +151,14 @@ export function computeStatusSummary(
     idle: 0,
   };
   for (const { session } of sessions) {
-    const status = session.status;
+    // Effective status, not raw: a lead idle at its prompt with subagents
+    // running counts as working, matching what the row renders.
+    const { status, attentionType } = getEffectiveStatus(session);
     if (status === "working") {
       summary.working++;
     } else if (status === "idle") {
       summary.idle++;
     } else if (status === "waiting") {
-      const { attentionType } = getEffectiveStatus(session);
       if (attentionType === "permission") {
         summary.waitingPermission++;
       } else if (attentionType === "plan_approval") {
@@ -246,7 +252,7 @@ export function buildFlatItems(
       label: getGroupLabel(key, groupBy),
       count: members.length,
       collapsed: isCollapsed,
-      statusSummary: computeStatusSummary(members),
+      members,
     });
     if (!isCollapsed) {
       for (const fs of members) {

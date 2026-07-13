@@ -4,6 +4,7 @@ import {
   createEffect,
   createMemo,
   For,
+  on,
   Show,
   onCleanup,
 } from "solid-js";
@@ -13,7 +14,7 @@ import type {
   TextRenderable,
   ScrollBoxRenderable,
 } from "@opentui/core";
-import type { EnrichedSession } from "../../types";
+import type { EnrichedSession, SubagentState } from "../../types";
 import type { IconStyle } from "../../lib/icons";
 import { capturePane } from "../utils/tmux";
 import { isSameServerCached } from "../utils/server-guard";
@@ -26,7 +27,52 @@ import { getStatusColor } from "./StatusBadge";
 import { getEffectiveStatus } from "../../daemon/status-machine";
 import { useStatusIcon } from "../utils/useStatusIcon";
 import { theme } from "../theme";
-import { formatRelativeTime, formatVersion, shortenCwd } from "../utils/format";
+import { useTick } from "../store";
+import {
+  formatDuration,
+  formatRelativeTime,
+  formatSubagentName,
+  formatVersion,
+  shortenCwd,
+} from "../utils/format";
+
+/**
+ * One row of the preview's Agents section: activity spinner, the agent's
+ * human name (parsed from its transcript filename), and runtime since spawn.
+ * The duration is anchored to `startedAt`, never last-activity; a null
+ * `startedAt` renders no duration rather than silently swapping metrics.
+ * Both `working` and `waiting` subagents render as activity; a subagent's
+ * `waiting` is an unresolved tool_use (usually a tool mid-execution), not a
+ * prompt for the user (see `getEffectiveStatus`).
+ */
+const SubagentRow: Component<{
+  sub: SubagentState;
+  iconStyle?: IconStyle;
+}> = (props) => {
+  const { tick } = useTick();
+  const icon = useStatusIcon(
+    () => "working",
+    () => null,
+    () => props.iconStyle,
+    () => undefined,
+  );
+  // Re-evaluated on the 1s tick so the runtime counts up live.
+  const runtime = createMemo((): string => {
+    void tick();
+    return props.sub.startedAt
+      ? formatDuration(Date.now() - new Date(props.sub.startedAt).getTime())
+      : "";
+  });
+  return (
+    <box flexDirection="row">
+      <text fg={theme.peach}>{"  " + icon()}</text>
+      <box flexGrow={1} paddingLeft={1}>
+        <text fg={theme.text}>{formatSubagentName(props.sub.agentId)}</text>
+      </box>
+      <text fg={theme.overlay}>{runtime()}</text>
+    </box>
+  );
+};
 /**
  * Peek body for a paneless background (background-agent) row. There is no
  * tmux pane to capture, so surface the agent's own record instead: the ask
@@ -249,11 +295,21 @@ export const Preview: Component<PreviewProps> = (props) => {
     await refreshPane();
   });
 
-  createEffect(() => {
-    void props.refreshKey; // track reactive dependency
-    if (!props.focused || !props.session?.tmuxPane) return;
-    refreshPane();
-  });
+  // Forced re-capture: the parent bumps refreshKey when it knows the pane
+  // just changed underneath us (e.g. review notes delivered to the agent's
+  // composer), so the user sees the outcome without focusing the preview.
+  // `on(..., {defer})` tracks only the key: mount and selection changes are
+  // already captured by the effects above, and an unfocused preview stays a
+  // single snapshot otherwise.
+  createEffect(
+    on(
+      () => props.refreshKey,
+      () => {
+        if (props.session?.tmuxPane) refreshPane();
+      },
+      { defer: true },
+    ),
+  );
 
   // Background refresh while focused (catches external output). Polls at
   // 500ms while the pane is changing, doubling up to 2s while it is quiet
@@ -329,8 +385,16 @@ export const Preview: Component<PreviewProps> = (props) => {
     if (!s) return "";
     const attn = attentionState();
     const eff = effective();
+    // Lifted state (lead idle, subagents running) reads "agents",
+    // matching the row's StatusBadge.
+    if (eff?.status === "working" && eff.fromSubagent) return "agents";
     return s.status === "idle" && attn ? "done" : (eff?.status ?? "");
   };
+
+  /** Live subagents for the Agents section; capped so a large fan-out
+   * doesn't crowd out the pane content below. */
+  const AGENTS_SHOWN_MAX = 4;
+  const liveSubagents = () => props.session?.subagents ?? [];
 
   const metadataLine = () => {
     const s = props.session;
@@ -382,6 +446,23 @@ export const Preview: Component<PreviewProps> = (props) => {
           <text fg={theme.overlay}>{metadataLine()}</text>
           <text fg={theme.border}>{"─".repeat(separatorWidth())}</text>
         </box>
+
+        <Show when={liveSubagents().length > 0}>
+          <box flexDirection="column" flexShrink={0}>
+            <text fg={theme.subtext}>
+              <b>Agents ({liveSubagents().length})</b>
+            </text>
+            <For each={liveSubagents().slice(0, AGENTS_SHOWN_MAX)}>
+              {(sub) => <SubagentRow sub={sub} iconStyle={props.iconStyle} />}
+            </For>
+            <Show when={liveSubagents().length > AGENTS_SHOWN_MAX}>
+              <text fg={theme.overlay}>
+                {"  "}+{liveSubagents().length - AGENTS_SHOWN_MAX} more
+              </text>
+            </Show>
+            <text fg={theme.border}>{"─".repeat(separatorWidth())}</text>
+          </box>
+        </Show>
 
         <Show when={props.session!.tmuxPane}>
           <Show

@@ -4,7 +4,7 @@ Deep-dive notes for contributors. For the high-level picture and the system over
 
 ## The core problem
 
-ccmux exists to bridge a fundamental gap: AI agents running in tmux panes are observable but not addressable from outside. A `ps` listing tells you "claude is alive in pane %12," but it can't tell you which Claude session UUID that maps to. Claude doesn't keep its JSONL log file open, so `lsof` won't link the PID to a log path. Codex, Cursor, OpenCode, and Pi each have their own variant of the same opacity.
+ccmux exists to bridge a fundamental gap: AI agents running in tmux panes are observable but not addressable from outside. A `ps` listing tells you "claude is alive in pane %12," but it can't tell you which Claude session UUID that maps to. Claude doesn't keep its JSONL log file open, so `lsof` won't link the PID to a log path. Codex, Cursor, OpenCode, Pi, and Antigravity each have their own variant of the same opacity.
 
 The daemon merges three signals to derive per-session state, in order of trust:
 
@@ -69,6 +69,22 @@ Claude Code writes transcripts to `$CLAUDE_CONFIG_DIR/projects`, so a second acc
 
 Because a transcript lives in exactly one tree, marker events route to the watcher that owns the session: `LogWatcher.ownsSession(id)` reports whether that tree has discovered the session's log, and the Claude adapter's `ownerFor` (`getLogWatchers("claude")` → `find(ownsSession) ?? watchers[0]`) picks the owning watcher, falling back to the primary for sessions no tree has discovered yet (e.g. a marker written before the first turn). For the same reason, per-watcher freshness state (`isRecentlyProcessed`) is folded across all Claude watchers in the reconciler, so a second-account session isn't invisible to the just-processed debounce guard.
 
+## Subagent tracking (Claude)
+
+Claude Code writes per-subagent transcripts to `<projects>/<encoded>/<sessionId>/subagents/agent-*.jsonl`; `ClaudeLogAdapter` owns a private chokidar instance for that layer and folds each file's derived state into `Session.subagents`. Each entry also carries `startedAt`, read once from the transcript's first entry (`readFirstEntryTimestamp`) and carried forward; the head is immutable, so re-reads after eviction or a daemon restart derive the same value. The preview renders it as runtime-since-spawn, the same clock Claude's own agent panel shows; staleness detection stays on `lastActivityAt`. `getEffectiveStatus` (used by every TUI consumer) then lifts the parent: any active subagent (working or waiting) lifts an `idle` parent to `working` (rendered as "agents"), so a lead sitting at its prompt never renders as done while its agents run. A subagent's `waiting` deliberately does NOT surface as row-level waiting: it is log-derived from an unresolved tool_use, which a tool mid-execution and a genuine approval prompt exhibit identically, so it would false-alarm under bypassPermissions. Genuine permission prompts surface in the lead's own pane and reach the row through marker/terminal signals as the parent's own `waiting`.
+
+Subagents come in two flavors with different lifecycles, and the adapter must handle both:
+
+- **Blocking `Task` tools**: the parent transcript records the tool_use, so the status machine tracks pending task IDs (`hasActiveSubagent`), and the subagent's own log ends with `end_turn` (it self-reports idle, and idle entries self-evict via `SessionManager.updateSubagent`).
+- **Background teammates** (`Agent` tool, `taskKind: in_process_teammate`): the tool_result acks in milliseconds and the parent ends its turn, so the parent log carries **no** subagent bookkeeping, and the teammate's transcript never records a terminal `end_turn`. Filenames embed the agent name (`agent-areviewer-functionality-<hex>.jsonl`), not just hex.
+
+That forces four design points:
+
+1. **Discovery keys off the directory, not the parent log**: the adapter attaches when `hasActiveSubagent` is set _or_ when any `agent-*.jsonl` in the subagents dir was written within `SUBAGENT_STALE_TIMEOUT_MS` (probe result cached ~15s, since parent parses are frequent).
+2. **Evaluation cannot be parse-driven alone**: parent log parses stop at `end_turn`, and teammates often start writing only after the parent's last parse (verified live). `LogAdapter.onReconcileTick`, called from `tickLogAdapters` every reconciler scan, re-evaluates attach/teardown independent of parent activity.
+3. **Completion is inferred from silence**: the reconciler's `capStaleSubagents` sweep downgrades active (`working` or `waiting`) subagents whose logs have been silent past `SUBAGENT_STALE_TIMEOUT_MS`; the downgrade to idle also removes the entry. The threshold is deliberately generous (a subagent inside one long Bash call appends nothing while genuinely working).
+4. **Teardown requires all signals gone**: the dir watch is dropped only when the subagents array is empty, the parent has no pending tasks, and the dir is inactive. The parent reading `idle` is explicitly _not_ an exit signal — it's the normal background-agent state. Sharing the staleness threshold between the attach probe, the seed cap (`capStaleSubagentSeed` on re-attach seeding), and the sweep is what prevents attach/teardown loops.
+
 ## Hook lifecycle
 
 <picture>
@@ -102,13 +118,14 @@ The entire interface between ccmux and the agent is one JSON file per session, w
 
 ### Per-agent strategies
 
-| Agent    | Mechanism                                                                                                                                                                                                                                                                                         | Pane correlation                                  |
-| :------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------------------------------ |
-| Claude   | 3 shell scripts (`SessionStart`, `SessionEnd`, `Notification`) registered in `~/.claude/settings.json`.                                                                                                                                                                                           | TTY match (`marker.tty` to `pane.tty`)            |
-| Codex    | 3 shell scripts (`SessionStart`, `Stop`, `PermissionRequest`) in `~/.codex/hooks.json`, plus the codex hooks feature flag in `config.toml` (`[features] codex_hooks = true` pre-0.124, `[features] hooks = true` on 0.124+; ccmux recognizes either).                                             | TTY match                                         |
-| Cursor   | 4 shell scripts (`sessionStart`, `sessionEnd`, `beforeSubmitPrompt`, `stop`) via `~/.cursor/hooks.json`. Scripts walk PID ancestry to find the real `cursor-agent` PID (Cursor invokes hooks via `/bin/zsh -c`, so `$PPID` is a transient shell).                                                 | PID-ancestry: `ctx.getPaneHostingPid(marker.pid)` |
-| OpenCode | One JS plugin at `~/.config/opencode/plugin/ccmux.js` subscribed to OpenCode's message bus (no shell hooks; pure `node:fs/promises` so the same file runs on Bun or Node).                                                                                                                        | PID-ancestry; one server hosts N sessions         |
-| Pi       | One JS extension at `~/.pi/agent/extensions/ccmux.js` subscribed to Pi's lifecycle events (no shell hooks; pure `node:fs/promises`, auto-discovered and loaded via jiti). Writes the marker at `session_start`, which fires at launch with full identity (pid, session id, transcript path, cwd). | PID-ancestry; one session per process             |
+| Agent       | Mechanism                                                                                                                                                                                                                                                                                         | Pane correlation                                  |
+| :---------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------------------------------ |
+| Claude      | 3 shell scripts (`SessionStart`, `SessionEnd`, `Notification`) registered in `~/.claude/settings.json`.                                                                                                                                                                                           | TTY match (`marker.tty` to `pane.tty`)            |
+| Codex       | 3 shell scripts (`SessionStart`, `Stop`, `PermissionRequest`) in `~/.codex/hooks.json`, plus the codex hooks feature flag in `config.toml` (`[features] codex_hooks = true` pre-0.124, `[features] hooks = true` on 0.124+; ccmux recognizes either).                                             | TTY match                                         |
+| Cursor      | 4 shell scripts (`sessionStart`, `sessionEnd`, `beforeSubmitPrompt`, `stop`) via `~/.cursor/hooks.json`. Scripts walk PID ancestry to find the real `cursor-agent` PID (Cursor invokes hooks via `/bin/zsh -c`, so `$PPID` is a transient shell).                                                 | PID-ancestry: `ctx.getPaneHostingPid(marker.pid)` |
+| OpenCode    | One JS plugin at `~/.config/opencode/plugin/ccmux.js` subscribed to OpenCode's message bus (no shell hooks; pure `node:fs/promises` so the same file runs on Bun or Node).                                                                                                                        | PID-ancestry; one server hosts N sessions         |
+| Pi          | One JS extension at `~/.pi/agent/extensions/ccmux.js` subscribed to Pi's lifecycle events (no shell hooks; pure `node:fs/promises`, auto-discovered and loaded via jiti). Writes the marker at `session_start`, which fires at launch with full identity (pid, session id, transcript path, cwd). | PID-ancestry; one session per process             |
+| Antigravity | 2 shell scripts (`PreInvocation`, `Stop`) via global `~/.gemini/config/hooks.json`. The first `PreInvocation` creates the marker because Antigravity exposes no session-start hook.                                                                                                               | TTY match with PID-ancestry fallback              |
 
 ### Lifecycle (`hook-manager.ts`)
 
@@ -116,7 +133,7 @@ The entire interface between ccmux and the agent is one JSON file per session, w
 2. Agent fires hook, script writes marker file.
 3. `HookManager.start()` first replays existing on-disk markers (covers "daemon was down when agent booted"), then opens chokidar with `ignoreInitial: true`.
 4. Add event triggers `adapter.onMarkerAdded(marker, ctx)`. The adapter locates the matching pane-tracked session, sets `nativeSessionId`, `logPath`, `cwd`, and (Claude) starts log-tailing. A marker written before the daemon's first scan created the pane-tracked session would otherwise be orphaned; the shared, agent-agnostic `reconcileSessionMarkerLinks()` (`adapters/link.ts`, keyed off `adapter.agentType`) closes that race on the next scan and re-derives native-id ownership each scan so a mis-linked id heals.
-5. Per-turn signals (Claude `Notification`, Codex `PermissionRequest`, Cursor `beforeSubmitPrompt`, OpenCode `permission.asked`, Pi `agent_start`/`agent_end`) update the marker's `state` and `state_timestamp`. The next reconcile tick picks them up via the freshest-wins cascade (`evaluateCascade()`).
+5. Per-turn signals (Claude `Notification`, Codex `PermissionRequest`, Cursor `beforeSubmitPrompt`, OpenCode `permission.asked`, Pi `agent_start`/`agent_end`, Antigravity `PreInvocation`/`Stop`) update the marker's `state` and `state_timestamp`. The next reconcile tick picks them up via the freshest-wins cascade (`evaluateCascade()`).
 6. Cleanup: `cleanupStaleMarkers()` groups by `(agent_type, session_id)`, dedupes, and applies a 3-level liveness check (PID, TTY, adapter callback `isSessionStillLive`); any failed check unlinks the marker.
 
 ### OpenCode aggregation
@@ -172,6 +189,8 @@ Constructed in `Daemon.start()` only when `backgroundAgents !== false` (opt-out 
 ## Daemon lifecycle and boot ordering
 
 The Server (`server.ts`) starts at the top of `Daemon.start()`, before session migration, marker replay, and the initial scan: auto-start callers poll `/health` on a short budget, and a session-heavy boot would otherwise outlast it. Early SSE clients get a sparse `init` and hydrate live via `session_created` / `session_updated`. `GET /server-info` returns `{ socketPath: string | null }`, the tmux socket the daemon scans, so consumers can refuse cross-server pane targeting.
+
+`POST /sessions/:id/send` routes single-line text through `sendLiteralToPane` and multiline text through `sendPromptToPane` in `pane-io.ts`; the latter uses tmux bracketed paste so embedded newlines remain one prompt, and both paths honor requests that paste without pressing Enter.
 
 `lifecycle.ts` owns process management: PID-file read/write, HTTP `/health` liveness (used instead of the PID file alone, because a dead daemon's PID can be recycled by an unrelated process — a false positive would suppress auto-start), detached background spawn, and PID-reuse-safe zombie-port recovery. `stopDaemonByPort` signals only the confirmed port LISTENer found via `findDaemonPidByPort` (`lsof -sTCP:LISTEN`), never the PID-file PID, and spares a foreign squatter whose `ps` command line isn't `daemon start` (fail-open on an unreadable cmd to preserve recovery). The auto-start/recovery flow that composes these lives in `src/commands/shared.ts` (`ensureDaemon` → `launchDaemon`: evict the zombie holding the port, spawn fresh, wait for health, surface the blocker's PID/cmd on failure), shared by every CLI entrypoint.
 

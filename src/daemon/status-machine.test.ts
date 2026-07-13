@@ -393,6 +393,24 @@ describe("status-machine", () => {
       expect(state.attentionType).toBeNull();
     });
 
+    it("should handle assistant stop_sequence with no tools as idle", () => {
+      const entry: AssistantLogEntry = {
+        type: "assistant",
+        uuid: "123",
+        parentUuid: null,
+        timestamp: "2024-01-01T00:00:00Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Here is my response" }],
+          stop_reason: "stop_sequence",
+        },
+      };
+
+      const state = processEntry(entry, createInitialState());
+      expect(state.status).toBe("idle");
+      expect(state.attentionType).toBeNull();
+    });
+
     it("should handle summary entry as idle", () => {
       const entry: SummaryLogEntry = {
         type: "summary",
@@ -916,7 +934,11 @@ describe("status-machine", () => {
       expect(result.fromSubagent).toBe(false);
     });
 
-    it("should return permission from subagent when subagent is waiting for permission", () => {
+    it("should not surface subagent waiting on a working parent", () => {
+      // Subagent waiting is log-derived (unresolved tool_use) and cannot
+      // distinguish "blocked on approval" from "executing a long tool";
+      // it must never turn the row red. Genuine prompts arrive via the
+      // parent's own marker/terminal-driven waiting.
       const session: Session = {
         ...baseSession,
         subagents: [
@@ -926,58 +948,99 @@ describe("status-machine", () => {
             attentionType: "permission",
             pendingTool: "Bash",
             lastActivityAt: null,
+            startedAt: null,
           },
         ],
       };
       const result = getEffectiveStatus(session);
-      expect(result.status).toBe("waiting");
-      expect(result.attentionType).toBe("permission");
-      expect(result.fromSubagent).toBe(true);
+      expect(result.status).toBe("working");
+      expect(result.fromSubagent).toBe(false);
     });
 
-    it("should return question from subagent when subagent is waiting for question", () => {
+    it("should lift an idle parent to working when a subagent is waiting", () => {
+      // Waiting counts as activity (mid tool call), not attention.
       const session: Session = {
         ...baseSession,
+        status: "idle",
         subagents: [
           {
             agentId: "sub1",
-            status: "waiting",
-            attentionType: "question",
-            pendingTool: "AskUserQuestion",
-            lastActivityAt: null,
-          },
-        ],
-      };
-      const result = getEffectiveStatus(session);
-      expect(result.status).toBe("waiting");
-      expect(result.attentionType).toBe("question");
-      expect(result.fromSubagent).toBe(true);
-    });
-
-    it("should prioritize permission over question across subagents", () => {
-      const session: Session = {
-        ...baseSession,
-        subagents: [
-          {
-            agentId: "sub1",
-            status: "waiting",
-            attentionType: "question",
-            pendingTool: "AskUserQuestion",
-            lastActivityAt: null,
-          },
-          {
-            agentId: "sub2",
             status: "waiting",
             attentionType: "permission",
             pendingTool: "Bash",
             lastActivityAt: null,
+            startedAt: null,
+          },
+        ],
+      };
+      const result = getEffectiveStatus(session);
+      expect(result.status).toBe("working");
+      expect(result.attentionType).toBe(null);
+      expect(result.fromSubagent).toBe(true);
+    });
+
+    it("should lift an idle parent to working when a subagent is still working", () => {
+      const session: Session = {
+        ...baseSession,
+        status: "idle",
+        attentionState: "unread",
+        subagents: [
+          {
+            agentId: "sub1",
+            status: "working",
+            attentionType: null,
+            pendingTool: null,
+            lastActivityAt: null,
+            startedAt: null,
+          },
+        ],
+      };
+      const result = getEffectiveStatus(session);
+      expect(result.status).toBe("working");
+      expect(result.attentionType).toBe(null);
+      expect(result.fromSubagent).toBe(true);
+    });
+
+    it("should keep an idle parent idle when all subagents are idle", () => {
+      const session: Session = {
+        ...baseSession,
+        status: "idle",
+        subagents: [
+          {
+            agentId: "sub1",
+            status: "idle",
+            attentionType: null,
+            pendingTool: null,
+            lastActivityAt: null,
+            startedAt: null,
+          },
+        ],
+      };
+      const result = getEffectiveStatus(session);
+      expect(result.status).toBe("idle");
+      expect(result.fromSubagent).toBe(false);
+    });
+
+    it("should not override a waiting parent when a subagent is working", () => {
+      const session: Session = {
+        ...baseSession,
+        status: "waiting",
+        attentionType: "permission",
+        subagents: [
+          {
+            agentId: "sub1",
+            status: "working",
+            attentionType: null,
+            pendingTool: null,
+            lastActivityAt: null,
+            startedAt: null,
           },
         ],
       };
       const result = getEffectiveStatus(session);
       expect(result.status).toBe("waiting");
       expect(result.attentionType).toBe("permission");
-      expect(result.fromSubagent).toBe(true);
+      expect(result.fromSubagent).toBe(false);
     });
   });
 

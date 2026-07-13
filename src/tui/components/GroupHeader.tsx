@@ -1,7 +1,7 @@
 import type { Component } from "solid-js";
-import { Show } from "solid-js";
-import { WAITING_SUBTYPES } from "../utils/grouping";
-import type { StatusSummary } from "../utils/grouping";
+import { createMemo, Show } from "solid-js";
+import { WAITING_SUBTYPES, computeStatusSummary } from "../utils/grouping";
+import type { FilteredSession, StatusSummary } from "../utils/grouping";
 import type { IconStyle } from "../../lib/icons";
 import { getStatusIcon } from "../../lib/icons";
 import { getStatusColor } from "./StatusBadge";
@@ -14,7 +14,7 @@ interface GroupHeaderProps {
   count: number;
   collapsed: boolean;
   selected: boolean;
-  statusSummary: StatusSummary;
+  members: FilteredSession[];
   iconStyle?: IconStyle;
   dimmed?: boolean;
   onActivate?: () => void;
@@ -56,14 +56,17 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
     props.selected && !props.dimmed ? theme.surface : undefined;
   const indicator = () => (props.collapsed ? "▶" : "▼");
 
+  // Derived here (not in the flat-item memo) so a subagent-driven status
+  // change re-renders only this header, not the whole row list.
+  const summary = createMemo(() => computeStatusSummary(props.members));
+
   const workingIcon = useStatusIcon(
-    () => (props.statusSummary.working > 0 ? "working" : "idle"),
+    () => (summary().working > 0 ? "working" : "idle"),
     () => null,
     () => props.iconStyle,
   );
 
-  const dots = () =>
-    staticDots(props.statusSummary, props.iconStyle, props.dimmed);
+  const dots = () => staticDots(summary(), props.iconStyle, props.dimmed);
 
   return (
     <box
@@ -90,9 +93,9 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         <text fg={c(theme.subtext)}>({props.count})</text>
         <Show when={props.collapsed}>
           <box flexDirection="row" gap={1}>
-            <Show when={props.statusSummary.working > 0}>
+            <Show when={summary().working > 0}>
               <text fg={c(theme.peach)}>
-                {workingIcon()} {props.statusSummary.working}
+                {workingIcon()} {summary().working}
               </text>
             </Show>
             {dots().map((dot) => (

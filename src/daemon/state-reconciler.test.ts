@@ -59,6 +59,7 @@ afterAll(() => {
 });
 
 import {
+  capStaleSubagents,
   clearTerminalRuleCache,
   collectPaneTrackedSources,
   readLogFileMtime,
@@ -1354,6 +1355,7 @@ describe("reconcileAll", () => {
             attentionType: null,
             pendingTool: null,
             lastActivityAt: null,
+            startedAt: null,
           },
         ],
       });
@@ -2990,5 +2992,121 @@ describe("reconcileOne (marker-event path)", () => {
     expect(updated.status).toBe("waiting");
     expect(updated.attentionType).toBe("permission");
     expect(updated.pendingTool).toBe("external_directory");
+  });
+});
+
+describe("capStaleSubagents", () => {
+  const STALE = new Date(Date.now() - 4 * 60_000).toISOString();
+  const FRESH = new Date(Date.now() - 30_000).toISOString();
+
+  function subagent(
+    overrides: Partial<Session["subagents"][number]> = {},
+  ): Session["subagents"][number] {
+    return {
+      agentId: "sub-1",
+      status: "working",
+      attentionType: null,
+      pendingTool: null,
+      lastActivityAt: FRESH,
+      startedAt: null,
+      ...overrides,
+    };
+  }
+
+  it("downgrades a working subagent whose log went silent past the threshold", () => {
+    const manager = new SessionManager();
+    const id = makeSession(manager, {
+      status: "idle",
+      subagents: [subagent({ lastActivityAt: STALE })],
+    });
+
+    capStaleSubagents(makeDeps(manager));
+
+    // Idle subagents are filtered out by updateSubagent, so the downgrade
+    // manifests as removal.
+    expect(manager.getSession(id)!.subagents).toHaveLength(0);
+  });
+
+  it("keeps a recently active working subagent", () => {
+    const manager = new SessionManager();
+    const id = makeSession(manager, {
+      status: "idle",
+      subagents: [subagent({ lastActivityAt: FRESH })],
+    });
+
+    capStaleSubagents(makeDeps(manager));
+
+    const subs = manager.getSession(id)!.subagents;
+    expect(subs).toHaveLength(1);
+    expect(subs[0].status).toBe("working");
+  });
+
+  it("downgrades only the stale subagent when fresh and stale coexist", () => {
+    const manager = new SessionManager();
+    const id = makeSession(manager, {
+      status: "idle",
+      subagents: [
+        subagent({ agentId: "sub-stale", lastActivityAt: STALE }),
+        subagent({ agentId: "sub-fresh", lastActivityAt: FRESH }),
+      ],
+    });
+
+    capStaleSubagents(makeDeps(manager));
+
+    const subs = manager.getSession(id)!.subagents;
+    expect(subs.map((s) => s.agentId)).toEqual(["sub-fresh"]);
+  });
+
+  it("downgrades stale waiting subagents like working ones", () => {
+    // A subagent's waiting is an unresolved tool_use, which a killed agent
+    // exhibits forever; since waiting counts as activity in
+    // getEffectiveStatus, a frozen one must not lift its parent forever.
+    const manager = new SessionManager();
+    const id = makeSession(manager, {
+      status: "idle",
+      subagents: [
+        subagent({
+          status: "waiting",
+          attentionType: "permission",
+          pendingTool: "Bash",
+          lastActivityAt: STALE,
+        }),
+      ],
+    });
+
+    capStaleSubagents(makeDeps(manager));
+
+    expect(manager.getSession(id)!.subagents).toHaveLength(0);
+  });
+
+  it("keeps a recently active waiting subagent", () => {
+    const manager = new SessionManager();
+    const id = makeSession(manager, {
+      status: "idle",
+      subagents: [
+        subagent({
+          status: "waiting",
+          attentionType: "permission",
+          pendingTool: "Bash",
+          lastActivityAt: FRESH,
+        }),
+      ],
+    });
+
+    capStaleSubagents(makeDeps(manager));
+
+    expect(manager.getSession(id)!.subagents).toHaveLength(1);
+  });
+
+  it("leaves working subagents without lastActivityAt alone", () => {
+    const manager = new SessionManager();
+    const id = makeSession(manager, {
+      status: "idle",
+      subagents: [subagent({ lastActivityAt: null })],
+    });
+
+    capStaleSubagents(makeDeps(manager));
+
+    expect(manager.getSession(id)!.subagents).toHaveLength(1);
   });
 });

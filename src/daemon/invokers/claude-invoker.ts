@@ -226,6 +226,7 @@ export class ClaudeInvoker implements Invoker {
         const sentPrompt = await this.deps.tmux.sendPromptToPane(
           paneId,
           input.prompt,
+          true,
         );
         if (!sentPrompt) {
           if (signal.aborted) {
@@ -264,6 +265,7 @@ export class ClaudeInvoker implements Invoker {
         const sentPrompt = await this.deps.tmux.sendPromptToPane(
           paneId,
           input.prompt,
+          true,
         );
         if (!sentPrompt) {
           if (signal.aborted) {

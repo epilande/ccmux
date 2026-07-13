@@ -3,10 +3,11 @@ import {
   DAEMON_PORT,
   DAEMON_HOST,
   HEARTBEAT_INTERVAL_MS,
+  MAX_SEND_TEXT_CHARS,
   isCcmuxPane,
 } from "../lib/config";
 import { getPreferences } from "../lib/preferences";
-import { capturePane } from "./pane-io";
+import { capturePane, sendLiteralToPane, sendPromptToPane } from "./pane-io";
 import type { AgentDef } from "../lib/agents";
 import {
   getMarkerKey,
@@ -51,6 +52,10 @@ interface SSEClient {
 /** Function to get the current pane cache from the daemon */
 type PaneCacheGetter = () => Map<string, TmuxPane>;
 type AgentLookup = (agentType: string) => AgentDef | undefined;
+interface PaneSendDeps {
+  sendLiteralToPane: typeof sendLiteralToPane;
+  sendPromptToPane: typeof sendPromptToPane;
+}
 
 /** Cached git branch result */
 interface BranchCacheEntry {
@@ -226,6 +231,7 @@ export class DaemonServer {
   private attentionTracker: AttentionTracker;
   private invocationManager: InvocationManager;
   private getHookAdapter: (agentName: string) => HookAdapter | null;
+  private paneSendDeps: PaneSendDeps;
 
   constructor(
     sessionManager: SessionManager,
@@ -234,6 +240,7 @@ export class DaemonServer {
     attentionTracker: AttentionTracker,
     invocationManager: InvocationManager,
     getHookAdapter: (agentName: string) => HookAdapter | null,
+    paneSendDeps: PaneSendDeps = { sendLiteralToPane, sendPromptToPane },
   ) {
     this.sessionManager = sessionManager;
     this.getPaneCache = getPaneCache;
@@ -241,6 +248,7 @@ export class DaemonServer {
     this.attentionTracker = attentionTracker;
     this.invocationManager = invocationManager;
     this.getHookAdapter = getHookAdapter;
+    this.paneSendDeps = paneSendDeps;
 
     // Listen for session changes
     this.sessionManager.on("change", async (event: SessionEvent) => {
@@ -1159,9 +1167,11 @@ export class DaemonServer {
       );
     }
 
-    if (text.length > 10_000) {
+    if (text.length > MAX_SEND_TEXT_CHARS) {
       return Response.json(
-        { error: "Text exceeds maximum length of 10,000 characters" },
+        {
+          error: `Text exceeds maximum length of ${MAX_SEND_TEXT_CHARS.toLocaleString("en-US")} characters`,
+        },
         { status: 400, headers },
       );
     }
@@ -1172,31 +1182,12 @@ export class DaemonServer {
     // wrong pane. `%N` is immutable for the pane's life.
     const target = session.tmuxPane;
 
-    try {
-      // Send text literally (no key-name interpretation)
-      const proc = Bun.spawn(
-        ["tmux", "send-keys", "-t", target, "-l", "--", text],
-        { stdout: "pipe", stderr: "pipe" },
-      );
-      const exitCode = await proc.exited;
-      if (exitCode !== 0) {
-        const stderr = await new Response(proc.stderr).text();
-        return Response.json(
-          { error: `tmux send-keys failed: ${stderr.trim()}` },
-          { status: 500, headers },
-        );
-      }
-
-      if (enter) {
-        const enterProc = Bun.spawn(
-          ["tmux", "send-keys", "-t", target, "Enter"],
-          { stdout: "pipe", stderr: "pipe" },
-        );
-        await enterProc.exited;
-      }
-    } catch (err: unknown) {
+    const sent = text.includes("\n")
+      ? await this.paneSendDeps.sendPromptToPane(target, text, enter)
+      : await this.paneSendDeps.sendLiteralToPane(target, text, enter);
+    if (!sent) {
       return Response.json(
-        { error: `Failed to send to session: ${errorMessage(err)}` },
+        { error: "Failed to send to session" },
         { status: 500, headers },
       );
     }

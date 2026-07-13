@@ -25,12 +25,19 @@ export const ConfirmationDialog: Component<ConfirmationDialogProps> = (
         return "Kill Group?";
       case "restart":
         return "Restart Session?";
+      case "send-review":
+        return "Send review comments";
       default:
         return "Kill Session?";
     }
   });
 
   const subtitle = createMemo(() => {
+    if (props.action === "send-review") {
+      const n = props.sessionCount ?? 0;
+      const agent = props.session?.agentType ?? "agent";
+      return `Send ${n} comment${n === 1 ? "" : "s"} to ${agent}?`;
+    }
     if (props.action === "kill-group") {
       const n = props.sessionCount ?? 0;
       const label = props.groupLabel || "group";

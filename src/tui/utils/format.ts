@@ -1,4 +1,4 @@
-export { formatRelativeTime } from "../../lib/format";
+export { formatDuration, formatRelativeTime } from "../../lib/format";
 
 export function shortenCwd(cwd: string): string {
   const home = process.env.HOME ?? "";
@@ -10,6 +10,23 @@ export function formatVersion(version: string | null): string {
   // Strip prerelease/platform suffixes (e.g. "0.104.0-darwin-arm64" → "0.104.0")
   const semver = version.replace(/^v?/, "").replace(/[-+].*$/, "");
   return semver ? `v${semver}` : `v${version}`;
+}
+
+/**
+ * Human name for a subagent from its transcript-derived agent ID.
+ *
+ * IDs come in two shapes (both observed on disk):
+ * - Named agents/teammates: `a<name>-<hex>` (e.g.
+ *   `areviewer-quality-4e04b65eee350afe` → `reviewer-quality`)
+ * - Anonymous Task subagents: `a<hex>` (e.g. `a3a022751130cff19` → `3a0227`)
+ *
+ * Both start with a literal `a` prefix and end in a hex run; strip the
+ * prefix, then strip a trailing `-<hex>` when a name remains.
+ */
+export function formatSubagentName(agentId: string): string {
+  const body = agentId.startsWith("a") ? agentId.slice(1) : agentId;
+  if (/^[0-9a-f]{8,}$/.test(body)) return body.slice(0, 6);
+  return body.replace(/-[0-9a-f]{8,}$/, "");
 }
 
 /** Truncate plain text to `maxLen` chars, adding an ellipsis when clipped. */

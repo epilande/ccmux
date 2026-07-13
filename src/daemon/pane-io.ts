@@ -102,7 +102,7 @@ export async function sendLiteralToPane(
  * input box instead of being interpreted as separate Enter presses
  * (which is what `send-keys -l` does for any string containing `\n`).
  *
- * After pasting, sends an explicit Enter to submit.
+ * After pasting, optionally sends an explicit Enter to submit.
  *
  * Do NOT use this for shell commands (the buffer's bracketed-paste
  * sequence is meaningless to a non-readline shell); use sendLiteralToPane
@@ -111,6 +111,7 @@ export async function sendLiteralToPane(
 export async function sendPromptToPane(
   paneId: string,
   text: string,
+  pressEnter: boolean,
 ): Promise<boolean> {
   // Per-pane buffer name keeps concurrent invocations from clobbering
   // each other's buffer if tmux ever schedules paste-buffer out of order.
@@ -134,15 +135,19 @@ export async function sendPromptToPane(
     const pasteExit = await paste.exited;
     if (pasteExit !== 0) return false;
 
-    // Same 150ms gap as sendLiteralToPane: gives the TUI a tick to
-    // commit the paste before we send the submit.
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    const enter = Bun.spawn(["tmux", "send-keys", "-t", paneId, "Enter"], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const enterExit = await enter.exited;
-    return enterExit === 0;
+    if (pressEnter) {
+      // Same 150ms gap as sendLiteralToPane: gives the TUI a tick to
+      // commit the paste before we send the submit.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const enter = Bun.spawn(["tmux", "send-keys", "-t", paneId, "Enter"], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const enterExit = await enter.exited;
+      if (enterExit !== 0) return false;
+    }
+
+    return true;
   } catch {
     return false;
   }

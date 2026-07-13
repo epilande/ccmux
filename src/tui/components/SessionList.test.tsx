@@ -4,7 +4,11 @@ import { MouseButtons } from "@opentui/core/testing";
 import { createSignal } from "solid-js";
 import { SessionList, isActivePaneRow } from "./SessionList";
 import { TickContext } from "../store";
-import { mockEnrichedSession, emptySummary } from "./test-helpers";
+import {
+  mockEnrichedSession,
+  emptySummary,
+  membersFromSummary,
+} from "./test-helpers";
 import type { FlatItem } from "../utils/grouping";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
@@ -21,7 +25,7 @@ function makeHeader(label: string, count: number, groupKey?: string): FlatItem {
     label,
     count,
     collapsed: false,
-    statusSummary: { ...emptySummary(), idle: count },
+    members: membersFromSummary({ ...emptySummary(), idle: count }),
   };
 }
 

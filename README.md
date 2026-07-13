@@ -1,5 +1,11 @@
 <div align="center">
-  <h1>ccmux 🔮</h1>
+  <h1>
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+      <img alt="ccmux logo" src="assets/logo.svg" width="120">
+    </picture>
+    <br>ccmux
+  </h1>
 </div>
 
 <p align="center">
@@ -16,12 +22,12 @@ When running multiple AI coding agent sessions across tmux panes, it's hard to k
 
 It works with your existing tmux workflow. You don't change how you launch or run your agents; ccmux discovers what's already running in your panes, so as long as you're in tmux with a supported agent, it just works.
 
-**Built-in support for:** Claude Code, Codex, Cursor, OpenCode, Pi, Gemini CLI, plus [custom agent definitions](#-custom-agents) via config.
+**Built-in support for:** Claude Code, Codex, Cursor, OpenCode, Pi, Antigravity, Gemini CLI, plus [custom agent definitions](#-custom-agents) via config.
 
 ## ✨ Features
 
 - 🎯 **Live Session States**: Every agent tracked as idle, working, or waiting (permission / plan approval / question), flagged the moment one needs you
-- 🧩 **Multi-Agent**: Claude Code, Codex, Cursor, OpenCode, Pi, Gemini CLI, plus custom agents via config
+- 🧩 **Multi-Agent**: Claude Code, Codex, Cursor, OpenCode, Pi, Antigravity, Gemini CLI, plus custom agents via config
 - 🔄 **Real-Time**: Background daemon streams state changes instantly over SSE, no polling, no refresh
 - 👁️ **Live Preview**: Split-pane view of the selected session's pane content
 - ⚡ **Act in Place**: Tab into the preview to approve, answer, or type, keys go straight to that pane
@@ -30,7 +36,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 📂 **Session Grouping**: Collapsible project groups with reordering and pinning
 - 🌿 **Git & PR Aware**: Branch and worktree detection, open PRs with live CI and review status
 - 📝 **Diff Review**: Press <kbd>d</kbd> to review a session's working-tree diff with [hunk](https://github.com/modem-dev/hunk), right in the pane
-- 🤖 **Background Agents & Subagents**: Claude Code background agents get rows too; nested Task agent waiting states surface
+- 🤖 **Background Agents & Subagents**: Claude Code background agents get rows too; running subagents show as `agents` with a live list in the preview
 - 🔁 **Session Control**: Spawn, kill, and restart sessions from the TUI; `ccmux invoke` for scripted one-shot agent turns
 - ⌨️ **Keyboard-First, Mouse-Friendly**: Vim keys and number jumps, plus click-to-switch and right-click context actions
 
@@ -87,40 +93,40 @@ ccmux setup
 
 ### CLI Commands
 
-| Command                                     | Description                                                                                     |
-| :------------------------------------------ | :---------------------------------------------------------------------------------------------- |
-| `ccmux`                                     | Launch interactive TUI picker (default)                                                         |
-| `ccmux picker`                              | Launch TUI with options (`--preview`, `--icons <style>`)                                        |
-| `ccmux picker --persistent`                 | Dashboard mode (stay open after switching sessions)                                             |
-| `ccmux spawn [agent]`                       | Spawn a new agent session in a tmux pane                                                        |
-| `ccmux invoke [agent] "prompt"`             | Run a single agent turn and write the response to stdout ([docs](docs/invoke.md))               |
-| `ccmux invoke list`                         | List active and recently-finished invocations (`-j` for JSON)                                   |
-| `ccmux invoke cancel <id>`                  | Cancel a running invocation by id (idempotent)                                                  |
-| `ccmux invoke result <id>`                  | Print an invocation's full captured output (subprocess agents only)                             |
-| `ccmux show`                                | List all active sessions                                                                        |
-| `ccmux show --json`                         | Output sessions as JSON                                                                         |
-| `ccmux status`                              | Show daemon and session overview                                                                |
-| `ccmux switch <id>`                         | Switch tmux client to a session's pane                                                          |
-| `ccmux review [id]`                         | Review a session's diff with [hunk](https://github.com/modem-dev/hunk) (defaults to cwd)        |
-| `ccmux kill <id>`                           | Kill a session's process                                                                        |
-| `ccmux restart <id>`                        | Kill and resume a session                                                                       |
-| `ccmux send <id> <text>`                    | Send text to a session's tmux pane                                                              |
-| `ccmux screen [id]`                         | Capture pane content                                                                            |
-| `ccmux screen --grep <pattern>`             | Search across all session panes                                                                 |
-| `ccmux dismiss <id>`                        | Remove a session from tracking                                                                  |
-| `ccmux daemon start\|stop\|restart\|status` | Manage the background daemon                                                                    |
-| `ccmux config set <key> <value>`            | Set a preference                                                                                |
-| `ccmux config get <key>`                    | Get a single preference value                                                                   |
-| `ccmux config list`                         | List all preferences                                                                            |
-| `ccmux config themes`                       | List built-in themes (marks the active one)                                                     |
-| `ccmux setup`                               | Install hooks for every supported agent found on PATH (Claude + Codex + Cursor + OpenCode + Pi) |
-| `ccmux setup --agent <name>`                | Limit install/uninstall/status to specific agent(s); forces install even if not found on PATH   |
-| `ccmux setup --status`                      | Report install state without writing anything                                                   |
-| `ccmux setup --uninstall`                   | Remove hooks (preserves user-owned hook entries)                                                |
-| `ccmux debug`                               | Diagnose session tracking discrepancies                                                         |
-| `ccmux notify [message]`                    | Send a notification via the configured backend (bare: test message + diagnostics)               |
-| `ccmux sidebar`                             | Launch narrow sidebar TUI (no preview/footer)                                                   |
-| `ccmux sidebar --toggle`                    | Smart toggle: spawn/kill sidebars in every window across all tmux sessions                      |
+| Command                                     | Description                                                                                                   |
+| :------------------------------------------ | :------------------------------------------------------------------------------------------------------------ |
+| `ccmux`                                     | Launch interactive TUI picker (default)                                                                       |
+| `ccmux picker`                              | Launch TUI with options (`--preview`, `--icons <style>`)                                                      |
+| `ccmux picker --persistent`                 | Dashboard mode (stay open after switching sessions)                                                           |
+| `ccmux spawn [agent]`                       | Spawn a new agent session in a tmux pane                                                                      |
+| `ccmux invoke [agent] "prompt"`             | Run a single agent turn and write the response to stdout ([docs](docs/invoke.md))                             |
+| `ccmux invoke list`                         | List active and recently-finished invocations (`-j` for JSON)                                                 |
+| `ccmux invoke cancel <id>`                  | Cancel a running invocation by id (idempotent)                                                                |
+| `ccmux invoke result <id>`                  | Print an invocation's full captured output (subprocess agents only)                                           |
+| `ccmux show`                                | List all active sessions                                                                                      |
+| `ccmux show --json`                         | Output sessions as JSON                                                                                       |
+| `ccmux status`                              | Show daemon and session overview                                                                              |
+| `ccmux switch <id>`                         | Switch tmux client to a session's pane                                                                        |
+| `ccmux review [id]`                         | Review a session's diff with [hunk](https://github.com/modem-dev/hunk) (defaults to cwd)                      |
+| `ccmux kill <id>`                           | Kill a session's process                                                                                      |
+| `ccmux restart <id>`                        | Kill and resume a session                                                                                     |
+| `ccmux send <id> <text>`                    | Send text to a session's tmux pane (multiline pastes as one message; `--no-enter` skips submit)               |
+| `ccmux screen [id]`                         | Capture pane content                                                                                          |
+| `ccmux screen --grep <pattern>`             | Search across all session panes                                                                               |
+| `ccmux dismiss <id>`                        | Remove a session from tracking                                                                                |
+| `ccmux daemon start\|stop\|restart\|status` | Manage the background daemon                                                                                  |
+| `ccmux config set <key> <value>`            | Set a preference                                                                                              |
+| `ccmux config get <key>`                    | Get a single preference value                                                                                 |
+| `ccmux config list`                         | List all preferences                                                                                          |
+| `ccmux config themes`                       | List built-in themes (marks the active one)                                                                   |
+| `ccmux setup`                               | Install hooks for every supported agent found on PATH (Claude + Codex + Cursor + OpenCode + Pi + Antigravity) |
+| `ccmux setup --agent <name>`                | Limit install/uninstall/status to specific agent(s); forces install even if not found on PATH                 |
+| `ccmux setup --status`                      | Report install state without writing anything                                                                 |
+| `ccmux setup --uninstall`                   | Remove hooks (preserves user-owned hook entries)                                                              |
+| `ccmux debug`                               | Diagnose session tracking discrepancies                                                                       |
+| `ccmux notify [message]`                    | Send a notification via the configured backend (bare: test message + diagnostics)                             |
+| `ccmux sidebar`                             | Launch narrow sidebar TUI (no preview/footer)                                                                 |
+| `ccmux sidebar --toggle`                    | Smart toggle: spawn/kill sidebars in every window across all tmux sessions                                    |
 
 The daemon starts automatically the first time you run a ccmux command (picker, show, invoke, etc.). It runs on `127.0.0.1:2269` and provides both a REST API and SSE event stream.
 
@@ -128,11 +134,27 @@ The daemon starts automatically the first time you run a ccmux command (picker, 
 
 Press <kbd>P</kbd> to split the picker and preview the highlighted session's live pane content side by side. Press <kbd>Tab</kbd> to focus the preview and act in place: your keystrokes go straight to that agent's pane, so you can approve a permission, answer a question, or type a follow-up without ever leaving ccmux.
 
+When the session has agents running, an **Agents** section lists each one with its runtime. Finished agents drop off the list.
+
 https://github.com/user-attachments/assets/7e0d42b3-4e7b-43b8-8d06-72a2d69dd694
 
 ### Diff Review with Hunk
 
-[hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's working-tree diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the right-click context menu.
+[hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's working-tree diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the right-click context menu. If the working tree has no changes, ccmux reports that instead of opening an empty review.
+
+To send review feedback back to the agent:
+
+1. Press <kbd>c</kbd> in hunk to annotate a line, then <kbd>Ctrl+S</kbd> to save the note.
+2. Add any other review notes and quit hunk.
+3. Confirm **Send review comments** when the picker resumes. ccmux sends all captured notes, including short source snippets, to the agent as one prompt and stays in the picker so you can watch its status.
+
+The offer relies on hunk's session JSON commands (`hunk session list` / `session comment list`, verified against hunk 0.17.0). With an older hunk the review itself still works; the offer just doesn't appear.
+
+The `reviewHandback` preference controls what happens when hunk exits:
+
+- `confirm` (default) asks before sending the prompt.
+- `auto` sends and submits the prompt immediately without a dialog.
+- `fill` pastes the prompt into the agent's composer without submitting it. The text remains there until you jump to the session and submit or edit it; a later send or invoke may find it prepended.
 
 The review also runs from the CLI:
 
@@ -208,7 +230,7 @@ echo "what is 2 + 2" | ccmux invoke claude
 git diff main | ccmux invoke claude "Review this diff"
 ```
 
-Claude runs interactively in a dedicated tmux session and returns clean text parsed from the transcript JSONL. Codex, Cursor, OpenCode, Pi, and Gemini run as non-interactive subprocesses (`codex exec -o`, `cursor-agent --print`, `opencode run --format json`, `pi -p`, `gemini -p`) and return the agent's clean response text.
+Claude runs interactively in a dedicated tmux session and returns clean text parsed from the transcript JSONL. Codex, Cursor, OpenCode, Pi, Antigravity, and Gemini run as non-interactive subprocesses (`codex exec -o`, `cursor-agent --print`, `opencode run --format json`, `pi -p`, `agy -p`, `gemini -p`) and return the agent's clean response text.
 
 For orchestration, name an invocation with `--id <id>`, then use `ccmux invoke list`, `ccmux invoke cancel <id>`, and `ccmux invoke result <id>` to watch, cancel, or read its full captured output by that id. See [`docs/invoke.md`](docs/invoke.md#fire-and-poll---id-list-cancel-result) for the fire-and-poll reference.
 
@@ -225,31 +247,31 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 
 ## ⌨️ Keyboard Controls
 
-| Action                | Key                                                                                | Description                                                                                        |
-| :-------------------- | :--------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------- |
-| Navigate              | <kbd>j</kbd> / <kbd>k</kbd> or <kbd>↑</kbd> / <kbd>↓</kbd>                         | Move through session list                                                                          |
-| Jump to first/last    | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd>                                            | Go to top / bottom                                                                                 |
-| Jump to session       | <kbd>1</kbd>–<kbd>9</kbd>                                                          | Switch directly to session N                                                                       |
-| Switch to session     | <kbd>Enter</kbd>                                                                   | Switch tmux to the selected pane                                                                   |
-| Search                | <kbd>/</kbd>                                                                       | Enter fuzzy search mode                                                                            |
-| Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel                                                                        |
-| Scroll preview        | <kbd>Ctrl+D</kbd> / <kbd>Ctrl+U</kbd>                                              | Half-page scroll in preview                                                                        |
-| Resize preview        | <kbd>Alt+H</kbd> / <kbd>Alt+L</kbd>                                                | Increase/decrease preview width                                                                    |
-| Focus preview         | <kbd>Tab</kbd>                                                                     | Send keys directly to tmux pane                                                                    |
-| Restart session       | <kbd>r</kbd>                                                                       | Kill and resume the selected session                                                               |
-| Reconnect             | <kbd>R</kbd>                                                                       | Reconnect to the daemon SSE stream                                                                 |
-| Kill session          | <kbd>x</kbd>                                                                       | Kill the selected session's process                                                                |
-| Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions                                                                          |
-| Review diff           | <kbd>d</kbd>                                                                       | Review the session's diff with [hunk](https://github.com/modem-dev/hunk) (requires `hunk` on PATH) |
-| Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state                                                                       |
-| Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)                                                                |
-| Move group top/bottom | <kbd><</kbd> / <kbd>></kbd>                                                        | Pin group to top / bottom                                                                          |
-| Collapse/expand all   | <kbd>z</kbd><kbd>M</kbd> / <kbd>z</kbd><kbd>R</kbd> or <kbd>-</kbd> / <kbd>=</kbd> | Collapse or expand all groups                                                                      |
-| Hide idle             | <kbd>f</kbd>                                                                       | Toggle hiding idle sessions                                                                        |
-| Cycle prompt          | <kbd>p</kbd>                                                                       | Prompt display: inline → own row → off                                                             |
-| Cycle group-by        | <kbd>b</kbd>                                                                       | Cycle through group-by modes                                                                       |
-| Help                  | <kbd>?</kbd>                                                                       | Show keyboard shortcuts overlay                                                                    |
-| Quit                  | <kbd>q</kbd> / <kbd>Esc</kbd>                                                      | Exit the picker                                                                                    |
+| Action                | Key                                                                                | Description                                                                                                            |
+| :-------------------- | :--------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------- |
+| Navigate              | <kbd>j</kbd> / <kbd>k</kbd> or <kbd>↑</kbd> / <kbd>↓</kbd>                         | Move through session list                                                                                              |
+| Jump to first/last    | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd>                                            | Go to top / bottom                                                                                                     |
+| Jump to session       | <kbd>1</kbd>–<kbd>9</kbd>                                                          | Switch directly to session N                                                                                           |
+| Switch to session     | <kbd>Enter</kbd>                                                                   | Switch tmux to the selected pane                                                                                       |
+| Search                | <kbd>/</kbd>                                                                       | Enter fuzzy search mode                                                                                                |
+| Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel                                                                                            |
+| Scroll preview        | <kbd>Ctrl+D</kbd> / <kbd>Ctrl+U</kbd>                                              | Half-page scroll in preview                                                                                            |
+| Resize preview        | <kbd>Alt+H</kbd> / <kbd>Alt+L</kbd>                                                | Increase/decrease preview width                                                                                        |
+| Focus preview         | <kbd>Tab</kbd>                                                                     | Send keys directly to tmux pane                                                                                        |
+| Restart session       | <kbd>r</kbd>                                                                       | Kill and resume the selected session                                                                                   |
+| Reconnect             | <kbd>R</kbd>                                                                       | Reconnect to the daemon SSE stream                                                                                     |
+| Kill session          | <kbd>x</kbd>                                                                       | Kill the selected session's process                                                                                    |
+| Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions                                                                                              |
+| Review and hand back  | <kbd>d</kbd>                                                                       | Review with [hunk](https://github.com/modem-dev/hunk), then offer to send notes to the agent (requires `hunk` on PATH) |
+| Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state                                                                                           |
+| Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)                                                                                    |
+| Move group top/bottom | <kbd><</kbd> / <kbd>></kbd>                                                        | Pin group to top / bottom                                                                                              |
+| Collapse/expand all   | <kbd>z</kbd><kbd>M</kbd> / <kbd>z</kbd><kbd>R</kbd> or <kbd>-</kbd> / <kbd>=</kbd> | Collapse or expand all groups                                                                                          |
+| Hide idle             | <kbd>f</kbd>                                                                       | Toggle hiding idle sessions                                                                                            |
+| Cycle prompt          | <kbd>p</kbd>                                                                       | Prompt display: inline → own row → off                                                                                 |
+| Cycle group-by        | <kbd>b</kbd>                                                                       | Cycle through group-by modes                                                                                           |
+| Help                  | <kbd>?</kbd>                                                                       | Show keyboard shortcuts overlay                                                                                        |
+| Quit                  | <kbd>q</kbd> / <kbd>Esc</kbd>                                                      | Exit the picker                                                                                                        |
 
 <details>
 <summary><strong>Search mode keys</strong></summary>
@@ -301,6 +323,7 @@ ccmux config list
 | `searchPaneLines`            | `10`–`500`                                                                   | `100`              | Lines of pane content scanned in TUI search                                                                                        |
 | `searchTranscript`           | `true`, `false`                                                              | `true`             | Search live Claude/Codex transcripts (full history + assistant text) via the daemon                                                |
 | `persistent`                 | `true`, `false`                                                              | `false`            | Keep picker open after switching sessions (dashboard mode)                                                                         |
+| `reviewHandback`             | `confirm`, `auto`, `fill`                                                    | `confirm`          | After a hunk review, confirm delivery, send immediately, or fill the agent composer without submitting                             |
 | `sidebar.width`              | `10`–`80`                                                                    | `30`               | Sidebar pane width in columns                                                                                                      |
 | `sidebar.position`           | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                                                                                      |
 
@@ -460,7 +483,7 @@ ccmux setup --status           # Report install state without writing
 ccmux setup --uninstall        # Remove hooks
 ```
 
-Hooks write PID marker files under `~/.config/ccmux/session-pids/` whenever a session starts, a turn completes, or the agent asks the user to approve a tool. The daemon picks up the markers in real time via a filesystem watcher. See [`docs/architecture.md#hook-lifecycle`](./docs/architecture.md#hook-lifecycle) for the full flow (marker writes, chokidar dispatch, per-agent correlation).
+Hooks write PID marker files under `~/.config/ccmux/session-pids/` whenever a session starts or begins its first invocation, a turn completes, or the agent asks the user to approve a tool. The daemon picks up the markers in real time via a filesystem watcher. See [`docs/architecture.md#hook-lifecycle`](./docs/architecture.md#hook-lifecycle) for the full flow (marker writes, chokidar dispatch, per-agent correlation).
 
 Gemini CLI is tracked through process detection and terminal pattern matching, so it needs no setup.
 
@@ -515,6 +538,15 @@ Uses Pi's extension system rather than shell hooks. `ccmux setup --agent pi` dro
 - `session_shutdown`: unlinks the marker
 
 Pi runs one session per process, so there's no server-style aggregation; the daemon correlates the marker's PID to its tmux pane via process ancestry and links `nativeSessionId`.
+
+### Antigravity CLI
+
+Uses Antigravity's global named-hook config at `~/.gemini/config/hooks.json` with two scripts under `~/.gemini/config/hooks/`:
+
+- `ccmux-preinvocation.sh`: creates or refreshes the marker as `working` before each model invocation
+- `ccmux-stop.sh`: refreshes the marker as `idle` when the execution loop stops
+
+Antigravity exposes no session-start hook, so a fresh idle session remains pane-tracked until its first prompt. ccmux deliberately does not install `PreToolUse`: in Antigravity v1.1.1, an empty `{}` response silently denies the tool call. Permission attention instead comes from the native permission dialog detected in pane content.
 
 ### Matching priority (with hooks installed)
 

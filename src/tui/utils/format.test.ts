@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { formatVersion, truncateText, truncateHighlighted } from "./format";
+import { formatSubagentName, formatVersion, truncateText, truncateHighlighted } from "./format";
 
 /** Visible length: markup tags and ellipsis affixes excluded. */
 const visibleLen = (s: string) =>
@@ -114,5 +114,24 @@ describe("truncateHighlighted", () => {
   it("falls back to plain truncation when there is no span", () => {
     const plain = "plain long text well over the budget";
     expect(truncateHighlighted(plain, 10)).toBe(truncateText(plain, 10));
+  });
+});
+
+describe("formatSubagentName", () => {
+  it("parses named agent IDs", () => {
+    expect(formatSubagentName("areviewer-quality-4e04b65eee350afe")).toBe(
+      "reviewer-quality",
+    );
+    expect(formatSubagentName("asleeper-one-8c2e4613a97d4ec9")).toBe(
+      "sleeper-one",
+    );
+  });
+
+  it("shortens anonymous hex IDs", () => {
+    expect(formatSubagentName("a3a022751130cff19")).toBe("3a0227");
+  });
+
+  it("passes through IDs without the a-prefix convention", () => {
+    expect(formatSubagentName("custom-name")).toBe("custom-name");
   });
 });

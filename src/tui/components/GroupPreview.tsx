@@ -3,8 +3,8 @@ import { createMemo, For, Show } from "solid-js";
 import { useTerminalDimensions } from "@opentui/solid";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../../types";
-import { WAITING_SUBTYPES } from "../utils/grouping";
-import type { StatusSummary } from "../utils/grouping";
+import { WAITING_SUBTYPES, computeStatusSummary } from "../utils/grouping";
+import type { FilteredSession, StatusSummary } from "../utils/grouping";
 import type { IconStyle } from "../../lib/icons";
 import { getStatusIcon } from "../../lib/icons";
 import { getStatusColor } from "./StatusBadge";
@@ -15,7 +15,7 @@ import { formatRelativeTime, formatVersion, shortenCwd } from "../utils/format";
 import { theme } from "../theme";
 
 interface GroupPreviewProps {
-  header: { label: string; count: number; statusSummary: StatusSummary };
+  header: { label: string; count: number; members: FilteredSession[] };
   sessions: EnrichedSession[];
   onScrollboxRef?: (ref: ScrollBoxRenderable) => void;
   iconStyle?: IconStyle;
@@ -115,14 +115,17 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
     Math.max(1, Math.floor((dims().width * props.width) / 100) - 3),
   );
 
+  // Derived in this component's reactive scope (not the flat-item memo) so a
+  // subagent-driven status change re-renders only the preview header.
+  const summary = createMemo(() => computeStatusSummary(props.header.members));
+
   const workingIcon = useStatusIcon(
-    () => (props.header.statusSummary.working > 0 ? "working" : "idle"),
+    () => (summary().working > 0 ? "working" : "idle"),
     () => null,
     () => props.iconStyle,
   );
 
-  const summaryParts = () =>
-    staticSummaryParts(props.header.statusSummary, props.iconStyle);
+  const summaryParts = () => staticSummaryParts(summary(), props.iconStyle);
 
   return (
     <box
@@ -143,9 +146,9 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
           <text fg={theme.subtext}>({props.header.count} sessions)</text>
         </box>
         <box flexDirection="row" gap={2}>
-          <Show when={props.header.statusSummary.working > 0}>
+          <Show when={summary().working > 0}>
             <text fg={theme.peach}>
-              {workingIcon()} {props.header.statusSummary.working} working
+              {workingIcon()} {summary().working} working
             </text>
           </Show>
           <For each={summaryParts()}>

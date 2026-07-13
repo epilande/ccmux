@@ -1,3 +1,20 @@
+/**
+ * Compact elapsed-duration label with seconds precision: `42s`, `2m14s`,
+ * `1h5m`. Seconds drop at an hour and above; negative input (clock skew)
+ * clamps to `0s`.
+ */
+export function formatDuration(ms: number): string {
+  const totalSecs = Math.max(0, Math.floor(ms / 1000));
+  const secs = totalSecs % 60;
+  const totalMins = Math.floor(totalSecs / 60);
+  const mins = totalMins % 60;
+  const hours = Math.floor(totalMins / 60);
+
+  if (hours > 0) return `${hours}h${mins}m`;
+  if (totalMins > 0) return `${mins}m${secs}s`;
+  return `${secs}s`;
+}
+
 export function formatRelativeTime(date: Date, suffix = ""): string {
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();

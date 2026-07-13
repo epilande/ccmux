@@ -1,4 +1,4 @@
-import { describe, it, expect, spyOn, afterAll } from "bun:test";
+import { describe, it, expect, spyOn, afterAll, mock } from "bun:test";
 import {
   DaemonServer,
   rejectCrossOriginBrowser,
@@ -19,6 +19,7 @@ import type { HookAdapter } from "./hook-adapter";
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import type { sendLiteralToPane, sendPromptToPane } from "./pane-io";
 
 /**
  * Access private methods/fields on DaemonServer for unit testing.
@@ -94,6 +95,13 @@ function createServer(
   tracker?: AttentionTracker,
   getHookAdapter?: (name: string) => HookAdapter | null,
   agentLookup?: (name: string) => AgentDef | undefined,
+  paneSendDeps: {
+    sendLiteralToPane: typeof sendLiteralToPane;
+    sendPromptToPane: typeof sendPromptToPane;
+  } = {
+    sendLiteralToPane: mock(async () => true),
+    sendPromptToPane: mock(async () => true),
+  },
 ) {
   const mgr = manager ?? new SessionManager();
   const cache = paneCache ?? new Map<string, TmuxPane>();
@@ -116,6 +124,7 @@ function createServer(
     attn,
     invocationManager,
     resolveHookAdapter,
+    paneSendDeps,
   );
   return {
     manager: mgr,
@@ -910,6 +919,114 @@ describe("DaemonServer", () => {
       expect(data.error).toBe(
         "Text exceeds maximum length of 10,000 characters",
       );
+    });
+
+    it("routes single-line text through literal delivery with enter threading", async () => {
+      const paneSendDeps = {
+        sendLiteralToPane: mock(async () => true),
+        sendPromptToPane: mock(async () => true),
+      };
+      const { manager, internals } = createServer(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        paneSendDeps,
+      );
+      manager.createSession(
+        "s1",
+        "/Users/test/.claude/projects/-Users-test-proj/s1.jsonl",
+      );
+      manager.setTmuxPane("s1", "%1");
+
+      const response = await internals.handleSendToSession(
+        "s1",
+        new Request("http://localhost/sessions/s1/send", {
+          method: "POST",
+          body: JSON.stringify({ text: "hello", enter: false }),
+        }),
+        {},
+      );
+
+      expect(response.status).toBe(200);
+      expect(paneSendDeps.sendLiteralToPane).toHaveBeenCalledWith(
+        "%1",
+        "hello",
+        false,
+      );
+      expect(paneSendDeps.sendPromptToPane).not.toHaveBeenCalled();
+    });
+
+    it("routes multiline text through bracketed-paste delivery with enter threading", async () => {
+      const paneSendDeps = {
+        sendLiteralToPane: mock(async () => true),
+        sendPromptToPane: mock(async () => true),
+      };
+      const { manager, internals } = createServer(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        paneSendDeps,
+      );
+      manager.createSession(
+        "s1",
+        "/Users/test/.claude/projects/-Users-test-proj/s1.jsonl",
+      );
+      manager.setTmuxPane("s1", "%1");
+
+      const response = await internals.handleSendToSession(
+        "s1",
+        new Request("http://localhost/sessions/s1/send", {
+          method: "POST",
+          body: JSON.stringify({ text: "line one\nline two", enter: false }),
+        }),
+        {},
+      );
+
+      expect(response.status).toBe(200);
+      expect(paneSendDeps.sendPromptToPane).toHaveBeenCalledWith(
+        "%1",
+        "line one\nline two",
+        false,
+      );
+      expect(paneSendDeps.sendLiteralToPane).not.toHaveBeenCalled();
+    });
+
+    it("returns 500 when pane delivery fails", async () => {
+      const paneSendDeps = {
+        sendLiteralToPane: mock(async () => false),
+        sendPromptToPane: mock(async () => true),
+      };
+      const { manager, internals } = createServer(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        paneSendDeps,
+      );
+      manager.createSession(
+        "s1",
+        "/Users/test/.claude/projects/-Users-test-proj/s1.jsonl",
+      );
+      manager.setTmuxPane("s1", "%1");
+
+      const response = await internals.handleSendToSession(
+        "s1",
+        new Request("http://localhost/sessions/s1/send", {
+          method: "POST",
+          body: JSON.stringify({ text: "hello" }),
+        }),
+        {},
+      );
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({
+        error: "Failed to send to session",
+      });
     });
   });
 

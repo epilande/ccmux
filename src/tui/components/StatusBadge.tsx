@@ -75,8 +75,13 @@ export const StatusBadge: Component<StatusBadgeProps> = (props) => {
     if (mode === "icon") return icon();
     const attn = props.attentionState;
     const eff = effective();
+    // Lifted state: the lead is idle at its prompt while its subagents run.
+    // Same spinner and color as working (it IS activity), but the label
+    // says whose activity it is.
+    let labelText: string =
+      eff.status === "working" && eff.fromSubagent ? "agents" : eff.status;
     // Both unread and read display as "done"
-    const labelText = eff.status === "idle" && attn ? "done" : eff.status;
+    if (eff.status === "idle" && attn) labelText = "done";
     return `${icon()} ${mode === "short" ? labelText.slice(0, 4) : labelText.padEnd(7)}`;
   };
 

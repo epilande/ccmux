@@ -115,6 +115,113 @@ describe("Preview", () => {
     );
     expect(frame).toContain("(worktree)");
   });
+
+  it("lists live subagents with parsed names and shows agents status", async () => {
+    const frame = await renderPreview(
+      mockEnrichedSession({
+        status: "idle",
+        tmuxPane: "%1",
+        subagents: [
+          {
+            agentId: "areviewer-quality-4e04b65eee350afe",
+            status: "working",
+            attentionType: null,
+            pendingTool: null,
+            lastActivityAt: "2024-01-15T12:00:00Z",
+            startedAt: null,
+          },
+          {
+            agentId: "a3a022751130cff19",
+            status: "waiting",
+            attentionType: "permission",
+            pendingTool: "Bash",
+            lastActivityAt: null,
+            startedAt: null,
+          },
+        ],
+      }),
+    );
+    expect(frame).toContain("Agents (2)");
+    expect(frame).toContain("reviewer-quality");
+    expect(frame).toContain("3a0227");
+    // Lifted status label in the header, not raw idle/working
+    expect(frame).toContain("agents");
+  });
+
+  it("shows runtime since spawn, anchored to startedAt (not last activity)", async () => {
+    // The agent wrote to its transcript 2s ago but spawned 2m14s ago; the
+    // divergent timestamps prove the row anchors to the spawn.
+    const now = Date.now();
+    const frame = await renderPreview(
+      mockEnrichedSession({
+        status: "idle",
+        tmuxPane: "%1",
+        subagents: [
+          {
+            agentId: "areviewer-quality-4e04b65eee350afe",
+            status: "working",
+            attentionType: null,
+            pendingTool: null,
+            lastActivityAt: new Date(now - 2_000).toISOString(),
+            startedAt: new Date(now - 134_000).toISOString(),
+          },
+        ],
+      }),
+    );
+    expect(frame).toMatch(/2m1[45]s/);
+  });
+
+  it("renders no duration when startedAt is unknown", async () => {
+    // Without a spawn time we render nothing rather than silently swapping
+    // in the last-activity metric.
+    const now = Date.now();
+    const frame = await renderPreview(
+      mockEnrichedSession({
+        status: "idle",
+        tmuxPane: "%1",
+        subagents: [
+          {
+            agentId: "areviewer-quality-4e04b65eee350afe",
+            status: "working",
+            attentionType: null,
+            pendingTool: null,
+            lastActivityAt: new Date(now - 2_000).toISOString(),
+            startedAt: null,
+          },
+        ],
+      }),
+    );
+    const row = frame
+      .split("\n")
+      .find((line) => line.includes("reviewer-quality"));
+    expect(row).toBeDefined();
+    expect(row!).not.toMatch(/\d+[smh]\s*$/);
+  });
+
+  it("caps the agents list and shows an overflow line", async () => {
+    const subagents = Array.from({ length: 6 }, (_, i) => ({
+      agentId: `aworker-${i}-4e04b65eee350afe`,
+      status: "working" as const,
+      attentionType: null,
+      pendingTool: null,
+      lastActivityAt: null,
+      startedAt: null,
+    }));
+    const frame = await renderPreview(
+      mockEnrichedSession({ status: "idle", tmuxPane: "%1", subagents }),
+    );
+    expect(frame).toContain("Agents (6)");
+    expect(frame).toContain("worker-3");
+    expect(frame).not.toContain("worker-4");
+    expect(frame).toContain("+2 more");
+  });
+
+  it("shows no agents section without subagents", async () => {
+    const frame = await renderPreview(
+      mockEnrichedSession({ tmuxPane: "%1", subagents: [] }),
+    );
+    expect(frame).not.toContain("Agents (");
+  });
 });
 
 describe("Preview pane capture", () => {
@@ -161,6 +268,39 @@ describe("Preview pane capture", () => {
     const frame = await pollFrame();
     expect(frame).toContain("BBB_FRESH_CONTENT");
     expect(frame).not.toContain("AAA_STALE_CONTENT");
+  });
+
+  it("re-captures on a refreshKey bump even when unfocused", async () => {
+    // An unfocused preview is a single snapshot: it must NOT pick up pane
+    // changes on its own, but a refreshKey bump (e.g. after review notes are
+    // delivered to the agent's composer) forces one re-capture.
+    let content = "BEFORE_FILL";
+    captureImpl = async () => content;
+    const [refreshKey, setRefreshKey] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <Preview
+            session={mockEnrichedSession({ tmuxPane: "%1" })}
+            width={40}
+            focused={false}
+            refreshKey={refreshKey()}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 100, height: 15 },
+    );
+    await setup.renderOnce();
+    expect(await pollFrame(5)).toContain("BEFORE_FILL");
+
+    content = "AFTER_FILL";
+    // Unfocused and un-bumped: the stale snapshot stays.
+    expect(await pollFrame(5)).toContain("BEFORE_FILL");
+
+    setRefreshKey(1);
+    const frame = await pollFrame(5);
+    expect(frame).toContain("AFTER_FILL");
+    expect(frame).not.toContain("BEFORE_FILL");
   });
 
   it("renders the failure state when a capture throws (dead pane)", async () => {

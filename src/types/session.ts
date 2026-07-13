@@ -91,6 +91,11 @@ export interface SubagentState {
   pendingTool: string | null;
   /** Last activity timestamp */
   lastActivityAt: string | null;
+  /**
+   * Spawn timestamp (first entry in the subagent's transcript). Null when
+   * the head read failed, in which case the preview renders no duration.
+   */
+  startedAt: string | null;
 }
 
 /**

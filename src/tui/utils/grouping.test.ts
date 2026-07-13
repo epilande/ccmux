@@ -328,6 +328,43 @@ describe("buildFlatItems", () => {
     expect(items[4].type).toBe("session");
   });
 
+  it("carries raw group members on headers without a precomputed summary", () => {
+    // Regression: buildFlatItems must not derive the status summary itself.
+    // computeStatusSummary reads session.subagents, and this list is a memo;
+    // reading subagents here would rebuild every FlatItem (and recreate every
+    // reference-keyed row) on each subagent-log write during a fan-out. The
+    // header carries raw members so the summary is derived downstream in the
+    // header's own reactive scope.
+    const lead = toFiltered(
+      mockSession({
+        id: "lead",
+        project: "alpha",
+        status: "idle",
+        subagents: [
+          {
+            agentId: "a1",
+            status: "working",
+            attentionType: null,
+            pendingTool: null,
+            lastActivityAt: null,
+            startedAt: null,
+          },
+        ],
+      }),
+    );
+    const items = buildFlatItems([lead], "project", new Set(), false);
+    const header = items[0];
+    expect(header.type).toBe("header");
+    if (header.type === "header") {
+      expect(header.members).toEqual([lead]);
+      expect("statusSummary" in header).toBe(false);
+      // The effective-status summary (idle lead + working subagent = working)
+      // is still recoverable from the carried members, so the header intent
+      // survives the move downstream.
+      expect(computeStatusSummary(header.members).working).toBe(1);
+    }
+  });
+
   it("hides children of collapsed groups", () => {
     const sessions = [
       toFiltered(mockSession({ id: "a", project: "alpha" })),
