@@ -3,7 +3,11 @@ import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { GroupPreview } from "./GroupPreview";
 import { TickContext } from "../store";
-import { mockEnrichedSession, emptySummary } from "./test-helpers";
+import {
+  mockEnrichedSession,
+  emptySummary,
+  membersFromSummary,
+} from "./test-helpers";
 import type { StatusSummary } from "../utils/grouping";
 import type { EnrichedSession } from "../../types";
 
@@ -19,10 +23,15 @@ async function renderGroupPreview(
   sessions: EnrichedSession[],
 ) {
   const [tick] = createSignal(0);
+  const headerProps = {
+    label: header.label,
+    count: header.count,
+    members: membersFromSummary(header.statusSummary),
+  };
   setup = await testRender(
     () => (
       <TickContext.Provider value={{ tick }}>
-        <GroupPreview header={header} sessions={sessions} width={40} />
+        <GroupPreview header={headerProps} sessions={sessions} width={40} />
       </TickContext.Provider>
     ),
     { width: 100, height: 20 },

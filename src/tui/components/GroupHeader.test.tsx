@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import { GroupHeader } from "./GroupHeader";
-import { emptySummary } from "./test-helpers";
+import { emptySummary, membersFromSummary } from "./test-helpers";
 import type { StatusSummary } from "../utils/grouping";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
@@ -27,7 +27,7 @@ async function renderHeader(props: {
         count={props.count ?? 3}
         collapsed={props.collapsed ?? false}
         selected={props.selected ?? false}
-        statusSummary={props.statusSummary ?? emptySummary()}
+        members={membersFromSummary(props.statusSummary ?? emptySummary())}
         dimmed={props.dimmed}
       />
     ),
@@ -126,7 +126,7 @@ describe("GroupHeader", () => {
           count={3}
           collapsed={false}
           selected={false}
-          statusSummary={emptySummary()}
+          members={[]}
           onActivate={() => {
             calls++;
           }}
@@ -147,7 +147,7 @@ describe("GroupHeader", () => {
           count={3}
           collapsed={false}
           selected={false}
-          statusSummary={emptySummary()}
+          members={[]}
         />
       ),
       { width: 80, height: 3 },
@@ -168,7 +168,7 @@ describe("GroupHeader", () => {
           count={3}
           collapsed={false}
           selected={false}
-          statusSummary={emptySummary()}
+          members={[]}
           onActivate={() => {
             activateCalls++;
           }}
@@ -200,7 +200,7 @@ describe("GroupHeader", () => {
           count={3}
           collapsed={false}
           selected={false}
-          statusSummary={emptySummary()}
+          members={[]}
           onActivate={() => {
             activateCalls++;
           }}

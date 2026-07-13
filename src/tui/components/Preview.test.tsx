@@ -115,6 +115,67 @@ describe("Preview", () => {
     );
     expect(frame).toContain("(worktree)");
   });
+
+  it("lists live subagents with parsed names and shows agents status", async () => {
+    const frame = await renderPreview(
+      mockEnrichedSession({
+        status: "idle",
+        tmuxPane: "%1",
+        subagents: [
+          {
+            agentId: "areviewer-quality-4e04b65eee350afe",
+            status: "working",
+            attentionType: null,
+            pendingTool: null,
+            lastActivityAt: "2024-01-15T12:00:00Z",
+          },
+          {
+            agentId: "a3a022751130cff19",
+            status: "waiting",
+            attentionType: "permission",
+            pendingTool: "Bash",
+            lastActivityAt: null,
+          },
+        ],
+      }),
+    );
+    expect(frame).toContain("Agents (2)");
+    expect(frame).toContain("reviewer-quality");
+    expect(frame).toContain("3a0227");
+    // Lifted status label in the header, not raw idle/working
+    expect(frame).toContain("agents");
+    // No time column: last-activity is jitter for a working agent, and
+    // runtime duplicates the lead's agent panel in the pane capture below.
+    const row = frame
+      .split("\n")
+      .find((line) => line.includes("reviewer-quality"));
+    expect(row).toBeDefined();
+    expect(row!).not.toMatch(/\d+[smh]\s*$/);
+  });
+
+  it("caps the agents list and shows an overflow line", async () => {
+    const subagents = Array.from({ length: 6 }, (_, i) => ({
+      agentId: `aworker-${i}-4e04b65eee350afe`,
+      status: "working" as const,
+      attentionType: null,
+      pendingTool: null,
+      lastActivityAt: null,
+    }));
+    const frame = await renderPreview(
+      mockEnrichedSession({ status: "idle", tmuxPane: "%1", subagents }),
+    );
+    expect(frame).toContain("Agents (6)");
+    expect(frame).toContain("worker-3");
+    expect(frame).not.toContain("worker-4");
+    expect(frame).toContain("+2 more");
+  });
+
+  it("shows no agents section without subagents", async () => {
+    const frame = await renderPreview(
+      mockEnrichedSession({ tmuxPane: "%1", subagents: [] }),
+    );
+    expect(frame).not.toContain("Agents (");
+  });
 });
 
 describe("Preview pane capture", () => {

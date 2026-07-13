@@ -29,16 +29,36 @@ import type {
  * When a Claude log's last activity is older than the idle threshold, a
  * `working` status cannot be genuine — the session just went silent.
  * Cap it to idle to prevent phantom working→idle flaps on daemon restart.
- * Subagent seeding passes SUBAGENT_STALE_TIMEOUT_MS instead, so re-watching
- * a dir of finished subagent logs doesn't resurrect them as `working`.
  */
-function capStaleWorking(
-  state: SessionState,
-  thresholdMs: number = PANE_IDLE_THRESHOLD_MS,
-): SessionState {
+function capStaleWorking(state: SessionState): SessionState {
   if (state.status !== "working" || !state.lastActivityAt) return state;
   const age = Date.now() - new Date(state.lastActivityAt).getTime();
-  if (age <= thresholdMs) return state;
+  if (age <= PANE_IDLE_THRESHOLD_MS) return state;
+  return {
+    ...state,
+    status: "idle",
+    attentionType: null,
+    pendingTool: null,
+  };
+}
+
+/**
+ * Subagent-seeding variant of `capStaleWorking` that also caps `waiting`.
+ * A killed or finished subagent's log commonly ends with an unresolved
+ * tool_use (derives `waiting`), and subagent waiting counts as activity in
+ * `getEffectiveStatus` — replaying an old file must not resurrect it. The
+ * parent path deliberately keeps `waiting` on seed (a real prompt persists
+ * however old it is); this is for subagents only.
+ */
+function capStaleSubagentSeed(state: SessionState): SessionState {
+  if (
+    (state.status !== "working" && state.status !== "waiting") ||
+    !state.lastActivityAt
+  ) {
+    return state;
+  }
+  const age = Date.now() - new Date(state.lastActivityAt).getTime();
+  if (age <= SUBAGENT_STALE_TIMEOUT_MS) return state;
   return {
     ...state,
     status: "idle",
@@ -386,9 +406,9 @@ export class ClaudeLogAdapter implements LogAdapter {
     if (offset === 0) {
       const seeded = await this.seedStateFromTail(path);
       // Seeding often replays finished logs (attach fires `add` for every
-      // existing file). Cap silent `working` to idle so they don't come
-      // back to life; idle entries are filtered out by updateSubagent.
-      state = capStaleWorking(seeded.state, SUBAGENT_STALE_TIMEOUT_MS);
+      // existing file). Cap silent working/waiting to idle so they don't
+      // come back to life; idle entries are filtered out by updateSubagent.
+      state = capStaleSubagentSeed(seeded.state);
       this.subagentFileOffsets.set(path, seeded.newOffset);
     } else {
       const { entries, newOffset } = await readLogIncremental(path, offset);

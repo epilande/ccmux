@@ -119,10 +119,10 @@ describe("StatusBadge", () => {
     expect(frame).not.toContain("done");
   });
 
-  it("shows working (not done) when an idle parent has a working subagent", async () => {
+  it("shows agents (not done) when an idle parent has a working subagent", async () => {
     // Regression: background agents keep working after the parent ends its
     // turn (parent legitimately idle by its own log); the row must render
-    // working, not the bogus "done"/idle badge.
+    // the lifted "agents" state, not the bogus "done"/idle badge.
     const session = mockSession({
       status: "idle",
       attentionState: "unread",
@@ -149,9 +149,35 @@ describe("StatusBadge", () => {
     );
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("working");
+    expect(frame).toContain("agents");
     expect(frame).not.toContain("done");
     expect(frame).not.toContain("idle");
+    expect(frame).not.toContain("working");
+  });
+
+  it("shows plain working when the lead itself is working, even with subagents", async () => {
+    const session = mockSession({
+      status: "working",
+      subagents: [
+        {
+          agentId: "sub1",
+          status: "working",
+          attentionType: null,
+          pendingTool: null,
+          lastActivityAt: null,
+        },
+      ],
+    });
+    setup = await testRender(
+      () => (
+        <StatusBadge status={session.status} session={session} mode="full" />
+      ),
+      { width: 20, height: 3 },
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("working");
+    expect(frame).not.toContain("agents");
   });
 
   it("renders nothing with none icon style", async () => {
