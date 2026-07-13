@@ -948,6 +948,7 @@ describe("status-machine", () => {
             attentionType: "permission",
             pendingTool: "Bash",
             lastActivityAt: null,
+            startedAt: null,
           },
         ],
       };
@@ -968,6 +969,7 @@ describe("status-machine", () => {
             attentionType: "permission",
             pendingTool: "Bash",
             lastActivityAt: null,
+            startedAt: null,
           },
         ],
       };
@@ -989,6 +991,7 @@ describe("status-machine", () => {
             attentionType: null,
             pendingTool: null,
             lastActivityAt: null,
+            startedAt: null,
           },
         ],
       };
@@ -1009,6 +1012,7 @@ describe("status-machine", () => {
             attentionType: null,
             pendingTool: null,
             lastActivityAt: null,
+            startedAt: null,
           },
         ],
       };
@@ -1029,6 +1033,7 @@ describe("status-machine", () => {
             attentionType: null,
             pendingTool: null,
             lastActivityAt: null,
+            startedAt: null,
           },
         ],
       };

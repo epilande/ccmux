@@ -347,6 +347,7 @@ describe("buildFlatItems", () => {
             attentionType: null,
             pendingTool: null,
             lastActivityAt: null,
+            startedAt: null,
           },
         ],
       }),

@@ -1,5 +1,29 @@
 import { describe, it, expect, setSystemTime, afterAll } from "bun:test";
-import { formatRelativeTime } from "./format";
+import { formatDuration, formatRelativeTime } from "./format";
+
+describe("formatDuration", () => {
+  it("formats sub-minute durations as seconds", () => {
+    expect(formatDuration(0)).toBe("0s");
+    expect(formatDuration(42_000)).toBe("42s");
+    expect(formatDuration(59_999)).toBe("59s");
+  });
+
+  it("keeps seconds precision under an hour", () => {
+    expect(formatDuration(60_000)).toBe("1m0s");
+    expect(formatDuration(134_000)).toBe("2m14s");
+    expect(formatDuration(59 * 60_000 + 59_000)).toBe("59m59s");
+  });
+
+  it("drops seconds at an hour and above", () => {
+    expect(formatDuration(60 * 60_000)).toBe("1h0m");
+    expect(formatDuration(65 * 60_000 + 30_000)).toBe("1h5m");
+    expect(formatDuration(3 * 60 * 60_000 + 12 * 60_000)).toBe("3h12m");
+  });
+
+  it("clamps negative durations (clock skew) to 0s", () => {
+    expect(formatDuration(-5_000)).toBe("0s");
+  });
+});
 
 describe("formatRelativeTime", () => {
   afterAll(() => setSystemTime());

@@ -1,4 +1,4 @@
-export { formatRelativeTime } from "../../lib/format";
+export { formatDuration, formatRelativeTime } from "../../lib/format";
 
 export function shortenCwd(cwd: string): string {
   const home = process.env.HOME ?? "";

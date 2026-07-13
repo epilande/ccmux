@@ -225,6 +225,7 @@ describe("SessionItem", () => {
             attentionType: null,
             pendingTool: null,
             lastActivityAt: null,
+            startedAt: null,
           },
           {
             agentId: "sub2",
@@ -232,6 +233,7 @@ describe("SessionItem", () => {
             attentionType: null,
             pendingTool: null,
             lastActivityAt: null,
+            startedAt: null,
           },
         ],
       }),
@@ -566,6 +568,7 @@ describe("SessionItem sidebar mode", () => {
               attentionType: null,
               pendingTool: null,
               lastActivityAt: null,
+              startedAt: null,
             },
           ],
         }),

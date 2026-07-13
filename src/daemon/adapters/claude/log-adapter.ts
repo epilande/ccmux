@@ -11,6 +11,7 @@ import {
   extractSessionIdFromPath,
   readLogTail,
   readLogIncremental,
+  readFirstEntryTimestamp,
 } from "../../parser";
 import {
   deriveStateFromEntries,
@@ -400,6 +401,12 @@ export class ClaudeLogAdapter implements LogAdapter {
       this.sessionManager.getSessionByNativeSessionId(sessionId) ?? null;
     if (!session) return;
 
+    const existing = session.subagents.find((s) => s.agentId === agentId);
+    // Spawn time comes from the immutable transcript head, so a successful
+    // read is carried forward; a failed (null) read retries on the next
+    // change event.
+    const startedAt = existing?.startedAt ?? readFirstEntryTimestamp(path);
+
     const offset = this.subagentFileOffsets.get(path) ?? 0;
     let state: SessionState;
 
@@ -414,7 +421,6 @@ export class ClaudeLogAdapter implements LogAdapter {
       const { entries, newOffset } = await readLogIncremental(path, offset);
       this.subagentFileOffsets.set(path, newOffset);
 
-      const existing = session.subagents.find((s) => s.agentId === agentId);
       const currentState: SessionState = existing
         ? {
             status: existing.status,
@@ -442,6 +448,7 @@ export class ClaudeLogAdapter implements LogAdapter {
       attentionType: state.attentionType,
       pendingTool: state.pendingTool,
       lastActivityAt: state.lastActivityAt ?? null,
+      startedAt,
     });
 
     // Propagate subagent activity to parent session to keep it fresh

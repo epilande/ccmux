@@ -815,6 +815,7 @@ const mockSubagent = (
   attentionType: null,
   pendingTool: null,
   lastActivityAt: null,
+  startedAt: null,
   ...overrides,
 });
 
