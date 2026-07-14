@@ -36,24 +36,30 @@ function createFakeBus(
   options: {
     getProxyObjectImpl?: BusLike["getProxyObject"];
     getServerInformationImpl?: NotificationsInterfaceLike["GetServerInformation"];
+    getCapabilitiesImpl?: NotificationsInterfaceLike["GetCapabilities"];
     notifyImpl?: NotificationsInterfaceLike["Notify"];
   } = {},
 ): {
   bus: BusLike;
   notifyCalls: NotifyCall[];
   disconnectCalls: number[];
+  closeCalls: number[];
   fireActionInvoked: (id: number, actionKey: string) => void;
   fireNotificationClosed: (id: number, reason: number) => void;
+  fireNotificationReplied: (id: number, text: string) => void;
   fireBusError: (err: unknown) => void;
 } {
   const notifyCalls: NotifyCall[] = [];
   const disconnectCalls: number[] = [];
+  const closeCalls: number[] = [];
   let nextId = 1;
   let actionInvokedListener: ((id: number, actionKey: string) => void) | null =
     null;
   let notificationClosedListener:
     | ((id: number, reason: number) => void)
     | null = null;
+  let notificationRepliedListener: ((id: number, text: string) => void) | null =
+    null;
   let busErrorListener: ((err: unknown) => void) | null = null;
 
   const iface: NotificationsInterfaceLike = {
@@ -81,9 +87,13 @@ function createFakeBus(
         });
         return nextId++;
       }),
+    CloseNotification: async (id: number) => {
+      closeCalls.push(id);
+    },
     GetServerInformation:
       options.getServerInformationImpl ??
       (async () => ["ccmux-test-server", "ccmux", "1.0", "1.2"]),
+    GetCapabilities: options.getCapabilitiesImpl ?? (async () => []),
     on: ((event: string, listener: (...args: never[]) => void) => {
       if (event === "ActionInvoked") {
         actionInvokedListener = listener as (
@@ -95,6 +105,12 @@ function createFakeBus(
         notificationClosedListener = listener as (
           id: number,
           reason: number,
+        ) => void;
+      }
+      if (event === "NotificationReplied") {
+        notificationRepliedListener = listener as (
+          id: number,
+          text: string,
         ) => void;
       }
       return iface;
@@ -120,10 +136,13 @@ function createFakeBus(
     bus,
     notifyCalls,
     disconnectCalls,
+    closeCalls,
     fireActionInvoked: (id, actionKey) =>
       actionInvokedListener?.(id, actionKey),
     fireNotificationClosed: (id, reason) =>
       notificationClosedListener?.(id, reason),
+    fireNotificationReplied: (id, text) =>
+      notificationRepliedListener?.(id, text),
     fireBusError: (err) => busErrorListener?.(err),
   };
 }
@@ -172,13 +191,39 @@ describe("DbusNotifier: notify", () => {
     expect(notifyCalls[2]?.replacesId).toBe(1); // a, reuses a's last id
   });
 
-  it("includes actions only when onActivate is provided", async () => {
+  it("includes the default/Open pair when onAction and canDefault are both set", async () => {
     const { bus, notifyCalls } = createFakeBus();
     const notifier = new DbusNotifier(() => bus);
 
-    await notifier.notify(BASE_PAYLOAD, { onActivate: () => {} });
+    await notifier.notify(BASE_PAYLOAD, {
+      onAction: () => {},
+      canDefault: true,
+    });
 
     expect(notifyCalls[0]?.actions).toEqual(["default", "Open"]);
+  });
+
+  it("omits the default/Open pair when canDefault is false (no dead Open button)", async () => {
+    const { bus, notifyCalls } = createFakeBus();
+    const notifier = new DbusNotifier(() => bus);
+
+    // onAction present (a button is wired) but the jump can't land: the
+    // default/Open pair must not appear, while approve/deny still do.
+    await notifier.notify(
+      { ...BASE_PAYLOAD, actions: [{ id: "approve", label: "Approve" }] },
+      { onAction: () => {}, canDefault: false },
+    );
+
+    expect(notifyCalls[0]?.actions).toEqual(["approve", "Approve"]);
+  });
+
+  it("sends no actions at all when onAction is absent", async () => {
+    const { bus, notifyCalls } = createFakeBus();
+    const notifier = new DbusNotifier(() => bus);
+
+    await notifier.notify(BASE_PAYLOAD, {});
+
+    expect(notifyCalls[0]?.actions).toEqual([]);
   });
 
   it("maps sound: true to the message-new-instant hint", async () => {
@@ -250,13 +295,13 @@ describe("DbusNotifier: notify", () => {
 });
 
 describe("DbusNotifier: ActionInvoked / NotificationClosed", () => {
-  it("dispatches ActionInvoked to the onActivate registered for that notification id", async () => {
+  it("dispatches ActionInvoked to the onAction registered for that notification id", async () => {
     const fakeBus = createFakeBus();
     const notifier = new DbusNotifier(() => fakeBus.bus);
     let activated = false;
 
     const id = await notifier.notify(BASE_PAYLOAD, {
-      onActivate: () => {
+      onAction: () => {
         activated = true;
       },
     });
@@ -271,7 +316,7 @@ describe("DbusNotifier: ActionInvoked / NotificationClosed", () => {
     let activatedCount = 0;
 
     const id = await notifier.notify(BASE_PAYLOAD, {
-      onActivate: () => {
+      onAction: () => {
         activatedCount++;
       },
     });
@@ -286,7 +331,7 @@ describe("DbusNotifier: ActionInvoked / NotificationClosed", () => {
     let activatedCount = 0;
 
     const id = await notifier.notify(BASE_PAYLOAD, {
-      onActivate: () => {
+      onAction: () => {
         activatedCount++;
       },
     });
@@ -297,7 +342,7 @@ describe("DbusNotifier: ActionInvoked / NotificationClosed", () => {
     expect(activatedCount).toBe(0);
   });
 
-  it("a notification sent without onActivate registers no callback (no-op on ActionInvoked)", async () => {
+  it("a notification sent without onAction registers no callback (no-op on ActionInvoked)", async () => {
     const fakeBus = createFakeBus();
     const notifier = new DbusNotifier(() => fakeBus.bus);
 
@@ -305,6 +350,128 @@ describe("DbusNotifier: ActionInvoked / NotificationClosed", () => {
 
     // Must not throw even though there's nothing registered for this id.
     expect(() => fakeBus.fireActionInvoked(id!, "default")).not.toThrow();
+  });
+
+  it("passes the action key through to onAction", async () => {
+    const fakeBus = createFakeBus();
+    const notifier = new DbusNotifier(() => fakeBus.bus);
+    const keys: string[] = [];
+
+    const id = await notifier.notify(BASE_PAYLOAD, {
+      onAction: (actionKey) => keys.push(actionKey),
+    });
+
+    fakeBus.fireActionInvoked(id!, "approve");
+    expect(keys).toEqual(["approve"]);
+  });
+
+  it("routes NotificationReplied to onAction with the answer key and typed text", async () => {
+    const fakeBus = createFakeBus();
+    const notifier = new DbusNotifier(() => fakeBus.bus);
+    const calls: Array<{ key: string; text?: string }> = [];
+
+    const id = await notifier.notify(BASE_PAYLOAD, {
+      onAction: (key, text) => calls.push({ key, text }),
+    });
+
+    fakeBus.fireNotificationReplied(id!, "use the staging bucket");
+    expect(calls).toEqual([{ key: "answer", text: "use the staging bucket" }]);
+  });
+});
+
+describe("DbusNotifier: action buttons", () => {
+  it("appends approve/deny actions after the base default/Open when the payload carries them", async () => {
+    const { bus, notifyCalls } = createFakeBus();
+    const notifier = new DbusNotifier(() => bus);
+
+    await notifier.notify(
+      {
+        ...BASE_PAYLOAD,
+        actions: [
+          { id: "approve", label: "Approve" },
+          { id: "deny", label: "Deny" },
+        ],
+      },
+      { onAction: () => {}, canDefault: true },
+    );
+
+    expect(notifyCalls[0]?.actions).toEqual([
+      "default",
+      "Open",
+      "approve",
+      "Approve",
+      "deny",
+      "Deny",
+    ]);
+  });
+
+  it("adds the inline-reply action only when the server advertises the inline-reply capability", async () => {
+    const withCap = createFakeBus({
+      getCapabilitiesImpl: async () => ["body", "actions", "inline-reply"],
+    });
+    const notifier = new DbusNotifier(() => withCap.bus);
+
+    await notifier.notify(
+      { ...BASE_PAYLOAD, reply: { id: "answer", label: "Reply" } },
+      { onAction: () => {}, canDefault: true },
+    );
+
+    expect(withCap.notifyCalls[0]?.actions).toEqual([
+      "default",
+      "Open",
+      "inline-reply",
+      "Reply",
+    ]);
+  });
+
+  it("omits the inline-reply action when the capability is absent (never faked)", async () => {
+    const noCap = createFakeBus({
+      getCapabilitiesImpl: async () => ["body", "actions"],
+    });
+    const notifier = new DbusNotifier(() => noCap.bus);
+
+    await notifier.notify(
+      { ...BASE_PAYLOAD, reply: { id: "answer", label: "Reply" } },
+      { onAction: () => {}, canDefault: true },
+    );
+
+    expect(noCap.notifyCalls[0]?.actions).toEqual(["default", "Open"]);
+  });
+});
+
+describe("DbusNotifier: retract", () => {
+  it("closes the tracked notification id for a session", async () => {
+    const fakeBus = createFakeBus();
+    const notifier = new DbusNotifier(() => fakeBus.bus);
+
+    const id = await notifier.notify(BASE_PAYLOAD);
+    await notifier.retract(BASE_PAYLOAD.sessionId);
+
+    expect(fakeBus.closeCalls).toEqual([id!]);
+  });
+
+  it("is a no-op for a session with no delivered notification", async () => {
+    const fakeBus = createFakeBus();
+    const notifier = new DbusNotifier(() => fakeBus.bus);
+
+    await notifier.notify(BASE_PAYLOAD);
+    await notifier.retract("some-other-session");
+
+    expect(fakeBus.closeCalls).toEqual([]);
+  });
+
+  it("never throws when CloseNotification rejects", async () => {
+    const { bus } = createFakeBus();
+    const iface = (await bus.getProxyObject("", "")).getInterface("");
+    iface.CloseNotification = async () => {
+      throw new Error("no such notification");
+    };
+    const notifier = new DbusNotifier(() => bus);
+
+    await notifier.notify(BASE_PAYLOAD);
+    await expect(
+      notifier.retract(BASE_PAYLOAD.sessionId),
+    ).resolves.toBeUndefined();
   });
 });
 
@@ -427,7 +594,9 @@ describe("DbusNotifier: connection lifecycle", () => {
   it("close() never throws even when disconnect() itself throws", async () => {
     const iface: NotificationsInterfaceLike = {
       Notify: async () => 1,
+      CloseNotification: async () => {},
       GetServerInformation: async () => ["", "", "", ""],
+      GetCapabilities: async () => [],
       on: () => iface,
     };
     const bus: BusLike = {

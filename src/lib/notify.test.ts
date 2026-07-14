@@ -1,8 +1,24 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  buildCcmuxNotifierArgv,
   deliver,
+  deliverTimeoutFor,
+  DELIVER_TIMEOUT_MS,
+  normalizeBackendConfig,
+  NOTIFIER_DELIVER_TIMEOUT_MS,
   probeBackend,
+  probeCcmuxNotifier,
   resolveBackend,
+  resolveCcmuxNotifierBinary,
   type NotificationPayload,
   type SpawnFn,
 } from "./notify";
@@ -16,6 +32,15 @@ const BASE_PAYLOAD: NotificationPayload = {
   project: "ccmux",
   branch: "main",
   pane: "%3",
+};
+
+/** A ccmux-notifier payload as the delivery layer stamps it. */
+const NOTIFIER_PAYLOAD: NotificationPayload = {
+  ...BASE_PAYLOAD,
+  notifierPath:
+    "/opt/homebrew/libexec/ccmux-notifier.app/Contents/MacOS/ccmux-notifier",
+  callbackUrl: "http://127.0.0.1:2269/notification-action",
+  statusChangedAt: "2024-01-15T12:00:00Z",
 };
 
 /** Records every call and resolves `exited` with `exitCode` (default 0). */
@@ -38,32 +63,201 @@ function throwingSpawn(): SpawnFn {
 }
 
 describe("resolveBackend", () => {
-  it("darwin with terminal-notifier on PATH resolves to terminal-notifier", () => {
-    const which = (cmd: string) =>
-      cmd === "terminal-notifier" ? "/usr/local/bin/terminal-notifier" : null;
-    expect(resolveBackend({}, "darwin", which)).toBe("terminal-notifier");
-  });
-
-  it("darwin without terminal-notifier falls back to osascript", () => {
-    const which = () => null;
-    expect(resolveBackend({}, "darwin", which)).toBe("osascript");
+  it("darwin auto resolves to ccmux-notifier (delivery layer falls to osascript when unresolvable)", () => {
+    expect(resolveBackend({}, "darwin")).toBe("ccmux-notifier");
   });
 
   it("linux resolves to dbus", () => {
-    expect(resolveBackend({}, "linux", () => null)).toBe("dbus");
+    expect(resolveBackend({}, "linux")).toBe("dbus");
   });
 
   it("unsupported platforms resolve to null", () => {
-    expect(resolveBackend({}, "win32", () => null)).toBe(null);
+    expect(resolveBackend({}, "win32")).toBe(null);
   });
 
   it("an explicit non-auto backend wins regardless of platform", () => {
-    expect(resolveBackend({ backend: "command" }, "darwin", () => null)).toBe(
-      "command",
+    expect(resolveBackend({ backend: "command" }, "darwin")).toBe("command");
+    expect(resolveBackend({ backend: "notify-send" }, "win32")).toBe(
+      "notify-send",
     );
-    expect(
-      resolveBackend({ backend: "notify-send" }, "win32", () => null),
-    ).toBe("notify-send");
+    expect(resolveBackend({ backend: "osascript" }, "darwin")).toBe(
+      "osascript",
+    );
+  });
+});
+
+describe("normalizeBackendConfig", () => {
+  it("maps the removed terminal-notifier backend to auto and flags it", () => {
+    expect(normalizeBackendConfig("terminal-notifier")).toEqual({
+      backend: undefined,
+      removed: "terminal-notifier",
+    });
+  });
+
+  it("passes through a live backend value untouched", () => {
+    expect(normalizeBackendConfig("dbus")).toEqual({
+      backend: "dbus",
+      removed: null,
+    });
+    expect(normalizeBackendConfig("ccmux-notifier")).toEqual({
+      backend: "ccmux-notifier",
+      removed: null,
+    });
+  });
+
+  it("passes through undefined (unset) untouched", () => {
+    expect(normalizeBackendConfig(undefined)).toEqual({
+      backend: undefined,
+      removed: null,
+    });
+  });
+});
+
+describe("resolveCcmuxNotifierBinary", () => {
+  it("prefers CCMUX_NOTIFIER_PATH pointing at the .app bundle, normalized to the inner binary", () => {
+    const resolved = resolveCcmuxNotifierBinary({
+      env: { CCMUX_NOTIFIER_PATH: "/Apps/ccmux-notifier.app" },
+      exists: (p) =>
+        p === "/Apps/ccmux-notifier.app/Contents/MacOS/ccmux-notifier",
+      which: () => null,
+    });
+    expect(resolved).toBe(
+      "/Apps/ccmux-notifier.app/Contents/MacOS/ccmux-notifier",
+    );
+  });
+
+  it("accepts CCMUX_NOTIFIER_PATH pointing directly at the inner binary", () => {
+    const resolved = resolveCcmuxNotifierBinary({
+      env: { CCMUX_NOTIFIER_PATH: "/custom/ccmux-notifier" },
+      exists: (p) => p === "/custom/ccmux-notifier",
+      which: () => null,
+    });
+    expect(resolved).toBe("/custom/ccmux-notifier");
+  });
+
+  it("returns null for a set-but-nonexistent CCMUX_NOTIFIER_PATH (never silently falls through)", () => {
+    const resolved = resolveCcmuxNotifierBinary({
+      env: { CCMUX_NOTIFIER_PATH: "/gone/ccmux-notifier" },
+      exists: () => false,
+      ccmuxPath: "/opt/homebrew/bin/ccmux",
+      which: () => "/usr/local/bin/ccmux-notifier",
+    });
+    expect(resolved).toBeNull();
+  });
+
+  it("falls to the brew libexec sibling of the ccmux binary when env is unset", () => {
+    const resolved = resolveCcmuxNotifierBinary({
+      env: {},
+      ccmuxPath: "/opt/homebrew/bin/ccmux",
+      // `path.join` normalizes the `..`, so the sibling lands at
+      // <prefix>/libexec/... (not <prefix>/bin/../libexec/...).
+      exists: (p) =>
+        p ===
+        "/opt/homebrew/libexec/ccmux-notifier.app/Contents/MacOS/ccmux-notifier",
+      which: () => null,
+    });
+    expect(resolved).toBe(
+      "/opt/homebrew/libexec/ccmux-notifier.app/Contents/MacOS/ccmux-notifier",
+    );
+  });
+
+  it("falls to PATH (which) when env and sibling both miss", () => {
+    const resolved = resolveCcmuxNotifierBinary({
+      env: {},
+      ccmuxPath: "/opt/homebrew/bin/ccmux",
+      exists: () => false,
+      which: (cmd) =>
+        cmd === "ccmux-notifier" ? "/usr/local/bin/ccmux-notifier" : null,
+    });
+    expect(resolved).toBe("/usr/local/bin/ccmux-notifier");
+  });
+
+  it("returns null when nothing resolves", () => {
+    const resolved = resolveCcmuxNotifierBinary({
+      env: {},
+      ccmuxPath: null,
+      exists: () => false,
+      which: () => null,
+    });
+    expect(resolved).toBeNull();
+  });
+
+  describe("brew symlink resolution (real filesystem)", () => {
+    let root: string;
+
+    beforeEach(() => {
+      root = mkdtempSync(join(tmpdir(), "ccmux-notify-brew-"));
+    });
+    afterEach(() => {
+      rmSync(root, { recursive: true, force: true });
+    });
+
+    it("resolves the helper in the Cellar keg when ccmux is a prefix symlink into it", () => {
+      // Mirror Homebrew's layout: the real binary + helper live in a versioned
+      // keg, and <prefix>/bin/ccmux is a SYMLINK into it. A lexical
+      // `../libexec` join off the prefix symlink would miss the keg (the helper
+      // isn't linked into the prefix) — only realpath-ing the symlink first
+      // lands in the keg where the helper actually is.
+      const keg = join(root, "Cellar", "ccmux", "1.2.0");
+      mkdirSync(join(keg, "bin"), { recursive: true });
+      const helper = join(
+        keg,
+        "libexec",
+        "ccmux-notifier.app",
+        "Contents",
+        "MacOS",
+        "ccmux-notifier",
+      );
+      mkdirSync(join(helper, ".."), { recursive: true });
+      writeFileSync(join(keg, "bin", "ccmux"), "#!/bin/sh\n");
+      writeFileSync(helper, "#!/bin/sh\n");
+
+      // <prefix>/bin/ccmux -> Cellar keg's bin/ccmux
+      const prefixBin = join(root, "bin");
+      mkdirSync(prefixBin, { recursive: true });
+      const prefixCcmux = join(prefixBin, "ccmux");
+      symlinkSync(join(keg, "bin", "ccmux"), prefixCcmux);
+
+      // Default `exists` (real existsSync) + real realpathSync on the symlink.
+      const resolved = resolveCcmuxNotifierBinary({
+        env: {},
+        ccmuxPath: prefixCcmux,
+        which: () => null,
+      });
+      // realpathSync canonicalizes (e.g. /var -> /private/var on macOS), so
+      // compare on the stable trailing keg-relative segment.
+      expect(resolved).not.toBeNull();
+      expect(
+        resolved!.endsWith(
+          join(
+            "1.2.0",
+            "libexec",
+            "ccmux-notifier.app",
+            "Contents",
+            "MacOS",
+            "ccmux-notifier",
+          ),
+        ),
+      ).toBe(true);
+    });
+  });
+});
+
+describe("deliverTimeoutFor", () => {
+  it("gives ccmux-notifier a long cap above the helper's 180s auth timeout", () => {
+    // A short generic cap would kill the helper mid-requestAuthorization on a
+    // fresh install (it blocks up to 180s before it can post).
+    expect(deliverTimeoutFor("ccmux-notifier")).toBe(
+      NOTIFIER_DELIVER_TIMEOUT_MS,
+    );
+    expect(NOTIFIER_DELIVER_TIMEOUT_MS).toBeGreaterThan(180_000);
+  });
+
+  it("keeps the short 3s cap for every other spawn backend", () => {
+    expect(deliverTimeoutFor("osascript")).toBe(DELIVER_TIMEOUT_MS);
+    expect(deliverTimeoutFor("notify-send")).toBe(DELIVER_TIMEOUT_MS);
+    expect(deliverTimeoutFor("command")).toBe(DELIVER_TIMEOUT_MS);
+    expect(DELIVER_TIMEOUT_MS).toBe(3000);
   });
 });
 
@@ -116,18 +310,6 @@ describe("deliver: osascript", () => {
     );
 
     const argv = calls[0].argv;
-    expect(argv).toEqual([
-      "osascript",
-      "-e",
-      "on run argv",
-      "-e",
-      "display notification (item 2 of argv) with title (item 1 of argv)",
-      "-e",
-      "end run",
-      "--",
-      flagLikeTitle,
-      BASE_PAYLOAD.body,
-    ]);
     expect(argv.indexOf("--")).toBe(argv.indexOf(flagLikeTitle) - 1);
   });
 
@@ -137,71 +319,85 @@ describe("deliver: osascript", () => {
     expect(calls[0].argv.at(-1)).toBe("default");
   });
 
-  it("passes a shell-metacharacter body as a single plain argv entry, never interpolated into the script", async () => {
+  it("passes a shell-metacharacter body as a single plain argv entry", async () => {
     const { spawn, calls } = fakeSpawn();
     const maliciousBody = '"$(rm -rf ~)"';
     await deliver("osascript", { ...BASE_PAYLOAD, body: maliciousBody }, spawn);
 
     const argv = calls[0].argv;
-    // The AppleScript source (the -e clauses) never contains the body text.
     for (const arg of argv.slice(0, -2)) {
       expect(arg).not.toContain(maliciousBody);
     }
-    // It shows up only as its own trailing argv element, verbatim.
     expect(argv.at(-1)).toBe(maliciousBody);
   });
 });
 
-describe("deliver: terminal-notifier", () => {
-  it("builds the full argv with subtitle, group, sender, sound, activate, and execute", async () => {
+describe("deliver: ccmux-notifier", () => {
+  it("builds the post argv with group, callback URL, and payload JSON", async () => {
     const { spawn, calls } = fakeSpawn();
-    await deliver(
-      "terminal-notifier",
-      {
-        ...BASE_PAYLOAD,
-        subtitle: "Needs permission: Bash",
-        sound: "Glass",
-        senderBundleId: "com.mitchellh.ghostty",
-        activateBundleId: "com.mitchellh.ghostty",
-        executeCommand: "/opt/homebrew/bin/ccmux switch abc123",
-      },
-      spawn,
-    );
+    await deliver("ccmux-notifier", NOTIFIER_PAYLOAD, spawn);
 
     expect(calls[0].argv).toEqual([
-      "terminal-notifier",
-      "-title",
-      BASE_PAYLOAD.title,
-      "-subtitle",
-      "Needs permission: Bash",
-      "-message",
-      BASE_PAYLOAD.body,
-      "-group",
+      NOTIFIER_PAYLOAD.notifierPath!,
+      "post",
+      "--title",
+      NOTIFIER_PAYLOAD.title,
+      "--body",
+      NOTIFIER_PAYLOAD.body,
+      "--group",
       "ccmux-abc123",
-      "-sender",
-      "com.mitchellh.ghostty",
-      "-sound",
-      "Glass",
-      "-activate",
-      "com.mitchellh.ghostty",
-      "-execute",
-      "/opt/homebrew/bin/ccmux switch abc123",
+      "--callback-url",
+      NOTIFIER_PAYLOAD.callbackUrl!,
+      "--payload",
+      '{"sessionId":"abc123","statusChangedAt":"2024-01-15T12:00:00Z"}',
     ]);
   });
 
-  it("omits optional flags entirely when not provided", async () => {
-    const { spawn, calls } = fakeSpawn();
-    await deliver("terminal-notifier", BASE_PAYLOAD, spawn);
+  it("adds --subtitle, --sound, --actions, and --reply-action only when present", async () => {
+    const argv = buildCcmuxNotifierArgv({
+      ...NOTIFIER_PAYLOAD,
+      subtitle: "Needs permission: Bash",
+      sound: "Glass",
+      actions: [
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ],
+      reply: { id: "answer", label: "Reply" },
+    })!;
 
-    expect(calls[0].argv).toEqual([
-      "terminal-notifier",
-      "-title",
-      BASE_PAYLOAD.title,
-      "-message",
-      BASE_PAYLOAD.body,
-      "-group",
-      "ccmux-abc123",
-    ]);
+    expect(argv).toContain("--subtitle");
+    expect(argv[argv.indexOf("--subtitle") + 1]).toBe("Needs permission: Bash");
+    expect(argv[argv.indexOf("--sound") + 1]).toBe("Glass");
+    expect(argv[argv.indexOf("--actions") + 1]).toBe(
+      "approve:Approve,deny:Deny",
+    );
+    expect(argv[argv.indexOf("--reply-action") + 1]).toBe("answer:Reply");
+  });
+
+  it("omits the optional flags entirely when absent", async () => {
+    const argv = buildCcmuxNotifierArgv(NOTIFIER_PAYLOAD)!;
+    expect(argv).not.toContain("--subtitle");
+    expect(argv).not.toContain("--sound");
+    expect(argv).not.toContain("--actions");
+    expect(argv).not.toContain("--reply-action");
+  });
+
+  it("omits statusChangedAt from the payload JSON when unset", async () => {
+    const argv = buildCcmuxNotifierArgv({
+      ...NOTIFIER_PAYLOAD,
+      statusChangedAt: undefined,
+    })!;
+    expect(argv[argv.indexOf("--payload") + 1]).toBe('{"sessionId":"abc123"}');
+  });
+
+  it("refuses to build (null) without a resolved notifierPath or callbackUrl", async () => {
+    expect(buildCcmuxNotifierArgv(BASE_PAYLOAD)).toBeNull();
+    expect(
+      buildCcmuxNotifierArgv({ ...BASE_PAYLOAD, notifierPath: "/x" }),
+    ).toBeNull();
+    const { spawn, calls } = fakeSpawn();
+    await deliver("ccmux-notifier", BASE_PAYLOAD, spawn);
+    expect(calls).toHaveLength(0);
   });
 });
 
@@ -229,13 +425,6 @@ describe("deliver: notify-send", () => {
     );
 
     const argv = calls[0].argv;
-    expect(argv).toEqual([
-      "notify-send",
-      "--app-name=ccmux",
-      "--",
-      flagLikeTitle,
-      BASE_PAYLOAD.body,
-    ]);
     expect(argv.indexOf("--")).toBe(argv.indexOf(flagLikeTitle) - 1);
   });
 });
@@ -307,12 +496,6 @@ describe("probeBackend", () => {
     expect(calls[0].argv).toEqual(["osascript", "-e", "return 0"]);
   });
 
-  it("probes terminal-notifier with -help", async () => {
-    const { spawn, calls } = fakeSpawn(0);
-    expect(await probeBackend("terminal-notifier", spawn)).toBe(true);
-    expect(calls[0].argv).toEqual(["terminal-notifier", "-help"]);
-  });
-
   it("probes notify-send with --version", async () => {
     const { spawn, calls } = fakeSpawn(0);
     expect(await probeBackend("notify-send", spawn)).toBe(true);
@@ -328,16 +511,31 @@ describe("probeBackend", () => {
     expect(await probeBackend("notify-send", throwingSpawn())).toBe(false);
   });
 
-  it("never probes the command backend; always reports available", async () => {
+  it("never probes command/dbus/ccmux-notifier here; always reports available", async () => {
     const { spawn, calls } = fakeSpawn(0);
     expect(await probeBackend("command", spawn)).toBe(true);
+    expect(await probeBackend("dbus", spawn)).toBe(true);
+    expect(await probeBackend("ccmux-notifier", spawn)).toBe(true);
     expect(calls).toHaveLength(0);
   });
+});
 
-  it("never probes the dbus backend either (no spawn-based probe); callers route it through DbusNotifier.probe() first", async () => {
+describe("probeCcmuxNotifier", () => {
+  it("probes the resolved binary path with --version, success on exit 0", async () => {
     const { spawn, calls } = fakeSpawn(0);
-    expect(await probeBackend("dbus", spawn)).toBe(true);
-    expect(calls).toHaveLength(0);
+    expect(await probeCcmuxNotifier("/bin/ccmux-notifier", spawn)).toBe(true);
+    expect(calls[0].argv).toEqual(["/bin/ccmux-notifier", "--version"]);
+  });
+
+  it("reports disabled on non-zero exit", async () => {
+    const { spawn } = fakeSpawn(1);
+    expect(await probeCcmuxNotifier("/bin/ccmux-notifier", spawn)).toBe(false);
+  });
+
+  it("reports disabled when spawn throws", async () => {
+    expect(
+      await probeCcmuxNotifier("/bin/ccmux-notifier", throwingSpawn()),
+    ).toBe(false);
   });
 });
 
@@ -351,14 +549,13 @@ describe("deliver: failure modes are swallowed (fail-open)", () => {
   it("does not throw on a non-zero exit code", async () => {
     const { spawn } = fakeSpawn(1);
     await expect(
-      deliver("terminal-notifier", BASE_PAYLOAD, spawn),
+      deliver("ccmux-notifier", NOTIFIER_PAYLOAD, spawn),
     ).resolves.toBeUndefined();
   });
 
-  it("resolves via the timeout (never stranded) when the process never exits, killing it exactly once", async () => {
+  it("resolves via the timeout (never stranded) when the process never exits, killing it once", async () => {
     let killCalls = 0;
     const spawn: SpawnFn = () => ({
-      // Never resolves: a "command" backend ignoring SIGTERM.
       exited: new Promise<number>(() => {}),
       kill: () => {
         killCalls += 1;
@@ -371,7 +568,7 @@ describe("deliver: failure modes are swallowed (fail-open)", () => {
     expect(killCalls).toBe(1);
   });
 
-  it("swallows a late `exited` rejection that arrives after the timeout already resolved", async () => {
+  it("swallows a late `exited` rejection that arrives after the timeout resolved", async () => {
     let rejectExited: (err: unknown) => void = () => {};
     const spawn: SpawnFn = () => ({
       exited: new Promise<number>((_resolve, reject) => {
@@ -381,8 +578,6 @@ describe("deliver: failure modes are swallowed (fail-open)", () => {
     });
 
     await deliver("notify-send", BASE_PAYLOAD, spawn, 10);
-    // Fires after delivery has already resolved via the timeout path; must
-    // not surface as an unhandled rejection.
     rejectExited(new Error("boom, but too late"));
     await new Promise((resolve) => setTimeout(resolve, 10));
   });

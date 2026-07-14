@@ -154,7 +154,7 @@ export const DEFAULT_SIDEBAR_WIDTH = 30;
 
 export const VALID_NOTIFICATION_BACKENDS = [
   "auto",
-  "terminal-notifier",
+  "ccmux-notifier",
   "osascript",
   "notify-send",
   "dbus",
@@ -177,15 +177,12 @@ export interface NotificationsConfig {
   sound?: boolean | string;
   /** debounce (ms) for the "finished" event only; default 1000 */
   delayMs?: number;
-  /** default "auto" (platform-appropriate ladder) */
+  /** default "auto" (platform-appropriate ladder). The v1 `"terminal-notifier"`
+   * value was removed in v2; a config still carrying it is treated as "auto"
+   * (fail-open) with a one-line log — see `normalizeBackendConfig`. */
   backend?: (typeof VALID_NOTIFICATION_BACKENDS)[number];
   /** shell command run when backend is "command" */
   command?: string;
-  /** macOS: "none" (default) | "terminal" (borrow terminal app icon) | bundle id.
-   * Default "none" delivers under terminal-notifier's own identity; "terminal"
-   * is silently dropped on terminals that don't register with macOS
-   * notifications (Ghostty, kitty, Alacritty, WezTerm). */
-  icon?: string;
 }
 
 export const DEFAULT_BREAKPOINTS: Required<BreakpointConfig> = {

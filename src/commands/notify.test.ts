@@ -3,31 +3,17 @@ import type { Preferences } from "../lib/preferences";
 import type { Backend } from "../lib/notify";
 import * as preferencesMod from "../lib/preferences";
 import * as notifyMod from "../lib/notify";
-import * as tmuxClientMod from "../lib/tmux-client";
-import * as focusMod from "../daemon/focus";
 import { DbusNotifier } from "../lib/notify-dbus";
-import { createNotifyCommand, resolveSenderBundleId } from "./notify";
+import { createNotifyCommand } from "./notify";
 
 // Deliberately NOT `mock.module`: Bun's module mocks are process-global with
-// no per-file restore, so they leak into sibling test files that exercise the
-// real implementations (`lib/notify.test.ts`, `lib/notify-dbus.test.ts`,
-// `lib/tmux-client.test.ts`, `daemon/focus.test.ts`), failing them when this
-// file loads first (order-dependent: Linux CI, not macOS). And the obvious
-// restore recipe — capture the real module at top level and swap it back in
-// `afterAll` — deadlocks Bun 1.3.x when the poisoned order actually occurs
-// (a top-level `await import()`/`require()` of a module that this file also
-// `mock.module`s hangs the whole run).
-//
-// `spyOn(namespace, name)` sidesteps both: it patches the export in place on
-// the shared module record (so `notify.ts`'s static imports observe the fake
-// at call time), and `mockRestore()` in `afterAll` puts the genuine
-// implementation back before any sibling file loads. The dbus path is
-// stubbed at `DbusNotifier.prototype` (probe/notify/close) instead of
-// replacing the class — the real constructor is inert (it connects lazily),
-// so instances created by the command are safe to construct for real.
+// no per-file restore, so they leak into sibling test files. `spyOn` patches
+// the export in place and `mockRestore()` in `afterAll` puts the genuine
+// implementation back before any sibling file loads. See the git history of
+// this file for the full rationale (the leak broke Linux CI).
 let prefs: Preferences = {};
 
-let resolvedBackend: Backend | null = "terminal-notifier";
+let resolvedBackend: Backend | null = "osascript";
 let probeOk = true;
 const resolveBackendCalls: unknown[] = [];
 const probeBackendCalls: string[] = [];
@@ -39,15 +25,20 @@ const dbusProbeCalls: number[] = [];
 const dbusNotifyCalls: unknown[] = [];
 const dbusCloseCalls: number[] = [];
 
-let clientPid: number | null = null;
-let terminalBundleId: string | null = null;
+/** Resolved ccmux-notifier helper path (null = "not installed"). */
+let notifierPath: string | null = "/libexec/ccmux-notifier";
+/** What the helper's `list` subcommand reports back. */
+let notifierSettings: Record<string, unknown> = {
+  authorizationStatus: "authorized",
+  alertStyle: "alert",
+  alertSetting: "enabled",
+  delivered: [],
+};
+/** Every ccmux-notifier subcommand `ccmux notify` shelled out to. */
+const notifierSpawnArgs: string[][] = [];
 
 const spies = [
-  // Neutralize preferences I/O so tests never touch the real ccmux.json.
   spyOn(preferencesMod, "getPreferences").mockImplementation(async () => prefs),
-  // Stand in for src/lib/notify.ts: resolveBackend/probeBackend are the only
-  // failure signals the command can observe (deliver is void, so there is no
-  // delivery-failure path to test - see notify.ts's plan).
   spyOn(notifyMod, "resolveBackend").mockImplementation((config) => {
     resolveBackendCalls.push(config);
     return resolvedBackend;
@@ -59,9 +50,9 @@ const spies = [
   spyOn(notifyMod, "deliver").mockImplementation(async (backend, payload) => {
     deliverCalls.push({ backend, payload });
   }),
-  // Stand in for src/lib/notify-dbus.ts: the dbus backend is one-shot
-  // (probe/notify/close) and routes through `DbusNotifier` entirely,
-  // bypassing resolveBackend/probeBackend/deliver above.
+  spyOn(notifyMod, "resolveCcmuxNotifierBinary").mockImplementation(
+    () => notifierPath,
+  ),
   spyOn(DbusNotifier.prototype, "probe").mockImplementation(async () => {
     dbusProbeCalls.push(dbusProbeCalls.length);
     return dbusProbeOk;
@@ -75,30 +66,25 @@ const spies = [
   spyOn(DbusNotifier.prototype, "close").mockImplementation(async () => {
     dbusCloseCalls.push(dbusCloseCalls.length);
   }),
-  // The "terminal" icon's bundle-id resolution depends on real tmux/platform
-  // state (`$TMUX`, darwin, an actual `.app`-hosted client) - deterministically
-  // mocked here rather than left to whatever environment happens to run the
-  // test (a real tmux session on the test runner's machine would otherwise
-  // make "no sender" assertions flaky).
-  spyOn(tmuxClientMod, "getActiveTmuxClientPid").mockImplementation(
-    async () => clientPid,
-  ),
-  spyOn(focusMod, "resolveTerminalBundleId").mockImplementation(
-    async () => terminalBundleId,
-  ),
+  // The ccmux-notifier flow shells out to the helper's `request-permission` /
+  // `list` subcommands via Bun.spawn; stub it so the JSON round-trip is
+  // deterministic without a real .app on the runner. `deliver` is already
+  // mocked, so the `post` never reaches here.
+  spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
+    notifierSpawnArgs.push(argv);
+    const isList = argv.includes("list");
+    const json = isList ? JSON.stringify(notifierSettings) : "{}";
+    return {
+      stdout: new Response(json).body,
+      exited: Promise.resolve(0),
+    };
+  }) as unknown as typeof Bun.spawn),
 ];
 
-// Hand every export back to its real implementation once this file's tests
-// complete, so sibling files loaded afterwards see real behavior.
 afterAll(() => {
   for (const spy of spies) spy.mockRestore();
 });
 
-/**
- * Sentinel for process.exit: a no-op mock wouldn't halt execution, so a
- * failure path would fall through to the diagnostics printer. Throwing halts
- * like the real exit; the test catches it to assert the code.
- */
 class ExitError extends Error {
   constructor(public code?: number) {
     super(`process.exit(${code})`);
@@ -115,12 +101,6 @@ function withExitSentinel(): () => void {
   };
 }
 
-/**
- * Pins `process.platform` so assertions on `printFailureHints`' output are
- * deterministic. Those hints branch on the platform (the icon-impersonation
- * advice is macOS-only), so a test asserting the darwin text would otherwise
- * fail on a Linux runner - the exact break that only surfaced on CI.
- */
 function withPlatform(platform: NodeJS.Platform): () => void {
   const original = Object.getOwnPropertyDescriptor(process, "platform");
   Object.defineProperty(process, "platform", {
@@ -146,10 +126,8 @@ async function runNotify(message?: string): Promise<ExitError | null> {
 
 function reset(): void {
   prefs = {};
-  resolvedBackend = "terminal-notifier";
+  resolvedBackend = "osascript";
   probeOk = true;
-  clientPid = null;
-  terminalBundleId = null;
   resolveBackendCalls.length = 0;
   probeBackendCalls.length = 0;
   deliverCalls.length = 0;
@@ -158,38 +136,80 @@ function reset(): void {
   dbusProbeCalls.length = 0;
   dbusNotifyCalls.length = 0;
   dbusCloseCalls.length = 0;
+  notifierPath = "/libexec/ccmux-notifier";
+  notifierSettings = {
+    authorizationStatus: "authorized",
+    alertStyle: "alert",
+    alertSetting: "enabled",
+    delivered: [],
+  };
+  notifierSpawnArgs.length = 0;
 }
 
-describe("ccmux notify", () => {
-  it("bare invocation sends the test message and prints diagnostics", async () => {
+describe("ccmux notify: legacy backend normalization", () => {
+  it("normalizes a removed v1 terminal-notifier backend to the auto ladder instead of exiting 1", async () => {
     reset();
+    // A v1 config still naming the removed backend must not make `ccmux notify`
+    // exit 1 while the daemon delivers fine — normalize it like the daemon does.
+    // `terminal-notifier` was removed from the Backend union in v2; a stale
+    // config can still carry it at runtime, so cast past the type.
+    prefs = {
+      notifications: { backend: "terminal-notifier" },
+    } as unknown as Preferences;
+    resolvedBackend = "osascript";
+    const restorePlatform = withPlatform("darwin");
     const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runNotify();
+
+      // Did NOT exit 1.
+      expect(exit).toBeNull();
+      // resolveBackend saw the NORMALIZED (undefined) backend, not the stale value.
+      expect(resolveBackendCalls).toContainEqual({ backend: undefined });
+      const err = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(err).toContain("terminal-notifier");
+      expect(err).toContain("removed in v2");
+    } finally {
+      restoreExit();
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+      restorePlatform();
+    }
+  });
+});
+
+describe("ccmux notify: osascript", () => {
+  it("bare invocation delivers the test message and prints diagnostics + honest limits", async () => {
+    reset();
+    const restorePlatform = withPlatform("darwin");
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     const restoreExit = withExitSentinel();
     try {
       const exit = await runNotify();
 
       expect(exit).toBeNull();
       expect(deliverCalls).toHaveLength(1);
-      expect(deliverCalls[0]?.backend).toBe("terminal-notifier");
-      expect(deliverCalls[0]?.payload).toMatchObject({
-        body: "Notifications are working",
-      });
+      expect(deliverCalls[0]?.backend).toBe("osascript");
 
-      const output = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      expect(output).toContain("Backend: terminal-notifier");
-      expect(output).toContain("Probe: ok");
-      expect(output).toContain("Effective config:");
+      const out = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      const err = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(out).toContain("Backend: osascript");
+      // Honest osascript limits + brew recommendation.
+      expect(`${out}\n${err}`).toContain("brew install epilande/tap/ccmux");
     } finally {
       restoreExit();
       logSpy.mockRestore();
+      errorSpy.mockRestore();
+      restorePlatform();
     }
   });
 
   it("exits 1 with a hint when the probe fails", async () => {
     reset();
     probeOk = false;
-    // The `notifications.icon none` hint is macOS-only; pin the platform so
-    // this assertion holds regardless of the runner's OS.
     const restorePlatform = withPlatform("darwin");
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     const restoreExit = withExitSentinel();
@@ -201,11 +221,6 @@ describe("ccmux notify", () => {
       expect(
         errorSpy.mock.calls.some((c) =>
           String(c[0]).includes("is not available"),
-        ),
-      ).toBe(true);
-      expect(
-        errorSpy.mock.calls.some((c) =>
-          String(c[0]).includes("notifications.icon none"),
         ),
       ).toBe(true);
     } finally {
@@ -255,46 +270,109 @@ describe("ccmux notify", () => {
       logSpy.mockRestore();
     }
   });
+});
 
-  it("passes senderBundleId only for an explicit bundle id icon", async () => {
+describe("ccmux notify: ccmux-notifier backend", () => {
+  it("runs request-permission, posts a probe, and reports the authorized state", async () => {
     reset();
-    prefs = { notifications: { icon: "com.example.term" } };
+    resolvedBackend = "ccmux-notifier";
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
     const restoreExit = withExitSentinel();
     try {
-      await runNotify("hi");
-      expect(deliverCalls[0]?.payload).toMatchObject({
-        senderBundleId: "com.example.term",
-      });
+      const exit = await runNotify();
+
+      expect(exit).toBeNull();
+      // request-permission + list both shelled out; the post went through the
+      // mocked `deliver`.
+      expect(
+        notifierSpawnArgs.some((a) => a.includes("request-permission")),
+      ).toBe(true);
+      expect(notifierSpawnArgs.some((a) => a.includes("list"))).toBe(true);
+      expect(deliverCalls[0]?.backend).toBe("ccmux-notifier");
+
+      const out = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(out).toContain("Backend: ccmux-notifier");
+      expect(out).toContain("Authorization: authorized");
     } finally {
       restoreExit();
+      logSpy.mockRestore();
     }
   });
 
-  it("passes no senderBundleId for the default terminal icon or none", async () => {
+  it("prints the Settings deep-link grant instructions when not authorized", async () => {
     reset();
+    resolvedBackend = "ccmux-notifier";
+    notifierSettings = {
+      authorizationStatus: "denied",
+      alertStyle: "none",
+      alertSetting: "disabled",
+      delivered: [],
+    };
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     const restoreExit = withExitSentinel();
     try {
-      await runNotify("hi");
-      expect(
-        (deliverCalls[0]?.payload as { senderBundleId?: string })
-          .senderBundleId,
-      ).toBeUndefined();
+      await runNotify();
 
-      reset();
-      prefs = { notifications: { icon: "none" } };
-      await runNotify("hi");
-      expect(
-        (deliverCalls[0]?.payload as { senderBundleId?: string })
-          .senderBundleId,
-      ).toBeUndefined();
+      const err = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(err).toContain("not authorized");
+      expect(err).toContain(
+        "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
+      );
+      expect(err).toContain("Persistent");
     } finally {
       restoreExit();
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("falls back to osascript diagnostics when the helper is not installed", async () => {
+    reset();
+    resolvedBackend = "ccmux-notifier";
+    notifierPath = null;
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runNotify();
+
+      expect(exit).toBeNull();
+      const out = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      const err = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(out).toContain("ccmux-notifier helper not found");
+      expect(err).toContain("brew install epilande/tap/ccmux");
+      // No probe post when the helper is absent.
+      expect(notifierSpawnArgs).toHaveLength(0);
+    } finally {
+      restoreExit();
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("stays quiet on a custom message (still posts through the helper)", async () => {
+    reset();
+    resolvedBackend = "ccmux-notifier";
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runNotify("custom message");
+
+      expect(exit).toBeNull();
+      expect(deliverCalls[0]?.payload).toMatchObject({
+        body: "custom message",
+      });
+      expect(logSpy).not.toHaveBeenCalled();
+    } finally {
+      restoreExit();
+      logSpy.mockRestore();
     }
   });
 });
 
 describe("ccmux notify: dbus backend", () => {
-  it("one-shot: connects, probes, notifies, and closes the DbusNotifier — skipping lib probeBackend/deliver entirely", async () => {
+  it("one-shot: connects, probes, notifies, and closes — skipping lib probeBackend/deliver", async () => {
     reset();
     resolvedBackend = "dbus";
     const logSpy = spyOn(console, "log").mockImplementation(() => {});
@@ -317,19 +395,6 @@ describe("ccmux notify: dbus backend", () => {
     } finally {
       restoreExit();
       logSpy.mockRestore();
-    }
-  });
-
-  it("delivers a supplied message verbatim via the DbusNotifier", async () => {
-    reset();
-    resolvedBackend = "dbus";
-    const restoreExit = withExitSentinel();
-    try {
-      const exit = await runNotify("custom message");
-      expect(exit).toBeNull();
-      expect(dbusNotifyCalls[0]).toMatchObject({ body: "custom message" });
-    } finally {
-      restoreExit();
     }
   });
 
@@ -375,86 +440,6 @@ describe("ccmux notify: dbus backend", () => {
     } finally {
       restoreExit();
       errorSpy.mockRestore();
-    }
-  });
-});
-
-/** Ensure `$TMUX` is unset/set for the duration of the test. */
-function withTmuxEnv(value: string | undefined): () => void {
-  const original = process.env.TMUX;
-  if (value === undefined) delete process.env.TMUX;
-  else process.env.TMUX = value;
-  return () => {
-    if (original === undefined) delete process.env.TMUX;
-    else process.env.TMUX = original;
-  };
-}
-
-describe("resolveSenderBundleId", () => {
-  it("icon 'none' -> undefined regardless of platform/tmux", async () => {
-    expect(await resolveSenderBundleId("none", "darwin")).toBeUndefined();
-    expect(await resolveSenderBundleId("none", "linux")).toBeUndefined();
-  });
-
-  it("an explicit bundle id passes through verbatim regardless of platform/tmux", async () => {
-    expect(await resolveSenderBundleId("com.example.term", "linux")).toBe(
-      "com.example.term",
-    );
-  });
-
-  it("icon 'terminal' on a non-darwin platform -> undefined without resolving", async () => {
-    reset();
-    clientPid = 42;
-    terminalBundleId = "com.mitchellh.ghostty";
-    expect(await resolveSenderBundleId("terminal", "linux")).toBeUndefined();
-  });
-
-  it("icon 'terminal' on darwin outside tmux -> undefined without resolving", async () => {
-    reset();
-    clientPid = 42;
-    terminalBundleId = "com.mitchellh.ghostty";
-    const restore = withTmuxEnv(undefined);
-    try {
-      expect(await resolveSenderBundleId("terminal", "darwin")).toBeUndefined();
-    } finally {
-      restore();
-    }
-  });
-
-  it("icon 'terminal' on darwin inside tmux resolves the terminal bundle id", async () => {
-    reset();
-    clientPid = 42;
-    terminalBundleId = "com.mitchellh.ghostty";
-    const restore = withTmuxEnv("/tmp/sock,1,0");
-    try {
-      expect(await resolveSenderBundleId("terminal", "darwin")).toBe(
-        "com.mitchellh.ghostty",
-      );
-    } finally {
-      restore();
-    }
-  });
-
-  it("icon 'terminal' falls back to undefined when no client pid resolves", async () => {
-    reset();
-    clientPid = null;
-    const restore = withTmuxEnv("/tmp/sock,1,0");
-    try {
-      expect(await resolveSenderBundleId("terminal", "darwin")).toBeUndefined();
-    } finally {
-      restore();
-    }
-  });
-
-  it("icon 'terminal' falls back to undefined when the bundle id can't be resolved", async () => {
-    reset();
-    clientPid = 42;
-    terminalBundleId = null;
-    const restore = withTmuxEnv("/tmp/sock,1,0");
-    try {
-      expect(await resolveSenderBundleId("terminal", "darwin")).toBeUndefined();
-    } finally {
-      restore();
     }
   });
 });
