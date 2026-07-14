@@ -96,6 +96,18 @@ export interface AgentDef {
     markerDir?: string;
     type?: string;
   };
+  /**
+   * Named tmux keys (or literal characters) an actionable notification sends
+   * to answer this agent's permission prompt, applied sequentially via
+   * `sendKeyToPane`. Presence of a map is what gates Approve/Deny buttons onto
+   * a `permission` notification (v2 scope: Claude only); an agent without a map
+   * gets default-click-jump notifications with no buttons. Question-type waits
+   * use inline reply instead and don't consult this field.
+   */
+  notificationActions?: {
+    approve?: string[];
+    deny?: string[];
+  };
 }
 
 function parseRegex(pattern: string, fieldName: string): RegExp {
@@ -254,6 +266,15 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
       ...override.hooks,
     };
   }
+  if (override.notificationActions !== undefined) {
+    // Whole-object replace (not a per-key merge): a custom map is authored as a
+    // complete approve/deny pair, and merging keys from the builtin default
+    // would silently graft Claude's keystrokes onto a different agent's prompt.
+    merged.notificationActions = {
+      approve: override.notificationActions.approve,
+      deny: override.notificationActions.deny,
+    };
+  }
 
   return merged;
 }
@@ -358,6 +379,12 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // changes again.
     readyPattern: /^[>❯]\s*$/,
     hooks: { markerDir: MARKERS_DIR, type: "claude" },
+    // Claude's numbered permission prompt: "1" quick-selects the first option
+    // (approve) and submits immediately, so no trailing Enter is needed; Escape
+    // cancels/denies. The lone-"1" choice is unverified against every prompt
+    // variant — the notification-action e2e pass MUST confirm it approves (and
+    // switch to ["1", "Enter"] if the prompt turns out to need submission).
+    notificationActions: { approve: ["1"], deny: ["Escape"] },
   },
   {
     name: "opencode",

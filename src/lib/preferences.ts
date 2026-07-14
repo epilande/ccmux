@@ -57,6 +57,16 @@ export interface AgentConfig {
     markerDir?: string;
     type?: string;
   };
+  /**
+   * Named tmux keys sent to answer a permission prompt from a notification
+   * Approve/Deny button (see `AgentDef.notificationActions`). Defining a map
+   * for a custom agent is what opts its `permission` notifications into
+   * buttons.
+   */
+  notificationActions?: {
+    approve?: string[];
+    deny?: string[];
+  };
 }
 
 export const BREAKPOINT_NAMES = ["xs", "sm", "md", "lg"] as const;

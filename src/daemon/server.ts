@@ -32,6 +32,10 @@ import {
   SEARCH_CONCURRENCY,
   type SessionMatches,
 } from "./transcript-search";
+import type {
+  NotificationActionInput,
+  NotificationActionResult,
+} from "./notification-action";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -56,6 +60,18 @@ interface PaneSendDeps {
   sendLiteralToPane: typeof sendLiteralToPane;
   sendPromptToPane: typeof sendPromptToPane;
 }
+
+/** Runs one actionable-notification callback (constructed in `index.ts` with
+ *  its effect deps, so the server stays dumb transport). See
+ *  `notification-action.ts`. */
+type NotificationActionRunner = (
+  input: NotificationActionInput,
+) => Promise<NotificationActionResult>;
+
+/** Retracts a session's delivered notification (constructed in `index.ts`,
+ *  sharing the delivery closure's backend/dbus state). Fired when the user
+ *  focuses a pane whose session had pending attention. Fail-open. */
+type NotificationRetractFn = (sessionId: string) => Promise<void>;
 
 /** Cached git branch result */
 interface BranchCacheEntry {
@@ -232,6 +248,8 @@ export class DaemonServer {
   private invocationManager: InvocationManager;
   private getHookAdapter: (agentName: string) => HookAdapter | null;
   private paneSendDeps: PaneSendDeps;
+  private runNotificationAction: NotificationActionRunner | null;
+  private retractNotification: NotificationRetractFn | null;
 
   constructor(
     sessionManager: SessionManager,
@@ -241,6 +259,8 @@ export class DaemonServer {
     invocationManager: InvocationManager,
     getHookAdapter: (agentName: string) => HookAdapter | null,
     paneSendDeps: PaneSendDeps = { sendLiteralToPane, sendPromptToPane },
+    runNotificationAction: NotificationActionRunner | null = null,
+    retractNotification: NotificationRetractFn | null = null,
   ) {
     this.sessionManager = sessionManager;
     this.getPaneCache = getPaneCache;
@@ -249,6 +269,8 @@ export class DaemonServer {
     this.invocationManager = invocationManager;
     this.getHookAdapter = getHookAdapter;
     this.paneSendDeps = paneSendDeps;
+    this.runNotificationAction = runNotificationAction;
+    this.retractNotification = retractNotification;
 
     // Listen for session changes
     this.sessionManager.on("change", async (event: SessionEvent) => {
@@ -628,6 +650,10 @@ export class DaemonServer {
       return await this.handleInvoke(req, corsHeaders);
     }
 
+    if (path === "/notification-action" && req.method === "POST") {
+      return await this.handleNotificationActionRequest(req, corsHeaders);
+    }
+
     if (
       path.startsWith("/invoke/") &&
       path.endsWith("/cancel") &&
@@ -867,6 +893,11 @@ export class DaemonServer {
       this.attentionTracker.markSeen(session.id, false);
       this.sessionManager.setAttentionState(session.id, "read");
       this.attentionTracker.save();
+      // Retract any delivered notification for this session — the user is
+      // looking at the pane now, so the alert is stale. Fail-open (the closure
+      // swallows its own errors); fire-and-forget so focus handling isn't
+      // blocked on a notifier spawn / dbus round-trip.
+      void this.retractNotification?.(session.id);
     }
 
     this.broadcastEvent({
@@ -877,6 +908,98 @@ export class DaemonServer {
     });
 
     return Response.json({ success: true, sessionId }, { headers });
+  }
+
+  /**
+   * Handle an actionable-notification callback (from the ccmux-notifier app):
+   * parse the body, delegate to the shared handler (all safety gating lives
+   * there), and map its structured result to an HTTP status. The handler is
+   * wired in `index.ts`; when unconfigured (e.g. server tests) this reports
+   * 503 so a stray call fails safe rather than 200-ing a no-op.
+   */
+  private async handleNotificationActionRequest(
+    req: Request,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    if (!this.runNotificationAction) {
+      return Response.json(
+        { ok: false, error: "Notification actions not available" },
+        { status: 503, headers },
+      );
+    }
+
+    let body: {
+      sessionId?: unknown;
+      action?: unknown;
+      statusChangedAt?: unknown;
+      userText?: unknown;
+      payload?: unknown;
+    };
+    try {
+      body = (await req.json()) as typeof body;
+    } catch {
+      return Response.json(
+        { ok: false, error: "Invalid JSON body" },
+        { status: 400, headers },
+      );
+    }
+
+    // The ccmux-notifier helper passes the daemon's own opaque `--payload`
+    // string back verbatim (see notifier/Sources/main.swift `postCallbackAsync`),
+    // so sessionId/statusChangedAt live INSIDE it — the daemon stamped that
+    // format in `buildCcmuxNotifierArgv`, so it owns parsing it here. Top-level
+    // fields remain accepted for hand-testing, but a present `payload` wins.
+    let payloadSessionId: string | undefined;
+    let payloadStatusChangedAt: string | undefined;
+    if (typeof body.payload === "string") {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body.payload);
+      } catch {
+        return Response.json(
+          { ok: false, error: "Invalid payload JSON" },
+          { status: 400, headers },
+        );
+      }
+      if (parsed && typeof parsed === "object") {
+        const p = parsed as { sessionId?: unknown; statusChangedAt?: unknown };
+        if (typeof p.sessionId === "string") payloadSessionId = p.sessionId;
+        if (typeof p.statusChangedAt === "string") {
+          payloadStatusChangedAt = p.statusChangedAt;
+        }
+      }
+    }
+
+    const sessionId =
+      payloadSessionId ??
+      (typeof body.sessionId === "string" ? body.sessionId : undefined);
+    const statusChangedAt =
+      payloadStatusChangedAt ??
+      (typeof body.statusChangedAt === "string"
+        ? body.statusChangedAt
+        : undefined);
+
+    if (sessionId === undefined || typeof body.action !== "string") {
+      return Response.json(
+        { ok: false, error: "Missing sessionId or action" },
+        { status: 400, headers },
+      );
+    }
+
+    const input: NotificationActionInput = {
+      sessionId,
+      action: body.action,
+      statusChangedAt,
+      userText: typeof body.userText === "string" ? body.userText : undefined,
+    };
+
+    const result = await this.runNotificationAction(input);
+    return Response.json(
+      result.ok
+        ? { ok: true, action: result.action }
+        : { ok: false, error: result.error },
+      { status: result.code, headers },
+    );
   }
 
   /**

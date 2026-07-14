@@ -143,7 +143,7 @@ function buildSnippet(
 
 /** Read the tail of a transcript, discarding a partial first line when the
  *  file was larger than the window (same idiom as `readLogTail`). */
-async function readTranscriptTail(
+export async function readTranscriptTail(
   path: string,
   maxBytes: number,
 ): Promise<string> {
