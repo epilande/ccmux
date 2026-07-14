@@ -445,7 +445,7 @@ ccmux config set notifications.enabled true
 ccmux notify   # sends a test notification through the configured backend
 ```
 
-`ccmux notify` matters for the first run: macOS only shows its notification-permission dialog on the first notification sent, so triggering that first send yourself (rather than a real transition firing while you're away) is what surfaces the dialog instead of silently dropping every notification after it.
+Run `ccmux notify` once after enabling: macOS shows its permission dialog only on the first notification, so trigger it yourself instead of letting a real transition drop silently while you're away.
 
 Configure further with `ccmux config set notifications.<key> <value>`, or edit `~/.config/ccmux/ccmux.json` directly:
 
@@ -463,17 +463,12 @@ Configure further with `ccmux config set notifications.<key> <value>`, or edit `
 }
 ```
 
-`backend: "auto"` resolves to `terminal-notifier` if it's on `PATH`, else `osascript` on macOS; on Linux it talks to `org.freedesktop.Notifications` over D-Bus directly (`dbus`, no extra binary to install), falling back to `notify-send` for that delivery if the D-Bus session bus isn't reachable.
+`backend: "auto"` picks `terminal-notifier` (else `osascript`) on macOS, and D-Bus (else `notify-send`) on Linux. `command` runs your own shell command with `CCMUX_*` env set (`EVENT`, `SESSION_ID`, `AGENT`, `PROJECT`, `BRANCH`, `TITLE`, `BODY`, `PANE`), for ntfy, Pushover, and the like.
 
 > [!NOTE]
-> Without `terminal-notifier` (`brew install terminal-notifier`), macOS falls back to `osascript`, which attributes notifications to Script Editor, can't group notifications per session, and can't click-to-jump to the pane. Installing `terminal-notifier` gets you all three.
+> **macOS:** `brew install terminal-notifier` for per-session grouping and click-to-jump (`osascript` has neither and posts as Script Editor). Keep `icon: "none"`; setting `"terminal"` borrows your terminal's icon but macOS silently drops it on terminals that don't register for notifications (Ghostty, kitty, Alacritty, WezTerm). Use `"terminal"` only on iTerm2 or Terminal.app.
 
-> [!NOTE]
-> `icon` defaults to `"none"` (notifications carry terminal-notifier's own icon). Setting `icon: "terminal"` borrows your terminal app's icon via `-sender`, but macOS **silently drops** notifications impersonating a terminal that doesn't register with its notification system — Ghostty, kitty, Alacritty, and WezTerm are affected, and enabling them in System Settings does not help. Use `"terminal"` only on iTerm2 or Terminal.app, where it works.
-
-- On Linux, `dbus` groups notifications per session and supports click-to-jump (clicking focuses the pane, or opens the picker popup for paneless background agents) — no extra binary needed, and the same fallback covers a daemon that can't reach the bus. A daemon started outside the graphical session (over SSH, as a systemd service, etc.) needs `DBUS_SESSION_BUS_ADDRESS` set in its environment for `dbus` to connect, and `DISPLAY`/`DBUS_SESSION_BUS_ADDRESS` for the `notify-send` fallback to deliver.
-- With `backend: "command"`, the shell command runs with `CCMUX_EVENT`, `CCMUX_SESSION_ID`, `CCMUX_AGENT`, `CCMUX_PROJECT`, `CCMUX_BRANCH`, `CCMUX_TITLE`, `CCMUX_BODY`, and `CCMUX_PANE` set in its environment, for routing to ntfy, Pushover, or anything else ccmux doesn't integrate directly.
-- Frontmost detection is app-level: a different window of the same terminal app counts as viewing, so a notification can be suppressed even when the agent's actual pane isn't visible.
+Linux `dbus` grouping and click-to-jump are native (no extra binary); a headless daemon (SSH, systemd) needs `DBUS_SESSION_BUS_ADDRESS`, plus `DISPLAY` for the `notify-send` fallback. Frontmost suppression is app-level: another window of the same terminal app counts as viewing.
 
 ## 🔗 Session Matching with Hooks
 
