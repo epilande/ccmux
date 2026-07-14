@@ -58,14 +58,195 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
+  # Build, sign, and notarize the macOS ccmux-notifier helper app (the v2
+  # actionable-notification backend). Runs in parallel with `build`; the
+  # notarized zip is uploaded as the `notifier-app` artifact and folded into
+  # the release by the `release` job (see its download/checksum steps). The
+  # artifact name intentionally does NOT match `ccmux-*` so the release job's
+  # binary-flattening loop skips it.
+  notarize-notifier:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: macos-15
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: notifier
+    env:
+      APP_NAME: ccmux-notifier
+      SCHEME: ccmux-notifier
+      CONFIG: Release
+      ARCHIVE_PATH: build/ccmux-notifier.xcarchive
+      EXPORT_DIR: build/export
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Xcode 26.2
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.2"
+
+      - name: Resolve version
+        id: version
+        run: |
+          echo "semver=${{ needs.check-version.outputs.version }}" >> "$GITHUB_OUTPUT"
+          echo "build_number=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Validate required secrets
+        run: |
+          MISSING=0
+          for secret in TEAM_ID NOTARIZE_APPLE_ID NOTARIZE_PASSWORD \
+                        MACOS_CERT_BASE64 MACOS_CERT_PASSWORD; do
+            if [ -z "$(eval echo \$$secret 2>/dev/null || echo '')" ]; then
+              echo "Missing: $secret"
+              MISSING=1
+            fi
+          done
+          if [ $MISSING -eq 1 ]; then
+            echo "Required secrets are missing."
+            echo "Configure them in: Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          NOTARIZE_APPLE_ID: ${{ secrets.NOTARIZE_APPLE_ID }}
+          NOTARIZE_PASSWORD: ${{ secrets.NOTARIZE_PASSWORD }}
+          MACOS_CERT_BASE64: ${{ secrets.MACOS_CERT_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate build configuration
+        run: |
+          mkdir -p Configurations
+          cat > Configurations/Local.xcconfig << EOF
+          DEVELOPMENT_TEAM = ${{ secrets.TEAM_ID }}
+          EOF
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Prepare ExportOptions.plist
+        run: |
+          mkdir -p build
+          sed "s/__TEAM_ID__/${{ secrets.TEAM_ID }}/g" \
+            ExportOptions.plist > build/ExportOptions.plist
+
+      - name: Import Developer ID certificate
+        uses: apple-actions/import-codesign-certs@v5
+        with:
+          p12-file-base64: ${{ secrets.MACOS_CERT_BASE64 }}
+          p12-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+
+      - name: Store notarization credentials
+        run: |
+          xcrun notarytool store-credentials "notary-profile" \
+            --apple-id "${{ secrets.NOTARIZE_APPLE_ID }}" \
+            --password "${{ secrets.NOTARIZE_PASSWORD }}" \
+            --team-id "${{ secrets.TEAM_ID }}"
+
+      - name: Archive
+        timeout-minutes: 5
+        run: |
+          set -euxo pipefail
+          mkdir -p build
+          # Universal (arm64 + x86_64) comes from project.yml's Release
+          # ARCHS = $(ARCHS_STANDARD); do not override ARCHS here.
+          xcodebuild \
+            -project "$APP_NAME.xcodeproj" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIG" \
+            -archivePath "$ARCHIVE_PATH" \
+            -destination "generic/platform=macOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            MARKETING_VERSION=${{ steps.version.outputs.semver }} \
+            CURRENT_PROJECT_VERSION=${{ steps.version.outputs.build_number }} \
+            clean archive
+
+      - name: Export signed app
+        timeout-minutes: 2
+        run: |
+          mkdir -p "$EXPORT_DIR"
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$EXPORT_DIR" \
+            -exportOptionsPlist build/ExportOptions.plist
+
+      - name: Sign with hardened runtime
+        run: |
+          set -euxo pipefail
+          APP_BUNDLE="$EXPORT_DIR/$APP_NAME.app"
+          IDENTITY="Developer ID Application"
+          ENTITLEMENTS="$APP_NAME.entitlements"
+          # No embedded frameworks in this thin helper; sign the bundle only.
+          codesign --force --sign "$IDENTITY" -o runtime --timestamp \
+            --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
+          codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+
+      - name: Notarize
+        timeout-minutes: 10
+        run: |
+          set -euxo pipefail
+          ditto -c -k --keepParent "$EXPORT_DIR/$APP_NAME.app" "build/notarize.zip"
+          # Capture notarytool's exit code without `set -e` aborting the step,
+          # so the failure diagnostics below (log fetch) still run when the
+          # submission errors or is rejected.
+          SUBMIT_STATUS=0
+          SUBMIT_OUT=$(xcrun notarytool submit "build/notarize.zip" \
+            --keychain-profile "notary-profile" \
+            --wait 2>&1) || SUBMIT_STATUS=$?
+          echo "$SUBMIT_OUT"
+          # `|| true`: a missing id (failed submit) must not itself abort here.
+          SUBMISSION_ID=$(echo "$SUBMIT_OUT" | grep -m1 'id:' | awk '{print $2}') || true
+          echo "SUBMISSION_ID=$SUBMISSION_ID" >> $GITHUB_ENV
+          if [ "$SUBMIT_STATUS" -ne 0 ] || ! echo "$SUBMIT_OUT" | grep -q "status: Accepted"; then
+            echo "Notarization failed (notarytool exit $SUBMIT_STATUS). Fetching log..."
+            xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "notary-profile" || true
+            exit 1
+          fi
+          rm -f "build/notarize.zip"
+
+      - name: Staple notarization
+        run: |
+          set -euxo pipefail
+          for i in 1 2 3; do
+            if xcrun stapler staple "$EXPORT_DIR/$APP_NAME.app" 2>&1; then
+              break
+            fi
+            if [ "$i" -eq 3 ]; then
+              echo "Staple failed after 3 attempts. Fetching notarization log..."
+              xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "notary-profile" || true
+              exit 1
+            fi
+            echo "Staple attempt $i failed, retrying in 15s..."
+            sleep 15
+          done
+          xcrun stapler validate "$EXPORT_DIR/$APP_NAME.app"
+          codesign --verify --deep --strict --verbose=2 "$EXPORT_DIR/$APP_NAME.app"
+
+      - name: Create notarized ZIP
+        run: |
+          ditto -c -k --keepParent "$EXPORT_DIR/$APP_NAME.app" "build/ccmux-notifier.zip"
+
+      - name: Upload notifier artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: notifier-app
+          path: notifier/build/ccmux-notifier.zip
+
   release:
-    needs: [check-version, build]
+    needs: [check-version, build, notarize-notifier]
     runs-on: ubuntu-latest
     outputs:
       version: ${{ needs.check-version.outputs.version }}
       sha_macos_arm64: ${{ steps.checksums.outputs.sha_macos_arm64 }}
       sha_macos_x64: ${{ steps.checksums.outputs.sha_macos_x64 }}
       sha_linux_x64: ${{ steps.checksums.outputs.sha_linux_x64 }}
+      sha_notifier_app: ${{ steps.checksums.outputs.sha_notifier_app }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -77,9 +258,13 @@ jobs:
           git tag -a "v${{ needs.check-version.outputs.version }}" -m "Release v${{ needs.check-version.outputs.version }}"
           git push origin "v${{ needs.check-version.outputs.version }}"
 
-      - name: Download all artifacts
+      - name: Download binary artifacts
         uses: actions/download-artifact@v4
         with:
+          # Only the compiled binaries (each artifact is a dir holding one
+          # like-named file). The notifier zip is fetched separately below so
+          # the flattening loop never sees it.
+          pattern: ccmux-*
           path: dist
 
       - name: Prepare release assets
@@ -96,6 +281,15 @@ jobs:
           chmod +x ccmux-*
           ls -la
 
+      - name: Download notifier app artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: notifier-app
+          path: dist-notifier
+
+      - name: Stage notifier zip
+        run: mv dist-notifier/ccmux-notifier.zip dist/ccmux-notifier.zip
+
       - name: Generate checksums
         id: checksums
         run: |
@@ -105,6 +299,7 @@ jobs:
           echo "sha_macos_arm64=$(sha256sum ccmux-macos-arm64 | awk '{print $1}')" >> $GITHUB_OUTPUT
           echo "sha_macos_x64=$(sha256sum ccmux-macos-x64 | awk '{print $1}')" >> $GITHUB_OUTPUT
           echo "sha_linux_x64=$(sha256sum ccmux-linux-x64 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "sha_notifier_app=$(sha256sum ccmux-notifier.zip | awk '{print $1}')" >> $GITHUB_OUTPUT
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -140,6 +335,7 @@ jobs:
           SHA_MACOS_ARM64: ${{ needs.release.outputs.sha_macos_arm64 }}
           SHA_MACOS_X64: ${{ needs.release.outputs.sha_macos_x64 }}
           SHA_LINUX_X64: ${{ needs.release.outputs.sha_linux_x64 }}
+          SHA_NOTIFIER_APP: ${{ needs.release.outputs.sha_notifier_app }}
         run: bash scripts/update-homebrew-formula.sh homebrew-tap/Formula/ccmux.rb
 
       - name: Commit and push formula

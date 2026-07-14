@@ -3,7 +3,8 @@ set -euo pipefail
 
 # Generate the Homebrew formula for ccmux.
 # Usage: update-homebrew-formula.sh <output-path>
-# Requires env: VERSION (no 'v' prefix), SHA_MACOS_ARM64, SHA_MACOS_X64, SHA_LINUX_X64.
+# Requires env: VERSION (no 'v' prefix), SHA_MACOS_ARM64, SHA_MACOS_X64,
+# SHA_LINUX_X64, SHA_NOTIFIER_APP.
 
 OUTPUT_PATH="${1:-}"
 
@@ -13,7 +14,7 @@ if [[ -z "$OUTPUT_PATH" ]]; then
 	exit 1
 fi
 
-for var in VERSION SHA_MACOS_ARM64 SHA_MACOS_X64 SHA_LINUX_X64; do
+for var in VERSION SHA_MACOS_ARM64 SHA_MACOS_X64 SHA_LINUX_X64 SHA_NOTIFIER_APP; do
 	if [[ -z "${!var:-}" ]]; then
 		echo "Error: $var environment variable is required" >&2
 		exit 1
@@ -34,10 +35,14 @@ class Ccmux < Formula
   license "MIT"
 
   on_macos do
-    # Notification backend: gives the daemon's notifications and \`ccmux
-    # notify\` click-to-jump, per-session grouping, and the terminal's icon
-    # out of the box (ccmux falls back to osascript without it).
-    depends_on "terminal-notifier"
+    # Actionable-notification backend: the signed + notarized ccmux-notifier
+    # helper app, staged into libexec below. Gives real ccmux identity,
+    # Approve/Deny buttons, inline reply, per-session grouping, and retraction
+    # (ccmux falls back to osascript without it).
+    resource "notifier" do
+      url "https://github.com/${REPO}/releases/download/v${VERSION}/ccmux-notifier.zip"
+      sha256 "${SHA_NOTIFIER_APP}"
+    end
 
     if Hardware::CPU.arm?
       url "https://github.com/${REPO}/releases/download/v${VERSION}/ccmux-macos-arm64"
@@ -56,6 +61,14 @@ class Ccmux < Formula
   def install
     binary_name = stable.url.split("/").last
     bin.install binary_name => "ccmux"
+
+    # Stage the notarized helper app alongside the binary. The ccmux daemon
+    # resolves it at ../libexec/ccmux-notifier.app relative to bin/ccmux.
+    if OS.mac?
+      resource("notifier").stage do
+        libexec.install "ccmux-notifier.app"
+      end
+    end
   end
 
   test do
