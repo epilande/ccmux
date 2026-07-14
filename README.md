@@ -438,14 +438,18 @@ ccmux daemon restart
 
 ### 🔔 Notifications
 
-Desktop notifications on `waiting`/`finished` transitions, disabled by default. Enable and grant the macOS permission:
+Desktop notifications on `waiting`/`finished` transitions, disabled by default. When a session needs permission the banner carries **Approve** / **Deny** buttons, and questions get an inline **Reply** field, so you can unblock an agent straight from the notification without switching to its pane. Focusing a session's pane clears its notification.
 
 ```bash
 ccmux config set notifications.enabled true
-ccmux notify   # sends a test notification through the configured backend
+ccmux notify   # sends a test notification and prints setup diagnostics
 ```
 
-Run `ccmux notify` once after enabling: macOS shows its permission dialog only on the first notification, so trigger it yourself instead of letting a real transition drop silently while you're away.
+Actionable buttons are Claude Code only for now; every other agent still gets click-to-jump. Approve/Deny work on both macOS and Linux; inline reply needs a notification server that advertises it (always available on macOS, varies on Linux).
+
+On **macOS**, the buttons, ccmux's own name and icon, per-session grouping, and retraction come from a small helper app that Homebrew installs alongside ccmux. Source installs have no helper and fall back to `osascript`, which posts under Script Editor's name, is silenced by Focus / Do Not Disturb, and has no buttons or reply; `brew install epilande/tap/ccmux` for the full experience.
+
+macOS never shows a permission dialog for a CLI-launched app, so grant it once by hand. Run `ccmux notify` and follow the steps it prints: open the notifications-settings deep link, find **ccmux-notifier**, enable **Allow notifications**, and set its **Alert Style** to **Persistent** so alerts don't auto-dismiss after a few seconds. Re-run `ccmux notify` to confirm the grant took, it reports the live authorization and alert state each run.
 
 Configure further with `ccmux config set notifications.<key> <value>`, or edit `~/.config/ccmux/ccmux.json` directly:
 
@@ -456,19 +460,21 @@ Configure further with `ccmux config set notifications.<key> <value>`, or edit `
     "events": ["waiting", "finished"], // default both
     "sound": "Glass", // false (default) | true (platform default sound) | macOS sound name
     "delayMs": 1000, // debounce for "finished" only; "waiting" always fires immediately
-    "backend": "auto", // "auto" | "terminal-notifier" | "osascript" | "notify-send" | "dbus" | "command"
+    "backend": "auto", // "auto" | "ccmux-notifier" | "osascript" | "notify-send" | "dbus" | "command"
     "command": "ntfy publish agents \"$CCMUX_TITLE: $CCMUX_BODY\"", // used when backend = "command"
-    "icon": "none", // macOS: "none" (default) | "terminal" (borrow terminal app icon) | bundle id
   },
 }
 ```
 
-`backend: "auto"` picks `terminal-notifier` (else `osascript`) on macOS, and D-Bus (else `notify-send`) on Linux. `command` runs your own shell command with `CCMUX_*` env set (`EVENT`, `SESSION_ID`, `AGENT`, `PROJECT`, `BRANCH`, `TITLE`, `BODY`, `PANE`), for ntfy, Pushover, and the like.
+`backend: "auto"` picks `ccmux-notifier` (else `osascript`) on macOS, and D-Bus (else `notify-send`) on Linux. `command` runs your own shell command with `CCMUX_*` env set (`EVENT`, `SESSION_ID`, `AGENT`, `PROJECT`, `BRANCH`, `TITLE`, `BODY`, `PANE`), for ntfy, Pushover, and the like.
+
+Linux `dbus` grouping, click-to-jump, and Approve/Deny buttons are native (no extra binary); inline reply appears only when the notification server advertises it. A headless daemon (SSH, systemd) needs `DBUS_SESSION_BUS_ADDRESS`, plus `DISPLAY` for the `notify-send` fallback. Frontmost suppression is app-level: another window of the same terminal app counts as viewing.
 
 > [!NOTE]
-> **macOS:** `brew install terminal-notifier` for per-session grouping and click-to-jump (`osascript` has neither and posts as Script Editor). Keep `icon: "none"`; setting `"terminal"` borrows your terminal's icon but macOS silently drops it on terminals that don't register for notifications (Ghostty, kitty, Alacritty, WezTerm). Use `"terminal"` only on iTerm2 or Terminal.app.
+> The v1 `terminal-notifier` backend and the `notifications.icon` key were both removed in v2; a config still naming `terminal-notifier` falls back to the auto ladder with a log line.
 
-Linux `dbus` grouping and click-to-jump are native (no extra binary); a headless daemon (SSH, systemd) needs `DBUS_SESSION_BUS_ADDRESS`, plus `DISPLAY` for the `notify-send` fallback. Frontmost suppression is app-level: another window of the same terminal app counts as viewing.
+> [!NOTE]
+> **What Approve does, and doesn't:** Approve/Deny only send the mapped keystroke to that session's pane (for Claude, the same key you would press yourself). If the session moved on since the notification fired, the press sends nothing and you get a fresh "state changed" notification instead. Dismissing a notification never approves anything.
 
 ## 🔗 Session Matching with Hooks
 
