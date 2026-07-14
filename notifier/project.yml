@@ -1,0 +1,63 @@
+name: ccmux-notifier
+options:
+  bundleIdPrefix: com.epilande
+  deploymentTarget:
+    macOS: "15.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+  groupSortPosition: top
+  generateEmptyDirectories: false
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    # Keep in lockstep with ccmux's package.json version.
+    MARKETING_VERSION: "1.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  ccmux-notifier:
+    type: application
+    platform: macOS
+    sources:
+      - Sources
+      # Asset catalog: xcodegen auto-classifies .xcassets into a resources phase.
+      - Assets.xcassets
+    settings:
+      base:
+        # Binary name matters: the ccmux CLI invokes
+        # <app>/Contents/MacOS/ccmux-notifier by this exact name.
+        PRODUCT_NAME: ccmux-notifier
+        PRODUCT_BUNDLE_IDENTIFIER: com.epilande.ccmux-notifier
+        CODE_SIGN_ENTITLEMENTS: ccmux-notifier.entitlements
+        GENERATE_INFOPLIST_FILE: false
+        INFOPLIST_FILE: Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_HARDENED_RUNTIME: true
+        COMBINE_HIDPI_IMAGES: true
+        # LSUIElement helper: no Dock icon, no menu bar.
+        LSUIElement: true
+      debug:
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+      release:
+        SWIFT_COMPILATION_MODE: wholemodule
+        SWIFT_OPTIMIZATION_LEVEL: -O
+        # Universal binary (arm64 + x86_64) for release/notarization.
+        ARCHS: $(ARCHS_STANDARD)
+    configFiles:
+      Debug: Configurations/Base.xcconfig
+      Release: Configurations/Base.xcconfig
+
+schemes:
+  ccmux-notifier:
+    build:
+      targets:
+        ccmux-notifier: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

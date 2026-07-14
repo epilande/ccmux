@@ -1,0 +1,7 @@
+// Base configuration for ccmux-notifier
+
+// Code signing
+CODE_SIGN_STYLE = Automatic
+
+// Include Local.xcconfig for local overrides (DEVELOPMENT_TEAM, etc.)
+#include? "Local.xcconfig"

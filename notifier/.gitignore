@@ -1,0 +1,15 @@
+# XcodeGen — generated project (devs and CI run `xcodegen generate`)
+*.xcodeproj
+
+# Build products
+build/
+DerivedData/
+*.dSYM
+*.dSYM.zip
+
+# Local development configuration
+Configurations/Local.xcconfig
+
+# macOS
+.DS_Store
+xcuserdata/
