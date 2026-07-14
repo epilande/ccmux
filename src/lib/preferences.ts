@@ -142,6 +142,42 @@ interface SidebarConfig {
 
 export const DEFAULT_SIDEBAR_WIDTH = 30;
 
+export const VALID_NOTIFICATION_BACKENDS = [
+  "auto",
+  "terminal-notifier",
+  "osascript",
+  "notify-send",
+  "dbus",
+  "command",
+] as const;
+
+export const VALID_NOTIFICATION_EVENTS = ["waiting", "finished"] as const;
+
+/**
+ * Desktop notification settings. Defaults (documented per-field below) live
+ * in the consumers (`src/commands/notify.ts`, `src/daemon/notifier.ts`), not
+ * here, matching the rest of this file's convention.
+ */
+export interface NotificationsConfig {
+  /** default false (opt-in) */
+  enabled?: boolean;
+  /** default both; edge-triggered status transitions to notify on */
+  events?: Array<(typeof VALID_NOTIFICATION_EVENTS)[number]>;
+  /** default false; `true` maps to the platform default sound name */
+  sound?: boolean | string;
+  /** debounce (ms) for the "finished" event only; default 1000 */
+  delayMs?: number;
+  /** default "auto" (platform-appropriate ladder) */
+  backend?: (typeof VALID_NOTIFICATION_BACKENDS)[number];
+  /** shell command run when backend is "command" */
+  command?: string;
+  /** macOS: "none" (default) | "terminal" (borrow terminal app icon) | bundle id.
+   * Default "none" delivers under terminal-notifier's own identity; "terminal"
+   * is silently dropped on terminals that don't register with macOS
+   * notifications (Ghostty, kitty, Alacritty, WezTerm). */
+  icon?: string;
+}
+
 export const DEFAULT_BREAKPOINTS: Required<BreakpointConfig> = {
   xs: 40,
   sm: 60,
@@ -255,6 +291,8 @@ export interface Preferences {
   backgroundAgents?: boolean;
   /** Sidebar mode configuration */
   sidebar?: SidebarConfig;
+  /** Desktop notification settings (default: disabled). See {@link NotificationsConfig}. */
+  notifications?: NotificationsConfig;
   /**
    * TUI color theme, resolved once at launch (no in-TUI toggle). A built-in
    * name (e.g. `"catppuccin-latte"`) or an object with a `base` plus per-key

@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { getDaemonUrl } from "../lib/config";
 import { isSameTmuxServer } from "../lib/tmux-server";
+import { resolveActiveTmuxClientTty } from "../lib/tmux-client";
 import { ensureDaemon } from "./shared";
 
 export function createSwitchCommand(): Command {
@@ -56,7 +57,25 @@ export function createSwitchCommand(): Command {
           process.exit(1);
         }
 
-        const proc = Bun.spawn(["tmux", "switch-client", "-t", target], {
+        // Outside tmux (e.g. a notification click from Notification Center)
+        // there is no implicit current client for `switch-client` to act
+        // on, so target the most-recently-active attached client
+        // explicitly. Inside tmux this is skipped entirely: argv is
+        // unchanged from today's path.
+        const switchArgs = ["tmux", "switch-client"];
+        if (!process.env.TMUX) {
+          const clientTty = await resolveActiveTmuxClientTty();
+          if (!clientTty) {
+            console.error(
+              "No attached tmux client found; run this from inside tmux, or attach a client first",
+            );
+            process.exit(1);
+          }
+          switchArgs.push("-c", clientTty);
+        }
+        switchArgs.push("-t", target);
+
+        const proc = Bun.spawn(switchArgs, {
           stdout: "pipe",
           stderr: "pipe",
         });

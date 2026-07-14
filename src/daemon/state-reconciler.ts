@@ -353,7 +353,12 @@ async function reconcileAttentionStates(deps: ReconcilerDeps): Promise<void> {
   }
 }
 
-async function getActivePaneId(): Promise<string | null> {
+/**
+ * Live tmux query for the currently active pane, shared by the reconciler's
+ * own attention-tracking arm and the daemon notifier's focus-suppression
+ * check (`src/daemon/notifier.ts` via its `getActivePaneId` dep).
+ */
+export async function getActivePaneId(): Promise<string | null> {
   try {
     const proc = Bun.spawn(["tmux", "display-message", "-p", "#{pane_id}"], {
       stdout: "pipe",

@@ -8,9 +8,12 @@ import {
   VALID_REVIEW_HANDBACK,
   BREAKPOINT_NAMES,
   COLUMN_FIELDS,
+  VALID_NOTIFICATION_BACKENDS,
+  VALID_NOTIFICATION_EVENTS,
   type BreakpointConfig,
   type ColumnsConfig,
   type ColumnEntry,
+  type NotificationsConfig,
   type Preferences,
   type RowConfig,
 } from "../lib/preferences";
@@ -226,7 +229,7 @@ export function createConfigCommand(): Command {
         if (!spec) {
           console.error(`Unknown key: ${key}`);
           console.error(
-            `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, sidebar.<key>`,
+            `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, sidebar.<key>, notifications.<key>`,
           );
           process.exit(1);
         }
@@ -322,9 +325,120 @@ export function createConfigCommand(): Command {
         return;
       }
 
+      if (parts[0] === "notifications" && parts.length === 2) {
+        const notifKey = parts[1];
+        const prefs = await getPreferences();
+        const notifications: NotificationsConfig = { ...prefs.notifications };
+        let note: string | undefined;
+
+        switch (notifKey) {
+          case "enabled": {
+            if (value !== "true" && value !== "false") {
+              console.error("Invalid notifications.enabled (true, false)");
+              process.exit(1);
+            }
+            notifications.enabled = value === "true";
+            if (notifications.enabled) {
+              note =
+                "Run `ccmux notify` to send a test notification and grant permission (macOS)";
+            }
+            break;
+          }
+          case "delayMs": {
+            const n = Number(value);
+            if (!Number.isInteger(n) || n < 0) {
+              console.error(
+                "Invalid notifications.delayMs (non-negative integer)",
+              );
+              process.exit(1);
+            }
+            notifications.delayMs = n;
+            break;
+          }
+          case "backend": {
+            if (
+              !(VALID_NOTIFICATION_BACKENDS as readonly string[]).includes(
+                value,
+              )
+            ) {
+              console.error(`Invalid notifications.backend: ${value}`);
+              console.error(
+                `Valid backends: ${VALID_NOTIFICATION_BACKENDS.join(", ")}`,
+              );
+              process.exit(1);
+            }
+            notifications.backend = value as NotificationsConfig["backend"];
+            break;
+          }
+          case "events": {
+            const events = value
+              .split(",")
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0);
+            const valid =
+              events.length > 0 &&
+              events.every((e) =>
+                (VALID_NOTIFICATION_EVENTS as readonly string[]).includes(e),
+              );
+            if (!valid) {
+              console.error(`Invalid notifications.events: ${value}`);
+              console.error(
+                `  Comma-separated subset of: ${VALID_NOTIFICATION_EVENTS.join(", ")}`,
+              );
+              process.exit(1);
+            }
+            notifications.events = events as NotificationsConfig["events"];
+            break;
+          }
+          case "sound": {
+            if (value === "true" || value === "false") {
+              notifications.sound = value === "true";
+            } else if (value.trim().length > 0) {
+              notifications.sound = value;
+            } else {
+              console.error(
+                "Invalid notifications.sound (true, false, or a sound name)",
+              );
+              process.exit(1);
+            }
+            break;
+          }
+          case "command": {
+            if (value.trim().length === 0) {
+              console.error(
+                "Invalid notifications.command (must be non-empty)",
+              );
+              process.exit(1);
+            }
+            notifications.command = value;
+            break;
+          }
+          case "icon": {
+            if (value.trim().length === 0) {
+              console.error("Invalid notifications.icon (must be non-empty)");
+              process.exit(1);
+            }
+            notifications.icon = value;
+            break;
+          }
+          default: {
+            console.error(`Unknown notifications key: ${notifKey}`);
+            console.error(
+              "Valid notifications keys: enabled, events, sound, delayMs, backend, command, icon",
+            );
+            process.exit(1);
+          }
+        }
+
+        await setPreferences({ notifications });
+        console.log(`${key} = ${value}`);
+        if (note) console.log(note);
+        return;
+      }
+
       console.error(`Unknown key: ${key}`);
       console.error(
-        `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, sidebar.<key>`,
+        `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, sidebar.<key>, notifications.<key>`,
       );
       process.exit(1);
     });

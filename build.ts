@@ -21,6 +21,17 @@ const result = await Bun.build({
   target: "bun",
   outdir: STAGING,
   plugins: [solidPlugin],
+  // dbus-next (src/lib/notify-dbus.ts's dynamic `import("dbus-next")`, only
+  // ever reached on Linux with the dbus notification backend) has one dead
+  // code path, `getDbusAddressFromWindowSelection` in its address-x11.js,
+  // that does a top-level-in-function `require('x11')` — a package dbus-next
+  // itself doesn't declare as a dependency and that isn't installed. It's
+  // never called (dbus-next only calls its sibling `getDbusAddressFromFs`),
+  // but Bun's bundler still resolves every reachable `require`/`import`
+  // regardless of whether the containing function ever runs, so the build
+  // fails without this. Marking it external leaves a harmless unresolved
+  // `require("x11")` in the bundle that's simply never executed.
+  external: ["x11"],
 });
 
 if (!result.success) {

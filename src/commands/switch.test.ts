@@ -82,19 +82,39 @@ function withFetch(opts: {
   };
 }
 
-/** Record every tmux spawn without launching one, so the target is assertable. */
-function withSpawnSpy(): { calls: string[][]; restore: () => void } {
+/**
+ * Record every tmux spawn without launching one, so the target is
+ * assertable. `listClientsOutput` canned-answers `tmux list-clients` (the
+ * out-of-tmux `switch-client -c` fallback's client resolution); every other
+ * command gets empty stdout and a zero exit.
+ */
+function withSpawnSpy(
+  opts: {
+    listClientsOutput?: string;
+  } = {},
+): { calls: string[][]; restore: () => void } {
   const original = Bun.spawn;
   const calls: string[][] = [];
   Bun.spawn = ((args: string[]) => {
     calls.push(args);
+    const stdout =
+      args[1] === "list-clients" ? (opts.listClientsOutput ?? "") : "";
     return {
       exited: Promise.resolve(0),
-      stdout: new Blob([""]).stream(),
+      stdout: new Blob([stdout]).stream(),
       stderr: new Blob([""]).stream(),
     };
   }) as unknown as typeof Bun.spawn;
   return { calls, restore: () => (Bun.spawn = original) };
+}
+
+/** Ensure `$TMUX` is unset for the duration of the test. */
+function withoutTmux(): () => void {
+  const original = process.env.TMUX;
+  delete process.env.TMUX;
+  return () => {
+    if (original !== undefined) process.env.TMUX = original;
+  };
 }
 
 /** Run the switch action; return the ExitError it threw, or null if it didn't. */
@@ -168,6 +188,80 @@ describe("ccmux switch cross-server refusal", () => {
 
       expect(exit).toBeNull();
       expect(spawn.calls).toContainEqual(["tmux", "switch-client", "-t", "%5"]);
+    } finally {
+      spawn.restore();
+      restoreExit();
+      restoreFetch();
+      restoreTmux();
+    }
+  });
+});
+
+describe("ccmux switch outside tmux", () => {
+  it("targets the highest-activity attached client via -c when $TMUX is unset", async () => {
+    const restoreTmux = withoutTmux();
+    const restoreFetch = withFetch({});
+    const restoreExit = withExitSentinel();
+    const spawn = withSpawnSpy({
+      listClientsOutput:
+        "100 /dev/ttys001\n200 /dev/ttys002\n50 /dev/ttys003\n",
+    });
+    try {
+      const exit = await runSwitch();
+
+      expect(exit).toBeNull();
+      expect(spawn.calls).toContainEqual([
+        "tmux",
+        "switch-client",
+        "-c",
+        "/dev/ttys002",
+        "-t",
+        "%5",
+      ]);
+    } finally {
+      spawn.restore();
+      restoreExit();
+      restoreFetch();
+      restoreTmux();
+    }
+  });
+
+  it("exits 1 with a clear message when no tmux client is attached", async () => {
+    const restoreTmux = withoutTmux();
+    const restoreFetch = withFetch({});
+    const restoreExit = withExitSentinel();
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const spawn = withSpawnSpy({ listClientsOutput: "" });
+    try {
+      const exit = await runSwitch();
+
+      expect(exit?.code).toBe(1);
+      expect(
+        errorSpy.mock.calls.some((c) =>
+          String(c[0]).includes("No attached tmux client found"),
+        ),
+      ).toBe(true);
+      expect(spawn.calls.some((c) => c[1] === "switch-client")).toBe(false);
+    } finally {
+      spawn.restore();
+      restoreExit();
+      restoreFetch();
+      restoreTmux();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("leaves argv unchanged (no -c) when inside tmux", async () => {
+    const restoreTmux = withTmux("/tmp/same-sock,1,0");
+    const restoreFetch = withFetch({ serverInfoSocket: "/tmp/same-sock" });
+    const restoreExit = withExitSentinel();
+    const spawn = withSpawnSpy();
+    try {
+      const exit = await runSwitch();
+
+      expect(exit).toBeNull();
+      expect(spawn.calls).toContainEqual(["tmux", "switch-client", "-t", "%5"]);
+      expect(spawn.calls.some((c) => c.includes("list-clients"))).toBe(false);
     } finally {
       spawn.restore();
       restoreExit();
