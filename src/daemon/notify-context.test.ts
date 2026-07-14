@@ -4,8 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildNotificationContext,
+  extractPermissionPrompt,
   type NotifyContextSession,
 } from "./notify-context";
+
+// Mirror of the module's MAX_CONTEXT_CHARS cap; kept local so the clamp test
+// stays honest without exporting the constant.
+const MAX = 300;
 
 let dir: string;
 
@@ -42,134 +47,161 @@ function assistantText(text: string) {
   };
 }
 
+/** A permission session whose pane capture returns `paneText`. */
 function permissionSession(
-  logPath: string | null,
-  pendingTool: string | null = "Bash",
-): NotifyContextSession {
+  paneText: string,
+  overrides: Partial<NotifyContextSession> = {},
+): { session: NotifyContextSession; capturePane: () => Promise<string> } {
   return {
-    agentType: "claude",
-    logPath,
-    attentionType: "permission",
-    pendingTool,
+    session: {
+      agentType: "claude",
+      logPath: null,
+      attentionType: "permission",
+      pendingTool: "Bash",
+      tmuxPane: "%42",
+      ...overrides,
+    },
+    capturePane: async () => paneText,
   };
 }
 
-describe("buildNotificationContext: permission", () => {
-  it("renders a Bash tool_use as the command", async () => {
-    const path = await writeTranscript([
-      assistantText("let me look"),
-      assistantToolUse("Bash", {
-        command: "rm -rf /tmp/x",
-        description: "clean",
-      }),
-    ]);
-    expect(await buildNotificationContext(permissionSession(path))).toBe(
-      "Bash: rm -rf /tmp/x",
+/** The realistic tmux capture-pane output for a Claude Bash approval, box
+ *  chrome and all (no ANSI — capture-pane -p strips colour). */
+const BORDERED_PROMPT = [
+  "  ⏺ I'll check the site.",
+  "",
+  "╭─────────────────────────────────────────────────╮",
+  "│ Bash command                                      │",
+  "│                                                   │",
+  "│   rtk curl -sI https://example.com/               │",
+  "│   Fetch example.com front page                    │",
+  "│                                                   │",
+  "│ Do you want to proceed?                           │",
+  "│ ❯ 1. Yes                                          │",
+  "│   2. Yes, and don't ask again this session        │",
+  "│   3. No, and tell Claude what to do differently   │",
+  "╰─────────────────────────────────────────────────╯",
+].join("\n");
+
+/** The bare shape described in the task prompt (no borders, stacked
+ *  "requires approval" + "Do you want to proceed?" terminators). */
+const BARE_PROMPT = [
+  "Bash command",
+  "  rtk curl -sI https://example.com/",
+  "  Fetch example.com front page",
+  " This command requires approval",
+  " Do you want to proceed?",
+  " ❯ 1. Yes",
+].join("\n");
+
+describe("extractPermissionPrompt", () => {
+  it("pulls the command block from a bordered prompt (header split by blank)", () => {
+    expect(extractPermissionPrompt(BORDERED_PROMPT)).toBe(
+      "rtk curl -sI https://example.com/\nFetch example.com front page",
     );
   });
 
-  it("renders an Edit tool_use as the file_path", async () => {
-    const path = await writeTranscript([
-      assistantToolUse("Edit", {
-        file_path: "/repo/src/index.ts",
-        old_string: "a",
-        new_string: "b",
-      }),
-    ]);
-    expect(
-      await buildNotificationContext(permissionSession(path, "Edit")),
-    ).toBe("Edit: /repo/src/index.ts");
-  });
-
-  it("falls back to the longest string field for an unknown tool", async () => {
-    const path = await writeTranscript([
-      assistantToolUse("MysteryTool", {
-        short: "x",
-        detail: "the longest descriptive value here",
-        n: 5,
-      }),
-    ]);
-    expect(
-      await buildNotificationContext(permissionSession(path, "MysteryTool")),
-    ).toBe("MysteryTool: the longest descriptive value here");
-  });
-
-  it("uses the newest tool_use matching the pending tool", async () => {
-    const path = await writeTranscript([
-      assistantToolUse("Bash", { command: "first" }),
-      assistantToolUse("Bash", { command: "second" }),
-    ]);
-    expect(await buildNotificationContext(permissionSession(path))).toBe(
-      "Bash: second",
+  it("handles the bare shape with stacked terminator lines", () => {
+    // No blank line separates the "Bash command" header, so it rides along;
+    // the two stacked chrome lines are excluded as boundaries.
+    expect(extractPermissionPrompt(BARE_PROMPT)).toBe(
+      "Bash command\nrtk curl -sI https://example.com/\nFetch example.com front page",
     );
   });
 
-  it("clamps a long command with an ellipsis", async () => {
-    const long = "echo " + "y".repeat(400);
-    const path = await writeTranscript([
-      assistantToolUse("Bash", { command: long }),
-    ]);
-    const out = await buildNotificationContext(permissionSession(path));
+  it("returns null when no permission prompt is present", () => {
+    expect(
+      extractPermissionPrompt("just some assistant output\nno prompt here"),
+    ).toBeNull();
+  });
+
+  it("returns null for an unknown shape (terminator but no block)", () => {
+    expect(
+      extractPermissionPrompt("Do you want to proceed?\n1. Yes"),
+    ).toBeNull();
+  });
+
+  it("anchors on the newest prompt when scrollback holds an older one", () => {
+    // Two bordered prompt boxes in scrollback; the box borders collapse to
+    // blank boundaries, so the newest box's command block is isolated.
+    const box = (cmd: string) =>
+      [
+        "╭──────────────────────────────╮",
+        "│ Bash command                  │",
+        "│                               │",
+        `│   ${cmd}`.padEnd(32) + "│",
+        "│                               │",
+        "│ Do you want to proceed?       │",
+        "│ ❯ 1. Yes                      │",
+        "╰──────────────────────────────╯",
+      ].join("\n");
+    const text = `${box("echo stale")}\nsome output\n${box("echo fresh")}`;
+    expect(extractPermissionPrompt(text)).toBe("echo fresh");
+  });
+
+  it("strips control characters from the captured block", () => {
+    const text = [
+      "Bash command",
+      "  echo \x07\x1b[31mhi\x1b[0m",
+      " Do you want to proceed?",
+    ].join("\n");
+    const out = extractPermissionPrompt(text);
     expect(out).not.toBeNull();
-    expect(out!.length).toBeLessThanOrEqual("Bash: ".length + 301);
+    // Bell + CSI bytes gone; printable text survives.
+    expect(out).not.toContain("\x07");
+    expect(out).not.toContain("\x1b");
+    expect(out).toContain("echo");
+    expect(out).toContain("hi");
+  });
+
+  it("clamps a very long command with an ellipsis", () => {
+    const long = "echo " + "y".repeat(400);
+    const text = ["Bash command", `  ${long}`, " Do you want to proceed?"].join(
+      "\n",
+    );
+    const out = extractPermissionPrompt(text);
+    expect(out).not.toBeNull();
+    expect(out!.length).toBeLessThanOrEqual(MAX + 2);
     expect(out!.endsWith("…")).toBe(true);
   });
+});
 
-  it("returns null when there is no tool_use", async () => {
-    const path = await writeTranscript([assistantText("just talking")]);
-    expect(await buildNotificationContext(permissionSession(path))).toBeNull();
+describe("buildNotificationContext: permission (pane capture)", () => {
+  it("renders the captured command block", async () => {
+    const { session, capturePane } = permissionSession(BORDERED_PROMPT);
+    expect(await buildNotificationContext(session, { capturePane })).toBe(
+      "rtk curl -sI https://example.com/\nFetch example.com front page",
+    );
   });
 
-  it("ignores malformed lines and still finds a valid tool_use", async () => {
-    const path = join(dir, "mixed.jsonl");
-    await Bun.write(
-      path,
-      "not json at all\n" +
-        JSON.stringify(assistantToolUse("Bash", { command: "ok" })) +
-        "\n{ broken\n",
-    );
-    expect(await buildNotificationContext(permissionSession(path))).toBe(
-      "Bash: ok",
-    );
+  it("returns null when the pane has no prompt (fail-open to base body)", async () => {
+    const { session, capturePane } = permissionSession("idle pane, no prompt");
+    expect(await buildNotificationContext(session, { capturePane })).toBeNull();
+  });
+
+  it("returns null when the session has no pane", async () => {
+    const { session, capturePane } = permissionSession(BORDERED_PROMPT, {
+      tmuxPane: null,
+    });
+    expect(await buildNotificationContext(session, { capturePane })).toBeNull();
+  });
+
+  it("fails open to null when the capture throws", async () => {
+    const session: NotifyContextSession = {
+      agentType: "claude",
+      logPath: null,
+      attentionType: "permission",
+      pendingTool: "Bash",
+      tmuxPane: "%42",
+    };
+    const capturePane = async () => {
+      throw new Error("tmux gone");
+    };
+    expect(await buildNotificationContext(session, { capturePane })).toBeNull();
   });
 });
 
-describe("buildNotificationContext: pending-tool matching", () => {
-  it("describes the pending tool, not a newer unrelated tool_use", async () => {
-    // The pending permission is for the Bash call, but a later (already
-    // resolved) Read is the last tool_use in the transcript. The body must
-    // describe the Bash command being approved — never the Read.
-    const path = await writeTranscript([
-      assistantToolUse("Bash", { command: "rm -rf /important" }),
-      assistantToolUse("Read", { file_path: "/etc/hosts" }),
-    ]);
-    expect(
-      await buildNotificationContext(permissionSession(path, "Bash")),
-    ).toBe("Bash: rm -rf /important");
-  });
-
-  it("returns null when no tool_use matches the pending tool", async () => {
-    // Rather than fall back to a wrong tool's detail, render nothing (the
-    // caller keeps the bare "Needs permission: <tool>" line).
-    const path = await writeTranscript([
-      assistantToolUse("Read", { file_path: "/safe.ts" }),
-    ]);
-    expect(
-      await buildNotificationContext(permissionSession(path, "Bash")),
-    ).toBeNull();
-  });
-
-  it("returns null when the pending tool is unknown", async () => {
-    const path = await writeTranscript([
-      assistantToolUse("Bash", { command: "echo hi" }),
-    ]);
-    expect(
-      await buildNotificationContext(permissionSession(path, null)),
-    ).toBeNull();
-  });
-});
-
-describe("buildNotificationContext: question", () => {
+describe("buildNotificationContext: question (transcript)", () => {
   it("renders the last assistant text", async () => {
     const path = await writeTranscript([
       assistantText("first"),
@@ -181,6 +213,7 @@ describe("buildNotificationContext: question", () => {
         logPath: path,
         attentionType: "question",
         pendingTool: null,
+        tmuxPane: "%42",
       }),
     ).toBe("which option do you prefer?");
   });
@@ -195,6 +228,19 @@ describe("buildNotificationContext: question", () => {
         logPath: path,
         attentionType: "question",
         pendingTool: null,
+        tmuxPane: "%42",
+      }),
+    ).toBeNull();
+  });
+
+  it("returns null when logPath is absent", async () => {
+    expect(
+      await buildNotificationContext({
+        agentType: "claude",
+        logPath: null,
+        attentionType: "question",
+        pendingTool: null,
+        tmuxPane: "%42",
       }),
     ).toBeNull();
   });
@@ -202,41 +248,33 @@ describe("buildNotificationContext: question", () => {
 
 describe("buildNotificationContext: gating", () => {
   it("returns null for a non-claude agent", async () => {
-    const path = await writeTranscript([
-      assistantToolUse("Bash", { command: "x" }),
-    ]);
+    const { capturePane } = permissionSession(BORDERED_PROMPT);
     expect(
-      await buildNotificationContext({
-        agentType: "codex",
-        logPath: path,
-        attentionType: "permission",
-        pendingTool: "Bash",
-      }),
+      await buildNotificationContext(
+        {
+          agentType: "codex",
+          logPath: null,
+          attentionType: "permission",
+          pendingTool: "Bash",
+          tmuxPane: "%42",
+        },
+        { capturePane },
+      ),
     ).toBeNull();
-  });
-
-  it("returns null when logPath is absent", async () => {
-    expect(await buildNotificationContext(permissionSession(null))).toBeNull();
   });
 
   it("returns null for a plan_approval wait", async () => {
-    const path = await writeTranscript([
-      assistantToolUse("Bash", { command: "x" }),
-    ]);
-    expect(
-      await buildNotificationContext({
-        agentType: "claude",
-        logPath: path,
-        attentionType: "plan_approval",
-        pendingTool: "Bash",
-      }),
-    ).toBeNull();
-  });
-
-  it("returns null when the file does not exist (fail-open)", async () => {
+    const { capturePane } = permissionSession(BORDERED_PROMPT);
     expect(
       await buildNotificationContext(
-        permissionSession(join(dir, "nope.jsonl")),
+        {
+          agentType: "claude",
+          logPath: null,
+          attentionType: "plan_approval",
+          pendingTool: "Bash",
+          tmuxPane: "%42",
+        },
+        { capturePane },
       ),
     ).toBeNull();
   });

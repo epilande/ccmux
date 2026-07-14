@@ -59,6 +59,11 @@ function createHarness(
     getActivePaneId: overrides.getActivePaneId ?? (async () => null),
     isTerminalFrontmost: overrides.isTerminalFrontmost ?? (async () => false),
     getPrefs: overrides.getPrefs ?? (async () => prefs),
+    // Stub context enrichment off by default: the real one reads the pane via
+    // tmux (permission waits) or the transcript (question waits), which would
+    // spawn a subprocess in the fire path and make delivery nondeterministic.
+    // The dedicated context-enrichment block overrides this explicitly.
+    buildContext: overrides.buildContext ?? (async () => null),
     deliver:
       overrides.deliver ??
       (async (payload: NotificationPayload) => {

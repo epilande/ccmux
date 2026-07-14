@@ -2476,7 +2476,7 @@ describe("native cascade (Claude + Codex)", () => {
     expect(session.pendingTool).toBe("Edit");
   });
 
-  it("works for native Codex with same shapes (read-time overlay parity)", async () => {
+  it("works for native Codex, marker.pending_tool winning over the log", async () => {
     const id = "native-codex-1";
     setupNative(id, "codex", {
       status: "working",
@@ -2493,7 +2493,7 @@ describe("native cascade (Claude + Codex)", () => {
             timestamp: 1_700_000_000,
             state_timestamp: Date.now() / 1000,
             state: "waiting_permission",
-            pending_tool: "MarkerSaysIgnoreMe",
+            pending_tool: "MarkerTool",
           }),
           getMarkersByAgentAndPid: () => [],
         },
@@ -2507,9 +2507,10 @@ describe("native cascade (Claude + Codex)", () => {
     const session = sessionManager.getSession(id)!;
     expect(session.status).toBe("waiting");
     expect(session.attentionType).toBe("permission");
-    // pendingTool from session (log adapter) wins over marker's pending_tool,
-    // matching today's read-time overlay behavior.
-    expect(session.pendingTool).toBe("ApplyPatch");
+    // nativeMarkerSource now prefers marker.pending_tool (the hook's authoritative
+    // signal) and falls back to the log-derived session.pendingTool only when the
+    // marker omits it. See cascade-evaluator.ts nativeMarkerSource.
+    expect(session.pendingTool).toBe("MarkerTool");
   });
 
   it("pane-tracked Claude routes through the pane reconciler (native cascade arm skips it)", async () => {

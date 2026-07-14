@@ -178,4 +178,63 @@ describe("claude hook script execution (requires bash + jq)", () => {
     expect(marker.agent_type).toBe("claude");
     expect(marker.state).toBe("waiting_permission");
   });
+
+  /** Run state-notify against a fresh marker and return the parsed result. */
+  async function runStateNotify(
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    writeScript(STATE_NOTIFY_HOOK_SCRIPT);
+    const ccmuxHome = join(tempRoot, "isolated-home");
+    const result = await runScript(JSON.stringify(payload), {
+      ...process.env,
+      CCMUX_HOME: ccmuxHome,
+    });
+    expect(result.exitCode).toBe(0);
+    const markerFile = join(
+      ccmuxHome,
+      "session-pids",
+      `claude-${payload.session_id}.json`,
+    );
+    expect(existsSync(markerFile)).toBe(true);
+    return JSON.parse(readFileSync(markerFile, "utf-8"));
+  }
+
+  it("state-notify parses the tool name out of a permission message", async () => {
+    const marker = await runStateNotify({
+      session_id: "sid-tool",
+      notification_type: "permission_prompt",
+      message: "Claude needs your permission to use Bash",
+    });
+    expect(marker.state).toBe("waiting_permission");
+    expect(marker.pending_tool).toBe("Bash");
+  });
+
+  it("state-notify preserves an mcp__ tool name", async () => {
+    const marker = await runStateNotify({
+      session_id: "sid-mcp",
+      notification_type: "permission_prompt",
+      message: "Claude needs your permission to use mcp__github__create_issue",
+    });
+    expect(marker.pending_tool).toBe("mcp__github__create_issue");
+  });
+
+  it("state-notify leaves pending_tool null when the message has no tool", async () => {
+    const marker = await runStateNotify({
+      session_id: "sid-noshape",
+      notification_type: "permission_prompt",
+      message: "something unexpected with no parseable tool",
+    });
+    expect(marker.state).toBe("waiting_permission");
+    expect(marker.pending_tool).toBeNull();
+  });
+
+  it("state-notify clears pending_tool on an idle_prompt", async () => {
+    const marker = await runStateNotify({
+      session_id: "sid-idle",
+      notification_type: "idle_prompt",
+      message: "Claude is waiting for your input",
+    });
+    expect(marker.state).toBe("idle");
+    expect(marker.pending_tool).toBeNull();
+  });
 });

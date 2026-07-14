@@ -197,14 +197,15 @@ export function logSource(session: Session): CascadeSource {
  * and idle-prompt transitions. To match the read-time overlay this
  * replaces, the factory:
  *
- * - On `waiting_permission`: peeks `session.pendingTool` so the
- *   log-derived tool name survives the cascade. The marker may also
- *   carry `pending_tool` (Codex `PermissionRequest`), but the overlay
- *   it replaces intentionally preferred the log's view, so we do too.
- *   Claude's `Notification` hook never writes `pending_tool`, which is
- *   exactly why pane-tracked Claude routes through here instead of
- *   `genericMarkerSource`: the latter would clobber the log-derived tool
- *   name to `null`.
+ * - On `waiting_permission`: prefers `marker.pending_tool` and falls back
+ *   to `session.pendingTool`. Claude's `Notification` hook now parses the
+ *   tool name out of the notification message and writes `pending_tool`
+ *   into the marker (Codex's `PermissionRequest` already did), which is the
+ *   authoritative pending-tool signal: Claude does NOT flush the
+ *   permission-gated `tool_use` to its JSONL until after approval, so the
+ *   log-derived value is null during the wait. The `?? session.pendingTool`
+ *   fallback keeps the log's view for the post-approval window and for any
+ *   older marker written before this enrichment existed.
  * - On `idle`: emits explicit nulls. SessionEnd unlinks the marker
  *   entirely; the `state === "idle"` payload only fires for
  *   `idle_prompt` transitions, which legitimately clear attention.
@@ -222,7 +223,7 @@ export function nativeMarkerSource(
       ? {
           status: "waiting",
           attentionType: "permission",
-          pendingTool: session.pendingTool,
+          pendingTool: marker.pending_tool ?? session.pendingTool,
         }
       : { status: "idle", attentionType: null, pendingTool: null };
   if (marker.state_timestamp !== undefined) {
