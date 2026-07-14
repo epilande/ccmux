@@ -13,13 +13,16 @@ import { getActiveTmuxClientPid } from "../lib/tmux-client";
 const TEST_MESSAGE = "Notifications are working";
 
 /**
- * Resolves `-sender` per `notifications.icon`: `"none"` unsets it, an
- * explicit bundle id passes through as-is, and the default `"terminal"`
- * borrows the hosting terminal's icon via `src/daemon/focus.ts`'s ancestor
- * walk. Only meaningful inside a tmux client on macOS (the walk needs
- * `#{client_pid}`, and the daemon/other platforms don't have a bundle id to
- * borrow anyway); outside tmux, on another platform, or on any resolution
- * failure this falls back to no sender rather than failing the command.
+ * Resolves `-sender` per `notifications.icon`: `"none"` (the default) unsets
+ * it, an explicit bundle id passes through as-is, and `"terminal"` borrows the
+ * hosting terminal's icon via `src/daemon/focus.ts`'s ancestor walk. Default is
+ * `"none"` because `-sender` impersonation is silently dropped by macOS for
+ * terminals that never register with its notification system (Ghostty, kitty,
+ * Alacritty, WezTerm); `"terminal"` is opt-in for terminals where it works
+ * (iTerm2, Terminal.app). `"terminal"` is only meaningful inside a tmux client
+ * on macOS (the walk needs `#{client_pid}`, and the daemon/other platforms
+ * don't have a bundle id to borrow anyway); outside tmux, on another platform,
+ * or on any resolution failure this falls back to no sender rather than failing.
  */
 export async function resolveSenderBundleId(
   icon: string,
@@ -102,7 +105,7 @@ export function createNotifyCommand(): Command {
         process.exit(1);
       }
 
-      const icon = notifications.icon ?? "terminal";
+      const icon = notifications.icon ?? "none";
 
       if (backend === "dbus") {
         // Connection-oriented, one-shot: connect, probe, notify (no click

@@ -224,13 +224,31 @@ describe("createDeliverFn: per-backend probe isolation", () => {
 });
 
 describe("createDeliverFn: icon modes", () => {
-  it("icon 'terminal' (default) uses the resolved terminal bundle id as sender", async () => {
-    const { deps, delivered } = createDeps();
+  it("icon 'terminal' uses the resolved terminal bundle id as sender", async () => {
+    const { deps, delivered } = createDeps({
+      getPrefs: async () => ({
+        notifications: { backend: "terminal-notifier", icon: "terminal" },
+      }),
+    });
     const deliver = createDeliverFn(deps);
 
     await deliver(BASE_PAYLOAD);
 
     expect(delivered[0]?.payload.senderBundleId).toBe("com.mitchellh.ghostty");
+    expect(delivered[0]?.payload.activateBundleId).toBe(
+      "com.mitchellh.ghostty",
+    );
+  });
+
+  it("default icon (unset) omits sender like 'none' but still resolves activate", async () => {
+    const { deps, delivered } = createDeps();
+    const deliver = createDeliverFn(deps);
+
+    await deliver(BASE_PAYLOAD);
+
+    // Default is "none": no -sender impersonation (silently dropped by macOS
+    // for terminals that don't register), but click-to-activate still works.
+    expect(delivered[0]?.payload.senderBundleId).toBeUndefined();
     expect(delivered[0]?.payload.activateBundleId).toBe(
       "com.mitchellh.ghostty",
     );
@@ -270,6 +288,9 @@ describe("createDeliverFn: icon modes", () => {
 
   it("unresolvable terminal bundle id -> sender/activate both undefined", async () => {
     const { deps, delivered } = createDeps({
+      getPrefs: async () => ({
+        notifications: { backend: "terminal-notifier", icon: "terminal" },
+      }),
       getClientPid: async () => null,
     });
     const deliver = createDeliverFn(deps);

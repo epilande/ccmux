@@ -171,7 +171,10 @@ export interface NotificationsConfig {
   backend?: (typeof VALID_NOTIFICATION_BACKENDS)[number];
   /** shell command run when backend is "command" */
   command?: string;
-  /** macOS: "terminal" (default, borrow terminal app icon) | "none" | bundle id */
+  /** macOS: "none" (default) | "terminal" (borrow terminal app icon) | bundle id.
+   * Default "none" delivers under terminal-notifier's own identity; "terminal"
+   * is silently dropped on terminals that don't register with macOS
+   * notifications (Ghostty, kitty, Alacritty, WezTerm). */
   icon?: string;
 }
 

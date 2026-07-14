@@ -114,9 +114,13 @@ async function resolveExecuteCommand(
   );
 }
 
-/** Resolves `-sender` per `notifications.icon`: `"none"` unsets it, an
- * explicit bundle id passes through as-is, and the default `"terminal"`
- * borrows the resolved terminal bundle id (undefined if unresolvable). */
+/** Resolves `-sender` per `notifications.icon`: `"none"` (the default) unsets
+ * it, `"terminal"` borrows the resolved terminal bundle id (undefined if
+ * unresolvable), and an explicit bundle id passes through as-is. Default is
+ * `"none"` because `-sender` impersonation is silently dropped by macOS for
+ * terminals that never register with its notification system (Ghostty, kitty,
+ * Alacritty, WezTerm — enabling them in System Settings does not help);
+ * `"terminal"` is opt-in for terminals where it works (iTerm2, Terminal.app). */
 function resolveSenderBundleId(
   icon: string,
   terminalBundleId: string | null,
@@ -138,7 +142,7 @@ async function enrichForTerminalNotifier(
   return {
     ...payload,
     senderBundleId: resolveSenderBundleId(
-      cfg?.icon ?? "terminal",
+      cfg?.icon ?? "none",
       terminalBundleId,
     ),
     // Always the resolved terminal id (not icon-gated): clicking should

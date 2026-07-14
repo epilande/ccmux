@@ -458,7 +458,7 @@ Configure further with `ccmux config set notifications.<key> <value>`, or edit `
     "delayMs": 1000, // debounce for "finished" only; "waiting" always fires immediately
     "backend": "auto", // "auto" | "terminal-notifier" | "osascript" | "notify-send" | "dbus" | "command"
     "command": "ntfy publish agents \"$CCMUX_TITLE: $CCMUX_BODY\"", // used when backend = "command"
-    "icon": "terminal", // macOS: "terminal" (borrow terminal app icon) | "none" | bundle id
+    "icon": "none", // macOS: "none" (default) | "terminal" (borrow terminal app icon) | bundle id
   },
 }
 ```
@@ -467,6 +467,9 @@ Configure further with `ccmux config set notifications.<key> <value>`, or edit `
 
 > [!NOTE]
 > Without `terminal-notifier` (`brew install terminal-notifier`), macOS falls back to `osascript`, which attributes notifications to Script Editor, can't group notifications per session, and can't click-to-jump to the pane. Installing `terminal-notifier` gets you all three.
+
+> [!NOTE]
+> `icon` defaults to `"none"` (notifications carry terminal-notifier's own icon). Setting `icon: "terminal"` borrows your terminal app's icon via `-sender`, but macOS **silently drops** notifications impersonating a terminal that doesn't register with its notification system — Ghostty, kitty, Alacritty, and WezTerm are affected, and enabling them in System Settings does not help. Use `"terminal"` only on iTerm2 or Terminal.app, where it works.
 
 - On Linux, `dbus` groups notifications per session and supports click-to-jump (clicking focuses the pane, or opens the picker popup for paneless background agents) — no extra binary needed, and the same fallback covers a daemon that can't reach the bus. A daemon started outside the graphical session (over SSH, as a systemd service, etc.) needs `DBUS_SESSION_BUS_ADDRESS` set in its environment for `dbus` to connect, and `DISPLAY`/`DBUS_SESSION_BUS_ADDRESS` for the `notify-send` fallback to deliver.
 - With `backend: "command"`, the shell command runs with `CCMUX_EVENT`, `CCMUX_SESSION_ID`, `CCMUX_AGENT`, `CCMUX_PROJECT`, `CCMUX_BRANCH`, `CCMUX_TITLE`, `CCMUX_BODY`, and `CCMUX_PANE` set in its environment, for routing to ntfy, Pushover, or anything else ccmux doesn't integrate directly.
