@@ -327,7 +327,7 @@ describe("ccmux notify: ccmux-notifier backend", () => {
     }
   });
 
-  it("falls back to osascript diagnostics when the helper is not installed", async () => {
+  it("falls back to osascript AND delivers when the helper is not installed", async () => {
     reset();
     resolvedBackend = "ccmux-notifier";
     notifierPath = null;
@@ -342,11 +342,69 @@ describe("ccmux notify: ccmux-notifier backend", () => {
       const err = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
       expect(out).toContain("ccmux-notifier helper not found");
       expect(err).toContain("brew install epilande/tap/ccmux");
-      // No probe post when the helper is absent.
+      // The notification is actually delivered via the osascript floor, not
+      // dropped: the daemon (and v1) both deliver here.
+      expect(probeBackendCalls).toContain("osascript");
+      expect(deliverCalls).toHaveLength(1);
+      expect(deliverCalls[0]?.backend).toBe("osascript");
+      expect(deliverCalls[0]?.payload).toMatchObject({
+        body: "Notifications are working",
+      });
+      // No helper subcommands (request-permission/list) when the helper is absent.
       expect(notifierSpawnArgs).toHaveLength(0);
     } finally {
       restoreExit();
       logSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("stays quiet but still delivers via osascript on a custom message when the helper is not installed", async () => {
+    reset();
+    resolvedBackend = "ccmux-notifier";
+    notifierPath = null;
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runNotify("custom message");
+
+      expect(exit).toBeNull();
+      // Honors the script-friendly quiet contract: no backend/hint diagnostics.
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(errorSpy).not.toHaveBeenCalled();
+      // Still delivers the message verbatim via the osascript floor.
+      expect(deliverCalls).toHaveLength(1);
+      expect(deliverCalls[0]?.backend).toBe("osascript");
+      expect(deliverCalls[0]?.payload).toMatchObject({
+        body: "custom message",
+      });
+    } finally {
+      restoreExit();
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("exits 1 when the helper is not installed and the osascript floor probe fails", async () => {
+    reset();
+    resolvedBackend = "ccmux-notifier";
+    notifierPath = null;
+    probeOk = false;
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runNotify();
+
+      expect(exit?.code).toBe(1);
+      expect(deliverCalls).toHaveLength(0);
+      expect(
+        errorSpy.mock.calls.some((c) =>
+          String(c[0]).includes("is not available"),
+        ),
+      ).toBe(true);
+    } finally {
+      restoreExit();
       errorSpy.mockRestore();
     }
   });
