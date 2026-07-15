@@ -149,8 +149,46 @@ describe("resolveCcmuxNotifierBinary", () => {
     const resolved = resolveCcmuxNotifierBinary({
       env: {},
       ccmuxPath: "/opt/homebrew/bin/ccmux",
+      // Identity realpath: these lexical tests must not touch the real
+      // filesystem (a genuinely brew-installed ccmux would resolve into
+      // the Cellar and dodge the mocked `exists`).
+      realpath: (p) => p,
       // `path.join` normalizes the `..`, so the sibling lands at
       // <prefix>/libexec/... (not <prefix>/bin/../libexec/...).
+      exists: (p) =>
+        p ===
+        "/opt/homebrew/libexec/ccmux-notifier.app/Contents/MacOS/ccmux-notifier",
+      which: () => null,
+    });
+    expect(resolved).toBe(
+      "/opt/homebrew/libexec/ccmux-notifier.app/Contents/MacOS/ccmux-notifier",
+    );
+  });
+
+  it("prefers the running executable's sibling over the PATH-resolved ccmux's (shadowed brew install)", () => {
+    // A dev/bun-linked ccmux shadows the brew one on PATH; the compiled
+    // binary must still find the helper next to ITSELF in the keg.
+    const resolved = resolveCcmuxNotifierBinary({
+      env: {},
+      execPath: "/opt/homebrew/Cellar/ccmux/1.2.0/bin/ccmux",
+      ccmuxPath: "/Users/dev/.bun/bin/ccmux",
+      realpath: (p) => p,
+      exists: (p) =>
+        p ===
+        "/opt/homebrew/Cellar/ccmux/1.2.0/libexec/ccmux-notifier.app/Contents/MacOS/ccmux-notifier",
+      which: () => null,
+    });
+    expect(resolved).toBe(
+      "/opt/homebrew/Cellar/ccmux/1.2.0/libexec/ccmux-notifier.app/Contents/MacOS/ccmux-notifier",
+    );
+  });
+
+  it("falls through a bun execPath (dev) to the PATH-resolved ccmux's sibling", () => {
+    const resolved = resolveCcmuxNotifierBinary({
+      env: {},
+      execPath: "/Users/dev/.bun/bin/bun",
+      ccmuxPath: "/opt/homebrew/bin/ccmux",
+      realpath: (p) => p,
       exists: (p) =>
         p ===
         "/opt/homebrew/libexec/ccmux-notifier.app/Contents/MacOS/ccmux-notifier",

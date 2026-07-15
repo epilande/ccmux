@@ -131,10 +131,20 @@ const NOTIFIER_INNER_BINARY = join("Contents", "MacOS", "ccmux-notifier");
 
 export interface CcmuxNotifierResolveDeps {
   env?: NodeJS.ProcessEnv;
-  /** Absolute path to the `ccmux` binary, for the brew-sibling rung. */
+  /**
+   * Path of the running executable (`process.execPath`), for the brew-sibling
+   * rung. In a compiled ccmux binary this IS ccmux, so its keg's `libexec` is
+   * checked first — immune to another `ccmux` shadowing the brew one on PATH.
+   * Under `bun run` it's the `bun` binary, whose sibling never exists, so it
+   * falls through harmlessly.
+   */
+  execPath?: string | null;
+  /** Absolute path to the `ccmux` binary on PATH, for the brew-sibling rung. */
   ccmuxPath?: string | null;
   which?: (cmd: string) => string | null;
   exists?: (path: string) => boolean;
+  /** Symlink resolution for the brew-sibling rung; throws when path is missing. */
+  realpath?: (path: string) => string;
 }
 
 /**
@@ -143,8 +153,9 @@ export interface CcmuxNotifierResolveDeps {
  *      binary; normalized to the inner binary. An explicit override that
  *      doesn't exist resolves to `null` (it never silently falls through to a
  *      different install).
- *   2. Sibling of the `ccmux` binary: `<dir>/../libexec/ccmux-notifier.app/...`
- *      — the Homebrew formula's `libexec` layout.
+ *   2. Sibling of the ccmux binary: `<dir>/../libexec/ccmux-notifier.app/...`
+ *      — the Homebrew formula's `libexec` layout. Checked for the running
+ *      executable first (see `execPath`), then for `ccmux` on PATH.
  *   3. `ccmux-notifier` on PATH — dev builds / manual installs.
  * `null` when none resolve; the caller falls down the backend ladder (to
  * osascript on darwin) rather than erroring.
@@ -155,6 +166,7 @@ export function resolveCcmuxNotifierBinary(
   const env = deps.env ?? process.env;
   const which = deps.which ?? Bun.which;
   const exists = deps.exists ?? existsSync;
+  const realpath = deps.realpath ?? realpathSync;
 
   const envPath = env.CCMUX_NOTIFIER_PATH;
   if (envPath) {
@@ -164,20 +176,21 @@ export function resolveCcmuxNotifierBinary(
     return exists(candidate) ? candidate : null;
   }
 
-  if (deps.ccmuxPath) {
+  for (const base of [deps.execPath, deps.ccmuxPath]) {
+    if (!base) continue;
     // `ccmux` in a Homebrew prefix is a symlink into the versioned Cellar keg
     // (`Cellar/ccmux/<v>/bin/ccmux`), where the helper is staged in the keg's
     // `libexec` — not linked into the prefix. Resolve the real path first so
     // the lexical `../libexec` join lands in the keg, not the prefix's `bin`.
     // Fail-open: a broken/missing symlink keeps the un-resolved path.
-    let realCcmuxPath = deps.ccmuxPath;
+    let realBase = base;
     try {
-      realCcmuxPath = realpathSync(deps.ccmuxPath);
+      realBase = realpath(base);
     } catch {
       // keep the un-resolved path
     }
     const sibling = join(
-      dirname(realCcmuxPath),
+      dirname(realBase),
       "..",
       "libexec",
       NOTIFIER_APP_NAME,

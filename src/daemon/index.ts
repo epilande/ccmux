@@ -366,7 +366,8 @@ export class Daemon {
       resolveBackend,
       probeBackend,
       deliver: libDeliver,
-      resolveNotifierPath: () => resolveCcmuxNotifierBinary({ ccmuxPath }),
+      resolveNotifierPath: () =>
+        resolveCcmuxNotifierBinary({ execPath: process.execPath, ccmuxPath }),
       notifierCallbackUrl: `http://${DAEMON_HOST}:${DAEMON_PORT}/notification-action`,
       runNotificationAction: (input: NotificationActionInput) =>
         this.runNotificationAction(input),

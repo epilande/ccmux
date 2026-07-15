@@ -253,6 +253,7 @@ export function createNotifyCommand(): Command {
 
       if (backend === "ccmux-notifier") {
         const binaryPath = resolveCcmuxNotifierBinary({
+          execPath: process.execPath,
           ccmuxPath: Bun.which("ccmux"),
         });
         if (!binaryPath) {
