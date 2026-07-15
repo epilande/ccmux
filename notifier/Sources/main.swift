@@ -79,90 +79,10 @@ func scheduleTimeout(seconds: Double, exitCode: Int32) {
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { exit(exitCode) }
 }
 
-// MARK: - Arg parsing
-
-func optValue(_ args: [String], _ name: String) -> String? {
-    guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
-    return args[i + 1]
-}
-
-// "approve:Approve,deny:Deny" -> [(id, title)]
-func parseActions(_ s: String?) -> [(String, String)] {
-    guard let s = s, !s.isEmpty else { return [] }
-    return s.split(separator: ",").compactMap { pair in
-        let parts = pair.split(separator: ":", maxSplits: 1)
-        guard parts.count == 2 else { return nil }
-        return (String(parts[0]), String(parts[1]))
-    }
-}
-
-// --sound mapping: "default" -> the system default, any other name -> a named
-// sound, omitted -> no sound (nil).
-func makeSound(_ name: String?) -> UNNotificationSound? {
-    guard let name = name else { return nil }
-    if name == "default" { return .default }
-    return UNNotificationSound(named: UNNotificationSoundName(name))
-}
-
-// A deterministic category id derived from the action SHAPE, so each distinct
-// button/reply layout gets its own stable id. The complete fixed set of shapes
-// (see `responderCategories`) is registered together, and a notification stamps
-// the id matching its own shape — so its buttons always resolve to the right
-// layout regardless of which other shapes are registered. Examples:
-// "ccmux.approve,deny" / "ccmux.reply=answer" / "ccmux.approve,deny,reply=answer".
-func categoryIdentifier(buttons: [(String, String)], reply: (String, String)?) -> String {
-    var tokens = buttons.map { $0.0 }
-    if let reply = reply { tokens.append("reply=\(reply.0)") }
-    return "ccmux." + tokens.joined(separator: ",")
-}
-
-// Plain buttons plus an optional inline text-input action. All use options: []
-// — no .authenticationRequired, no .foreground — so a press (or a Send from the
-// text field) works without focusing/relaunching into the UI. The text action,
-// when present, is appended last. `identifier` is the shape-derived id.
-func makeCategory(identifier: String, buttons: [(String, String)], reply: (String, String)?) -> UNNotificationCategory {
-    var acts: [UNNotificationAction] = buttons.map {
-        UNNotificationAction(identifier: $0.0, title: $0.1, options: [])
-    }
-    if let reply = reply {
-        acts.append(UNTextInputNotificationAction(identifier: reply.0,
-                                                  title: reply.1,
-                                                  options: [],
-                                                  textInputButtonTitle: "Send",
-                                                  textInputPlaceholder: "Type your answer"))
-    }
-    return UNNotificationCategory(identifier: identifier, actions: acts, intentIdentifiers: [], options: [])
-}
-
-// The COMPLETE, fixed set of action shapes ccmux can ever post: permission
-// Approve/Deny, the question inline reply, and the combined Approve/Deny+reply
-// (both `--actions` and `--reply-action` can be passed together, so deliverPost
-// can stamp that id too — enumerate it so this set is a true superset of every
-// categoryIdentifier deliverPost can produce).
-//
-// `setNotificationCategories` REPLACES the app's whole set and there is no
-// cross-process lock, so a read-modify-write merge is fundamentally racy: two
-// one-shot post processes can both read the same base set and the second write
-// then drops the first's freshly-added category, breaking that notification's
-// buttons. The fix is to register this ENTIRE fixed set on every post instead of
-// just the current post's shape. Because every process writes the IDENTICAL
-// complete set, concurrent `setNotificationCategories` calls are idempotent — no
-// clobber, ever — and any delivered notification's categoryIdentifier always
-// resolves because all shapes are always registered. Both the post path and the
-// no-args relaunch responder register this same set via the same shape-derived
-// id derivation, so a delivered notification's category resolves in either.
-func responderCategories() -> Set<UNNotificationCategory> {
-    let permissionButtons = parseActions("approve:Approve,deny:Deny")
-    let questionReply = parseActions("answer:Reply").first
-    return [
-        makeCategory(identifier: categoryIdentifier(buttons: permissionButtons, reply: nil),
-                     buttons: permissionButtons, reply: nil),
-        makeCategory(identifier: categoryIdentifier(buttons: [], reply: questionReply),
-                     buttons: [], reply: questionReply),
-        makeCategory(identifier: categoryIdentifier(buttons: permissionButtons, reply: questionReply),
-                     buttons: permissionButtons, reply: questionReply),
-    ]
-}
+// Arg parsing, category/sound construction, and the pure response helpers
+// (optValue, parseActions, makeSound, categoryIdentifier, makeCategory,
+// responderCategories, mapActionIdentifier, shouldPostCallback, callbackBody)
+// live in NotifierCore.swift so they can be unit-tested without a run loop.
 
 // MARK: - CLI modes (all invoked from applicationDidFinishLaunching, fully async)
 
@@ -272,9 +192,7 @@ func postCallbackAsync(url: String, action: String, userText: String?, payload: 
     var req = URLRequest(url: u, timeoutInterval: kCallbackTimeout)
     req.httpMethod = "POST"
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    let body: [String: Any] = ["action": action,
-                               "userText": userText ?? NSNull(),
-                               "payload": payload ?? NSNull()]
+    let body = callbackBody(action: action, userText: userText, payload: payload)
     req.httpBody = try? JSONSerialization.data(withJSONObject: body)
     let task = URLSession.shared.dataTask(with: req) { _, _, _ in completion() }
     task.resume()
@@ -325,12 +243,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let payload = userInfo["payload"] as? String
         let callbackUrl = userInfo["callbackUrl"] as? String
 
-        let action: String
-        switch response.actionIdentifier {
-        case UNNotificationDefaultActionIdentifier: action = "default"
-        case UNNotificationDismissActionIdentifier: action = "dismiss"
-        default: action = response.actionIdentifier
-        }
+        let action = mapActionIdentifier(response.actionIdentifier)
 
         let userText = (response as? UNTextInputNotificationResponse)?.userText
 
@@ -340,16 +253,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // it only needs to fire once before we exit.
         completionHandler()
 
-        // Dismiss must NEVER reach the callback: a swipe-away is not approval.
-        if action == "dismiss" {
+        // shouldPostCallback encodes the invariants: a "dismiss" (swipe-away) is
+        // NEVER approval and must not reach the callback, and a missing URL has
+        // nowhere to post. Both cases exit without a callback.
+        guard shouldPostCallback(action: action, callbackUrl: callbackUrl),
+              let cb = callbackUrl else {
             exit(0)
         }
-
-        if let cb = callbackUrl {
-            postCallbackAsync(url: cb, action: action, userText: userText, payload: payload) {
-                exit(0)
-            }
-        } else {
+        postCallbackAsync(url: cb, action: action, userText: userText, payload: payload) {
             exit(0)
         }
     }

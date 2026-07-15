@@ -48,6 +48,24 @@ targets:
       Debug: Configurations/Base.xcconfig
       Release: Configurations/Base.xcconfig
 
+  # Headless XCTest bundle for the pure logic in NotifierCore.swift. It compiles
+  # ONLY NotifierCore.swift + the test sources — never main.swift, whose
+  # top-level `app.run()` entry code would execute inside the test host. It is a
+  # logic bundle (no TEST_HOST / host app), so it needs no signing and no GUI.
+  NotifierTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Sources/NotifierCore.swift
+      - path: Tests
+    settings:
+      base:
+        PRODUCT_NAME: NotifierTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.epilande.ccmux-notifier.tests
+        GENERATE_INFOPLIST_FILE: true
+    dependencies:
+      - sdk: UserNotifications.framework
+
 schemes:
   ccmux-notifier:
     build:
@@ -61,3 +79,14 @@ schemes:
       config: Debug
     archive:
       config: Release
+
+  # Dedicated test scheme so `xcodebuild test -scheme NotifierTests` runs the
+  # pure-logic suite without dragging in the (signable) app target.
+  NotifierTests:
+    build:
+      targets:
+        NotifierTests: [test]
+    test:
+      config: Debug
+      targets:
+        - NotifierTests

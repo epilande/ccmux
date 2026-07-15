@@ -1,0 +1,39 @@
+name: Notifier Swift Tests
+
+on:
+  pull_request:
+    paths:
+      - notifier/**
+      - .github/workflows/notifier-swift-test.yml
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: notifier
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Xcode 26.2
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.2"
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      # Logic-only bundle: no signing needed (CODE_SIGNING_ALLOWED=NO).
+      - name: Run NotifierTests
+        run: |
+          xcodebuild test \
+            -project ccmux-notifier.xcodeproj \
+            -scheme NotifierTests \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO
