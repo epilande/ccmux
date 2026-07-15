@@ -31,6 +31,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 🔄 **Real-Time**: Background daemon streams state changes instantly over SSE, no polling, no refresh
 - 👁️ **Live Preview**: Split-pane view of the selected session's pane content
 - ⚡ **Act in Place**: Tab into the preview to approve, answer, or type, keys go straight to that pane
+- 🔔 **Actionable Notifications**: Approve, deny, or reply to a waiting agent straight from the desktop notification
 - 📊 **Sidebar Mode**: Compact always-visible session rail docked beside your working panes
 - 🔍 **Fuzzy Search**: Fuzzy-match sessions by project, branch, or path; substring-match any recent prompt, captured pane content, and on-demand live transcripts
 - 📂 **Session Grouping**: Collapsible project groups with reordering and pinning
