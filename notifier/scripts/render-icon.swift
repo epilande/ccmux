@@ -7,8 +7,8 @@
 // macOS 26 (Tahoe) re-renders app icons with the Liquid Glass treatment: icons
 // with transparent margins are treated as legacy and composited onto a gray
 // plate. The fix is the iOS model — full-bleed opaque square art, and the
-// system applies the squircle mask itself. So: dark brand background filling
-// the whole canvas, light-on-dark orb (logo-dark.svg) centered on it. On
+// system applies the squircle mask itself. So: off-white brand background
+// filling the whole canvas, dark-on-light orb (logo.svg) centered on it. On
 // pre-Tahoe (deployment target is 15.0) no mask is applied and the icon shows
 // square corners; acceptable for a helper only visible in notifications and
 // System Settings.
@@ -16,7 +16,7 @@ import AppKit
 import Foundation
 
 let notifierDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-let svgURL = notifierDir.deletingLastPathComponent().appendingPathComponent("assets/logo-dark.svg")
+let svgURL = notifierDir.deletingLastPathComponent().appendingPathComponent("assets/logo.svg")
 let iconsetDir = notifierDir.appendingPathComponent("Assets.xcassets/AppIcon.appiconset")
 
 guard let svg = NSImage(contentsOf: svgURL) else {
@@ -24,8 +24,8 @@ guard let svg = NSImage(contentsOf: svgURL) else {
     exit(1)
 }
 
-// Brand dark (matches the logo's stroke color on the light variant).
-let background = NSColor(srgbRed: 0x1A / 255.0, green: 0x1F / 255.0, blue: 0x2B / 255.0, alpha: 1.0)
+// Off-white, so the dark-stroke logo art keeps its contrast.
+let background = NSColor(srgbRed: 0xF4 / 255.0, green: 0xF5 / 255.0, blue: 0xF8 / 255.0, alpha: 1.0)
 
 // Fraction of the canvas the orb occupies (centered). Tahoe's squircle mask
 // crops the corners, so keep the art comfortably inside the safe zone.
