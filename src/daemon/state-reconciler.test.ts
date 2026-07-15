@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it, mock, beforeEach } from "bun:test";
 import { join } from "path";
 import { tmpdir } from "os";
-import type { AgentDef } from "../lib/agents";
+import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
 import type { ProcessInfo, Session, TmuxPane } from "../types/session";
 import type { PaneDetectionResult } from "./pane-classify";
 
@@ -1228,6 +1228,81 @@ describe("reconcileAll", () => {
       await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
       expect(captureCalls).toBe(1);
       expect(sessionManager.getSession(id)!.status).toBe("waiting");
+    });
+  });
+
+  describe("ambiguous permission marker correction (AskUserQuestion)", () => {
+    const claudeAgent = BUILTIN_AGENTS.find((a) => a.name === "claude")!;
+
+    /** A captured AskUserQuestion picker: the terminal question rule
+     *  (`type something.` + `enter to select`) matches, but no real permission
+     *  prompt terminator is present. */
+    const QUESTION_PICKER = [
+      " ☐ Fav color",
+      "What's your favorite color?",
+      "❯ 1. Blue",
+      "  5. Type something.",
+      "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    ].join("\n");
+
+    function permissionMarker(): SessionPidMarker {
+      return {
+        agent_type: "claude",
+        pid: 1,
+        tty: "/dev/ttys001",
+        session_id: "cc-uuid",
+        timestamp: 1,
+        state: "waiting_permission",
+        state_timestamp: Date.now() / 1000,
+      };
+    }
+
+    async function run(agent: AgentDef, paneContent: string): Promise<Session> {
+      const id = makeSession(sessionManager, {
+        trackingMode: "native",
+        status: "idle",
+        tmuxPane: "%1",
+      });
+      mockCapturePane = async () => paneContent;
+      const deps = makeDeps(sessionManager, {
+        agents: [agent],
+        hookManager: {
+          getMarkerForSession: () => permissionMarker(),
+          getMarkersByAgentAndPid: () => [],
+        },
+      });
+      const session = sessionManager.getSession(id)!;
+      await reconcileOne(deps, session, new Map());
+      return sessionManager.getSession(id)!;
+    }
+
+    it("relabels a permission marker as question when the pane shows the picker", async () => {
+      const session = await run(claudeAgent, QUESTION_PICKER);
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("question");
+    });
+
+    it("preserves permission when the agent is not flagged", async () => {
+      const unflagged: AgentDef = {
+        ...claudeAgent,
+        ambiguousPermissionMarker: false,
+      };
+      const session = await run(unflagged, QUESTION_PICKER);
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("permission");
+    });
+
+    it("preserves permission when the pane is a real permission prompt (not a question)", async () => {
+      const permissionPane = [
+        "Bash command",
+        "  rm -rf /tmp/x",
+        "This command requires approval",
+        "Do you want to proceed?",
+        "❯ 1. Yes",
+      ].join("\n");
+      const session = await run(claudeAgent, permissionPane);
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("permission");
     });
   });
 

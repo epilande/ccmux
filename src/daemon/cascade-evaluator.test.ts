@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { SessionStatus } from "../types/session";
 import {
+  correctAmbiguousPermissionMarker,
   evaluateCascade,
   type CascadeSource,
   type CascadeState,
@@ -710,5 +711,75 @@ describe("evaluateCascade", () => {
     const snapshot = sources.map((s) => s.name);
     evaluateCascade(sources);
     expect(sources.map((s) => s.name)).toEqual(snapshot);
+  });
+});
+
+describe("correctAmbiguousPermissionMarker", () => {
+  it("relabels a permission marker to question when a terminal question source is present and the flag is set", () => {
+    const marker = markerSource({
+      ts: 10_000,
+      state: { status: "waiting", attentionType: "permission", pendingTool: null },
+    });
+    const terminal = terminalUpgrade({
+      ts: 5_000,
+      state: { status: "waiting", attentionType: "question", pendingTool: null },
+    });
+    const sources = [marker, terminal];
+    correctAmbiguousPermissionMarker(sources, true);
+    expect(marker.state.attentionType).toBe("question");
+    // Status and freshness untouched: the marker still wins the fold.
+    expect(marker.state.status).toBe("waiting");
+    expect(evaluateCascade(sources)).toMatchObject({
+      status: "waiting",
+      attentionType: "question",
+    });
+  });
+
+  it("is a no-op when the flag is absent", () => {
+    const marker = markerSource({
+      ts: 10_000,
+      state: { status: "waiting", attentionType: "permission", pendingTool: null },
+    });
+    const terminal = terminalUpgrade({
+      ts: 5_000,
+      state: { status: "waiting", attentionType: "question", pendingTool: null },
+    });
+    correctAmbiguousPermissionMarker([marker, terminal], undefined);
+    expect(marker.state.attentionType).toBe("permission");
+  });
+
+  it("is a no-op when the terminal source is not a question", () => {
+    const marker = markerSource({
+      ts: 10_000,
+      state: { status: "waiting", attentionType: "permission", pendingTool: "Bash" },
+    });
+    const terminal = terminalUpgrade({
+      ts: 5_000,
+      state: { status: "waiting", attentionType: "permission", pendingTool: null },
+    });
+    correctAmbiguousPermissionMarker([marker, terminal], true);
+    expect(marker.state.attentionType).toBe("permission");
+  });
+
+  it("is a no-op when there is no terminal source", () => {
+    const marker = markerSource({
+      ts: 10_000,
+      state: { status: "waiting", attentionType: "permission", pendingTool: "Bash" },
+    });
+    correctAmbiguousPermissionMarker([marker], true);
+    expect(marker.state.attentionType).toBe("permission");
+  });
+
+  it("is a no-op when the marker is not a permission wait", () => {
+    const marker = markerSource({
+      ts: 10_000,
+      state: { status: "working", attentionType: null, pendingTool: null },
+    });
+    const terminal = terminalUpgrade({
+      ts: 5_000,
+      state: { status: "waiting", attentionType: "question", pendingTool: null },
+    });
+    correctAmbiguousPermissionMarker([marker, terminal], true);
+    expect(marker.state.attentionType).toBeNull();
   });
 });

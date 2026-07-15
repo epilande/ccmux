@@ -1,11 +1,19 @@
-import type { AttentionState, Session, SessionStatus } from "../types/session";
+import type {
+  AttentionState,
+  AttentionType,
+  Session,
+  SessionStatus,
+} from "../types/session";
 import type { SessionManager, SessionEvent } from "./sessions";
 import type { NotificationEventKind, NotificationPayload } from "../lib/notify";
 import type { NotificationsConfig } from "../lib/preferences";
 import type { AgentDef } from "../lib/agents";
 import { SCAN_INTERVAL_MS } from "../lib/config";
 import { getAgentDisplayName } from "../lib/agents";
-import { buildNotificationContext } from "./notify-context";
+import {
+  buildNotificationContext,
+  type NotificationContext,
+} from "./notify-context";
 
 export type { NotificationsConfig };
 
@@ -39,10 +47,11 @@ export interface NotifierDeps {
    *  payload builder can gate Approve/Deny buttons on a `notificationActions`
    *  map. Optional: absent means no session ever gets action buttons. */
   getAgent?: (agentType: string) => AgentDef | undefined;
-  /** Builds the body-enrichment text (pending command / question) for a
-   *  waiting session. Injectable for tests; defaults to the real
-   *  transcript-backed extractor. Any failure returns null (fail-open). */
-  buildContext?: (session: Readonly<Session>) => Promise<string | null>;
+  /** Builds the body-enrichment text (pending command / question) plus an
+   *  optional delivery-time reclassification for a waiting session. Injectable
+   *  for tests; defaults to the real transcript/pane-backed extractor. Any
+   *  failure returns `{ body: null }` (fail-open). */
+  buildContext?: (session: Readonly<Session>) => Promise<NotificationContext>;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -70,10 +79,20 @@ export function decideNotification(
 }
 
 function describeWaiting(session: Readonly<Session>): string {
-  switch (session.attentionType) {
+  return describeAttention(session.attentionType, session.pendingTool);
+}
+
+/** Base "waiting" line for an attention type, split out so a delivery-time
+ *  reclassification (permission → question) can rebuild the line for the
+ *  effective type instead of the stored one. */
+function describeAttention(
+  attentionType: AttentionType,
+  pendingTool: string | null,
+): string {
+  switch (attentionType) {
     case "permission":
-      return session.pendingTool
-        ? `Needs permission: ${session.pendingTool}`
+      return pendingTool
+        ? `Needs permission: ${pendingTool}`
         : "Needs permission";
     case "question":
       return "Waiting for your input";
@@ -412,7 +431,16 @@ export class Notifier {
     const payload = buildBasePayload(session, kind, cfg);
     if (kind !== "waiting") return payload;
 
-    if (session.attentionType === "permission") {
+    // Build the context first: it captures the pane, which can reveal that a
+    // stored `permission` wait is really an AskUserQuestion question (the
+    // marker's next-scan correction hasn't landed yet). The actions/reply are
+    // then decided off the effective type through this ONE decision path, so a
+    // delivery-time reclassification and a stored classification never diverge.
+    const buildContext = this.deps.buildContext ?? buildNotificationContext;
+    const context = await buildContext(session);
+    const effectiveAttention = context.reclassifyAs ?? session.attentionType;
+
+    if (effectiveAttention === "permission") {
       const map = this.deps.getAgent?.(session.agentType)?.notificationActions;
       const actions: NotificationPayload["actions"] = [];
       if (map?.approve && map.approve.length > 0) {
@@ -423,7 +451,7 @@ export class Notifier {
       }
       if (actions.length > 0) payload.actions = actions;
     } else if (
-      session.attentionType === "question" &&
+      effectiveAttention === "question" &&
       // v2 scope: only Claude's `answer` path is wired end to end. Gate on the
       // agent type explicitly (question waits use inline reply, not the
       // approve/deny key map, so there's no map presence to key off).
@@ -432,10 +460,14 @@ export class Notifier {
       payload.reply = { id: "answer", label: "Reply" };
     }
 
-    const buildContext = this.deps.buildContext ?? buildNotificationContext;
-    const context = await buildContext(session);
-    if (context) {
-      payload.body = `${payload.body}\n${context}`;
+    // A reclassification also invalidates the base line (built for the stored
+    // `permission` type), so rebuild it for the effective type before appending
+    // the context body.
+    if (context.reclassifyAs) {
+      payload.body = describeAttention(context.reclassifyAs, null);
+    }
+    if (context.body) {
+      payload.body = `${payload.body}\n${context.body}`;
     }
 
     return payload;

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import {
   buildNotificationContext,
   extractPermissionPrompt,
+  extractQuestionPrompt,
+  matchesQuestionPickerSignature,
   type NotifyContextSession,
 } from "./notify-context";
 
@@ -94,6 +96,68 @@ const BARE_PROMPT = [
   " ❯ 1. Yes",
 ].join("\n");
 
+/** Verbatim shape of a Claude AskUserQuestion picker (200-col pane capture):
+ *  a header chip, the question line, the numbered options with descriptions,
+ *  the "Type something." / "Chat about this" tail, and the select footer. */
+const QUESTION_PICKER = [
+  " ☐ Fav color",
+  "What's your favorite color?",
+  "❯ 1. Blue",
+  "     Calm, cool, and the most commonly picked favorite color.",
+  "  2. Green",
+  "     Fresh and natural.",
+  "  5. Type something.",
+  "──────────────",
+  "  6. Chat about this",
+  "Enter to select · ↑/↓ to navigate · Esc to cancel",
+].join("\n");
+
+/** Same picker with a question that does NOT end in "?" (exercises the
+ *  last-header-line fallback). */
+const QUESTION_PICKER_NO_MARK = [
+  " ☐ Pick one",
+  "Choose the deployment target",
+  "❯ 1. Staging",
+  "  2. Production",
+  "  3. Type something.",
+  "Enter to select · ↑/↓ to navigate · Esc to cancel",
+].join("\n");
+
+describe("matchesQuestionPickerSignature", () => {
+  it("matches the picker's Type something / Enter to select signature", () => {
+    expect(matchesQuestionPickerSignature(QUESTION_PICKER)).toBe(true);
+  });
+  it("does not match a plain permission prompt", () => {
+    expect(matchesQuestionPickerSignature(BORDERED_PROMPT)).toBe(false);
+  });
+});
+
+describe("extractQuestionPrompt", () => {
+  it("extracts the question line above the first option", () => {
+    expect(extractQuestionPrompt(QUESTION_PICKER)).toBe(
+      "What's your favorite color?",
+    );
+  });
+
+  it("falls back to the last header line when no line ends in '?'", () => {
+    expect(extractQuestionPrompt(QUESTION_PICKER_NO_MARK)).toBe(
+      "Choose the deployment target",
+    );
+  });
+
+  it("returns null when there is no numbered option list", () => {
+    expect(
+      extractQuestionPrompt("just some prose\nno options here"),
+    ).toBeNull();
+  });
+
+  it("returns null when nothing but a header chip sits above the options", () => {
+    expect(
+      extractQuestionPrompt(" ☐ Fav color\n❯ 1. Blue\n  2. Green"),
+    ).toBeNull();
+  });
+});
+
 describe("extractPermissionPrompt", () => {
   it("pulls the command block from a bordered prompt (header split by blank)", () => {
     expect(extractPermissionPrompt(BORDERED_PROMPT)).toBe(
@@ -169,24 +233,28 @@ describe("extractPermissionPrompt", () => {
 describe("buildNotificationContext: permission (pane capture)", () => {
   it("renders the captured command block", async () => {
     const { session, capturePane } = permissionSession(BORDERED_PROMPT);
-    expect(await buildNotificationContext(session, { capturePane })).toBe(
-      "rtk curl -sI https://example.com/\nFetch example.com front page",
-    );
+    expect(await buildNotificationContext(session, { capturePane })).toEqual({
+      body: "rtk curl -sI https://example.com/\nFetch example.com front page",
+    });
   });
 
-  it("returns null when the pane has no prompt (fail-open to base body)", async () => {
+  it("returns null body when the pane has no prompt (fail-open to base body)", async () => {
     const { session, capturePane } = permissionSession("idle pane, no prompt");
-    expect(await buildNotificationContext(session, { capturePane })).toBeNull();
+    expect(await buildNotificationContext(session, { capturePane })).toEqual({
+      body: null,
+    });
   });
 
-  it("returns null when the session has no pane", async () => {
+  it("returns null body when the session has no pane", async () => {
     const { session, capturePane } = permissionSession(BORDERED_PROMPT, {
       tmuxPane: null,
     });
-    expect(await buildNotificationContext(session, { capturePane })).toBeNull();
+    expect(await buildNotificationContext(session, { capturePane })).toEqual({
+      body: null,
+    });
   });
 
-  it("fails open to null when the capture throws", async () => {
+  it("fails open to null body when the capture throws", async () => {
     const session: NotifyContextSession = {
       agentType: "claude",
       logPath: null,
@@ -197,7 +265,17 @@ describe("buildNotificationContext: permission (pane capture)", () => {
     const capturePane = async () => {
       throw new Error("tmux gone");
     };
-    expect(await buildNotificationContext(session, { capturePane })).toBeNull();
+    expect(await buildNotificationContext(session, { capturePane })).toEqual({
+      body: null,
+    });
+  });
+
+  it("reclassifies to a question when the pane shows the AskUserQuestion picker (no permission terminator)", async () => {
+    const { session, capturePane } = permissionSession(QUESTION_PICKER);
+    expect(await buildNotificationContext(session, { capturePane })).toEqual({
+      body: "What's your favorite color?",
+      reclassifyAs: "question",
+    });
   });
 });
 
@@ -215,39 +293,63 @@ describe("buildNotificationContext: question (transcript)", () => {
         pendingTool: null,
         tmuxPane: "%42",
       }),
-    ).toBe("which option do you prefer?");
+    ).toEqual({ body: "which option do you prefer?" });
   });
 
-  it("returns null when there is no assistant text", async () => {
+  it("falls back to the pane picker when the transcript has no assistant text", async () => {
     const path = await writeTranscript([
       assistantToolUse("Bash", { command: "x" }),
     ]);
     expect(
-      await buildNotificationContext({
-        agentType: "claude",
-        logPath: path,
-        attentionType: "question",
-        pendingTool: null,
-        tmuxPane: "%42",
-      }),
-    ).toBeNull();
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "question",
+          pendingTool: null,
+          tmuxPane: "%42",
+        },
+        { capturePane: async () => QUESTION_PICKER },
+      ),
+    ).toEqual({ body: "What's your favorite color?" });
   });
 
-  it("returns null when logPath is absent", async () => {
+  it("returns null body when transcript is empty and the pane holds no picker", async () => {
+    const path = await writeTranscript([
+      assistantToolUse("Bash", { command: "x" }),
+    ]);
     expect(
-      await buildNotificationContext({
-        agentType: "claude",
-        logPath: null,
-        attentionType: "question",
-        pendingTool: null,
-        tmuxPane: "%42",
-      }),
-    ).toBeNull();
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "question",
+          pendingTool: null,
+          tmuxPane: "%42",
+        },
+        { capturePane: async () => "idle pane, no picker" },
+      ),
+    ).toEqual({ body: null });
+  });
+
+  it("returns null body when logPath is absent and no pane picker", async () => {
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: null,
+          attentionType: "question",
+          pendingTool: null,
+          tmuxPane: "%42",
+        },
+        { capturePane: async () => "" },
+      ),
+    ).toEqual({ body: null });
   });
 });
 
 describe("buildNotificationContext: gating", () => {
-  it("returns null for a non-claude agent", async () => {
+  it("returns null body for a non-claude agent", async () => {
     const { capturePane } = permissionSession(BORDERED_PROMPT);
     expect(
       await buildNotificationContext(
@@ -260,10 +362,10 @@ describe("buildNotificationContext: gating", () => {
         },
         { capturePane },
       ),
-    ).toBeNull();
+    ).toEqual({ body: null });
   });
 
-  it("returns null for a plan_approval wait", async () => {
+  it("returns null body for a plan_approval wait", async () => {
     const { capturePane } = permissionSession(BORDERED_PROMPT);
     expect(
       await buildNotificationContext(
@@ -276,6 +378,6 @@ describe("buildNotificationContext: gating", () => {
         },
         { capturePane },
       ),
-    ).toBeNull();
+    ).toEqual({ body: null });
   });
 });

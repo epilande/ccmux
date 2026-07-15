@@ -63,7 +63,7 @@ function createHarness(
     // tmux (permission waits) or the transcript (question waits), which would
     // spawn a subprocess in the fire path and make delivery nondeterministic.
     // The dedicated context-enrichment block overrides this explicitly.
-    buildContext: overrides.buildContext ?? (async () => null),
+    buildContext: overrides.buildContext ?? (async () => ({ body: null })),
     deliver:
       overrides.deliver ??
       (async (payload: NotificationPayload) => {
@@ -985,7 +985,7 @@ describe("Notifier", () => {
       const notifier = new Notifier({
         ...h.deps,
         getAgent: opts.getAgent,
-        buildContext: opts.buildContext ?? (async () => null),
+        buildContext: opts.buildContext ?? (async () => ({ body: null })),
       });
       notifier.start();
       h.advanceTime(PAST_GRACE_WINDOW);
@@ -1050,16 +1050,36 @@ describe("Notifier", () => {
         attentionType: "permission",
         pendingTool: "Bash",
         getAgent: () => claudeAgent,
-        buildContext: async () => "Bash: rm -rf /tmp/x",
+        buildContext: async () => ({ body: "Bash: rm -rf /tmp/x" }),
       });
       expect(payload.body).toBe("Needs permission: Bash\nBash: rm -rf /tmp/x");
+    });
+
+    it("delivery-time reclassify: a permission wait the pane reveals as a question gets Reply, not Approve/Deny", async () => {
+      const payload = await deliverWaiting({
+        // Store still says permission (Part 1's scan correction hasn't landed).
+        attentionType: "permission",
+        pendingTool: "Bash",
+        getAgent: () => claudeAgent,
+        buildContext: async () => ({
+          body: "What's your favorite color?",
+          reclassifyAs: "question",
+        }),
+      });
+      expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
+      expect(payload.actions).toBeUndefined();
+      // Base line is rebuilt for the effective (question) type, not the stored
+      // "Needs permission: Bash".
+      expect(payload.body).toBe(
+        "Waiting for your input\nWhat's your favorite color?",
+      );
     });
 
     it("stamps statusChangedAt as the staleness token", async () => {
       const h = createHarness();
       const notifier = new Notifier({
         ...h.deps,
-        buildContext: async () => null,
+        buildContext: async () => ({ body: null }),
       });
       notifier.start();
       h.advanceTime(PAST_GRACE_WINDOW);
@@ -1085,7 +1105,7 @@ describe("Notifier", () => {
         ...h.deps,
         getAgent: () => claudeAgent,
         // Would append if consulted; a finished notification must skip it.
-        buildContext: async () => "should not appear",
+        buildContext: async () => ({ body: "should not appear" }),
       });
       notifier.start();
       h.advanceTime(PAST_GRACE_WINDOW);

@@ -252,6 +252,64 @@ describe("handleNotificationAction: answer", () => {
     ]);
   });
 
+  it("sends the agent's answerPrelude keys before the reply text (Claude: Escape)", async () => {
+    const session = questionSession(); // claude, answerPrelude: ["Escape"]
+    const { deps, sendKeyCalls, sendTextCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "teal",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+    expect(sendTextCalls).toEqual([{ pane: "%1", text: "teal", enter: true }]);
+  });
+
+  it("sends no prelude when the agent defines none", async () => {
+    const noPreludeAgent: AgentDef = {
+      ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
+      notificationActions: { approve: ["1"], deny: ["Escape"] },
+    };
+    const session = questionSession();
+    const { deps, sendKeyCalls, sendTextCalls } = makeDeps(session, {
+      getAgent: () => noPreludeAgent,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "teal",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(sendTextCalls).toEqual([{ pane: "%1", text: "teal", enter: true }]);
+  });
+
+  it("returns 500 (no reply text) when an answerPrelude keystroke fails", async () => {
+    const session = questionSession();
+    const { deps, sendTextCalls } = makeDeps(session, {
+      sendKeyResult: false,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "teal",
+      },
+      deps,
+    );
+    expect(res.code).toBe(500);
+    expect(sendTextCalls).toHaveLength(0);
+  });
+
   it("rejects an empty reply with 400 and no re-notify", async () => {
     const session = questionSession();
     const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session);

@@ -11,6 +11,7 @@ import type {
   TmuxPane,
 } from "../types/session";
 import {
+  correctAmbiguousPermissionMarker,
   evaluateCascade,
   genericMarkerSource,
   logSource,
@@ -194,8 +195,47 @@ async function reconcileNativeSession(
   }
 
   const marker = deps.hookManager.getMarkerForSession(session);
-  const resolved = evaluateCascade(collectNativeSources(session, marker));
+  const sources = collectNativeSources(session, marker);
+  await applyAmbiguousPermissionCorrection(deps, session, sources);
+  const resolved = evaluateCascade(sources);
   deps.sessionManager.updateSession(session.id, resolved);
+}
+
+/**
+ * AskUserQuestion disambiguation for the native cascade paths, which build
+ * only (marker, log) sources — no terminal source. When the marker candidate
+ * claims a `permission` wait for an agent flagged `ambiguousPermissionMarker`
+ * (Claude), capture the pane once and match its terminal rules: if they report
+ * a `question` picker, add that terminal source and let
+ * `correctAmbiguousPermissionMarker` relabel the marker candidate before the
+ * fold. Gated on the marker+flag, so the pane is captured only while a flagged
+ * agent actually sits at a permission/question prompt (a brief, rare state) —
+ * every other reconcile stays capture-free. Mutates `sources` in place; any
+ * capture failure is a fail-open no-op (the marker's `permission` stands).
+ */
+async function applyAmbiguousPermissionCorrection(
+  deps: Pick<ReconcilerDeps, "agents">,
+  session: Session,
+  sources: CascadeSource[],
+  capture: (paneId: string, lines?: number) => Promise<string> = capturePane,
+): Promise<void> {
+  const agent = deps.agents.find((a) => a.name === session.agentType);
+  if (!agent?.ambiguousPermissionMarker) return;
+  if (!session.tmuxPane) return;
+  const marker = sources.find((s) => s.name === "marker");
+  if (!marker || marker.state.attentionType !== "permission") return;
+
+  let content: string;
+  try {
+    content = await capture(session.tmuxPane, 50);
+  } catch {
+    return;
+  }
+  const ruleMatch = matchTerminalRule(content, agent);
+  if (ruleMatch) {
+    sources.push(terminalSource(ruleMatch, { upgradeOnly: true }));
+  }
+  correctAmbiguousPermissionMarker(sources, agent.ambiguousPermissionMarker);
 }
 
 /**
@@ -618,7 +658,9 @@ async function reconcilePaneTrackedClaudeSession(
       // The marker arm does NOT clear `inPlanMode` on idle (the pane-detection
       // idle branch below does). Intentional: matches the deleted read-time
       // overlay, which only wrote `status`/`attentionType`/`pendingTool`.
-      const resolved = evaluateCascade(collectNativeSources(session, marker));
+      const sources = collectNativeSources(session, marker);
+      await applyAmbiguousPermissionCorrection(deps, session, sources);
+      const resolved = evaluateCascade(sources);
       deps.sessionManager.updateSession(session.id, resolved);
       return;
     }

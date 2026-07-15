@@ -36,6 +36,12 @@ export const STATE_CHANGED_BODY = "State changed. Check the pane.";
  *  `sendLiteralToPane`'s gap so a TUI doesn't batch them into one paste. */
 const KEY_SEQUENCE_GAP_MS = 30;
 
+/** Settle delay after an `answerPrelude` (e.g. Escape to cancel Claude's
+ *  AskUserQuestion picker) before the literal reply, so the picker's cancel
+ *  lands and the composer is focused first. Longer than the keystroke gap
+ *  because it waits on a TUI transition, not just an un-batched keypress. */
+const ANSWER_PRELUDE_SETTLE_MS = 150;
+
 export interface NotificationActionInput {
   sessionId: string;
   /** Untrusted: validated against {@link WHITELIST} before anything else. */
@@ -152,6 +158,22 @@ export async function handleNotificationAction(
         ok: false,
         error: `Reply exceeds ${MAX_NOTIFICATION_REPLY_CHARS} characters`,
       };
+    }
+    // Some agents ignore typed text at the wait (Claude's AskUserQuestion
+    // picker) and need a prelude keystroke to reach a composer that accepts
+    // it. Send those named keys first, then let the TUI settle before typing.
+    const prelude = deps.getAgent(session.agentType)?.notificationActions
+      ?.answerPrelude;
+    if (prelude && prelude.length > 0) {
+      for (let i = 0; i < prelude.length; i++) {
+        if (i > 0) await sleep(KEY_SEQUENCE_GAP_MS);
+        const sentKey = await deps.sendKey(pane, prelude[i]);
+        if (!sentKey) {
+          log("notification-action: sendKey failed for answer prelude");
+          return { code: 500, ok: false, error: "Failed to send reply" };
+        }
+      }
+      await sleep(ANSWER_PRELUDE_SETTLE_MS);
     }
     const sent = await deps.sendText(pane, text, true);
     if (!sent) {

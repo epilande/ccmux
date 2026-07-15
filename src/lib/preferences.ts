@@ -61,12 +61,21 @@ export interface AgentConfig {
    * Named tmux keys sent to answer a permission prompt from a notification
    * Approve/Deny button (see `AgentDef.notificationActions`). Defining a map
    * for a custom agent is what opts its `permission` notifications into
-   * buttons.
+   * buttons. `answerPrelude` keys are sent before the reply text on the inline
+   * reply action (e.g. to cancel a picker that ignores typed input).
    */
   notificationActions?: {
     approve?: string[];
     deny?: string[];
+    answerPrelude?: string[];
   };
+  /**
+   * Set when this custom agent's permission marker can actually cover an
+   * interactive question picker (like Claude's AskUserQuestion), so the
+   * reconciler relabels the marker as a `question` wait when the pane shows a
+   * question terminal rule instead. See `AgentDef.ambiguousPermissionMarker`.
+   */
+  ambiguousPermissionMarker?: boolean;
 }
 
 export const BREAKPOINT_NAMES = ["xs", "sm", "md", "lg"] as const;

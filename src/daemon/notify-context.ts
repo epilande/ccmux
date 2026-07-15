@@ -46,6 +46,21 @@ export interface NotifyContextDeps {
   capturePane?: (paneId: string, lines?: number) => Promise<string>;
 }
 
+/**
+ * Result of building a waiting notification's context. `body` is the enrichment
+ * appended to the base line (null keeps the base). `reclassifyAs` is a
+ * delivery-time correction: for an agent whose permission marker is ambiguous
+ * (Claude's AskUserQuestion picker wears the same `permission_prompt` marker as
+ * a real permission prompt), the freshly-captured pane can reveal the wait is
+ * actually a `question` even though the store still says `permission` (the next
+ * scan's reconciler correction hasn't landed yet). It tells the notifier to
+ * render the Reply variant instead of Approve/Deny for that one delivery.
+ */
+export interface NotificationContext {
+  body: string | null;
+  reclassifyAs?: "question";
+}
+
 /** Only the last slice of the transcript is scanned — the last assistant
  *  turn is always at the very tail. */
 const CONTEXT_TAIL_BYTES = 128 * 1024;
@@ -146,6 +161,62 @@ export function extractPermissionPrompt(paneText: string): string | null {
   return clampBody(block.join("\n"));
 }
 
+/** A captured Claude AskUserQuestion option-picker line, e.g. "1. Blue" (after
+ *  `cleanPromptLine` strips the leading `❯` caret). Marks the bottom of the
+ *  question header. */
+const OPTION_LINE_RE = /^\d+\.\s/;
+/** Header chip line the picker renders above the question (e.g. "☐ Fav color");
+ *  a checkbox glyph, not the question itself, so it's skipped. */
+const CHECKBOX_LINE_RE = /^[☐☑☒]/;
+
+/**
+ * True when a captured pane looks like Claude's AskUserQuestion option picker:
+ * a "Type something." choice plus the "Enter to select" footer. Mirrors the
+ * `terminalRules` question anchors in `src/lib/agents.ts`; used delivery-time
+ * to disambiguate the shared `permission_prompt` marker (see
+ * docs/agent-adapters.md).
+ */
+export function matchesQuestionPickerSignature(paneText: string): boolean {
+  const lower = paneText.toLowerCase();
+  return lower.includes("type something.") && lower.includes("enter to select");
+}
+
+/**
+ * Extract the question text from a captured AskUserQuestion picker. The shape
+ * is a header (an optional "☐ <title>" chip then the question line) above a
+ * numbered option list. We anchor on the first numbered option and take the
+ * lines above it (cleaned of box chrome, blanks and the title chip dropped),
+ * then prefer the last question-shaped line (ends with "?"); failing that, the
+ * last header line. Returns null on any shape mismatch so the caller falls back
+ * to the base body.
+ */
+export function extractQuestionPrompt(paneText: string): string | null {
+  const lines = paneText.split("\n").map(cleanPromptLine);
+
+  let firstOptionIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (OPTION_LINE_RE.test(lines[i])) {
+      firstOptionIdx = i;
+      break;
+    }
+  }
+  if (firstOptionIdx <= 0) return null;
+
+  const header: string[] = [];
+  for (let i = 0; i < firstOptionIdx; i++) {
+    const line = lines[i];
+    if (line === "") continue;
+    if (CHECKBOX_LINE_RE.test(line)) continue;
+    header.push(line);
+  }
+  if (header.length === 0) return null;
+
+  const question =
+    [...header].reverse().find((line) => line.endsWith("?")) ??
+    header[header.length - 1];
+  return clampBody(question);
+}
+
 /** Find the last assistant text block across parsed entries. */
 function lastAssistantText(entries: LogEntry[]): string | null {
   for (let i = entries.length - 1; i >= 0; i--) {
@@ -158,22 +229,56 @@ function lastAssistantText(entries: LogEntry[]): string | null {
   return null;
 }
 
-/** Permission context: read the live prompt off the pane. */
+/**
+ * Permission context: read the live prompt off the pane. Captures the pane
+ * ONCE. If the permission-prompt extraction finds no terminator (returns null)
+ * but the same pane shows the AskUserQuestion picker signature, the wait is
+ * really a question wearing the shared `permission_prompt` marker — return the
+ * question body and a `reclassifyAs: "question"` signal so the notifier renders
+ * the Reply variant. Otherwise fail open to a null body.
+ */
 async function buildPermissionContext(
   session: NotifyContextSession,
   capture: (paneId: string, lines?: number) => Promise<string>,
+): Promise<NotificationContext> {
+  if (!session.tmuxPane) return { body: null };
+  let text: string;
+  try {
+    text = await capture(session.tmuxPane, PANE_CAPTURE_LINES);
+  } catch {
+    return { body: null };
+  }
+  const permission = extractPermissionPrompt(text);
+  if (permission !== null) return { body: permission };
+  if (matchesQuestionPickerSignature(text)) {
+    return { body: extractQuestionPrompt(text), reclassifyAs: "question" };
+  }
+  return { body: null };
+}
+
+/**
+ * Question context: the last assistant text from the transcript tail. During an
+ * AskUserQuestion wait the transcript is silent (the picker's `tool_use` is not
+ * flushed until after the answer), so when the tail yields nothing fall back to
+ * extracting the question straight off the pane.
+ */
+async function buildQuestionContext(
+  session: NotifyContextSession,
+  capture: (paneId: string, lines?: number) => Promise<string>,
 ): Promise<string | null> {
+  const fromTranscript = await questionFromTranscript(session);
+  if (fromTranscript !== null) return fromTranscript;
   if (!session.tmuxPane) return null;
   try {
     const text = await capture(session.tmuxPane, PANE_CAPTURE_LINES);
-    return extractPermissionPrompt(text);
+    return extractQuestionPrompt(text);
   } catch {
     return null;
   }
 }
 
-/** Question context: the last assistant text from the transcript tail. */
-async function buildQuestionContext(
+/** The transcript-tail half of {@link buildQuestionContext}. */
+async function questionFromTranscript(
   session: NotifyContextSession,
 ): Promise<string | null> {
   if (!session.logPath) return null;
@@ -192,21 +297,24 @@ async function buildQuestionContext(
 }
 
 /**
- * Build a plain-text body enrichment for a waiting `session`, or null when
- * there's nothing to add. Claude only (others return null); `permission` waits
- * render the pending command captured from the pane, `question` waits render
- * the last assistant message from the transcript.
+ * Build the context for a waiting `session`: an enrichment `body` and an
+ * optional delivery-time `reclassifyAs`. Claude only (others return an empty
+ * body); `permission` waits render the pending command captured from the pane
+ * (and may reclassify to a question — see `buildPermissionContext`), `question`
+ * waits render the last assistant message from the transcript, falling back to
+ * the pane's question picker.
  */
 export async function buildNotificationContext(
   session: NotifyContextSession,
   deps: NotifyContextDeps = {},
-): Promise<string | null> {
-  if (session.agentType !== "claude") return null;
+): Promise<NotificationContext> {
+  if (session.agentType !== "claude") return { body: null };
+  const capture = deps.capturePane ?? capturePane;
   if (session.attentionType === "permission") {
-    return buildPermissionContext(session, deps.capturePane ?? capturePane);
+    return buildPermissionContext(session, capture);
   }
   if (session.attentionType === "question") {
-    return buildQuestionContext(session);
+    return { body: await buildQuestionContext(session, capture) };
   }
-  return null;
+  return { body: null };
 }

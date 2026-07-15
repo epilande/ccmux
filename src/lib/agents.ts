@@ -102,12 +102,30 @@ export interface AgentDef {
    * `sendKeyToPane`. Presence of a map is what gates Approve/Deny buttons onto
    * a `permission` notification (v2 scope: Claude only); an agent without a map
    * gets default-click-jump notifications with no buttons. Question-type waits
-   * use inline reply instead and don't consult this field.
+   * use inline reply instead and don't consult `approve`/`deny`.
+   *
+   * `answerPrelude` is sent (as named keys, sequentially) BEFORE the literal
+   * reply text on the `answer` action — Claude's AskUserQuestion picker ignores
+   * typed text, so `["Escape"]` cancels the picker back to the composer where
+   * the reply lands as a normal user message (see `handleNotificationAction`).
    */
   notificationActions?: {
     approve?: string[];
     deny?: string[];
+    answerPrelude?: string[];
   };
+  /**
+   * This agent's permission-prompt marker cannot be trusted to mean a real
+   * permission wait: Claude fires the `Notification` hook for its
+   * AskUserQuestion option picker with the EXACT same payload as a real
+   * permission prompt (`{"notification_type":"permission_prompt"}`, verified on
+   * Claude Code 2.1.209/2.1.210), and does NOT flush the picker's `tool_use` to
+   * its JSONL during the wait. Only the pane distinguishes the two, so the
+   * reconciler relabels a `permission` marker as a `question` when the terminal
+   * source sees the picker (see `correctAmbiguousPermissionMarker`). Opt-in;
+   * off for agents whose permission markers are unambiguous.
+   */
+  ambiguousPermissionMarker?: boolean;
 }
 
 function parseRegex(pattern: string, fieldName: string): RegExp {
@@ -268,12 +286,17 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
   }
   if (override.notificationActions !== undefined) {
     // Whole-object replace (not a per-key merge): a custom map is authored as a
-    // complete approve/deny pair, and merging keys from the builtin default
-    // would silently graft Claude's keystrokes onto a different agent's prompt.
+    // complete approve/deny/answerPrelude set, and merging keys from the
+    // builtin default would silently graft Claude's keystrokes onto a
+    // different agent's prompt.
     merged.notificationActions = {
       approve: override.notificationActions.approve,
       deny: override.notificationActions.deny,
+      answerPrelude: override.notificationActions.answerPrelude,
     };
+  }
+  if (override.ambiguousPermissionMarker !== undefined) {
+    merged.ambiguousPermissionMarker = override.ambiguousPermissionMarker;
   }
 
   return merged;
@@ -384,7 +407,18 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // cancels/denies. The lone-"1" choice is unverified against every prompt
     // variant — the notification-action e2e pass MUST confirm it approves (and
     // switch to ["1", "Enter"] if the prompt turns out to need submission).
-    notificationActions: { approve: ["1"], deny: ["Escape"] },
+    // `answerPrelude: ["Escape"]` cancels the AskUserQuestion picker before the
+    // reply text (the picker ignores typed literals; Escape returns to the
+    // composer where the reply sends as a user message).
+    notificationActions: {
+      approve: ["1"],
+      deny: ["Escape"],
+      answerPrelude: ["Escape"],
+    },
+    // AskUserQuestion fires the same `permission_prompt` payload as a real
+    // permission prompt, so its marker lands as `waiting_permission`; the pane
+    // is the only disambiguator (see `ambiguousPermissionMarker` doc above).
+    ambiguousPermissionMarker: true,
   },
   {
     name: "opencode",
