@@ -205,13 +205,24 @@ async function reconcileNativeSession(
  * AskUserQuestion disambiguation for the native cascade paths, which build
  * only (marker, log) sources — no terminal source. When the marker candidate
  * claims a `permission` wait for an agent flagged `ambiguousPermissionMarker`
- * (Claude), capture the pane once and match its terminal rules: if they report
- * a `question` picker, add that terminal source and let
- * `correctAmbiguousPermissionMarker` relabel the marker candidate before the
- * fold. Gated on the marker+flag, so the pane is captured only while a flagged
- * agent actually sits at a permission/question prompt (a brief, rare state) —
- * every other reconcile stays capture-free. Mutates `sources` in place; any
- * capture failure is a fail-open no-op (the marker's `permission` stands).
+ * (Claude), capture the pane once and match its terminal rules: ONLY a
+ * `question` picker match is added as a source, so
+ * `correctAmbiguousPermissionMarker` can relabel the marker candidate before
+ * the fold. A `permission` rule match is deliberately dropped: it is the exact
+ * residual-scrollback false positive this guard exists to exclude. Claude's
+ * permission rule matches plain narrative text ("requires approval" /
+ * "permission rule") that lingers in scrollback for the whole next turn after
+ * the user approves at the keyboard (no hook fires on approval, so the marker
+ * stays `waiting_permission`). Pushed as an `upgradeOnly` waiting source, that
+ * stale match would lift a fresher log-derived `working` back to
+ * `waiting/permission`, re-arming a spent notification's Approve button against
+ * a now-working pane. The pane is consulted here ONLY to detect the live
+ * AskUserQuestion picker (a `matchAll` of two interactive-widget strings that
+ * does not survive as scrollback), never to re-assert a permission wait. Gated
+ * on the marker+flag, so the pane is captured only while a flagged agent
+ * actually sits at a permission/question prompt (a brief, rare state) — every
+ * other reconcile stays capture-free. Mutates `sources` in place; any capture
+ * failure is a fail-open no-op (the marker's `permission` stands).
  */
 async function applyAmbiguousPermissionCorrection(
   deps: Pick<ReconcilerDeps, "agents">,
@@ -231,8 +242,22 @@ async function applyAmbiguousPermissionCorrection(
   } catch {
     return;
   }
-  const ruleMatch = matchTerminalRule(content, agent);
-  if (ruleMatch) {
+  // Match against the QUESTION rules only. `matchTerminalRule` is
+  // first-match-wins over all rules, so a permission-phrase in the window
+  // (residual prompt scrollback, or prose — Claude's own release-notes banner
+  // literally contains "permission rules") would SHADOW the question rule and
+  // blind this correction exactly when it's needed. Filtering the rules, not
+  // the result, keeps the picker detectable regardless of what else is on
+  // screen; a permission-rule match remains excluded either way (see the doc
+  // comment).
+  const questionRules = agent.terminalRules.filter(
+    (r) => r.attentionType === "question",
+  );
+  const ruleMatch = matchTerminalRule(content, {
+    ...agent,
+    terminalRules: questionRules,
+  });
+  if (ruleMatch && ruleMatch.attentionType === "question") {
     sources.push(terminalSource(ruleMatch, { upgradeOnly: true }));
   }
   correctAmbiguousPermissionMarker(sources, agent.ambiguousPermissionMarker);

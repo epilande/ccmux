@@ -83,22 +83,26 @@ export function evaluateCascade(sources: CascadeSource[]): CascadeState {
  * the marker lands as `waiting_permission`, and the picker's `tool_use` is not
  * flushed to the transcript during the wait. The pane terminal rules are the
  * only source that tells them apart. When the agent opts in
- * (`ambiguousPermissionMarker`), the marker candidate claims a `permission`
- * wait, AND a terminal candidate independently reports a `waiting`/`question`
- * wait, relabel the marker candidate's `attentionType` to `question` in place
- * BEFORE the freshest-wins fold. This is deliberately a pre-fold source
- * correction, NOT a change to the fold: `evaluateCascade` stays a pure
- * freshest-wins-with-tiebreak fold, and the marker keeps its freshness and
- * status (only its attention label changes), so it still wins the fold and the
- * result flips from permission to question. No-op unless the agent opts in.
+ * (`ambiguousPermissionMarker`) AND a terminal candidate independently reports
+ * a `waiting`/`question` wait, relabel EVERY candidate claiming a
+ * `waiting`/`permission` state to `question` in place BEFORE the
+ * freshest-wins fold. That covers both the marker (the hook ambiguity itself)
+ * and the log candidate — which for native sessions echoes the session's
+ * STORED state with a fresh timestamp, so a mis-stored `permission` would
+ * otherwise out-fresh the relabeled marker every tick and the wrong state
+ * could never heal (found live: the store poisoned once, then self-sustained).
+ * Relabeling only, never restatusing: this is deliberately a pre-fold source
+ * correction, NOT a change to the fold — `evaluateCascade` stays a pure
+ * freshest-wins-with-tiebreak fold, every candidate keeps its freshness and
+ * status, and whichever wins now carries the pane-verified `question` label.
+ * Safe because a real permission prompt never matches the picker signature
+ * (live-widget `matchAll` strings). No-op unless the agent opts in.
  */
 export function correctAmbiguousPermissionMarker(
   sources: CascadeSource[],
   ambiguousPermissionMarker: boolean | undefined,
 ): void {
   if (!ambiguousPermissionMarker) return;
-  const marker = sources.find((s) => s.name === "marker");
-  if (!marker || marker.state.attentionType !== "permission") return;
   const terminalQuestion = sources.some(
     (s) =>
       s.name === "terminal" &&
@@ -106,7 +110,15 @@ export function correctAmbiguousPermissionMarker(
       s.state.attentionType === "question",
   );
   if (!terminalQuestion) return;
-  marker.state.attentionType = "question";
+  for (const source of sources) {
+    if (
+      source.name !== "terminal" &&
+      source.state.status === "waiting" &&
+      source.state.attentionType === "permission"
+    ) {
+      source.state.attentionType = "question";
+    }
+  }
 }
 
 const SOURCE_PRIORITY: Record<CascadeSource["name"], number> = {
