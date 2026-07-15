@@ -104,11 +104,11 @@ func makeSound(_ name: String?) -> UNNotificationSound? {
     return UNNotificationSound(named: UNNotificationSoundName(name))
 }
 
-// A deterministic category id derived from the action SHAPE, so same-shape posts
-// share one id (replace-in-place per session still works) while different shapes
-// get distinct ids (no clobber). `setNotificationCategories` replaces the app's
-// whole category set, so a single fixed id would let two concurrent posts with
-// different action shapes overwrite each other's registration. Examples:
+// A deterministic category id derived from the action SHAPE, so each distinct
+// button/reply layout gets its own stable id. The complete fixed set of shapes
+// (see `responderCategories`) is registered together, and a notification stamps
+// the id matching its own shape — so its buttons always resolve to the right
+// layout regardless of which other shapes are registered. Examples:
 // "ccmux.approve,deny" / "ccmux.reply=answer" / "ccmux.approve,deny,reply=answer".
 func categoryIdentifier(buttons: [(String, String)], reply: (String, String)?) -> String {
     var tokens = buttons.map { $0.0 }
@@ -134,31 +134,23 @@ func makeCategory(identifier: String, buttons: [(String, String)], reply: (Strin
     return UNNotificationCategory(identifier: identifier, actions: acts, intentIdentifiers: [], options: [])
 }
 
-// Merge-preserving category registration. `setNotificationCategories` REPLACES
-// the app's whole set, so we first fetch the currently registered categories,
-// drop any sharing an incoming identifier (replace-in-place for the same shape),
-// and register the UNION. This preserves other shapes' categories across posts,
-// shrinking the cross-process race (each post is its own one-shot process) to
-// same-shape re-registration, which is harmless. `getNotificationCategories` is
-// async and fires on a background queue; we bridge it into the existing
-// completion-chain style (no @Sendable needed under the @preconcurrency import,
-// matching `center.add`'s completion below).
-func registerCategories(_ center: UNUserNotificationCenter,
-                        _ categories: Set<UNNotificationCategory>,
-                        completion: @escaping () -> Void) {
-    let incomingIds = Set(categories.map { $0.identifier })
-    center.getNotificationCategories { existing in
-        var merged = Set(existing.filter { !incomingIds.contains($0.identifier) })
-        merged.formUnion(categories)
-        center.setNotificationCategories(merged)
-        completion()
-    }
-}
-
-// The full set of action shapes ccmux may post (permission Approve/Deny and the
-// question inline reply). The no-args relaunch responder registers these under
-// their shape-derived ids so a delivered notification's category still resolves
-// its buttons after the app is relaunched to handle the press.
+// The COMPLETE, fixed set of action shapes ccmux can ever post: permission
+// Approve/Deny, the question inline reply, and the combined Approve/Deny+reply
+// (both `--actions` and `--reply-action` can be passed together, so deliverPost
+// can stamp that id too — enumerate it so this set is a true superset of every
+// categoryIdentifier deliverPost can produce).
+//
+// `setNotificationCategories` REPLACES the app's whole set and there is no
+// cross-process lock, so a read-modify-write merge is fundamentally racy: two
+// one-shot post processes can both read the same base set and the second write
+// then drops the first's freshly-added category, breaking that notification's
+// buttons. The fix is to register this ENTIRE fixed set on every post instead of
+// just the current post's shape. Because every process writes the IDENTICAL
+// complete set, concurrent `setNotificationCategories` calls are idempotent — no
+// clobber, ever — and any delivered notification's categoryIdentifier always
+// resolves because all shapes are always registered. Both the post path and the
+// no-args relaunch responder register this same set via the same shape-derived
+// id derivation, so a delivered notification's category resolves in either.
 func responderCategories() -> Set<UNNotificationCategory> {
     let permissionButtons = parseActions("approve:Approve,deny:Deny")
     let questionReply = parseActions("answer:Reply").first
@@ -167,6 +159,8 @@ func responderCategories() -> Set<UNNotificationCategory> {
                      buttons: permissionButtons, reply: nil),
         makeCategory(identifier: categoryIdentifier(buttons: [], reply: questionReply),
                      buttons: [], reply: questionReply),
+        makeCategory(identifier: categoryIdentifier(buttons: permissionButtons, reply: questionReply),
+                     buttons: permissionButtons, reply: questionReply),
     ]
 }
 
@@ -205,15 +199,15 @@ func deliverPost(_ center: UNUserNotificationCenter, _ args: [String]) {
     let buttons = parseActions(optValue(args, "--actions"))
     let reply = parseActions(optValue(args, "--reply-action")).first // id:Title
     if !buttons.isEmpty || reply != nil {
-        // Shape-keyed category: derive the id, stamp it on the content, and
-        // register merge-preserving so a concurrent post of a different shape
-        // isn't clobbered. Add the request only after registration completes.
-        let categoryId = categoryIdentifier(buttons: buttons, reply: reply)
-        content.categoryIdentifier = categoryId
-        let category = makeCategory(identifier: categoryId, buttons: buttons, reply: reply)
-        registerCategories(center, [category]) {
-            addPost(center, group: group, content: content)
-        }
+        // Stamp this post's shape-derived id on the content, then register the
+        // COMPLETE fixed set (not just this shape) so concurrent one-shot posts
+        // write an identical, idempotent set — no cross-process clobber — and
+        // the stamped id is always among the registered categories.
+        // `setNotificationCategories` is synchronous, so add the request right
+        // after (no completion chain).
+        content.categoryIdentifier = categoryIdentifier(buttons: buttons, reply: reply)
+        center.setNotificationCategories(responderCategories())
+        addPost(center, group: group, content: content)
     } else {
         // No actions and no reply: leave categoryIdentifier unset (no category).
         addPost(center, group: group, content: content)
@@ -315,11 +309,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             performList(center)
         default:
             // No-args relaunch: category registration is per-process, so
-            // re-register (merge-preserving) every shape ccmux may post — each
-            // under its own shape-derived id — in case macOS consults categories
-            // while resolving the response. Using the same derivation as post
-            // keeps a delivered notification's category id resolvable here.
-            registerCategories(center, responderCategories()) {}
+            // re-register the COMPLETE fixed set — identical to the post path —
+            // in case macOS consults categories while resolving the response.
+            // Using the same shape-derived derivation as post keeps a delivered
+            // notification's category id resolvable here.
+            center.setNotificationCategories(responderCategories())
             scheduleTimeout(seconds: kResponderTimeout, exitCode: 0)
         }
     }
