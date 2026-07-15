@@ -1,0 +1,51 @@
+name: Linux D-Bus E2E
+
+on:
+  pull_request:
+    paths:
+      - src/lib/notify-dbus.ts
+      - src/daemon/notify-delivery.ts
+      - test/linux-dbus-e2e/**
+      - .github/workflows/linux-dbus-e2e.yml
+  workflow_dispatch:
+
+jobs:
+  dbus-e2e:
+    name: DbusNotifier wire protocol (real bus + stub server)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+
+      # dbus-run-session lives in the `dbus` package (via dbus-bin) on
+      # ubuntu-24.04; python3-dbus + python3-gi drive the independent stub
+      # notification server.
+      - name: Install D-Bus + python bindings
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus dbus-x11 python3-dbus python3-gi
+          command -v dbus-run-session
+
+      - name: Run D-Bus e2e
+        env:
+          CCMUX_DBUS_E2E_OUT: ${{ runner.temp }}/ccmux-dbus-e2e
+        run: |
+          mkdir -p "$CCMUX_DBUS_E2E_OUT"
+          dbus-run-session -- bash -c '
+            set -e
+            python3 test/linux-dbus-e2e/stub_server.py &
+            SERVER_PID=$!
+            for i in $(seq 1 50); do
+              [ -f "$CCMUX_DBUS_E2E_OUT/server-ready" ] && break
+              sleep 0.1
+            done
+            if [ ! -f "$CCMUX_DBUS_E2E_OUT/server-ready" ]; then
+              echo "stub server failed to start"; exit 1
+            fi
+            echo "=== stub notification server ready; running harness ==="
+            bun test/linux-dbus-e2e/harness.ts
+            RC=$?
+            kill $SERVER_PID 2>/dev/null || true
+            exit $RC
+          '
