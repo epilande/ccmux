@@ -10,14 +10,20 @@
  * this module normalizes control characters (keeping only `\n`) and caps the
  * length — the notifier renders `\n` verbatim.
  *
- * Permission vs. question take different sources on Claude:
+ * Both permission and question read the pane first on Claude, because Claude
+ * defers the same JSONL write in both cases:
  * - `permission`: the pane itself. Claude does NOT flush the permission-gated
  *   `tool_use` to its JSONL until AFTER the user approves, so the transcript
  *   is empty about the pending tool during the wait. The rendered permission
  *   prompt is the only live source of the command, and (bonus) it reflects
  *   post-hook rewrites of the command, which the transcript would not.
- * - `question`: the transcript tail (the last assistant text), which IS
- *   present at fire time.
+ * - `question`: the rendered option picker on the pane. Claude does NOT flush
+ *   the AskUserQuestion `tool_use` to its JSONL during the wait either (same
+ *   deferred write), so the transcript tail holds only the PREVIOUS turn's
+ *   assistant text at fire time — confidently-wrong if trusted. We read the
+ *   picker off the pane and fall back to the transcript tail only when the
+ *   pane shows no picker (a plain-text question, whose assistant message IS
+ *   flushed and current).
  */
 
 import { parseLogEntries } from "./parser";
@@ -117,7 +123,21 @@ function cleanPromptLine(line: string): string {
  *  the first blank line, is the block). Kept in sync with Claude's permission
  *  prompt chrome and the `terminalRules` anchors in `src/lib/agents.ts`. */
 const TERMINATOR_RE =
-  /(requires approval|do you want to proceed|would you like to proceed)/i;
+  /(requires approval|do you want to proceed|would you like to proceed|do you want to make this edit|do you want to create)/i;
+
+/**
+ * A full-width separator rule row (the divider Claude renders around an Edit /
+ * Write diff, and the rounded-box borders). Detected on the RAW line: it holds
+ * at least one horizontal box-drawing dash and collapses to "" once box chrome
+ * is stripped. These are dropped entirely before block collection — unlike a
+ * real interior blank (e.g. "│   │", only verticals + spaces), a rule must NOT
+ * split the command block, so the Edit body keeps "Edit file / <path> / <diff>"
+ * across its dividers.
+ */
+const RULE_CHARS = /[─━┄┅┈┉╌╍═╾╼]/;
+function isSeparatorRule(raw: string): boolean {
+  return RULE_CHARS.test(raw) && cleanPromptLine(raw) === "";
+}
 
 /**
  * Extract the command block from a captured Claude permission prompt.
@@ -131,7 +151,13 @@ const TERMINATOR_RE =
  * the caller keeps the bare "Needs permission: <tool>" line.
  */
 export function extractPermissionPrompt(paneText: string): string | null {
-  const lines = paneText.split("\n").map(cleanPromptLine);
+  // Drop separator rules first so a divider inside the block (the Edit/Write
+  // diff dividers) doesn't act as a boundary; real interior blanks survive as
+  // "" and still bound the block.
+  const lines = paneText
+    .split("\n")
+    .filter((raw) => !isSeparatorRule(raw))
+    .map(cleanPromptLine);
 
   let termIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -162,9 +188,9 @@ export function extractPermissionPrompt(paneText: string): string | null {
 }
 
 /** A captured Claude AskUserQuestion option-picker line, e.g. "1. Blue" (after
- *  `cleanPromptLine` strips the leading `❯` caret). Marks the bottom of the
- *  question header. */
-const OPTION_LINE_RE = /^\d+\.\s/;
+ *  `cleanPromptLine` strips the leading `❯` caret). The captured group is the
+ *  option number; the picker always numbers its first real option "1.". */
+const OPTION_LINE_RE = /^(\d+)\.\s/;
 /** Header chip line the picker renders above the question (e.g. "☐ Fav color");
  *  a checkbox glyph, not the question itself, so it's skipped. */
 const CHECKBOX_LINE_RE = /^[☐☑☒]/;
@@ -184,36 +210,42 @@ export function matchesQuestionPickerSignature(paneText: string): boolean {
 /**
  * Extract the question text from a captured AskUserQuestion picker. The shape
  * is a header (an optional "☐ <title>" chip then the question line) above a
- * numbered option list. We anchor on the first numbered option and take the
- * lines above it (cleaned of box chrome, blanks and the title chip dropped),
- * then prefer the last question-shaped line (ends with "?"); failing that, the
- * last header line. Returns null on any shape mismatch so the caller falls back
- * to the base body.
+ * numbered option list. We anchor on the START of the bottom-most option block
+ * — the LAST line that renders as option "1." — which isolates the live picker
+ * from a stale scrollback picker AND from a prose numbered list in Claude's own
+ * output above it (the sibling `extractPermissionPrompt` anchors on the LAST
+ * terminator for the same stale-scrollback reason). The header sits directly
+ * above that block; we collect the non-chip lines above it, stopping at the
+ * first option line (a prose list), and prefer the nearest question-shaped line
+ * (ends with "?"), failing that the nearest header line. Returns null on any
+ * shape mismatch so the caller falls back to the base body.
  */
 export function extractQuestionPrompt(paneText: string): string | null {
   const lines = paneText.split("\n").map(cleanPromptLine);
 
-  let firstOptionIdx = -1;
-  for (let i = 0; i < lines.length; i++) {
-    if (OPTION_LINE_RE.test(lines[i])) {
-      firstOptionIdx = i;
+  let blockStartIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const match = OPTION_LINE_RE.exec(lines[i]);
+    if (match && match[1] === "1") {
+      blockStartIdx = i;
       break;
     }
   }
-  if (firstOptionIdx <= 0) return null;
+  if (blockStartIdx <= 0) return null;
 
+  // Walk up from the block, keeping header lines closest-first. Stop at an
+  // option line so a prose numbered list above the header is excluded.
   const header: string[] = [];
-  for (let i = 0; i < firstOptionIdx; i++) {
+  for (let i = blockStartIdx - 1; i >= 0; i--) {
     const line = lines[i];
     if (line === "") continue;
     if (CHECKBOX_LINE_RE.test(line)) continue;
+    if (OPTION_LINE_RE.test(line)) break;
     header.push(line);
   }
   if (header.length === 0) return null;
 
-  const question =
-    [...header].reverse().find((line) => line.endsWith("?")) ??
-    header[header.length - 1];
+  const question = header.find((line) => line.endsWith("?")) ?? header[0];
   return clampBody(question);
 }
 
@@ -257,24 +289,28 @@ async function buildPermissionContext(
 }
 
 /**
- * Question context: the last assistant text from the transcript tail. During an
- * AskUserQuestion wait the transcript is silent (the picker's `tool_use` is not
- * flushed until after the answer), so when the tail yields nothing fall back to
- * extracting the question straight off the pane.
+ * Question context: the rendered option picker on the pane. During an
+ * AskUserQuestion wait the picker's `tool_use` is not flushed until after the
+ * answer, so the transcript tail holds the PREVIOUS turn's assistant text and
+ * trusting it would render confidently-wrong stale text. We read the picker off
+ * the pane first and fall back to the transcript tail only when the pane shows
+ * no picker — a plain-text question, whose assistant message IS flushed.
  */
 async function buildQuestionContext(
   session: NotifyContextSession,
   capture: (paneId: string, lines?: number) => Promise<string>,
 ): Promise<string | null> {
-  const fromTranscript = await questionFromTranscript(session);
-  if (fromTranscript !== null) return fromTranscript;
-  if (!session.tmuxPane) return null;
-  try {
-    const text = await capture(session.tmuxPane, PANE_CAPTURE_LINES);
-    return extractQuestionPrompt(text);
-  } catch {
-    return null;
+  if (session.tmuxPane) {
+    try {
+      const fromPane = extractQuestionPrompt(
+        await capture(session.tmuxPane, PANE_CAPTURE_LINES),
+      );
+      if (fromPane !== null) return fromPane;
+    } catch {
+      // Pane unreadable — fall through to the transcript tail.
+    }
   }
+  return questionFromTranscript(session);
 }
 
 /** The transcript-tail half of {@link buildQuestionContext}. */
@@ -301,8 +337,8 @@ async function questionFromTranscript(
  * optional delivery-time `reclassifyAs`. Claude only (others return an empty
  * body); `permission` waits render the pending command captured from the pane
  * (and may reclassify to a question — see `buildPermissionContext`), `question`
- * waits render the last assistant message from the transcript, falling back to
- * the pane's question picker.
+ * waits render the pane's question picker, falling back to the last assistant
+ * message from the transcript only when no picker is on the pane.
  */
 export async function buildNotificationContext(
   session: NotifyContextSession,

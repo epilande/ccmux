@@ -85,6 +85,36 @@ const BORDERED_PROMPT = [
   "╰─────────────────────────────────────────────────╯",
 ].join("\n");
 
+/** Verbatim Claude Code 2.1.210 Edit approval capture (single-space indent,
+ *  ╌ = U+254C full-width dividers around the diff). */
+const EDIT_PROMPT = [
+  " Edit file",
+  " sample.txt",
+  "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+  " 1 -goodbye world",
+  " 1 +hello world",
+  "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+  " Do you want to make this edit to sample.txt?",
+  " ❯ 1. Yes",
+  "   2. Yes, allow all edits during this session (shift+tab)",
+  "   3. No",
+  " Esc to cancel · Tab to amend",
+].join("\n");
+
+/** Verbatim Claude Code 2.1.210 Write approval capture. */
+const WRITE_PROMPT = [
+  " Create file",
+  " notes.md",
+  "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+  " 1 test",
+  "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+  " Do you want to create notes.md?",
+  " ❯ 1. Yes",
+  "   2. Yes, allow all edits during this session (shift+tab)",
+  "   3. No",
+  " Esc to cancel · Tab to amend",
+].join("\n");
+
 /** The bare shape described in the task prompt (no borders, stacked
  *  "requires approval" + "Do you want to proceed?" terminators). */
 const BARE_PROMPT = [
@@ -123,6 +153,20 @@ const QUESTION_PICKER_NO_MARK = [
   "Enter to select · ↑/↓ to navigate · Esc to cancel",
 ].join("\n");
 
+/** A prose numbered list in Claude's output sits in scrollback ABOVE the real
+ *  picker (question + its own numbered options + footer). The extractor must
+ *  anchor on the bottom picker, not the prose list. */
+const QUESTION_PICKER_WITH_PROSE = [
+  "Here are the options I considered:",
+  "1. Add tests",
+  "2. Refactor the parser",
+  "What's your favorite color?",
+  "❯ 1. Blue",
+  "  2. Green",
+  "  3. Type something.",
+  "Enter to select · ↑/↓ to navigate · Esc to cancel",
+].join("\n");
+
 describe("matchesQuestionPickerSignature", () => {
   it("matches the picker's Type something / Enter to select signature", () => {
     expect(matchesQuestionPickerSignature(QUESTION_PICKER)).toBe(true);
@@ -142,6 +186,12 @@ describe("extractQuestionPrompt", () => {
   it("falls back to the last header line when no line ends in '?'", () => {
     expect(extractQuestionPrompt(QUESTION_PICKER_NO_MARK)).toBe(
       "Choose the deployment target",
+    );
+  });
+
+  it("anchors on the real picker, not a prose numbered list above it", () => {
+    expect(extractQuestionPrompt(QUESTION_PICKER_WITH_PROSE)).toBe(
+      "What's your favorite color?",
     );
   });
 
@@ -170,6 +220,18 @@ describe("extractPermissionPrompt", () => {
     // the two stacked chrome lines are excluded as boundaries.
     expect(extractPermissionPrompt(BARE_PROMPT)).toBe(
       "Bash command\nrtk curl -sI https://example.com/\nFetch example.com front page",
+    );
+  });
+
+  it("keeps the Edit diff block across its ╌ dividers", () => {
+    expect(extractPermissionPrompt(EDIT_PROMPT)).toBe(
+      "Edit file\nsample.txt\n1 -goodbye world\n1 +hello world",
+    );
+  });
+
+  it("keeps the Write block across its ╌ dividers", () => {
+    expect(extractPermissionPrompt(WRITE_PROMPT)).toBe(
+      "Create file\nnotes.md\n1 test",
     );
   });
 
@@ -279,26 +341,13 @@ describe("buildNotificationContext: permission (pane capture)", () => {
   });
 });
 
-describe("buildNotificationContext: question (transcript)", () => {
-  it("renders the last assistant text", async () => {
+describe("buildNotificationContext: question (pane-first)", () => {
+  it("renders the pane picker even when the transcript tail holds stale prior-turn text", async () => {
+    // Reality during an AskUserQuestion wait: the picker's tool_use is not
+    // flushed, so the transcript's last assistant text is the PREVIOUS turn.
+    // The body must come from the live pane, not that stale text.
     const path = await writeTranscript([
-      assistantText("first"),
-      assistantText("which option do you prefer?"),
-    ]);
-    expect(
-      await buildNotificationContext({
-        agentType: "claude",
-        logPath: path,
-        attentionType: "question",
-        pendingTool: null,
-        tmuxPane: "%42",
-      }),
-    ).toEqual({ body: "which option do you prefer?" });
-  });
-
-  it("falls back to the pane picker when the transcript has no assistant text", async () => {
-    const path = await writeTranscript([
-      assistantToolUse("Bash", { command: "x" }),
+      assistantText("stale text from the previous turn"),
     ]);
     expect(
       await buildNotificationContext(
@@ -314,7 +363,50 @@ describe("buildNotificationContext: question (transcript)", () => {
     ).toEqual({ body: "What's your favorite color?" });
   });
 
-  it("returns null body when transcript is empty and the pane holds no picker", async () => {
+  it("falls back to the transcript tail for a plain-text question (no picker on the pane)", async () => {
+    // A plain assistant-text question IS flushed, so with no picker on the
+    // pane the transcript tail is the current source.
+    const path = await writeTranscript([
+      assistantText("first"),
+      assistantText("which option do you prefer?"),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "question",
+          pendingTool: null,
+          tmuxPane: "%42",
+        },
+        { capturePane: async () => "idle pane, no picker" },
+      ),
+    ).toEqual({ body: "which option do you prefer?" });
+  });
+
+  it("falls back to the transcript tail when the pane capture throws", async () => {
+    const path = await writeTranscript([
+      assistantText("which option do you prefer?"),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "question",
+          pendingTool: null,
+          tmuxPane: "%42",
+        },
+        {
+          capturePane: async () => {
+            throw new Error("tmux gone");
+          },
+        },
+      ),
+    ).toEqual({ body: "which option do you prefer?" });
+  });
+
+  it("returns null body when the pane holds no picker and the transcript has no assistant text", async () => {
     const path = await writeTranscript([
       assistantToolUse("Bash", { command: "x" }),
     ]);
