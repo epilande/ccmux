@@ -64,9 +64,17 @@ class Ccmux < Formula
 
     # Stage the notarized helper app alongside the binary. The ccmux daemon
     # resolves it at ../libexec/ccmux-notifier.app relative to bin/ccmux.
+    # Homebrew strips a sole top-level directory when unpacking, so the
+    # staged tree is usually the bundle's *contents* (Contents/...) and the
+    # bundle must be reconstructed around them; the branch also handles an
+    # unstripped archive in case that behavior ever changes.
     if OS.mac?
       resource("notifier").stage do
-        libexec.install "ccmux-notifier.app"
+        if File.directory?("ccmux-notifier.app")
+          libexec.install "ccmux-notifier.app"
+        else
+          (libexec/"ccmux-notifier.app").install Dir["*"]
+        end
       end
     end
   end
