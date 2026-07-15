@@ -306,6 +306,9 @@ jobs:
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
           generate_release_notes: true
+          # Versions with a pre-release suffix (1.2.0-rc.1) publish as GitHub
+          # pre-releases: visible for testing, never "latest".
+          prerelease: ${{ contains(needs.check-version.outputs.version, '-') }}
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -313,6 +316,10 @@ jobs:
   homebrew:
     needs: release
     runs-on: ubuntu-latest
+    # The tap only ever sees stable versions; pre-release suffixed versions
+    # (1.2.0-rc.1) skip the formula update entirely so `brew install`/`brew
+    # upgrade` users are never pointed at a test build.
+    if: ${{ !contains(needs.release.outputs.version, '-') }}
     # Soft-fail: a tap-update hiccup must not fail the release. Needs the
     # HOMEBREW_TAP_GITHUB_TOKEN secret (PAT with push to epilande/homebrew-tap).
     continue-on-error: true
