@@ -2,14 +2,21 @@
 // ccmux orb logo. Run: swift scripts/render-icon.swift (from notifier/).
 //
 // No rsvg-convert / inkscape on the build machines, so we rasterize through
-// NSImage, which reads SVG natively on modern macOS. The macOS icon ladder has NO
-// automatic squircle mask, so the orb is inset to ~80% of the canvas on a
-// transparent background to leave the margin a mac icon expects.
+// NSImage, which reads SVG natively on modern macOS.
+//
+// macOS 26 (Tahoe) re-renders app icons with the Liquid Glass treatment: icons
+// with transparent margins are treated as legacy and composited onto a gray
+// plate. The fix is the iOS model — full-bleed opaque square art, and the
+// system applies the squircle mask itself. So: dark brand background filling
+// the whole canvas, light-on-dark orb (logo-dark.svg) centered on it. On
+// pre-Tahoe (deployment target is 15.0) no mask is applied and the icon shows
+// square corners; acceptable for a helper only visible in notifications and
+// System Settings.
 import AppKit
 import Foundation
 
 let notifierDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-let svgURL = notifierDir.deletingLastPathComponent().appendingPathComponent("assets/logo.svg")
+let svgURL = notifierDir.deletingLastPathComponent().appendingPathComponent("assets/logo-dark.svg")
 let iconsetDir = notifierDir.appendingPathComponent("Assets.xcassets/AppIcon.appiconset")
 
 guard let svg = NSImage(contentsOf: svgURL) else {
@@ -17,8 +24,12 @@ guard let svg = NSImage(contentsOf: svgURL) else {
     exit(1)
 }
 
-// Fraction of the canvas the orb occupies (centered); the rest is transparent margin.
-let inset = 0.80
+// Brand dark (matches the logo's stroke color on the light variant).
+let background = NSColor(srgbRed: 0x1A / 255.0, green: 0x1F / 255.0, blue: 0x2B / 255.0, alpha: 1.0)
+
+// Fraction of the canvas the orb occupies (centered). Tahoe's squircle mask
+// crops the corners, so keep the art comfortably inside the safe zone.
+let inset = 0.72
 
 func renderPNG(pixels: Int, to url: URL) {
     let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
@@ -27,10 +38,12 @@ func renderPNG(pixels: Int, to url: URL) {
     rep.size = NSSize(width: pixels, height: pixels)
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    background.setFill()
+    NSRect(x: 0, y: 0, width: pixels, height: pixels).fill()
     let side = Double(pixels) * inset
     let origin = (Double(pixels) - side) / 2.0
     let dst = NSRect(x: origin, y: origin, width: side, height: side)
-    svg.draw(in: dst, from: .zero, operation: .copy, fraction: 1.0)
+    svg.draw(in: dst, from: .zero, operation: .sourceOver, fraction: 1.0)
     NSGraphicsContext.restoreGraphicsState()
     guard let data = rep.representation(using: .png, properties: [:]) else {
         FileHandle.standardError.write(Data("png encode failed at \(pixels)\n".utf8)); exit(1)
