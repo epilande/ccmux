@@ -20,11 +20,8 @@ export type Backend =
 export type NotificationEventKind = "waiting" | "finished";
 
 /**
- * Subset of the (future) `notifications` preferences section that backend
- * resolution needs. Kept local rather than imported from
- * `src/lib/preferences.ts` since that section hasn't landed yet; a later
- * stage can fold this into `NotificationsConfig` without changing this
- * module's callers.
+ * Subset of the `notifications` preferences section that backend resolution
+ * needs; kept local so this module stays free of preference imports.
  */
 export interface NotifyConfig {
   backend?: "auto" | Backend;
@@ -48,10 +45,9 @@ export interface NotificationPayload {
   pane?: string | null;
   /**
    * True for paneless background-agent sessions. `pane` alone is ambiguous
-   * for this (a soft-evicted pane-tracked session also has `pane: null`), so
-   * the daemon's click-action enrichment (`src/daemon/notify-delivery.ts`)
-   * uses this to route background sessions to the picker-popup click target
-   * instead of a pane jump.
+   * (a soft-evicted pane-tracked session also has `pane: null`), so the
+   * daemon's click-action enrichment uses this to route background sessions
+   * to the picker-popup click target instead of a pane jump.
    */
   background?: boolean;
   /** `true` maps to the platform default sound; a string names a sound. */
@@ -60,22 +56,20 @@ export interface NotificationPayload {
   command?: string;
   /**
    * ccmux-notifier only: absolute path to the resolved helper binary, stamped
-   * by the daemon's delivery wrapper (`src/daemon/notify-delivery.ts`), which
-   * resolves it via {@link resolveCcmuxNotifierBinary}. Absent for every other
-   * backend; `buildCcmuxNotifierArgv` refuses to build without it.
+   * by the daemon's delivery wrapper via {@link resolveCcmuxNotifierBinary}.
+   * `buildCcmuxNotifierArgv` refuses to build without it.
    */
   notifierPath?: string;
   /**
    * ccmux-notifier only: the `/notification-action` callback URL the helper
-   * POSTs to on a button/click. Stamped by the delivery wrapper (it owns the
-   * daemon port); `buildCcmuxNotifierArgv` refuses to build without it.
+   * POSTs to. Stamped by the delivery wrapper (it owns the daemon port);
+   * `buildCcmuxNotifierArgv` refuses to build without it.
    */
   callbackUrl?: string;
   /**
-   * Staleness token echoed back in the notification-action callback so the
-   * daemon can reject a button press whose session has moved on since the
-   * notification fired (same `session.statusChangedAt` the debounce keys on).
-   * Additive for the ccmux-notifier backend; other backends ignore it.
+   * Staleness token (`session.statusChangedAt`) echoed back in the
+   * notification-action callback so the daemon can reject a button press
+   * whose session has moved on since the notification fired.
    */
   statusChangedAt?: string;
   /**
@@ -114,9 +108,8 @@ export const DELIVER_TIMEOUT_MS = 3000;
  */
 export const NOTIFIER_DELIVER_TIMEOUT_MS = 190_000;
 
-/** "dbus" has no spawn-based probe (it's a connection, not a binary) — its
- * own probe lives on `DbusNotifier.probe()` (`src/lib/notify-dbus.ts`),
- * consulted before this module's `probeBackend` ever would be. */
+/** "dbus" / "ccmux-notifier" / "command" have no static probe argv — see
+ * {@link probeBackend}. */
 const PROBE_ARGV: Record<
   Exclude<Backend, "command" | "dbus" | "ccmux-notifier">,
   string[]
@@ -202,27 +195,13 @@ export function resolveCcmuxNotifierBinary(
   return which("ccmux-notifier");
 }
 
-/**
- * Resolves the backend to use. `"auto"` (the default) walks the ladder:
- * darwin -> ccmux-notifier (the delivery layer falls to osascript when the
- * helper isn't resolvable, mirroring dbus -> notify-send on linux); linux ->
- * dbus (click-to-jump capable; the daemon falls back to notify-send if the
- * dbus probe fails, see `src/daemon/notify-delivery.ts`); anything else ->
- * disabled. An explicit non-"auto" backend always wins, regardless of
- * platform.
- *
- * The legacy `"terminal-notifier"` value (removed in v2) is not in
- * {@link Backend}; a config still carrying it is normalized to `"auto"` by
- * the callers before it reaches here (fail-open, see `notifications.backend`).
- */
 /** Backends removed in v2 (v1 config values that must not hard-error). */
 const REMOVED_BACKENDS = new Set(["terminal-notifier"]);
 
 /**
- * Normalizes a raw configured backend value read from `ccmux.json` (untyped at
- * runtime). A removed v1 backend (`terminal-notifier`) maps to `undefined` (→
- * the auto ladder) and is reported via `removed` so the caller can log it once
- * — the plan's fail-open requirement. Any other value passes through.
+ * Normalizes a raw configured backend value from `ccmux.json` (untyped at
+ * runtime). A removed v1 backend maps to `undefined` (→ the auto ladder),
+ * reported via `removed` so the caller can log it once (fail-open).
  */
 export function normalizeBackendConfig(raw: unknown): {
   backend: NotifyConfig["backend"];
@@ -234,6 +213,14 @@ export function normalizeBackendConfig(raw: unknown): {
   return { backend: raw as NotifyConfig["backend"], removed: null };
 }
 
+/**
+ * Resolves the backend to use. `"auto"` (the default) walks the ladder:
+ * darwin -> ccmux-notifier (the delivery layer falls to osascript when the
+ * helper isn't resolvable, mirroring dbus -> notify-send on linux); linux ->
+ * dbus; anything else -> disabled. An explicit non-"auto" backend always
+ * wins, regardless of platform. Legacy `"terminal-notifier"` configs are
+ * normalized to `"auto"` by callers first (see {@link normalizeBackendConfig}).
+ */
 export function resolveBackend(
   config: NotifyConfig,
   platform: NodeJS.Platform = process.platform,
@@ -304,21 +291,17 @@ async function runWithTimeout(
 
 /**
  * Probes that the resolved backend's binary actually works, run once before
- * the first delivery. `"command"` runs an arbitrary user command, so there's
- * nothing safe to probe; it always reports available. `"dbus"` similarly has
- * no spawn-based probe here — callers route it through `DbusNotifier.probe()`
- * instead (`ccmux notify`'s command handler, `notify-delivery.ts`'s
- * dispatcher) before ever reaching this function, so `true` is a harmless
- * default that's never actually relied on for dbus.
+ * the first delivery. Three backends have no spawn-based probe here and
+ * default to a harmless `true` that's never relied on: `"command"` runs an
+ * arbitrary user command (nothing safe to probe), `"dbus"` is routed through
+ * `DbusNotifier.probe()` by its callers first, and `"ccmux-notifier"` is
+ * probed with its *resolved absolute path* in `notify-delivery.ts`
+ * (`probeCcmuxNotifier`), which this module can't know.
  */
 export async function probeBackend(
   backend: Backend,
   spawn: SpawnFn = Bun.spawn as unknown as SpawnFn,
 ): Promise<boolean> {
-  // "command"/"dbus" have no spawn-based probe here (see the doc above).
-  // "ccmux-notifier" is probed with its *resolved absolute path* in
-  // `notify-delivery.ts` (`probeCcmuxNotifier`), which this module can't know,
-  // so it's a harmless `true` default that path never relies on.
   if (
     backend === "command" ||
     backend === "dbus" ||
@@ -382,16 +365,12 @@ function buildOsascriptArgv(payload: NotificationPayload): string[] {
 }
 
 /**
- * Builds the ccmux-notifier `post` argv from the payload. `argv[0]` is the
- * resolved absolute helper path (`payload.notifierPath`), so `Bun.spawn`
- * executes it directly. Returns `null` when the delivery layer hasn't stamped
- * the helper path and callback URL — nothing to run.
- *
- * `--actions`/`--reply-action` appear only when the payload carries them (a
- * `permission` wait with a mapped agent gets Approve/Deny; a `question` wait
- * gets Reply); `--body` passes through verbatim, multi-line context and all.
- * `--payload` is the opaque staleness token the helper echoes back to
- * `/notification-action`.
+ * Builds the ccmux-notifier `post` argv from the payload; `argv[0]` is the
+ * resolved absolute helper path. Returns `null` when the delivery layer
+ * hasn't stamped the helper path and callback URL — nothing to run.
+ * `--actions`/`--reply-action` appear only when the payload carries them;
+ * `--body` passes through verbatim, multi-line context and all; `--payload`
+ * is the opaque staleness token the helper echoes to `/notification-action`.
  */
 export function buildCcmuxNotifierArgv(
   payload: NotificationPayload,
@@ -466,20 +445,12 @@ function buildArgv(
       return payload.command ? ["sh", "-c", payload.command] : null;
     case "dbus":
       // Connection-oriented, not spawn-oriented: real dispatch lives in
-      // `src/daemon/notify-delivery.ts`'s `DbusNotifier`. A documented
-      // no-op so a stray direct call to `deliver("dbus", ...)` fails safe
-      // instead of throwing.
+      // `DbusNotifier`. Deliberate no-op so a stray direct call to
+      // `deliver("dbus", ...)` fails safe instead of throwing.
       return null;
   }
 }
 
-/**
- * Delivers one notification via `backend`. Fire-and-forget by design: stdout
- * and stderr are ignored, exit is awaited with a cap, and failures (spawn
- * throws, non-zero exit, timeout) are swallowed here. Callers that need to
- * disable the notifier on repeated failure should rely on {@link probeBackend}
- * up front rather than inspecting delivery outcomes.
- */
 /**
  * Per-backend default delivery timeout. ccmux-notifier may block on first-run
  * auth (see {@link NOTIFIER_DELIVER_TIMEOUT_MS}); every other spawn backend
@@ -492,6 +463,13 @@ export function deliverTimeoutFor(backend: Backend): number {
     : DELIVER_TIMEOUT_MS;
 }
 
+/**
+ * Delivers one notification via `backend`. Fire-and-forget by design: stdout
+ * and stderr are ignored, exit is awaited with a cap, and failures (spawn
+ * throws, non-zero exit, timeout) are swallowed here. Callers that need to
+ * disable the notifier on repeated failure should rely on {@link probeBackend}
+ * up front rather than inspecting delivery outcomes.
+ */
 export async function deliver(
   backend: Backend,
   payload: NotificationPayload,
@@ -501,8 +479,8 @@ export async function deliver(
   const argv = buildArgv(backend, payload);
   if (!argv) return;
 
-  // An explicit `timeoutMs` always wins (tests, or a caller that knows better);
-  // otherwise fall to the per-backend default.
+  // An explicit `timeoutMs` (tests, or a caller that knows better) beats the
+  // per-backend default.
   const effectiveTimeout = timeoutMs ?? deliverTimeoutFor(backend);
 
   const options: SpawnOptions =

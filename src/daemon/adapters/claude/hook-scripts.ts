@@ -69,16 +69,13 @@ if [ -n "$SESSION_ID" ]; then
   esac
 
   # Claude does NOT write the permission-gated tool_use to the JSONL until
-  # AFTER the user approves, so the transcript is empty about the pending
-  # tool during the wait. The Notification payload is the only structured
-  # signal at prompt time. NOTE: as of Claude Code 2.1.209 the permission
-  # message is the generic "Claude needs your permission" with NO tool name,
-  # so this parse yields nothing and pending_tool stays null (the notifier
-  # instead reads the command from the pane, see notify-context.ts). The
-  # parse is kept as future-proofing: some builds/contexts phrase it as
-  # "...to use <Tool>", in which case we capture the token after "to use ".
-  # Fails open to empty (idle_prompt and the generic message both yield
-  # nothing) so pending_tool is cleared rather than left stale.
+  # AFTER the user approves, so the Notification payload is the only
+  # structured signal at prompt time. As of Claude Code 2.1.209 the message
+  # is the generic "Claude needs your permission" with NO tool name, so this
+  # parse yields nothing (the notifier reads the command from the pane, see
+  # notify-context.ts); it's kept because some builds/contexts phrase it as
+  # "...to use <Tool>". Fails open to empty so pending_tool is cleared
+  # rather than left stale.
   PENDING_TOOL=$(printf '%s' "$MESSAGE" | sed -n 's/.*to use \\([A-Za-z0-9_][A-Za-z0-9_-]*\\).*/\\1/p')
 
   # Get TTY from parent process (Claude) for backfill

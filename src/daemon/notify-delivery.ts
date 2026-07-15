@@ -1,32 +1,26 @@
 /**
  * The daemon's `Notifier` deliver/retract dependency: wraps `src/lib/notify.ts`'s
- * bare `deliver` with everything that needs daemon/session context the lib
- * module deliberately doesn't know about (per its own docs, it's
- * dependency-free so the TUI could reuse it):
+ * bare `deliver` with everything that needs daemon/session context (the lib
+ * module is deliberately dependency-free):
  *
  * - Resolves the backend fresh per delivery (config is read live) and probes
- *   each distinct backend once per daemon lifetime, per
- *   `notifications-plan.md`'s "Fail-open everywhere": a broken backend logs
- *   once and disables delivery for THAT backend for the rest of the daemon's
- *   run rather than retrying forever. Because the probe result is cached per
- *   backend (not globally), switching `notifications.backend` away from a
- *   broken one and back doesn't get stuck disabled, and a backend that was
- *   never tried gets its own fresh probe.
+ *   each distinct backend once per daemon lifetime: a broken backend logs
+ *   once and stays disabled for THAT backend for the rest of the run rather
+ *   than retrying forever. Caching per backend (not globally) means switching
+ *   `notifications.backend` away from a broken one and back doesn't get
+ *   stuck disabled.
  * - For `ccmux-notifier` (the macOS v2 rung), resolves the helper binary once
  *   (env `CCMUX_NOTIFIER_PATH` -> brew `libexec` sibling of `ccmux` -> PATH),
- *   probes it with `--version`, and stamps `notifierPath` + `callbackUrl` onto
- *   the payload so `buildCcmuxNotifierArgv` can build the `post` invocation.
- *   Unresolvable or probe-failed -> falls down the ladder to `osascript`
+ *   probes it with `--version`, and stamps `notifierPath` + `callbackUrl`
+ *   onto the payload. Unresolvable or probe-failed -> falls to `osascript`
  *   silently (mirroring the dbus -> notify-send fallback below).
- * - For `dbus`, routes to a persistent `DbusNotifier` (created lazily on
- *   first use) instead of `src/lib/notify.ts`'s spawn-based `deliver` (which
- *   treats "dbus" as a no-op — it's connection-oriented, not spawn-oriented).
- *   A failed dbus probe falls back to resolving "notify-send" for that
- *   delivery rather than hard-disabling notifications on Linux. The click/
- *   button action runs in-process: `default`/`Open` jumps (a bound session
- *   spawns `tmux switch-client`, a background/unbound one `tmux display-popup`),
- *   while `approve`/`deny`/`answer` route to the shared `/notification-action`
- *   handler (same in-process code path the macOS HTTP callback uses).
+ * - For `dbus`, routes to a persistent, lazily-created `DbusNotifier`
+ *   instead of `src/lib/notify.ts`'s spawn-based `deliver` (which treats
+ *   "dbus" as a no-op — it's connection-oriented, not spawn-oriented). A
+ *   failed dbus probe falls back to "notify-send" rather than hard-disabling
+ *   notifications on Linux. Click/button actions run in-process through the
+ *   shared `/notification-action` handler — the SAME code path the macOS
+ *   HTTP callback uses, so jumps and safety gating can't diverge per platform.
  *
  * Retraction (`retract(sessionId)`) auto-clears a session's notification when
  * the user views its pane: `ccmux-notifier remove --group ...` on macOS,
@@ -74,9 +68,9 @@ export interface DeliveryDeps {
   /** Probes a resolved ccmux-notifier binary (`<path> --version`). Defaults to
    * the lib helper bound to `spawn`; injectable for tests. */
   probeNotifier?: (binaryPath: string) => Promise<boolean>;
-  /** Runs a notification-action callback in-process for the D-Bus
-   * approve/deny/answer buttons — the SAME shared handler the macOS HTTP
-   * route uses, injected from `index.ts`. */
+  /** Runs a notification-action callback in-process for the D-Bus buttons —
+   * the SAME shared handler the macOS HTTP route uses, injected from
+   * `index.ts`. */
   runNotificationAction: (input: NotificationActionInput) => unknown;
   /** Absolute path to the `ccmux` entry point, or null if unresolvable. The
    * D-Bus background/unbound popup jump is omitted when null. */
@@ -93,20 +87,18 @@ export interface DeliveryDeps {
   log?: (message: string, error?: unknown) => void;
 }
 
-/** Builds the dbus backend's interaction wiring. Unlike the spawn-based
- * backends, there's no shell command built ahead of time — the callback runs
- * in-process when the signal actually fires. Every key (including
- * `default`/`Open`) routes to the shared `/notification-action` handler, the
- * SAME in-process code path the macOS HTTP callback uses, so the jump and the
- * safety gating can't diverge between platforms — and the handler re-reads the
+/** Builds the dbus backend's interaction wiring. No shell command is built
+ * ahead of time — the callback runs in-process when the signal fires, and
+ * every key (including `default`/`Open`) routes to the shared
+ * `/notification-action` handler (see the module doc), which re-reads the
  * session's LIVE pane rather than this delivery-time snapshot.
  *
- * `canDefault` reports whether a default-click jump can actually land (a bound
- * pane, or a background/unbound session with a resolvable `ccmuxPath`); the
- * dbus layer omits the visible `default`/`Open` button when it can't, so we
- * never show a button that does nothing. `onAction` is `undefined` (no actions
- * sent at all) only when there's nothing wireable: no jump target AND no
- * buttons/reply on the payload. */
+ * `canDefault` reports whether a default-click jump can actually land (a
+ * bound pane, or a background/unbound session with a resolvable `ccmuxPath`);
+ * the dbus layer omits the visible `default`/`Open` button when it can't, so
+ * we never show a button that does nothing. `onAction` is `undefined` (no
+ * actions sent at all) only when there's nothing wireable: no jump target
+ * AND no buttons/reply on the payload. */
 function resolveDbusActionWiring(
   payload: NotificationPayload,
   deps: DeliveryDeps,
@@ -142,7 +134,7 @@ function resolveDbusActionWiring(
     // to `answer` above), so this key itself is a no-op — never a jump.
     if (actionKey === "inline-reply") return;
     // "default" / "Open" (or any other key) -> the shared handler's
-    // default-click jump (live pane, one code path with the macOS callback).
+    // default-click jump.
     void deps.runNotificationAction({
       sessionId: payload.sessionId,
       action: "default",

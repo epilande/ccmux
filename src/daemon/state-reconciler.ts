@@ -203,26 +203,24 @@ async function reconcileNativeSession(
 
 /**
  * AskUserQuestion disambiguation for the native cascade paths, which build
- * only (marker, log) sources — no terminal source. When the marker candidate
- * claims a `permission` wait for an agent flagged `ambiguousPermissionMarker`
- * (Claude), capture the pane once and match its terminal rules: ONLY a
- * `question` picker match is added as a source, so
- * `correctAmbiguousPermissionMarker` can relabel the marker candidate before
- * the fold. A `permission` rule match is deliberately dropped: it is the exact
- * residual-scrollback false positive this guard exists to exclude. Claude's
- * permission rule matches plain narrative text ("requires approval" /
- * "permission rule") that lingers in scrollback for the whole next turn after
- * the user approves at the keyboard (no hook fires on approval, so the marker
- * stays `waiting_permission`). Pushed as an `upgradeOnly` waiting source, that
- * stale match would lift a fresher log-derived `working` back to
- * `waiting/permission`, re-arming a spent notification's Approve button against
- * a now-working pane. The pane is consulted here ONLY to detect the live
- * AskUserQuestion picker (a `matchAll` of two interactive-widget strings that
- * does not survive as scrollback), never to re-assert a permission wait. Gated
- * on the marker+flag, so the pane is captured only while a flagged agent
- * actually sits at a permission/question prompt (a brief, rare state) — every
- * other reconcile stays capture-free. Mutates `sources` in place; any capture
- * failure is a fail-open no-op (the marker's `permission` stands).
+ * only (marker, log) sources — no terminal source. When the marker claims a
+ * `permission` wait for an agent flagged `ambiguousPermissionMarker`
+ * (Claude), capture the pane once and match ONLY its `question` rules; a
+ * picker match is pushed as a source for `correctAmbiguousPermissionMarker`
+ * to relabel against. A `permission` rule match is deliberately dropped —
+ * Claude's permission rule matches plain narrative text ("requires approval")
+ * that lingers in scrollback for the whole next turn after a keyboard
+ * approval (no hook fires on approval, so the marker stays
+ * `waiting_permission`), and as an `upgradeOnly` waiting source it would lift
+ * a fresher log-derived `working` back to `waiting/permission`, re-arming a
+ * spent notification's Approve button against a now-working pane. The
+ * picker's `matchAll` of two interactive-widget strings does not survive as
+ * scrollback, so the pane is consulted only to detect the live picker, never
+ * to re-assert a permission wait. The marker+flag gate means the capture runs
+ * only while a flagged agent sits at a permission/question prompt (a brief,
+ * rare state); every other reconcile stays capture-free. Mutates `sources` in
+ * place; any capture failure is a fail-open no-op (the marker's `permission`
+ * stands).
  */
 async function applyAmbiguousPermissionCorrection(
   deps: Pick<ReconcilerDeps, "agents">,
@@ -242,14 +240,12 @@ async function applyAmbiguousPermissionCorrection(
   } catch {
     return;
   }
-  // Match against the QUESTION rules only. `matchTerminalRule` is
-  // first-match-wins over all rules, so a permission-phrase in the window
-  // (residual prompt scrollback, or prose — Claude's own release-notes banner
-  // literally contains "permission rules") would SHADOW the question rule and
-  // blind this correction exactly when it's needed. Filtering the rules, not
-  // the result, keeps the picker detectable regardless of what else is on
-  // screen; a permission-rule match remains excluded either way (see the doc
-  // comment).
+  // `matchTerminalRule` is first-match-wins over all rules, so a permission
+  // phrase in the window (residual scrollback, or prose — Claude's own
+  // release-notes banner literally contains "permission rules") would SHADOW
+  // the question rule exactly when this correction is needed. Filter the
+  // rules, not the result, so the picker stays detectable regardless of what
+  // else is on screen.
   const questionRules = agent.terminalRules.filter(
     (r) => r.attentionType === "question",
   );

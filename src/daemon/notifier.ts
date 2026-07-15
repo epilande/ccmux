@@ -43,14 +43,14 @@ export interface NotifierDeps {
   isTerminalFrontmost: () => Promise<boolean>;
   getPrefs: () => Promise<{ notifications?: NotificationsConfig }>;
   deliver: (payload: NotificationPayload) => Promise<void>;
-  /** Resolves the agent definition for a session's `agentType`, so the
-   *  payload builder can gate Approve/Deny buttons on a `notificationActions`
-   *  map. Optional: absent means no session ever gets action buttons. */
+  /** Resolves a session's agent definition so the payload builder can gate
+   *  Approve/Deny buttons on its `notificationActions` map. Optional: absent
+   *  means no session ever gets action buttons. */
   getAgent?: (agentType: string) => AgentDef | undefined;
-  /** Builds the body-enrichment text (pending command / question) plus an
-   *  optional delivery-time reclassification for a waiting session. Injectable
-   *  for tests; defaults to the real transcript/pane-backed extractor. Any
-   *  failure returns `{ body: null }` (fail-open). */
+  /** Builds the body-enrichment text plus an optional delivery-time
+   *  reclassification for a waiting session. Injectable for tests; defaults
+   *  to the real pane/transcript-backed extractor. Fail-open: any failure
+   *  returns `{ body: null }`. */
   buildContext?: (session: Readonly<Session>) => Promise<NotificationContext>;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
@@ -142,11 +142,10 @@ function buildBasePayload(
 }
 
 /**
- * Build the "your button press didn't land, look at the pane" notification
- * fired by `/notification-action` when a stale approve/deny/answer is rejected.
- * Carries no action buttons or reply (it's informational) but keeps default
- * click-to-jump. Exported so the daemon wiring can hand it to the shared
- * action handler's `reNotify` dep.
+ * The "your button press didn't land, look at the pane" notification fired
+ * by `/notification-action` when a stale approve/deny/answer is rejected.
+ * Informational: no buttons or reply, but default click-to-jump stays.
+ * Exported for the daemon wiring's `reNotify` dep.
  */
 export function buildStateChangedPayload(
   session: Readonly<Session>,
@@ -407,21 +406,12 @@ export class Notifier {
   }
 
   /**
-   * Delivers (or drops) one notification for an already-current `session`
-   * (freshness is the caller's job: `"waiting"` fires use the event's own
-   * snapshot immediately, `"finished"` fires are re-checked by
-   * `fireDebounced` first). Every subsequent step (prefs gate, focus check,
-   * cooldown, delivery) can fail without taking the daemon down — the whole
-   * path is one fail-open try/catch, logged at debug.
-   */
-  /**
    * Builds the delivered payload: the base fields plus the v2 actionable
-   * extras (Approve/Deny buttons, inline Reply, and the context body). All
-   * three are `"waiting"`-only; `"finished"` gets none of them. Buttons appear
-   * only for a `permission` wait whose agent defines a `notificationActions`
-   * map; Reply only for a `question` wait on Claude (v2 scope). The context
-   * enrichment (pending command / question) is appended to the base body and
-   * fails open — a null result leaves the base line untouched.
+   * extras (Approve/Deny buttons, inline Reply, and the context body), all
+   * `"waiting"`-only. Buttons appear only for a `permission` wait whose agent
+   * defines a `notificationActions` map; Reply only for a `question` wait on
+   * Claude (v2 scope). The context enrichment fails open — a null result
+   * leaves the base line untouched.
    */
   private async buildPayload(
     session: Readonly<Session>,
@@ -431,11 +421,11 @@ export class Notifier {
     const payload = buildBasePayload(session, kind, cfg);
     if (kind !== "waiting") return payload;
 
-    // Build the context first: it captures the pane, which can reveal that a
-    // stored `permission` wait is really an AskUserQuestion question (the
-    // marker's next-scan correction hasn't landed yet). The actions/reply are
-    // then decided off the effective type through this ONE decision path, so a
-    // delivery-time reclassification and a stored classification never diverge.
+    // Build the context first: its pane capture can reveal that a stored
+    // `permission` wait is really an AskUserQuestion question (the marker's
+    // next-scan correction hasn't landed yet). Actions/reply are then decided
+    // off the effective type through this ONE decision path, so delivery-time
+    // and stored classifications never diverge.
     const buildContext = this.deps.buildContext ?? buildNotificationContext;
     const context = await buildContext(session);
     const effectiveAttention = context.reclassifyAs ?? session.attentionType;
@@ -461,8 +451,7 @@ export class Notifier {
     }
 
     // A reclassification also invalidates the base line (built for the stored
-    // `permission` type), so rebuild it for the effective type before appending
-    // the context body.
+    // type), so rebuild it before appending the context body.
     if (context.reclassifyAs) {
       payload.body = describeAttention(context.reclassifyAs, null);
     }
@@ -473,6 +462,14 @@ export class Notifier {
     return payload;
   }
 
+  /**
+   * Delivers (or drops) one notification for an already-current `session`
+   * (freshness is the caller's job: `"waiting"` fires use the event's own
+   * snapshot immediately, `"finished"` fires are re-checked by
+   * `fireDebounced` first). Every subsequent step (prefs gate, focus check,
+   * cooldown, delivery) can fail without taking the daemon down — the whole
+   * path is one fail-open try/catch, logged at debug.
+   */
   private async fire(
     session: Readonly<Session>,
     kind: NotificationEventKind,

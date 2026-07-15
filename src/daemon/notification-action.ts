@@ -1,8 +1,8 @@
 /**
  * Shared handler for actionable-notification callbacks, invoked both by the
  * HTTP route (`POST /notification-action`, from the macOS ccmux-notifier app)
- * and, later, by the Linux D-Bus `ActionInvoked` dispatch — one in-process
- * code path so the safety rules can't drift between platforms.
+ * and by the Linux D-Bus `ActionInvoked` dispatch — one in-process code path
+ * so the safety rules can't drift between platforms.
  *
  * An action button types into a live agent pane, so this is the risk surface
  * of the whole feature. Every mutating action is gated on the session still

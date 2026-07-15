@@ -76,27 +76,23 @@ export function evaluateCascade(sources: CascadeSource[]): CascadeState {
 }
 
 /**
- * Pre-fold disambiguation for agents whose permission marker is ambiguous.
- * Claude fires the `Notification` hook for its AskUserQuestion option picker
- * with the exact same `permission_prompt` payload as a real permission prompt
- * (verified on Claude Code 2.1.209/2.1.210 — see docs/agent-adapters.md), so
- * the marker lands as `waiting_permission`, and the picker's `tool_use` is not
- * flushed to the transcript during the wait. The pane terminal rules are the
- * only source that tells them apart. When the agent opts in
- * (`ambiguousPermissionMarker`) AND a terminal candidate independently reports
- * a `waiting`/`question` wait, relabel EVERY candidate claiming a
- * `waiting`/`permission` state to `question` in place BEFORE the
- * freshest-wins fold. That covers both the marker (the hook ambiguity itself)
- * and the log candidate — which for native sessions echoes the session's
- * STORED state with a fresh timestamp, so a mis-stored `permission` would
- * otherwise out-fresh the relabeled marker every tick and the wrong state
- * could never heal (found live: the store poisoned once, then self-sustained).
- * Relabeling only, never restatusing: this is deliberately a pre-fold source
- * correction, NOT a change to the fold — `evaluateCascade` stays a pure
- * freshest-wins-with-tiebreak fold, every candidate keeps its freshness and
- * status, and whichever wins now carries the pane-verified `question` label.
+ * Pre-fold disambiguation for agents with an ambiguous permission marker
+ * (opt-in via `ambiguousPermissionMarker`; no-op otherwise). Claude fires the
+ * `Notification` hook for its AskUserQuestion picker with the exact same
+ * `permission_prompt` payload as a real permission prompt (verified on Claude
+ * Code 2.1.209/2.1.210 — see docs/agent-adapters.md), and the picker's
+ * `tool_use` is not flushed during the wait, so the pane terminal rules are
+ * the only source that tells them apart. When a terminal candidate
+ * independently reports a `waiting`/`question` wait, relabel EVERY
+ * `waiting`/`permission` candidate to `question` in place BEFORE the fold —
+ * including the log candidate, which for native sessions echoes the session's
+ * STORED state with a fresh timestamp: a mis-stored `permission` would
+ * out-fresh the relabeled marker every tick and never heal (found live: the
+ * store poisoned once, then self-sustained). Relabeling only, never
+ * restatusing: this is a pre-fold source correction, NOT a change to the
+ * fold — `evaluateCascade` stays a pure freshest-wins-with-tiebreak fold.
  * Safe because a real permission prompt never matches the picker signature
- * (live-widget `matchAll` strings). No-op unless the agent opts in.
+ * (live-widget `matchAll` strings).
  */
 export function correctAmbiguousPermissionMarker(
   sources: CascadeSource[],
@@ -243,15 +239,13 @@ export function logSource(session: Session): CascadeSource {
  * and idle-prompt transitions. To match the read-time overlay this
  * replaces, the factory:
  *
- * - On `waiting_permission`: prefers `marker.pending_tool` and falls back
- *   to `session.pendingTool`. Claude's `Notification` hook now parses the
- *   tool name out of the notification message and writes `pending_tool`
- *   into the marker (Codex's `PermissionRequest` already did), which is the
- *   authoritative pending-tool signal: Claude does NOT flush the
- *   permission-gated `tool_use` to its JSONL until after approval, so the
- *   log-derived value is null during the wait. The `?? session.pendingTool`
- *   fallback keeps the log's view for the post-approval window and for any
- *   older marker written before this enrichment existed.
+ * - On `waiting_permission`: prefers `marker.pending_tool` (Claude's
+ *   `Notification` hook parses the tool name out of the message; Codex's
+ *   `PermissionRequest` already wrote it). The marker is authoritative
+ *   because Claude does NOT flush the permission-gated `tool_use` to its
+ *   JSONL until after approval, so the log-derived value is null during the
+ *   wait; the `?? session.pendingTool` fallback covers the post-approval
+ *   window and older markers written before this enrichment.
  * - On `idle`: emits explicit nulls. SessionEnd unlinks the marker
  *   entirely; the `state === "idle"` payload only fires for
  *   `idle_prompt` transitions, which legitimately clear attention.

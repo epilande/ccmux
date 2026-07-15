@@ -10,20 +10,15 @@
  * this module normalizes control characters (keeping only `\n`) and caps the
  * length — the notifier renders `\n` verbatim.
  *
- * Both permission and question read the pane first on Claude, because Claude
- * defers the same JSONL write in both cases:
- * - `permission`: the pane itself. Claude does NOT flush the permission-gated
- *   `tool_use` to its JSONL until AFTER the user approves, so the transcript
- *   is empty about the pending tool during the wait. The rendered permission
- *   prompt is the only live source of the command, and (bonus) it reflects
- *   post-hook rewrites of the command, which the transcript would not.
- * - `question`: the rendered option picker on the pane. Claude does NOT flush
- *   the AskUserQuestion `tool_use` to its JSONL during the wait either (same
- *   deferred write), so the transcript tail holds only the PREVIOUS turn's
- *   assistant text at fire time — confidently-wrong if trusted. We read the
- *   picker off the pane and fall back to the transcript tail only when the
- *   pane shows no picker (a plain-text question, whose assistant message IS
- *   flushed and current).
+ * Both permission and question read the pane first on Claude: it does NOT
+ * flush the gated `tool_use` (permission or AskUserQuestion) to its JSONL
+ * until AFTER the user responds, so during the wait the transcript knows
+ * nothing about the pending tool — for a question its tail still holds the
+ * PREVIOUS turn's assistant text, confidently-wrong if trusted. The rendered
+ * pane prompt is the only live source (and for permission it also reflects
+ * post-hook rewrites of the command, which the transcript would not). The
+ * transcript tail is used only for a plain-text question with no picker,
+ * whose assistant message IS flushed and current.
  */
 
 import { parseLogEntries } from "./parser";
@@ -38,9 +33,8 @@ export interface NotifyContextSession {
   agentType: string;
   logPath: string | null;
   attentionType: "permission" | "question" | "plan_approval" | null;
-  /** Name of the tool the pending permission is actually for. Retained for
-   *  the base "Needs permission: <tool>" line the caller builds; the context
-   *  body itself is now read from the pane, not keyed off this field. */
+  /** Tool the pending permission is for; feeds the caller's base
+   *  "Needs permission: <tool>" line (the context body reads the pane). */
   pendingTool: string | null;
   /** tmux pane id (e.g. `%418`) the session runs in. The permission-context
    *  path captures this pane; null means we can't read the prompt. */
@@ -53,14 +47,12 @@ export interface NotifyContextDeps {
 }
 
 /**
- * Result of building a waiting notification's context. `body` is the enrichment
- * appended to the base line (null keeps the base). `reclassifyAs` is a
- * delivery-time correction: for an agent whose permission marker is ambiguous
- * (Claude's AskUserQuestion picker wears the same `permission_prompt` marker as
- * a real permission prompt), the freshly-captured pane can reveal the wait is
- * actually a `question` even though the store still says `permission` (the next
- * scan's reconciler correction hasn't landed yet). It tells the notifier to
- * render the Reply variant instead of Approve/Deny for that one delivery.
+ * `body` is the enrichment appended to the base line (null keeps the base).
+ * `reclassifyAs` is a delivery-time correction: Claude's AskUserQuestion
+ * picker wears the same `permission_prompt` marker as a real permission
+ * prompt, so the freshly-captured pane can reveal that a stored `permission`
+ * is really a `question` before the next scan's reconciler correction lands.
+ * The notifier then renders Reply instead of Approve/Deny for that delivery.
  */
 export interface NotificationContext {
   body: string | null;
@@ -81,9 +73,8 @@ const MAX_CONTEXT_CHARS = 300;
 const MAX_BLOCK_LINES = 8;
 
 /**
- * Strip control characters other than newline and collapse the result to at
- * most `MAX_CONTEXT_LINES` lines / `MAX_CONTEXT_CHARS` chars with an ellipsis.
- * Returns null when nothing printable survives.
+ * Strip control characters (keeping `\n`) and clamp to `MAX_CONTEXT_LINES` /
+ * `MAX_CONTEXT_CHARS` with an ellipsis. Null when nothing printable survives.
  */
 function clampBody(raw: string): string | null {
   const normalized = stripControlChars(raw.replace(/\r\n?/g, "\n"), {
@@ -127,12 +118,11 @@ const TERMINATOR_RE =
 
 /**
  * A full-width separator rule row (the divider Claude renders around an Edit /
- * Write diff, and the rounded-box borders). Detected on the RAW line: it holds
- * at least one horizontal box-drawing dash and collapses to "" once box chrome
- * is stripped. These are dropped entirely before block collection — unlike a
- * real interior blank (e.g. "│   │", only verticals + spaces), a rule must NOT
- * split the command block, so the Edit body keeps "Edit file / <path> / <diff>"
- * across its dividers.
+ * Write diff, and the rounded-box borders): the RAW line holds a horizontal
+ * box-drawing dash and collapses to "" once box chrome is stripped. Dropped
+ * entirely before block collection — unlike a real interior blank ("│   │"),
+ * a rule must NOT split the command block, so the Edit body keeps
+ * "Edit file / <path> / <diff>" across its dividers.
  */
 const RULE_CHARS = /[─━┄┅┈┉╌╍═╾╼]/;
 function isSeparatorRule(raw: string): boolean {
@@ -140,20 +130,17 @@ function isSeparatorRule(raw: string): boolean {
 }
 
 /**
- * Extract the command block from a captured Claude permission prompt.
- *
- * The prompt shape is: a header line (e.g. "Bash command"), the indented
- * command and Claude's one-line description, then a terminator line
- * ("This command requires approval" / "Do you want to proceed?") followed by
- * the numbered options. We anchor on the terminator and collect the non-blank
- * lines directly above it (skipping any blank gap), which yields the command
- * block without the redundant options. Returns null on any shape mismatch so
- * the caller keeps the bare "Needs permission: <tool>" line.
+ * Extract the command block from a captured Claude permission prompt. The
+ * shape is: a header line (e.g. "Bash command"), the indented command and
+ * one-line description, a terminator ("Do you want to proceed?"), then the
+ * numbered options. Anchor on the terminator and collect the non-blank lines
+ * directly above it — the command block without the redundant options.
+ * Returns null on any shape mismatch so the caller keeps the bare
+ * "Needs permission: <tool>" line.
  */
 export function extractPermissionPrompt(paneText: string): string | null {
-  // Drop separator rules first so a divider inside the block (the Edit/Write
-  // diff dividers) doesn't act as a boundary; real interior blanks survive as
-  // "" and still bound the block.
+  // Drop separator rules first (see RULE_CHARS); real interior blanks
+  // survive as "" and still bound the block.
   const lines = paneText
     .split("\n")
     .filter((raw) => !isSeparatorRule(raw))
@@ -168,11 +155,10 @@ export function extractPermissionPrompt(paneText: string): string | null {
   }
   if (termIdx < 0) return null;
 
-  // Skip a blank gap and any stacked terminator/chrome lines directly above
-  // the anchor (e.g. "This command requires approval" sits right above "Do you
-  // want to proceed?"), then collect the contiguous command block above it.
-  // Anchoring on the LAST terminator means a stale earlier prompt in
-  // scrollback is ignored.
+  // Skip blank/stacked-terminator lines directly above the anchor ("This
+  // command requires approval" sits right above "Do you want to proceed?"),
+  // then collect the contiguous command block. Anchoring on the LAST
+  // terminator ignores a stale earlier prompt in scrollback.
   const isBoundary = (line: string): boolean =>
     line === "" || TERMINATOR_RE.test(line);
   let i = termIdx - 1;
@@ -208,16 +194,15 @@ export function matchesQuestionPickerSignature(paneText: string): boolean {
 }
 
 /**
- * Extract the question text from a captured AskUserQuestion picker. The shape
- * is a header (an optional "☐ <title>" chip then the question line) above a
- * numbered option list. We anchor on the START of the bottom-most option block
- * — the LAST line that renders as option "1." — which isolates the live picker
- * from a stale scrollback picker AND from a prose numbered list in Claude's own
- * output above it (the sibling `extractPermissionPrompt` anchors on the LAST
- * terminator for the same stale-scrollback reason). The header sits directly
- * above that block; we collect the non-chip lines above it, stopping at the
- * first option line (a prose list), and prefer the nearest question-shaped line
- * (ends with "?"), failing that the nearest header line. Returns null on any
+ * Extract the question text from a captured AskUserQuestion picker: a header
+ * (an optional "☐ <title>" chip then the question line) above a numbered
+ * option list. Anchors on the LAST line rendering as option "1." — the start
+ * of the bottom-most option block — which isolates the live picker from a
+ * stale scrollback picker AND from a prose numbered list in Claude's own
+ * output (the same stale-scrollback reason `extractPermissionPrompt` anchors
+ * on the LAST terminator). Collects the non-chip header lines above it,
+ * stopping at an option line (a prose list), and prefers the nearest
+ * "?"-terminated line, else the nearest header line. Returns null on any
  * shape mismatch so the caller falls back to the base body.
  */
 export function extractQuestionPrompt(paneText: string): string | null {
@@ -262,12 +247,12 @@ function lastAssistantText(entries: LogEntry[]): string | null {
 }
 
 /**
- * Permission context: read the live prompt off the pane. Captures the pane
- * ONCE. If the permission-prompt extraction finds no terminator (returns null)
- * but the same pane shows the AskUserQuestion picker signature, the wait is
- * really a question wearing the shared `permission_prompt` marker — return the
- * question body and a `reclassifyAs: "question"` signal so the notifier renders
- * the Reply variant. Otherwise fail open to a null body.
+ * Permission context: read the live prompt off the pane (captured ONCE). If
+ * no terminator is found but the pane shows the AskUserQuestion picker
+ * signature, the wait is really a question wearing the shared
+ * `permission_prompt` marker — return the question body plus
+ * `reclassifyAs: "question"` so the notifier renders the Reply variant.
+ * Otherwise fail open to a null body.
  */
 async function buildPermissionContext(
   session: NotifyContextSession,
@@ -289,12 +274,10 @@ async function buildPermissionContext(
 }
 
 /**
- * Question context: the rendered option picker on the pane. During an
- * AskUserQuestion wait the picker's `tool_use` is not flushed until after the
- * answer, so the transcript tail holds the PREVIOUS turn's assistant text and
- * trusting it would render confidently-wrong stale text. We read the picker off
- * the pane first and fall back to the transcript tail only when the pane shows
- * no picker — a plain-text question, whose assistant message IS flushed.
+ * Question context: the rendered option picker on the pane, falling back to
+ * the transcript tail only when the pane shows no picker (a plain-text
+ * question). See the module doc for why the transcript can't be trusted
+ * during a picker wait.
  */
 async function buildQuestionContext(
   session: NotifyContextSession,
@@ -333,12 +316,10 @@ async function questionFromTranscript(
 }
 
 /**
- * Build the context for a waiting `session`: an enrichment `body` and an
- * optional delivery-time `reclassifyAs`. Claude only (others return an empty
- * body); `permission` waits render the pending command captured from the pane
- * (and may reclassify to a question — see `buildPermissionContext`), `question`
- * waits render the pane's question picker, falling back to the last assistant
- * message from the transcript only when no picker is on the pane.
+ * Build the context for a waiting `session`: an enrichment `body` plus an
+ * optional delivery-time `reclassifyAs`. Claude only; other agents return an
+ * empty body. See `buildPermissionContext` / `buildQuestionContext` for the
+ * per-type sourcing.
  */
 export async function buildNotificationContext(
   session: NotifyContextSession,
