@@ -256,14 +256,35 @@ export function createNotifyCommand(): Command {
           execPath: process.execPath,
           ccmuxPath: Bun.which("ccmux"),
         });
-        if (!binaryPath) {
-          // The helper isn't installed; the daemon falls to osascript for the
-          // same reason. Report the effective floor honestly.
-          console.log("Backend: osascript (ccmux-notifier helper not found)");
-          printOsascriptHints();
+        if (binaryPath) {
+          await runCcmuxNotifierFlow(binaryPath, notifications, message);
           return;
         }
-        await runCcmuxNotifierFlow(binaryPath, notifications, message);
+        // The helper isn't installed; the daemon falls down its ladder to
+        // osascript for the same reason (see `notify-delivery.ts`), and v1
+        // always delivered via osascript on macOS. Mirror that here: actually
+        // post through the osascript floor instead of printing diagnostics and
+        // dropping the notification.
+        const osascriptOk = await probeBackend("osascript");
+        if (!osascriptOk) {
+          console.error('Notification backend "osascript" is not available.');
+          printFailureHints("osascript");
+          process.exit(1);
+        }
+        await deliver("osascript", {
+          title: "ccmux",
+          body: message ?? TEST_MESSAGE,
+          event: "finished",
+          sessionId: "notify-cli",
+          agent: "ccmux",
+          project: "ccmux",
+          sound: notifications.sound,
+        });
+        // A caller-supplied message stays quiet on success (the script-friendly
+        // contract); the bare invocation reports the effective floor + limits.
+        if (message) return;
+        console.log("Backend: osascript (ccmux-notifier helper not found)");
+        printOsascriptHints();
         return;
       }
 
