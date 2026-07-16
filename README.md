@@ -441,6 +441,11 @@ ccmux daemon restart
 
 Desktop notifications on `waiting`/`finished` transitions, disabled by default. When a session needs permission the banner carries **Approve** / **Deny** buttons, and questions get an inline **Reply** field, so you can unblock an agent straight from the notification without switching to its pane. Focusing a session's pane clears its notification.
 
+<p align="center">
+  <img alt="ccmux notification with Approve / Deny buttons for a permission prompt" src="https://github.com/user-attachments/assets/e2fb5423-eac0-47d5-ae35-b003d797e42c" width="380">
+  <img alt="ccmux notification with an inline Reply field for a question" src="https://github.com/user-attachments/assets/75671613-1c19-47c0-986c-ee41fd6a9860" width="380">
+</p>
+
 ```bash
 ccmux config set notifications.enabled true
 ccmux notify   # sends a test notification and prints setup diagnostics
