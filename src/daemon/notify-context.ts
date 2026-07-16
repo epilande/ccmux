@@ -246,16 +246,44 @@ export function extractQuestionPrompt(paneText: string): string | null {
   return clampBody(question, MAX_CONTEXT_LINES, MAX_CONTEXT_CHARS);
 }
 
-/** Find the last assistant text block across parsed entries. */
-function lastAssistantText(entries: LogEntry[]): string | null {
+/**
+ * The newest assistant text in the tail, but ONLY when it is still the last
+ * conversational text there. Walking back to the most recent text-bearing entry
+ * (each entry's texts are single-role: user string, or assistant text blocks),
+ * a user-role newest text means the assistant turn we'd otherwise quote is stale
+ * (an interrupted/denied turn's "[Request interrupted by user]" marker, or a
+ * fresh prompt), so return null. Guards both the finished body and the
+ * question-tail fallback against quoting a superseded turn.
+ */
+function lastAssistantTextIfCurrent(entries: LogEntry[]): string | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     const texts = claudeEntryTexts(entries[i]);
     if (texts.length === 0) continue;
-    for (let j = texts.length - 1; j >= 0; j--) {
-      if (texts[j].role === "assistant") return texts[j].text;
-    }
+    const newest = texts[texts.length - 1];
+    return newest.role === "assistant" ? newest.text : null;
   }
   return null;
+}
+
+/**
+ * Shared transcript-tail pipeline: read the tail, parse it, and return the
+ * newest assistant text clamped to `maxLines` / `maxChars` (via
+ * {@link lastAssistantTextIfCurrent}, so a stale tail returns null). Fail-open:
+ * a read/parse error returns null so the caller can fall through.
+ */
+async function assistantTextFromTranscript(
+  logPath: string,
+  maxLines: number,
+  maxChars: number,
+): Promise<string | null> {
+  try {
+    const content = await readTranscriptTail(logPath, CONTEXT_TAIL_BYTES);
+    const text = lastAssistantTextIfCurrent(parseLogEntries(content));
+    if (text === null) return null;
+    return clampBody(text, maxLines, maxChars);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -308,23 +336,18 @@ async function buildQuestionContext(
   return questionFromTranscript(session);
 }
 
-/** The transcript-tail half of {@link buildQuestionContext}. */
+/** The transcript-tail half of {@link buildQuestionContext}: a plain-text
+ *  question IS the tail's last assistant text, so the shared pipeline's
+ *  stale-tail guard leaves it intact while rejecting a superseded turn. */
 async function questionFromTranscript(
   session: NotifyContextSession,
 ): Promise<string | null> {
   if (!session.logPath) return null;
-  try {
-    const content = await readTranscriptTail(
-      session.logPath,
-      CONTEXT_TAIL_BYTES,
-    );
-    const entries = parseLogEntries(content);
-    const text = lastAssistantText(entries);
-    if (text === null) return null;
-    return clampBody(text, MAX_CONTEXT_LINES, MAX_CONTEXT_CHARS);
-  } catch {
-    return null;
-  }
+  return assistantTextFromTranscript(
+    session.logPath,
+    MAX_CONTEXT_LINES,
+    MAX_CONTEXT_CHARS,
+  );
 }
 
 /**
@@ -355,9 +378,14 @@ export async function buildNotificationContext(
  *   1. Claude with a `logPath`: the last assistant text off the transcript
  *      tail. Unlike a wait, a finished turn IS flushed to the JSONL, so the
  *      tail is current (see the module doc for why a wait can't trust it).
- *   2. Any agent: the session's `lastPrompt` (what the user asked for).
- *   3. Else null — the caller keeps a bare payload; the subtitle carries the
- *      event.
+ *      Skipped when the tail's newest text is a user turn (interrupted/denied,
+ *      or a fresh prompt): the shared pipeline returns null and we fall through
+ *      rather than quoting the previous turn's answer.
+ *   2. Any agent: the session's `lastPrompt` (what the user asked for). The
+ *      transcript read is fail-open on its own, so a deleted/unreadable logPath
+ *      reaches this step instead of skipping the rest of the ladder.
+ *   3. Else null (the caller keeps a bare payload; the subtitle carries the
+ *      event).
  * Clamped tighter than the waiting context. Fail-open: any error returns null.
  */
 export async function buildFinishedContext(
@@ -365,15 +393,12 @@ export async function buildFinishedContext(
 ): Promise<string | null> {
   try {
     if (session.agentType === "claude" && session.logPath) {
-      const content = await readTranscriptTail(
+      const fromTranscript = await assistantTextFromTranscript(
         session.logPath,
-        CONTEXT_TAIL_BYTES,
+        MAX_FINISHED_LINES,
+        MAX_FINISHED_CHARS,
       );
-      const text = lastAssistantText(parseLogEntries(content));
-      if (text !== null) {
-        const clamped = clampBody(text, MAX_FINISHED_LINES, MAX_FINISHED_CHARS);
-        if (clamped !== null) return clamped;
-      }
+      if (fromTranscript !== null) return fromTranscript;
     }
     if (session.lastPrompt) {
       return clampBody(

@@ -29,7 +29,7 @@
  */
 
 import type { Backend, NotificationPayload, SpawnFn } from "../lib/notify";
-import { probeCcmuxNotifier } from "../lib/notify";
+import { isUnrecognizedBackend, probeCcmuxNotifier } from "../lib/notify";
 import type { NotificationsConfig } from "../lib/preferences";
 import type { NotificationActionInput } from "./notification-action";
 
@@ -182,10 +182,22 @@ export function createNotifyDelivery(deps: DeliveryDeps): {
     return dbusNotifier;
   };
 
+  /** Logged at most once per run: a configured backend that isn't recognized
+   * (a typo, or a value removed across versions) is ignored in favor of the
+   * auto ladder rather than silently disabling notifications. */
+  let loggedUnknownBackend = false;
   const resolveConfiguredBackend = (prefs: {
     notifications?: NotificationsConfig;
-  }): Backend | null =>
-    deps.resolveBackend({ backend: prefs.notifications?.backend });
+  }): Backend | null => {
+    const configured = prefs.notifications?.backend;
+    if (isUnrecognizedBackend(configured) && !loggedUnknownBackend) {
+      loggedUnknownBackend = true;
+      log(
+        `Notifier: notifications.backend "${String(configured)}" is not a recognized backend; using the auto ladder`,
+      );
+    }
+    return deps.resolveBackend({ backend: configured });
+  };
 
   async function deliverNotification(
     payload: NotificationPayload,

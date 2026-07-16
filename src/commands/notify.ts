@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { getPreferences } from "../lib/preferences";
 import {
   deliver,
+  isUnrecognizedBackend,
   probeBackend,
   resolveBackend,
   resolveCcmuxNotifierBinary,
@@ -11,6 +12,31 @@ import { DbusNotifier } from "../lib/notify-dbus";
 import { DAEMON_HOST, DAEMON_PORT } from "../lib/config";
 
 const TEST_MESSAGE = "Notifications are working";
+
+/**
+ * The test/diagnostic notification payload, shared by every backend branch so a
+ * contract change (new field, changed default) lands in one place. Mirrors a
+ * real notification's shape: event line in the subtitle, message in the body.
+ * `extra` carries the per-backend fields (ccmux-notifier's helper path/callback,
+ * the "command" backend's shell command).
+ */
+function buildTestPayload(
+  message: string | undefined,
+  notifications: { sound?: boolean | string },
+  extra: Partial<NotificationPayload> = {},
+): NotificationPayload {
+  return {
+    title: "ccmux",
+    subtitle: "Finished",
+    body: message ?? TEST_MESSAGE,
+    event: "finished",
+    sessionId: "notify-cli",
+    agent: "ccmux",
+    project: "ccmux",
+    sound: notifications.sound,
+    ...extra,
+  };
+}
 
 /** macOS Settings deep-link to the ccmux-notifier notifications pane, where the
  * user grants permission and sets Alert Style. The CLI-launched permission
@@ -162,20 +188,10 @@ async function runCcmuxNotifierFlow(
     console.error(`  Open: ${NOTIFICATIONS_SETTINGS_DEEP_LINK}`);
   }
 
-  const payload: NotificationPayload = {
-    title: "ccmux",
-    // Mirror a real notification's shape: the event line is the subtitle, the
-    // message is the body, so `ccmux notify` exercises the subtitle path.
-    subtitle: "Finished",
-    body: message ?? TEST_MESSAGE,
-    event: "finished",
-    sessionId: "notify-cli",
-    agent: "ccmux",
-    project: "ccmux",
-    sound: notifications.sound,
+  const payload = buildTestPayload(message, notifications, {
     notifierPath: binaryPath,
     callbackUrl: CALLBACK_URL,
-  };
+  });
   await deliver("ccmux-notifier", payload);
 
   const settings = await runNotifierJson(binaryPath, ["list"], LIST_TIMEOUT_MS);
@@ -222,6 +238,11 @@ export function createNotifyCommand(): Command {
       const notifications = prefs.notifications ?? {};
 
       const backend = resolveBackend({ backend: notifications.backend });
+      if (isUnrecognizedBackend(notifications.backend)) {
+        console.error(
+          `notifications.backend "${String(notifications.backend)}" is not a recognized backend; using the auto ladder.`,
+        );
+      }
       if (!backend) {
         console.error("No supported notification backend for this platform.");
         printFailureHints("none");
@@ -260,16 +281,7 @@ export function createNotifyCommand(): Command {
           printFailureHints("osascript");
           process.exit(1);
         }
-        await deliver("osascript", {
-          title: "ccmux",
-          subtitle: "Finished",
-          body: message ?? TEST_MESSAGE,
-          event: "finished",
-          sessionId: "notify-cli",
-          agent: "ccmux",
-          project: "ccmux",
-          sound: notifications.sound,
-        });
+        await deliver("osascript", buildTestPayload(message, notifications));
         // A caller-supplied message stays quiet on success (the script-friendly
         // contract); the bare invocation reports the effective floor + limits.
         if (message) return;
@@ -293,16 +305,9 @@ export function createNotifyCommand(): Command {
             process.exit(1);
           }
 
-          const id = await dbusNotifier.notify({
-            title: "ccmux",
-            subtitle: "Finished",
-            body: message ?? TEST_MESSAGE,
-            event: "finished",
-            sessionId: "notify-cli",
-            agent: "ccmux",
-            project: "ccmux",
-            sound: notifications.sound,
-          });
+          const id = await dbusNotifier.notify(
+            buildTestPayload(message, notifications),
+          );
           if (id === null) {
             console.error("Failed to deliver the dbus notification.");
             printFailureHints("dbus");
@@ -319,17 +324,9 @@ export function createNotifyCommand(): Command {
           process.exit(1);
         }
 
-        const payload: NotificationPayload = {
-          title: "ccmux",
-          subtitle: "Finished",
-          body: message ?? TEST_MESSAGE,
-          event: "finished",
-          sessionId: "notify-cli",
-          agent: "ccmux",
-          project: "ccmux",
-          sound: notifications.sound,
+        const payload = buildTestPayload(message, notifications, {
           command: notifications.command,
-        };
+        });
 
         await deliver(backend, payload);
       }

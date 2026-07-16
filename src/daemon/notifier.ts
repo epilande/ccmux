@@ -178,11 +178,11 @@ export function buildStateChangedPayload(
 /**
  * Daemon-side notification dispatcher. Subscribes to `SessionManager`'s
  * `"change"` event and turns `working/waiting/idle` transitions into
- * desktop notifications via an injected `deliver`. See
- * `notifications-plan.md` (Behavior section) for the full spec this
- * implements: edge-triggered events, finished-only debounce with a
- * terminal-only floor, two-condition focus suppression, dedup, and a 60s
- * renotify cooldown cleared early on read.
+ * desktop notifications via an injected `deliver`. See the Notifications
+ * section of `docs/architecture.md` for the behavior spec this implements:
+ * edge-triggered events, finished-only debounce with a terminal-only floor,
+ * two-condition focus suppression, dedup, and a 60s renotify cooldown
+ * cleared early on read.
  *
  * Known limitation (accepted): the dedup key is keyed on `statusChangedAt`,
  * an ISO string with millisecond resolution — two genuinely distinct

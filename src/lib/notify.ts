@@ -203,21 +203,46 @@ export function resolveCcmuxNotifierBinary(
   return which("ccmux-notifier");
 }
 
+/** The concrete backends `deliver` knows how to build (excludes the `"auto"`
+ *  sentinel). Kept local rather than importing the preferences list so this
+ *  module stays free of preference imports. */
+const VALID_BACKENDS = new Set<Backend>([
+  "ccmux-notifier",
+  "osascript",
+  "notify-send",
+  "dbus",
+  "command",
+]);
+
+/** True when `value` names a real backend (not `"auto"`, not an unknown
+ *  string). ccmux.json is hand-edited, so runtime values aren't type-safe. */
+export function isKnownBackend(value: unknown): value is Backend {
+  return typeof value === "string" && VALID_BACKENDS.has(value as Backend);
+}
+
+/** True when a CONFIGURED backend value is neither `"auto"` nor a recognized
+ *  backend, i.e. a typo/removed value `resolveBackend` will ignore (falling to
+ *  the auto ladder). Unset and `"auto"` are recognized (they select the ladder
+ *  on purpose). Lets callers surface a one-line warning. */
+export function isUnrecognizedBackend(value: unknown): boolean {
+  return value !== undefined && value !== "auto" && !isKnownBackend(value);
+}
+
 /**
- * Resolves the backend to use. `"auto"` (the default) walks the ladder:
+ * Resolves the backend to use. A recognized explicit backend always wins,
+ * regardless of platform. `"auto"` (the default), an unset value, OR an
+ * unrecognized value (ccmux.json is hand-edited) all walk the platform ladder:
  * darwin -> ccmux-notifier (the delivery layer falls to osascript when the
  * helper isn't resolvable, mirroring dbus -> notify-send on linux); linux ->
- * dbus; anything else -> disabled. An explicit non-"auto" backend always wins,
- * regardless of platform. An unrecognized value (ccmux.json is hand-edited)
- * rides through unchanged and fails open downstream: the probe/deliver layer
- * builds no argv for it and disables it rather than throwing.
+ * dbus; anything else -> disabled. Routing a typo to the working default beats
+ * silently hard-disabling notifications; callers surface it via
+ * {@link isUnrecognizedBackend}.
  */
 export function resolveBackend(
   config: NotifyConfig,
   platform: NodeJS.Platform = process.platform,
 ): Backend | null {
-  const backend = config.backend ?? "auto";
-  if (backend !== "auto") return backend;
+  if (isKnownBackend(config.backend)) return config.backend;
 
   if (platform === "darwin") {
     return "ccmux-notifier";
@@ -300,11 +325,12 @@ export async function probeBackend(
   ) {
     return true;
   }
-  const exitCode = await runWithTimeout(
-    PROBE_ARGV[backend],
-    PROBE_TIMEOUT_MS,
-    spawn,
-  );
+  // No static probe argv (an unrecognized backend slipped past resolution):
+  // report disabled explicitly rather than relying on `spawn(undefined)` to
+  // throw its way to a false.
+  const argv = PROBE_ARGV[backend];
+  if (!argv) return false;
+  const exitCode = await runWithTimeout(argv, PROBE_TIMEOUT_MS, spawn);
   return exitCode === 0;
 }
 
@@ -430,8 +456,11 @@ function buildCommandEnv(payload: NotificationPayload): Record<string, string> {
     CCMUX_PROJECT: payload.project,
     CCMUX_BRANCH: payload.branch ?? "",
     CCMUX_TITLE: payload.title,
+    // CCMUX_SUBTITLE is the bare event line for structured consumers; CCMUX_BODY
+    // is the complete text (subtitle folded in), matching the notify-send/dbus
+    // rendering, so a script reading only $CCMUX_BODY still gets the event line.
     CCMUX_SUBTITLE: payload.subtitle ?? "",
-    CCMUX_BODY: payload.body,
+    CCMUX_BODY: foldSubtitleIntoBody(payload),
     CCMUX_PANE: payload.pane ?? "",
   };
 }

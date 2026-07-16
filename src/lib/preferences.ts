@@ -186,9 +186,9 @@ export interface NotificationsConfig {
   sound?: boolean | string;
   /** debounce (ms) for the "finished" event only; default 1000 */
   delayMs?: number;
-  /** default "auto" (platform-appropriate ladder). An unrecognized value fails
-   * open: the delivery layer builds no argv for it and disables it rather than
-   * throwing. */
+  /** default "auto" (platform-appropriate ladder). An unrecognized value (the
+   * file is hand-edited) is ignored and falls back to the auto ladder, with a
+   * one-line warning, rather than disabling notifications. */
   backend?: (typeof VALID_NOTIFICATION_BACKENDS)[number];
   /** shell command run when backend is "command" */
   command?: string;

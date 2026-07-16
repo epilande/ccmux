@@ -50,6 +50,16 @@ function assistantText(text: string) {
   };
 }
 
+/** A user-role text turn (string content), e.g. a fresh prompt or an
+ *  "[Request interrupted by user]" marker after an assistant turn. */
+function userText(text: string) {
+  return {
+    type: "user",
+    message: { role: "user", content: text },
+    timestamp: "2024-01-15T12:00:00Z",
+  };
+}
+
 /** A permission session whose pane capture returns `paneText`. */
 function permissionSession(
   paneText: string,
@@ -511,6 +521,31 @@ describe("buildFinishedContext", () => {
     );
   });
 
+  it("falls through to lastPrompt when a user turn follows the last assistant text (stale tail)", async () => {
+    // An interrupted/denied turn or a fresh prompt lands as a user text AFTER
+    // the last assistant text; quoting that assistant text would be the
+    // previous turn's answer, so the ladder falls through to lastPrompt.
+    const path = await writeTranscript([
+      assistantText("Old answer from the previous turn."),
+      userText("[Request interrupted by user]"),
+    ]);
+    expect(
+      await buildFinishedContext(
+        finishedSession({ logPath: path, lastPrompt: "resume the refactor" }),
+      ),
+    ).toBe("resume the refactor");
+  });
+
+  it("returns null on a stale tail when there is no lastPrompt", async () => {
+    const path = await writeTranscript([
+      assistantText("Old answer."),
+      userText("a fresh prompt"),
+    ]);
+    expect(
+      await buildFinishedContext(finishedSession({ logPath: path })),
+    ).toBeNull();
+  });
+
   it("falls back to lastPrompt when the transcript has no assistant text", async () => {
     const path = await writeTranscript([
       assistantToolUse("Bash", { command: "x" }),
@@ -542,6 +577,19 @@ describe("buildFinishedContext", () => {
         finishedSession({ logPath: join(dir, "does-not-exist.jsonl") }),
       ),
     ).toBeNull();
+  });
+
+  it("falls through to lastPrompt when the transcript read throws (missing file)", async () => {
+    // The transcript branch's own failure must NOT skip the lastPrompt step:
+    // an unreadable logPath still yields the clamped lastPrompt.
+    expect(
+      await buildFinishedContext(
+        finishedSession({
+          logPath: join(dir, "does-not-exist.jsonl"),
+          lastPrompt: "wire up the notifier",
+        }),
+      ),
+    ).toBe("wire up the notifier");
   });
 
   it("clamps the finished body tighter than the waiting context (2 lines / 200 chars)", async () => {

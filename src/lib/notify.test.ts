@@ -14,6 +14,7 @@ import {
   deliverTimeoutFor,
   DELIVER_TIMEOUT_MS,
   foldSubtitleIntoBody,
+  isUnrecognizedBackend,
   NOTIFIER_DELIVER_TIMEOUT_MS,
   probeBackend,
   probeCcmuxNotifier,
@@ -85,12 +86,28 @@ describe("resolveBackend", () => {
     );
   });
 
-  it("passes an unrecognized backend through unchanged (fail-open; ccmux.json is hand-edited)", () => {
-    // A typo/removed value must not throw here; it rides through and the
-    // deliver/probe layer degrades gracefully (see the deliver test below).
+  it("resolves an unrecognized backend to the platform ladder (ccmux.json is hand-edited)", () => {
+    // A typo/removed value is ignored in favor of the working default rather
+    // than passing through to a silent hard-disable downstream.
     expect(resolveBackend({ backend: "bogus" as never }, "darwin")).toBe(
-      "bogus" as never,
+      "ccmux-notifier",
     );
+    expect(resolveBackend({ backend: "bogus" as never }, "linux")).toBe("dbus");
+    expect(resolveBackend({ backend: "bogus" as never }, "win32")).toBe(null);
+  });
+});
+
+describe("isUnrecognizedBackend", () => {
+  it("is false for a recognized backend, unset, or auto", () => {
+    expect(isUnrecognizedBackend("osascript")).toBe(false);
+    expect(isUnrecognizedBackend("dbus")).toBe(false);
+    expect(isUnrecognizedBackend(undefined)).toBe(false);
+    expect(isUnrecognizedBackend("auto")).toBe(false);
+  });
+
+  it("is true for a typo/removed value", () => {
+    expect(isUnrecognizedBackend("terminal-notifier")).toBe(true);
+    expect(isUnrecognizedBackend("bogus")).toBe(true);
   });
 });
 
@@ -591,16 +608,22 @@ describe("deliver: command", () => {
       CCMUX_PROJECT: "ccmux",
       CCMUX_BRANCH: "main",
       CCMUX_TITLE: BASE_PAYLOAD.title,
+      // Split contract: SUBTITLE is the bare event line; BODY is the complete
+      // text (subtitle folded in), so a script reading only $CCMUX_BODY still
+      // sees the event line.
       CCMUX_SUBTITLE: "Finished",
-      CCMUX_BODY: BASE_PAYLOAD.body,
+      CCMUX_BODY: `Finished\n${BASE_PAYLOAD.body}`,
       CCMUX_PANE: "%3",
     });
   });
 
-  it("exposes an empty CCMUX_SUBTITLE when the payload has no subtitle", async () => {
+  it("with no subtitle, CCMUX_SUBTITLE is empty and CCMUX_BODY is just the body", async () => {
     const { spawn, calls } = fakeSpawn();
     await deliver("command", { ...BASE_PAYLOAD, command: "echo hi" }, spawn);
-    expect(calls[0].options?.env).toMatchObject({ CCMUX_SUBTITLE: "" });
+    expect(calls[0].options?.env).toMatchObject({
+      CCMUX_SUBTITLE: "",
+      CCMUX_BODY: BASE_PAYLOAD.body,
+    });
   });
 
   it("falls back to empty-string env for a null branch/pane", async () => {
@@ -632,16 +655,6 @@ describe("deliver: dbus (documented no-op)", () => {
   });
 });
 
-describe("deliver: unrecognized backend (fail-open)", () => {
-  it("builds no argv and spawns nothing for an unknown backend value", async () => {
-    // ccmux.json is hand-edited, so a typo/removed backend reaches here; it
-    // must no-op rather than throw.
-    const { spawn, calls } = fakeSpawn();
-    await deliver("bogus" as never, BASE_PAYLOAD, spawn);
-    expect(calls).toHaveLength(0);
-  });
-});
-
 describe("probeBackend", () => {
   it('probes osascript with `-e "return 0"` and reports success on exit 0', async () => {
     const { spawn, calls } = fakeSpawn(0);
@@ -669,6 +682,15 @@ describe("probeBackend", () => {
     expect(await probeBackend("command", spawn)).toBe(true);
     expect(await probeBackend("dbus", spawn)).toBe(true);
     expect(await probeBackend("ccmux-notifier", spawn)).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("reports disabled without spawning for a backend with no probe argv", async () => {
+    // Defense-in-depth: an unrecognized backend that somehow reached here has
+    // no PROBE_ARGV entry, so the guard returns false rather than relying on
+    // spawn(undefined) throwing.
+    const { spawn, calls } = fakeSpawn(0);
+    expect(await probeBackend("bogus" as never, spawn)).toBe(false);
     expect(calls).toHaveLength(0);
   });
 });

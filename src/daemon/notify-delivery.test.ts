@@ -189,6 +189,28 @@ describe("createNotifyDelivery: probe-once-disable", () => {
   });
 });
 
+describe("createNotifyDelivery: unrecognized backend", () => {
+  it("logs once per run when the configured backend is unrecognized, still delivering via the ladder", async () => {
+    const { deps, delivered, logs } = createDeps({
+      getPrefs: async () => ({
+        notifications: { backend: "bogus" as never },
+      }),
+      // The real resolveBackend maps the unknown value onto the ladder; the
+      // fake stands in for its darwin result.
+      resolveBackend: () => "osascript",
+    });
+    const { deliver } = createNotifyDelivery(deps);
+
+    await deliver(BASE_PAYLOAD);
+    await deliver(BASE_PAYLOAD);
+
+    expect(delivered.map((d) => d.backend)).toEqual(["osascript", "osascript"]);
+    expect(
+      logs.filter((l) => l.includes("is not a recognized backend")),
+    ).toHaveLength(1);
+  });
+});
+
 describe("createNotifyDelivery: ccmux-notifier rung", () => {
   it("stamps the resolved helper path + callback URL onto the delivered payload", async () => {
     const { deps, delivered } = createDeps({

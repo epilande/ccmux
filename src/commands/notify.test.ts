@@ -146,6 +146,35 @@ function reset(): void {
   notifierSpawnArgs.length = 0;
 }
 
+describe("ccmux notify: unrecognized backend", () => {
+  it("warns that the value is not recognized and falls back to the ladder", async () => {
+    reset();
+    // Hand-edited ccmux.json can carry a typo; the CLI must warn and degrade to
+    // the auto ladder rather than exit or silently hard-disable.
+    prefs = {
+      notifications: { backend: "bogus" },
+    } as unknown as Preferences;
+    resolvedBackend = "osascript";
+    const restorePlatform = withPlatform("darwin");
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runNotify();
+
+      expect(exit).toBeNull();
+      const err = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(err).toContain("is not a recognized backend");
+      expect(deliverCalls[0]?.backend).toBe("osascript");
+    } finally {
+      restoreExit();
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+      restorePlatform();
+    }
+  });
+});
+
 describe("ccmux notify: osascript", () => {
   it("bare invocation delivers the test message and prints diagnostics + honest limits", async () => {
     reset();
