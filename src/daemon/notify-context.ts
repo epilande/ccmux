@@ -26,6 +26,10 @@ import { readTranscriptTail, claudeEntryTexts } from "./transcript-search";
 import { stripControlChars } from "./notify-text";
 import { capturePane } from "./pane-io";
 import { isPlanApprovalWait } from "./notification-action";
+import {
+  PROMPT_TERMINATOR_RE as TERMINATOR_RE,
+  classifyClaudePromptPane,
+} from "./pane-classify";
 import type { AssistantLogEntry, LogEntry, ToolUseBlock } from "../types/log";
 
 /** Minimal shape this module reads off a session (keeps it testable without
@@ -124,12 +128,6 @@ function cleanPromptLine(line: string): string {
     .replace(/｜/g, " ")
     .trim();
 }
-
-/** Lines that mark the END of the command block (everything above them, up to
- *  the first blank line, is the block). Kept in sync with Claude's permission
- *  prompt chrome and the `terminalRules` anchors in `src/lib/agents.ts`. */
-const TERMINATOR_RE =
-  /(requires approval|do you want to proceed|would you like to proceed|do you want to make this edit|do you want to create)/i;
 
 /**
  * A full-width separator rule row (the divider Claude renders around an Edit /
@@ -269,19 +267,20 @@ function lastAssistantTextIfCurrent(entries: LogEntry[]): string | null {
 }
 
 /**
- * Shared transcript-tail pipeline: read the tail, parse it, and return the
- * newest assistant text clamped to `maxLines` / `maxChars` (via
- * {@link lastAssistantTextIfCurrent}, so a stale tail returns null). Fail-open:
- * a read/parse error returns null so the caller can fall through.
+ * Shared transcript-tail pipeline: read the tail, parse it, run `extract` over
+ * the entries, and clamp the result to `maxLines` / `maxChars`. `extract`
+ * returning null (stale/absent content) yields null. Fail-open: any read/parse
+ * error returns null so the caller can fall through.
  */
-async function assistantTextFromTranscript(
+async function extractFromTranscriptTail(
   logPath: string,
+  extract: (entries: LogEntry[]) => string | null,
   maxLines: number,
   maxChars: number,
 ): Promise<string | null> {
   try {
     const content = await readTranscriptTail(logPath, CONTEXT_TAIL_BYTES);
-    const text = lastAssistantTextIfCurrent(parseLogEntries(content));
+    const text = extract(parseLogEntries(content));
     if (text === null) return null;
     return clampBody(text, maxLines, maxChars);
   } catch {
@@ -289,29 +288,34 @@ async function assistantTextFromTranscript(
   }
 }
 
+function assistantTextFromTranscript(
+  logPath: string,
+  maxLines: number,
+  maxChars: number,
+): Promise<string | null> {
+  return extractFromTranscriptTail(
+    logPath,
+    lastAssistantTextIfCurrent,
+    maxLines,
+    maxChars,
+  );
+}
+
 /**
- * Permission context: read the live prompt off the pane (captured ONCE). If
- * no terminator is found but the pane shows the AskUserQuestion picker
- * signature, the wait is really a question wearing the shared
- * `permission_prompt` marker — return the question body plus
- * `reclassifyAs: "question"` so the notifier renders the Reply variant.
- * Otherwise fail open to a null body.
+ * Permission context from an already-captured pane (`paneText`; null when the
+ * pane couldn't be read, which fails open to a null body). If no terminator is
+ * found but the pane shows the AskUserQuestion picker signature, the wait is
+ * really a question wearing the shared `permission_prompt` marker — return the
+ * question body plus `reclassifyAs: "question"` so the notifier renders the
+ * Reply variant. The caller captures once and shares the text with the pane
+ * classifier, so plan/permission/question all decide off ONE capture.
  */
-async function buildPermissionContext(
-  session: NotifyContextSession,
-  capture: (paneId: string, lines?: number) => Promise<string>,
-): Promise<NotificationContext> {
-  if (!session.tmuxPane) return { body: null };
-  let text: string;
-  try {
-    text = await capture(session.tmuxPane, PANE_CAPTURE_LINES);
-  } catch {
-    return { body: null };
-  }
-  const permission = extractPermissionPrompt(text);
+function buildPermissionContext(paneText: string | null): NotificationContext {
+  if (paneText === null) return { body: null };
+  const permission = extractPermissionPrompt(paneText);
   if (permission !== null) return { body: permission };
-  if (matchesQuestionPickerSignature(text)) {
-    return { body: extractQuestionPrompt(text), reclassifyAs: "question" };
+  if (matchesQuestionPickerSignature(paneText)) {
+    return { body: extractQuestionPrompt(paneText), reclassifyAs: "question" };
   }
   return { body: null };
 }
@@ -354,18 +358,25 @@ async function questionFromTranscript(
 }
 
 /**
- * The `input.plan` markdown of the LAST `ExitPlanMode` tool_use in the tail, or
- * null. Unlike a permission-gated tool_use (backdated to AFTER the user
- * responds), ExitPlanMode's tool_use IS flushed to the JSONL DURING the wait
- * with `input.plan` populated (verified on Claude Code 2.1.211), so the tail is
- * the live plan. Shape-guarded so a schema-invalid line yields null, not a throw.
+ * The `input.plan` markdown of the CURRENT `ExitPlanMode` wait, or null. Unlike a
+ * permission-gated tool_use (backdated to AFTER the user responds), ExitPlanMode's
+ * tool_use IS flushed to the JSONL DURING the wait with `input.plan` populated
+ * (verified on Claude Code 2.1.211), so the tail is the live plan. Currency guard,
+ * mirroring {@link lastAssistantTextIfCurrent}: a newer USER-role text turn than
+ * the ExitPlanMode tool_use means the wait was already answered/superseded, so
+ * return null rather than quote a stale plan. Shape-guarded so a schema-invalid
+ * line yields null, not a throw.
  */
-function lastExitPlanModePlan(entries: LogEntry[]): string | null {
+function currentExitPlanModePlan(entries: LogEntry[]): string | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
-    if (!entry || typeof entry !== "object" || entry.type !== "assistant") {
-      continue;
+    if (!entry || typeof entry !== "object") continue;
+    // A real typed user message newer than the plan supersedes it.
+    const texts = claudeEntryTexts(entry);
+    if (texts.length > 0 && texts[texts.length - 1].role === "user") {
+      return null;
     }
+    if (entry.type !== "assistant") continue;
     const content = (entry as AssistantLogEntry).message?.content;
     if (!Array.isArray(content)) continue;
     for (let j = content.length - 1; j >= 0; j--) {
@@ -382,24 +393,12 @@ function lastExitPlanModePlan(entries: LogEntry[]): string | null {
   return null;
 }
 
-/** The transcript-tail plan body for a plan_approval wait. Fail-open to null. */
-async function planTextFromTranscript(logPath: string): Promise<string | null> {
-  try {
-    const content = await readTranscriptTail(logPath, CONTEXT_TAIL_BYTES);
-    const plan = lastExitPlanModePlan(parseLogEntries(content));
-    if (plan === null) return null;
-    return clampBody(plan, MAX_CONTEXT_LINES, MAX_CONTEXT_CHARS);
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Plan-approval context: transcript-first, with NO pane extractor. Claude's plan
  * box is fixed-height and pads ~10 blank lines between the plan body and the
  * terminator, and the body sits above `PANE_CAPTURE_LINES`, so a pane walk-up
  * grabs only padding (verified on Claude Code 2.1.211). The transcript is the
- * reliable source instead (see `lastExitPlanModePlan`). Returns
+ * reliable source instead (see `currentExitPlanModePlan`). Returns
  * `reclassifyAs: "plan_approval"` only when the wait was STORED as a permission
  * (the marker-fresher window, see `isPlanApprovalWait`), so the subtitle
  * rebuilds from "Needs permission" to "Plan ready for review".
@@ -408,7 +407,12 @@ async function buildPlanContext(
   session: NotifyContextSession,
 ): Promise<NotificationContext> {
   const body = session.logPath
-    ? await planTextFromTranscript(session.logPath)
+    ? await extractFromTranscriptTail(
+        session.logPath,
+        currentExitPlanModePlan,
+        MAX_CONTEXT_LINES,
+        MAX_CONTEXT_CHARS,
+      )
     : null;
   return session.attentionType === "permission"
     ? { body, reclassifyAs: "plan_approval" }
@@ -427,14 +431,35 @@ export async function buildNotificationContext(
 ): Promise<NotificationContext> {
   if (session.agentType !== "claude") return { body: null };
   const capture = deps.capturePane ?? capturePane;
-  // Plan waits are routed FIRST: a live ExitPlanMode wait is stored as a
-  // permission (see `isPlanApprovalWait`), so this must precede the permission
-  // branch or the plan body would be sought (and missed) on the pane.
-  if (isPlanApprovalWait(session)) {
-    return buildPlanContext(session);
-  }
-  if (session.attentionType === "permission") {
-    return buildPermissionContext(session, capture);
+
+  // Plan vs permission is decided off the LIVE pane, not the stored
+  // attentionType/pendingTool, which is unreliable in BOTH directions: a live
+  // plan wait can arrive with pendingTool null (the log stamp can be lost, so
+  // isPlanApprovalWait is false), and a permission wait right after a plan wait
+  // can carry a stale "ExitPlanMode" pendingTool (cascade-evaluator carries the
+  // tool name forward). `classifyClaudePromptPane` overrides `isPlanApprovalWait`
+  // in both directions so the notifier's buttons match what's on screen; a
+  // failed/absent capture falls back to the predicate (the offer is fail-open,
+  // the press-time handler guard is the real enforcement point). A question
+  // picker classifies as null here and falls through to buildPermissionContext,
+  // which detects and reclassifies it as before.
+  if (isPlanApprovalWait(session) || session.attentionType === "permission") {
+    let paneText: string | null = null;
+    if (session.tmuxPane) {
+      try {
+        paneText = await capture(session.tmuxPane, PANE_CAPTURE_LINES);
+      } catch {
+        paneText = null;
+      }
+    }
+    const paneKind =
+      paneText === null ? null : classifyClaudePromptPane(paneText);
+    const isPlan =
+      paneKind === "plan_approval" ||
+      (paneKind === null && isPlanApprovalWait(session));
+    return isPlan
+      ? buildPlanContext(session)
+      : buildPermissionContext(paneText);
   }
   if (session.attentionType === "question") {
     return { body: await buildQuestionContext(session, capture) };

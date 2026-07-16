@@ -19,6 +19,7 @@
 import type { Session } from "../types/session";
 import type { AgentDef } from "../lib/agents";
 import { stripControlChars } from "./notify-text";
+import { classifyClaudePromptPane } from "./pane-classify";
 
 /** The only actions a notification callback may request. `dismiss` is
  *  deliberately absent — a dismissed notification posts nothing. */
@@ -77,10 +78,29 @@ export interface NotificationActionDeps {
   /** Fires a fresh "state changed" notification when a mutating action is
    *  rejected after its session was found (so the user learns it didn't land). */
   reNotify: (session: Session, body: string) => void;
+  /** Captures the target pane's visible text, for the press-time plan/permission
+   *  guard (see `sendKeyToPane`'s sibling `capturePane`). */
+  capturePane: (paneId: string) => Promise<string>;
+  /** The pane's foreground command (`tmux display-message #{pane_current_command}`),
+   *  for the liveness guard. Null on query failure. */
+  getPaneCommand: (paneId: string) => Promise<string | null>;
   log?: (message: string, error?: unknown) => void;
   /** Injectable for tests to avoid real timers between keystrokes. */
   sleep?: (ms: number) => Promise<void>;
 }
+
+/** Foreground commands that mean the agent is gone and the pane is a bare shell,
+ *  where a typed Reply would EXECUTE as a command. A login shell prefixes a
+ *  dash ("-zsh"), stripped before the lookup. */
+const SHELL_COMMANDS = new Set([
+  "zsh",
+  "bash",
+  "fish",
+  "sh",
+  "dash",
+  "nu",
+  "pwsh",
+]);
 
 function isWhitelisted(action: string): action is NotificationActionId {
   return (WHITELIST as readonly string[]).includes(action);
@@ -126,6 +146,11 @@ export function isPlanApprovalWait(session: {
  * means the action is illegal in this state (rejected + re-notified). The
  * caller applies the staleness-token check separately; this is purely the
  * state-legality half of the gate.
+ *
+ * `{ mode: "keys", keys: undefined }` is deliberately NON-null: the action is
+ * legal for the state, but the agent defined no key map. That distinction lets
+ * the keys path return the distinct "Agent has no action map" 409 (a misconfig)
+ * instead of the generic state-changed 409.
  */
 type ActionPlan =
   | { mode: "reply"; prelude?: string[] }
@@ -237,11 +262,8 @@ export async function handleNotificationAction(
   // prelude.
   const tokenMatches =
     (input.statusChangedAt ?? null) === (session.statusChangedAt ?? null);
-  const plan = resolveActionPlan(
-    action,
-    session,
-    deps.getAgent(session.agentType),
-  );
+  const agentDef = deps.getAgent(session.agentType);
+  const plan = resolveActionPlan(action, session, agentDef);
   if (!tokenMatches || plan === null) {
     deps.reNotify(session, STATE_CHANGED_BODY);
     return {
@@ -258,6 +280,21 @@ export async function handleNotificationAction(
     return { code: 409, ok: false, error: "Session has no bound pane" };
   }
   const pane = session.tmuxPane;
+
+  // Liveness guard (before ANY send): the reconciler keeps a dead agent's
+  // session as idle with its pane still bound, so a press after the agent exited
+  // would type into the bare shell — and a Reply would EXECUTE the text. Refuse
+  // if the pane's foreground process is a shell, or if the query fails (fail
+  // CLOSED: a dropped press is recoverable, a command run in the shell is not).
+  const foreground = await deps.getPaneCommand(pane);
+  const bareCommand = foreground?.replace(/^-/, "") ?? null;
+  if (bareCommand === null || SHELL_COMMANDS.has(bareCommand)) {
+    deps.reNotify(session, STATE_CHANGED_BODY);
+    log(
+      `notification-action: pane foreground is "${foreground ?? "unknown"}", refusing to type`,
+    );
+    return { code: 409, ok: false, error: "Session is no longer at the agent" };
+  }
 
   if (plan.mode === "reply") {
     const text = sanitizeReply(input.userText);
@@ -308,6 +345,39 @@ export async function handleNotificationAction(
       `notification-action: no ${action} key map for agent "${session.agentType}"`,
     );
     return { code: 409, ok: false, error: "Agent has no action map" };
+  }
+
+  // Press-time pane guard. A keys send is committed to a specific picker (plan
+  // approve = "2", permission approve = "1"), but the stored plan/permission
+  // classification is unreliable in BOTH directions (a live plan wait can lack
+  // the ExitPlanMode pendingTool; a permission wait after a plan wait can retain
+  // it via the cascade carry-forward), and the staleness token can't catch
+  // either since status never leaves `waiting`. So for an agent whose plan
+  // picker differs from its permission prompt (`planApprove` defined), re-read
+  // the pane and require it to match the type we're about to key. Fail CLOSED on
+  // a capture miss: sending "1" at a plan picker enables auto mode, "2" at a Bash
+  // prompt is the persistent "don't ask again" grant.
+  if (agentDef?.notificationActions?.planApprove) {
+    const expected = isPlanApprovalWait(session)
+      ? "plan_approval"
+      : "permission";
+    let paneKind: "plan_approval" | "permission" | null;
+    try {
+      paneKind = classifyClaudePromptPane(await deps.capturePane(pane));
+    } catch {
+      paneKind = null;
+    }
+    if (paneKind !== expected) {
+      deps.reNotify(session, STATE_CHANGED_BODY);
+      log(
+        `notification-action: pane shows ${paneKind ?? "no prompt"}, expected ${expected} for ${action}`,
+      );
+      return {
+        code: 409,
+        ok: false,
+        error: "Pane prompt no longer matches the notification",
+      };
+    }
   }
 
   for (let i = 0; i < keys.length; i++) {

@@ -489,11 +489,19 @@ describe("buildNotificationContext: plan_approval", () => {
   const CLAMPED =
     "Plan: add script\nStep 1: create hello.sh\nStep 2: chmod +x\nStep 3: run it…";
 
+  /** A pane that classifies as the plan picker (terminator + "use auto mode"). */
+  const PLAN_PICKER_PANE = [
+    " Would you like to proceed?",
+    " ❯ 1. Yes, and use auto mode",
+    "   2. Yes, manually approve edits",
+  ].join("\n");
+
   it("reads the ExitPlanMode input.plan from the transcript and reclassifies a permission-stored plan wait", async () => {
     // A LIVE plan wait is stored as permission + pendingTool ExitPlanMode (the
-    // marker wins the cascade as waiting_permission). The pane is never read;
-    // the body comes from the transcript, and the wait is reclassified so the
-    // subtitle rebuilds to "Plan ready for review".
+    // marker wins the cascade as waiting_permission). The pane confirms the plan
+    // picker; the BODY comes from the transcript (not the pane, whose plan box
+    // is unreadable), and the wait is reclassified so the subtitle rebuilds to
+    // "Plan ready for review".
     const path = await writeTranscript([
       assistantToolUse("ExitPlanMode", {
         plan: PLAN_MD,
@@ -510,14 +518,98 @@ describe("buildNotificationContext: plan_approval", () => {
           tmuxPane: "%42",
           lastPrompt: null,
         },
-        // capturePane must never be consulted for a plan wait.
+        { capturePane: async () => PLAN_PICKER_PANE },
+      ),
+    ).toEqual({ body: CLAMPED, reclassifyAs: "plan_approval" });
+  });
+
+  it("does NOT reclassify when the predicate says plan but the pane shows a permission prompt", async () => {
+    // Direction (b): a permission wait right after a plan wait can retain a
+    // stale ExitPlanMode pendingTool. The live pane overrides the predicate, so
+    // the notifier offers permission context/buttons, not plan.
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", { plan: PLAN_MD }),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "permission",
+          pendingTool: "ExitPlanMode",
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => BORDERED_PROMPT },
+      ),
+    ).toEqual({
+      body: "rtk curl -sI https://example.com/\nFetch example.com front page",
+    });
+  });
+
+  it("reclassifies to plan when the predicate says permission but the pane shows the plan picker", async () => {
+    // Direction (a): a live plan wait can arrive with pendingTool null (lost log
+    // stamp), so isPlanApprovalWait is false. The live pane overrides it back to
+    // a plan.
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", { plan: "Ship the thing" }),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "permission",
+          pendingTool: null,
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => PLAN_PICKER_PANE },
+      ),
+    ).toEqual({ body: "Ship the thing", reclassifyAs: "plan_approval" });
+  });
+
+  it("falls back to the predicate when the pane capture throws", async () => {
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", { plan: "Ship the thing" }),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "permission",
+          pendingTool: "ExitPlanMode",
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
         {
           capturePane: async () => {
-            throw new Error("pane must not be read for a plan wait");
+            throw new Error("tmux gone");
           },
         },
       ),
-    ).toEqual({ body: CLAMPED, reclassifyAs: "plan_approval" });
+    ).toEqual({ body: "Ship the thing", reclassifyAs: "plan_approval" });
+  });
+
+  it("returns a null body when a newer user message supersedes the plan (currency guard)", async () => {
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", { plan: PLAN_MD }),
+      userText("actually, do something else"),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "permission",
+          pendingTool: "ExitPlanMode",
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => PLAN_PICKER_PANE },
+      ),
+    ).toEqual({ body: null, reclassifyAs: "plan_approval" });
   });
 
   it("does not reclassify a wait already stored as plan_approval", async () => {

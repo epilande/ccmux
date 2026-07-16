@@ -235,6 +235,9 @@ Configure further with `ccmux config set notifications.<key> <value>`, or edit `
 > [!NOTE]
 > **Approve/Deny only send the mapped keystroke** to that session's pane (for Claude, the same key you'd press yourself). **Approve on a plan** picks "manually approve edits" (edits stay gated), never Claude's auto-accept mode. **Reply on a permission or plan notification denies the pending tool/plan** and sends your text as the next message (it cancels the prompt first, then types). If the session moved on since the notification fired, the press sends nothing and you get a fresh "state changed" notification instead; dismissing a notification never approves anything.
 
+> [!NOTE]
+> A custom `agents.<name>.notificationActions` override **replaces the whole map**, it is not merged key by key. It now controls the reply surfaces too (`replyOnQuestion`, `replyOnFinished`, `permissionReplyPrelude`, and the `plan*` keys), so any key you leave out is dropped rather than inherited from the built-in default. Copy across every key you still want when you override it.
+
 ### Search Mode
 
 Press <kbd>/</kbd> to filter the list as you type. ccmux searches several sources at once and highlights why each row matched:

@@ -86,7 +86,13 @@ import {
   handleNotificationAction,
   type NotificationActionInput,
 } from "./notification-action";
-import { sendKeyToPane, sendLiteralToPane, sendPromptToPane } from "./pane-io";
+import {
+  capturePane,
+  getPaneCurrentCommand,
+  sendKeyToPane,
+  sendLiteralToPane,
+  sendPromptToPane,
+} from "./pane-io";
 import { DbusNotifier } from "../lib/notify-dbus";
 import { isTerminalFrontmost, resolveTerminalBundleId } from "./focus";
 import {
@@ -325,6 +331,8 @@ export class Daemon {
       getAgent: (agentType) => this.agents.find((a) => a.name === agentType),
       sendKey: sendKeyToPane,
       sendText: sendLiteralToPane,
+      capturePane: (paneId) => capturePane(paneId),
+      getPaneCommand: getPaneCurrentCommand,
       jump: (session) =>
         performJump(
           {

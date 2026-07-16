@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   handleNotificationAction,
+  isPlanApprovalWait,
   sanitizeReply,
   MAX_NOTIFICATION_REPLY_CHARS,
   STATE_CHANGED_BODY,
@@ -12,6 +13,22 @@ import type { Session } from "../types/session";
 const opencodeAgent = BUILTIN_AGENTS.find((a) => a.name === "opencode")!;
 
 const STAMP = "2024-01-15T12:00:00.000Z";
+
+/** Pane captures classifyClaudePromptPane maps to each type: a permission prompt
+ *  (terminator + numbered options, no auto mode) and a plan picker (terminator +
+ *  the "use auto mode" option). The makeDeps default returns whichever matches
+ *  the session's stored type, so the press-time guard passes unless a test
+ *  overrides `captureText` to force a mismatch. */
+const PERMISSION_PANE = [
+  " Do you want to proceed?",
+  " ❯ 1. Yes",
+  "   2. No",
+].join("\n");
+const PLAN_PANE = [
+  " Would you like to proceed?",
+  " ❯ 1. Yes, and use auto mode",
+  "   2. Yes, manually approve edits",
+].join("\n");
 
 function mkSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -50,6 +67,13 @@ function makeDeps(
     getAgent: (t: string) => AgentDef | undefined;
     sendKeyResult: boolean;
     sendTextResult: boolean;
+    /** Force the press-time pane capture; default matches the session's type. */
+    captureText: string;
+    /** Make the pane capture throw (guard fails closed). */
+    captureThrows: boolean;
+    /** Foreground command for the liveness guard. `undefined` => "claude"
+     *  (agent alive); pass a shell name or `null` to trip the guard. */
+    paneCommand: string | null;
   }> = {},
 ) {
   const sendKeyCalls: Array<{ pane: string; key: string }> = [];
@@ -57,6 +81,7 @@ function makeDeps(
     [];
   const reNotifyCalls: Array<{ id: string; body: string }> = [];
   const jumpCalls: Session[] = [];
+  const capturePaneCalls: string[] = [];
 
   const deps: NotificationActionDeps = {
     getSession: (id) => (session && session.id === id ? session : undefined),
@@ -70,6 +95,16 @@ function makeDeps(
       sendTextCalls.push({ pane, text, enter });
       return overrides.sendTextResult ?? true;
     },
+    capturePane: async (pane) => {
+      capturePaneCalls.push(pane);
+      if (overrides.captureThrows) throw new Error("capture failed");
+      if (overrides.captureText !== undefined) return overrides.captureText;
+      return session && isPlanApprovalWait(session)
+        ? PLAN_PANE
+        : PERMISSION_PANE;
+    },
+    getPaneCommand: async () =>
+      overrides.paneCommand !== undefined ? overrides.paneCommand : "claude",
     jump: async (s) => {
       jumpCalls.push(s);
     },
@@ -78,7 +113,14 @@ function makeDeps(
     },
     sleep: async () => {},
   };
-  return { deps, sendKeyCalls, sendTextCalls, reNotifyCalls, jumpCalls };
+  return {
+    deps,
+    sendKeyCalls,
+    sendTextCalls,
+    reNotifyCalls,
+    jumpCalls,
+    capturePaneCalls,
+  };
 }
 
 describe("sanitizeReply", () => {
@@ -635,5 +677,121 @@ describe("handleNotificationAction: plan_approval", () => {
     expect(res.code).toBe(409);
     expect(sendKeyCalls).toHaveLength(0);
     expect(reNotifyCalls).toHaveLength(1);
+  });
+});
+
+describe("handleNotificationAction: liveness guard", () => {
+  it("rejects approve when the pane's foreground is a shell (agent exited)", async () => {
+    const session = mkSession(); // permission
+    const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session, {
+      paneCommand: "zsh",
+    });
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+
+  it("rejects a reply when the pane's foreground is a login shell (-bash)", async () => {
+    const session = mkSession({ attentionType: "question", pendingTool: null });
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      paneCommand: "-bash",
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "hi",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+
+  it("rejects when the pane-command query fails (fail closed)", async () => {
+    const session = mkSession();
+    const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session, {
+      paneCommand: null,
+    });
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+});
+
+describe("handleNotificationAction: press-time pane guard", () => {
+  it("rejects a plan approve when the pane now shows a permission prompt", async () => {
+    const session = mkSession({
+      attentionType: "permission",
+      pendingTool: "ExitPlanMode",
+    }); // isPlanApprovalWait -> expects plan_approval
+    const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: PERMISSION_PANE,
+    });
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+
+  it("rejects a permission approve when the pane now shows the plan picker", async () => {
+    const session = mkSession(); // permission, expects permission
+    const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: PLAN_PANE,
+    });
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+
+  it("rejects (fail closed) when the pane capture throws", async () => {
+    const session = mkSession();
+    const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session, {
+      captureThrows: true,
+    });
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+
+  it("skips the guard (no capture) when the agent def has no planApprove", async () => {
+    const noPlanAgent: AgentDef = {
+      ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
+      notificationActions: { approve: ["1"], deny: ["Escape"] },
+    };
+    const session = mkSession(); // permission
+    const { deps, sendKeyCalls, capturePaneCalls } = makeDeps(session, {
+      getAgent: () => noPlanAgent,
+      // Would classify as null (no prompt) and 409 IF the guard ran.
+      captureText: "",
+    });
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "1" }]);
+    expect(capturePaneCalls).toHaveLength(0);
   });
 });

@@ -108,17 +108,27 @@ function describeAttention(
   }
 }
 
-/** Approve/Deny buttons for a wait, each present only when the agent defines
- *  keys for it (a button with no key map would be a dead press). Shared by the
- *  `permission` and `plan_approval` branches, which differ only in key source. */
+/** The inline Reply action, hoisted so every branch stamps the identical
+ *  literal (the macOS helper keys its categories off the exact action set). */
+const REPLY_ACTION = { id: "answer", label: "Reply" } as const;
+
+/** Approve/Deny buttons for a wait: BOTH or NEITHER. The macOS helper registers
+ *  exactly three notification categories (approve+deny, reply-only,
+ *  approve+deny+reply), so a lone Approve or Deny matches none and renders with
+ *  NO buttons at all. A def with only one key map is a misconfig; drop both
+ *  rather than ship a silently button-less banner. Shared by the `permission`
+ *  and `plan_approval` branches, which differ only in key source. */
 function buildActionButtons(
   approveKeys: string[] | undefined,
   denyKeys: string[] | undefined,
 ): NonNullable<NotificationPayload["actions"]> {
-  const actions: NonNullable<NotificationPayload["actions"]> = [];
-  if (approveKeys?.length) actions.push({ id: "approve", label: "Approve" });
-  if (denyKeys?.length) actions.push({ id: "deny", label: "Deny" });
-  return actions;
+  if (approveKeys?.length && denyKeys?.length) {
+    return [
+      { id: "approve", label: "Approve" },
+      { id: "deny", label: "Deny" },
+    ];
+  }
+  return [];
 }
 
 function buildTitle(session: Readonly<Session>): string {
@@ -459,8 +469,11 @@ export class Notifier {
       const body = await buildFinished(session);
       if (body) payload.body = body;
       const map = this.deps.getAgent?.(session.agentType)?.notificationActions;
-      if (map?.replyOnFinished)
-        payload.reply = { id: "answer", label: "Reply" };
+      // Reply needs a bound pane to type into; a paneless (background /
+      // soft-evicted) row would advertise a Reply that can only 409 and discard
+      // the user's text.
+      if (map?.replyOnFinished && session.tmuxPane)
+        payload.reply = REPLY_ACTION;
       return payload;
     }
 
@@ -474,25 +487,30 @@ export class Notifier {
     const effectiveAttention = context.reclassifyAs ?? session.attentionType;
     const map = this.deps.getAgent?.(session.agentType)?.notificationActions;
 
-    if (effectiveAttention === "permission") {
-      const actions = buildActionButtons(map?.approve, map?.deny);
-      if (actions.length > 0) payload.actions = actions;
-      // A permission Reply is a deny-with-feedback (label stays "Reply"; the
-      // deny semantics live in the handler and README). The combined
-      // Approve/Deny+Reply category is already registered in the macOS helper.
-      if (map?.permissionReplyPrelude?.length) {
-        payload.reply = { id: "answer", label: "Reply" };
-      }
-    } else if (effectiveAttention === "question" && map?.replyOnQuestion) {
-      payload.reply = { id: "answer", label: "Reply" };
-    } else if (effectiveAttention === "plan_approval") {
-      // ExitPlanMode wait: same Approve/Deny + optional Reply shape as
-      // permission, but gated on the separate plan key maps (approve = the plain
-      // "manually approve edits" digit, never auto mode; see the Claude def).
-      const actions = buildActionButtons(map?.planApprove, map?.planDeny);
-      if (actions.length > 0) payload.actions = actions;
-      if (map?.planReplyPrelude?.length) {
-        payload.reply = { id: "answer", label: "Reply" };
+    // Every action/reply types into the pane, so a paneless (background /
+    // soft-evicted) row gets none: the button would only ever 409. The context
+    // body/subtitle below still enrich the informational notification.
+    if (session.tmuxPane) {
+      if (effectiveAttention === "permission") {
+        const actions = buildActionButtons(map?.approve, map?.deny);
+        if (actions.length > 0) payload.actions = actions;
+        // A permission Reply is a deny-with-feedback (label stays "Reply"; the
+        // deny semantics live in the handler and README). The combined
+        // Approve/Deny+Reply category is already registered in the macOS helper.
+        if (map?.permissionReplyPrelude?.length) {
+          payload.reply = REPLY_ACTION;
+        }
+      } else if (effectiveAttention === "question" && map?.replyOnQuestion) {
+        payload.reply = REPLY_ACTION;
+      } else if (effectiveAttention === "plan_approval") {
+        // ExitPlanMode wait: same Approve/Deny + optional Reply shape as
+        // permission, but gated on the separate plan key maps (approve = the
+        // plain "manually approve edits" digit, never auto mode; see the def).
+        const actions = buildActionButtons(map?.planApprove, map?.planDeny);
+        if (actions.length > 0) payload.actions = actions;
+        if (map?.planReplyPrelude?.length) {
+          payload.reply = REPLY_ACTION;
+        }
       }
     }
 

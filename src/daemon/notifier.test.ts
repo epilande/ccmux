@@ -1096,6 +1096,50 @@ describe("Notifier", () => {
       expect(payload.actions).toBeUndefined();
     });
 
+    it("omits buttons for a def with only approve (both Approve+Deny or neither)", async () => {
+      const approveOnlyAgent: AgentDef = {
+        ...claudeAgent,
+        notificationActions: { approve: ["1"] },
+      };
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Bash",
+        getAgent: () => approveOnlyAgent,
+      });
+      // A lone button matches none of the macOS helper's registered categories,
+      // so it is dropped rather than shipped as a silently button-less banner.
+      expect(payload.actions).toBeUndefined();
+    });
+
+    it("stamps neither actions nor reply for a paneless (background) wait", async () => {
+      const h = createHarness();
+      const notifier = new Notifier({
+        ...h.deps,
+        getAgent: () => claudeAgent,
+        buildContext: async () => ({ body: null }),
+      });
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+      const session = h.sessionManager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: "/tmp/myapp",
+        pid: 1,
+      });
+      // Soft-evict the pane: a background/paneless row can only 409 a press.
+      // (tmuxPane is a binding, not a SessionState field, so null it directly.)
+      session.tmuxPane = null;
+      h.sessionManager.updateSession(session.id, {
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash",
+      });
+      await flush();
+      expect(h.delivered.length).toBe(1);
+      expect(h.delivered[0].actions).toBeUndefined();
+      expect(h.delivered[0].reply).toBeUndefined();
+    });
+
     it("stamps a Reply action for a Claude question wait", async () => {
       const payload = await deliverWaiting({
         attentionType: "question",

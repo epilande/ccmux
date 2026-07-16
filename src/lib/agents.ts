@@ -311,21 +311,11 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
   }
   if (override.notificationActions !== undefined) {
     // Whole-object replace (not a per-key merge): a custom map is authored as a
-    // complete approve/deny/answerPrelude set, and merging keys from the
-    // builtin default would silently graft Claude's keystrokes onto a
-    // different agent's prompt.
-    merged.notificationActions = {
-      approve: override.notificationActions.approve,
-      deny: override.notificationActions.deny,
-      answerPrelude: override.notificationActions.answerPrelude,
-      permissionReplyPrelude:
-        override.notificationActions.permissionReplyPrelude,
-      planApprove: override.notificationActions.planApprove,
-      planDeny: override.notificationActions.planDeny,
-      planReplyPrelude: override.notificationActions.planReplyPrelude,
-      replyOnQuestion: override.notificationActions.replyOnQuestion,
-      replyOnFinished: override.notificationActions.replyOnFinished,
-    };
+    // complete set, and merging keys from the builtin default would silently
+    // graft Claude's keystrokes onto a different agent's prompt. The spread
+    // copies every field the config carries, so a new key never needs a
+    // matching line here (and can't be silently dropped when one is forgotten).
+    merged.notificationActions = { ...override.notificationActions };
   }
   if (override.ambiguousPermissionMarker !== undefined) {
     merged.ambiguousPermissionMarker = override.ambiguousPermissionMarker;
