@@ -235,8 +235,7 @@ Configure further with `ccmux config set notifications.<key> <value>`, or edit `
 > [!NOTE]
 > **Approve/Deny only send the mapped keystroke** to that session's pane (for Claude, the same key you'd press yourself). **Approve on a plan** picks "manually approve edits" (edits stay gated), never Claude's auto-accept mode. **Reply on a permission or plan notification denies the pending tool/plan** and sends your text as the next message (it cancels the prompt first, then types). If the session moved on since the notification fired, the press sends nothing and you get a fresh "state changed" notification instead; dismissing a notification never approves anything.
 
-> [!NOTE]
-> A custom `agents.<name>.notificationActions` override **replaces the whole map**, it is not merged key by key. It now controls the reply surfaces too (`replyOnQuestion`, `replyOnFinished`, `permissionReplyPrelude`, and the `plan*` keys), so any key you leave out is dropped rather than inherited from the built-in default. Copy across every key you still want when you override it.
+The keystrokes behind the buttons come from a per-agent `notificationActions` map, overridable per [Custom Agents](#-custom-agents).
 
 ### Search Mode
 
@@ -592,19 +591,20 @@ The built-in agents are the happy path: they ship with hook integration for auth
 }
 ```
 
-You can also override built-in agent settings by using the agent's name as the key (e.g., `"claude"`, `"codex"`).
+You can also override built-in agent settings by using the agent's name as the key (e.g., `"claude"`, `"codex"`). An override of `notificationActions` (the notification button/reply keystroke map) **replaces the whole map**, it is not merged key by key; it also controls the reply surfaces (`replyOnQuestion`, `replyOnFinished`, `permissionReplyPrelude`, and the `plan*` keys), so any key you leave out is dropped rather than inherited from the built-in default. Copy across every key you still want when you override it.
 
-| Field                | Required | Description                                          |
-| :------------------- | :------- | :--------------------------------------------------- |
-| `processMatch`       | Yes\*    | Regex to match the process executable                |
-| `commandPatterns`    | No       | Additional regex patterns to match full commands     |
-| `terminalRules`      | No       | Ordered terminal matching rules                      |
-| `versionCommand`     | No       | Command to get agent version                         |
-| `versionPatterns`    | No       | Regex patterns to extract version from output        |
-| `resumeCommand`      | No       | Command template for restarting (`{id}` placeholder) |
-| `sessionFilePattern` | No       | Regex to extract session ID from log filenames       |
-| `executable`         | No       | Command used to launch the agent (defaults to key)   |
-| `hooks`              | No       | `{ type }` (built-in override only; internal)        |
+| Field                 | Required | Description                                                                         |
+| :-------------------- | :------- | :---------------------------------------------------------------------------------- |
+| `processMatch`        | Yes\*    | Regex to match the process executable                                               |
+| `commandPatterns`     | No       | Additional regex patterns to match full commands                                    |
+| `terminalRules`       | No       | Ordered terminal matching rules                                                     |
+| `versionCommand`      | No       | Command to get agent version                                                        |
+| `versionPatterns`     | No       | Regex patterns to extract version from output                                       |
+| `resumeCommand`       | No       | Command template for restarting (`{id}` placeholder)                                |
+| `sessionFilePattern`  | No       | Regex to extract session ID from log filenames                                      |
+| `executable`          | No       | Command used to launch the agent (defaults to key)                                  |
+| `hooks`               | No       | `{ type }` (built-in override only; internal)                                       |
+| `notificationActions` | No       | Notification button/reply keystroke map (built-in override only; whole-map replace) |
 
 \* Required for new agents; optional when overriding built-in agents.
 
