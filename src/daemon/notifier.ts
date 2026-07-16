@@ -108,32 +108,16 @@ function describeAttention(
   }
 }
 
-/** Max length of the `project:branch` ref token shown in a title before it's
- *  middle-ellipsized. The agent name trails the title, so an unbounded ref would
- *  push the agent name off macOS's single visible title line; the cap protects
- *  it. */
-const MAX_REF_DISPLAY = 30;
-
-/** Middle-ellipsize a `project:branch` ref token to `MAX_REF_DISPLAY` chars
- *  with a single `…`, keeping the head and tail so the project prefix and the
- *  branch suffix both survive (e.g. `ccmux:feat/…tent`). Short refs pass through
- *  unchanged. */
-function ellipsizeRef(ref: string): string {
-  if (ref.length <= MAX_REF_DISPLAY) return ref;
-  const keep = MAX_REF_DISPLAY - 1; // room for the single "…"
-  const head = Math.ceil(keep / 2);
-  const tail = Math.floor(keep / 2);
-  return `${ref.slice(0, head)}…${ref.slice(ref.length - tail)}`;
-}
-
 function buildTitle(session: Readonly<Session>): string {
   const agent = getAgentDisplayName(session.agentType);
-  // The TUI's `project:branch` ref convention (see Preview.tsx /
-  // session-columns.ts) first, agent trailing.
+  // Agent-first, then the TUI's `project:branch` ref convention (see Preview.tsx
+  // / session-columns.ts). The ref is passed whole (no pre-clipping): the agent
+  // leads, so macOS's own single-line tail-truncation can only ever cost the
+  // ref's tail, never the agent name.
   const ref = session.gitBranch
     ? `${session.project}:${session.gitBranch}`
     : session.project;
-  return `${ellipsizeRef(ref)} · ${agent}`;
+  return `${agent} · ${ref}`;
 }
 
 function buildBasePayload(

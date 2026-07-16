@@ -34,8 +34,8 @@ export interface NotifyConfig {
  * doesn't know about.
  */
 export interface NotificationPayload {
-  /** Session identity: `project:branch · Agent` (the `project:branch` ref
-   * middle-ellipsized, agent name trailing). */
+  /** Session identity, agent-first: `Agent · project:branch` (passed whole; the
+   * OS tail-truncates the title line at render). */
   title: string;
   /** The event line ("Needs permission: <tool>", "Finished", etc.), always set
    * for a real notification. Backends with a native subtitle slot (ccmux-notifier,

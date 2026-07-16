@@ -1195,40 +1195,18 @@ describe("Notifier", () => {
       return h.delivered[0].title;
     }
 
-    /** Extracts the ref token before the trailing " · Agent" suffix. */
-    function refOf(title: string): string {
-      return title.slice(0, title.lastIndexOf(" · "));
-    }
-
-    it("is ref-first with a trailing agent name", async () => {
-      expect(await titleFor("main")).toBe("myapp:main · Claude");
+    it("is agent-first with the project:branch ref", async () => {
+      expect(await titleFor("main")).toBe("Claude · myapp:main");
     });
 
     it("omits the branch (and its colon) when there is none", async () => {
-      expect(await titleFor(null)).toBe("myapp · Claude");
+      expect(await titleFor(null)).toBe("Claude · myapp");
     });
 
-    it("middle-ellipsizes a long project:branch ref to 30 chars", async () => {
-      const title = await titleFor("feat/notification-content");
-      const ref = refOf(title);
-      expect(ref).toContain("…");
-      expect([...ref].length).toBe(30);
-      // Both the project head and the branch tail survive the middle cut.
-      expect(ref.startsWith("myapp:feat/")).toBe(true);
-      expect(ref.endsWith("content")).toBe(true);
-      expect(title.endsWith(" · Claude")).toBe(true);
-    });
-
-    it("ellipsizes when project + branch together cross 30 even though the branch alone is short", async () => {
-      // Long project, short branch: the combined ref crosses 30, so it's cut
-      // even though the branch alone is tiny.
-      const title = await titleFor("main", "/tmp/my-very-long-project-namexx");
-      const ref = refOf(title);
-      expect(ref).toContain("…");
-      expect([...ref].length).toBe(30);
-      expect(ref.startsWith("my-very-long")).toBe(true);
-      expect(ref.endsWith("main")).toBe(true);
-      expect(title.endsWith(" · Claude")).toBe(true);
+    it("passes a long project:branch ref through untruncated (macOS tail-truncates at render)", async () => {
+      expect(await titleFor("feat/notification-content")).toBe(
+        "Claude · myapp:feat/notification-content",
+      );
     });
   });
 
