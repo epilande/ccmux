@@ -96,6 +96,66 @@ export function sanitizeReply(raw: string | undefined): string {
 }
 
 /**
+ * How a legal action executes in the session's live state: `reply` sends the
+ * (optional) prelude keys then the literal text, `keys` sends named keys. `null`
+ * means the action is illegal in this state (rejected + re-notified). The
+ * caller applies the staleness-token check separately; this is purely the
+ * state-legality half of the gate.
+ */
+type ActionPlan =
+  | { mode: "reply"; prelude?: string[] }
+  | { mode: "keys"; keys?: string[] }
+  | null;
+
+/**
+ * Decide whether an `approve`/`deny`/`answer` press is legal in the session's
+ * CURRENT state, and how it should execute. Pure (no effects), so the gate is
+ * unit-testable in isolation.
+ *
+ * Safety asymmetry, deliberate: for a permission/plan reply the prelude key's
+ * PRESENCE is the legality gate. Without an Escape first, typing text + Enter at
+ * a numbered picker would select the highlighted option (i.e. approve), so a
+ * reply is only offered where a cancel-to-composer prelude exists. For an idle
+ * (finished) reply there is deliberately NO prelude: Escape at Claude's idle
+ * composer clears a typed draft and double-Escape opens history rewind, so idle
+ * gates on `status === "idle"` plus `replyOnFinished` alone.
+ */
+function resolveActionPlan(
+  action: "approve" | "deny" | "answer",
+  session: Session,
+  agentDef: AgentDef | undefined,
+): ActionPlan {
+  const na = agentDef?.notificationActions;
+
+  if (session.status === "idle") {
+    // Finished notification: the pane sits at an idle composer. Reply only,
+    // no prelude; approve/deny are illegal.
+    if (action === "answer" && na?.replyOnFinished) return { mode: "reply" };
+    return null;
+  }
+
+  if (session.status !== "waiting") return null;
+
+  switch (session.attentionType) {
+    case "permission":
+      if (action === "approve") return { mode: "keys", keys: na?.approve };
+      if (action === "deny") return { mode: "keys", keys: na?.deny };
+      return null; // commit 2: answer on permission = deny with feedback
+    case "question":
+      // approve/deny don't apply to a question wait; answer replies, gated on
+      // `replyOnQuestion` for symmetry with the notifier's Reply button.
+      if (action === "answer" && na?.replyOnQuestion) {
+        return { mode: "reply", prelude: na.answerPrelude };
+      }
+      return null;
+    case "plan_approval":
+      return null; // commit 3: actions + reply for plan_approval
+    default:
+      return null;
+  }
+}
+
+/**
  * Validate and dispatch one notification-action callback. Never throws: every
  * outcome is a structured {@link NotificationActionResult} the caller maps to
  * an HTTP status (or ignores, for D-Bus).
@@ -124,13 +184,24 @@ export async function handleNotificationAction(
     return { code: 200, ok: true, action };
   }
 
-  // approve / deny / answer all mutate the pane and share the staleness gate.
-  const expectedAttention = action === "answer" ? "question" : "permission";
-  const stale =
-    session.status !== "waiting" ||
-    session.attentionType !== expectedAttention ||
-    (input.statusChangedAt ?? null) !== (session.statusChangedAt ?? null);
-  if (stale) {
+  // approve / deny / answer all mutate the pane. Two orthogonal gates: the
+  // staleness token must still match the edge the notification fired for, AND
+  // the action must be legal in the session's live state. `resolveActionPlan`
+  // owns the state-legality half and returns how to execute the action.
+  //
+  // Token caveat: an attentionType flip WITHIN `waiting` (permission ->
+  // question) does not bump `statusChangedAt` (`SessionManager.updateSession`
+  // stamps only on status edges), so the token alone can't catch that flip. It
+  // is benign for Claude: both waiting reply variants use the same Escape
+  // prelude.
+  const tokenMatches =
+    (input.statusChangedAt ?? null) === (session.statusChangedAt ?? null);
+  const plan = resolveActionPlan(
+    action,
+    session,
+    deps.getAgent(session.agentType),
+  );
+  if (!tokenMatches || plan === null) {
     deps.reNotify(session, STATE_CHANGED_BODY);
     return {
       code: 409,
@@ -147,7 +218,7 @@ export async function handleNotificationAction(
   }
   const pane = session.tmuxPane;
 
-  if (action === "answer") {
+  if (plan.mode === "reply") {
     const text = sanitizeReply(input.userText);
     if (text.length === 0) {
       return { code: 400, ok: false, error: "Empty reply" };
@@ -159,11 +230,11 @@ export async function handleNotificationAction(
         error: `Reply exceeds ${MAX_NOTIFICATION_REPLY_CHARS} characters`,
       };
     }
-    // Some agents ignore typed text at the wait (Claude's AskUserQuestion
-    // picker) and need a prelude keystroke to reach a composer that accepts
-    // it. Send those named keys first, then let the TUI settle before typing.
-    const prelude = deps.getAgent(session.agentType)?.notificationActions
-      ?.answerPrelude;
+    // Some waits ignore typed text and need a prelude keystroke to reach a
+    // composer that accepts it (Claude's AskUserQuestion picker, or an
+    // Escape-cancel of a permission prompt). Send those named keys first, then
+    // let the TUI settle before typing. Idle replies carry no prelude.
+    const prelude = plan.prelude;
     if (prelude && prelude.length > 0) {
       for (let i = 0; i < prelude.length; i++) {
         if (i > 0) await sleep(KEY_SEQUENCE_GAP_MS);
@@ -175,7 +246,11 @@ export async function handleNotificationAction(
       }
       await sleep(ANSWER_PRELUDE_SETTLE_MS);
     }
-    const sent = await deps.sendText(pane, text, true);
+    // A reply beginning with "/" would trip the agent's slash-command palette
+    // instead of sending as text. One leading space defuses it agent-agnostically
+    // without changing the visible content.
+    const toSend = text.startsWith("/") ? ` ${text}` : text;
+    const sent = await deps.sendText(pane, toSend, true);
     if (!sent) {
       log("notification-action: sendText failed for answer");
       return { code: 500, ok: false, error: "Failed to send reply" };
@@ -183,13 +258,9 @@ export async function handleNotificationAction(
     return { code: 200, ok: true, action };
   }
 
-  // approve / deny: look up the agent's key map. Its absence means the notifier
-  // never should have shown a button — reject and re-notify defensively.
-  const agent = deps.getAgent(session.agentType);
-  const keys =
-    action === "approve"
-      ? agent?.notificationActions?.approve
-      : agent?.notificationActions?.deny;
+  // approve / deny: the plan carries the agent's key map. Its absence means the
+  // notifier never should have shown a button, so reject and re-notify defensively.
+  const keys = plan.keys;
   if (!keys || keys.length === 0) {
     deps.reNotify(session, STATE_CHANGED_BODY);
     log(

@@ -99,20 +99,27 @@ export interface AgentDef {
   /**
    * Named tmux keys (or literal characters) an actionable notification sends
    * to answer this agent's permission prompt, applied sequentially via
-   * `sendKeyToPane`. Presence of a map is what gates Approve/Deny buttons onto
-   * a `permission` notification (v2 scope: Claude only); an agent without a map
-   * gets default-click-jump notifications with no buttons. Question-type waits
-   * use inline reply instead and don't consult `approve`/`deny`.
+   * `sendKeyToPane`. Presence of `approve`/`deny` is what gates the Approve/Deny
+   * buttons onto a `permission` notification; an agent without them gets
+   * default-click-jump notifications with no buttons.
    *
    * `answerPrelude` is sent (as named keys, sequentially) BEFORE the literal
-   * reply text on the `answer` action — Claude's AskUserQuestion picker ignores
+   * reply text on the `answer` action. Claude's AskUserQuestion picker ignores
    * typed text, so `["Escape"]` cancels the picker back to the composer where
    * the reply lands as a normal user message (see `handleNotificationAction`).
+   *
+   * `replyOnQuestion` opts `question` waits into an inline Reply action;
+   * `replyOnFinished` opts `finished` (idle) notifications into one. Idle Reply
+   * deliberately carries NO prelude: at Claude's idle composer, Escape would
+   * clear a typed draft and double-Escape opens history rewind, so a prelude
+   * there is actively harmful (see `resolveActionPlan`).
    */
   notificationActions?: {
     approve?: string[];
     deny?: string[];
     answerPrelude?: string[];
+    replyOnQuestion?: boolean;
+    replyOnFinished?: boolean;
   };
   /**
    * This agent's permission-prompt marker cannot be trusted to mean a real
@@ -293,6 +300,8 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
       approve: override.notificationActions.approve,
       deny: override.notificationActions.deny,
       answerPrelude: override.notificationActions.answerPrelude,
+      replyOnQuestion: override.notificationActions.replyOnQuestion,
+      replyOnFinished: override.notificationActions.replyOnFinished,
     };
   }
   if (override.ambiguousPermissionMarker !== undefined) {
@@ -410,10 +419,17 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // `answerPrelude: ["Escape"]` cancels the AskUserQuestion picker before the
     // reply text (the picker ignores typed literals; Escape returns to the
     // composer where the reply sends as a user message).
+    // Idle Reply hazard: `replyOnFinished` sends the reply straight with NO
+    // prelude. Escape at Claude's idle composer clears a typed draft, and
+    // double-Escape opens history rewind, so any prelude there would be
+    // destructive (see `resolveActionPlan`). `replyOnQuestion` reuses the same
+    // Escape-to-composer path as `answerPrelude` for question waits.
     notificationActions: {
       approve: ["1"],
       deny: ["Escape"],
       answerPrelude: ["Escape"],
+      replyOnQuestion: true,
+      replyOnFinished: true,
     },
     // AskUserQuestion fires the same `permission_prompt` payload as a real
     // permission prompt, so its marker lands as `waiting_permission`; the pane

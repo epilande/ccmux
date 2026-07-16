@@ -444,6 +444,42 @@ describe("agents.claude.readyPattern override", () => {
   });
 });
 
+describe("agents.claude.notificationActions", () => {
+  it("carries the built-in reply gates on the default Claude def", () => {
+    const claude = BUILTIN_AGENTS.find((a) => a.name === "claude");
+    expect(claude?.notificationActions?.replyOnQuestion).toBe(true);
+    expect(claude?.notificationActions?.replyOnFinished).toBe(true);
+  });
+
+  it("whole-object replaces the map (omitted keys become undefined)", () => {
+    const agents = getAgents({
+      agents: {
+        claude: {
+          notificationActions: { approve: ["y"], deny: ["n"] },
+        },
+      },
+    });
+    const claude = agents.find((a) => a.name === "claude");
+    expect(claude?.notificationActions?.approve).toEqual(["y"]);
+    expect(claude?.notificationActions?.deny).toEqual(["n"]);
+    // A partial override drops the builtin reply gates rather than merging them.
+    expect(claude?.notificationActions?.answerPrelude).toBeUndefined();
+    expect(claude?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(claude?.notificationActions?.replyOnFinished).toBeUndefined();
+  });
+
+  it("preserves the built-in map when there is no override", () => {
+    const agents = getAgents({
+      agents: {
+        claude: { resumeCommand: "claude --resume {id}" },
+      },
+    });
+    const claude = agents.find((a) => a.name === "claude");
+    expect(claude?.notificationActions?.replyOnQuestion).toBe(true);
+    expect(claude?.notificationActions?.replyOnFinished).toBe(true);
+  });
+});
+
 describe("agents.<custom>.readyPattern (custom-agent path)", () => {
   // The merge path (override of a built-in) and the custom-agent path
   // (a brand-new agent with no built-in to merge into) are separate

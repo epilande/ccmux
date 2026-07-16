@@ -198,7 +198,7 @@ bind-key S run-shell "ccmux sidebar --toggle"
 
 ### Notifications
 
-Desktop notifications on `waiting`/`finished` transitions, disabled by default. When a session needs permission the banner carries **Approve** / **Deny** buttons; questions get an inline **Reply** field, so you can unblock an agent without switching to its pane. Focusing a session's pane clears its notification.
+Desktop notifications on `waiting`/`finished` transitions, disabled by default. When a session needs permission the banner carries **Approve** / **Deny** buttons; questions and "finished" notifications carry an inline **Reply** field, so you can answer a question or send the next instruction without switching to its pane. Focusing a session's pane clears its notification.
 
 |                                                                           **Permission → Approve / Deny**                                                                            |                                                                        **Question → inline Reply**                                                                         |
 | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------: |

@@ -422,12 +422,13 @@ export class Notifier {
 
   /**
    * Builds the delivered payload: the base fields (identity title + event-line
-   * subtitle) plus the contextual `body` and, for a wait, the v2 actionable
-   * extras (Approve/Deny buttons, inline Reply). Buttons appear only for a
-   * `permission` wait whose agent defines a `notificationActions` map; Reply
-   * only for a `question` wait on Claude (v2 scope). Every enrichment fails
-   * open — a null context leaves the body empty and the subtitle carrying the
-   * event on its own.
+   * subtitle) plus the contextual `body` and the actionable extras (Approve/Deny
+   * buttons, inline Reply). Buttons appear only for a `permission` wait whose
+   * agent defines `approve`/`deny` keys. Reply is def-driven: on a `question`
+   * wait when the agent sets `replyOnQuestion`, and on a `finished` (idle)
+   * notification when it sets `replyOnFinished`. Every enrichment fails open, so
+   * a null context leaves the body empty and the subtitle carrying the event on
+   * its own.
    */
   private async buildPayload(
     session: Readonly<Session>,
@@ -441,6 +442,9 @@ export class Notifier {
         this.deps.buildFinishedContext ?? buildFinishedContext;
       const body = await buildFinished(session);
       if (body) payload.body = body;
+      const map = this.deps.getAgent?.(session.agentType)?.notificationActions;
+      if (map?.replyOnFinished)
+        payload.reply = { id: "answer", label: "Reply" };
       return payload;
     }
 
@@ -452,9 +456,9 @@ export class Notifier {
     const buildContext = this.deps.buildContext ?? buildNotificationContext;
     const context = await buildContext(session);
     const effectiveAttention = context.reclassifyAs ?? session.attentionType;
+    const map = this.deps.getAgent?.(session.agentType)?.notificationActions;
 
     if (effectiveAttention === "permission") {
-      const map = this.deps.getAgent?.(session.agentType)?.notificationActions;
       const actions: NotificationPayload["actions"] = [];
       if (map?.approve && map.approve.length > 0) {
         actions.push({ id: "approve", label: "Approve" });
@@ -463,13 +467,7 @@ export class Notifier {
         actions.push({ id: "deny", label: "Deny" });
       }
       if (actions.length > 0) payload.actions = actions;
-    } else if (
-      effectiveAttention === "question" &&
-      // v2 scope: only Claude's `answer` path is wired end to end. Gate on the
-      // agent type explicitly (question waits use inline reply, not the
-      // approve/deny key map, so there's no map presence to key off).
-      session.agentType === "claude"
-    ) {
+    } else if (effectiveAttention === "question" && map?.replyOnQuestion) {
       payload.reply = { id: "answer", label: "Reply" };
     }
 

@@ -63,11 +63,15 @@ export interface AgentConfig {
    * for a custom agent is what opts its `permission` notifications into
    * buttons. `answerPrelude` keys are sent before the reply text on the inline
    * reply action (e.g. to cancel a picker that ignores typed input).
+   * `replyOnQuestion`/`replyOnFinished` opt the agent's `question` waits and
+   * `finished` (idle) notifications into an inline Reply action.
    */
   notificationActions?: {
     approve?: string[];
     deny?: string[];
     answerPrelude?: string[];
+    replyOnQuestion?: boolean;
+    replyOnFinished?: boolean;
   };
   /**
    * Set when this custom agent's permission marker can actually cover an

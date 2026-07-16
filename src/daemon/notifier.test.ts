@@ -1016,6 +1016,37 @@ describe("Notifier", () => {
       return h.delivered[0];
     }
 
+    /** Drives a session working -> idle and returns the single delivered
+     *  finished payload. `buildContext` is stubbed to a value that must NEVER
+     *  appear, so the assertions prove the waiting context is never consulted. */
+    async function deliverFinished(
+      getAgent?: NotifierDeps["getAgent"],
+    ): Promise<NotificationPayload> {
+      const h = createHarness();
+      const notifier = new Notifier({
+        ...h.deps,
+        getAgent,
+        buildContext: async () => ({ body: "should not appear" }),
+        buildFinishedContext: async () => "Wrapped up the refactor.",
+      });
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+      const session = h.sessionManager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: "/tmp/myapp",
+        pid: 1,
+      });
+      h.sessionManager.setLogPath(session.id, "/tmp/myapp/log.jsonl");
+      h.sessionManager.updateSession(session.id, { status: "working" });
+      await tick();
+      h.sessionManager.updateSession(session.id, { status: "idle" });
+      await flush();
+      await h.fireScheduled();
+      expect(h.delivered.length).toBe(1);
+      return h.delivered[0];
+    }
+
     it("stamps Approve/Deny for a permission wait when the agent has a map", async () => {
       const payload = await deliverWaiting({
         attentionType: "permission",
@@ -1052,6 +1083,15 @@ describe("Notifier", () => {
         getAgent: () => claudeAgent,
       });
       expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
+      expect(payload.actions).toBeUndefined();
+    });
+
+    it("stamps no Reply for a question wait when the agent lacks replyOnQuestion", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "question",
+        getAgent: () => opencodeAgent,
+      });
+      expect(payload.reply).toBeUndefined();
       expect(payload.actions).toBeUndefined();
     });
 
@@ -1109,37 +1149,26 @@ describe("Notifier", () => {
       expect(h.delivered[0].statusChangedAt).toBe(live!.statusChangedAt!);
     });
 
-    it("gives a finished notification no buttons or reply, and never consults the waiting context", async () => {
-      const h = createHarness();
-      const notifier = new Notifier({
-        ...h.deps,
-        getAgent: () => claudeAgent,
-        // The waiting-context builder must never run for a finished event.
-        buildContext: async () => ({ body: "should not appear" }),
-        buildFinishedContext: async () => "Wrapped up the refactor.",
-      });
-      notifier.start();
-      h.advanceTime(PAST_GRACE_WINDOW);
-      const session = h.sessionManager.createPaneTrackedSession({
-        agentType: "claude",
-        paneId: "%1",
-        cwd: "/tmp/myapp",
-        pid: 1,
-      });
-      h.sessionManager.setLogPath(session.id, "/tmp/myapp/log.jsonl");
-      h.sessionManager.updateSession(session.id, { status: "working" });
-      await tick();
-      h.sessionManager.updateSession(session.id, { status: "idle" });
-      await flush();
-      await h.fireScheduled();
-
-      expect(h.delivered.length).toBe(1);
-      expect(h.delivered[0].event).toBe("finished");
-      expect(h.delivered[0].subtitle).toBe("Finished");
+    it("stamps a Reply on a finished Claude notification, no buttons, and never consults the waiting context", async () => {
+      const payload = await deliverFinished(() => claudeAgent);
+      expect(payload.event).toBe("finished");
+      expect(payload.subtitle).toBe("Finished");
       // The finished body is the enrichment, not the waiting context.
-      expect(h.delivered[0].body).toBe("Wrapped up the refactor.");
-      expect(h.delivered[0].actions).toBeUndefined();
-      expect(h.delivered[0].reply).toBeUndefined();
+      expect(payload.body).toBe("Wrapped up the refactor.");
+      expect(payload.actions).toBeUndefined();
+      expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
+    });
+
+    it("stamps no Reply on a finished notification when no agent lookup is wired", async () => {
+      const payload = await deliverFinished();
+      expect(payload.reply).toBeUndefined();
+      expect(payload.actions).toBeUndefined();
+    });
+
+    it("stamps no Reply on a finished notification for an agent without replyOnFinished", async () => {
+      const payload = await deliverFinished(() => opencodeAgent);
+      expect(payload.reply).toBeUndefined();
+      expect(payload.actions).toBeUndefined();
     });
 
     it("finished body stays empty when the finished context yields nothing", async () => {

@@ -252,6 +252,42 @@ describe("handleNotificationAction: answer", () => {
     ]);
   });
 
+  it("prefixes a space to a reply starting with '/' so it doesn't trip the slash palette", async () => {
+    const session = questionSession();
+    const { deps, sendTextCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "/compact everything",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: " /compact everything", enter: true },
+    ]);
+  });
+
+  it("leaves a non-slash reply unchanged", async () => {
+    const session = questionSession();
+    const { deps, sendTextCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "compact everything",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "compact everything", enter: true },
+    ]);
+  });
+
   it("sends the agent's answerPrelude keys before the reply text (Claude: Escape)", async () => {
     const session = questionSession(); // claude, answerPrelude: ["Escape"]
     const { deps, sendKeyCalls, sendTextCalls } = makeDeps(session);
@@ -272,7 +308,11 @@ describe("handleNotificationAction: answer", () => {
   it("sends no prelude when the agent defines none", async () => {
     const noPreludeAgent: AgentDef = {
       ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
-      notificationActions: { approve: ["1"], deny: ["Escape"] },
+      notificationActions: {
+        approve: ["1"],
+        deny: ["Escape"],
+        replyOnQuestion: true,
+      },
     };
     const session = questionSession();
     const { deps, sendKeyCalls, sendTextCalls } = makeDeps(session, {
@@ -374,6 +414,86 @@ describe("handleNotificationAction: answer", () => {
     );
     expect(res.code).toBe(409);
     expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+});
+
+describe("handleNotificationAction: answer on finished (idle)", () => {
+  const idleSession = () =>
+    mkSession({
+      status: "idle",
+      attentionType: null,
+      previousStatus: "working",
+    });
+
+  it("sends the reply with NO prelude and returns 200", async () => {
+    const session = idleSession();
+    const { deps, sendKeyCalls, sendTextCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "keep going",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "keep going", enter: true },
+    ]);
+  });
+
+  it("rejects when the agent has no replyOnFinished with 409 + re-notify", async () => {
+    const noFinishedAgent: AgentDef = {
+      ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
+      notificationActions: { approve: ["1"], deny: ["Escape"] },
+    };
+    const session = idleSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      getAgent: () => noFinishedAgent,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "keep going",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+
+  it("rejects a stale token with 409 + re-notify", async () => {
+    const session = idleSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        userText: "keep going",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+
+  it("rejects approve on an idle session (illegal action) with 409", async () => {
+    const session = idleSession();
+    const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
     expect(reNotifyCalls).toHaveLength(1);
   });
 });
