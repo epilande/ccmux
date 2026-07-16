@@ -1,8 +1,8 @@
 /**
- * Notification body enrichment: given a waiting session, extract a short
- * plain-text description of WHAT it is waiting on, so an actionable
- * notification can show the pending command / question instead of a bare
- * "Needs permission: Bash".
+ * Notification body enrichment: extract a short plain-text description of WHAT
+ * a session is waiting on (the pending command / question) or, for a finished
+ * session, its closing words, so the notification body shows real context
+ * under the event line the subtitle already carries.
  *
  * Fail-open by contract: any read/parse error, an unsupported agent, or a
  * missing source returns `null`, and the caller keeps the base body. The
@@ -39,6 +39,9 @@ export interface NotifyContextSession {
   /** tmux pane id (e.g. `%418`) the session runs in. The permission-context
    *  path captures this pane; null means we can't read the prompt. */
   tmuxPane: string | null;
+  /** The session's last submitted prompt, the finished-context fallback when
+   *  no assistant closing words can be read from the transcript. */
+  lastPrompt: string | null;
 }
 
 /** Injected so tests can stub the tmux read. */
@@ -65,18 +68,27 @@ const CONTEXT_TAIL_BYTES = 128 * 1024;
 /** How many trailing pane lines to capture for the permission prompt. The
  *  prompt box (header + command + description + options) fits comfortably. */
 const PANE_CAPTURE_LINES = 30;
-/** Body caps: multi-line is fine (macOS renders `\n`), but keep it glanceable. */
+/** Waiting-context caps: multi-line is fine (macOS renders `\n`), but keep it
+ *  glanceable. The finished context (closing words) clamps tighter, below. */
 const MAX_CONTEXT_LINES = 4;
 const MAX_CONTEXT_CHARS = 300;
+/** Finished-context caps: an assistant turn's closing words can run long, so
+ *  clamp it tighter than the waiting command/question block. */
+const MAX_FINISHED_LINES = 2;
+const MAX_FINISHED_CHARS = 200;
 /** Upper bound on lines pulled from the prompt's command block, before the
  *  final clamp — guards against grabbing an unbounded run if the shape is off. */
 const MAX_BLOCK_LINES = 8;
 
 /**
- * Strip control characters (keeping `\n`) and clamp to `MAX_CONTEXT_LINES` /
- * `MAX_CONTEXT_CHARS` with an ellipsis. Null when nothing printable survives.
+ * Strip control characters (keeping `\n`) and clamp to `maxLines` / `maxChars`
+ * with an ellipsis. Null when nothing printable survives.
  */
-function clampBody(raw: string): string | null {
+function clampBody(
+  raw: string,
+  maxLines: number,
+  maxChars: number,
+): string | null {
   const normalized = stripControlChars(raw.replace(/\r\n?/g, "\n"), {
     keepNewlines: true,
   });
@@ -84,13 +96,13 @@ function clampBody(raw: string): string | null {
   let clipped = false;
 
   let kept = lines;
-  if (kept.length > MAX_CONTEXT_LINES) {
-    kept = kept.slice(0, MAX_CONTEXT_LINES);
+  if (kept.length > maxLines) {
+    kept = kept.slice(0, maxLines);
     clipped = true;
   }
   let text = kept.join("\n").trimEnd();
-  if (text.length > MAX_CONTEXT_CHARS) {
-    text = text.slice(0, MAX_CONTEXT_CHARS).trimEnd();
+  if (text.length > maxChars) {
+    text = text.slice(0, maxChars).trimEnd();
     clipped = true;
   }
   if (text.trim().length === 0) return null;
@@ -170,7 +182,7 @@ export function extractPermissionPrompt(paneText: string): string | null {
   }
   if (block.length === 0) return null;
 
-  return clampBody(block.join("\n"));
+  return clampBody(block.join("\n"), MAX_CONTEXT_LINES, MAX_CONTEXT_CHARS);
 }
 
 /** A captured Claude AskUserQuestion option-picker line, e.g. "1. Blue" (after
@@ -231,7 +243,7 @@ export function extractQuestionPrompt(paneText: string): string | null {
   if (header.length === 0) return null;
 
   const question = header.find((line) => line.endsWith("?")) ?? header[0];
-  return clampBody(question);
+  return clampBody(question, MAX_CONTEXT_LINES, MAX_CONTEXT_CHARS);
 }
 
 /** Find the last assistant text block across parsed entries. */
@@ -309,7 +321,7 @@ async function questionFromTranscript(
     const entries = parseLogEntries(content);
     const text = lastAssistantText(entries);
     if (text === null) return null;
-    return clampBody(text);
+    return clampBody(text, MAX_CONTEXT_LINES, MAX_CONTEXT_CHARS);
   } catch {
     return null;
   }
@@ -334,4 +346,44 @@ export async function buildNotificationContext(
     return { body: await buildQuestionContext(session, capture) };
   }
   return { body: null };
+}
+
+/**
+ * Build the context body for a FINISHED session: what the agent last said, so a
+ * "Finished" notification shows the turn's closing words instead of just the
+ * bare event line. The ladder:
+ *   1. Claude with a `logPath`: the last assistant text off the transcript
+ *      tail. Unlike a wait, a finished turn IS flushed to the JSONL, so the
+ *      tail is current (see the module doc for why a wait can't trust it).
+ *   2. Any agent: the session's `lastPrompt` (what the user asked for).
+ *   3. Else null — the caller keeps a bare payload; the subtitle carries the
+ *      event.
+ * Clamped tighter than the waiting context. Fail-open: any error returns null.
+ */
+export async function buildFinishedContext(
+  session: NotifyContextSession,
+): Promise<string | null> {
+  try {
+    if (session.agentType === "claude" && session.logPath) {
+      const content = await readTranscriptTail(
+        session.logPath,
+        CONTEXT_TAIL_BYTES,
+      );
+      const text = lastAssistantText(parseLogEntries(content));
+      if (text !== null) {
+        const clamped = clampBody(text, MAX_FINISHED_LINES, MAX_FINISHED_CHARS);
+        if (clamped !== null) return clamped;
+      }
+    }
+    if (session.lastPrompt) {
+      return clampBody(
+        session.lastPrompt,
+        MAX_FINISHED_LINES,
+        MAX_FINISHED_CHARS,
+      );
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }

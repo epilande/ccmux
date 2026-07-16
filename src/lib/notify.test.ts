@@ -13,6 +13,7 @@ import {
   deliver,
   deliverTimeoutFor,
   DELIVER_TIMEOUT_MS,
+  foldSubtitleIntoBody,
   normalizeBackendConfig,
   NOTIFIER_DELIVER_TIMEOUT_MS,
   probeBackend,
@@ -368,6 +369,91 @@ describe("deliver: osascript", () => {
     }
     expect(argv.at(-1)).toBe(maliciousBody);
   });
+
+  // The subtitle x sound matrix: subtitle is rendered natively (its own
+  // `item N of argv`), and the positional indices must stay in lockstep with
+  // the clause whether or not the optional sound clause is also present.
+  it("renders a subtitle natively with no sound (item 3)", async () => {
+    const { spawn, calls } = fakeSpawn();
+    await deliver(
+      "osascript",
+      { ...BASE_PAYLOAD, subtitle: "Needs permission: Bash" },
+      spawn,
+    );
+    expect(calls[0].argv).toEqual([
+      "osascript",
+      "-e",
+      "on run argv",
+      "-e",
+      "display notification (item 2 of argv) with title (item 1 of argv) subtitle (item 3 of argv)",
+      "-e",
+      "end run",
+      "--",
+      BASE_PAYLOAD.title,
+      BASE_PAYLOAD.body,
+      "Needs permission: Bash",
+    ]);
+  });
+
+  it("renders subtitle (item 3) and sound (item 4) together", async () => {
+    const { spawn, calls } = fakeSpawn();
+    await deliver(
+      "osascript",
+      { ...BASE_PAYLOAD, subtitle: "Finished", sound: "Glass" },
+      spawn,
+    );
+    expect(calls[0].argv).toEqual([
+      "osascript",
+      "-e",
+      "on run argv",
+      "-e",
+      "display notification (item 2 of argv) with title (item 1 of argv) subtitle (item 3 of argv) sound name (item 4 of argv)",
+      "-e",
+      "end run",
+      "--",
+      BASE_PAYLOAD.title,
+      BASE_PAYLOAD.body,
+      "Finished",
+      "Glass",
+    ]);
+  });
+
+  it("keeps sound at item 3 when there is no subtitle", async () => {
+    const { spawn, calls } = fakeSpawn();
+    await deliver("osascript", { ...BASE_PAYLOAD, sound: "Glass" }, spawn);
+    // Regression guard: without a subtitle, the sound clause must stay item 3,
+    // not shift to item 4.
+    expect(calls[0].argv[4]).toBe(
+      "display notification (item 2 of argv) with title (item 1 of argv) sound name (item 3 of argv)",
+    );
+  });
+});
+
+describe("foldSubtitleIntoBody", () => {
+  it("joins subtitle and body with a newline", () => {
+    expect(
+      foldSubtitleIntoBody({ subtitle: "Finished", body: "Wrapped up." }),
+    ).toBe("Finished\nWrapped up.");
+  });
+
+  it("drops an empty body (no trailing newline)", () => {
+    expect(foldSubtitleIntoBody({ subtitle: "Finished", body: "" })).toBe(
+      "Finished",
+    );
+  });
+
+  it("drops an empty/absent subtitle (no leading newline)", () => {
+    expect(foldSubtitleIntoBody({ subtitle: "", body: "just the body" })).toBe(
+      "just the body",
+    );
+    expect(foldSubtitleIntoBody({ body: "just the body" })).toBe(
+      "just the body",
+    );
+  });
+
+  it("is empty when both parts are empty", () => {
+    expect(foldSubtitleIntoBody({ subtitle: "", body: "" })).toBe("");
+  });
 });
 
 describe("deliver: ccmux-notifier", () => {
@@ -420,6 +506,17 @@ describe("deliver: ccmux-notifier", () => {
     expect(argv).not.toContain("--reply-action");
   });
 
+  it("omits --body when the body is empty (the subtitle carries the event)", async () => {
+    const argv = buildCcmuxNotifierArgv({
+      ...NOTIFIER_PAYLOAD,
+      subtitle: "Finished",
+      body: "",
+    })!;
+    expect(argv).not.toContain("--body");
+    expect(argv).toContain("--subtitle");
+    expect(argv[argv.indexOf("--subtitle") + 1]).toBe("Finished");
+  });
+
   it("omits statusChangedAt from the payload JSON when unset", async () => {
     const argv = buildCcmuxNotifierArgv({
       ...NOTIFIER_PAYLOAD,
@@ -453,6 +550,26 @@ describe("deliver: notify-send", () => {
     ]);
   });
 
+  it("folds the subtitle into body line 1 (no native subtitle slot)", async () => {
+    const { spawn, calls } = fakeSpawn();
+    await deliver(
+      "notify-send",
+      { ...BASE_PAYLOAD, subtitle: "Needs permission: Bash", body: "rm -rf x" },
+      spawn,
+    );
+    expect(calls[0].argv.at(-1)).toBe("Needs permission: Bash\nrm -rf x");
+  });
+
+  it("uses the subtitle alone when the body is empty (no trailing newline)", async () => {
+    const { spawn, calls } = fakeSpawn();
+    await deliver(
+      "notify-send",
+      { ...BASE_PAYLOAD, subtitle: "Finished", body: "" },
+      spawn,
+    );
+    expect(calls[0].argv.at(-1)).toBe("Finished");
+  });
+
   it("keeps `--` before a flag-looking title so it isn't parsed as an option", async () => {
     const { spawn, calls } = fakeSpawn();
     const flagLikeTitle = "--icon=evil";
@@ -475,6 +592,7 @@ describe("deliver: command", () => {
       {
         ...BASE_PAYLOAD,
         event: "finished",
+        subtitle: "Finished",
         command: 'ntfy publish agents "$CCMUX_TITLE: $CCMUX_BODY"',
       },
       spawn,
@@ -493,9 +611,16 @@ describe("deliver: command", () => {
       CCMUX_PROJECT: "ccmux",
       CCMUX_BRANCH: "main",
       CCMUX_TITLE: BASE_PAYLOAD.title,
+      CCMUX_SUBTITLE: "Finished",
       CCMUX_BODY: BASE_PAYLOAD.body,
       CCMUX_PANE: "%3",
     });
+  });
+
+  it("exposes an empty CCMUX_SUBTITLE when the payload has no subtitle", async () => {
+    const { spawn, calls } = fakeSpawn();
+    await deliver("command", { ...BASE_PAYLOAD, command: "echo hi" }, spawn);
+    expect(calls[0].options?.env).toMatchObject({ CCMUX_SUBTITLE: "" });
   });
 
   it("falls back to empty-string env for a null branch/pane", async () => {

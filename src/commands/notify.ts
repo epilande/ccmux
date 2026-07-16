@@ -165,6 +165,9 @@ async function runCcmuxNotifierFlow(
 
   const payload: NotificationPayload = {
     title: "ccmux",
+    // Mirror a real notification's shape: the event line is the subtitle, the
+    // message is the body, so `ccmux notify` exercises the subtitle path.
+    subtitle: "Finished",
     body: message ?? TEST_MESSAGE,
     event: "finished",
     sessionId: "notify-cli",
@@ -273,6 +276,7 @@ export function createNotifyCommand(): Command {
         }
         await deliver("osascript", {
           title: "ccmux",
+          subtitle: "Finished",
           body: message ?? TEST_MESSAGE,
           event: "finished",
           sessionId: "notify-cli",
@@ -305,6 +309,7 @@ export function createNotifyCommand(): Command {
 
           const id = await dbusNotifier.notify({
             title: "ccmux",
+            subtitle: "Finished",
             body: message ?? TEST_MESSAGE,
             event: "finished",
             sessionId: "notify-cli",
@@ -330,6 +335,7 @@ export function createNotifyCommand(): Command {
 
         const payload: NotificationPayload = {
           title: "ccmux",
+          subtitle: "Finished",
           body: message ?? TEST_MESSAGE,
           event: "finished",
           sessionId: "notify-cli",

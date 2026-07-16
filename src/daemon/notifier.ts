@@ -11,6 +11,7 @@ import type { AgentDef } from "../lib/agents";
 import { SCAN_INTERVAL_MS } from "../lib/config";
 import { getAgentDisplayName } from "../lib/agents";
 import {
+  buildFinishedContext,
   buildNotificationContext,
   type NotificationContext,
 } from "./notify-context";
@@ -52,6 +53,10 @@ export interface NotifierDeps {
    *  to the real pane/transcript-backed extractor. Fail-open: any failure
    *  returns `{ body: null }`. */
   buildContext?: (session: Readonly<Session>) => Promise<NotificationContext>;
+  /** Builds the finished-notification body (last assistant text, else
+   *  `lastPrompt`). Injectable for tests; defaults to the real transcript-backed
+   *  extractor. Fail-open: any failure returns null. */
+  buildFinishedContext?: (session: Readonly<Session>) => Promise<string | null>;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -103,11 +108,32 @@ function describeAttention(
   }
 }
 
+/** Max length of the `project:branch` ref token shown in a title before it's
+ *  middle-ellipsized. The agent name trails the title, so an unbounded ref would
+ *  push the agent name off macOS's single visible title line; the cap protects
+ *  it. */
+const MAX_REF_DISPLAY = 30;
+
+/** Middle-ellipsize a `project:branch` ref token to `MAX_REF_DISPLAY` chars
+ *  with a single `…`, keeping the head and tail so the project prefix and the
+ *  branch suffix both survive (e.g. `ccmux:feat/…tent`). Short refs pass through
+ *  unchanged. */
+function ellipsizeRef(ref: string): string {
+  if (ref.length <= MAX_REF_DISPLAY) return ref;
+  const keep = MAX_REF_DISPLAY - 1; // room for the single "…"
+  const head = Math.ceil(keep / 2);
+  const tail = Math.floor(keep / 2);
+  return `${ref.slice(0, head)}…${ref.slice(ref.length - tail)}`;
+}
+
 function buildTitle(session: Readonly<Session>): string {
   const agent = getAgentDisplayName(session.agentType);
-  return session.gitBranch
-    ? `${session.project} (${session.gitBranch}) · ${agent}`
-    : `${session.project} · ${agent}`;
+  // The TUI's `project:branch` ref convention (see Preview.tsx /
+  // session-columns.ts) first, agent trailing.
+  const ref = session.gitBranch
+    ? `${session.project}:${session.gitBranch}`
+    : session.project;
+  return `${ellipsizeRef(ref)} · ${agent}`;
 }
 
 function buildBasePayload(
@@ -115,14 +141,15 @@ function buildBasePayload(
   kind: NotificationEventKind,
   cfg: NotificationsConfig | undefined,
 ): NotificationPayload {
-  // The discriminated text travels in `body`, the only variable line every
-  // backend renders (osascript's builder drops `subtitle`). Deliberately not
-  // mirrored into `subtitle` to avoid showing the same text twice on backends
-  // that render both lines.
-  const body = kind === "finished" ? "Finished" : describeWaiting(session);
+  // The event line lives in `subtitle` now (every backend renders it, folding
+  // it into the body where there's no native subtitle slot); `body` is reserved
+  // for the contextual enrichment `buildPayload` fills in, and stays empty when
+  // there is none.
+  const subtitle = kind === "finished" ? "Finished" : describeWaiting(session);
   return {
     title: buildTitle(session),
-    body,
+    subtitle,
+    body: "",
     event: kind,
     sessionId: session.id,
     agent: getAgentDisplayName(session.agentType),
@@ -156,6 +183,10 @@ export function buildStateChangedPayload(
     // Carry the live config so the "command" backend (payload.command) still
     // fires and the configured sound isn't dropped on a stale-press re-notify.
     ...buildBasePayload(session, "waiting", cfg),
+    // `body` here is a self-contained message ("State changed. Check the
+    // pane."); clear the base waiting subtitle so it doesn't prepend a stale
+    // "Needs permission" line that no longer describes this notification.
+    subtitle: undefined,
     body,
   };
 }
@@ -406,12 +437,13 @@ export class Notifier {
   }
 
   /**
-   * Builds the delivered payload: the base fields plus the v2 actionable
-   * extras (Approve/Deny buttons, inline Reply, and the context body), all
-   * `"waiting"`-only. Buttons appear only for a `permission` wait whose agent
-   * defines a `notificationActions` map; Reply only for a `question` wait on
-   * Claude (v2 scope). The context enrichment fails open — a null result
-   * leaves the base line untouched.
+   * Builds the delivered payload: the base fields (identity title + event-line
+   * subtitle) plus the contextual `body` and, for a wait, the v2 actionable
+   * extras (Approve/Deny buttons, inline Reply). Buttons appear only for a
+   * `permission` wait whose agent defines a `notificationActions` map; Reply
+   * only for a `question` wait on Claude (v2 scope). Every enrichment fails
+   * open — a null context leaves the body empty and the subtitle carrying the
+   * event on its own.
    */
   private async buildPayload(
     session: Readonly<Session>,
@@ -419,7 +451,14 @@ export class Notifier {
     cfg: NotificationsConfig | undefined,
   ): Promise<NotificationPayload> {
     const payload = buildBasePayload(session, kind, cfg);
-    if (kind !== "waiting") return payload;
+
+    if (kind === "finished") {
+      const buildFinished =
+        this.deps.buildFinishedContext ?? buildFinishedContext;
+      const body = await buildFinished(session);
+      if (body) payload.body = body;
+      return payload;
+    }
 
     // Build the context first: its pane capture can reveal that a stored
     // `permission` wait is really an AskUserQuestion question (the marker's
@@ -450,13 +489,14 @@ export class Notifier {
       payload.reply = { id: "answer", label: "Reply" };
     }
 
-    // A reclassification also invalidates the base line (built for the stored
-    // type), so rebuild it before appending the context body.
+    // A reclassification invalidates the base SUBTITLE (built for the stored
+    // type), so rebuild it for the effective type. The context text is the body
+    // on its own now — no longer prefixed by the event line.
     if (context.reclassifyAs) {
-      payload.body = describeAttention(context.reclassifyAs, null);
+      payload.subtitle = describeAttention(context.reclassifyAs, null);
     }
     if (context.body) {
-      payload.body = `${payload.body}\n${context.body}`;
+      payload.body = context.body;
     }
 
     return payload;

@@ -19,7 +19,7 @@
  * known-broken bus forever.
  */
 
-import type { NotificationPayload } from "./notify";
+import { foldSubtitleIntoBody, type NotificationPayload } from "./notify";
 
 /** Minimal shape of `dbus-next`'s `Variant`, used to build the `a{sv}` hints
  * dict. Typed locally so this module's public surface has zero static
@@ -302,12 +302,14 @@ export class DbusNotifier {
       const soundName = resolveSoundHintName(payload.sound);
       if (soundName) hints["sound-name"] = this.makeVariant("s", soundName);
 
+      // No native subtitle slot on freedesktop, so the event line folds into
+      // body line 1 (see `foldSubtitleIntoBody`).
       const id = await this.notificationsInterface.Notify(
         APP_NAME,
         replacesId,
         "",
         payload.title,
-        payload.body,
+        foldSubtitleIntoBody(payload),
         actions,
         hints,
         -1,

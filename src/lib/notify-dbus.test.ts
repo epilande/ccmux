@@ -165,6 +165,26 @@ describe("DbusNotifier: notify", () => {
     expect(call.hints).toEqual({ urgency: { signature: "y", value: 1 } });
   });
 
+  it("folds the subtitle into body line 1 (no native subtitle slot)", async () => {
+    const { bus, notifyCalls } = createFakeBus();
+    const notifier = new DbusNotifier(() => bus);
+
+    await notifier.notify({
+      ...BASE_PAYLOAD,
+      subtitle: "Needs permission: Bash",
+      body: "rm -rf x",
+    });
+    expect(notifyCalls[0]?.body).toBe("Needs permission: Bash\nrm -rf x");
+  });
+
+  it("sends the subtitle alone when the body is empty (no trailing newline)", async () => {
+    const { bus, notifyCalls } = createFakeBus();
+    const notifier = new DbusNotifier(() => bus);
+
+    await notifier.notify({ ...BASE_PAYLOAD, subtitle: "Finished", body: "" });
+    expect(notifyCalls[0]?.body).toBe("Finished");
+  });
+
   it("reuses the last notification id as replaces_id for the same session", async () => {
     const { bus, notifyCalls } = createFakeBus();
     const notifier = new DbusNotifier(() => bus);
