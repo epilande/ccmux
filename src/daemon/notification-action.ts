@@ -96,6 +96,31 @@ export function sanitizeReply(raw: string | undefined): string {
 }
 
 /**
+ * A plan-approval (ExitPlanMode) wait. Shared by the notifier-side context
+ * (`buildNotificationContext`) and this handler so the offer and the accept can
+ * never diverge on what counts as a plan wait.
+ *
+ * The `attentionType === "permission"` arm is load-bearing: a LIVE hook-tracked
+ * plan wait is stored as a permission, not a `plan_approval`. Claude's
+ * `Notification` hook fires for ExitPlanMode with `state: waiting_permission`
+ * and `pending_tool: null` (verified on Claude Code 2.1.211), and the marker
+ * wins the cascade, so the stored `attentionType` is `permission`; the
+ * `ExitPlanMode` tool name only reaches `pendingTool` from the log. Without this
+ * arm, Approve on a plan notification would send the permission key (`1`), which
+ * at the ExitPlanMode picker selects "use auto mode".
+ */
+export function isPlanApprovalWait(session: {
+  attentionType: string | null;
+  pendingTool: string | null;
+}): boolean {
+  return (
+    session.attentionType === "plan_approval" ||
+    (session.attentionType === "permission" &&
+      session.pendingTool === "ExitPlanMode")
+  );
+}
+
+/**
  * How a legal action executes in the session's live state: `reply` sends the
  * (optional) prelude keys then the literal text, `keys` sends named keys. `null`
  * means the action is illegal in this state (rejected + re-notified). The
@@ -136,6 +161,18 @@ function resolveActionPlan(
 
   if (session.status !== "waiting") return null;
 
+  // Plan waits are checked BEFORE the plain-permission rows: a live plan wait is
+  // stored as a permission (see `isPlanApprovalWait`), and its ExitPlanMode
+  // picker is a different shape from a permission prompt, so approve/deny use the
+  // separate `planApprove`/`planDeny` keys (approve = `2`, NOT `1` = auto mode).
+  if (isPlanApprovalWait(session)) {
+    if (action === "approve") return { mode: "keys", keys: na?.planApprove };
+    if (action === "deny") return { mode: "keys", keys: na?.planDeny };
+    return na?.planReplyPrelude?.length
+      ? { mode: "reply", prelude: na.planReplyPrelude }
+      : null;
+  }
+
   switch (session.attentionType) {
     case "permission":
       if (action === "approve") return { mode: "keys", keys: na?.approve };
@@ -154,8 +191,6 @@ function resolveActionPlan(
         return { mode: "reply", prelude: na.answerPrelude };
       }
       return null;
-    case "plan_approval":
-      return null; // commit 3: actions + reply for plan_approval
     default:
       return null;
   }

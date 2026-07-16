@@ -1114,6 +1114,59 @@ describe("Notifier", () => {
       expect(payload.actions).toBeUndefined();
     });
 
+    it("stamps Approve/Deny AND Reply for a plan_approval wait on Claude", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "plan_approval",
+        getAgent: () => claudeAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
+      expect(payload.subtitle).toBe("Plan ready for review");
+    });
+
+    it("stamps neither actions nor reply for a plan_approval wait when the agent has no plan keys", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "plan_approval",
+        getAgent: () => opencodeAgent,
+      });
+      expect(payload.actions).toBeUndefined();
+      expect(payload.reply).toBeUndefined();
+    });
+
+    it("delivery-time reclassify: a permission wait revealed as a plan gets plan actions, not permission actions", async () => {
+      // Plan-only agent: if the permission branch ran (it should NOT), there
+      // would be no approve/deny/reply, so any actions prove the plan branch ran.
+      const planOnlyAgent: AgentDef = {
+        ...claudeAgent,
+        notificationActions: {
+          planApprove: ["2"],
+          planDeny: ["Escape"],
+          planReplyPrelude: ["Escape"],
+        },
+      };
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "ExitPlanMode",
+        getAgent: () => planOnlyAgent,
+        buildContext: async () => ({
+          body: "Plan: add a hello-world script",
+          reclassifyAs: "plan_approval",
+        }),
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
+      // The subtitle rebuilds for the reclassified (plan) type, not the stored
+      // "Needs permission: ExitPlanMode".
+      expect(payload.subtitle).toBe("Plan ready for review");
+      expect(payload.body).toBe("Plan: add a hello-world script");
+    });
+
     it("puts the buildContext text in the body, with the event line in the subtitle", async () => {
       const payload = await deliverWaiting({
         attentionType: "permission",

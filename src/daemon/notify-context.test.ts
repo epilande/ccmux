@@ -475,20 +475,102 @@ describe("buildNotificationContext: gating", () => {
       ),
     ).toEqual({ body: null });
   });
+});
 
-  it("returns null body for a plan_approval wait", async () => {
-    const { capturePane } = permissionSession(BORDERED_PROMPT);
+describe("buildNotificationContext: plan_approval", () => {
+  /** A long-enough plan to exercise the 4-line clamp. */
+  const PLAN_MD = [
+    "Plan: add script",
+    "Step 1: create hello.sh",
+    "Step 2: chmod +x",
+    "Step 3: run it",
+    "Step 4: verify output",
+  ].join("\n");
+  const CLAMPED =
+    "Plan: add script\nStep 1: create hello.sh\nStep 2: chmod +x\nStep 3: run it…";
+
+  it("reads the ExitPlanMode input.plan from the transcript and reclassifies a permission-stored plan wait", async () => {
+    // A LIVE plan wait is stored as permission + pendingTool ExitPlanMode (the
+    // marker wins the cascade as waiting_permission). The pane is never read;
+    // the body comes from the transcript, and the wait is reclassified so the
+    // subtitle rebuilds to "Plan ready for review".
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", {
+        plan: PLAN_MD,
+        planFilePath: "/x/plan.md",
+      }),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "permission",
+          pendingTool: "ExitPlanMode",
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        // capturePane must never be consulted for a plan wait.
+        {
+          capturePane: async () => {
+            throw new Error("pane must not be read for a plan wait");
+          },
+        },
+      ),
+    ).toEqual({ body: CLAMPED, reclassifyAs: "plan_approval" });
+  });
+
+  it("does not reclassify a wait already stored as plan_approval", async () => {
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", { plan: "Add a hello-world script" }),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "plan_approval",
+          pendingTool: null,
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => "" },
+      ),
+    ).toEqual({ body: "Add a hello-world script" });
+  });
+
+  it("returns a null body but still reclassifies when there is no transcript", async () => {
     expect(
       await buildNotificationContext(
         {
           agentType: "claude",
           logPath: null,
-          attentionType: "plan_approval",
-          pendingTool: "Bash",
+          attentionType: "permission",
+          pendingTool: "ExitPlanMode",
           tmuxPane: "%42",
           lastPrompt: null,
         },
-        { capturePane },
+        { capturePane: async () => "" },
+      ),
+    ).toEqual({ body: null, reclassifyAs: "plan_approval" });
+  });
+
+  it("returns a null body when the transcript has no ExitPlanMode tool_use", async () => {
+    const path = await writeTranscript([
+      assistantText("just some assistant text"),
+      assistantToolUse("Bash", { command: "ls" }),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "plan_approval",
+          pendingTool: null,
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => "" },
       ),
     ).toEqual({ body: null });
   });

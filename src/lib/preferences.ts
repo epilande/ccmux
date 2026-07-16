@@ -67,12 +67,17 @@ export interface AgentConfig {
    * `finished` (idle) notifications into an inline Reply action.
    * `permissionReplyPrelude` opts `permission` notifications into a Reply that
    * denies the pending tool (its keys cancel the prompt before the reply text).
+   * `planApprove`/`planDeny`/`planReplyPrelude` are the plan_approval analogues
+   * of `approve`/`deny`/`permissionReplyPrelude` for an ExitPlanMode wait.
    */
   notificationActions?: {
     approve?: string[];
     deny?: string[];
     answerPrelude?: string[];
     permissionReplyPrelude?: string[];
+    planApprove?: string[];
+    planDeny?: string[];
+    planReplyPrelude?: string[];
     replyOnQuestion?: boolean;
     replyOnFinished?: boolean;
   };

@@ -529,3 +529,111 @@ describe("handleNotificationAction: answer on finished (idle)", () => {
     expect(reNotifyCalls).toHaveLength(1);
   });
 });
+
+describe("handleNotificationAction: plan_approval", () => {
+  const planSession = () =>
+    mkSession({ attentionType: "plan_approval", pendingTool: null });
+
+  it("approve sends the plan-approve key (2), never the permission key (1)", async () => {
+    const session = planSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "2" }]);
+  });
+
+  it("deny sends Escape", async () => {
+    const session = planSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "deny", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+  });
+
+  it("answer sends Escape then the reply text", async () => {
+    const session = planSession();
+    const { deps, sendKeyCalls, sendTextCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "tweak step 2",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "tweak step 2", enter: true },
+    ]);
+  });
+
+  it("SAFETY: a live plan wait stored as permission + ExitPlanMode approves with 2, never 1", async () => {
+    // The marker stores a live ExitPlanMode wait as permission with pendingTool
+    // ExitPlanMode. isPlanApprovalWait routes it to the plan keys BEFORE the
+    // permission rows, so approve is `2` (plain manual approve), not `1` (which
+    // at the ExitPlanMode picker enables auto mode).
+    const session = mkSession({
+      attentionType: "permission",
+      pendingTool: "ExitPlanMode",
+    });
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "2" }]);
+  });
+
+  it("rejects answer when the agent has no planReplyPrelude with 409 + re-notify", async () => {
+    const noPlanReplyAgent: AgentDef = {
+      ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
+      notificationActions: { planApprove: ["2"], planDeny: ["Escape"] },
+    };
+    const session = planSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      getAgent: () => noPlanReplyAgent,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "hi",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+
+  it("rejects approve when the agent has no planApprove with 409 + re-notify", async () => {
+    const noPlanApproveAgent: AgentDef = {
+      ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
+      notificationActions: {
+        planDeny: ["Escape"],
+        planReplyPrelude: ["Escape"],
+      },
+    };
+    const session = planSession();
+    const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session, {
+      getAgent: () => noPlanApproveAgent,
+    });
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+});

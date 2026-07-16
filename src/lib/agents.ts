@@ -120,12 +120,22 @@ export interface AgentDef {
    * as the next user message. Its presence is the legality gate, because without
    * the cancel first, typed text + Enter at a numbered picker would select the
    * highlighted (approve) option.
+   *
+   * `planApprove`/`planDeny`/`planReplyPrelude` are the plan_approval analogues
+   * of `approve`/`deny`/`permissionReplyPrelude` for an ExitPlanMode wait, which
+   * renders a DIFFERENT picker from a permission prompt (so its approve key is
+   * separate, see the Claude def comment for the auto-mode footgun). Presence of
+   * `planApprove`/`planDeny` gates the buttons; `planReplyPrelude` gates the
+   * plan Reply.
    */
   notificationActions?: {
     approve?: string[];
     deny?: string[];
     answerPrelude?: string[];
     permissionReplyPrelude?: string[];
+    planApprove?: string[];
+    planDeny?: string[];
+    planReplyPrelude?: string[];
     replyOnQuestion?: boolean;
     replyOnFinished?: boolean;
   };
@@ -310,6 +320,9 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
       answerPrelude: override.notificationActions.answerPrelude,
       permissionReplyPrelude:
         override.notificationActions.permissionReplyPrelude,
+      planApprove: override.notificationActions.planApprove,
+      planDeny: override.notificationActions.planDeny,
+      planReplyPrelude: override.notificationActions.planReplyPrelude,
       replyOnQuestion: override.notificationActions.replyOnQuestion,
       replyOnFinished: override.notificationActions.replyOnFinished,
     };
@@ -436,15 +449,25 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // Escape-to-composer path as `answerPrelude` for question waits.
     // `permissionReplyPrelude: ["Escape"]` makes Reply on a permission prompt a
     // deny-with-feedback: Escape cancels the prompt, then the reply text sends
-    // as the next user message. UNVERIFIED that Escape cancels cleanly to a
-    // text-accepting composer across every prompt variant (Bash approval,
-    // Edit/Write diff, permission-rule variant, MCP tools); the notification
-    // e2e pass MUST confirm each before merge.
+    // as the next user message. Verified on Claude Code 2.1.211 for Bash approval
+    // and Edit/Write diff (both footers read "Esc to cancel", Escape drops to an
+    // empty composer that accepts text + Enter); the MCP-tool variant is still
+    // owed at the e2e merge gate.
+    // Plan (ExitPlanMode) picker, verified on Claude Code 2.1.211: option 1 is
+    // "Yes, and use auto mode" (AUTO / bypass) and option 2 is "Yes, manually
+    // approve edits" (PLAIN approve), so `planApprove` MUST target ["2"], never
+    // ["1"] (that would silently enable auto mode). The digit submits
+    // immediately, no Enter. `planDeny`/`planReplyPrelude` are ["Escape"]: it
+    // cancels ExitPlanMode to an empty composer with plan mode still on, where
+    // text + Enter then sends as a user message.
     notificationActions: {
       approve: ["1"],
       deny: ["Escape"],
       answerPrelude: ["Escape"],
       permissionReplyPrelude: ["Escape"],
+      planApprove: ["2"],
+      planDeny: ["Escape"],
+      planReplyPrelude: ["Escape"],
       replyOnQuestion: true,
       replyOnFinished: true,
     },

@@ -25,7 +25,8 @@ import { parseLogEntries } from "./parser";
 import { readTranscriptTail, claudeEntryTexts } from "./transcript-search";
 import { stripControlChars } from "./notify-text";
 import { capturePane } from "./pane-io";
-import type { LogEntry } from "../types/log";
+import { isPlanApprovalWait } from "./notification-action";
+import type { AssistantLogEntry, LogEntry, ToolUseBlock } from "../types/log";
 
 /** Minimal shape this module reads off a session (keeps it testable without
  *  the full `Session` type). */
@@ -51,15 +52,17 @@ export interface NotifyContextDeps {
 
 /**
  * `body` is the enrichment appended to the base line (null keeps the base).
- * `reclassifyAs` is a delivery-time correction: Claude's AskUserQuestion
- * picker wears the same `permission_prompt` marker as a real permission
- * prompt, so the freshly-captured pane can reveal that a stored `permission`
- * is really a `question` before the next scan's reconciler correction lands.
- * The notifier then renders Reply instead of Approve/Deny for that delivery.
+ * `reclassifyAs` is a delivery-time correction of a stored `permission` wait
+ * into its true type, so the notifier renders the right actions for that one
+ * delivery (before the next scan's reconciler correction lands). Two cases both
+ * arrive stored as `permission`: Claude's AskUserQuestion picker (the pane
+ * reveals it is really a `question`), and an ExitPlanMode wait (the marker wins
+ * the cascade as `waiting_permission`, so the plan wait is really a
+ * `plan_approval`; see `isPlanApprovalWait`).
  */
 export interface NotificationContext {
   body: string | null;
-  reclassifyAs?: "question";
+  reclassifyAs?: "question" | "plan_approval";
 }
 
 /** Only the last slice of the transcript is scanned — the last assistant
@@ -351,10 +354,72 @@ async function questionFromTranscript(
 }
 
 /**
+ * The `input.plan` markdown of the LAST `ExitPlanMode` tool_use in the tail, or
+ * null. Unlike a permission-gated tool_use (backdated to AFTER the user
+ * responds), ExitPlanMode's tool_use IS flushed to the JSONL DURING the wait
+ * with `input.plan` populated (verified on Claude Code 2.1.211), so the tail is
+ * the live plan. Shape-guarded so a schema-invalid line yields null, not a throw.
+ */
+function lastExitPlanModePlan(entries: LogEntry[]): string | null {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (!entry || typeof entry !== "object" || entry.type !== "assistant") {
+      continue;
+    }
+    const content = (entry as AssistantLogEntry).message?.content;
+    if (!Array.isArray(content)) continue;
+    for (let j = content.length - 1; j >= 0; j--) {
+      const block = content[j];
+      if (block && block.type === "tool_use") {
+        const toolUse = block as ToolUseBlock;
+        if (toolUse.name === "ExitPlanMode") {
+          const plan = toolUse.input?.plan;
+          return typeof plan === "string" && plan.length > 0 ? plan : null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** The transcript-tail plan body for a plan_approval wait. Fail-open to null. */
+async function planTextFromTranscript(logPath: string): Promise<string | null> {
+  try {
+    const content = await readTranscriptTail(logPath, CONTEXT_TAIL_BYTES);
+    const plan = lastExitPlanModePlan(parseLogEntries(content));
+    if (plan === null) return null;
+    return clampBody(plan, MAX_CONTEXT_LINES, MAX_CONTEXT_CHARS);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Plan-approval context: transcript-first, with NO pane extractor. Claude's plan
+ * box is fixed-height and pads ~10 blank lines between the plan body and the
+ * terminator, and the body sits above `PANE_CAPTURE_LINES`, so a pane walk-up
+ * grabs only padding (verified on Claude Code 2.1.211). The transcript is the
+ * reliable source instead (see `lastExitPlanModePlan`). Returns
+ * `reclassifyAs: "plan_approval"` only when the wait was STORED as a permission
+ * (the marker-fresher window, see `isPlanApprovalWait`), so the subtitle
+ * rebuilds from "Needs permission" to "Plan ready for review".
+ */
+async function buildPlanContext(
+  session: NotifyContextSession,
+): Promise<NotificationContext> {
+  const body = session.logPath
+    ? await planTextFromTranscript(session.logPath)
+    : null;
+  return session.attentionType === "permission"
+    ? { body, reclassifyAs: "plan_approval" }
+    : { body };
+}
+
+/**
  * Build the context for a waiting `session`: an enrichment `body` plus an
  * optional delivery-time `reclassifyAs`. Claude only; other agents return an
- * empty body. See `buildPermissionContext` / `buildQuestionContext` for the
- * per-type sourcing.
+ * empty body. See `buildPlanContext` / `buildPermissionContext` /
+ * `buildQuestionContext` for the per-type sourcing.
  */
 export async function buildNotificationContext(
   session: NotifyContextSession,
@@ -362,6 +427,12 @@ export async function buildNotificationContext(
 ): Promise<NotificationContext> {
   if (session.agentType !== "claude") return { body: null };
   const capture = deps.capturePane ?? capturePane;
+  // Plan waits are routed FIRST: a live ExitPlanMode wait is stored as a
+  // permission (see `isPlanApprovalWait`), so this must precede the permission
+  // branch or the plan body would be sought (and missed) on the pane.
+  if (isPlanApprovalWait(session)) {
+    return buildPlanContext(session);
+  }
   if (session.attentionType === "permission") {
     return buildPermissionContext(session, capture);
   }

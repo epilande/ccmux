@@ -451,6 +451,31 @@ describe("agents.claude.notificationActions", () => {
     expect(claude?.notificationActions?.replyOnFinished).toBe(true);
   });
 
+  it("carries the plan keys on the default Claude def (approve = 2, never 1)", () => {
+    const claude = BUILTIN_AGENTS.find((a) => a.name === "claude");
+    expect(claude?.notificationActions?.planApprove).toEqual(["2"]);
+    expect(claude?.notificationActions?.planDeny).toEqual(["Escape"]);
+    expect(claude?.notificationActions?.planReplyPrelude).toEqual(["Escape"]);
+  });
+
+  it("copies plan keys through a custom notificationActions override", () => {
+    const agents = getAgents({
+      agents: {
+        claude: {
+          notificationActions: {
+            planApprove: ["9"],
+            planDeny: ["q"],
+            planReplyPrelude: ["Escape"],
+          },
+        },
+      },
+    });
+    const claude = agents.find((a) => a.name === "claude");
+    expect(claude?.notificationActions?.planApprove).toEqual(["9"]);
+    expect(claude?.notificationActions?.planDeny).toEqual(["q"]);
+    expect(claude?.notificationActions?.planReplyPrelude).toEqual(["Escape"]);
+  });
+
   it("whole-object replaces the map (omitted keys become undefined)", () => {
     const agents = getAgents({
       agents: {
