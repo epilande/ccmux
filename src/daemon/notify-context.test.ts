@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildFinishedContext,
   buildNotificationContext,
   extractPermissionPrompt,
   extractQuestionPrompt,
@@ -49,6 +50,16 @@ function assistantText(text: string) {
   };
 }
 
+/** A user-role text turn (string content), e.g. a fresh prompt or an
+ *  "[Request interrupted by user]" marker after an assistant turn. */
+function userText(text: string) {
+  return {
+    type: "user",
+    message: { role: "user", content: text },
+    timestamp: "2024-01-15T12:00:00Z",
+  };
+}
+
 /** A permission session whose pane capture returns `paneText`. */
 function permissionSession(
   paneText: string,
@@ -61,6 +72,7 @@ function permissionSession(
       attentionType: "permission",
       pendingTool: "Bash",
       tmuxPane: "%42",
+      lastPrompt: null,
       ...overrides,
     },
     capturePane: async () => paneText,
@@ -323,6 +335,7 @@ describe("buildNotificationContext: permission (pane capture)", () => {
       attentionType: "permission",
       pendingTool: "Bash",
       tmuxPane: "%42",
+      lastPrompt: null,
     };
     const capturePane = async () => {
       throw new Error("tmux gone");
@@ -357,6 +370,7 @@ describe("buildNotificationContext: question (pane-first)", () => {
           attentionType: "question",
           pendingTool: null,
           tmuxPane: "%42",
+          lastPrompt: null,
         },
         { capturePane: async () => QUESTION_PICKER },
       ),
@@ -378,6 +392,7 @@ describe("buildNotificationContext: question (pane-first)", () => {
           attentionType: "question",
           pendingTool: null,
           tmuxPane: "%42",
+          lastPrompt: null,
         },
         { capturePane: async () => "idle pane, no picker" },
       ),
@@ -396,6 +411,7 @@ describe("buildNotificationContext: question (pane-first)", () => {
           attentionType: "question",
           pendingTool: null,
           tmuxPane: "%42",
+          lastPrompt: null,
         },
         {
           capturePane: async () => {
@@ -418,6 +434,7 @@ describe("buildNotificationContext: question (pane-first)", () => {
           attentionType: "question",
           pendingTool: null,
           tmuxPane: "%42",
+          lastPrompt: null,
         },
         { capturePane: async () => "idle pane, no picker" },
       ),
@@ -433,6 +450,7 @@ describe("buildNotificationContext: question (pane-first)", () => {
           attentionType: "question",
           pendingTool: null,
           tmuxPane: "%42",
+          lastPrompt: null,
         },
         { capturePane: async () => "" },
       ),
@@ -451,6 +469,7 @@ describe("buildNotificationContext: gating", () => {
           attentionType: "permission",
           pendingTool: "Bash",
           tmuxPane: "%42",
+          lastPrompt: null,
         },
         { capturePane },
       ),
@@ -467,9 +486,128 @@ describe("buildNotificationContext: gating", () => {
           attentionType: "plan_approval",
           pendingTool: "Bash",
           tmuxPane: "%42",
+          lastPrompt: null,
         },
         { capturePane },
       ),
     ).toEqual({ body: null });
+  });
+});
+
+describe("buildFinishedContext", () => {
+  /** A finished Claude session backed by `logPath`, with an optional
+   *  `lastPrompt` fallback. */
+  function finishedSession(
+    overrides: Partial<NotifyContextSession> = {},
+  ): NotifyContextSession {
+    return {
+      agentType: "claude",
+      logPath: null,
+      attentionType: null,
+      pendingTool: null,
+      tmuxPane: null,
+      lastPrompt: null,
+      ...overrides,
+    };
+  }
+
+  it("returns the last assistant text from the transcript tail (Claude)", async () => {
+    const path = await writeTranscript([
+      assistantText("earlier turn"),
+      assistantText("All done. The tests pass."),
+    ]);
+    expect(await buildFinishedContext(finishedSession({ logPath: path }))).toBe(
+      "All done. The tests pass.",
+    );
+  });
+
+  it("falls through to lastPrompt when a user turn follows the last assistant text (stale tail)", async () => {
+    // An interrupted/denied turn or a fresh prompt lands as a user text AFTER
+    // the last assistant text; quoting that assistant text would be the
+    // previous turn's answer, so the ladder falls through to lastPrompt.
+    const path = await writeTranscript([
+      assistantText("Old answer from the previous turn."),
+      userText("[Request interrupted by user]"),
+    ]);
+    expect(
+      await buildFinishedContext(
+        finishedSession({ logPath: path, lastPrompt: "resume the refactor" }),
+      ),
+    ).toBe("resume the refactor");
+  });
+
+  it("returns null on a stale tail when there is no lastPrompt", async () => {
+    const path = await writeTranscript([
+      assistantText("Old answer."),
+      userText("a fresh prompt"),
+    ]);
+    expect(
+      await buildFinishedContext(finishedSession({ logPath: path })),
+    ).toBeNull();
+  });
+
+  it("falls back to lastPrompt when the transcript has no assistant text", async () => {
+    const path = await writeTranscript([
+      assistantToolUse("Bash", { command: "x" }),
+    ]);
+    expect(
+      await buildFinishedContext(
+        finishedSession({ logPath: path, lastPrompt: "fix the flaky test" }),
+      ),
+    ).toBe("fix the flaky test");
+  });
+
+  it("falls back to lastPrompt for a non-Claude agent (no transcript read)", async () => {
+    expect(
+      await buildFinishedContext(
+        finishedSession({ agentType: "codex", lastPrompt: "ship the release" }),
+      ),
+    ).toBe("ship the release");
+  });
+
+  it("returns null when there is neither assistant text nor a lastPrompt", async () => {
+    expect(await buildFinishedContext(finishedSession())).toBeNull();
+  });
+
+  it("fails open to null when the transcript read throws (missing file)", async () => {
+    // A logPath pointing at a nonexistent file: the read rejects, and with no
+    // lastPrompt the ladder bottoms out at null rather than throwing.
+    expect(
+      await buildFinishedContext(
+        finishedSession({ logPath: join(dir, "does-not-exist.jsonl") }),
+      ),
+    ).toBeNull();
+  });
+
+  it("falls through to lastPrompt when the transcript read throws (missing file)", async () => {
+    // The transcript branch's own failure must NOT skip the lastPrompt step:
+    // an unreadable logPath still yields the clamped lastPrompt.
+    expect(
+      await buildFinishedContext(
+        finishedSession({
+          logPath: join(dir, "does-not-exist.jsonl"),
+          lastPrompt: "wire up the notifier",
+        }),
+      ),
+    ).toBe("wire up the notifier");
+  });
+
+  it("clamps the finished body tighter than the waiting context (2 lines / 200 chars)", async () => {
+    const fiveLines = ["one", "two", "three", "four", "five"].join("\n");
+    const path = await writeTranscript([assistantText(fiveLines)]);
+    const out = await buildFinishedContext(finishedSession({ logPath: path }));
+    expect(out).not.toBeNull();
+    // Only the first two lines survive, with a trailing ellipsis.
+    expect(out).toBe("one\ntwo…");
+  });
+
+  it("clamps a long single-line closing to 200 chars", async () => {
+    const long = "x".repeat(400);
+    const path = await writeTranscript([assistantText(long)]);
+    const out = await buildFinishedContext(finishedSession({ logPath: path }));
+    expect(out).not.toBeNull();
+    expect(out!.endsWith("…")).toBe(true);
+    // 200 chars of content plus the single ellipsis.
+    expect([...out!].length).toBeLessThanOrEqual(201);
   });
 });

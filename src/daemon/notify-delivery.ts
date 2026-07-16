@@ -29,7 +29,7 @@
  */
 
 import type { Backend, NotificationPayload, SpawnFn } from "../lib/notify";
-import { normalizeBackendConfig, probeCcmuxNotifier } from "../lib/notify";
+import { isUnrecognizedBackend, probeCcmuxNotifier } from "../lib/notify";
 import type { NotificationsConfig } from "../lib/preferences";
 import type { NotificationActionInput } from "./notification-action";
 
@@ -182,22 +182,21 @@ export function createNotifyDelivery(deps: DeliveryDeps): {
     return dbusNotifier;
   };
 
-  /** Logged at most once: a config still naming the removed `terminal-notifier`
-   * backend falls back to the auto ladder rather than hard-failing. */
-  let loggedLegacyBackend = false;
+  /** Logged at most once per run: a configured backend that isn't recognized
+   * (a typo, or a value removed across versions) is ignored in favor of the
+   * auto ladder rather than silently disabling notifications. */
+  let loggedUnknownBackend = false;
   const resolveConfiguredBackend = (prefs: {
     notifications?: NotificationsConfig;
   }): Backend | null => {
-    const { backend, removed } = normalizeBackendConfig(
-      prefs.notifications?.backend,
-    );
-    if (removed && !loggedLegacyBackend) {
-      loggedLegacyBackend = true;
+    const configured = prefs.notifications?.backend;
+    if (isUnrecognizedBackend(configured) && !loggedUnknownBackend) {
+      loggedUnknownBackend = true;
       log(
-        `Notifier: notifications.backend "${removed}" was removed in v2; using the auto ladder`,
+        `Notifier: notifications.backend "${String(configured)}" is not a recognized backend; using the auto ladder`,
       );
     }
-    return deps.resolveBackend({ backend });
+    return deps.resolveBackend({ backend: configured });
   };
 
   async function deliverNotification(

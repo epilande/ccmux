@@ -14,6 +14,11 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
+	<!-- User-facing name: the notification group header reads "ccmux", not the
+	     product/binary name "ccmux-notifier" (which the ccmux CLI invokes by
+	     path and must stay unchanged). -->
+	<key>CFBundleDisplayName</key>
+	<string>ccmux</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

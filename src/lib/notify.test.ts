@@ -13,7 +13,8 @@ import {
   deliver,
   deliverTimeoutFor,
   DELIVER_TIMEOUT_MS,
-  normalizeBackendConfig,
+  foldSubtitleIntoBody,
+  isUnrecognizedBackend,
   NOTIFIER_DELIVER_TIMEOUT_MS,
   probeBackend,
   probeCcmuxNotifier,
@@ -84,32 +85,29 @@ describe("resolveBackend", () => {
       "osascript",
     );
   });
+
+  it("resolves an unrecognized backend to the platform ladder (ccmux.json is hand-edited)", () => {
+    // A typo/removed value is ignored in favor of the working default rather
+    // than passing through to a silent hard-disable downstream.
+    expect(resolveBackend({ backend: "bogus" as never }, "darwin")).toBe(
+      "ccmux-notifier",
+    );
+    expect(resolveBackend({ backend: "bogus" as never }, "linux")).toBe("dbus");
+    expect(resolveBackend({ backend: "bogus" as never }, "win32")).toBe(null);
+  });
 });
 
-describe("normalizeBackendConfig", () => {
-  it("maps the removed terminal-notifier backend to auto and flags it", () => {
-    expect(normalizeBackendConfig("terminal-notifier")).toEqual({
-      backend: undefined,
-      removed: "terminal-notifier",
-    });
+describe("isUnrecognizedBackend", () => {
+  it("is false for a recognized backend, unset, or auto", () => {
+    expect(isUnrecognizedBackend("osascript")).toBe(false);
+    expect(isUnrecognizedBackend("dbus")).toBe(false);
+    expect(isUnrecognizedBackend(undefined)).toBe(false);
+    expect(isUnrecognizedBackend("auto")).toBe(false);
   });
 
-  it("passes through a live backend value untouched", () => {
-    expect(normalizeBackendConfig("dbus")).toEqual({
-      backend: "dbus",
-      removed: null,
-    });
-    expect(normalizeBackendConfig("ccmux-notifier")).toEqual({
-      backend: "ccmux-notifier",
-      removed: null,
-    });
-  });
-
-  it("passes through undefined (unset) untouched", () => {
-    expect(normalizeBackendConfig(undefined)).toEqual({
-      backend: undefined,
-      removed: null,
-    });
+  it("is true for a typo/removed value", () => {
+    expect(isUnrecognizedBackend("terminal-notifier")).toBe(true);
+    expect(isUnrecognizedBackend("bogus")).toBe(true);
   });
 });
 
@@ -368,6 +366,91 @@ describe("deliver: osascript", () => {
     }
     expect(argv.at(-1)).toBe(maliciousBody);
   });
+
+  // The subtitle x sound matrix: subtitle is rendered natively (its own
+  // `item N of argv`), and the positional indices must stay in lockstep with
+  // the clause whether or not the optional sound clause is also present.
+  it("renders a subtitle natively with no sound (item 3)", async () => {
+    const { spawn, calls } = fakeSpawn();
+    await deliver(
+      "osascript",
+      { ...BASE_PAYLOAD, subtitle: "Needs permission: Bash" },
+      spawn,
+    );
+    expect(calls[0].argv).toEqual([
+      "osascript",
+      "-e",
+      "on run argv",
+      "-e",
+      "display notification (item 2 of argv) with title (item 1 of argv) subtitle (item 3 of argv)",
+      "-e",
+      "end run",
+      "--",
+      BASE_PAYLOAD.title,
+      BASE_PAYLOAD.body,
+      "Needs permission: Bash",
+    ]);
+  });
+
+  it("renders subtitle (item 3) and sound (item 4) together", async () => {
+    const { spawn, calls } = fakeSpawn();
+    await deliver(
+      "osascript",
+      { ...BASE_PAYLOAD, subtitle: "Finished", sound: "Glass" },
+      spawn,
+    );
+    expect(calls[0].argv).toEqual([
+      "osascript",
+      "-e",
+      "on run argv",
+      "-e",
+      "display notification (item 2 of argv) with title (item 1 of argv) subtitle (item 3 of argv) sound name (item 4 of argv)",
+      "-e",
+      "end run",
+      "--",
+      BASE_PAYLOAD.title,
+      BASE_PAYLOAD.body,
+      "Finished",
+      "Glass",
+    ]);
+  });
+
+  it("keeps sound at item 3 when there is no subtitle", async () => {
+    const { spawn, calls } = fakeSpawn();
+    await deliver("osascript", { ...BASE_PAYLOAD, sound: "Glass" }, spawn);
+    // Regression guard: without a subtitle, the sound clause must stay item 3,
+    // not shift to item 4.
+    expect(calls[0].argv[4]).toBe(
+      "display notification (item 2 of argv) with title (item 1 of argv) sound name (item 3 of argv)",
+    );
+  });
+});
+
+describe("foldSubtitleIntoBody", () => {
+  it("joins subtitle and body with a newline", () => {
+    expect(
+      foldSubtitleIntoBody({ subtitle: "Finished", body: "Wrapped up." }),
+    ).toBe("Finished\nWrapped up.");
+  });
+
+  it("drops an empty body (no trailing newline)", () => {
+    expect(foldSubtitleIntoBody({ subtitle: "Finished", body: "" })).toBe(
+      "Finished",
+    );
+  });
+
+  it("drops an empty/absent subtitle (no leading newline)", () => {
+    expect(foldSubtitleIntoBody({ subtitle: "", body: "just the body" })).toBe(
+      "just the body",
+    );
+    expect(foldSubtitleIntoBody({ body: "just the body" })).toBe(
+      "just the body",
+    );
+  });
+
+  it("is empty when both parts are empty", () => {
+    expect(foldSubtitleIntoBody({ subtitle: "", body: "" })).toBe("");
+  });
 });
 
 describe("deliver: ccmux-notifier", () => {
@@ -420,6 +503,17 @@ describe("deliver: ccmux-notifier", () => {
     expect(argv).not.toContain("--reply-action");
   });
 
+  it("omits --body when the body is empty (the subtitle carries the event)", async () => {
+    const argv = buildCcmuxNotifierArgv({
+      ...NOTIFIER_PAYLOAD,
+      subtitle: "Finished",
+      body: "",
+    })!;
+    expect(argv).not.toContain("--body");
+    expect(argv).toContain("--subtitle");
+    expect(argv[argv.indexOf("--subtitle") + 1]).toBe("Finished");
+  });
+
   it("omits statusChangedAt from the payload JSON when unset", async () => {
     const argv = buildCcmuxNotifierArgv({
       ...NOTIFIER_PAYLOAD,
@@ -453,6 +547,26 @@ describe("deliver: notify-send", () => {
     ]);
   });
 
+  it("folds the subtitle into body line 1 (no native subtitle slot)", async () => {
+    const { spawn, calls } = fakeSpawn();
+    await deliver(
+      "notify-send",
+      { ...BASE_PAYLOAD, subtitle: "Needs permission: Bash", body: "rm -rf x" },
+      spawn,
+    );
+    expect(calls[0].argv.at(-1)).toBe("Needs permission: Bash\nrm -rf x");
+  });
+
+  it("uses the subtitle alone when the body is empty (no trailing newline)", async () => {
+    const { spawn, calls } = fakeSpawn();
+    await deliver(
+      "notify-send",
+      { ...BASE_PAYLOAD, subtitle: "Finished", body: "" },
+      spawn,
+    );
+    expect(calls[0].argv.at(-1)).toBe("Finished");
+  });
+
   it("keeps `--` before a flag-looking title so it isn't parsed as an option", async () => {
     const { spawn, calls } = fakeSpawn();
     const flagLikeTitle = "--icon=evil";
@@ -475,6 +589,7 @@ describe("deliver: command", () => {
       {
         ...BASE_PAYLOAD,
         event: "finished",
+        subtitle: "Finished",
         command: 'ntfy publish agents "$CCMUX_TITLE: $CCMUX_BODY"',
       },
       spawn,
@@ -493,8 +608,21 @@ describe("deliver: command", () => {
       CCMUX_PROJECT: "ccmux",
       CCMUX_BRANCH: "main",
       CCMUX_TITLE: BASE_PAYLOAD.title,
-      CCMUX_BODY: BASE_PAYLOAD.body,
+      // Split contract: SUBTITLE is the bare event line; BODY is the complete
+      // text (subtitle folded in), so a script reading only $CCMUX_BODY still
+      // sees the event line.
+      CCMUX_SUBTITLE: "Finished",
+      CCMUX_BODY: `Finished\n${BASE_PAYLOAD.body}`,
       CCMUX_PANE: "%3",
+    });
+  });
+
+  it("with no subtitle, CCMUX_SUBTITLE is empty and CCMUX_BODY is just the body", async () => {
+    const { spawn, calls } = fakeSpawn();
+    await deliver("command", { ...BASE_PAYLOAD, command: "echo hi" }, spawn);
+    expect(calls[0].options?.env).toMatchObject({
+      CCMUX_SUBTITLE: "",
+      CCMUX_BODY: BASE_PAYLOAD.body,
     });
   });
 
@@ -554,6 +682,15 @@ describe("probeBackend", () => {
     expect(await probeBackend("command", spawn)).toBe(true);
     expect(await probeBackend("dbus", spawn)).toBe(true);
     expect(await probeBackend("ccmux-notifier", spawn)).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("reports disabled without spawning for a backend with no probe argv", async () => {
+    // Defense-in-depth: an unrecognized backend that somehow reached here has
+    // no PROBE_ARGV entry, so the guard returns false rather than relying on
+    // spawn(undefined) throwing.
+    const { spawn, calls } = fakeSpawn(0);
+    expect(await probeBackend("bogus" as never, spawn)).toBe(false);
     expect(calls).toHaveLength(0);
   });
 });

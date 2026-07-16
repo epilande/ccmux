@@ -413,17 +413,6 @@ export function createConfigCommand(): Command {
             notifications.command = value;
             break;
           }
-          case "icon": {
-            // Removed in v2: v1's own hints recommended `notifications.icon
-            // none`, so accept the key and no-op (exit 0) rather than break old
-            // setup scripts. The macOS helper posts under ccmux's own identity;
-            // there is no icon to configure.
-            console.log(
-              "notifications.icon was removed in v2: notifications post under " +
-                "ccmux's own identity, so there is nothing to configure. No change made.",
-            );
-            return;
-          }
           default: {
             console.error(`Unknown notifications key: ${notifKey}`);
             console.error(

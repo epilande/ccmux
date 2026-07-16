@@ -230,7 +230,7 @@ Configure further with `ccmux config set notifications.<key> <value>`, or edit `
 }
 ```
 
-`backend: "auto"` picks `ccmux-notifier` (else `osascript`) on macOS, and D-Bus (else `notify-send`) on Linux. `command` runs your own shell command with `CCMUX_*` env set (`EVENT`, `SESSION_ID`, `AGENT`, `PROJECT`, `BRANCH`, `TITLE`, `BODY`, `PANE`), for ntfy, Pushover, and the like. (The v1 `terminal-notifier` backend and `notifications.icon` key were removed in v2; an old config naming them falls back to the auto ladder.)
+`backend: "auto"` picks `ccmux-notifier` (else `osascript`) on macOS, and D-Bus (else `notify-send`) on Linux. `command` runs your own shell command with `CCMUX_*` env set (`EVENT`, `SESSION_ID`, `AGENT`, `PROJECT`, `BRANCH`, `TITLE`, `SUBTITLE`, `BODY`, `PANE`), for ntfy, Pushover, and the like. `CCMUX_BODY` is the complete text (the event line plus any context), so a script reading only it still gets something meaningful; `CCMUX_SUBTITLE` is the bare event line on its own for structured consumers.
 
 > [!NOTE]
 > **Approve/Deny only send the mapped keystroke** to that session's pane (for Claude, the same key you'd press yourself). If the session moved on since the notification fired, the press sends nothing and you get a fresh "state changed" notification instead; dismissing a notification never approves anything.

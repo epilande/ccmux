@@ -186,9 +186,9 @@ export interface NotificationsConfig {
   sound?: boolean | string;
   /** debounce (ms) for the "finished" event only; default 1000 */
   delayMs?: number;
-  /** default "auto" (platform-appropriate ladder). The v1 `"terminal-notifier"`
-   * value was removed in v2; a config still carrying it is treated as "auto"
-   * (fail-open) with a one-line log — see `normalizeBackendConfig`. */
+  /** default "auto" (platform-appropriate ladder). An unrecognized value (the
+   * file is hand-edited) is ignored and falls back to the auto ladder, with a
+   * one-line warning, rather than disabling notifications. */
   backend?: (typeof VALID_NOTIFICATION_BACKENDS)[number];
   /** shell command run when backend is "command" */
   command?: string;

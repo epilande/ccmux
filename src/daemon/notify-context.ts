@@ -1,8 +1,8 @@
 /**
- * Notification body enrichment: given a waiting session, extract a short
- * plain-text description of WHAT it is waiting on, so an actionable
- * notification can show the pending command / question instead of a bare
- * "Needs permission: Bash".
+ * Notification body enrichment: extract a short plain-text description of WHAT
+ * a session is waiting on (the pending command / question) or, for a finished
+ * session, its closing words, so the notification body shows real context
+ * under the event line the subtitle already carries.
  *
  * Fail-open by contract: any read/parse error, an unsupported agent, or a
  * missing source returns `null`, and the caller keeps the base body. The
@@ -39,6 +39,9 @@ export interface NotifyContextSession {
   /** tmux pane id (e.g. `%418`) the session runs in. The permission-context
    *  path captures this pane; null means we can't read the prompt. */
   tmuxPane: string | null;
+  /** The session's last submitted prompt, the finished-context fallback when
+   *  no assistant closing words can be read from the transcript. */
+  lastPrompt: string | null;
 }
 
 /** Injected so tests can stub the tmux read. */
@@ -65,18 +68,27 @@ const CONTEXT_TAIL_BYTES = 128 * 1024;
 /** How many trailing pane lines to capture for the permission prompt. The
  *  prompt box (header + command + description + options) fits comfortably. */
 const PANE_CAPTURE_LINES = 30;
-/** Body caps: multi-line is fine (macOS renders `\n`), but keep it glanceable. */
+/** Waiting-context caps: multi-line is fine (macOS renders `\n`), but keep it
+ *  glanceable. The finished context (closing words) clamps tighter, below. */
 const MAX_CONTEXT_LINES = 4;
 const MAX_CONTEXT_CHARS = 300;
+/** Finished-context caps: an assistant turn's closing words can run long, so
+ *  clamp it tighter than the waiting command/question block. */
+const MAX_FINISHED_LINES = 2;
+const MAX_FINISHED_CHARS = 200;
 /** Upper bound on lines pulled from the prompt's command block, before the
  *  final clamp — guards against grabbing an unbounded run if the shape is off. */
 const MAX_BLOCK_LINES = 8;
 
 /**
- * Strip control characters (keeping `\n`) and clamp to `MAX_CONTEXT_LINES` /
- * `MAX_CONTEXT_CHARS` with an ellipsis. Null when nothing printable survives.
+ * Strip control characters (keeping `\n`) and clamp to `maxLines` / `maxChars`
+ * with an ellipsis. Null when nothing printable survives.
  */
-function clampBody(raw: string): string | null {
+function clampBody(
+  raw: string,
+  maxLines: number,
+  maxChars: number,
+): string | null {
   const normalized = stripControlChars(raw.replace(/\r\n?/g, "\n"), {
     keepNewlines: true,
   });
@@ -84,13 +96,13 @@ function clampBody(raw: string): string | null {
   let clipped = false;
 
   let kept = lines;
-  if (kept.length > MAX_CONTEXT_LINES) {
-    kept = kept.slice(0, MAX_CONTEXT_LINES);
+  if (kept.length > maxLines) {
+    kept = kept.slice(0, maxLines);
     clipped = true;
   }
   let text = kept.join("\n").trimEnd();
-  if (text.length > MAX_CONTEXT_CHARS) {
-    text = text.slice(0, MAX_CONTEXT_CHARS).trimEnd();
+  if (text.length > maxChars) {
+    text = text.slice(0, maxChars).trimEnd();
     clipped = true;
   }
   if (text.trim().length === 0) return null;
@@ -170,7 +182,7 @@ export function extractPermissionPrompt(paneText: string): string | null {
   }
   if (block.length === 0) return null;
 
-  return clampBody(block.join("\n"));
+  return clampBody(block.join("\n"), MAX_CONTEXT_LINES, MAX_CONTEXT_CHARS);
 }
 
 /** A captured Claude AskUserQuestion option-picker line, e.g. "1. Blue" (after
@@ -231,19 +243,47 @@ export function extractQuestionPrompt(paneText: string): string | null {
   if (header.length === 0) return null;
 
   const question = header.find((line) => line.endsWith("?")) ?? header[0];
-  return clampBody(question);
+  return clampBody(question, MAX_CONTEXT_LINES, MAX_CONTEXT_CHARS);
 }
 
-/** Find the last assistant text block across parsed entries. */
-function lastAssistantText(entries: LogEntry[]): string | null {
+/**
+ * The newest assistant text in the tail, but ONLY when it is still the last
+ * conversational text there. Walking back to the most recent text-bearing entry
+ * (each entry's texts are single-role: user string, or assistant text blocks),
+ * a user-role newest text means the assistant turn we'd otherwise quote is stale
+ * (an interrupted/denied turn's "[Request interrupted by user]" marker, or a
+ * fresh prompt), so return null. Guards both the finished body and the
+ * question-tail fallback against quoting a superseded turn.
+ */
+function lastAssistantTextIfCurrent(entries: LogEntry[]): string | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     const texts = claudeEntryTexts(entries[i]);
     if (texts.length === 0) continue;
-    for (let j = texts.length - 1; j >= 0; j--) {
-      if (texts[j].role === "assistant") return texts[j].text;
-    }
+    const newest = texts[texts.length - 1];
+    return newest.role === "assistant" ? newest.text : null;
   }
   return null;
+}
+
+/**
+ * Shared transcript-tail pipeline: read the tail, parse it, and return the
+ * newest assistant text clamped to `maxLines` / `maxChars` (via
+ * {@link lastAssistantTextIfCurrent}, so a stale tail returns null). Fail-open:
+ * a read/parse error returns null so the caller can fall through.
+ */
+async function assistantTextFromTranscript(
+  logPath: string,
+  maxLines: number,
+  maxChars: number,
+): Promise<string | null> {
+  try {
+    const content = await readTranscriptTail(logPath, CONTEXT_TAIL_BYTES);
+    const text = lastAssistantTextIfCurrent(parseLogEntries(content));
+    if (text === null) return null;
+    return clampBody(text, maxLines, maxChars);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -296,23 +336,18 @@ async function buildQuestionContext(
   return questionFromTranscript(session);
 }
 
-/** The transcript-tail half of {@link buildQuestionContext}. */
+/** The transcript-tail half of {@link buildQuestionContext}: a plain-text
+ *  question IS the tail's last assistant text, so the shared pipeline's
+ *  stale-tail guard leaves it intact while rejecting a superseded turn. */
 async function questionFromTranscript(
   session: NotifyContextSession,
 ): Promise<string | null> {
   if (!session.logPath) return null;
-  try {
-    const content = await readTranscriptTail(
-      session.logPath,
-      CONTEXT_TAIL_BYTES,
-    );
-    const entries = parseLogEntries(content);
-    const text = lastAssistantText(entries);
-    if (text === null) return null;
-    return clampBody(text);
-  } catch {
-    return null;
-  }
+  return assistantTextFromTranscript(
+    session.logPath,
+    MAX_CONTEXT_LINES,
+    MAX_CONTEXT_CHARS,
+  );
 }
 
 /**
@@ -334,4 +369,46 @@ export async function buildNotificationContext(
     return { body: await buildQuestionContext(session, capture) };
   }
   return { body: null };
+}
+
+/**
+ * Build the context body for a FINISHED session: what the agent last said, so a
+ * "Finished" notification shows the turn's closing words instead of just the
+ * bare event line. The ladder:
+ *   1. Claude with a `logPath`: the last assistant text off the transcript
+ *      tail. Unlike a wait, a finished turn IS flushed to the JSONL, so the
+ *      tail is current (see the module doc for why a wait can't trust it).
+ *      Skipped when the tail's newest text is a user turn (interrupted/denied,
+ *      or a fresh prompt): the shared pipeline returns null and we fall through
+ *      rather than quoting the previous turn's answer.
+ *   2. Any agent: the session's `lastPrompt` (what the user asked for). The
+ *      transcript read is fail-open on its own, so a deleted/unreadable logPath
+ *      reaches this step instead of skipping the rest of the ladder.
+ *   3. Else null (the caller keeps a bare payload; the subtitle carries the
+ *      event).
+ * Clamped tighter than the waiting context. Fail-open: any error returns null.
+ */
+export async function buildFinishedContext(
+  session: NotifyContextSession,
+): Promise<string | null> {
+  try {
+    if (session.agentType === "claude" && session.logPath) {
+      const fromTranscript = await assistantTextFromTranscript(
+        session.logPath,
+        MAX_FINISHED_LINES,
+        MAX_FINISHED_CHARS,
+      );
+      if (fromTranscript !== null) return fromTranscript;
+    }
+    if (session.lastPrompt) {
+      return clampBody(
+        session.lastPrompt,
+        MAX_FINISHED_LINES,
+        MAX_FINISHED_CHARS,
+      );
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }

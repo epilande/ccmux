@@ -34,8 +34,16 @@ export interface NotifyConfig {
  * doesn't know about.
  */
 export interface NotificationPayload {
+  /** Session identity, agent-first: `Agent · project:branch` (passed whole; the
+   * OS tail-truncates the title line at render). */
   title: string;
+  /** The event line ("Needs permission: <tool>", "Finished", etc.), always set
+   * for a real notification. Backends with a native subtitle slot (ccmux-notifier,
+   * osascript) render it as its own line; notify-send and D-Bus fold it into
+   * body line 1 (see `foldSubtitleIntoBody`). */
   subtitle?: string;
+  /** Contextual content only (the pending command/question, or a finished
+   * turn's closing words); may be empty when nothing could be extracted. */
   body: string;
   event: NotificationEventKind;
   sessionId: string;
@@ -195,38 +203,46 @@ export function resolveCcmuxNotifierBinary(
   return which("ccmux-notifier");
 }
 
-/** Backends removed in v2 (v1 config values that must not hard-error). */
-const REMOVED_BACKENDS = new Set(["terminal-notifier"]);
+/** The concrete backends `deliver` knows how to build (excludes the `"auto"`
+ *  sentinel). Kept local rather than importing the preferences list so this
+ *  module stays free of preference imports. */
+const VALID_BACKENDS = new Set<Backend>([
+  "ccmux-notifier",
+  "osascript",
+  "notify-send",
+  "dbus",
+  "command",
+]);
 
-/**
- * Normalizes a raw configured backend value from `ccmux.json` (untyped at
- * runtime). A removed v1 backend maps to `undefined` (→ the auto ladder),
- * reported via `removed` so the caller can log it once (fail-open).
- */
-export function normalizeBackendConfig(raw: unknown): {
-  backend: NotifyConfig["backend"];
-  removed: string | null;
-} {
-  if (typeof raw === "string" && REMOVED_BACKENDS.has(raw)) {
-    return { backend: undefined, removed: raw };
-  }
-  return { backend: raw as NotifyConfig["backend"], removed: null };
+/** True when `value` names a real backend (not `"auto"`, not an unknown
+ *  string). ccmux.json is hand-edited, so runtime values aren't type-safe. */
+export function isKnownBackend(value: unknown): value is Backend {
+  return typeof value === "string" && VALID_BACKENDS.has(value as Backend);
+}
+
+/** True when a CONFIGURED backend value is neither `"auto"` nor a recognized
+ *  backend, i.e. a typo/removed value `resolveBackend` will ignore (falling to
+ *  the auto ladder). Unset and `"auto"` are recognized (they select the ladder
+ *  on purpose). Lets callers surface a one-line warning. */
+export function isUnrecognizedBackend(value: unknown): boolean {
+  return value !== undefined && value !== "auto" && !isKnownBackend(value);
 }
 
 /**
- * Resolves the backend to use. `"auto"` (the default) walks the ladder:
+ * Resolves the backend to use. A recognized explicit backend always wins,
+ * regardless of platform. `"auto"` (the default), an unset value, OR an
+ * unrecognized value (ccmux.json is hand-edited) all walk the platform ladder:
  * darwin -> ccmux-notifier (the delivery layer falls to osascript when the
  * helper isn't resolvable, mirroring dbus -> notify-send on linux); linux ->
- * dbus; anything else -> disabled. An explicit non-"auto" backend always
- * wins, regardless of platform. Legacy `"terminal-notifier"` configs are
- * normalized to `"auto"` by callers first (see {@link normalizeBackendConfig}).
+ * dbus; anything else -> disabled. Routing a typo to the working default beats
+ * silently hard-disabling notifications; callers surface it via
+ * {@link isUnrecognizedBackend}.
  */
 export function resolveBackend(
   config: NotifyConfig,
   platform: NodeJS.Platform = process.platform,
 ): Backend | null {
-  const backend = config.backend ?? "auto";
-  if (backend !== "auto") return backend;
+  if (isKnownBackend(config.backend)) return config.backend;
 
   if (platform === "darwin") {
     return "ccmux-notifier";
@@ -309,11 +325,12 @@ export async function probeBackend(
   ) {
     return true;
   }
-  const exitCode = await runWithTimeout(
-    PROBE_ARGV[backend],
-    PROBE_TIMEOUT_MS,
-    spawn,
-  );
+  // No static probe argv (an unrecognized backend slipped past resolution):
+  // report disabled explicitly rather than relying on `spawn(undefined)` to
+  // throw its way to a false.
+  const argv = PROBE_ARGV[backend];
+  if (!argv) return false;
+  const exitCode = await runWithTimeout(argv, PROBE_TIMEOUT_MS, spawn);
   return exitCode === 0;
 }
 
@@ -338,39 +355,60 @@ function resolveSoundName(sound: boolean | string | undefined): string | null {
   return sound === true ? "default" : sound;
 }
 
+/**
+ * Backends with no native subtitle slot (notify-send, D-Bus) render the event
+ * line by folding the subtitle in as body line 1. Empty parts are skipped so
+ * neither an empty subtitle nor an empty body leaves a stray blank line.
+ */
+export function foldSubtitleIntoBody(payload: {
+  subtitle?: string;
+  body: string;
+}): string {
+  return [payload.subtitle, payload.body].filter((part) => !!part).join("\n");
+}
+
 function buildOsascriptArgv(payload: NotificationPayload): string[] {
   const sound = resolveSoundName(payload.sound);
-  const displayClause = sound
-    ? "display notification (item 2 of argv) with title (item 1 of argv) sound name (item 3 of argv)"
-    : "display notification (item 2 of argv) with title (item 1 of argv)";
 
-  const argv = [
+  // Positional args map to `item N of argv`, built in lockstep with the clause
+  // so subtitle and sound land at the right index whether or not either is set.
+  const positional = [payload.title, payload.body];
+  let clause =
+    "display notification (item 2 of argv) with title (item 1 of argv)";
+  if (payload.subtitle) {
+    positional.push(payload.subtitle);
+    clause += ` subtitle (item ${positional.length} of argv)`;
+  }
+  if (sound) {
+    positional.push(sound);
+    clause += ` sound name (item ${positional.length} of argv)`;
+  }
+
+  return [
     "osascript",
     "-e",
     "on run argv",
     "-e",
-    displayClause,
+    clause,
     "-e",
     "end run",
-    // `--` ends osascript's own flag parsing: title/body/sound are
+    // `--` ends osascript's own flag parsing: title/subtitle/body/sound are
     // attacker-influenceable (title starts with the session's project name,
     // a directory basename) and a value like "-e ..." would otherwise be
     // consumed as another osascript flag instead of a script argument.
     "--",
-    payload.title,
-    payload.body,
+    ...positional,
   ];
-  if (sound) argv.push(sound);
-  return argv;
 }
 
 /**
  * Builds the ccmux-notifier `post` argv from the payload; `argv[0]` is the
  * resolved absolute helper path. Returns `null` when the delivery layer
  * hasn't stamped the helper path and callback URL — nothing to run.
- * `--actions`/`--reply-action` appear only when the payload carries them;
- * `--body` passes through verbatim, multi-line context and all; `--payload`
- * is the opaque staleness token the helper echoes to `/notification-action`.
+ * `--subtitle`/`--actions`/`--reply-action` appear only when the payload
+ * carries them; `--body` passes through verbatim (multi-line context and all)
+ * and is omitted when empty; `--payload` is the opaque staleness token the
+ * helper echoes to `/notification-action`.
  */
 export function buildCcmuxNotifierArgv(
   payload: NotificationPayload,
@@ -379,7 +417,10 @@ export function buildCcmuxNotifierArgv(
 
   const argv = [payload.notifierPath, "post", "--title", payload.title];
   if (payload.subtitle) argv.push("--subtitle", payload.subtitle);
-  argv.push("--body", payload.body);
+  // The body is context-only now and may be empty (e.g. a finished notification
+  // whose closing words couldn't be extracted); the subtitle carries the event
+  // line, so omit an empty --body rather than posting a blank banner line.
+  if (payload.body) argv.push("--body", payload.body);
   argv.push("--group", `ccmux-${payload.sessionId}`);
 
   const sound = resolveSoundName(payload.sound);
@@ -415,7 +456,11 @@ function buildCommandEnv(payload: NotificationPayload): Record<string, string> {
     CCMUX_PROJECT: payload.project,
     CCMUX_BRANCH: payload.branch ?? "",
     CCMUX_TITLE: payload.title,
-    CCMUX_BODY: payload.body,
+    // CCMUX_SUBTITLE is the bare event line for structured consumers; CCMUX_BODY
+    // is the complete text (subtitle folded in), matching the notify-send/dbus
+    // rendering, so a script reading only $CCMUX_BODY still gets the event line.
+    CCMUX_SUBTITLE: payload.subtitle ?? "",
+    CCMUX_BODY: foldSubtitleIntoBody(payload),
     CCMUX_PANE: payload.pane ?? "",
   };
 }
@@ -432,14 +477,16 @@ function buildArgv(
     case "ccmux-notifier":
       return buildCcmuxNotifierArgv(payload);
     case "notify-send":
-      // `--` guards the same class of bug as osascript above: a title
-      // starting with `-` would otherwise parse as an option.
+      // notify-send has no subtitle slot, so the event line is folded into
+      // the body (see `foldSubtitleIntoBody`). `--` guards the same class of
+      // bug as osascript above: a title starting with `-` would otherwise
+      // parse as an option.
       return [
         "notify-send",
         "--app-name=ccmux",
         "--",
         payload.title,
-        payload.body,
+        foldSubtitleIntoBody(payload),
       ];
     case "command":
       return payload.command ? ["sh", "-c", payload.command] : null;

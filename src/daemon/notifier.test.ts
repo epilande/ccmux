@@ -64,6 +64,10 @@ function createHarness(
     // spawn a subprocess in the fire path and make delivery nondeterministic.
     // The dedicated context-enrichment block overrides this explicitly.
     buildContext: overrides.buildContext ?? (async () => ({ body: null })),
+    // Stub finished enrichment off by default: the real one reads the
+    // transcript tail, nondeterministic in a unit test. The finished-context
+    // block overrides this explicitly.
+    buildFinishedContext: overrides.buildFinishedContext ?? (async () => null),
     deliver:
       overrides.deliver ??
       (async (payload: NotificationPayload) => {
@@ -195,7 +199,10 @@ describe("Notifier", () => {
     expect(h.scheduled.length).toBe(0);
     expect(h.delivered.length).toBe(1);
     expect(h.delivered[0].event).toBe("waiting");
-    expect(h.delivered[0].body).toBe("Needs permission: Bash");
+    // The event line is the subtitle now; the body carries context only (empty
+    // here, since buildContext is stubbed off).
+    expect(h.delivered[0].subtitle).toBe("Needs permission: Bash");
+    expect(h.delivered[0].body).toBe("");
   });
 
   it("finished arms a debounce timer instead of delivering immediately", async () => {
@@ -225,7 +232,10 @@ describe("Notifier", () => {
     await h.fireScheduled();
     expect(h.delivered.length).toBe(1);
     expect(h.delivered[0].event).toBe("finished");
-    expect(h.delivered[0].body).toBe("Finished");
+    // "Finished" is the subtitle now; the body carries the (stubbed-empty)
+    // finished context.
+    expect(h.delivered[0].subtitle).toBe("Finished");
+    expect(h.delivered[0].body).toBe("");
   });
 
   it("enriched session uses delayMs; terminal-only session floors at SCAN_INTERVAL_MS + 1000", async () => {
@@ -1045,14 +1055,15 @@ describe("Notifier", () => {
       expect(payload.actions).toBeUndefined();
     });
 
-    it("appends buildContext text to the base body", async () => {
+    it("puts the buildContext text in the body, with the event line in the subtitle", async () => {
       const payload = await deliverWaiting({
         attentionType: "permission",
         pendingTool: "Bash",
         getAgent: () => claudeAgent,
         buildContext: async () => ({ body: "Bash: rm -rf /tmp/x" }),
       });
-      expect(payload.body).toBe("Needs permission: Bash\nBash: rm -rf /tmp/x");
+      expect(payload.subtitle).toBe("Needs permission: Bash");
+      expect(payload.body).toBe("Bash: rm -rf /tmp/x");
     });
 
     it("delivery-time reclassify: a permission wait the pane reveals as a question gets Reply, not Approve/Deny", async () => {
@@ -1068,11 +1079,10 @@ describe("Notifier", () => {
       });
       expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
       expect(payload.actions).toBeUndefined();
-      // Base line is rebuilt for the effective (question) type, not the stored
-      // "Needs permission: Bash".
-      expect(payload.body).toBe(
-        "Waiting for your input\nWhat's your favorite color?",
-      );
+      // The SUBTITLE is rebuilt for the effective (question) type, not the
+      // stored "Needs permission: Bash"; the body is the question text alone.
+      expect(payload.subtitle).toBe("Waiting for your input");
+      expect(payload.body).toBe("What's your favorite color?");
     });
 
     it("stamps statusChangedAt as the staleness token", async () => {
@@ -1099,13 +1109,14 @@ describe("Notifier", () => {
       expect(h.delivered[0].statusChangedAt).toBe(live!.statusChangedAt!);
     });
 
-    it("gives a finished notification no buttons, reply, or context", async () => {
+    it("gives a finished notification no buttons or reply, and never consults the waiting context", async () => {
       const h = createHarness();
       const notifier = new Notifier({
         ...h.deps,
         getAgent: () => claudeAgent,
-        // Would append if consulted; a finished notification must skip it.
+        // The waiting-context builder must never run for a finished event.
         buildContext: async () => ({ body: "should not appear" }),
+        buildFinishedContext: async () => "Wrapped up the refactor.",
       });
       notifier.start();
       h.advanceTime(PAST_GRACE_WINDOW);
@@ -1124,9 +1135,78 @@ describe("Notifier", () => {
 
       expect(h.delivered.length).toBe(1);
       expect(h.delivered[0].event).toBe("finished");
-      expect(h.delivered[0].body).toBe("Finished");
+      expect(h.delivered[0].subtitle).toBe("Finished");
+      // The finished body is the enrichment, not the waiting context.
+      expect(h.delivered[0].body).toBe("Wrapped up the refactor.");
       expect(h.delivered[0].actions).toBeUndefined();
       expect(h.delivered[0].reply).toBeUndefined();
+    });
+
+    it("finished body stays empty when the finished context yields nothing", async () => {
+      const payload = await (async () => {
+        const h = createHarness();
+        const notifier = new Notifier({
+          ...h.deps,
+          buildFinishedContext: async () => null,
+        });
+        notifier.start();
+        h.advanceTime(PAST_GRACE_WINDOW);
+        const session = h.sessionManager.createPaneTrackedSession({
+          agentType: "claude",
+          paneId: "%1",
+          cwd: "/tmp/myapp",
+          pid: 1,
+        });
+        h.sessionManager.setLogPath(session.id, "/tmp/myapp/log.jsonl");
+        h.sessionManager.updateSession(session.id, { status: "working" });
+        await tick();
+        h.sessionManager.updateSession(session.id, { status: "idle" });
+        await flush();
+        await h.fireScheduled();
+        return h.delivered[0];
+      })();
+      expect(payload.subtitle).toBe("Finished");
+      expect(payload.body).toBe("");
+    });
+  });
+
+  describe("title", () => {
+    /** Drives a session (project = basename of `cwd`) to `waiting`, optionally
+     *  with a git branch, and returns the delivered payload's title. */
+    async function titleFor(
+      gitBranch: string | null,
+      cwd = "/tmp/myapp",
+    ): Promise<string> {
+      const h = createHarness();
+      const notifier = new Notifier(h.deps);
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+      const session = h.sessionManager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd,
+        pid: 1,
+      });
+      if (gitBranch) h.sessionManager.updateSession(session.id, { gitBranch });
+      await tick();
+      h.sessionManager.updateSession(session.id, { status: "waiting" });
+      await flush();
+      expect(h.delivered.length).toBe(1);
+      return h.delivered[0].title;
+    }
+
+    it("is agent-first with the project:branch ref", async () => {
+      expect(await titleFor("main")).toBe("Claude · myapp:main");
+    });
+
+    it("omits the branch (and its colon) when there is none", async () => {
+      expect(await titleFor(null)).toBe("Claude · myapp");
+    });
+
+    it("passes a long project:branch ref through untruncated (macOS tail-truncates at render)", async () => {
+      expect(await titleFor("feat/notification-content")).toBe(
+        "Claude · myapp:feat/notification-content",
+      );
     });
   });
 
@@ -1153,6 +1233,9 @@ describe("Notifier", () => {
       expect(payload.command).toBe("my-notify.sh");
       expect(payload.sound).toBe("Glass");
       expect(payload.body).toBe("State changed. Check the pane.");
+      // The self-contained message is the whole notification: the base waiting
+      // subtitle is cleared so it doesn't prepend a stale "Needs permission".
+      expect(payload.subtitle).toBeUndefined();
       // Informational only: no action buttons or reply on a stale-press notice.
       expect(payload.event).toBe("waiting");
       expect(payload.actions).toBeUndefined();

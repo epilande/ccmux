@@ -26,11 +26,11 @@ export interface JumpDeps {
   log: (message: string, error?: unknown) => void;
   /**
    * Raises the terminal app hosting the tmux client to the foreground after a
-   * jump (macOS `open -b <bundleId>`), so a click on a buried terminal
-   * actually surfaces it — v1's terminal-notifier did this via `-activate`.
-   * Optional and platform-scoped: only the darwin wiring provides it; the
-   * Linux/D-Bus path leaves it undefined (a `tmux switch-client` there needs no
-   * app activation). Fail-open — its own errors are swallowed by the caller.
+   * jump (macOS `open -b <bundleId>`), so a click on a buried terminal actually
+   * surfaces it. Optional and platform-scoped: only the darwin wiring provides
+   * it; the Linux/D-Bus path leaves it undefined (a `tmux switch-client` there
+   * needs no app activation). Fail-open: its own errors are swallowed by the
+   * caller.
    */
   activateTerminal?: () => Promise<void>;
 }
