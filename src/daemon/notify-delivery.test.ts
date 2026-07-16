@@ -4,7 +4,7 @@ import {
   type DeliveryDeps,
   type DbusNotifierLike,
 } from "./notify-delivery";
-import type { Backend, NotificationPayload, SpawnFn } from "../lib/notify";
+import type { NotificationPayload, SpawnFn } from "../lib/notify";
 import type { NotificationActionInput } from "./notification-action";
 
 const BASE_PAYLOAD: NotificationPayload = {
@@ -186,33 +186,6 @@ describe("createNotifyDelivery: probe-once-disable", () => {
 
     expect(calls).toBe(2);
     expect(logs.some((l) => l.includes("delivery failed"))).toBe(true);
-  });
-});
-
-describe("createNotifyDelivery: legacy backend fail-open", () => {
-  it("a config still naming terminal-notifier falls back to the auto ladder, logging once", async () => {
-    const resolveBackendConfigs: Array<Backend | "auto" | undefined> = [];
-    const { deps, delivered, logs } = createDeps({
-      getPrefs: async () => ({
-        notifications: {
-          backend: "terminal-notifier" as never,
-        },
-      }),
-      resolveBackend: (config) => {
-        resolveBackendConfigs.push(config.backend);
-        // Mimic the real ladder: undefined (auto) -> osascript on darwin.
-        return (config.backend ?? "osascript") as Backend;
-      },
-    });
-    const { deliver } = createNotifyDelivery(deps);
-
-    await deliver(BASE_PAYLOAD);
-    await deliver(BASE_PAYLOAD);
-
-    // The removed value was normalized away before reaching resolveBackend.
-    expect(resolveBackendConfigs).toEqual([undefined, undefined]);
-    expect(delivered.map((d) => d.backend)).toEqual(["osascript", "osascript"]);
-    expect(logs.filter((l) => l.includes("was removed in v2"))).toHaveLength(1);
   });
 });
 

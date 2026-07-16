@@ -14,7 +14,6 @@ import {
   deliverTimeoutFor,
   DELIVER_TIMEOUT_MS,
   foldSubtitleIntoBody,
-  normalizeBackendConfig,
   NOTIFIER_DELIVER_TIMEOUT_MS,
   probeBackend,
   probeCcmuxNotifier,
@@ -85,32 +84,13 @@ describe("resolveBackend", () => {
       "osascript",
     );
   });
-});
 
-describe("normalizeBackendConfig", () => {
-  it("maps the removed terminal-notifier backend to auto and flags it", () => {
-    expect(normalizeBackendConfig("terminal-notifier")).toEqual({
-      backend: undefined,
-      removed: "terminal-notifier",
-    });
-  });
-
-  it("passes through a live backend value untouched", () => {
-    expect(normalizeBackendConfig("dbus")).toEqual({
-      backend: "dbus",
-      removed: null,
-    });
-    expect(normalizeBackendConfig("ccmux-notifier")).toEqual({
-      backend: "ccmux-notifier",
-      removed: null,
-    });
-  });
-
-  it("passes through undefined (unset) untouched", () => {
-    expect(normalizeBackendConfig(undefined)).toEqual({
-      backend: undefined,
-      removed: null,
-    });
+  it("passes an unrecognized backend through unchanged (fail-open; ccmux.json is hand-edited)", () => {
+    // A typo/removed value must not throw here; it rides through and the
+    // deliver/probe layer degrades gracefully (see the deliver test below).
+    expect(resolveBackend({ backend: "bogus" as never }, "darwin")).toBe(
+      "bogus" as never,
+    );
   });
 });
 
@@ -648,6 +628,16 @@ describe("deliver: dbus (documented no-op)", () => {
   it("never spawns anything — real dispatch lives in DbusNotifier", async () => {
     const { spawn, calls } = fakeSpawn();
     await deliver("dbus", BASE_PAYLOAD, spawn);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("deliver: unrecognized backend (fail-open)", () => {
+  it("builds no argv and spawns nothing for an unknown backend value", async () => {
+    // ccmux.json is hand-edited, so a typo/removed backend reaches here; it
+    // must no-op rather than throw.
+    const { spawn, calls } = fakeSpawn();
+    await deliver("bogus" as never, BASE_PAYLOAD, spawn);
     expect(calls).toHaveLength(0);
   });
 });

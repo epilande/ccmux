@@ -203,31 +203,14 @@ export function resolveCcmuxNotifierBinary(
   return which("ccmux-notifier");
 }
 
-/** Backends removed in v2 (v1 config values that must not hard-error). */
-const REMOVED_BACKENDS = new Set(["terminal-notifier"]);
-
-/**
- * Normalizes a raw configured backend value from `ccmux.json` (untyped at
- * runtime). A removed v1 backend maps to `undefined` (→ the auto ladder),
- * reported via `removed` so the caller can log it once (fail-open).
- */
-export function normalizeBackendConfig(raw: unknown): {
-  backend: NotifyConfig["backend"];
-  removed: string | null;
-} {
-  if (typeof raw === "string" && REMOVED_BACKENDS.has(raw)) {
-    return { backend: undefined, removed: raw };
-  }
-  return { backend: raw as NotifyConfig["backend"], removed: null };
-}
-
 /**
  * Resolves the backend to use. `"auto"` (the default) walks the ladder:
  * darwin -> ccmux-notifier (the delivery layer falls to osascript when the
  * helper isn't resolvable, mirroring dbus -> notify-send on linux); linux ->
- * dbus; anything else -> disabled. An explicit non-"auto" backend always
- * wins, regardless of platform. Legacy `"terminal-notifier"` configs are
- * normalized to `"auto"` by callers first (see {@link normalizeBackendConfig}).
+ * dbus; anything else -> disabled. An explicit non-"auto" backend always wins,
+ * regardless of platform. An unrecognized value (ccmux.json is hand-edited)
+ * rides through unchanged and fails open downstream: the probe/deliver layer
+ * builds no argv for it and disables it rather than throwing.
  */
 export function resolveBackend(
   config: NotifyConfig,

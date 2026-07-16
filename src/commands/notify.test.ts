@@ -146,40 +146,6 @@ function reset(): void {
   notifierSpawnArgs.length = 0;
 }
 
-describe("ccmux notify: legacy backend normalization", () => {
-  it("normalizes a removed v1 terminal-notifier backend to the auto ladder instead of exiting 1", async () => {
-    reset();
-    // A v1 config still naming the removed backend must not make `ccmux notify`
-    // exit 1 while the daemon delivers fine — normalize it like the daemon does.
-    // `terminal-notifier` was removed from the Backend union in v2; a stale
-    // config can still carry it at runtime, so cast past the type.
-    prefs = {
-      notifications: { backend: "terminal-notifier" },
-    } as unknown as Preferences;
-    resolvedBackend = "osascript";
-    const restorePlatform = withPlatform("darwin");
-    const logSpy = spyOn(console, "log").mockImplementation(() => {});
-    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
-    const restoreExit = withExitSentinel();
-    try {
-      const exit = await runNotify();
-
-      // Did NOT exit 1.
-      expect(exit).toBeNull();
-      // resolveBackend saw the NORMALIZED (undefined) backend, not the stale value.
-      expect(resolveBackendCalls).toContainEqual({ backend: undefined });
-      const err = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      expect(err).toContain("terminal-notifier");
-      expect(err).toContain("removed in v2");
-    } finally {
-      restoreExit();
-      logSpy.mockRestore();
-      errorSpy.mockRestore();
-      restorePlatform();
-    }
-  });
-});
-
 describe("ccmux notify: osascript", () => {
   it("bare invocation delivers the test message and prints diagnostics + honest limits", async () => {
     reset();

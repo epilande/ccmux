@@ -2,7 +2,6 @@ import { Command } from "commander";
 import { getPreferences } from "../lib/preferences";
 import {
   deliver,
-  normalizeBackendConfig,
   probeBackend,
   resolveBackend,
   resolveCcmuxNotifierBinary,
@@ -222,20 +221,7 @@ export function createNotifyCommand(): Command {
       const prefs = await getPreferences();
       const notifications = prefs.notifications ?? {};
 
-      // Normalize the raw configured backend the same way the daemon does, so a
-      // v1 config still naming `terminal-notifier` (removed in v2) falls to the
-      // auto ladder here too — rather than `resolveBackend` treating the stale
-      // value as an explicit unsupported backend and exiting 1.
-      const { backend: normalizedBackend, removed } = normalizeBackendConfig(
-        notifications.backend,
-      );
-      if (removed) {
-        console.error(
-          `notifications.backend "${removed}" was removed in v2; using the auto ladder.`,
-        );
-      }
-
-      const backend = resolveBackend({ backend: normalizedBackend });
+      const backend = resolveBackend({ backend: notifications.backend });
       if (!backend) {
         console.error("No supported notification backend for this platform.");
         printFailureHints("none");

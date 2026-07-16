@@ -29,7 +29,7 @@
  */
 
 import type { Backend, NotificationPayload, SpawnFn } from "../lib/notify";
-import { normalizeBackendConfig, probeCcmuxNotifier } from "../lib/notify";
+import { probeCcmuxNotifier } from "../lib/notify";
 import type { NotificationsConfig } from "../lib/preferences";
 import type { NotificationActionInput } from "./notification-action";
 
@@ -182,23 +182,10 @@ export function createNotifyDelivery(deps: DeliveryDeps): {
     return dbusNotifier;
   };
 
-  /** Logged at most once: a config still naming the removed `terminal-notifier`
-   * backend falls back to the auto ladder rather than hard-failing. */
-  let loggedLegacyBackend = false;
   const resolveConfiguredBackend = (prefs: {
     notifications?: NotificationsConfig;
-  }): Backend | null => {
-    const { backend, removed } = normalizeBackendConfig(
-      prefs.notifications?.backend,
-    );
-    if (removed && !loggedLegacyBackend) {
-      loggedLegacyBackend = true;
-      log(
-        `Notifier: notifications.backend "${removed}" was removed in v2; using the auto ladder`,
-      );
-    }
-    return deps.resolveBackend({ backend });
-  };
+  }): Backend | null =>
+    deps.resolveBackend({ backend: prefs.notifications?.backend });
 
   async function deliverNotification(
     payload: NotificationPayload,
