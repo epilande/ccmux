@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it, mock, beforeEach } from "bun:test";
 import { join } from "path";
 import { tmpdir } from "os";
-import type { AgentDef } from "../lib/agents";
+import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
 import type { ProcessInfo, Session, TmuxPane } from "../types/session";
 import type { PaneDetectionResult } from "./pane-classify";
 
@@ -1228,6 +1228,210 @@ describe("reconcileAll", () => {
       await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
       expect(captureCalls).toBe(1);
       expect(sessionManager.getSession(id)!.status).toBe("waiting");
+    });
+  });
+
+  describe("ambiguous permission marker correction (AskUserQuestion)", () => {
+    const claudeAgent = BUILTIN_AGENTS.find((a) => a.name === "claude")!;
+
+    /** A captured AskUserQuestion picker: the terminal question rule
+     *  (`type something.` + `enter to select`) matches, but no real permission
+     *  prompt terminator is present. */
+    const QUESTION_PICKER = [
+      " ☐ Fav color",
+      "What's your favorite color?",
+      "❯ 1. Blue",
+      "  5. Type something.",
+      "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    ].join("\n");
+
+    function permissionMarker(): SessionPidMarker {
+      return {
+        agent_type: "claude",
+        pid: 1,
+        tty: "/dev/ttys001",
+        session_id: "cc-uuid",
+        timestamp: 1,
+        state: "waiting_permission",
+        state_timestamp: Date.now() / 1000,
+      };
+    }
+
+    async function run(agent: AgentDef, paneContent: string): Promise<Session> {
+      const id = makeSession(sessionManager, {
+        trackingMode: "native",
+        status: "idle",
+        tmuxPane: "%1",
+      });
+      mockCapturePane = async () => paneContent;
+      const deps = makeDeps(sessionManager, {
+        agents: [agent],
+        hookManager: {
+          getMarkerForSession: () => permissionMarker(),
+          getMarkersByAgentAndPid: () => [],
+        },
+      });
+      const session = sessionManager.getSession(id)!;
+      await reconcileOne(deps, session, new Map());
+      return sessionManager.getSession(id)!;
+    }
+
+    it("relabels a permission marker as question when the pane shows the picker", async () => {
+      const session = await run(claudeAgent, QUESTION_PICKER);
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("question");
+    });
+
+    it("preserves permission when the agent is not flagged", async () => {
+      const unflagged: AgentDef = {
+        ...claudeAgent,
+        ambiguousPermissionMarker: false,
+      };
+      const session = await run(unflagged, QUESTION_PICKER);
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("permission");
+    });
+
+    it("preserves permission when the pane is a real permission prompt (not a question)", async () => {
+      const permissionPane = [
+        "Bash command",
+        "  rm -rf /tmp/x",
+        "This command requires approval",
+        "Do you want to proceed?",
+        "❯ 1. Yes",
+      ].join("\n");
+      const session = await run(claudeAgent, permissionPane);
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("permission");
+    });
+
+    /** A `waiting_permission` marker whose timestamp is well in the past —
+     *  models the post-approval window where the marker is stuck `waiting`
+     *  (no hook fires on keyboard approval) while the log has since advanced. */
+    function stalePermissionMarker(): SessionPidMarker {
+      return {
+        agent_type: "claude",
+        pid: 1,
+        tty: "/dev/ttys001",
+        session_id: "cc-uuid",
+        timestamp: 1,
+        state: "waiting_permission",
+        state_timestamp: (Date.now() - 5 * 60_000) / 1000,
+      };
+    }
+
+    /** Native Claude session already in `working` with a FRESH log activity
+     *  (fresher than the stale marker), so the log source wins the baseline
+     *  fold. The stale permission marker + `paneContent` drive the
+     *  ambiguous-permission correction. */
+    async function runWorkingLog(
+      paneContent: string,
+      marker: SessionPidMarker,
+    ): Promise<Session> {
+      const id = makeSession(sessionManager, {
+        trackingMode: "native",
+        status: "working",
+        lastActivityAt: new Date().toISOString(),
+        tmuxPane: "%1",
+      });
+      mockCapturePane = async () => paneContent;
+      const deps = makeDeps(sessionManager, {
+        agents: [claudeAgent],
+        hookManager: {
+          getMarkerForSession: () => marker,
+          getMarkersByAgentAndPid: () => [],
+        },
+      });
+      const session = sessionManager.getSession(id)!;
+      await reconcileOne(deps, session, new Map());
+      return sessionManager.getSession(id)!;
+    }
+
+    it("stays working when a stale permission marker meets a fresher working log and only residual 'requires approval' scrollback (regression: post-approval false-flip)", async () => {
+      // The user already approved at the keyboard; the marker is stuck
+      // `waiting_permission`, but the log advanced to `working`. Residual
+      // "requires approval" text in scrollback matches Claude's permission
+      // rule — which must NOT be pushed as an upgrade source, or it would flip
+      // the fresher working state back to waiting/permission.
+      const residualScrollback = [
+        "This command requires approval",
+        "  1. Yes",
+        "",
+        "> now running the approved command",
+        "  Working... (esc to interrupt)",
+      ].join("\n");
+      const session = await runWorkingLog(
+        residualScrollback,
+        stalePermissionMarker(),
+      );
+      expect(session.status).toBe("working");
+      expect(session.attentionType).toBeNull();
+    });
+
+    it("heals a mis-stored waiting/permission when the pane shows a live question picker (log-echo poisoning)", async () => {
+      // Found live: if the wrong `permission` classification ever gets STORED
+      // (e.g. the first reconcile raced the picker render), the native log
+      // source echoes that stored state with a fresh timestamp every tick,
+      // out-freshing the relabeled marker forever. The correction must relabel
+      // the log echo too, or the poisoned state can never heal.
+      const id = makeSession(sessionManager, {
+        trackingMode: "native",
+        status: "waiting",
+        attentionType: "permission",
+        lastActivityAt: new Date().toISOString(),
+        tmuxPane: "%1",
+      });
+      mockCapturePane = async () => QUESTION_PICKER;
+      const deps = makeDeps(sessionManager, {
+        agents: [claudeAgent],
+        hookManager: {
+          getMarkerForSession: () => stalePermissionMarker(),
+          getMarkersByAgentAndPid: () => [],
+        },
+      });
+      const session = sessionManager.getSession(id)!;
+      await reconcileOne(deps, session, new Map());
+      const healed = sessionManager.getSession(id)!;
+      expect(healed.status).toBe("waiting");
+      expect(healed.attentionType).toBe("question");
+    });
+
+    it("detects the question picker even when a permission phrase elsewhere on screen would shadow it (first-match immunity)", async () => {
+      // Found live: Claude's release-notes startup banner contains the literal
+      // phrase "permission rules", which matches the permission rule's
+      // matchAny. `matchTerminalRule` is first-match-wins, so matching ALL
+      // rules would return the permission rule and never consult the question
+      // rule — blinding the correction while the banner (or any permission
+      // prose) is in the window. The correction must match question rules only.
+      const bannerShadowedPicker = [
+        "Added a startup warning for Write(path) permission rules — use Edit(path) instead",
+        "",
+        "What's your favorite season?",
+        "❯ 1. Spring",
+        "  2. Summer",
+        "  5. Type something.",
+        "Enter to select · ↑/↓ to navigate · Esc to cancel",
+      ].join("\n");
+      const session = await runWorkingLog(
+        bannerShadowedPicker,
+        stalePermissionMarker(),
+      );
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("question");
+    });
+
+    it("upgrades a fresher working log to waiting/question when a live question picker is on the pane (the picker is genuine, not scrollback)", async () => {
+      // Unlike the permission rule, the question rule matchAll's two
+      // live-widget strings ("type something." + "enter to select") that do not
+      // survive as scrollback. When they are present the agent is genuinely
+      // blocked on the user, so the upgradeOnly question source legitimately
+      // lifts even a fresher working log to waiting/question.
+      const session = await runWorkingLog(
+        QUESTION_PICKER,
+        stalePermissionMarker(),
+      );
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("question");
     });
   });
 
@@ -2476,7 +2680,7 @@ describe("native cascade (Claude + Codex)", () => {
     expect(session.pendingTool).toBe("Edit");
   });
 
-  it("works for native Codex with same shapes (read-time overlay parity)", async () => {
+  it("works for native Codex, marker.pending_tool winning over the log", async () => {
     const id = "native-codex-1";
     setupNative(id, "codex", {
       status: "working",
@@ -2493,7 +2697,7 @@ describe("native cascade (Claude + Codex)", () => {
             timestamp: 1_700_000_000,
             state_timestamp: Date.now() / 1000,
             state: "waiting_permission",
-            pending_tool: "MarkerSaysIgnoreMe",
+            pending_tool: "MarkerTool",
           }),
           getMarkersByAgentAndPid: () => [],
         },
@@ -2507,9 +2711,10 @@ describe("native cascade (Claude + Codex)", () => {
     const session = sessionManager.getSession(id)!;
     expect(session.status).toBe("waiting");
     expect(session.attentionType).toBe("permission");
-    // pendingTool from session (log adapter) wins over marker's pending_tool,
-    // matching today's read-time overlay behavior.
-    expect(session.pendingTool).toBe("ApplyPatch");
+    // nativeMarkerSource now prefers marker.pending_tool (the hook's authoritative
+    // signal) and falls back to the log-derived session.pendingTool only when the
+    // marker omits it. See cascade-evaluator.ts nativeMarkerSource.
+    expect(session.pendingTool).toBe("MarkerTool");
   });
 
   it("pane-tracked Claude routes through the pane reconciler (native cascade arm skips it)", async () => {

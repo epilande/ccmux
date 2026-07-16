@@ -75,6 +75,48 @@ export function evaluateCascade(sources: CascadeSource[]): CascadeState {
   return result;
 }
 
+/**
+ * Pre-fold disambiguation for agents with an ambiguous permission marker
+ * (opt-in via `ambiguousPermissionMarker`; no-op otherwise). Claude fires the
+ * `Notification` hook for its AskUserQuestion picker with the exact same
+ * `permission_prompt` payload as a real permission prompt (verified on Claude
+ * Code 2.1.209/2.1.210 — see docs/agent-adapters.md), and the picker's
+ * `tool_use` is not flushed during the wait, so the pane terminal rules are
+ * the only source that tells them apart. When a terminal candidate
+ * independently reports a `waiting`/`question` wait, relabel EVERY
+ * `waiting`/`permission` candidate to `question` in place BEFORE the fold —
+ * including the log candidate, which for native sessions echoes the session's
+ * STORED state with a fresh timestamp: a mis-stored `permission` would
+ * out-fresh the relabeled marker every tick and never heal (found live: the
+ * store poisoned once, then self-sustained). Relabeling only, never
+ * restatusing: this is a pre-fold source correction, NOT a change to the
+ * fold — `evaluateCascade` stays a pure freshest-wins-with-tiebreak fold.
+ * Safe because a real permission prompt never matches the picker signature
+ * (live-widget `matchAll` strings).
+ */
+export function correctAmbiguousPermissionMarker(
+  sources: CascadeSource[],
+  ambiguousPermissionMarker: boolean | undefined,
+): void {
+  if (!ambiguousPermissionMarker) return;
+  const terminalQuestion = sources.some(
+    (s) =>
+      s.name === "terminal" &&
+      s.state.status === "waiting" &&
+      s.state.attentionType === "question",
+  );
+  if (!terminalQuestion) return;
+  for (const source of sources) {
+    if (
+      source.name !== "terminal" &&
+      source.state.status === "waiting" &&
+      source.state.attentionType === "permission"
+    ) {
+      source.state.attentionType = "question";
+    }
+  }
+}
+
 const SOURCE_PRIORITY: Record<CascadeSource["name"], number> = {
   marker: 3,
   log: 2,
@@ -197,14 +239,13 @@ export function logSource(session: Session): CascadeSource {
  * and idle-prompt transitions. To match the read-time overlay this
  * replaces, the factory:
  *
- * - On `waiting_permission`: peeks `session.pendingTool` so the
- *   log-derived tool name survives the cascade. The marker may also
- *   carry `pending_tool` (Codex `PermissionRequest`), but the overlay
- *   it replaces intentionally preferred the log's view, so we do too.
- *   Claude's `Notification` hook never writes `pending_tool`, which is
- *   exactly why pane-tracked Claude routes through here instead of
- *   `genericMarkerSource`: the latter would clobber the log-derived tool
- *   name to `null`.
+ * - On `waiting_permission`: prefers `marker.pending_tool` (Claude's
+ *   `Notification` hook parses the tool name out of the message; Codex's
+ *   `PermissionRequest` already wrote it). The marker is authoritative
+ *   because Claude does NOT flush the permission-gated `tool_use` to its
+ *   JSONL until after approval, so the log-derived value is null during the
+ *   wait; the `?? session.pendingTool` fallback covers the post-approval
+ *   window and older markers written before this enrichment.
  * - On `idle`: emits explicit nulls. SessionEnd unlinks the marker
  *   entirely; the `state === "idle"` payload only fires for
  *   `idle_prompt` transitions, which legitimately clear attention.
@@ -222,7 +263,7 @@ export function nativeMarkerSource(
       ? {
           status: "waiting",
           attentionType: "permission",
-          pendingTool: session.pendingTool,
+          pendingTool: marker.pending_tool ?? session.pendingTool,
         }
       : { status: "idle", attentionType: null, pendingTool: null };
   if (marker.state_timestamp !== undefined) {

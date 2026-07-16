@@ -94,6 +94,7 @@ The daemon (`src/daemon/`) detects agent processes in tmux panes, watches log fi
 - **Invocation Manager** (`invocation-manager.ts`) + **Invokers** (`invokers/`) - Drive `POST /invoke` / `ccmux invoke` (see [`docs/invoke.md`](docs/invoke.md)).
 - **Server** (`server.ts`) - HTTP + SSE on port 2269: session CRUD, invoke endpoints, `/server-info`, PR enrichment.
 - **Background Source** (`sources/claude-background.ts`) - Sole owner of paneless Claude background-agent rows (`claude --bg`), read-only and independent of hooks/pane scanning.
+- **Notifier** (`notifier.ts` + `notify-delivery.ts` + `notify-context.ts`) - Fires opt-in desktop notifications on `waiting`/`finished` transitions and delivers them down the backend ladder (macOS `ccmux-notifier` helper → osascript; Linux dbus → notify-send). Actionable Approve/Deny/Reply callbacks route through `notification-action.ts` (shared macOS-HTTP + Linux-D-Bus handler, all safety gating). The macOS helper app lives in `notifier/`.
 
 Full daemon internals — the binder's D1/D2/D3 guards, the recursive log-tree watcher, PR enrichment, background agents, boot ordering, the invoke split, and a complete concern→path code map — live in [`docs/architecture.md`](docs/architecture.md). Do not duplicate that detail here; keep this list to a one-line-per-module orientation.
 

@@ -2,57 +2,97 @@ import { Command } from "commander";
 import { getPreferences } from "../lib/preferences";
 import {
   deliver,
+  normalizeBackendConfig,
   probeBackend,
   resolveBackend,
+  resolveCcmuxNotifierBinary,
   type NotificationPayload,
 } from "../lib/notify";
 import { DbusNotifier } from "../lib/notify-dbus";
-import { resolveTerminalBundleId } from "../daemon/focus";
-import { getActiveTmuxClientPid } from "../lib/tmux-client";
+import { DAEMON_HOST, DAEMON_PORT } from "../lib/config";
 
 const TEST_MESSAGE = "Notifications are working";
 
-/**
- * Resolves `-sender` per `notifications.icon`: `"none"` (the default) unsets
- * it, an explicit bundle id passes through as-is, and `"terminal"` borrows the
- * hosting terminal's icon via `src/daemon/focus.ts`'s ancestor walk. Default is
- * `"none"` because `-sender` impersonation is silently dropped by macOS for
- * terminals that never register with its notification system (Ghostty, kitty,
- * Alacritty, WezTerm); `"terminal"` is opt-in for terminals where it works
- * (iTerm2, Terminal.app). `"terminal"` is only meaningful inside a tmux client
- * on macOS (the walk needs `#{client_pid}`, and the daemon/other platforms
- * don't have a bundle id to borrow anyway); outside tmux, on another platform,
- * or on any resolution failure this falls back to no sender rather than failing.
- */
-export async function resolveSenderBundleId(
-  icon: string,
-  platform: NodeJS.Platform = process.platform,
-): Promise<string | undefined> {
-  if (icon === "none") return undefined;
-  if (icon !== "terminal") return icon;
-  if (platform !== "darwin" || !process.env.TMUX) return undefined;
+/** macOS Settings deep-link to the ccmux-notifier notifications pane, where the
+ * user grants permission and sets Alert Style. The CLI-launched permission
+ * dialog never appears on macOS 26 (see the spike results in
+ * `notifier-app-plan.md`), so this manual step is the real grant path. */
+const NOTIFICATIONS_SETTINGS_DEEP_LINK =
+  "x-apple.systempreferences:com.apple.Notifications-Settings.extension";
 
+const CALLBACK_URL = `http://${DAEMON_HOST}:${DAEMON_PORT}/notification-action`;
+
+/** Statuses under which the helper can actually deliver an alert. */
+const DELIVERABLE_AUTH_STATUSES = new Set([
+  "authorized",
+  "provisional",
+  "ephemeral",
+]);
+
+/** On a fresh install the helper blocks in `requestAuthorization` for up to its
+ * own 180s `kAuthTimeout` before it can answer; sit just above that so the
+ * timeout only bites a genuinely wedged process. */
+const REQUEST_PERMISSION_TIMEOUT_MS = 190_000;
+/** `list` only reads settings — it returns in well under a second normally, so
+ * a much shorter cap is enough to avoid an indefinite hang. */
+const LIST_TIMEOUT_MS = 35_000;
+
+/** Runs a ccmux-notifier subcommand that prints one JSON object to stdout
+ * (`request-permission`, `list`), returning the parsed object or null on any
+ * failure OR on `timeoutMs` (the helper is killed). Never throws. */
+async function runNotifierJson(
+  binaryPath: string,
+  args: string[],
+  timeoutMs: number,
+): Promise<Record<string, unknown> | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const clientPid = await getActiveTmuxClientPid();
-    if (clientPid === null) return undefined;
-    return (await resolveTerminalBundleId(clientPid)) ?? undefined;
+    const proc = Bun.spawn([binaryPath, ...args], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    timer = setTimeout(() => {
+      try {
+        proc.kill();
+      } catch {
+        // best-effort; the parse below fails and we return null
+      }
+    }, timeoutMs);
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    const parsed = JSON.parse(out.trim());
+    return typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : null;
   } catch {
-    return undefined;
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
-/** Fires when delivery may have been silently blocked (see plan's Icon note). */
+/** Prints the honest limits + brew hint for the macOS osascript floor (the
+ * backend `ccmux notify` lands on when the helper isn't installed). */
+function printOsascriptHints(): void {
+  console.error(
+    "osascript notifications post under Script Editor's identity, are suppressed by " +
+      "Focus/Do Not Disturb, and have no Approve/Deny buttons or inline reply.",
+  );
+  console.error(
+    "For actionable notifications with ccmux's own identity, install the helper: " +
+      "brew install epilande/tap/ccmux",
+  );
+}
+
+/** Fires when delivery may have been silently blocked. */
 function printFailureHints(backend: string): void {
   if (process.platform === "darwin") {
-    console.error(
-      "Check System Settings > Notifications for the app that owns this backend " +
-        "(Script Editor for osascript, terminal-notifier for terminal-notifier).",
-    );
-    console.error(
-      "If notifications.icon is impersonating a disabled app, run `ccmux config set notifications.icon none`.",
-    );
-    if (backend === "terminal-notifier") {
-      console.error("Install with: brew install terminal-notifier");
+    if (backend === "osascript") {
+      printOsascriptHints();
+    } else {
+      console.error(
+        "Check System Settings > Notifications for the app that owns this backend.",
+      );
     }
   } else if (process.platform === "linux") {
     if (backend === "dbus") {
@@ -76,6 +116,99 @@ function printFailureHints(backend: string): void {
   }
 }
 
+/** Prints the grant instructions + Settings deep-link for a helper that isn't
+ * authorized (denied / notDetermined / alerts disabled). */
+function printGrantInstructions(): void {
+  console.error("ccmux-notifier is not authorized to post notifications yet.");
+  console.error(
+    "The permission dialog does not appear for CLI-launched apps on recent macOS; grant it manually:",
+  );
+  console.error(`  1. Open: ${NOTIFICATIONS_SETTINGS_DEEP_LINK}`);
+  console.error('  2. Find "ccmux-notifier" and enable "Allow notifications".');
+  console.error(
+    '  3. Set its Alert Style to "Persistent" so alerts do not auto-dismiss.',
+  );
+}
+
+/**
+ * `ccmux notify` grant + diagnostics flow for the ccmux-notifier backend. The
+ * permission dialog never appears for a CLI-launched app on recent macOS, so
+ * this: requests authorization (best-effort), posts a probe notification, then
+ * reads back `list` to report the real authorization/alert state and, when not
+ * deliverable, prints the manual grant steps. Stays quiet on a custom message.
+ */
+async function runCcmuxNotifierFlow(
+  binaryPath: string,
+  notifications: { sound?: boolean | string },
+  message: string | undefined,
+): Promise<void> {
+  // Best-effort: nudges the OS to register the identity. On recent macOS this
+  // resolves denied/notDetermined without a dialog; we rely on `list` for truth.
+  // On a fresh install this call can block for up to ~180s while the helper
+  // waits on the authorization prompt, so warn before it and cap it.
+  console.error(
+    "Checking notification authorization (this can take a moment; " +
+      "macOS may require you to grant it in System Settings)...",
+  );
+  const permission = await runNotifierJson(
+    binaryPath,
+    ["request-permission"],
+    REQUEST_PERMISSION_TIMEOUT_MS,
+  );
+  if (permission === null) {
+    console.error(
+      "Authorization check did not complete (it may have timed out). If a " +
+        "notification does not appear below, grant permission manually:",
+    );
+    console.error(`  Open: ${NOTIFICATIONS_SETTINGS_DEEP_LINK}`);
+  }
+
+  const payload: NotificationPayload = {
+    title: "ccmux",
+    body: message ?? TEST_MESSAGE,
+    event: "finished",
+    sessionId: "notify-cli",
+    agent: "ccmux",
+    project: "ccmux",
+    sound: notifications.sound,
+    notifierPath: binaryPath,
+    callbackUrl: CALLBACK_URL,
+  };
+  await deliver("ccmux-notifier", payload);
+
+  const settings = await runNotifierJson(binaryPath, ["list"], LIST_TIMEOUT_MS);
+
+  // A custom message stays script-friendly and quiet on success.
+  if (message) return;
+
+  const authStatus =
+    typeof settings?.authorizationStatus === "string"
+      ? settings.authorizationStatus
+      : "unknown";
+  const alertSetting =
+    typeof settings?.alertSetting === "string"
+      ? settings.alertSetting
+      : "unknown";
+  const alertStyle =
+    typeof settings?.alertStyle === "string" ? settings.alertStyle : "unknown";
+
+  console.log("Backend: ccmux-notifier");
+  console.log(`Helper: ${binaryPath}`);
+  console.log(`Authorization: ${authStatus}`);
+  console.log(`Alerts: ${alertSetting} (style: ${alertStyle})`);
+
+  const deliverable = DELIVERABLE_AUTH_STATUSES.has(authStatus);
+  if (!deliverable || alertSetting === "disabled") {
+    console.log("");
+    printGrantInstructions();
+  } else if (alertStyle !== "alert") {
+    console.log(
+      'Tip: set Alert Style to "Persistent" (Settings > Notifications > ' +
+        "ccmux-notifier) so alerts do not auto-dismiss after a few seconds.",
+    );
+  }
+}
+
 export function createNotifyCommand(): Command {
   return new Command("notify")
     .description(
@@ -86,7 +219,20 @@ export function createNotifyCommand(): Command {
       const prefs = await getPreferences();
       const notifications = prefs.notifications ?? {};
 
-      const backend = resolveBackend({ backend: notifications.backend });
+      // Normalize the raw configured backend the same way the daemon does, so a
+      // v1 config still naming `terminal-notifier` (removed in v2) falls to the
+      // auto ladder here too — rather than `resolveBackend` treating the stale
+      // value as an explicit unsupported backend and exiting 1.
+      const { backend: normalizedBackend, removed } = normalizeBackendConfig(
+        notifications.backend,
+      );
+      if (removed) {
+        console.error(
+          `notifications.backend "${removed}" was removed in v2; using the auto ladder.`,
+        );
+      }
+
+      const backend = resolveBackend({ backend: normalizedBackend });
       if (!backend) {
         console.error("No supported notification backend for this platform.");
         printFailureHints("none");
@@ -105,7 +251,42 @@ export function createNotifyCommand(): Command {
         process.exit(1);
       }
 
-      const icon = notifications.icon ?? "none";
+      if (backend === "ccmux-notifier") {
+        const binaryPath = resolveCcmuxNotifierBinary({
+          execPath: process.execPath,
+          ccmuxPath: Bun.which("ccmux"),
+        });
+        if (binaryPath) {
+          await runCcmuxNotifierFlow(binaryPath, notifications, message);
+          return;
+        }
+        // The helper isn't installed; the daemon falls down its ladder to
+        // osascript for the same reason (see `notify-delivery.ts`), and v1
+        // always delivered via osascript on macOS. Mirror that here: actually
+        // post through the osascript floor instead of printing diagnostics and
+        // dropping the notification.
+        const osascriptOk = await probeBackend("osascript");
+        if (!osascriptOk) {
+          console.error('Notification backend "osascript" is not available.');
+          printFailureHints("osascript");
+          process.exit(1);
+        }
+        await deliver("osascript", {
+          title: "ccmux",
+          body: message ?? TEST_MESSAGE,
+          event: "finished",
+          sessionId: "notify-cli",
+          agent: "ccmux",
+          project: "ccmux",
+          sound: notifications.sound,
+        });
+        // A caller-supplied message stays quiet on success (the script-friendly
+        // contract); the bare invocation reports the effective floor + limits.
+        if (message) return;
+        console.log("Backend: osascript (ccmux-notifier helper not found)");
+        printOsascriptHints();
+        return;
+      }
 
       if (backend === "dbus") {
         // Connection-oriented, one-shot: connect, probe, notify (no click
@@ -147,8 +328,6 @@ export function createNotifyCommand(): Command {
           process.exit(1);
         }
 
-        const senderBundleId = await resolveSenderBundleId(icon);
-
         const payload: NotificationPayload = {
           title: "ccmux",
           body: message ?? TEST_MESSAGE,
@@ -158,7 +337,6 @@ export function createNotifyCommand(): Command {
           project: "ccmux",
           sound: notifications.sound,
           command: notifications.command,
-          senderBundleId,
         };
 
         await deliver(backend, payload);
@@ -177,12 +355,9 @@ export function createNotifyCommand(): Command {
       console.log(`  sound: ${notifications.sound ?? false}`);
       console.log(`  delayMs: ${notifications.delayMs ?? 1000}`);
       console.log(`  backend: ${notifications.backend ?? "auto"}`);
-      console.log(`  icon: ${icon}`);
-      if (process.platform === "darwin") {
-        console.log(
-          "Didn't see a notification? Check System Settings > Notifications " +
-            "for the app this backend delivers through.",
-        );
+      if (backend === "osascript") {
+        console.log("");
+        printOsascriptHints();
       }
     });
 }

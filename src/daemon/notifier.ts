@@ -1,9 +1,19 @@
-import type { AttentionState, Session, SessionStatus } from "../types/session";
+import type {
+  AttentionState,
+  AttentionType,
+  Session,
+  SessionStatus,
+} from "../types/session";
 import type { SessionManager, SessionEvent } from "./sessions";
 import type { NotificationEventKind, NotificationPayload } from "../lib/notify";
 import type { NotificationsConfig } from "../lib/preferences";
+import type { AgentDef } from "../lib/agents";
 import { SCAN_INTERVAL_MS } from "../lib/config";
 import { getAgentDisplayName } from "../lib/agents";
+import {
+  buildNotificationContext,
+  type NotificationContext,
+} from "./notify-context";
 
 export type { NotificationsConfig };
 
@@ -33,6 +43,15 @@ export interface NotifierDeps {
   isTerminalFrontmost: () => Promise<boolean>;
   getPrefs: () => Promise<{ notifications?: NotificationsConfig }>;
   deliver: (payload: NotificationPayload) => Promise<void>;
+  /** Resolves a session's agent definition so the payload builder can gate
+   *  Approve/Deny buttons on its `notificationActions` map. Optional: absent
+   *  means no session ever gets action buttons. */
+  getAgent?: (agentType: string) => AgentDef | undefined;
+  /** Builds the body-enrichment text plus an optional delivery-time
+   *  reclassification for a waiting session. Injectable for tests; defaults
+   *  to the real pane/transcript-backed extractor. Fail-open: any failure
+   *  returns `{ body: null }`. */
+  buildContext?: (session: Readonly<Session>) => Promise<NotificationContext>;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -60,10 +79,20 @@ export function decideNotification(
 }
 
 function describeWaiting(session: Readonly<Session>): string {
-  switch (session.attentionType) {
+  return describeAttention(session.attentionType, session.pendingTool);
+}
+
+/** Base "waiting" line for an attention type, split out so a delivery-time
+ *  reclassification (permission → question) can rebuild the line for the
+ *  effective type instead of the stored one. */
+function describeAttention(
+  attentionType: AttentionType,
+  pendingTool: string | null,
+): string {
+  switch (attentionType) {
     case "permission":
-      return session.pendingTool
-        ? `Needs permission: ${session.pendingTool}`
+      return pendingTool
+        ? `Needs permission: ${pendingTool}`
         : "Needs permission";
     case "question":
       return "Waiting for your input";
@@ -81,15 +110,15 @@ function buildTitle(session: Readonly<Session>): string {
     : `${session.project} · ${agent}`;
 }
 
-function buildPayload(
+function buildBasePayload(
   session: Readonly<Session>,
   kind: NotificationEventKind,
   cfg: NotificationsConfig | undefined,
 ): NotificationPayload {
   // The discriminated text travels in `body`, the only variable line every
   // backend renders (osascript's builder drops `subtitle`). Deliberately not
-  // mirrored into `subtitle`: terminal-notifier would show the same text
-  // twice (-subtitle and -message are separate lines).
+  // mirrored into `subtitle` to avoid showing the same text twice on backends
+  // that render both lines.
   const body = kind === "finished" ? "Finished" : describeWaiting(session);
   return {
     title: buildTitle(session),
@@ -103,10 +132,31 @@ function buildPayload(
     background: session.trackingMode === "background",
     sound: cfg?.sound,
     command: cfg?.command,
-    // Click actions (senderBundleId/activateBundleId/executeCommand) are
-    // enriched by the daemon's delivery wrapper (src/daemon/notify-delivery.ts),
-    // which has the resolved terminal bundle id and the daemon's own
-    // PATH/ccmux entry point that this module doesn't have.
+    // The staleness token the ccmux-notifier callback echoes back so
+    // `/notification-action` can reject a press whose session moved on.
+    statusChangedAt: session.statusChangedAt ?? undefined,
+    // ccmux-notifier delivery fields (notifierPath/callbackUrl) are stamped by
+    // the daemon's delivery wrapper (src/daemon/notify-delivery.ts), which owns
+    // the resolved helper path and daemon port this module doesn't have.
+  };
+}
+
+/**
+ * The "your button press didn't land, look at the pane" notification fired
+ * by `/notification-action` when a stale approve/deny/answer is rejected.
+ * Informational: no buttons or reply, but default click-to-jump stays.
+ * Exported for the daemon wiring's `reNotify` dep.
+ */
+export function buildStateChangedPayload(
+  session: Readonly<Session>,
+  body: string,
+  cfg: NotificationsConfig | undefined,
+): NotificationPayload {
+  return {
+    // Carry the live config so the "command" backend (payload.command) still
+    // fires and the configured sound isn't dropped on a stale-press re-notify.
+    ...buildBasePayload(session, "waiting", cfg),
+    body,
   };
 }
 
@@ -356,6 +406,63 @@ export class Notifier {
   }
 
   /**
+   * Builds the delivered payload: the base fields plus the v2 actionable
+   * extras (Approve/Deny buttons, inline Reply, and the context body), all
+   * `"waiting"`-only. Buttons appear only for a `permission` wait whose agent
+   * defines a `notificationActions` map; Reply only for a `question` wait on
+   * Claude (v2 scope). The context enrichment fails open — a null result
+   * leaves the base line untouched.
+   */
+  private async buildPayload(
+    session: Readonly<Session>,
+    kind: NotificationEventKind,
+    cfg: NotificationsConfig | undefined,
+  ): Promise<NotificationPayload> {
+    const payload = buildBasePayload(session, kind, cfg);
+    if (kind !== "waiting") return payload;
+
+    // Build the context first: its pane capture can reveal that a stored
+    // `permission` wait is really an AskUserQuestion question (the marker's
+    // next-scan correction hasn't landed yet). Actions/reply are then decided
+    // off the effective type through this ONE decision path, so delivery-time
+    // and stored classifications never diverge.
+    const buildContext = this.deps.buildContext ?? buildNotificationContext;
+    const context = await buildContext(session);
+    const effectiveAttention = context.reclassifyAs ?? session.attentionType;
+
+    if (effectiveAttention === "permission") {
+      const map = this.deps.getAgent?.(session.agentType)?.notificationActions;
+      const actions: NotificationPayload["actions"] = [];
+      if (map?.approve && map.approve.length > 0) {
+        actions.push({ id: "approve", label: "Approve" });
+      }
+      if (map?.deny && map.deny.length > 0) {
+        actions.push({ id: "deny", label: "Deny" });
+      }
+      if (actions.length > 0) payload.actions = actions;
+    } else if (
+      effectiveAttention === "question" &&
+      // v2 scope: only Claude's `answer` path is wired end to end. Gate on the
+      // agent type explicitly (question waits use inline reply, not the
+      // approve/deny key map, so there's no map presence to key off).
+      session.agentType === "claude"
+    ) {
+      payload.reply = { id: "answer", label: "Reply" };
+    }
+
+    // A reclassification also invalidates the base line (built for the stored
+    // type), so rebuild it before appending the context body.
+    if (context.reclassifyAs) {
+      payload.body = describeAttention(context.reclassifyAs, null);
+    }
+    if (context.body) {
+      payload.body = `${payload.body}\n${context.body}`;
+    }
+
+    return payload;
+  }
+
+  /**
    * Delivers (or drops) one notification for an already-current `session`
    * (freshness is the caller's job: `"waiting"` fires use the event's own
    * snapshot immediately, `"finished"` fires are re-checked by
@@ -387,7 +494,7 @@ export class Notifier {
       // delivery leaving a 60s stamp behind is an acceptable trade —
       // delivery failures are swallowed below regardless.
       this.cooldowns.set(cooldownKey, now);
-      const payload = buildPayload(session, kind, cfg);
+      const payload = await this.buildPayload(session, kind, cfg);
       await this.deps.deliver(payload);
     } catch (error) {
       console.debug("Notifier: fire failed, dropping notification", error);

@@ -1,0 +1,16 @@
+// ============================================
+// Local Configuration Template (OPTIONAL)
+// ============================================
+//
+// SETUP:
+//    1. Copy this file: cp Local.xcconfig.example Local.xcconfig
+//    2. Edit Local.xcconfig with your settings
+//
+// DO NOT COMMIT Local.xcconfig - it's .gitignored and contains your personal settings.
+//
+// Not needed for the local dev loop (scripts/build-dev.sh ad-hoc signs). Only
+// required for a signed/notarized Developer ID build.
+
+// Apple Developer Team ID
+// Find at: https://developer.apple.com/account → Membership → Team ID
+DEVELOPMENT_TEAM = YOUR_TEAM_ID_HERE

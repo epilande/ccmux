@@ -83,6 +83,10 @@ type ServerInternals = {
   ): Promise<Response>;
   resolveSession(id: string): Session | undefined;
   lastActivePaneId: string | null;
+  handleNotificationActionRequest(
+    req: Request,
+    headers: Record<string, string>,
+  ): Promise<Response>;
   handleSSE(): Response;
   invocationManager: InvocationManager;
   handleRequest(req: Request): Promise<Response>;
@@ -102,6 +106,7 @@ function createServer(
     sendLiteralToPane: mock(async () => true),
     sendPromptToPane: mock(async () => true),
   },
+  runNotificationAction?: ConstructorParameters<typeof DaemonServer>[7],
 ) {
   const mgr = manager ?? new SessionManager();
   const cache = paneCache ?? new Map<string, TmuxPane>();
@@ -125,6 +130,7 @@ function createServer(
     invocationManager,
     resolveHookAdapter,
     paneSendDeps,
+    runNotificationAction ?? null,
   );
   return {
     manager: mgr,
@@ -2162,5 +2168,203 @@ describe("getServerSocketPath and /server-info", () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe("POST /notification-action", () => {
+  function postBody(body: unknown): Request {
+    return new Request("http://localhost/notification-action", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("extracts sessionId/statusChangedAt from the opaque payload string (the helper's real body shape)", async () => {
+    // This is exactly what notifier/Sources/main.swift POSTs: action + a
+    // possibly-null userText + the daemon's own opaque `--payload` string
+    // (sessionId/statusChangedAt live INSIDE it, not at top level).
+    let received: unknown = null;
+    const runner = mock(async (input: unknown) => {
+      received = input;
+      return { code: 200 as const, ok: true, action: "approve" as const };
+    });
+    const { internals } = createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runner,
+    );
+    const res = await internals.handleRequest(
+      postBody({
+        action: "approve",
+        userText: null,
+        payload: JSON.stringify({ sessionId: "s1", statusChangedAt: "t" }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, action: "approve" });
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(received).toEqual({
+      sessionId: "s1",
+      action: "approve",
+      statusChangedAt: "t",
+      userText: undefined,
+    });
+  });
+
+  it("prefers the payload's sessionId/statusChangedAt over top-level fields", async () => {
+    let received: unknown = null;
+    const runner = mock(async (input: unknown) => {
+      received = input;
+      return { code: 200 as const, ok: true, action: "approve" as const };
+    });
+    const { internals } = createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runner,
+    );
+    const res = await internals.handleRequest(
+      postBody({
+        sessionId: "top-level",
+        statusChangedAt: "top-t",
+        action: "approve",
+        payload: JSON.stringify({ sessionId: "s1", statusChangedAt: "t" }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(received).toEqual({
+      sessionId: "s1",
+      action: "approve",
+      statusChangedAt: "t",
+      userText: undefined,
+    });
+  });
+
+  it("carries a top-level userText through for an answer", async () => {
+    let received: unknown = null;
+    const runner = mock(async (input: unknown) => {
+      received = input;
+      return { code: 200 as const, ok: true, action: "answer" as const };
+    });
+    const { internals } = createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runner,
+    );
+    await internals.handleRequest(
+      postBody({
+        action: "answer",
+        userText: "yes, proceed",
+        payload: JSON.stringify({ sessionId: "s1", statusChangedAt: "t" }),
+      }),
+    );
+    expect(received).toEqual({
+      sessionId: "s1",
+      action: "answer",
+      statusChangedAt: "t",
+      userText: "yes, proceed",
+    });
+  });
+
+  it("returns 400 for a malformed payload JSON string without calling the handler", async () => {
+    const runner = mock(async () => ({ code: 200 as const, ok: true }));
+    const { internals } = createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runner,
+    );
+    const res = await internals.handleRequest(
+      postBody({ action: "approve", payload: "{ not valid json" }),
+    );
+    expect(res.status).toBe(400);
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it("accepts top-level sessionId as a fallback when no payload is present (hand-testing)", async () => {
+    let received: unknown = null;
+    const runner = mock(async (input: unknown) => {
+      received = input;
+      return { code: 200 as const, ok: true, action: "approve" as const };
+    });
+    const { internals } = createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runner,
+    );
+    const res = await internals.handleRequest(
+      postBody({ sessionId: "s1", action: "approve", statusChangedAt: "t" }),
+    );
+    expect(res.status).toBe(200);
+    expect(received).toEqual({
+      sessionId: "s1",
+      action: "approve",
+      statusChangedAt: "t",
+      userText: undefined,
+    });
+  });
+
+  it("maps a rejection code (409) and error message through", async () => {
+    const runner = mock(async () => ({
+      code: 409 as const,
+      ok: false,
+      error: "stale",
+    }));
+    const { internals } = createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runner,
+    );
+    const res = await internals.handleRequest(
+      postBody({ sessionId: "s1", action: "approve" }),
+    );
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, error: "stale" });
+  });
+
+  it("returns 400 for a body missing sessionId/action without calling the handler", async () => {
+    const runner = mock(async () => ({ code: 200 as const, ok: true }));
+    const { internals } = createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runner,
+    );
+    const res = await internals.handleRequest(postBody({ action: "approve" }));
+    expect(res.status).toBe(400);
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it("returns 503 when no notification-action handler is wired", async () => {
+    const { internals } = createServer();
+    const res = await internals.handleRequest(
+      postBody({ sessionId: "s1", action: "approve" }),
+    );
+    expect(res.status).toBe(503);
   });
 });

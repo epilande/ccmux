@@ -10,6 +10,8 @@ import {
   SCAN_INTERVAL_MS,
   PROJECTS_DIR,
   CCMUX_DIR,
+  DAEMON_HOST,
+  DAEMON_PORT,
   resolveClaudeProjectDirs,
 } from "../lib/config";
 import { readFirstLine } from "./parser";
@@ -77,8 +79,14 @@ import {
 import { AttentionTracker } from "./attention-tracker";
 import { redirectStdioToLogFile } from "./log-redirect";
 import { InvocationManager } from "./invocation-manager";
-import { Notifier } from "./notifier";
-import { createDeliverFn } from "./notify-delivery";
+import { Notifier, buildStateChangedPayload } from "./notifier";
+import { createNotifyDelivery } from "./notify-delivery";
+import { performJump, type JumpDeps } from "./notify-jump";
+import {
+  handleNotificationAction,
+  type NotificationActionInput,
+} from "./notification-action";
+import { sendKeyToPane, sendLiteralToPane, sendPromptToPane } from "./pane-io";
 import { DbusNotifier } from "../lib/notify-dbus";
 import { isTerminalFrontmost, resolveTerminalBundleId } from "./focus";
 import {
@@ -89,6 +97,9 @@ import {
   deliver as libDeliver,
   probeBackend,
   resolveBackend,
+  resolveCcmuxNotifierBinary,
+  type SpawnFn,
+  type NotificationPayload,
 } from "../lib/notify";
 import {
   ClaudeInvoker,
@@ -113,6 +124,29 @@ export function isRecentlyProcessedByAny(
   sessionId: string,
 ): boolean {
   return watchers.some((w) => w.isRecentlyProcessed(sessionId));
+}
+
+/**
+ * Raise the terminal app hosting the active tmux client to the foreground
+ * (macOS `open -b <bundleId>`), so a notification click that jumps to a buried
+ * terminal actually surfaces it. Fail-open: any missing client, unresolved
+ * bundle id, or spawn failure is swallowed — activation is a nicety on top of
+ * the jump, never a hard dependency. Darwin-only by construction (the wiring
+ * only installs it there).
+ */
+async function activateHostTerminal(): Promise<void> {
+  try {
+    const clientPid = await getActiveTmuxClientPid();
+    if (clientPid === null) return;
+    const bundleId = await resolveTerminalBundleId(clientPid);
+    if (!bundleId) return;
+    Bun.spawn(["open", "-b", bundleId], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+  } catch {
+    // best-effort; the jump itself already happened
+  }
 }
 
 /**
@@ -162,6 +196,17 @@ export class Daemon {
    * feature is gated off (no watchers, no resync, zero overhead). */
   private backgroundSource: ClaudeBackgroundSource | null = null;
   private notifier: Notifier;
+  /** Shared notification delivery closure (Notifier + stale-press re-notify).
+   *  Set in the constructor before the server, which needs the action runner
+   *  that depends on it. */
+  private notifyDeliver: (payload: NotificationPayload) => Promise<void>;
+  /** Retracts a session's delivered notification (used when the user views the
+   *  pane). Shares the delivery closure's probe cache + dbus connection. */
+  private notifyRetract: (sessionId: string) => Promise<void>;
+  /** Default-click jump wiring (tmux/ccmux paths, terminal activation),
+   *  resolved once at construction and shared by every notification-action
+   *  callback rather than rebuilt per button press. */
+  private readonly jumpDeps: JumpDeps;
 
   constructor() {
     this.sessionManager = new SessionManager();
@@ -189,6 +234,37 @@ export class Daemon {
       this.sessionManager,
       invocationRegistry,
     );
+
+    // Resolve the daemon's own binaries once (mirroring how it resolves every
+    // other tool — `Bun.which`), shared by the delivery layer and the jump
+    // wiring below rather than re-resolved per notification-action press.
+    const ccmuxPath = Bun.which("ccmux");
+    const tmuxPath = Bun.which("tmux") ?? "tmux";
+    this.jumpDeps = {
+      resolveActiveClientTty: resolveActiveTmuxClientTty,
+      tmuxPath,
+      ccmuxPath,
+      spawn: Bun.spawn as unknown as SpawnFn,
+      log: (message: string, error?: unknown) =>
+        console.warn(message, error ?? ""),
+      // Raising the hosting terminal after a jump is macOS-only (see
+      // `notify-jump.ts`); Linux `switch-client` needs no app activation.
+      activateTerminal:
+        process.platform === "darwin" ? activateHostTerminal : undefined,
+    };
+
+    // One delivery closure shared by the Notifier and the notification-action
+    // handler's `reNotify`, so its per-backend probe cache and lazy dbus
+    // connection aren't duplicated. Its `retract` companion shares the same
+    // dbus connection (needed so `CloseNotification` can find the id). Built
+    // here (before the server) because the server needs the action runner and
+    // the retract hook that depend on it.
+    const notifyDelivery = createNotifyDelivery(
+      this.buildNotifyDeliveryDeps(ccmuxPath, tmuxPath),
+    );
+    this.notifyDeliver = notifyDelivery.deliver;
+    this.notifyRetract = notifyDelivery.retract;
+
     this.server = new DaemonServer(
       this.sessionManager,
       () => this.paneCache,
@@ -196,6 +272,9 @@ export class Daemon {
       this.attentionTracker,
       this.invocationManager,
       (agentName) => this.hookManager.getAdapter(agentName) ?? null,
+      { sendLiteralToPane, sendPromptToPane },
+      (input) => this.runNotificationAction(input),
+      (sessionId) => this.notifyRetract(sessionId),
     );
 
     this.hookManager.setContext({
@@ -228,33 +307,72 @@ export class Daemon {
       getActivePaneId,
       isTerminalFrontmost: () => isTerminalFrontmost(getActiveTmuxClientPid),
       getPrefs: getPreferences,
-      deliver: createDeliverFn(this.buildNotifyDeliveryDeps()),
+      deliver: notifyDelivery.deliver,
+      getAgent: (agentType) => this.agents.find((a) => a.name === agentType),
     });
   }
 
   /**
-   * Resolves everything the notification click-action wrapper needs once,
-   * at daemon construction: the daemon's own `PATH` (Notification Center
-   * invokes click actions in a minimal-PATH shell) and the absolute paths of
-   * `ccmux`/`tmux` (mirroring how the daemon already resolves its own
-   * binaries — `Bun.which`, the same mechanism `resolveBackend`'s auto
-   * ladder and `lifecycle.ts`'s hook installers use — rather than assuming a
-   * fixed install location). `ccmux` not being on PATH degrades gracefully:
-   * `notify-delivery.ts` omits the click action entirely rather than
-   * building a broken one.
+   * Runs one actionable-notification callback (`POST /notification-action`,
+   * and later the Linux D-Bus `ActionInvoked` path) through the shared safety
+   * handler, wiring its effect deps: session/agent lookup, pane keystroke/text
+   * send, the default-click jump (same routing as the dbus click action), and
+   * the stale-press re-notification (reuses the shared delivery closure).
    */
-  private buildNotifyDeliveryDeps() {
+  private runNotificationAction(input: NotificationActionInput) {
+    return handleNotificationAction(input, {
+      getSession: (id) => this.sessionManager.getSession(id),
+      getAgent: (agentType) => this.agents.find((a) => a.name === agentType),
+      sendKey: sendKeyToPane,
+      sendText: sendLiteralToPane,
+      jump: (session) =>
+        performJump(
+          {
+            background: session.trackingMode === "background",
+            pane: session.tmuxPane,
+          },
+          this.jumpDeps,
+        ),
+      reNotify: (session, body) => {
+        // Read prefs live so the re-notify carries the configured command/sound
+        // (a "command" backend delivers nothing without payload.command).
+        void getPreferences()
+          .then((prefs) =>
+            this.notifyDeliver(
+              buildStateChangedPayload(session, body, prefs.notifications),
+            ),
+          )
+          .catch((error) => {
+            console.debug("Notifier: state-changed re-notify failed", error);
+          });
+      },
+    });
+  }
+
+  /**
+   * Assembles what the notification delivery layer needs, given the `ccmux`/
+   * `tmux` paths the constructor already resolved once (via `Bun.which`, the
+   * same mechanism `resolveBackend`'s auto ladder and `lifecycle.ts`'s hook
+   * installers use — shared with the jump wiring rather than re-resolved): the
+   * resolved ccmux-notifier helper (env -> brew `libexec` sibling of `ccmux` ->
+   * PATH) and the `/notification-action` callback URL (respects `CCMUX_PORT`).
+   * `ccmux` not being on PATH degrades gracefully: the D-Bus popup jump is
+   * omitted rather than built broken, and the notifier sibling rung is skipped.
+   */
+  private buildNotifyDeliveryDeps(ccmuxPath: string | null, tmuxPath: string) {
     return {
       getPrefs: getPreferences,
-      getClientPid: getActiveTmuxClientPid,
-      resolveTerminalBundleId,
       resolveActiveClientTty: resolveActiveTmuxClientTty,
       resolveBackend,
       probeBackend,
       deliver: libDeliver,
-      ccmuxPath: Bun.which("ccmux"),
-      tmuxPath: Bun.which("tmux") ?? "tmux",
-      path: process.env.PATH ?? "",
+      resolveNotifierPath: () =>
+        resolveCcmuxNotifierBinary({ execPath: process.execPath, ccmuxPath }),
+      notifierCallbackUrl: `http://${DAEMON_HOST}:${DAEMON_PORT}/notification-action`,
+      runNotificationAction: (input: NotificationActionInput) =>
+        this.runNotificationAction(input),
+      ccmuxPath,
+      tmuxPath,
       // `notify-delivery.ts` constructs at most one of these per daemon run,
       // lazily on the first "dbus" delivery (only relevant on Linux with the
       // dbus backend resolved); `dbus-next` itself is loaded even later,

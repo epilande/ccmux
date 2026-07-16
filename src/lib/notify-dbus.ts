@@ -1,19 +1,17 @@
 /**
  * Linux native D-Bus notification backend, speaking
  * `org.freedesktop.Notifications` directly via `dbus-next` (pure JS, no
- * native deps, bundles into the compiled binary — see
- * `notifications-plan.md`'s "Seamless backends" section).
+ * native deps, bundles into the compiled binary).
  *
  * Unlike the spawn-based backends in `src/lib/notify.ts`, this is
  * connection-oriented: one persistent session-bus connection is reused
- * across deliveries (owned by the daemon's `notify-delivery.ts`), which is
- * what makes Linux click-to-jump possible (`ActionInvoked` is a signal on
- * that live connection, not something a one-shot spawn can observe).
+ * across deliveries, which is what makes Linux click-to-jump possible
+ * (`ActionInvoked` is a signal on that live connection, not something a
+ * one-shot spawn can observe).
  *
  * `dbus-next` is imported lazily (dynamic `import()`) inside `connect()`
- * only, so platforms that never resolve to the "dbus" backend (macOS, or
- * Linux configured for another backend) never load it — load-bearing for the
- * compiled-binary + macOS-safety requirement in the plan.
+ * only, so platforms that never resolve to the "dbus" backend never load it
+ * — load-bearing for the compiled-binary + macOS-safety requirement.
  *
  * Every public method fails open: connection/probe/delivery failures resolve
  * `false`/`null` rather than throwing, and any failure resets the cached
@@ -23,21 +21,18 @@
 
 import type { NotificationPayload } from "./notify";
 
-/** Minimal shape of `dbus-next`'s `Variant` this module constructs — a
- * signature string plus the value, used to build the `a{sv}` hints dict. Not
- * imported from `dbus-next`'s own types so this module's public surface has
- * zero static dependency on the package (only the dynamic import inside
- * `connect()` touches it).
+/** Minimal shape of `dbus-next`'s `Variant`, used to build the `a{sv}` hints
+ * dict. Typed locally so this module's public surface has zero static
+ * dependency on the package (only the dynamic import in `connect()` touches
+ * it).
  *
  * IMPORTANT: against the real dbus-next connection this must be an actual
- * `dbus-next` `Variant` *instance*, not merely an object with this shape —
- * its marshaller checks `value.constructor === Variant` when serializing an
- * `a{sv}` dict entry and throws `"expected a Variant for value"` otherwise.
- * `DbusNotifier` builds these via `makeVariant`, which uses the real
- * `Variant` class (captured from the same dynamic import as `sessionBus`)
- * when connected for real, and falls back to a plain object — sufficient
- * for a test double that doesn't run real dbus-next marshalling — when a
- * `sessionBusFactory` was injected. */
+ * `Variant` *instance*, not merely an object with this shape — the
+ * marshaller checks `value.constructor === Variant` when serializing an
+ * `a{sv}` entry and throws `"expected a Variant for value"` otherwise.
+ * `makeVariant` uses the real class when connected for real, and falls back
+ * to a plain object when a `sessionBusFactory` was injected (fine for a test
+ * double that never runs real marshalling). */
 export interface DbusVariant<T = unknown> {
   signature: string;
   value: T;
@@ -67,7 +62,9 @@ export interface NotificationsInterfaceLike {
     hints: Record<string, DbusVariant>,
     expireTimeout: number,
   ): Promise<number>;
+  CloseNotification(id: number): Promise<void>;
   GetServerInformation(): Promise<[string, string, string, string]>;
+  GetCapabilities(): Promise<string[]>;
   on(
     event: "ActionInvoked",
     listener: (id: number, actionKey: string) => void,
@@ -75,6 +72,10 @@ export interface NotificationsInterfaceLike {
   on(
     event: "NotificationClosed",
     listener: (id: number, reason: number) => void,
+  ): unknown;
+  on(
+    event: "NotificationReplied",
+    listener: (id: number, text: string) => void,
   ): unknown;
 }
 
@@ -143,11 +144,19 @@ function withTimeout<T>(
 }
 
 export interface NotifyDbusOptions {
-  /** Registered against the returned notification id; invoked when the
-   * user clicks the notification's "Open" action. Omitted entirely (no
-   * `actions` sent) when not provided, matching the plan: actions only
-   * appear when there's something to do on click. */
-  onActivate?: () => void;
+  /** Registered against the returned notification id. `actionKey` is the
+   * freedesktop action key (`"default"`/`"Open"` for click-to-jump,
+   * `"approve"`/`"deny"` for the buttons); `userText` carries the typed
+   * inline reply (delivered via `NotificationReplied`, key `"answer"`).
+   * When not provided, no `actions` are sent at all — actions only appear
+   * when there's something to do on interaction. */
+  onAction?: (actionKey: string, userText?: string) => void;
+  /** Whether a `default`/`Open` click can actually jump somewhere (a bound
+   * pane, or a background/unbound session with a resolvable `ccmux`). When
+   * false, the `default`/`Open` action pair is omitted so the notification
+   * never shows an "Open" button that does nothing; approve/deny/reply stay
+   * gated on the payload independently. Defaults to false. */
+  canDefault?: boolean;
 }
 
 export class DbusNotifier {
@@ -155,18 +164,24 @@ export class DbusNotifier {
   private notificationsInterface: NotificationsInterfaceLike | null = null;
   private connecting: Promise<boolean> | null = null;
   /** The real `dbus-next` `Variant` class, captured from the same dynamic
-   * import as `sessionBus` — null when a `sessionBusFactory` was injected
-   * (no dbus-next import happens at all in that case; `makeVariant` falls
-   * back to a plain object, fine for a fake bus). See `DbusVariant`'s doc
-   * for why this matters. */
+   * import as `sessionBus`; null when a `sessionBusFactory` was injected.
+   * See `DbusVariant`'s doc for why this matters. */
   private variantCtor: VariantConstructor | null = null;
   /** Last notification id delivered per session id, so a session's
-   * notification replaces in place (`replaces_id`) — parity with
-   * terminal-notifier's `-group`. */
+   * notification replaces in place (`replaces_id`) — parity with the macOS
+   * helper's `--group`, and the id `retract`/`CloseNotification` targets. */
   private readonly replacesIds = new Map<string, number>();
-  /** Notification id -> the `onActivate` callback registered for it.
+  /** Notification id -> the `onAction` callback registered for it. Receives
+   * the freedesktop action key (and, for inline reply, the typed text).
    * Pruned on `NotificationClosed`, per the plan. */
-  private readonly activateCallbacks = new Map<number, () => void>();
+  private readonly actionCallbacks = new Map<
+    number,
+    (actionKey: string, userText?: string) => void
+  >();
+  /** Server capabilities from `GetCapabilities`, fetched once on connect.
+   * Gates the inline-reply action (only added when the server advertises
+   * `"inline-reply"`) — the plan's "do NOT fake it" rule. */
+  private capabilities: string[] = [];
 
   constructor(private readonly sessionBusFactory?: SessionBusFactory) {}
 
@@ -215,12 +230,26 @@ export class DbusNotifier {
       );
       const iface = proxyObject.getInterface(NOTIFICATIONS_BUS_NAME);
 
-      iface.on("ActionInvoked", (id, _actionKey) => {
-        this.activateCallbacks.get(id)?.();
+      iface.on("ActionInvoked", (id, actionKey) => {
+        this.actionCallbacks.get(id)?.(actionKey);
+      });
+      // Inline reply (servers advertising the `inline-reply` capability) is
+      // delivered as its own signal, not `ActionInvoked` — route the typed
+      // text through the same per-id callback with the internal `answer` key.
+      iface.on("NotificationReplied", (id, text) => {
+        this.actionCallbacks.get(id)?.("answer", text);
       });
       iface.on("NotificationClosed", (id) => {
-        this.activateCallbacks.delete(id);
+        this.actionCallbacks.delete(id);
       });
+
+      // Best-effort capability probe; failure leaves `capabilities` empty
+      // (inline reply simply stays off), never blocks connecting.
+      try {
+        this.capabilities = await iface.GetCapabilities();
+      } catch {
+        this.capabilities = [];
+      }
 
       this.bus = bus;
       this.notificationsInterface = iface;
@@ -265,7 +294,7 @@ export class DbusNotifier {
 
     try {
       const replacesId = this.replacesIds.get(payload.sessionId) ?? 0;
-      const actions = options.onActivate ? ["default", "Open"] : [];
+      const actions = this.buildActions(payload, options);
 
       const hints: Record<string, DbusVariant> = {
         urgency: this.makeVariant("y", URGENCY_NORMAL),
@@ -285,12 +314,49 @@ export class DbusNotifier {
       );
 
       this.replacesIds.set(payload.sessionId, id);
-      if (options.onActivate)
-        this.activateCallbacks.set(id, options.onActivate);
+      if (options.onAction) this.actionCallbacks.set(id, options.onAction);
       return id;
     } catch {
       this.resetConnection();
       return null;
+    }
+  }
+
+  /** Builds the freedesktop `actions` array (flat `[key, label, ...]`):
+   * `default`/`Open` for the click-to-jump base (only when `canDefault` — a
+   * jump that can actually land), `approve`/`deny` when the payload advertises
+   * them, and `inline-reply` only when the payload carries a reply AND the
+   * server's capabilities include `"inline-reply"` (never faked, per the
+   * plan). All are gated on a click handler being present. */
+  private buildActions(
+    payload: NotificationPayload,
+    options: NotifyDbusOptions,
+  ): string[] {
+    if (!options.onAction) return [];
+    const actions: string[] = [];
+    if (options.canDefault) actions.push("default", "Open");
+    if (payload.actions) {
+      for (const a of payload.actions) actions.push(a.id, a.label);
+    }
+    if (payload.reply && this.capabilities.includes("inline-reply")) {
+      actions.push("inline-reply", payload.reply.label);
+    }
+    return actions;
+  }
+
+  /** Closes (retracts) the live notification for `sessionId`, if one is
+   * tracked. Fail-open: a missing id, an unconnected bus, or a rejecting
+   * `CloseNotification` all resolve without throwing. Mirrors the macOS
+   * helper's `remove --group`. */
+  async retract(sessionId: string): Promise<void> {
+    const id = this.replacesIds.get(sessionId);
+    if (id === undefined) return;
+    const connected = await this.connect();
+    if (!connected || !this.notificationsInterface) return;
+    try {
+      await this.notificationsInterface.CloseNotification(id);
+    } catch {
+      // best-effort; leave the tracked id so a later delivery still replaces.
     }
   }
 
@@ -303,6 +369,6 @@ export class DbusNotifier {
       // best-effort
     }
     this.resetConnection();
-    this.activateCallbacks.clear();
+    this.actionCallbacks.clear();
   }
 }

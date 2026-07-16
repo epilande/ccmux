@@ -325,12 +325,23 @@ describe("nativeMarkerSource", () => {
     expect(built.source.state.pendingTool).toBeNull();
   });
 
-  it("ignores marker.pending_tool (overlay-style: log is the authority)", () => {
+  it("prefers marker.pending_tool over session.pendingTool", () => {
+    // Claude's Notification hook now parses the tool out of the notification
+    // message and writes pending_tool (the log can't populate it during a
+    // permission wait), so the marker wins.
     const built = nativeMarkerSource(
       mkMarker({
         state: "waiting_permission",
         pending_tool: "MarkerSays",
       }),
+      mkSession({ pendingTool: "LogSays" }),
+    );
+    expect(built.source.state.pendingTool).toBe("MarkerSays");
+  });
+
+  it("falls back to session.pendingTool when the marker omits pending_tool", () => {
+    const built = nativeMarkerSource(
+      mkMarker({ state: "waiting_permission" }),
       mkSession({ pendingTool: "LogSays" }),
     );
     expect(built.source.state.pendingTool).toBe("LogSays");

@@ -11,6 +11,7 @@ import type {
   TmuxPane,
 } from "../types/session";
 import {
+  correctAmbiguousPermissionMarker,
   evaluateCascade,
   genericMarkerSource,
   logSource,
@@ -194,8 +195,68 @@ async function reconcileNativeSession(
   }
 
   const marker = deps.hookManager.getMarkerForSession(session);
-  const resolved = evaluateCascade(collectNativeSources(session, marker));
+  const sources = collectNativeSources(session, marker);
+  await applyAmbiguousPermissionCorrection(deps, session, sources);
+  const resolved = evaluateCascade(sources);
   deps.sessionManager.updateSession(session.id, resolved);
+}
+
+/**
+ * AskUserQuestion disambiguation for the native cascade paths, which build
+ * only (marker, log) sources — no terminal source. When the marker claims a
+ * `permission` wait for an agent flagged `ambiguousPermissionMarker`
+ * (Claude), capture the pane once and match ONLY its `question` rules; a
+ * picker match is pushed as a source for `correctAmbiguousPermissionMarker`
+ * to relabel against. A `permission` rule match is deliberately dropped —
+ * Claude's permission rule matches plain narrative text ("requires approval")
+ * that lingers in scrollback for the whole next turn after a keyboard
+ * approval (no hook fires on approval, so the marker stays
+ * `waiting_permission`), and as an `upgradeOnly` waiting source it would lift
+ * a fresher log-derived `working` back to `waiting/permission`, re-arming a
+ * spent notification's Approve button against a now-working pane. The
+ * picker's `matchAll` of two interactive-widget strings does not survive as
+ * scrollback, so the pane is consulted only to detect the live picker, never
+ * to re-assert a permission wait. The marker+flag gate means the capture runs
+ * only while a flagged agent sits at a permission/question prompt (a brief,
+ * rare state); every other reconcile stays capture-free. Mutates `sources` in
+ * place; any capture failure is a fail-open no-op (the marker's `permission`
+ * stands).
+ */
+async function applyAmbiguousPermissionCorrection(
+  deps: Pick<ReconcilerDeps, "agents">,
+  session: Session,
+  sources: CascadeSource[],
+  capture: (paneId: string, lines?: number) => Promise<string> = capturePane,
+): Promise<void> {
+  const agent = deps.agents.find((a) => a.name === session.agentType);
+  if (!agent?.ambiguousPermissionMarker) return;
+  if (!session.tmuxPane) return;
+  const marker = sources.find((s) => s.name === "marker");
+  if (!marker || marker.state.attentionType !== "permission") return;
+
+  let content: string;
+  try {
+    content = await capture(session.tmuxPane, 50);
+  } catch {
+    return;
+  }
+  // `matchTerminalRule` is first-match-wins over all rules, so a permission
+  // phrase in the window (residual scrollback, or prose — Claude's own
+  // release-notes banner literally contains "permission rules") would SHADOW
+  // the question rule exactly when this correction is needed. Filter the
+  // rules, not the result, so the picker stays detectable regardless of what
+  // else is on screen.
+  const questionRules = agent.terminalRules.filter(
+    (r) => r.attentionType === "question",
+  );
+  const ruleMatch = matchTerminalRule(content, {
+    ...agent,
+    terminalRules: questionRules,
+  });
+  if (ruleMatch && ruleMatch.attentionType === "question") {
+    sources.push(terminalSource(ruleMatch, { upgradeOnly: true }));
+  }
+  correctAmbiguousPermissionMarker(sources, agent.ambiguousPermissionMarker);
 }
 
 /**
@@ -618,7 +679,9 @@ async function reconcilePaneTrackedClaudeSession(
       // The marker arm does NOT clear `inPlanMode` on idle (the pane-detection
       // idle branch below does). Intentional: matches the deleted read-time
       // overlay, which only wrote `status`/`attentionType`/`pendingTool`.
-      const resolved = evaluateCascade(collectNativeSources(session, marker));
+      const sources = collectNativeSources(session, marker);
+      await applyAmbiguousPermissionCorrection(deps, session, sources);
+      const resolved = evaluateCascade(sources);
       deps.sessionManager.updateSession(session.id, resolved);
       return;
     }

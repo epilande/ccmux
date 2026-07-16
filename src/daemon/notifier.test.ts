@@ -1,11 +1,13 @@
 import { describe, it, expect } from "bun:test";
 import {
   Notifier,
+  buildStateChangedPayload,
   decideNotification,
   type NotifierDeps,
   type NotificationsConfig,
 } from "./notifier";
 import { SessionManager } from "./sessions";
+import { BUILTIN_AGENTS } from "../lib/agents";
 import type { NotificationPayload } from "../lib/notify";
 import { SCAN_INTERVAL_MS } from "../lib/config";
 import type { Session, SessionStatus } from "../types/session";
@@ -57,6 +59,11 @@ function createHarness(
     getActivePaneId: overrides.getActivePaneId ?? (async () => null),
     isTerminalFrontmost: overrides.isTerminalFrontmost ?? (async () => false),
     getPrefs: overrides.getPrefs ?? (async () => prefs),
+    // Stub context enrichment off by default: the real one reads the pane via
+    // tmux (permission waits) or the transcript (question waits), which would
+    // spawn a subprocess in the fire path and make delivery nondeterministic.
+    // The dedicated context-enrichment block overrides this explicitly.
+    buildContext: overrides.buildContext ?? (async () => ({ body: null })),
     deliver:
       overrides.deliver ??
       (async (payload: NotificationPayload) => {
@@ -958,6 +965,209 @@ describe("Notifier", () => {
 
       // Immediately after restart, still inside the fresh window.
       expect(h.delivered.length).toBe(1);
+    });
+  });
+
+  describe("actionable payload stamping", () => {
+    const claudeAgent = BUILTIN_AGENTS.find((a) => a.name === "claude")!;
+    const opencodeAgent = BUILTIN_AGENTS.find((a) => a.name === "opencode")!;
+
+    /** Drives a session to `waiting` with the given attention type and returns
+     *  the single delivered payload. `buildContext` is stubbed off by default
+     *  so the body is deterministic. */
+    async function deliverWaiting(opts: {
+      attentionType: Session["attentionType"];
+      pendingTool?: string;
+      getAgent?: NotifierDeps["getAgent"];
+      buildContext?: NotifierDeps["buildContext"];
+    }): Promise<NotificationPayload> {
+      const h = createHarness();
+      const notifier = new Notifier({
+        ...h.deps,
+        getAgent: opts.getAgent,
+        buildContext: opts.buildContext ?? (async () => ({ body: null })),
+      });
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+
+      const session = h.sessionManager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: "/tmp/myapp",
+        pid: 1,
+      });
+      h.sessionManager.updateSession(session.id, {
+        status: "waiting",
+        attentionType: opts.attentionType,
+        pendingTool: opts.pendingTool ?? null,
+      });
+      await flush();
+      expect(h.delivered.length).toBe(1);
+      return h.delivered[0];
+    }
+
+    it("stamps Approve/Deny for a permission wait when the agent has a map", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Bash",
+        getAgent: () => claudeAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(payload.reply).toBeUndefined();
+    });
+
+    it("omits buttons for a permission wait when the agent has no map", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Bash",
+        getAgent: () => opencodeAgent,
+      });
+      expect(payload.actions).toBeUndefined();
+    });
+
+    it("omits buttons when no agent lookup is wired", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Bash",
+      });
+      expect(payload.actions).toBeUndefined();
+    });
+
+    it("stamps a Reply action for a Claude question wait", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "question",
+        getAgent: () => claudeAgent,
+      });
+      expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
+      expect(payload.actions).toBeUndefined();
+    });
+
+    it("appends buildContext text to the base body", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Bash",
+        getAgent: () => claudeAgent,
+        buildContext: async () => ({ body: "Bash: rm -rf /tmp/x" }),
+      });
+      expect(payload.body).toBe("Needs permission: Bash\nBash: rm -rf /tmp/x");
+    });
+
+    it("delivery-time reclassify: a permission wait the pane reveals as a question gets Reply, not Approve/Deny", async () => {
+      const payload = await deliverWaiting({
+        // Store still says permission (Part 1's scan correction hasn't landed).
+        attentionType: "permission",
+        pendingTool: "Bash",
+        getAgent: () => claudeAgent,
+        buildContext: async () => ({
+          body: "What's your favorite color?",
+          reclassifyAs: "question",
+        }),
+      });
+      expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
+      expect(payload.actions).toBeUndefined();
+      // Base line is rebuilt for the effective (question) type, not the stored
+      // "Needs permission: Bash".
+      expect(payload.body).toBe(
+        "Waiting for your input\nWhat's your favorite color?",
+      );
+    });
+
+    it("stamps statusChangedAt as the staleness token", async () => {
+      const h = createHarness();
+      const notifier = new Notifier({
+        ...h.deps,
+        buildContext: async () => ({ body: null }),
+      });
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+      const session = h.sessionManager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: "/tmp/myapp",
+        pid: 1,
+      });
+      h.sessionManager.updateSession(session.id, {
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash",
+      });
+      await flush();
+      const live = h.sessionManager.getSession(session.id);
+      expect(h.delivered[0].statusChangedAt).toBe(live!.statusChangedAt!);
+    });
+
+    it("gives a finished notification no buttons, reply, or context", async () => {
+      const h = createHarness();
+      const notifier = new Notifier({
+        ...h.deps,
+        getAgent: () => claudeAgent,
+        // Would append if consulted; a finished notification must skip it.
+        buildContext: async () => ({ body: "should not appear" }),
+      });
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+      const session = h.sessionManager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: "/tmp/myapp",
+        pid: 1,
+      });
+      h.sessionManager.setLogPath(session.id, "/tmp/myapp/log.jsonl");
+      h.sessionManager.updateSession(session.id, { status: "working" });
+      await tick();
+      h.sessionManager.updateSession(session.id, { status: "idle" });
+      await flush();
+      await h.fireScheduled();
+
+      expect(h.delivered.length).toBe(1);
+      expect(h.delivered[0].event).toBe("finished");
+      expect(h.delivered[0].body).toBe("Finished");
+      expect(h.delivered[0].actions).toBeUndefined();
+      expect(h.delivered[0].reply).toBeUndefined();
+    });
+  });
+
+  describe("buildStateChangedPayload", () => {
+    function makeSession(): Session {
+      const sm = new SessionManager();
+      return sm.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: "/tmp/myapp",
+        pid: 1,
+      });
+    }
+
+    it("carries the configured command and sound so the re-notify still delivers", () => {
+      // Regression: this payload was previously built with cfg=undefined, so on
+      // the "command" backend it delivered NOTHING (no payload.command) and the
+      // configured sound was dropped.
+      const payload = buildStateChangedPayload(
+        makeSession(),
+        "State changed. Check the pane.",
+        { enabled: true, command: "my-notify.sh", sound: "Glass" },
+      );
+      expect(payload.command).toBe("my-notify.sh");
+      expect(payload.sound).toBe("Glass");
+      expect(payload.body).toBe("State changed. Check the pane.");
+      // Informational only: no action buttons or reply on a stale-press notice.
+      expect(payload.event).toBe("waiting");
+      expect(payload.actions).toBeUndefined();
+      expect(payload.reply).toBeUndefined();
+    });
+
+    it("tolerates an undefined config (no command/sound to carry)", () => {
+      const payload = buildStateChangedPayload(
+        makeSession(),
+        "body",
+        undefined,
+      );
+      expect(payload.command).toBeUndefined();
+      expect(payload.sound).toBeUndefined();
+      expect(payload.body).toBe("body");
     });
   });
 });

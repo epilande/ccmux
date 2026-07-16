@@ -1,43 +1,37 @@
 /**
- * The daemon's `Notifier` deliver dependency: wraps `src/lib/notify.ts`'s
- * bare `deliver` with everything that needs daemon/session context the lib
- * module deliberately doesn't know about (per its own docs, it's
- * dependency-free so the TUI could reuse it):
+ * The daemon's `Notifier` deliver/retract dependency: wraps `src/lib/notify.ts`'s
+ * bare `deliver` with everything that needs daemon/session context (the lib
+ * module is deliberately dependency-free):
  *
  * - Resolves the backend fresh per delivery (config is read live) and probes
- *   each distinct backend once per daemon lifetime, per
- *   `notifications-plan.md`'s "Fail-open everywhere": a broken backend logs
- *   once and disables delivery for THAT backend for the rest of the daemon's
- *   run rather than retrying forever. Because the probe result is cached per
- *   backend (not globally), switching `notifications.backend` away from a
- *   broken one and back doesn't get stuck disabled, and a backend that was
- *   never tried gets its own fresh probe.
- * - For `terminal-notifier` only, enriches the payload with the click
- *   actions the plan's "Click-to-jump" section describes: `-sender` (the
- *   configurable icon), `-activate` (always the resolved terminal bundle id,
- *   regardless of icon setting), and `-execute` (jump to the session's pane,
- *   or - for background/unbound sessions with no pane - open the picker
- *   popup on the most-recently-active tmux client instead).
- * - For `dbus`, routes to a persistent `DbusNotifier` (created lazily on
- *   first use) instead of `src/lib/notify.ts`'s spawn-based `deliver` (which
- *   treats "dbus" as a no-op — it's connection-oriented, not spawn-oriented).
- *   A failed dbus probe falls back to resolving "notify-send" for that
- *   delivery rather than hard-disabling notifications on Linux, per the
- *   "Seamless backends" section of the plan. The click action runs
- *   in-process (no `sh -c` wrapper needed — we're already in the daemon):
- *   a bound session spawns `tmux switch-client`, a background/unbound one
- *   spawns `tmux display-popup`, mirroring `switch.ts`'s argv.
+ *   each distinct backend once per daemon lifetime: a broken backend logs
+ *   once and stays disabled for THAT backend for the rest of the run rather
+ *   than retrying forever. Caching per backend (not globally) means switching
+ *   `notifications.backend` away from a broken one and back doesn't get
+ *   stuck disabled.
+ * - For `ccmux-notifier` (the macOS v2 rung), resolves the helper binary once
+ *   (env `CCMUX_NOTIFIER_PATH` -> brew `libexec` sibling of `ccmux` -> PATH),
+ *   probes it with `--version`, and stamps `notifierPath` + `callbackUrl`
+ *   onto the payload. Unresolvable or probe-failed -> falls to `osascript`
+ *   silently (mirroring the dbus -> notify-send fallback below).
+ * - For `dbus`, routes to a persistent, lazily-created `DbusNotifier`
+ *   instead of `src/lib/notify.ts`'s spawn-based `deliver` (which treats
+ *   "dbus" as a no-op — it's connection-oriented, not spawn-oriented). A
+ *   failed dbus probe falls back to "notify-send" rather than hard-disabling
+ *   notifications on Linux. Click/button actions run in-process through the
+ *   shared `/notification-action` handler — the SAME code path the macOS
+ *   HTTP callback uses, so jumps and safety gating can't diverge per platform.
  *
- * Click actions for the spawn-based backends run in Notification Center's
- * minimal-PATH shell, so the built `-execute` command is wrapped as
- * `/bin/sh -c 'PATH=<daemon PATH> exec <abs binary> ...'`, capturing the
- * daemon's own PATH and resolved absolute binaries once at construction
- * time (see `createDeliverFn`'s `ccmuxPath`/`tmuxPath` params).
+ * Retraction (`retract(sessionId)`) auto-clears a session's notification when
+ * the user views its pane: `ccmux-notifier remove --group ...` on macOS,
+ * `CloseNotification` on the live D-Bus connection, a no-op for backends that
+ * can't retract. Fail-open like everything else.
  */
 
 import type { Backend, NotificationPayload, SpawnFn } from "../lib/notify";
+import { normalizeBackendConfig, probeCcmuxNotifier } from "../lib/notify";
 import type { NotificationsConfig } from "../lib/preferences";
-import { shellQuote } from "../lib/shell-quote";
+import type { NotificationActionInput } from "./notification-action";
 
 /** Structural subset of `DbusNotifier` (`src/lib/notify-dbus.ts`) this
  * module calls — lets tests inject a fake without touching the real
@@ -46,211 +40,200 @@ export interface DbusNotifierLike {
   probe(): Promise<boolean>;
   notify(
     payload: NotificationPayload,
-    options?: { onActivate?: () => void },
+    options?: {
+      onAction?: (actionKey: string, userText?: string) => void;
+      canDefault?: boolean;
+    },
   ): Promise<number | null>;
+  retract(sessionId: string): Promise<void>;
   close(): Promise<void>;
 }
 
 export interface DeliveryDeps {
   getPrefs: () => Promise<{ notifications?: NotificationsConfig }>;
-  /** tmux client pid backing `-sender`/`-activate` bundle-id resolution. */
-  getClientPid: () => Promise<number | null>;
-  resolveTerminalBundleId: (clientPid: number) => Promise<string | null>;
   /** Most-recently-active attached client, for the background-session popup
-   * click target (`display-popup -c`). */
+   * click target (`display-popup -c`) and bound-session `switch-client`. */
   resolveActiveClientTty: () => Promise<string | null>;
   resolveBackend: (config: {
     backend?: NotificationsConfig["backend"];
   }) => Backend | null;
   probeBackend: (backend: Backend) => Promise<boolean>;
   deliver: (backend: Backend, payload: NotificationPayload) => Promise<void>;
-  /** Absolute path to the `ccmux` entry point, or null if unresolvable (see
-   * `createDeliverFn`'s doc comment). Click actions are omitted when null. */
+  /** Resolves the ccmux-notifier helper binary (env -> brew sibling -> PATH),
+   * or null when unresolvable. Called at most once per closure (cached). */
+  resolveNotifierPath: () => string | null;
+  /** The `/notification-action` callback URL the ccmux-notifier helper POSTs
+   * to (respects `CCMUX_PORT`); stamped onto the delivered payload. */
+  notifierCallbackUrl: string;
+  /** Probes a resolved ccmux-notifier binary (`<path> --version`). Defaults to
+   * the lib helper bound to `spawn`; injectable for tests. */
+  probeNotifier?: (binaryPath: string) => Promise<boolean>;
+  /** Runs a notification-action callback in-process for the D-Bus buttons —
+   * the SAME shared handler the macOS HTTP route uses, injected from
+   * `index.ts`. */
+  runNotificationAction: (input: NotificationActionInput) => unknown;
+  /** Absolute path to the `ccmux` entry point, or null if unresolvable. The
+   * D-Bus background/unbound popup jump is omitted when null. */
   ccmuxPath: string | null;
   /** Absolute path to `tmux` (falls back to the bare name if unresolved). */
   tmuxPath: string;
-  /** The daemon's own `PATH`, prefixed onto the wrapped click command so the
-   * resolved binaries (and whatever they in turn exec, e.g. `bin/ccmux`'s
-   * own `bun`) can be found from Notification Center's minimal-PATH shell. */
-  path: string;
-  /** Constructs the dbus notifier, called at most once per `createDeliverFn`
-   * closure (lazily, on the first "dbus" delivery) and reused afterward.
-   * Injectable so tests never touch a real dbus-next connection. */
+  /** Constructs the dbus notifier, called at most once per closure (lazily,
+   * on the first "dbus" delivery/retract) and reused afterward. Injectable so
+   * tests never touch a real dbus-next connection. */
   createDbusNotifier: () => DbusNotifierLike;
-  /** Spawns the in-process click action for the dbus backend (pane jump or
-   * popup). Defaults to `Bun.spawn`; injectable for tests. */
+  /** Spawns the ccmux-notifier `post`/`remove` and the in-process dbus jump.
+   * Defaults to `Bun.spawn`; injectable for tests. */
   spawn?: SpawnFn;
   log?: (message: string, error?: unknown) => void;
 }
 
-function buildShCommand(innerCommand: string, path: string): string {
-  return `/bin/sh -c ${shellQuote(`PATH=${shellQuote(path)} exec ${innerCommand}`)}`;
-}
-
-/** Resolves the `-execute` click target: a pane jump for bound sessions, or
- * the picker popup for background/paneless ones (background sessions, and
- * defensively any pane-tracked session that's currently unbound - `pane`
- * alone can't tell those apart, see `NotificationPayload.background`'s
- * doc). Returns undefined when the popup path has no client to target, or
- * when `ccmuxPath` couldn't be resolved at all. */
-async function resolveExecuteCommand(
+/** Builds the dbus backend's interaction wiring. No shell command is built
+ * ahead of time — the callback runs in-process when the signal fires, and
+ * every key (including `default`/`Open`) routes to the shared
+ * `/notification-action` handler (see the module doc), which re-reads the
+ * session's LIVE pane rather than this delivery-time snapshot.
+ *
+ * `canDefault` reports whether a default-click jump can actually land (a
+ * bound pane, or a background/unbound session with a resolvable `ccmuxPath`);
+ * the dbus layer omits the visible `default`/`Open` button when it can't, so
+ * we never show a button that does nothing. `onAction` is `undefined` (no
+ * actions sent at all) only when there's nothing wireable: no jump target
+ * AND no buttons/reply on the payload. */
+function resolveDbusActionWiring(
   payload: NotificationPayload,
   deps: DeliveryDeps,
-): Promise<string | undefined> {
-  if (!deps.ccmuxPath) return undefined;
+): {
+  onAction?: (actionKey: string, userText?: string) => void;
+  canDefault: boolean;
+} {
+  const needsPopup = payload.background || !payload.pane;
+  const canDefault = !needsPopup || !!deps.ccmuxPath;
+  const hasButtons = !!payload.actions?.length || !!payload.reply;
+  if (!canDefault && !hasButtons) return { canDefault: false };
 
-  if (payload.background || !payload.pane) {
-    const clientTty = await deps.resolveActiveClientTty();
-    if (!clientTty) return undefined;
-    return buildShCommand(
-      `${shellQuote(deps.tmuxPath)} display-popup -c ${shellQuote(clientTty)} -E ${shellQuote(deps.ccmuxPath)}`,
-      deps.path,
-    );
-  }
-
-  return buildShCommand(
-    `${shellQuote(deps.ccmuxPath)} switch ${shellQuote(payload.sessionId)}`,
-    deps.path,
-  );
-}
-
-/** Resolves `-sender` per `notifications.icon`: `"none"` (the default) unsets
- * it, `"terminal"` borrows the resolved terminal bundle id (undefined if
- * unresolvable), and an explicit bundle id passes through as-is. Default is
- * `"none"` because `-sender` impersonation is silently dropped by macOS for
- * terminals that never register with its notification system (Ghostty, kitty,
- * Alacritty, WezTerm — enabling them in System Settings does not help);
- * `"terminal"` is opt-in for terminals where it works (iTerm2, Terminal.app). */
-function resolveSenderBundleId(
-  icon: string,
-  terminalBundleId: string | null,
-): string | undefined {
-  if (icon === "none") return undefined;
-  if (icon === "terminal") return terminalBundleId ?? undefined;
-  return icon;
-}
-
-async function enrichForTerminalNotifier(
-  payload: NotificationPayload,
-  cfg: NotificationsConfig | undefined,
-  deps: DeliveryDeps,
-): Promise<NotificationPayload> {
-  const clientPid = await deps.getClientPid();
-  const terminalBundleId =
-    clientPid !== null ? await deps.resolveTerminalBundleId(clientPid) : null;
-
-  return {
-    ...payload,
-    senderBundleId: resolveSenderBundleId(
-      cfg?.icon ?? "none",
-      terminalBundleId,
-    ),
-    // Always the resolved terminal id (not icon-gated): clicking should
-    // focus the terminal even when icon impersonation is turned off.
-    activateBundleId: terminalBundleId ?? undefined,
-    executeCommand: await resolveExecuteCommand(payload, deps),
+  const onAction = (actionKey: string, userText?: string) => {
+    if (actionKey === "approve" || actionKey === "deny") {
+      void deps.runNotificationAction({
+        sessionId: payload.sessionId,
+        action: actionKey,
+        statusChangedAt: payload.statusChangedAt,
+      });
+      return;
+    }
+    if (actionKey === "answer") {
+      void deps.runNotificationAction({
+        sessionId: payload.sessionId,
+        action: "answer",
+        statusChangedAt: payload.statusChangedAt,
+        userText,
+      });
+      return;
+    }
+    // The freedesktop `inline-reply` action key only signals that the text
+    // field opened; the typed reply arrives via `NotificationReplied` (mapped
+    // to `answer` above), so this key itself is a no-op — never a jump.
+    if (actionKey === "inline-reply") return;
+    // "default" / "Open" (or any other key) -> the shared handler's
+    // default-click jump.
+    void deps.runNotificationAction({
+      sessionId: payload.sessionId,
+      action: "default",
+      statusChangedAt: payload.statusChangedAt,
+    });
   };
-}
-
-/** Builds the dbus backend's click action: unlike the spawn-based backends,
- * there's no shell command to build ahead of time — the callback itself
- * spawns the tmux command in-process (no `sh -c` wrapper needed, we're
- * already in the daemon) when `ActionInvoked` actually fires. Same routing
- * as `resolveExecuteCommand`: a bound session jumps to its pane, a
- * background/unbound one opens the picker popup on the most-recently-active
- * client. `undefined` when the popup path has no `ccmuxPath` to open -
- * mirrors `resolveExecuteCommand` omitting the action entirely in that case
- * (a bound-session jump never needs `ccmuxPath`, so it's never gated on it).
- */
-function resolveDbusOnActivate(
-  payload: NotificationPayload,
-  deps: DeliveryDeps,
-): (() => void) | undefined {
-  const spawn = deps.spawn ?? (Bun.spawn as unknown as SpawnFn);
-  const log =
-    deps.log ??
-    ((message: string, error?: unknown) => console.warn(message, error ?? ""));
-
-  if (payload.background || !payload.pane) {
-    if (!deps.ccmuxPath) return undefined;
-    const ccmuxPath = deps.ccmuxPath;
-    return () => {
-      void (async () => {
-        try {
-          const clientTty = await deps.resolveActiveClientTty();
-          if (!clientTty) return;
-          spawn(
-            [deps.tmuxPath, "display-popup", "-c", clientTty, "-E", ccmuxPath],
-            { stdout: "ignore", stderr: "ignore" },
-          );
-        } catch (error) {
-          log("Notifier: dbus popup click action failed", error);
-        }
-      })();
-    };
-  }
-
-  const pane = payload.pane;
-  return () => {
-    void (async () => {
-      try {
-        const clientTty = await deps.resolveActiveClientTty();
-        if (!clientTty) return;
-        spawn([deps.tmuxPath, "switch-client", "-c", clientTty, "-t", pane], {
-          stdout: "ignore",
-          stderr: "ignore",
-        });
-      } catch (error) {
-        log("Notifier: dbus pane-jump click action failed", error);
-      }
-    })();
-  };
+  return { onAction, canDefault };
 }
 
 /**
- * Builds the `NotifierDeps["deliver"]` function the daemon wires into
- * `Notifier`. Each distinct backend is probed once, on its first delivery
- * attempt; a failed probe disables that backend for the lifetime of the
- * returned closure (i.e. for the daemon's run) and logs once for it. The
- * probe cache is keyed per backend (not a single global flag), so switching
- * `notifications.backend` to a different backend still gets its own probe,
- * and switching back to a previously-failed one stays disabled without
- * re-probing or re-logging. Every other failure (prefs read, enrichment, the
- * underlying `deliver` call itself) is swallowed here too, matching the
- * plan's "notifications must never affect session tracking" rule -
- * `Notifier.fire` already wraps its caller in a try/catch, but this stays
- * defensive on its own.
+ * Builds the delivery closure the daemon wires into `Notifier`, plus a
+ * `retract` companion that shares its per-backend probe cache, resolved
+ * notifier path, and lazy dbus connection (retraction needs the SAME dbus
+ * connection so its `replacesIds` map can find the notification to close).
+ * Failure of every kind (prefs read, probe, the underlying `deliver`) is
+ * swallowed here, matching the plan's "notifications must never affect session
+ * tracking" rule.
  */
-export function createDeliverFn(
-  deps: DeliveryDeps,
-): (payload: NotificationPayload) => Promise<void> {
+export function createNotifyDelivery(deps: DeliveryDeps): {
+  deliver: (payload: NotificationPayload) => Promise<void>;
+  retract: (sessionId: string) => Promise<void>;
+} {
   /** `true` = probed and working, `false` = probed and disabled. Absent =
-   * not yet probed. Shared across "dbus" and the spawn-based backends so a
-   * dbus probe failure and its notify-send fallback each get their own
-   * cached, once-only probe. */
+   * not yet probed. Shared across every backend so each gets its own cached,
+   * once-only probe. */
   const probeResults = new Map<Backend, boolean>();
   const log =
     deps.log ??
     ((message: string, error?: unknown) => console.warn(message, error ?? ""));
+  const spawn = deps.spawn ?? (Bun.spawn as unknown as SpawnFn);
+  const probeNotifier =
+    deps.probeNotifier ?? ((p: string) => probeCcmuxNotifier(p, spawn));
 
-  /** Constructed at most once, on the first "dbus" delivery, and reused for
-   * every delivery after (the persistent connection is the whole point —
-   * see the module doc comment). */
+  /** Resolved at most once (undefined = not yet resolved, null = resolved to
+   * "no helper"). Shared by deliver + retract. */
+  let notifierPath: string | null | undefined;
+  const getNotifierPath = (): string | null => {
+    if (notifierPath === undefined) notifierPath = deps.resolveNotifierPath();
+    return notifierPath;
+  };
+
   let dbusNotifier: DbusNotifierLike | null = null;
   const getDbusNotifier = (): DbusNotifierLike => {
     if (!dbusNotifier) dbusNotifier = deps.createDbusNotifier();
     return dbusNotifier;
   };
 
-  return async function deliverNotification(
+  /** Logged at most once: a config still naming the removed `terminal-notifier`
+   * backend falls back to the auto ladder rather than hard-failing. */
+  let loggedLegacyBackend = false;
+  const resolveConfiguredBackend = (prefs: {
+    notifications?: NotificationsConfig;
+  }): Backend | null => {
+    const { backend, removed } = normalizeBackendConfig(
+      prefs.notifications?.backend,
+    );
+    if (removed && !loggedLegacyBackend) {
+      loggedLegacyBackend = true;
+      log(
+        `Notifier: notifications.backend "${removed}" was removed in v2; using the auto ladder`,
+      );
+    }
+    return deps.resolveBackend({ backend });
+  };
+
+  async function deliverNotification(
     payload: NotificationPayload,
   ): Promise<void> {
     try {
       const prefs = await deps.getPrefs();
-      let backend = deps.resolveBackend({
-        backend: prefs.notifications?.backend,
-      });
+      let backend = resolveConfiguredBackend(prefs);
       if (!backend) return;
+
+      if (backend === "ccmux-notifier") {
+        const path = getNotifierPath();
+        if (path) {
+          let ok = probeResults.get("ccmux-notifier");
+          if (ok === undefined) {
+            ok = await probeNotifier(path);
+            probeResults.set("ccmux-notifier", ok);
+            if (!ok) {
+              log(
+                'Notifier: backend "ccmux-notifier" failed its startup probe; falling back to "osascript" for this delivery',
+              );
+            }
+          }
+          if (ok) {
+            await deps.deliver("ccmux-notifier", {
+              ...payload,
+              notifierPath: path,
+              callbackUrl: deps.notifierCallbackUrl,
+            });
+            return;
+          }
+        }
+        // Unresolvable helper or a failed probe: fall through to osascript,
+        // which probes (and caches) exactly like any other backend below.
+        backend = "osascript";
+      }
 
       if (backend === "dbus") {
         let dbusOk = probeResults.get("dbus");
@@ -264,11 +247,11 @@ export function createDeliverFn(
           }
         }
         if (dbusOk) {
-          const onActivate = resolveDbusOnActivate(payload, deps);
-          await getDbusNotifier().notify(
+          const { onAction, canDefault } = resolveDbusActionWiring(
             payload,
-            onActivate ? { onActivate } : {},
+            deps,
           );
+          await getDbusNotifier().notify(payload, { onAction, canDefault });
           return;
         }
         // Fall through to the shared spawn-based path below, which probes
@@ -288,14 +271,41 @@ export function createDeliverFn(
       }
       if (!ok) return;
 
-      const enriched =
-        backend === "terminal-notifier"
-          ? await enrichForTerminalNotifier(payload, prefs.notifications, deps)
-          : payload;
-
-      await deps.deliver(backend, enriched);
+      await deps.deliver(backend, payload);
     } catch (error) {
       log("Notifier: delivery failed, dropping notification", error);
     }
-  };
+  }
+
+  async function retract(sessionId: string): Promise<void> {
+    try {
+      const prefs = await deps.getPrefs();
+      const backend = resolveConfiguredBackend(prefs);
+      if (!backend) return;
+
+      if (backend === "ccmux-notifier") {
+        const path = getNotifierPath();
+        if (!path) return;
+        // Only retract via the helper if deliver actually used it (probe
+        // succeeded). If the probe failed, deliveries fell back to osascript —
+        // which posts under a different identity and can't be retracted anyway;
+        // if it never ran (undefined), nothing was posted via the helper yet.
+        if (probeResults.get("ccmux-notifier") !== true) return;
+        spawn([path, "remove", "--group", `ccmux-${sessionId}`], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        return;
+      }
+      if (backend === "dbus") {
+        await getDbusNotifier().retract(sessionId);
+        return;
+      }
+      // osascript / notify-send / command have no retraction capability.
+    } catch (error) {
+      log("Notifier: retract failed", error);
+    }
+  }
+
+  return { deliver: deliverNotification, retract };
 }

@@ -31,6 +31,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 🔄 **Real-Time**: Background daemon streams state changes instantly over SSE, no polling, no refresh
 - 👁️ **Live Preview**: Split-pane view of the selected session's pane content
 - ⚡ **Act in Place**: Tab into the preview to approve, answer, or type, keys go straight to that pane
+- 🔔 **Actionable Notifications**: Approve, deny, or reply to a waiting agent straight from the desktop notification
 - 📊 **Sidebar Mode**: Compact always-visible session rail docked beside your working panes
 - 🔍 **Fuzzy Search**: Fuzzy-match sessions by project, branch, or path; substring-match any recent prompt, captured pane content, and on-demand live transcripts
 - 📂 **Session Grouping**: Collapsible project groups with reordering and pinning
@@ -194,6 +195,45 @@ ccmux config set sidebar.position right
 ```tmux
 bind-key S run-shell "ccmux sidebar --toggle"
 ```
+
+### Notifications
+
+Desktop notifications on `waiting`/`finished` transitions, disabled by default. When a session needs permission the banner carries **Approve** / **Deny** buttons; questions get an inline **Reply** field, so you can unblock an agent without switching to its pane. Focusing a session's pane clears its notification.
+
+|                                                                           **Permission → Approve / Deny**                                                                            |                                                                        **Question → inline Reply**                                                                         |
+| :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------: |
+| <img alt="ccmux notification with Approve / Deny buttons for a permission prompt" src="https://github.com/user-attachments/assets/e2fb5423-eac0-47d5-ae35-b003d797e42c" width="380"> | <img alt="ccmux notification with an inline Reply field for a question" src="https://github.com/user-attachments/assets/75671613-1c19-47c0-986c-ee41fd6a9860" width="380"> |
+
+```bash
+ccmux config set notifications.enabled true
+ccmux notify   # sends a test notification and prints setup diagnostics
+```
+
+Actionable buttons are Claude Code only for now; other agents get click-to-jump. Approve/Deny work on macOS and Linux; inline reply needs a notification server that advertises it (always on macOS, varies on Linux).
+
+**macOS:** the buttons, ccmux's own name and icon, per-session grouping, and retraction come from a helper app Homebrew installs alongside ccmux, so `brew install epilande/tap/ccmux` for the full experience. Source installs fall back to `osascript` (posts as Script Editor, silenced by Focus / Do Not Disturb, no buttons or reply). macOS never shows a permission dialog for a CLI-launched app, so grant it once by hand: run `ccmux notify` and follow the printed steps (open the settings deep link, find **ccmux-notifier**, enable **Allow notifications**, set **Alert Style** to **Persistent**), then re-run `ccmux notify` to confirm.
+
+**Linux:** `dbus` grouping, click-to-jump, and Approve/Deny are native (no extra binary); inline reply appears only when the server advertises it. A headless daemon (SSH, systemd) needs `DBUS_SESSION_BUS_ADDRESS`, plus `DISPLAY` for the `notify-send` fallback.
+
+Configure further with `ccmux config set notifications.<key> <value>`, or edit `~/.config/ccmux/ccmux.json` directly:
+
+```jsonc
+{
+  "notifications": {
+    "enabled": true, // default false (opt-in)
+    "events": ["waiting", "finished"], // default both
+    "sound": "Glass", // false (default) | true (platform default sound) | macOS sound name
+    "delayMs": 1000, // debounce for "finished" only; "waiting" always fires immediately
+    "backend": "auto", // "auto" | "ccmux-notifier" | "osascript" | "notify-send" | "dbus" | "command"
+    "command": "ntfy publish agents \"$CCMUX_TITLE: $CCMUX_BODY\"", // used when backend = "command"
+  },
+}
+```
+
+`backend: "auto"` picks `ccmux-notifier` (else `osascript`) on macOS, and D-Bus (else `notify-send`) on Linux. `command` runs your own shell command with `CCMUX_*` env set (`EVENT`, `SESSION_ID`, `AGENT`, `PROJECT`, `BRANCH`, `TITLE`, `BODY`, `PANE`), for ntfy, Pushover, and the like. (The v1 `terminal-notifier` backend and `notifications.icon` key were removed in v2; an old config naming them falls back to the auto ladder.)
+
+> [!NOTE]
+> **Approve/Deny only send the mapped keystroke** to that session's pane (for Claude, the same key you'd press yourself). If the session moved on since the notification fired, the press sends nothing and you get a fresh "state changed" notification instead; dismissing a notification never approves anything.
 
 ### Search Mode
 
@@ -435,40 +475,6 @@ ccmux daemon restart
 
 > [!NOTE]
 > If you add a dir later, re-run `ccmux setup --agent claude`. The daemon warns at startup about any configured dir still missing hooks.
-
-### 🔔 Notifications
-
-Desktop notifications on `waiting`/`finished` transitions, disabled by default. Enable and grant the macOS permission:
-
-```bash
-ccmux config set notifications.enabled true
-ccmux notify   # sends a test notification through the configured backend
-```
-
-Run `ccmux notify` once after enabling: macOS shows its permission dialog only on the first notification, so trigger it yourself instead of letting a real transition drop silently while you're away.
-
-Configure further with `ccmux config set notifications.<key> <value>`, or edit `~/.config/ccmux/ccmux.json` directly:
-
-```jsonc
-{
-  "notifications": {
-    "enabled": true, // default false (opt-in)
-    "events": ["waiting", "finished"], // default both
-    "sound": "Glass", // false (default) | true (platform default sound) | macOS sound name
-    "delayMs": 1000, // debounce for "finished" only; "waiting" always fires immediately
-    "backend": "auto", // "auto" | "terminal-notifier" | "osascript" | "notify-send" | "dbus" | "command"
-    "command": "ntfy publish agents \"$CCMUX_TITLE: $CCMUX_BODY\"", // used when backend = "command"
-    "icon": "none", // macOS: "none" (default) | "terminal" (borrow terminal app icon) | bundle id
-  },
-}
-```
-
-`backend: "auto"` picks `terminal-notifier` (else `osascript`) on macOS, and D-Bus (else `notify-send`) on Linux. `command` runs your own shell command with `CCMUX_*` env set (`EVENT`, `SESSION_ID`, `AGENT`, `PROJECT`, `BRANCH`, `TITLE`, `BODY`, `PANE`), for ntfy, Pushover, and the like.
-
-> [!NOTE]
-> **macOS:** `brew install terminal-notifier` for per-session grouping and click-to-jump (`osascript` has neither and posts as Script Editor). Keep `icon: "none"`; setting `"terminal"` borrows your terminal's icon but macOS silently drops it on terminals that don't register for notifications (Ghostty, kitty, Alacritty, WezTerm). Use `"terminal"` only on iTerm2 or Terminal.app.
-
-Linux `dbus` grouping and click-to-jump are native (no extra binary); a headless daemon (SSH, systemd) needs `DBUS_SESSION_BUS_ADDRESS`, plus `DISPLAY` for the `notify-send` fallback. Frontmost suppression is app-level: another window of the same terminal app counts as viewing.
 
 ## 🔗 Session Matching with Hooks
 
