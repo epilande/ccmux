@@ -439,23 +439,22 @@ ccmux daemon restart
 
 ### 🔔 Notifications
 
-Desktop notifications on `waiting`/`finished` transitions, disabled by default. When a session needs permission the banner carries **Approve** / **Deny** buttons, and questions get an inline **Reply** field, so you can unblock an agent straight from the notification without switching to its pane. Focusing a session's pane clears its notification.
+Desktop notifications on `waiting`/`finished` transitions, disabled by default. When a session needs permission the banner carries **Approve** / **Deny** buttons; questions get an inline **Reply** field, so you can unblock an agent without switching to its pane. Focusing a session's pane clears its notification.
 
-<p align="center">
-  <img alt="ccmux notification with Approve / Deny buttons for a permission prompt" src="https://github.com/user-attachments/assets/e2fb5423-eac0-47d5-ae35-b003d797e42c" width="380">
-  <img alt="ccmux notification with an inline Reply field for a question" src="https://github.com/user-attachments/assets/75671613-1c19-47c0-986c-ee41fd6a9860" width="380">
-</p>
+|                                                                           **Permission → Approve / Deny**                                                                            |                                                                        **Question → inline Reply**                                                                         |
+| :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------: |
+| <img alt="ccmux notification with Approve / Deny buttons for a permission prompt" src="https://github.com/user-attachments/assets/e2fb5423-eac0-47d5-ae35-b003d797e42c" width="380"> | <img alt="ccmux notification with an inline Reply field for a question" src="https://github.com/user-attachments/assets/75671613-1c19-47c0-986c-ee41fd6a9860" width="380"> |
 
 ```bash
 ccmux config set notifications.enabled true
 ccmux notify   # sends a test notification and prints setup diagnostics
 ```
 
-Actionable buttons are Claude Code only for now; every other agent still gets click-to-jump. Approve/Deny work on both macOS and Linux; inline reply needs a notification server that advertises it (always available on macOS, varies on Linux).
+Actionable buttons are Claude Code only for now; other agents get click-to-jump. Approve/Deny work on macOS and Linux; inline reply needs a notification server that advertises it (always on macOS, varies on Linux).
 
-On **macOS**, the buttons, ccmux's own name and icon, per-session grouping, and retraction come from a small helper app that Homebrew installs alongside ccmux. Source installs have no helper and fall back to `osascript`, which posts under Script Editor's name, is silenced by Focus / Do Not Disturb, and has no buttons or reply; `brew install epilande/tap/ccmux` for the full experience.
+**macOS:** the buttons, ccmux's own name and icon, per-session grouping, and retraction come from a helper app Homebrew installs alongside ccmux, so `brew install epilande/tap/ccmux` for the full experience. Source installs fall back to `osascript` (posts as Script Editor, silenced by Focus / Do Not Disturb, no buttons or reply). macOS never shows a permission dialog for a CLI-launched app, so grant it once by hand: run `ccmux notify` and follow the printed steps (open the settings deep link, find **ccmux-notifier**, enable **Allow notifications**, set **Alert Style** to **Persistent**), then re-run `ccmux notify` to confirm.
 
-macOS never shows a permission dialog for a CLI-launched app, so grant it once by hand. Run `ccmux notify` and follow the steps it prints: open the notifications-settings deep link, find **ccmux-notifier**, enable **Allow notifications**, and set its **Alert Style** to **Persistent** so alerts don't auto-dismiss after a few seconds. Re-run `ccmux notify` to confirm the grant took, it reports the live authorization and alert state each run.
+**Linux:** `dbus` grouping, click-to-jump, and Approve/Deny are native (no extra binary); inline reply appears only when the server advertises it. A headless daemon (SSH, systemd) needs `DBUS_SESSION_BUS_ADDRESS`, plus `DISPLAY` for the `notify-send` fallback.
 
 Configure further with `ccmux config set notifications.<key> <value>`, or edit `~/.config/ccmux/ccmux.json` directly:
 
@@ -472,15 +471,10 @@ Configure further with `ccmux config set notifications.<key> <value>`, or edit `
 }
 ```
 
-`backend: "auto"` picks `ccmux-notifier` (else `osascript`) on macOS, and D-Bus (else `notify-send`) on Linux. `command` runs your own shell command with `CCMUX_*` env set (`EVENT`, `SESSION_ID`, `AGENT`, `PROJECT`, `BRANCH`, `TITLE`, `BODY`, `PANE`), for ntfy, Pushover, and the like.
-
-Linux `dbus` grouping, click-to-jump, and Approve/Deny buttons are native (no extra binary); inline reply appears only when the notification server advertises it. A headless daemon (SSH, systemd) needs `DBUS_SESSION_BUS_ADDRESS`, plus `DISPLAY` for the `notify-send` fallback. Frontmost suppression is app-level: another window of the same terminal app counts as viewing.
+`backend: "auto"` picks `ccmux-notifier` (else `osascript`) on macOS, and D-Bus (else `notify-send`) on Linux. `command` runs your own shell command with `CCMUX_*` env set (`EVENT`, `SESSION_ID`, `AGENT`, `PROJECT`, `BRANCH`, `TITLE`, `BODY`, `PANE`), for ntfy, Pushover, and the like. (The v1 `terminal-notifier` backend and `notifications.icon` key were removed in v2; an old config naming them falls back to the auto ladder.)
 
 > [!NOTE]
-> The v1 `terminal-notifier` backend and the `notifications.icon` key were both removed in v2; a config still naming `terminal-notifier` falls back to the auto ladder with a log line.
-
-> [!NOTE]
-> **What Approve does, and doesn't:** Approve/Deny only send the mapped keystroke to that session's pane (for Claude, the same key you would press yourself). If the session moved on since the notification fired, the press sends nothing and you get a fresh "state changed" notification instead. Dismissing a notification never approves anything.
+> **Approve/Deny only send the mapped keystroke** to that session's pane (for Claude, the same key you'd press yourself). If the session moved on since the notification fired, the press sends nothing and you get a fresh "state changed" notification instead; dismissing a notification never approves anything.
 
 ## 🔗 Session Matching with Hooks
 
