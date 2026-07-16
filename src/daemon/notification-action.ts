@@ -162,6 +162,17 @@ type ActionPlan =
  * CURRENT state, and how it should execute. Pure (no effects), so the gate is
  * unit-testable in isolation.
  *
+ * `waitTypeOverride` makes the LIVE pane authoritative for the plan-vs-permission
+ * split (the caller classifies the pane and passes the result). This is
+ * load-bearing, not a refinement: a live ExitPlanMode wait is usually stored as
+ * `{ permission, pendingTool: null }` because the marker reports
+ * `waiting_permission` with a null tool AND the ExitPlanMode `tool_use` is
+ * frequently deferred out of the JSONL during the wait (like a permission-gated
+ * tool_use, nondeterministically). So `isPlanApprovalWait` is FALSE in the common
+ * plan window; only the pane reliably shows which picker is up. When the override
+ * is absent (no-ambiguity agents, or `answer` whose prelude is Escape either way)
+ * the stored classification is used.
+ *
  * Safety asymmetry, deliberate: for a permission/plan reply the prelude key's
  * PRESENCE is the legality gate. Without an Escape first, typing text + Enter at
  * a numbered picker would select the highlighted option (i.e. approve), so a
@@ -174,6 +185,7 @@ function resolveActionPlan(
   action: "approve" | "deny" | "answer",
   session: Session,
   agentDef: AgentDef | undefined,
+  waitTypeOverride?: "plan_approval" | "permission",
 ): ActionPlan {
   const na = agentDef?.notificationActions;
 
@@ -186,11 +198,17 @@ function resolveActionPlan(
 
   if (session.status !== "waiting") return null;
 
-  // Plan waits are checked BEFORE the plain-permission rows: a live plan wait is
-  // stored as a permission (see `isPlanApprovalWait`), and its ExitPlanMode
-  // picker is a different shape from a permission prompt, so approve/deny use the
-  // separate `planApprove`/`planDeny` keys (approve = `2`, NOT `1` = auto mode).
-  if (isPlanApprovalWait(session)) {
+  // The pane override wins when present; otherwise the stored classification
+  // (`isPlanApprovalWait` covers both a `plan_approval` attentionType and the
+  // permission+ExitPlanMode marker-fresher window).
+  const isPlan = waitTypeOverride
+    ? waitTypeOverride === "plan_approval"
+    : isPlanApprovalWait(session);
+
+  // A plan wait's ExitPlanMode picker is a DIFFERENT shape from a permission
+  // prompt, so approve/deny use the separate `planApprove`/`planDeny` keys
+  // (approve = `2`, NOT `1` = auto mode).
+  if (isPlan) {
     if (action === "approve") return { mode: "keys", keys: na?.planApprove };
     if (action === "deny") return { mode: "keys", keys: na?.planDeny };
     return na?.planReplyPrelude?.length
@@ -198,7 +216,10 @@ function resolveActionPlan(
       : null;
   }
 
-  switch (session.attentionType) {
+  // Not a plan wait. When the pane override forced `permission`, use that row
+  // even if the stored attentionType is something else.
+  const effectiveType = waitTypeOverride ?? session.attentionType;
+  switch (effectiveType) {
     case "permission":
       if (action === "approve") return { mode: "keys", keys: na?.approve };
       if (action === "deny") return { mode: "keys", keys: na?.deny };
@@ -250,10 +271,8 @@ export async function handleNotificationAction(
     return { code: 200, ok: true, action };
   }
 
-  // approve / deny / answer all mutate the pane. Two orthogonal gates: the
-  // staleness token must still match the edge the notification fired for, AND
-  // the action must be legal in the session's live state. `resolveActionPlan`
-  // owns the state-legality half and returns how to execute the action.
+  // approve / deny / answer all mutate the pane. First the staleness token must
+  // still match the edge the notification fired for.
   //
   // Token caveat: an attentionType flip WITHIN `waiting` (permission ->
   // question) does not bump `statusChangedAt` (`SessionManager.updateSession`
@@ -262,9 +281,70 @@ export async function handleNotificationAction(
   // prelude.
   const tokenMatches =
     (input.statusChangedAt ?? null) === (session.statusChangedAt ?? null);
+  if (!tokenMatches) {
+    deps.reNotify(session, STATE_CHANGED_BODY);
+    return {
+      code: 409,
+      ok: false,
+      error: "Session state changed since the notification fired",
+    };
+  }
+
   const agentDef = deps.getAgent(session.agentType);
-  const plan = resolveActionPlan(action, session, agentDef);
-  if (!tokenMatches || plan === null) {
+
+  // Pane-authoritative wait type. For a press by an agent whose plan picker
+  // differs from its permission prompt (`planApprove` defined) on a waiting
+  // permission/plan wait, the stored plan/permission classification is unreliable
+  // in both directions and the staleness token can't catch it (status stays
+  // `waiting`): the common live-plan window is `{ permission, pendingTool: null }`
+  // (marker null tool + deferred log tool_use, see `resolveActionPlan`), and a
+  // permission wait right after a plan wait can retain a stale `ExitPlanMode`
+  // pendingTool. The pane is the only signal reliably present at the picker, so
+  // classify it and let it DECIDE the wait type, matching the notifier's offer
+  // side which classifies the same pane.
+  const paneAuthoritative =
+    !!agentDef?.notificationActions?.planApprove &&
+    session.status === "waiting" &&
+    (session.attentionType === "permission" ||
+      session.attentionType === "plan_approval") &&
+    session.tmuxPane !== null;
+
+  let plan: ActionPlan;
+  if (paneAuthoritative) {
+    let paneKind: "plan_approval" | "permission" | null;
+    try {
+      paneKind = classifyClaudePromptPane(
+        await deps.capturePane(session.tmuxPane!),
+      );
+    } catch {
+      paneKind = null;
+    }
+    if (paneKind !== null) {
+      plan = resolveActionPlan(action, session, agentDef, paneKind);
+    } else if (action === "answer") {
+      // The classifier only knows plan/permission; a null here is usually an
+      // AskUserQuestion picker (or a plain-text question). A reply is safe to
+      // fall back to the stored type: for Claude every waiting reply prelude is
+      // the same Escape, so the question path still lands.
+      plan = resolveActionPlan(action, session, agentDef);
+    } else {
+      // approve/deny with no picker classified: fail CLOSED. Keying "1" at a plan
+      // picker enables auto mode and "2" at a Bash prompt is the persistent grant,
+      // so a press with no visible prompt to match must send nothing.
+      deps.reNotify(session, STATE_CHANGED_BODY);
+      log(
+        `notification-action: no active prompt visible on pane for ${action}`,
+      );
+      return {
+        code: 409,
+        ok: false,
+        error: "No active prompt on the pane",
+      };
+    }
+  } else {
+    plan = resolveActionPlan(action, session, agentDef);
+  }
+  if (plan === null) {
     deps.reNotify(session, STATE_CHANGED_BODY);
     return {
       code: 409,
@@ -347,38 +427,8 @@ export async function handleNotificationAction(
     return { code: 409, ok: false, error: "Agent has no action map" };
   }
 
-  // Press-time pane guard. A keys send is committed to a specific picker (plan
-  // approve = "2", permission approve = "1"), but the stored plan/permission
-  // classification is unreliable in BOTH directions (a live plan wait can lack
-  // the ExitPlanMode pendingTool; a permission wait after a plan wait can retain
-  // it via the cascade carry-forward), and the staleness token can't catch
-  // either since status never leaves `waiting`. So for an agent whose plan
-  // picker differs from its permission prompt (`planApprove` defined), re-read
-  // the pane and require it to match the type we're about to key. Fail CLOSED on
-  // a capture miss: sending "1" at a plan picker enables auto mode, "2" at a Bash
-  // prompt is the persistent "don't ask again" grant.
-  if (agentDef?.notificationActions?.planApprove) {
-    const expected = isPlanApprovalWait(session)
-      ? "plan_approval"
-      : "permission";
-    let paneKind: "plan_approval" | "permission" | null;
-    try {
-      paneKind = classifyClaudePromptPane(await deps.capturePane(pane));
-    } catch {
-      paneKind = null;
-    }
-    if (paneKind !== expected) {
-      deps.reNotify(session, STATE_CHANGED_BODY);
-      log(
-        `notification-action: pane shows ${paneKind ?? "no prompt"}, expected ${expected} for ${action}`,
-      );
-      return {
-        code: 409,
-        ok: false,
-        error: "Pane prompt no longer matches the notification",
-      };
-    }
-  }
+  // No separate pane guard here: the pane already DECIDED this wait's type above
+  // (`paneAuthoritative`), so `keys` is the map for the picker actually on screen.
 
   for (let i = 0; i < keys.length; i++) {
     if (i > 0) await sleep(KEY_SEQUENCE_GAP_MS);

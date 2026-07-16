@@ -6,6 +6,7 @@ import {
   buildFinishedContext,
   buildNotificationContext,
   extractPermissionPrompt,
+  extractPlanPrompt,
   extractQuestionPrompt,
   matchesQuestionPickerSignature,
   type NotifyContextSession,
@@ -477,6 +478,42 @@ describe("buildNotificationContext: gating", () => {
   });
 });
 
+describe("extractPlanPrompt", () => {
+  /** A pane with the ExitPlanMode plan box: header, top rule, content, bottom
+   *  rule (╌ = U+254C), blank padding, then the picker. */
+  const PLAN_BOX = [
+    "  ⏺ Ready to code?",
+    "   Here is Claude's plan:",
+    "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+    "   Plan: add hello script",
+    "   Context",
+    "   Add a hello-world shell script",
+    "   Steps",
+    "   1. Create hello.sh",
+    "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+    "",
+    "  ──────────────────────────────",
+    "   Would you like to proceed?",
+    "   ❯ 1. Yes, and use auto mode",
+    "     2. Yes, manually approve edits",
+  ].join("\n");
+
+  it("extracts the plan box content, clamped, when the header is visible", () => {
+    expect(extractPlanPrompt(PLAN_BOX)).toBe(
+      "Plan: add hello script\nContext\nAdd a hello-world shell script\nSteps…",
+    );
+  });
+
+  it("returns null when the header scrolled off (not in the capture)", () => {
+    const noHeader = PLAN_BOX.split("\n").slice(3).join("\n");
+    expect(extractPlanPrompt(noHeader)).toBeNull();
+  });
+
+  it("returns null on a pane with no plan box at all", () => {
+    expect(extractPlanPrompt("just some idle output\n❯ ")).toBeNull();
+  });
+});
+
 describe("buildNotificationContext: plan_approval", () => {
   /** A long-enough plan to exercise the 4-line clamp. */
   const PLAN_MD = [
@@ -488,6 +525,37 @@ describe("buildNotificationContext: plan_approval", () => {
   ].join("\n");
   const CLAMPED =
     "Plan: add script\nStep 1: create hello.sh\nStep 2: chmod +x\nStep 3: run it…";
+
+  /** The plan box on the pane, for the transcript-absent fallback. */
+  const PLAN_BOX_PANE = [
+    "   Here is Claude's plan:",
+    "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+    "   Ship the thing",
+    "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+    "",
+    "  ──────────────────────────────",
+    "   Would you like to proceed?",
+    "   ❯ 1. Yes, and use auto mode",
+    "     2. Yes, manually approve edits",
+  ].join("\n");
+
+  it("falls back to the pane plan box when the transcript has no ExitPlanMode tool_use", async () => {
+    // The common wait window: ExitPlanMode's tool_use is deferred out of the
+    // JSONL, so the body comes from the pane plan box instead.
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: null,
+          attentionType: "permission",
+          pendingTool: null,
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => PLAN_BOX_PANE },
+      ),
+    ).toEqual({ body: "Ship the thing", reclassifyAs: "plan_approval" });
+  });
 
   /** A pane that classifies as the plan picker (terminator + "use auto mode"). */
   const PLAN_PICKER_PANE = [

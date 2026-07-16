@@ -439,10 +439,9 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // Escape-to-composer path as `answerPrelude` for question waits.
     // `permissionReplyPrelude: ["Escape"]` makes Reply on a permission prompt a
     // deny-with-feedback: Escape cancels the prompt, then the reply text sends
-    // as the next user message. Verified on Claude Code 2.1.211 for Bash approval
-    // and Edit/Write diff (both footers read "Esc to cancel", Escape drops to an
-    // empty composer that accepts text + Enter); the MCP-tool variant is still
-    // owed at the e2e merge gate.
+    // as the next user message. Verified on Claude Code 2.1.211 across the Bash
+    // approval, Edit/Write diff, and MCP-tool variants (each footer reads "Esc to
+    // cancel", Escape drops to an empty composer that accepts text + Enter).
     // Plan (ExitPlanMode) picker, verified on Claude Code 2.1.211: option 1 is
     // "Yes, and use auto mode" (AUTO / bypass) and option 2 is "Yes, manually
     // approve edits" (PLAIN approve), so `planApprove` MUST target ["2"], never

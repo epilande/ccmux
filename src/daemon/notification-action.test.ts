@@ -729,28 +729,58 @@ describe("handleNotificationAction: liveness guard", () => {
   });
 });
 
-describe("handleNotificationAction: press-time pane guard", () => {
-  it("rejects a plan approve when the pane now shows a permission prompt", async () => {
-    const session = mkSession({
-      attentionType: "permission",
-      pendingTool: "ExitPlanMode",
-    }); // isPlanApprovalWait -> expects plan_approval
-    const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session, {
+describe("handleNotificationAction: pane-authoritative wait type", () => {
+  it("KEY FIX: stored permission + pendingTool null with a plan-picker capture sends planApprove [2]", async () => {
+    // The common live-plan window: marker null tool + deferred log tool_use, so
+    // isPlanApprovalWait is false. The pane is the only signal, and it wins:
+    // approve sends "2" (plain manual approve), NEVER "1" (auto mode).
+    const session = mkSession({ pendingTool: null }); // stored permission
+    const { deps, sendKeyCalls } = makeDeps(session, {
+      captureText: PLAN_PANE,
+    });
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "2" }]);
+  });
+
+  it("the same session with a Bash-prompt capture sends the permission key [1]", async () => {
+    const session = mkSession({ pendingTool: null }); // stored permission
+    const { deps, sendKeyCalls } = makeDeps(session, {
       captureText: PERMISSION_PANE,
     });
     const res = await handleNotificationAction(
       { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
       deps,
     );
-    expect(res.code).toBe(409);
-    expect(sendKeyCalls).toHaveLength(0);
-    expect(reNotifyCalls).toHaveLength(1);
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "1" }]);
   });
 
-  it("rejects a permission approve when the pane now shows the plan picker", async () => {
-    const session = mkSession(); // permission, expects permission
+  it("stored permission + stale ExitPlanMode pendingTool, but pane shows permission -> sends [1]", async () => {
+    // Direction (b): the cascade carried a stale ExitPlanMode pendingTool
+    // forward onto a real permission wait. The pane overrides it back.
+    const session = mkSession({
+      attentionType: "permission",
+      pendingTool: "ExitPlanMode",
+    });
+    const { deps, sendKeyCalls } = makeDeps(session, {
+      captureText: PERMISSION_PANE,
+    });
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "1" }]);
+  });
+
+  it("rejects (fail closed) when the pane shows no active prompt", async () => {
+    const session = mkSession({ pendingTool: null });
     const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session, {
-      captureText: PLAN_PANE,
+      captureText: "just some idle output, no prompt",
     });
     const res = await handleNotificationAction(
       { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
@@ -775,7 +805,7 @@ describe("handleNotificationAction: press-time pane guard", () => {
     expect(reNotifyCalls).toHaveLength(1);
   });
 
-  it("skips the guard (no capture) when the agent def has no planApprove", async () => {
+  it("does not consult the pane (uses stored type) when the agent def has no planApprove", async () => {
     const noPlanAgent: AgentDef = {
       ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
       notificationActions: { approve: ["1"], deny: ["Escape"] },
@@ -783,7 +813,7 @@ describe("handleNotificationAction: press-time pane guard", () => {
     const session = mkSession(); // permission
     const { deps, sendKeyCalls, capturePaneCalls } = makeDeps(session, {
       getAgent: () => noPlanAgent,
-      // Would classify as null (no prompt) and 409 IF the guard ran.
+      // Would classify as null (no prompt) and 409 IF the pane were consulted.
       captureText: "",
     });
     const res = await handleNotificationAction(
@@ -793,5 +823,87 @@ describe("handleNotificationAction: press-time pane guard", () => {
     expect(res.code).toBe(200);
     expect(sendKeyCalls).toEqual([{ pane: "%1", key: "1" }]);
     expect(capturePaneCalls).toHaveLength(0);
+  });
+
+  // An agent with DISTINCT plan vs permission reply preludes, so the answer
+  // tests can prove which one the pane selected (Claude's are both Escape).
+  const distinctPreludeAgent: AgentDef = {
+    ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
+    notificationActions: {
+      approve: ["1"],
+      deny: ["Escape"],
+      answerPrelude: ["Escape"],
+      permissionReplyPrelude: ["Escape"],
+      planApprove: ["2"],
+      planDeny: ["Escape"],
+      planReplyPrelude: ["q"],
+      replyOnQuestion: true,
+    },
+  };
+
+  it("answer picks the plan reply prelude when the pane shows the plan picker", async () => {
+    const session = mkSession({ pendingTool: null }); // stored permission
+    const { deps, sendKeyCalls, sendTextCalls } = makeDeps(session, {
+      getAgent: () => distinctPreludeAgent,
+      captureText: PLAN_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "tweak it",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "q" }]); // planReplyPrelude
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "tweak it", enter: true },
+    ]);
+  });
+
+  it("answer picks the permission reply prelude when the pane shows a permission prompt", async () => {
+    const session = mkSession({ pendingTool: null }); // stored permission
+    const { deps, sendKeyCalls } = makeDeps(session, {
+      getAgent: () => distinctPreludeAgent,
+      captureText: PERMISSION_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "no thanks",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]); // permissionReplyPrelude
+  });
+
+  it("answer falls back to the stored type when the pane classifies null (question reply still lands)", async () => {
+    // A null classification is usually an AskUserQuestion picker; a reply must
+    // NOT fail closed (unlike a keys press), so it falls back to the stored type.
+    const session = mkSession({ pendingTool: null }); // stored permission
+    const { deps, sendKeyCalls, sendTextCalls, reNotifyCalls } = makeDeps(
+      session,
+      { getAgent: () => distinctPreludeAgent, captureText: "" },
+    );
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "the blue one",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(reNotifyCalls).toHaveLength(0);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]); // permissionReplyPrelude
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "the blue one", enter: true },
+    ]);
   });
 });
