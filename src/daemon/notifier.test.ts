@@ -7,7 +7,7 @@ import {
   type NotificationsConfig,
 } from "./notifier";
 import { SessionManager } from "./sessions";
-import { BUILTIN_AGENTS } from "../lib/agents";
+import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
 import type { NotificationPayload } from "../lib/notify";
 import { SCAN_INTERVAL_MS } from "../lib/config";
 import type { Session, SessionStatus } from "../types/session";
@@ -1047,11 +1047,30 @@ describe("Notifier", () => {
       return h.delivered[0];
     }
 
-    it("stamps Approve/Deny for a permission wait when the agent has a map", async () => {
+    it("stamps Approve/Deny AND Reply for a permission wait on Claude", async () => {
       const payload = await deliverWaiting({
         attentionType: "permission",
         pendingTool: "Bash",
         getAgent: () => claudeAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      // Claude sets `permissionReplyPrelude`, so a permission wait also carries
+      // the deny-with-feedback Reply.
+      expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
+    });
+
+    it("stamps Approve/Deny only when the agent has no permissionReplyPrelude", async () => {
+      const noPermReplyAgent: AgentDef = {
+        ...claudeAgent,
+        notificationActions: { approve: ["1"], deny: ["Escape"] },
+      };
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Bash",
+        getAgent: () => noPermReplyAgent,
       });
       expect(payload.actions).toEqual([
         { id: "approve", label: "Approve" },

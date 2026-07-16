@@ -65,11 +65,14 @@ export interface AgentConfig {
    * reply action (e.g. to cancel a picker that ignores typed input).
    * `replyOnQuestion`/`replyOnFinished` opt the agent's `question` waits and
    * `finished` (idle) notifications into an inline Reply action.
+   * `permissionReplyPrelude` opts `permission` notifications into a Reply that
+   * denies the pending tool (its keys cancel the prompt before the reply text).
    */
   notificationActions?: {
     approve?: string[];
     deny?: string[];
     answerPrelude?: string[];
+    permissionReplyPrelude?: string[];
     replyOnQuestion?: boolean;
     replyOnFinished?: boolean;
   };

@@ -467,6 +467,12 @@ export class Notifier {
         actions.push({ id: "deny", label: "Deny" });
       }
       if (actions.length > 0) payload.actions = actions;
+      // A permission Reply is a deny-with-feedback (label stays "Reply"; the
+      // deny semantics live in the handler and README). The combined
+      // Approve/Deny+Reply category is already registered in the macOS helper.
+      if (map?.permissionReplyPrelude?.length) {
+        payload.reply = { id: "answer", label: "Reply" };
+      }
     } else if (effectiveAttention === "question" && map?.replyOnQuestion) {
       payload.reply = { id: "answer", label: "Reply" };
     }

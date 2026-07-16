@@ -432,6 +432,40 @@ describe("createNotifyDelivery: dbus routing", () => {
     ]);
   });
 
+  it("routes both approve and answer from one payload carrying actions and reply", async () => {
+    const fake = createFakeDbusNotifier(true);
+    const { deps, actionCalls } = createDeps({
+      resolveBackend: () => "dbus",
+      createDbusNotifier: () => fake.notifier,
+    });
+    const { deliver } = createNotifyDelivery(deps);
+
+    // A permission wait deny-with-feedback stamps buttons AND a reply together.
+    const payload: NotificationPayload = {
+      ...BASE_PAYLOAD,
+      statusChangedAt: "t-3",
+      actions: [
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ],
+      reply: { id: "answer", label: "Reply" },
+    };
+    await deliver(payload);
+
+    const onAction = fake.notifyCalls[0]?.onAction;
+    onAction!("approve");
+    onAction!("answer", "use a safer flag");
+    expect(actionCalls).toEqual([
+      { sessionId: "abc123", action: "approve", statusChangedAt: "t-3" },
+      {
+        sessionId: "abc123",
+        action: "answer",
+        statusChangedAt: "t-3",
+        userText: "use a safer flag",
+      },
+    ]);
+  });
+
   it("omits onAction for a background session with no ccmuxPath and no buttons", async () => {
     const fake = createFakeDbusNotifier(true);
     const { deps } = createDeps({

@@ -113,11 +113,19 @@ export interface AgentDef {
    * deliberately carries NO prelude: at Claude's idle composer, Escape would
    * clear a typed draft and double-Escape opens history rewind, so a prelude
    * there is actively harmful (see `resolveActionPlan`).
+   *
+   * `permissionReplyPrelude` opts a `permission` notification into Reply AND
+   * legalizes `answer` on a permission wait. This IS a deny: the prelude keys
+   * cancel the permission prompt (Claude: `Escape`), then the reply text arrives
+   * as the next user message. Its presence is the legality gate, because without
+   * the cancel first, typed text + Enter at a numbered picker would select the
+   * highlighted (approve) option.
    */
   notificationActions?: {
     approve?: string[];
     deny?: string[];
     answerPrelude?: string[];
+    permissionReplyPrelude?: string[];
     replyOnQuestion?: boolean;
     replyOnFinished?: boolean;
   };
@@ -300,6 +308,8 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
       approve: override.notificationActions.approve,
       deny: override.notificationActions.deny,
       answerPrelude: override.notificationActions.answerPrelude,
+      permissionReplyPrelude:
+        override.notificationActions.permissionReplyPrelude,
       replyOnQuestion: override.notificationActions.replyOnQuestion,
       replyOnFinished: override.notificationActions.replyOnFinished,
     };
@@ -424,10 +434,17 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // double-Escape opens history rewind, so any prelude there would be
     // destructive (see `resolveActionPlan`). `replyOnQuestion` reuses the same
     // Escape-to-composer path as `answerPrelude` for question waits.
+    // `permissionReplyPrelude: ["Escape"]` makes Reply on a permission prompt a
+    // deny-with-feedback: Escape cancels the prompt, then the reply text sends
+    // as the next user message. UNVERIFIED that Escape cancels cleanly to a
+    // text-accepting composer across every prompt variant (Bash approval,
+    // Edit/Write diff, permission-rule variant, MCP tools); the notification
+    // e2e pass MUST confirm each before merge.
     notificationActions: {
       approve: ["1"],
       deny: ["Escape"],
       answerPrelude: ["Escape"],
+      permissionReplyPrelude: ["Escape"],
       replyOnQuestion: true,
       replyOnFinished: true,
     },

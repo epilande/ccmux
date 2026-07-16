@@ -464,6 +464,7 @@ describe("agents.claude.notificationActions", () => {
     expect(claude?.notificationActions?.deny).toEqual(["n"]);
     // A partial override drops the builtin reply gates rather than merging them.
     expect(claude?.notificationActions?.answerPrelude).toBeUndefined();
+    expect(claude?.notificationActions?.permissionReplyPrelude).toBeUndefined();
     expect(claude?.notificationActions?.replyOnQuestion).toBeUndefined();
     expect(claude?.notificationActions?.replyOnFinished).toBeUndefined();
   });

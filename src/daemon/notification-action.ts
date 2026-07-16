@@ -140,7 +140,13 @@ function resolveActionPlan(
     case "permission":
       if (action === "approve") return { mode: "keys", keys: na?.approve };
       if (action === "deny") return { mode: "keys", keys: na?.deny };
-      return null; // commit 2: answer on permission = deny with feedback
+      // answer on a permission wait = deny with feedback: the prelude cancels
+      // the prompt, then the reply arrives as the next user message. Legal only
+      // when the prelude key is defined (without it, text + Enter would select
+      // the highlighted approve option).
+      return na?.permissionReplyPrelude?.length
+        ? { mode: "reply", prelude: na.permissionReplyPrelude }
+        : null;
     case "question":
       // approve/deny don't apply to a question wait; answer replies, gated on
       // `replyOnQuestion` for symmetry with the notifier's Reply button.

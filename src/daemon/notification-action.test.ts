@@ -400,9 +400,41 @@ describe("handleNotificationAction: answer", () => {
     expect(reNotifyCalls).toHaveLength(1);
   });
 
-  it("rejects an answer on a permission wait (wrong attentionType)", async () => {
+  it("answers a permission wait as deny-with-feedback (Claude: Escape then text)", async () => {
+    const session = mkSession(); // permission; builtin claude has permissionReplyPrelude
+    const { deps, sendKeyCalls, sendTextCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "use a safer flag",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "use a safer flag", enter: true },
+    ]);
+  });
+
+  it("rejects an answer on a permission wait when the agent has no permissionReplyPrelude", async () => {
+    const noPermReplyAgent: AgentDef = {
+      ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
+      notificationActions: {
+        approve: ["1"],
+        deny: ["Escape"],
+        answerPrelude: ["Escape"],
+        replyOnQuestion: true,
+        replyOnFinished: true,
+        // no permissionReplyPrelude -> answer on a permission wait is illegal
+      },
+    };
     const session = mkSession(); // attentionType: "permission"
-    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session);
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      getAgent: () => noPermReplyAgent,
+    });
     const res = await handleNotificationAction(
       {
         sessionId: session.id,
