@@ -19,7 +19,7 @@
 import type { Session } from "../types/session";
 import type { AgentDef } from "../lib/agents";
 import { stripControlChars } from "./notify-text";
-import { classifyClaudePromptPane } from "./pane-classify";
+import { classifyClaudePromptPane, isNonAgentCommand } from "./pane-classify";
 
 /** The only actions a notification callback may request. `dismiss` is
  *  deliberately absent — a dismissed notification posts nothing. */
@@ -89,19 +89,6 @@ export interface NotificationActionDeps {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** Foreground commands that mean the agent is gone and the pane is a bare shell,
- *  where a typed Reply would EXECUTE as a command. A login shell prefixes a
- *  dash ("-zsh"), stripped before the lookup. */
-const SHELL_COMMANDS = new Set([
-  "zsh",
-  "bash",
-  "fish",
-  "sh",
-  "dash",
-  "nu",
-  "pwsh",
-]);
-
 function isWhitelisted(action: string): action is NotificationActionId {
   return (WHITELIST as readonly string[]).includes(action);
 }
@@ -170,8 +157,9 @@ type ActionPlan =
  * frequently deferred out of the JSONL during the wait (like a permission-gated
  * tool_use, nondeterministically). So `isPlanApprovalWait` is FALSE in the common
  * plan window; only the pane reliably shows which picker is up. When the override
- * is absent (no-ambiguity agents, or `answer` whose prelude is Escape either way)
- * the stored classification is used.
+ * is absent (a no-ambiguity agent, or a null classification where `answer` falls
+ * back to the stored type instead of failing closed) the stored classification
+ * is used.
  *
  * Safety asymmetry, deliberate: for a permission/plan reply the prelude key's
  * PRESENCE is the legality gate. Without an Escape first, typing text + Enter at
@@ -363,12 +351,12 @@ export async function handleNotificationAction(
 
   // Liveness guard (before ANY send): the reconciler keeps a dead agent's
   // session as idle with its pane still bound, so a press after the agent exited
-  // would type into the bare shell — and a Reply would EXECUTE the text. Refuse
-  // if the pane's foreground process is a shell, or if the query fails (fail
+  // would land at whatever now holds the pane. Refuse if the foreground is a
+  // shell (a typed Reply would EXECUTE as a command) or a terminal editor
+  // (keystrokes land as normal-mode commands), or if the query fails (fail
   // CLOSED: a dropped press is recoverable, a command run in the shell is not).
   const foreground = await deps.getPaneCommand(pane);
-  const bareCommand = foreground?.replace(/^-/, "") ?? null;
-  if (bareCommand === null || SHELL_COMMANDS.has(bareCommand)) {
+  if (foreground === null || isNonAgentCommand(foreground)) {
     deps.reNotify(session, STATE_CHANGED_BODY);
     log(
       `notification-action: pane foreground is "${foreground ?? "unknown"}", refusing to type`,

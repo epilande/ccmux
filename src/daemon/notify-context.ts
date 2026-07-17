@@ -30,7 +30,12 @@ import {
   PROMPT_TERMINATOR_RE as TERMINATOR_RE,
   classifyClaudePromptPane,
 } from "./pane-classify";
-import type { AssistantLogEntry, LogEntry, ToolUseBlock } from "../types/log";
+import type {
+  AssistantLogEntry,
+  LogEntry,
+  ToolUseBlock,
+  UserLogEntry,
+} from "../types/log";
 
 /** Minimal shape this module reads off a session (keeps it testable without
  *  the full `Session` type). */
@@ -198,15 +203,18 @@ const PLAN_HEADER_RE = /here is claude.s plan:/i;
  * the transcript's `ExitPlanMode input.plan` is deferred out of the JSONL during
  * the wait. The plan renders in a box below a "Here is Claude's plan:" header:
  * the header, a top separator rule, the plan content, a bottom separator rule,
- * then ~10 blank padding lines and the picker. Anchor on the header, skip to the
- * top rule, and read DOWN to the bottom rule (dropping the box's blank padding),
- * clamped. Returns null when the header is not in the capture (a very long plan
- * scrolled its top off) so the caller keeps a bare body.
+ * then ~10 blank padding lines and the picker. Anchor on the LAST header, skip
+ * to the top rule, and read DOWN to the bottom rule (dropping the box's blank
+ * padding), clamped. Anchoring on the LAST header (last-wins, like the sibling
+ * `extractPermissionPrompt` / `extractQuestionPrompt` extractors) keeps a stale
+ * plan box higher in the scrollback from shadowing a fresh one below it (two can
+ * share one capture in the refine flow). Returns null when no header is in the
+ * capture (a very long plan scrolled its top off) so the caller keeps a bare body.
  */
 export function extractPlanPrompt(paneText: string): string | null {
   const rawLines = paneText.split("\n");
   let headerIdx = -1;
-  for (let i = 0; i < rawLines.length; i++) {
+  for (let i = rawLines.length - 1; i >= 0; i--) {
     if (PLAN_HEADER_RE.test(rawLines[i])) {
       headerIdx = i;
       break;
@@ -409,10 +417,12 @@ async function questionFromTranscript(
  * consecutive waits in one session (absent = deferred like a permission-gated
  * tool_use). So this is the preferred source when it is there, and
  * `extractPlanPrompt` covers the pane when it is not. Currency guard,
- * mirroring {@link lastAssistantTextIfCurrent}: a newer USER-role text turn than
- * the ExitPlanMode tool_use means the wait was already answered/superseded, so
- * return null rather than quote a stale plan. Shape-guarded so a schema-invalid
- * line yields null, not a throw.
+ * mirroring {@link lastAssistantTextIfCurrent}: a newer USER turn than the
+ * ExitPlanMode tool_use means the wait was already answered/superseded, so
+ * return null rather than quote a stale plan. That covers both a typed user
+ * message (string content) and a plan RESOLUTION (an array-form user turn
+ * carrying a `tool_result`, which `claudeEntryTexts` reports as no text).
+ * Shape-guarded so a schema-invalid line yields null, not a throw.
  */
 function currentExitPlanModePlan(entries: LogEntry[]): string | null {
   for (let i = entries.length - 1; i >= 0; i--) {
@@ -422,6 +432,20 @@ function currentExitPlanModePlan(entries: LogEntry[]): string | null {
     const texts = claudeEntryTexts(entry);
     if (texts.length > 0 && texts[texts.length - 1].role === "user") {
       return null;
+    }
+    // An array-form user turn newer than the plan is its resolution: approving
+    // or rejecting-with-feedback writes a `tool_result` reply to the plan's
+    // tool_use. A live, unanswered wait has NO tool_result newer than that
+    // tool_use, so meeting one first proves the newest ExitPlanMode was already
+    // resolved. Fail closed here so the caller routes to the pane fallback.
+    if (entry.type === "user") {
+      const content = (entry as UserLogEntry).message?.content;
+      if (
+        Array.isArray(content) &&
+        content.some((item) => item?.type === "tool_result")
+      ) {
+        return null;
+      }
     }
     if (entry.type !== "assistant") continue;
     const content = (entry as AssistantLogEntry).message?.content;

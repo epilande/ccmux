@@ -61,6 +61,20 @@ function userText(text: string) {
   };
 }
 
+/** An array-form user turn: a `tool_result` reply, which carries no user text.
+ *  A plan approval / rejection-with-feedback writes exactly this against the
+ *  ExitPlanMode tool_use. */
+function userToolResult(text: string) {
+  return {
+    type: "user",
+    message: {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "t1", content: text }],
+    },
+    timestamp: "2024-01-15T12:00:00Z",
+  };
+}
+
 /** A permission session whose pane capture returns `paneText`. */
 function permissionSession(
   paneText: string,
@@ -512,6 +526,22 @@ describe("extractPlanPrompt", () => {
   it("returns null on a pane with no plan box at all", () => {
     expect(extractPlanPrompt("just some idle output\n❯ ")).toBeNull();
   });
+
+  it("anchors on the LAST plan box when scrollback holds an earlier one", () => {
+    // Two plan boxes share one capture (the refine flow re-renders the box); the
+    // extractor must read the LAST (fresh) plan, not the stale one above it.
+    const box = (title: string) =>
+      [
+        "   Here is Claude's plan:",
+        "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+        `   ${title}`,
+        "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+      ].join("\n");
+    const text = `${box("stale first plan")}\n  ⏺ refining...\n${box(
+      "fresh second plan",
+    )}`;
+    expect(extractPlanPrompt(text)).toBe("fresh second plan");
+  });
 });
 
 describe("buildNotificationContext: plan_approval", () => {
@@ -678,6 +708,31 @@ describe("buildNotificationContext: plan_approval", () => {
         { capturePane: async () => PLAN_PICKER_PANE },
       ),
     ).toEqual({ body: null, reclassifyAs: "plan_approval" });
+  });
+
+  it("falls back to pane extraction when a tool_result resolution supersedes the transcript plan", async () => {
+    // The plan's ExitPlanMode tool_use is still in the tail, but a NEWER
+    // array-form user turn carries a tool_result: the plan was already
+    // approved/denied. The transcript path must fail closed to null (it would
+    // otherwise return the superseded PLAN_MD), so the body comes from the pane
+    // plan box instead.
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", { plan: PLAN_MD }),
+      userToolResult("User has approved your plan. You can now start coding."),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "permission",
+          pendingTool: "ExitPlanMode",
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => PLAN_BOX_PANE },
+      ),
+    ).toEqual({ body: "Ship the thing", reclassifyAs: "plan_approval" });
   });
 
   it("does not reclassify a wait already stored as plan_approval", async () => {

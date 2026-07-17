@@ -36,26 +36,43 @@ export function classifyPaneTitle(
   return "unknown";
 }
 
-const IDLE_COMMANDS = new Set([
+/**
+ * Foreground commands that mean an interactive agent is NOT the process at the
+ * pane: a bare shell (where a typed Reply would EXECUTE as a command) or a
+ * terminal editor (where keystrokes land as normal-mode commands). Single owner
+ * for both the idle-detection and the notification-action liveness guard, so the
+ * two can't drift. A login shell prefixes a dash ("-zsh"), stripped before the
+ * lookup, so the set holds only the bare names.
+ */
+const NON_AGENT_COMMANDS = new Set([
   "zsh",
   "bash",
   "fish",
   "sh",
   "dash",
   "ksh",
-  "-zsh",
-  "-bash",
+  "nu",
+  "pwsh",
   "nvim",
   "vim",
   "vi",
 ]);
 
 /**
+ * True when the pane's foreground command is a shell or terminal editor rather
+ * than a running agent. Strips a leading dash (login-shell prefix, "-zsh")
+ * before the lookup.
+ */
+export function isNonAgentCommand(command: string | null): boolean {
+  if (!command) return false;
+  return NON_AGENT_COMMANDS.has(command.replace(/^-/, ""));
+}
+
+/**
  * Check if the pane's foreground command indicates Claude is not running.
  */
 export function isIdleCommand(command: string | null): boolean {
-  if (!command) return false;
-  return IDLE_COMMANDS.has(command);
+  return isNonAgentCommand(command);
 }
 
 /**

@@ -4,6 +4,7 @@ import {
   classifyPaneContent,
   classifyPaneTitle,
   isIdleCommand,
+  isNonAgentCommand,
 } from "./pane-classify";
 
 describe("classifyPaneTitle", () => {
@@ -45,6 +46,9 @@ describe("isIdleCommand", () => {
     expect(isIdleCommand("-zsh")).toBe(true);
     expect(isIdleCommand("-bash")).toBe(true);
     expect(isIdleCommand("ksh")).toBe(true);
+    expect(isIdleCommand("nu")).toBe(true);
+    expect(isIdleCommand("pwsh")).toBe(true);
+    expect(isIdleCommand("-fish")).toBe(true);
   });
 
   it("should detect editors as idle", () => {
@@ -58,6 +62,24 @@ describe("isIdleCommand", () => {
     expect(isIdleCommand("claude")).toBe(false);
     expect(isIdleCommand("node")).toBe(false);
     expect(isIdleCommand(null)).toBe(false);
+  });
+});
+
+describe("isNonAgentCommand", () => {
+  it("matches shells and editors, stripping a login-shell dash prefix", () => {
+    expect(isNonAgentCommand("zsh")).toBe(true);
+    expect(isNonAgentCommand("-zsh")).toBe(true);
+    expect(isNonAgentCommand("ksh")).toBe(true);
+    expect(isNonAgentCommand("nu")).toBe(true);
+    expect(isNonAgentCommand("pwsh")).toBe(true);
+    expect(isNonAgentCommand("-fish")).toBe(true);
+    expect(isNonAgentCommand("nvim")).toBe(true);
+  });
+
+  it("does not match a running agent or a null command", () => {
+    expect(isNonAgentCommand("claude")).toBe(false);
+    expect(isNonAgentCommand("node")).toBe(false);
+    expect(isNonAgentCommand(null)).toBe(false);
   });
 });
 

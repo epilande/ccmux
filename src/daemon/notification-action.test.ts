@@ -714,6 +714,36 @@ describe("handleNotificationAction: liveness guard", () => {
     expect(reNotifyCalls).toHaveLength(1);
   });
 
+  // The guard shares pane-classify's non-agent command set, so ksh (a reply
+  // would EXECUTE), the login shell -zsh/-fish, and a terminal editor (nvim,
+  // keystrokes land as normal-mode commands) all fail closed.
+  for (const cmd of ["ksh", "nvim", "-fish", "-zsh"]) {
+    it(`rejects approve when the pane's foreground is "${cmd}"`, async () => {
+      const session = mkSession(); // permission
+      const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session, {
+        paneCommand: cmd,
+      });
+      const res = await handleNotificationAction(
+        { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+        deps,
+      );
+      expect(res.code).toBe(409);
+      expect(sendKeyCalls).toHaveLength(0);
+      expect(reNotifyCalls).toHaveLength(1);
+    });
+  }
+
+  it("proceeds when the pane's foreground is the agent (node)", async () => {
+    const session = mkSession(); // permission
+    const { deps, sendKeyCalls } = makeDeps(session, { paneCommand: "node" });
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "1" }]);
+  });
+
   it("rejects when the pane-command query fails (fail closed)", async () => {
     const session = mkSession();
     const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session, {
