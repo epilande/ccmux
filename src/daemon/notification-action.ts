@@ -19,7 +19,11 @@
 import type { Session } from "../types/session";
 import type { AgentDef } from "../lib/agents";
 import { stripControlChars } from "./notify-text";
-import { classifyClaudePromptPane, isNonAgentCommand } from "./pane-classify";
+import {
+  classifyClaudePromptPane,
+  isNonAgentCommand,
+  matchesQuestionPickerSignature,
+} from "./pane-classify";
 
 /** The only actions a notification callback may request. `dismiss` is
  *  deliberately absent — a dismissed notification posts nothing. */
@@ -305,10 +309,6 @@ export async function handleNotificationAction(
     session.tmuxPane !== null;
 
   let plan: ActionPlan;
-  // True when `plan` came from a prompt this handler SAW on the pane. A reply's
-  // prelude exists to cancel that prompt, so its disappearance is verifiable
-  // after the fact (see the re-check before the reply text is typed).
-  let classifiedLivePrompt = false;
   if (paneAuthoritative) {
     let paneKind: "plan_approval" | "permission" | null;
     try {
@@ -320,7 +320,6 @@ export async function handleNotificationAction(
     }
     if (paneKind !== null) {
       plan = resolveActionPlan(action, session, agentDef, paneKind);
-      classifiedLivePrompt = true;
     } else if (action === "answer") {
       // The classifier only knows plan/permission; a null here is usually an
       // AskUserQuestion picker (or a plain-text question). A reply is safe to
@@ -411,28 +410,39 @@ export async function handleNotificationAction(
       // at a permission prompt, auto mode at a plan picker. That turns a
       // deny-with-feedback press into a silent approve, reported to the user as
       // a 200. The settle above makes this rare, not impossible, so don't trust
-      // it: type only once the prompt we classified is provably gone. A live
-      // prompt or a failed capture fails CLOSED, since a dropped reply is
-      // recoverable and a wrong approve is not.
-      if (classifiedLivePrompt) {
-        let promptCleared: boolean;
-        try {
-          promptCleared =
-            classifyClaudePromptPane(await deps.capturePane(pane)) === null;
-        } catch {
-          promptCleared = false;
-        }
-        if (!promptCleared) {
-          deps.reNotify(session, STATE_CHANGED_BODY);
-          log(
-            "notification-action: prompt still live after the reply prelude, refusing to type",
-          );
-          return {
-            code: 409,
-            ok: false,
-            error: "Prompt did not clear for the reply",
-          };
-        }
+      // it: type only once the prompt is provably gone.
+      //
+      // This runs after EVERY prelude, not just the pane-authoritative
+      // plan/permission path: the question picker and the null-classification
+      // reply fallback send a prelude too, and the picker (which
+      // `classifyClaudePromptPane` reports as null BY DESIGN) is exactly where a
+      // swallowed cancel silently selects an option. So "cleared" means all of:
+      // a non-empty capture, no plan/permission terminator, AND no question
+      // picker. The non-empty check is load-bearing — the wired `capturePane`
+      // signals failure as "" (it never throws), which would classify null and
+      // read as "cleared". A live prompt, a picker, OR a failed/empty capture
+      // fails CLOSED, since a dropped reply is recoverable and a wrong approve
+      // is not.
+      let promptCleared: boolean;
+      try {
+        const paneText = await deps.capturePane(pane);
+        promptCleared =
+          paneText.trim().length > 0 &&
+          classifyClaudePromptPane(paneText) === null &&
+          !matchesQuestionPickerSignature(paneText);
+      } catch {
+        promptCleared = false;
+      }
+      if (!promptCleared) {
+        deps.reNotify(session, STATE_CHANGED_BODY);
+        log(
+          "notification-action: prompt still live after the reply prelude, refusing to type",
+        );
+        return {
+          code: 409,
+          ok: false,
+          error: "Prompt did not clear for the reply",
+        };
       }
     }
     // A reply beginning with "/" would trip the agent's slash-command palette,

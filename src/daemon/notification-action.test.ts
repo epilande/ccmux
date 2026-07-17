@@ -33,6 +33,17 @@ const PLAN_PANE = [
  *  and no option rows, so `classifyClaudePromptPane` returns null. What the
  *  post-prelude re-check must see before the reply text is typed. */
 const CLEARED_PANE = [" > ", " ? for shortcuts"].join("\n");
+/** A live AskUserQuestion picker: no plan/permission terminator of its own, so
+ *  `classifyClaudePromptPane` returns null, but it carries the picker signature
+ *  ("Type something." + "Enter to select"). The post-prelude re-check must treat
+ *  this as NOT cleared, or a swallowed Escape lets the Enter select an option. */
+const QUESTION_PANE = [
+  " Which color?",
+  " ❯ 1. Blue",
+  "   2. Teal",
+  " Type something.",
+  " Enter to select",
+].join("\n");
 
 function mkSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -1030,6 +1041,64 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
     );
     expect(res.code).toBe(409);
     expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+
+  it('SAFETY: refuses to type when the post-prelude capture returns empty (real dep signals failure as "", not a throw)', async () => {
+    // The wired `capturePane` catches every error and returns "" (it never
+    // throws, unlike the test above), and "" classifies as null = "no prompt".
+    // Without the non-empty guard that reads as "prompt cleared" and the reply
+    // is typed into a prompt that may still be live -- the fail-OPEN hole the
+    // throw-based test could not catch, since the real dep can't throw.
+    const session = mkSession({ pendingTool: null }); // stored permission
+    let captures = 0;
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      getAgent: () => distinctPreludeAgent,
+      captureText: PERMISSION_PANE,
+    });
+    const realCapture = deps.capturePane;
+    deps.capturePane = async (pane) => {
+      captures++;
+      if (captures > 1) return ""; // transient tmux failure, dep-contract shape
+      return realCapture(pane);
+    };
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "no, do not do that",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0); // nothing typed => nothing approved
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+
+  it("SAFETY: refuses to type a QUESTION reply when the prelude leaves the picker live", async () => {
+    // A question wait is NOT pane-authoritative, so the pre-fix re-check (gated
+    // on a plan/permission classification) skipped this path entirely -- exactly
+    // where a live picker is most likely to swallow the reply. `classifyClaude-
+    // PromptPane` returns null for the picker BY DESIGN, so the re-check also has
+    // to reject on the picker signature, not just a non-null classification.
+    const session = mkSession({ attentionType: "question", pendingTool: null });
+    const { deps, sendKeyCalls, sendTextCalls, reNotifyCalls } = makeDeps(
+      session,
+      { captureText: QUESTION_PANE, preludeFailsToCancel: true },
+    );
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "no, the other one",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]); // prelude sent
+    expect(sendTextCalls).toHaveLength(0); // picker still up => nothing selected
     expect(reNotifyCalls).toHaveLength(1);
   });
 
