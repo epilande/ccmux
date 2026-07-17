@@ -29,6 +29,10 @@ const PLAN_PANE = [
   " ❯ 1. Yes, and use auto mode",
   "   2. Yes, manually approve edits",
 ].join("\n");
+/** The pane a cancelled prompt leaves behind: a bare composer, no terminator
+ *  and no option rows, so `classifyClaudePromptPane` returns null. What the
+ *  post-prelude re-check must see before the reply text is typed. */
+const CLEARED_PANE = [" > ", " ? for shortcuts"].join("\n");
 
 function mkSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -71,6 +75,9 @@ function makeDeps(
     captureText: string;
     /** Make the pane capture throw (guard fails closed). */
     captureThrows: boolean;
+    /** Model the prelude's cancel NOT landing (Escape+text coalesced into one
+     *  Alt+char read), so the prompt is still live when the reply would type. */
+    preludeFailsToCancel: boolean;
     /** Foreground command for the liveness guard. `undefined` => "claude"
      *  (agent alive); pass a shell name or `null` to trip the guard. */
     paneCommand: string | null;
@@ -98,6 +105,13 @@ function makeDeps(
     capturePane: async (pane) => {
       capturePaneCalls.push(pane);
       if (overrides.captureThrows) throw new Error("capture failed");
+      // The pane changes over time: a reply's prelude (Escape) cancels the
+      // prompt, so any capture after it sees the bare composer. Keying the
+      // prompt-shaped pane forever would make the post-prelude re-check
+      // unfalsifiable.
+      if (sendKeyCalls.length > 0 && !overrides.preludeFailsToCancel) {
+        return CLEARED_PANE;
+      }
       if (overrides.captureText !== undefined) return overrides.captureText;
       return session && isPlanApprovalWait(session)
         ? PLAN_PANE
@@ -312,6 +326,45 @@ describe("handleNotificationAction: answer", () => {
     ]);
   });
 
+  it("prefixes a space to a reply starting with '!' so it doesn't trip shell mode", async () => {
+    // SAFETY: Claude's composer offers "! for shell mode" (verified on 2.1.211),
+    // where the text runs as a shell command with NO permission prompt instead of
+    // reaching the agent. A natural reply ("!!! no, stop") hits this.
+    const session = questionSession();
+    const { deps, sendTextCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "!!! no, stop",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: " !!! no, stop", enter: true },
+    ]);
+  });
+
+  it("leaves a reply starting with '#' unchanged (not a mode trigger)", async () => {
+    const session = questionSession();
+    const { deps, sendTextCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "#3 looks right",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "#3 looks right", enter: true },
+    ]);
+  });
+
   it("leaves a non-slash reply unchanged", async () => {
     const session = questionSession();
     const { deps, sendTextCalls } = makeDeps(session);
@@ -347,7 +400,13 @@ describe("handleNotificationAction: answer", () => {
     expect(sendTextCalls).toEqual([{ pane: "%1", text: "teal", enter: true }]);
   });
 
-  it("sends no prelude when the agent defines none", async () => {
+  it("refuses a question reply when the agent defines no prelude", async () => {
+    // SAFETY: the picker ignores typed text, so with no cancel key the Enter
+    // would select whichever option is highlighted -- an answer the user never
+    // chose. `replyOnQuestion` alone must not open the reply path; the prelude
+    // is half the gate, exactly as on the permission and plan rows. Reachable
+    // only via an override, since `notificationActions` is a whole-map replace
+    // and the built-in claude def always carries `answerPrelude: ["Escape"]`.
     const noPreludeAgent: AgentDef = {
       ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
       notificationActions: {
@@ -357,9 +416,10 @@ describe("handleNotificationAction: answer", () => {
       },
     };
     const session = questionSession();
-    const { deps, sendKeyCalls, sendTextCalls } = makeDeps(session, {
-      getAgent: () => noPreludeAgent,
-    });
+    const { deps, sendKeyCalls, sendTextCalls, reNotifyCalls } = makeDeps(
+      session,
+      { getAgent: () => noPreludeAgent },
+    );
     const res = await handleNotificationAction(
       {
         sessionId: session.id,
@@ -369,9 +429,10 @@ describe("handleNotificationAction: answer", () => {
       },
       deps,
     );
-    expect(res.code).toBe(200);
+    expect(res.code).toBe(409);
     expect(sendKeyCalls).toHaveLength(0);
-    expect(sendTextCalls).toEqual([{ pane: "%1", text: "teal", enter: true }]);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
   });
 
   it("returns 500 (no reply text) when an answerPrelude keystroke fails", async () => {
@@ -910,6 +971,66 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
     );
     expect(res.code).toBe(200);
     expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]); // permissionReplyPrelude
+  });
+
+  it("SAFETY: refuses to type when the reply prelude did not clear the prompt", async () => {
+    // Reproduced against Claude Code 2.1.212: an Escape immediately followed by
+    // printable bytes can be read as ONE escape sequence (Alt+char), so the
+    // cancel never lands. The reply text is then swallowed by the still-live
+    // picker and the Enter selects the HIGHLIGHTED option -- "1. Yes" -- turning
+    // a deny-with-feedback press into a silent APPROVE reported as 200. The
+    // settle makes that rare, not impossible, so the prompt's disappearance is
+    // verified rather than assumed.
+    const session = mkSession({ pendingTool: null }); // stored permission
+    const { deps, sendKeyCalls, sendTextCalls, reNotifyCalls } = makeDeps(
+      session,
+      {
+        getAgent: () => distinctPreludeAgent,
+        captureText: PERMISSION_PANE,
+        preludeFailsToCancel: true,
+      },
+    );
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "no, do not do that",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+    expect(sendTextCalls).toHaveLength(0); // nothing typed => nothing approved
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+
+  it("SAFETY: refuses to type when the post-prelude capture fails (fails closed)", async () => {
+    // A dropped reply is recoverable; a wrong approve is not.
+    const session = mkSession({ pendingTool: null });
+    let captures = 0;
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      getAgent: () => distinctPreludeAgent,
+      captureText: PERMISSION_PANE,
+    });
+    const realCapture = deps.capturePane;
+    deps.capturePane = async (pane) => {
+      captures++;
+      if (captures > 1) throw new Error("capture failed");
+      return realCapture(pane);
+    };
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        userText: "no, do not do that",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
   });
 
   it("answer falls back to the stored type when the pane classifies null (question reply still lands)", async () => {

@@ -220,8 +220,15 @@ function resolveActionPlan(
         : null;
     case "question":
       // approve/deny don't apply to a question wait; answer replies, gated on
-      // `replyOnQuestion` for symmetry with the notifier's Reply button.
-      if (action === "answer" && na?.replyOnQuestion) {
+      // `replyOnQuestion` for symmetry with the notifier's Reply button. The
+      // prelude is part of the gate for the same reason as the rows above:
+      // the picker ignores typed text, so without a cancel key Enter would
+      // select the highlighted option instead of sending the reply.
+      if (
+        action === "answer" &&
+        na?.replyOnQuestion &&
+        na.answerPrelude?.length
+      ) {
         return { mode: "reply", prelude: na.answerPrelude };
       }
       return null;
@@ -298,6 +305,10 @@ export async function handleNotificationAction(
     session.tmuxPane !== null;
 
   let plan: ActionPlan;
+  // True when `plan` came from a prompt this handler SAW on the pane. A reply's
+  // prelude exists to cancel that prompt, so its disappearance is verifiable
+  // after the fact (see the re-check before the reply text is typed).
+  let classifiedLivePrompt = false;
   if (paneAuthoritative) {
     let paneKind: "plan_approval" | "permission" | null;
     try {
@@ -309,6 +320,7 @@ export async function handleNotificationAction(
     }
     if (paneKind !== null) {
       plan = resolveActionPlan(action, session, agentDef, paneKind);
+      classifiedLivePrompt = true;
     } else if (action === "answer") {
       // The classifier only knows plan/permission; a null here is usually an
       // AskUserQuestion picker (or a plain-text question). A reply is safe to
@@ -391,11 +403,45 @@ export async function handleNotificationAction(
         }
       }
       await sleep(ANSWER_PRELUDE_SETTLE_MS);
+      // The prelude is fire-and-forget: `sendKey` resolving true only means tmux
+      // accepted the keystroke, not that the TUI acted on it. The gap is not
+      // theoretical. An Escape immediately followed by printable bytes can be
+      // read as ONE escape sequence (Alt+char), so the cancel never happens and
+      // the Enter below selects the prompt's HIGHLIGHTED option instead: "1. Yes"
+      // at a permission prompt, auto mode at a plan picker. That turns a
+      // deny-with-feedback press into a silent approve, reported to the user as
+      // a 200. The settle above makes this rare, not impossible, so don't trust
+      // it: type only once the prompt we classified is provably gone. A live
+      // prompt or a failed capture fails CLOSED, since a dropped reply is
+      // recoverable and a wrong approve is not.
+      if (classifiedLivePrompt) {
+        let promptCleared: boolean;
+        try {
+          promptCleared =
+            classifyClaudePromptPane(await deps.capturePane(pane)) === null;
+        } catch {
+          promptCleared = false;
+        }
+        if (!promptCleared) {
+          deps.reNotify(session, STATE_CHANGED_BODY);
+          log(
+            "notification-action: prompt still live after the reply prelude, refusing to type",
+          );
+          return {
+            code: 409,
+            ok: false,
+            error: "Prompt did not clear for the reply",
+          };
+        }
+      }
     }
-    // A reply beginning with "/" would trip the agent's slash-command palette
-    // instead of sending as text. One leading space defuses it agent-agnostically
-    // without changing the visible content.
-    const toSend = text.startsWith("/") ? ` ${text}` : text;
+    // A reply beginning with "/" would trip the agent's slash-command palette,
+    // and one beginning with "!" trips Claude's shell mode, where the text runs
+    // as a command with no permission prompt (verified on 2.1.211: the composer
+    // footer offers "! for shell mode"). Neither reaches the agent as a message.
+    // One leading space defuses both agent-agnostically without changing the
+    // visible content. ("#" is NOT a mode trigger on 2.1.211; it types through.)
+    const toSend = /^[/!]/.test(text) ? ` ${text}` : text;
     const sent = await deps.sendText(pane, toSend, true);
     if (!sent) {
       log("notification-action: sendText failed for answer");

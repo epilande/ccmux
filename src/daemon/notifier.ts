@@ -500,7 +500,14 @@ export class Notifier {
         if (map?.permissionReplyPrelude?.length) {
           payload.reply = REPLY_ACTION;
         }
-      } else if (effectiveAttention === "question" && map?.replyOnQuestion) {
+      } else if (
+        effectiveAttention === "question" &&
+        map?.replyOnQuestion &&
+        map.answerPrelude?.length
+      ) {
+        // The prelude is half the gate, matching resolveActionPlan's question
+        // row: without a cancel key the handler refuses the reply (the picker
+        // ignores typed text), so a button offered without one could only 409.
         payload.reply = REPLY_ACTION;
       } else if (effectiveAttention === "plan_approval") {
         // ExitPlanMode wait: same Approve/Deny + optional Reply shape as

@@ -1158,6 +1158,27 @@ describe("Notifier", () => {
       expect(payload.actions).toBeUndefined();
     });
 
+    it("stamps no Reply for a question wait when replyOnQuestion lacks an answerPrelude", async () => {
+      // Mirrors the handler's question-row gate: with no cancel key the press
+      // would 409 (the picker ignores typed text), so no button is offered.
+      // Reachable only via an override, since notificationActions is a
+      // whole-map replace and the built-in def always carries answerPrelude.
+      const noPreludeAgent: AgentDef = {
+        ...claudeAgent,
+        notificationActions: {
+          approve: ["1"],
+          deny: ["Escape"],
+          replyOnQuestion: true,
+        },
+      };
+      const payload = await deliverWaiting({
+        attentionType: "question",
+        getAgent: () => noPreludeAgent,
+      });
+      expect(payload.reply).toBeUndefined();
+      expect(payload.actions).toBeUndefined();
+    });
+
     it("stamps Approve/Deny AND Reply for a plan_approval wait on Claude", async () => {
       const payload = await deliverWaiting({
         attentionType: "plan_approval",
