@@ -62,13 +62,12 @@ export interface NotifyContextDeps {
 
 /**
  * `body` is the enrichment appended to the base line (null keeps the base).
- * `reclassifyAs` is a delivery-time correction of a stored `permission` wait
- * into its true type, so the notifier renders the right actions for that one
- * delivery (before the next scan's reconciler correction lands). Two cases both
- * arrive stored as `permission`: Claude's AskUserQuestion picker (the pane
- * reveals it is really a `question`), and an ExitPlanMode wait (the marker wins
- * the cascade as `waiting_permission`, so the plan wait is really a
- * `plan_approval`; see `isPlanApprovalWait`).
+ * `reclassifyAs` corrects a stored `permission` wait to its true type at
+ * delivery time, so the notifier renders the right actions before the next
+ * scan's reconciler correction lands. Two cases both arrive stored as
+ * `permission`: Claude's AskUserQuestion picker (pane reveals a `question`), and
+ * an ExitPlanMode wait (marker wins the cascade as `waiting_permission`, so it's
+ * really `plan_approval`; see `isPlanApprovalWait`).
  */
 export interface NotificationContext {
   body: string | null;
@@ -78,12 +77,13 @@ export interface NotificationContext {
 /** Only the last slice of the transcript is scanned — the last assistant
  *  turn is always at the very tail. */
 const CONTEXT_TAIL_BYTES = 128 * 1024;
-/** How many trailing pane lines to capture for the permission prompt. The
- *  prompt box (header + command + description + options) fits comfortably. */
+/** Trailing pane lines to capture for the question picker (its choices +
+ *  "Enter to select" footer fit comfortably). The permission/plan path uses the
+ *  deeper `PLAN_PANE_CAPTURE_LINES` below. */
 const PANE_CAPTURE_LINES = 30;
-/** Deeper capture for the plan/permission ambiguity: the ExitPlanMode plan box
- *  top ("Here is Claude's plan:") sits ~46 lines above the picker options, so a
- *  30-line capture reaches the picker but not the plan body. 60 covers both. */
+/** Deeper capture for plan waits: the ExitPlanMode plan box top ("Here is
+ *  Claude's plan:") sits ~46 lines above the picker, so a 30-line capture
+ *  reaches the picker but not the plan body. 60 covers both. */
 const PLAN_PANE_CAPTURE_LINES = 60;
 /** Waiting-context caps: multi-line is fine (macOS renders `\n`), but keep it
  *  glanceable. The finished context (closing words) clamps tighter, below. */
@@ -202,15 +202,13 @@ const PLAN_HEADER_RE = /here is claude.s plan:/i;
 /**
  * Extract the plan body from a captured ExitPlanMode pane, the fallback for when
  * the transcript's `ExitPlanMode input.plan` is deferred out of the JSONL during
- * the wait. The plan renders in a box below a "Here is Claude's plan:" header:
- * the header, a top separator rule, the plan content, a bottom separator rule,
- * then ~10 blank padding lines and the picker. Anchor on the LAST header, skip
- * to the top rule, and read DOWN to the bottom rule (dropping the box's blank
- * padding), clamped. Anchoring on the LAST header (last-wins, like the sibling
- * `extractPermissionPrompt` / `extractQuestionPrompt` extractors) keeps a stale
- * plan box higher in the scrollback from shadowing a fresh one below it (two can
- * share one capture in the refine flow). Returns null when no header is in the
- * capture (a very long plan scrolled its top off) so the caller keeps a bare body.
+ * the wait. The box renders below a "Here is Claude's plan:" header: header, top
+ * rule, plan content, bottom rule, ~10 blank padding lines, picker. Anchor on
+ * the LAST header (last-wins, like the sibling extractors) so a stale plan box
+ * higher in scrollback can't shadow a fresh one below it (two can share one
+ * capture in the refine flow); then read DOWN from the top rule to the bottom
+ * rule, dropping padding, clamped. Returns null when no header is in the capture
+ * (a very long plan scrolled its top off).
  */
 export function extractPlanPrompt(paneText: string): string | null {
   const rawLines = paneText.split("\n");
@@ -223,8 +221,8 @@ export function extractPlanPrompt(paneText: string): string | null {
   }
   if (headerIdx < 0) return null;
 
-  // Advance past the header to the top box rule, then collect the content lines
-  // until the bottom rule (or the block cap), skipping blank padding.
+  // Skip to the top box rule, then collect content until the bottom rule (or
+  // the block cap), dropping blank padding.
   let i = headerIdx + 1;
   while (i < rawLines.length && !isSeparatorRule(rawLines[i])) i++;
   i++; // step over the top rule
@@ -344,13 +342,12 @@ function assistantTextFromTranscript(
 }
 
 /**
- * Permission context from an already-captured pane (`paneText`; null when the
- * pane couldn't be read, which fails open to a null body). If no terminator is
- * found but the pane shows the AskUserQuestion picker signature, the wait is
- * really a question wearing the shared `permission_prompt` marker — return the
- * question body plus `reclassifyAs: "question"` so the notifier renders the
- * Reply variant. The caller captures once and shares the text with the pane
- * classifier, so plan/permission/question all decide off ONE capture.
+ * Permission context from an already-captured pane (`paneText`; null fails open
+ * to a null body). If no terminator is found but the pane shows the
+ * AskUserQuestion picker signature, the wait is really a question wearing the
+ * shared `permission_prompt` marker — return the question body plus
+ * `reclassifyAs: "question"` so the notifier renders Reply. The caller captures
+ * once and shares the text, so plan/permission/question decide off ONE capture.
  */
 function buildPermissionContext(paneText: string | null): NotificationContext {
   if (paneText === null) return { body: null };
@@ -401,17 +398,16 @@ async function questionFromTranscript(
 
 /**
  * The `input.plan` markdown of the CURRENT `ExitPlanMode` wait, or null. The
- * tool_use is flushed to the JSONL during the wait only NONDETERMINISTICALLY:
- * e2e on Claude Code 2.1.211 observed it both present and absent across
- * consecutive waits in one session (absent = deferred like a permission-gated
- * tool_use). So this is the preferred source when it is there, and
- * `extractPlanPrompt` covers the pane when it is not. Currency guard,
- * mirroring {@link lastAssistantTextIfCurrent}: a newer USER turn than the
- * ExitPlanMode tool_use means the wait was already answered/superseded, so
- * return null rather than quote a stale plan. That covers both a typed user
- * message (string content) and a plan RESOLUTION (an array-form user turn
- * carrying a `tool_result`, which `claudeEntryTexts` reports as no text).
- * Shape-guarded so a schema-invalid line yields null, not a throw.
+ * tool_use is flushed to the JSONL only NONDETERMINISTICALLY (Claude Code 2.1.211
+ * e2e saw it present and absent across consecutive waits; absent = deferred like
+ * a permission-gated tool_use), so this is preferred when present and
+ * `extractPlanPrompt` covers the pane when not. Currency guard, mirroring
+ * {@link lastAssistantTextIfCurrent}: a newer USER turn than the ExitPlanMode
+ * tool_use means the wait was already answered, so return null rather than quote
+ * a stale plan — covering both a typed user message (string content) and a plan
+ * RESOLUTION (an array-form user turn carrying a `tool_result`, which
+ * `claudeEntryTexts` reports as no text). Shape-guarded so a schema-invalid line
+ * yields null, not a throw.
  */
 function currentExitPlanModePlan(entries: LogEntry[]): string | null {
   for (let i = entries.length - 1; i >= 0; i--) {
@@ -422,11 +418,10 @@ function currentExitPlanModePlan(entries: LogEntry[]): string | null {
     if (texts.length > 0 && texts[texts.length - 1].role === "user") {
       return null;
     }
-    // An array-form user turn newer than the plan is its resolution: approving
-    // or rejecting-with-feedback writes a `tool_result` reply to the plan's
-    // tool_use. A live, unanswered wait has NO tool_result newer than that
-    // tool_use, so meeting one first proves the newest ExitPlanMode was already
-    // resolved. Fail closed here so the caller routes to the pane fallback.
+    // An array-form user turn newer than the plan is its resolution: approving or
+    // rejecting-with-feedback writes a `tool_result` reply to the plan's tool_use.
+    // A live wait has none newer than its tool_use, so meeting one first proves
+    // the newest ExitPlanMode was already resolved — fail closed to the pane.
     if (entry.type === "user") {
       const content = (entry as UserLogEntry).message?.content;
       if (
@@ -454,23 +449,21 @@ function currentExitPlanModePlan(entries: LogEntry[]): string | null {
 }
 
 /**
- * Plan-approval context: the transcript `input.plan` FIRST (complete and clean)
- * when present, but ExitPlanMode's tool_use is flushed only nondeterministically
- * (see `currentExitPlanModePlan`), so it falls back to `extractPlanPrompt` over
- * the pane. That pane read needs a deeper capture than a permission prompt (the
- * plan box top sits ~46 lines above the picker), which the caller supplies via
- * `PLAN_PANE_CAPTURE_LINES`. Returns `reclassifyAs: "plan_approval"` only when the
- * wait was STORED as a permission (the marker-fresher window, see
- * `isPlanApprovalWait`), so the subtitle rebuilds from "Needs permission" to
- * "Plan ready for review".
+ * Plan-approval context: the transcript `input.plan` FIRST when present, else
+ * `extractPlanPrompt` over the pane (the tool_use is flushed only
+ * nondeterministically, see `currentExitPlanModePlan`). That pane read needs a
+ * deeper capture than a permission prompt (plan box top ~46 lines above the
+ * picker), supplied by the caller via `PLAN_PANE_CAPTURE_LINES`. Returns
+ * `reclassifyAs: "plan_approval"` only when the wait was STORED as a permission
+ * (the marker-fresher window, see `isPlanApprovalWait`), so the subtitle rebuilds
+ * from "Needs permission" to "Plan ready for review".
  */
 async function buildPlanContext(
   session: NotifyContextSession,
   paneText: string | null,
 ): Promise<NotificationContext> {
-  // Transcript `input.plan` FIRST when present (complete and clean), but the
-  // ExitPlanMode tool_use is frequently deferred out of the JSONL during the
-  // wait, so fall back to extracting the plan box off the same pane capture.
+  // Transcript first, else extract the plan box off the same pane capture (the
+  // ExitPlanMode tool_use is frequently deferred out of the JSONL during the wait).
   let body = session.logPath
     ? await extractFromTranscriptTail(
         session.logPath,
@@ -504,14 +497,13 @@ export async function buildNotificationContext(
   // attentionType/pendingTool, which is unreliable in BOTH directions: a live
   // plan wait usually arrives with pendingTool null (marker null tool + deferred
   // log tool_use, so isPlanApprovalWait is false), and a permission wait right
-  // after a plan wait can carry a stale "ExitPlanMode" pendingTool (cascade
-  // carries the tool name forward). `classifyClaudePromptPane` is authoritative
-  // in both directions so the notifier's buttons match what's on screen; only a
-  // failed/absent capture falls back to the predicate (the offer is fail-open,
-  // the press-time handler is the real enforcement point). A question picker
-  // classifies as null here and falls through to buildPermissionContext, which
-  // detects and reclassifies it as before. The capture is deeper than the plain
-  // permission path so `buildPlanContext` can extract the plan box off it.
+  // after a plan wait can carry a stale "ExitPlanMode" pendingTool (the cascade
+  // carries the tool name forward). So `classifyClaudePromptPane` is
+  // authoritative, and only a failed/absent capture falls back to the predicate
+  // (the offer is fail-open; the press-time handler is the real enforcement
+  // point). A question picker classifies as null here and falls through to
+  // buildPermissionContext, which reclassifies it. The capture is deeper than
+  // the plain permission path so `buildPlanContext` can extract the plan box.
   if (isPlanApprovalWait(session) || session.attentionType === "permission") {
     let paneText: string | null = null;
     if (session.tmuxPane) {

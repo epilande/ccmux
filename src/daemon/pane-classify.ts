@@ -37,12 +37,11 @@ export function classifyPaneTitle(
 }
 
 /**
- * Foreground commands that mean an interactive agent is NOT the process at the
- * pane: a bare shell (where a typed Reply would EXECUTE as a command) or a
- * terminal editor (where keystrokes land as normal-mode commands). Single owner
- * for both the idle-detection and the notification-action liveness guard, so the
- * two can't drift. A login shell prefixes a dash ("-zsh"), stripped before the
- * lookup, so the set holds only the bare names.
+ * Foreground commands meaning no agent runs at the pane: a bare shell (a typed
+ * Reply would EXECUTE as a command) or a terminal editor (keystrokes land as
+ * normal-mode commands). Single owner for both idle-detection and the
+ * notification-action liveness guard, so they can't drift. Bare names only; a
+ * login shell's dash ("-zsh") is stripped before lookup.
  */
 const NON_AGENT_COMMANDS = new Set([
   "zsh",
@@ -58,11 +57,8 @@ const NON_AGENT_COMMANDS = new Set([
   "vi",
 ]);
 
-/**
- * True when the pane's foreground command is a shell or terminal editor rather
- * than a running agent. Strips a leading dash (login-shell prefix, "-zsh")
- * before the lookup.
- */
+/** True when the pane's foreground command is a shell or terminal editor, not a
+ *  running agent. Strips a leading dash (login-shell "-zsh") before lookup. */
 export function isNonAgentCommand(command: string | null): boolean {
   if (!command) return false;
   return NON_AGENT_COMMANDS.has(command.replace(/^-/, ""));
@@ -76,10 +72,10 @@ export function isIdleCommand(command: string | null): boolean {
 }
 
 /**
- * Lines that terminate a Claude prompt's command/option block. The plan
- * picker's "Would you like to proceed?" matches too, so this anchors both the
- * permission-context extractor (`notify-context.ts`, which imports this) and
- * `classifyClaudePromptPane` below. Kept in one place so the two never drift.
+ * Lines terminating a Claude prompt's command/option block (the plan picker's
+ * "Would you like to proceed?" included). Single owner, shared by the
+ * permission-context extractor (`notify-context.ts`) and
+ * `classifyClaudePromptPane`, so the two can't drift.
  */
 export const PROMPT_TERMINATOR_RE =
   /(requires approval|do you want to proceed|would you like to proceed|do you want to make this edit|do you want to create)/i;
@@ -88,13 +84,12 @@ export const PROMPT_TERMINATOR_RE =
 const OPTION_ROW_RE = /(^|\s)\d+\.\s/;
 
 /**
- * True when a captured pane looks like Claude's AskUserQuestion option picker:
- * a "Type something." choice plus the "Enter to select" footer. Mirrors the
- * `terminalRules` question anchors in `src/lib/agents.ts`. Used delivery-time
- * to disambiguate the shared `permission_prompt` marker (see
- * docs/agent-adapters.md), and by `classifyClaudePromptPane` below to fail its
- * plan/permission classification closed when a picker sits below a lingering
- * terminator.
+ * True when a captured pane looks like Claude's AskUserQuestion picker: a
+ * "Type something." choice plus an "Enter to select" footer. Mirrors the
+ * `terminalRules` question anchors in `src/lib/agents.ts`. Used delivery-time to
+ * disambiguate the shared `permission_prompt` marker (docs/agent-adapters.md),
+ * and by `classifyClaudePromptPane` to fail closed when a picker sits below a
+ * lingering terminator.
  */
 export function matchesQuestionPickerSignature(paneText: string): boolean {
   const lower = paneText.toLowerCase();
@@ -102,19 +97,18 @@ export function matchesQuestionPickerSignature(paneText: string): boolean {
 }
 
 /**
- * Classify the CURRENT Claude prompt at the bottom of a captured pane as a
- * plan-approval picker or a plain permission prompt, or null when no active
- * prompt is present. BOTTOM-ANCHORED on the LAST terminator line, so a stale
- * plan footer higher in the scrollback can never misclassify a fresh permission
- * prompt rendered below it (the exact both-directions failure the stored
- * `pendingTool` suffers). Pure: used by BOTH the press-time handler guard
- * (`handleNotificationAction`) and the notifier offer (`buildNotificationContext`),
- * so the offer and the enforcement can't disagree on what the pane shows.
+ * Classify the CURRENT Claude prompt at the pane's bottom as a plan-approval
+ * picker or a plain permission prompt, or null when no active prompt is present.
+ * BOTTOM-ANCHORED on the LAST terminator, so a stale plan footer higher in
+ * scrollback can't misclassify a fresh prompt below it (the both-directions
+ * failure the stored `pendingTool` suffers). Pure, used by BOTH the press-time
+ * handler guard (`handleNotificationAction`) and the notifier offer
+ * (`buildNotificationContext`), so the offer and the enforcement can't disagree.
  *
- * A question picker (AskUserQuestion) renders no terminator of its own, so when
- * one sits below a lingering (resolved) terminator its numbered option rows
- * would read as a permission prompt; the below-region is checked against the
- * picker signature first and returns null so approve/deny fail closed.
+ * A question picker (AskUserQuestion) renders no terminator of its own, so below
+ * a lingering terminator its option rows would read as a permission prompt; the
+ * below-region is checked against the picker signature first, returning null so
+ * approve/deny fail closed.
  */
 export function classifyClaudePromptPane(
   paneText: string,
@@ -130,11 +124,11 @@ export function classifyClaudePromptPane(
   if (termIdx < 0) return null;
 
   const below = lines.slice(termIdx + 1);
-  // A question picker has no terminator of its own, so its option rows below a
-  // lingering terminator belong to the picker, not this prompt. Returning null
-  // fails approve/deny closed while the notifier's `answer` falls back to the
-  // stored type. Checked on the below-region only: the WHOLE capture would
-  // regress the inverse layout (a stale picker ABOVE a live permission prompt).
+  // Option rows below a lingering terminator belong to the picker (which has no
+  // terminator of its own), not this prompt. null fails approve/deny closed; the
+  // notifier's `answer` falls back to the stored type. Below-region only:
+  // matching the WHOLE capture would regress the inverse layout (a stale picker
+  // ABOVE a live permission prompt).
   if (matchesQuestionPickerSignature(below.join("\n"))) return null;
   const belowText = below.join("\n").toLowerCase();
   // The plan picker is the only prompt offering an "auto mode" option and the

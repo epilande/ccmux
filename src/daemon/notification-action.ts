@@ -107,18 +107,15 @@ export function sanitizeReply(raw: string | undefined): string {
 }
 
 /**
- * A plan-approval (ExitPlanMode) wait. Shared by the notifier-side context
- * (`buildNotificationContext`) and this handler so the offer and the accept can
- * never diverge on what counts as a plan wait.
+ * A plan-approval (ExitPlanMode) wait. Shared by `buildNotificationContext` and
+ * this handler so the offer and the accept never diverge.
  *
- * The `attentionType === "permission"` arm is load-bearing: a LIVE hook-tracked
- * plan wait is stored as a permission, not a `plan_approval`. Claude's
- * `Notification` hook fires for ExitPlanMode with `state: waiting_permission`
- * and `pending_tool: null` (verified on Claude Code 2.1.211), and the marker
- * wins the cascade, so the stored `attentionType` is `permission`; the
- * `ExitPlanMode` tool name only reaches `pendingTool` from the log. Without this
- * arm, Approve on a plan notification would send the permission key (`1`), which
- * at the ExitPlanMode picker selects "use auto mode".
+ * The `attentionType === "permission"` arm is load-bearing: a live hook-tracked
+ * plan wait is stored as permission, not `plan_approval` — Claude's `Notification`
+ * hook fires ExitPlanMode as `waiting_permission`/`pending_tool: null` (2.1.211)
+ * and the marker wins the cascade, so only the log's `ExitPlanMode` reaches
+ * `pendingTool`. Without this arm, Approve sends the permission key `1`, which at
+ * the ExitPlanMode picker selects "use auto mode".
  */
 export function isPlanApprovalWait(session: {
   attentionType: string | null;
@@ -153,25 +150,21 @@ type ActionPlan =
  * CURRENT state, and how it should execute. Pure (no effects), so the gate is
  * unit-testable in isolation.
  *
- * `waitTypeOverride` makes the LIVE pane authoritative for the plan-vs-permission
- * split (the caller classifies the pane and passes the result). This is
- * load-bearing, not a refinement: a live ExitPlanMode wait is usually stored as
- * `{ permission, pendingTool: null }` because the marker reports
- * `waiting_permission` with a null tool AND the ExitPlanMode `tool_use` is
- * frequently deferred out of the JSONL during the wait (like a permission-gated
- * tool_use, nondeterministically). So `isPlanApprovalWait` is FALSE in the common
- * plan window; only the pane reliably shows which picker is up. When the override
- * is absent (a no-ambiguity agent, or a null classification where `answer` falls
- * back to the stored type instead of failing closed) the stored classification
- * is used.
+ * `waitTypeOverride` lets the live pane decide the plan-vs-permission split, and
+ * is load-bearing: a live ExitPlanMode wait is usually stored `{ permission,
+ * pendingTool: null }` (the marker reports `waiting_permission`/null tool, and the
+ * `tool_use` is nondeterministically deferred out of the JSONL), so
+ * `isPlanApprovalWait` is FALSE in the common plan window and only the pane shows
+ * which picker is up. Absent the override (no-ambiguity agent, or a null
+ * classification where `answer` falls back rather than failing closed) the stored
+ * classification is used.
  *
- * Safety asymmetry, deliberate: for a permission/plan reply the prelude key's
- * PRESENCE is the legality gate. Without an Escape first, typing text + Enter at
- * a numbered picker would select the highlighted option (i.e. approve), so a
- * reply is only offered where a cancel-to-composer prelude exists. For an idle
- * (finished) reply there is deliberately NO prelude: Escape at Claude's idle
- * composer clears a typed draft and double-Escape opens history rewind, so idle
- * gates on `status === "idle"` plus `replyOnFinished` alone.
+ * A permission/plan reply is gated on the prelude key's PRESENCE: without an
+ * Escape first, text + Enter at a numbered picker selects the highlighted
+ * (approve) option, so a reply is offered only where a cancel-to-composer prelude
+ * exists. An idle (finished) reply deliberately has NO prelude (Escape at the idle
+ * composer clears a draft, double-Escape opens history rewind), so it gates on
+ * `status === "idle"` + `replyOnFinished` alone.
  */
 function resolveActionPlan(
   action: "approve" | "deny" | "answer",
@@ -190,9 +183,8 @@ function resolveActionPlan(
 
   if (session.status !== "waiting") return null;
 
-  // The pane override wins when present; otherwise the stored classification
-  // (`isPlanApprovalWait` covers both a `plan_approval` attentionType and the
-  // permission+ExitPlanMode marker-fresher window).
+  // Pane override wins; else the stored classification (`isPlanApprovalWait`
+  // covers `plan_approval` and the permission+ExitPlanMode window).
   const isPlan = waitTypeOverride
     ? waitTypeOverride === "plan_approval"
     : isPlanApprovalWait(session);
@@ -215,19 +207,16 @@ function resolveActionPlan(
     case "permission":
       if (action === "approve") return { mode: "keys", keys: na?.approve };
       if (action === "deny") return { mode: "keys", keys: na?.deny };
-      // answer on a permission wait = deny with feedback: the prelude cancels
-      // the prompt, then the reply arrives as the next user message. Legal only
-      // when the prelude key is defined (without it, text + Enter would select
-      // the highlighted approve option).
+      // answer = deny with feedback: the prelude cancels the prompt, then the
+      // reply arrives as the next user message. Legal only when the prelude is
+      // defined (else text + Enter selects the highlighted approve option).
       return na?.permissionReplyPrelude?.length
         ? { mode: "reply", prelude: na.permissionReplyPrelude }
         : null;
     case "question":
-      // approve/deny don't apply to a question wait; answer replies, gated on
-      // `replyOnQuestion` for symmetry with the notifier's Reply button. The
-      // prelude is part of the gate for the same reason as the rows above:
-      // the picker ignores typed text, so without a cancel key Enter would
-      // select the highlighted option instead of sending the reply.
+      // approve/deny don't apply; answer replies, gated on `replyOnQuestion` (for
+      // symmetry with the offer) plus the prelude: the picker ignores typed text,
+      // so without a cancel key Enter selects the highlighted option.
       if (
         action === "answer" &&
         na?.replyOnQuestion &&
@@ -270,14 +259,11 @@ export async function handleNotificationAction(
     return { code: 200, ok: true, action };
   }
 
-  // approve / deny / answer all mutate the pane. First the staleness token must
-  // still match the edge the notification fired for.
-  //
-  // Token caveat: an attentionType flip WITHIN `waiting` (permission ->
-  // question) does not bump `statusChangedAt` (`SessionManager.updateSession`
-  // stamps only on status edges), so the token alone can't catch that flip. It
-  // is benign for Claude: both waiting reply variants use the same Escape
-  // prelude.
+  // approve / deny / answer all mutate the pane; first the staleness token must
+  // still match the edge the notification fired for. Caveat: an attentionType flip
+  // WITHIN `waiting` (permission -> question) doesn't bump `statusChangedAt`
+  // (stamped only on status edges), so the token can't catch it — benign for
+  // Claude, where both waiting reply variants share the Escape prelude.
   const tokenMatches =
     (input.statusChangedAt ?? null) === (session.statusChangedAt ?? null);
   if (!tokenMatches) {
@@ -291,16 +277,13 @@ export async function handleNotificationAction(
 
   const agentDef = deps.getAgent(session.agentType);
 
-  // Pane-authoritative wait type. For a press by an agent whose plan picker
-  // differs from its permission prompt (`planApprove` defined) on a waiting
-  // permission/plan wait, the stored plan/permission classification is unreliable
-  // in both directions and the staleness token can't catch it (status stays
-  // `waiting`): the common live-plan window is `{ permission, pendingTool: null }`
-  // (marker null tool + deferred log tool_use, see `resolveActionPlan`), and a
-  // permission wait right after a plan wait can retain a stale `ExitPlanMode`
-  // pendingTool. The pane is the only signal reliably present at the picker, so
-  // classify it and let it DECIDE the wait type, matching the notifier's offer
-  // side which classifies the same pane.
+  // Pane-authoritative wait type. For an agent whose plan picker differs from its
+  // permission prompt (`planApprove` defined), the stored plan/permission split is
+  // unreliable both ways and the token can't catch it (status stays `waiting`):
+  // the common plan window is `{ permission, pendingTool: null }` and a permission
+  // wait right after a plan can retain a stale `ExitPlanMode` pendingTool. Only the
+  // pane is reliably present at the picker, so let it DECIDE the wait type — the
+  // same classify the notifier's offer side runs.
   const paneAuthoritative =
     !!agentDef?.notificationActions?.planApprove &&
     session.status === "waiting" &&
@@ -321,15 +304,14 @@ export async function handleNotificationAction(
     if (paneKind !== null) {
       plan = resolveActionPlan(action, session, agentDef, paneKind);
     } else if (action === "answer") {
-      // The classifier only knows plan/permission; a null here is usually an
-      // AskUserQuestion picker (or a plain-text question). A reply is safe to
-      // fall back to the stored type: for Claude every waiting reply prelude is
-      // the same Escape, so the question path still lands.
+      // Null is usually an AskUserQuestion picker; a reply safely falls back to
+      // the stored type (for Claude every waiting prelude is the same Escape, so
+      // the question path still lands).
       plan = resolveActionPlan(action, session, agentDef);
     } else {
-      // approve/deny with no picker classified: fail CLOSED. Keying "1" at a plan
-      // picker enables auto mode and "2" at a Bash prompt is the persistent grant,
-      // so a press with no visible prompt to match must send nothing.
+      // approve/deny with no picker classified: fail CLOSED. "1" at a plan picker
+      // enables auto mode, "2" at a Bash prompt is the persistent grant, so a
+      // press with no visible prompt sends nothing.
       deps.reNotify(session, STATE_CHANGED_BODY);
       log(
         `notification-action: no active prompt visible on pane for ${action}`,
@@ -360,12 +342,12 @@ export async function handleNotificationAction(
   }
   const pane = session.tmuxPane;
 
-  // Liveness guard (before ANY send): the reconciler keeps a dead agent's
-  // session as idle with its pane still bound, so a press after the agent exited
-  // would land at whatever now holds the pane. Refuse if the foreground is a
-  // shell (a typed Reply would EXECUTE as a command) or a terminal editor
-  // (keystrokes land as normal-mode commands), or if the query fails (fail
-  // CLOSED: a dropped press is recoverable, a command run in the shell is not).
+  // Liveness guard (before ANY send): the reconciler keeps a dead agent's session
+  // idle with its pane bound, so a press after the agent exited lands at whatever
+  // now holds the pane. Refuse if the foreground is a shell (a Reply would EXECUTE
+  // as a command), a terminal editor (keystrokes become normal-mode commands), or
+  // if the query fails (fail CLOSED — a dropped press is recoverable, a command in
+  // the shell is not).
   const foreground = await deps.getPaneCommand(pane);
   if (foreground === null || isNonAgentCommand(foreground)) {
     deps.reNotify(session, STATE_CHANGED_BODY);
@@ -402,27 +384,21 @@ export async function handleNotificationAction(
         }
       }
       await sleep(ANSWER_PRELUDE_SETTLE_MS);
-      // The prelude is fire-and-forget: `sendKey` resolving true only means tmux
-      // accepted the keystroke, not that the TUI acted on it. The gap is not
-      // theoretical. An Escape immediately followed by printable bytes can be
-      // read as ONE escape sequence (Alt+char), so the cancel never happens and
-      // the Enter below selects the prompt's HIGHLIGHTED option instead: "1. Yes"
-      // at a permission prompt, auto mode at a plan picker. That turns a
-      // deny-with-feedback press into a silent approve, reported to the user as
-      // a 200. The settle above makes this rare, not impossible, so don't trust
-      // it: type only once the prompt is provably gone.
+      // The prelude is fire-and-forget: `sendKey` true means tmux accepted the
+      // keystroke, not that the TUI acted on it. An Escape immediately followed by
+      // printable bytes can read as ONE Alt+char sequence, so the cancel never
+      // lands and the Enter below selects the HIGHLIGHTED option ("1. Yes", or auto
+      // mode at a plan picker) — a deny-with-feedback press silently approves,
+      // reported as 200. The settle makes this rare, not impossible, so type only
+      // once the prompt is provably gone.
       //
-      // This runs after EVERY prelude, not just the pane-authoritative
-      // plan/permission path: the question picker and the null-classification
-      // reply fallback send a prelude too, and the picker (which
-      // `classifyClaudePromptPane` reports as null BY DESIGN) is exactly where a
-      // swallowed cancel silently selects an option. So "cleared" means all of:
-      // a non-empty capture, no plan/permission terminator, AND no question
-      // picker. The non-empty check is load-bearing — the wired `capturePane`
-      // signals failure as "" (it never throws), which would classify null and
-      // read as "cleared". A live prompt, a picker, OR a failed/empty capture
-      // fails CLOSED, since a dropped reply is recoverable and a wrong approve
-      // is not.
+      // Runs after EVERY prelude, including the question and null-fallback reply
+      // paths: the picker (null BY DESIGN from `classifyClaudePromptPane`) is where
+      // a swallowed cancel selects an option. "Cleared" = non-empty capture, no
+      // terminator, AND no question picker. The non-empty check is load-bearing:
+      // `capturePane` signals failure as "" (never throws), which classifies null
+      // and would read as "cleared". Any live prompt, picker, or failed capture
+      // fails CLOSED — a dropped reply is recoverable, a wrong approve is not.
       let promptCleared: boolean;
       try {
         const paneText = await deps.capturePane(pane);
