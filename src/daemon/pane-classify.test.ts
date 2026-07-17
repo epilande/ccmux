@@ -3,7 +3,6 @@ import {
   classifyClaudePromptPane,
   classifyPaneContent,
   classifyPaneTitle,
-  isIdleCommand,
   isNonAgentCommand,
 } from "./pane-classify";
 
@@ -36,47 +35,29 @@ describe("classifyPaneTitle", () => {
   });
 });
 
-describe("isIdleCommand", () => {
-  it("should detect shell commands as idle", () => {
-    expect(isIdleCommand("zsh")).toBe(true);
-    expect(isIdleCommand("bash")).toBe(true);
-    expect(isIdleCommand("fish")).toBe(true);
-    expect(isIdleCommand("sh")).toBe(true);
-    expect(isIdleCommand("dash")).toBe(true);
-    expect(isIdleCommand("-zsh")).toBe(true);
-    expect(isIdleCommand("-bash")).toBe(true);
-    expect(isIdleCommand("ksh")).toBe(true);
-    expect(isIdleCommand("nu")).toBe(true);
-    expect(isIdleCommand("pwsh")).toBe(true);
-    expect(isIdleCommand("-fish")).toBe(true);
-  });
-
-  it("should detect editors as idle", () => {
-    expect(isIdleCommand("nvim")).toBe(true);
-    expect(isIdleCommand("vim")).toBe(true);
-    expect(isIdleCommand("vi")).toBe(true);
-  });
-
-  it("should not detect other commands as idle", () => {
-    expect(isIdleCommand("2.1.38")).toBe(false);
-    expect(isIdleCommand("claude")).toBe(false);
-    expect(isIdleCommand("node")).toBe(false);
-    expect(isIdleCommand(null)).toBe(false);
-  });
-});
-
 describe("isNonAgentCommand", () => {
-  it("matches shells and editors, stripping a login-shell dash prefix", () => {
+  it("should detect shell commands as non-agent", () => {
     expect(isNonAgentCommand("zsh")).toBe(true);
+    expect(isNonAgentCommand("bash")).toBe(true);
+    expect(isNonAgentCommand("fish")).toBe(true);
+    expect(isNonAgentCommand("sh")).toBe(true);
+    expect(isNonAgentCommand("dash")).toBe(true);
     expect(isNonAgentCommand("-zsh")).toBe(true);
+    expect(isNonAgentCommand("-bash")).toBe(true);
     expect(isNonAgentCommand("ksh")).toBe(true);
     expect(isNonAgentCommand("nu")).toBe(true);
     expect(isNonAgentCommand("pwsh")).toBe(true);
     expect(isNonAgentCommand("-fish")).toBe(true);
-    expect(isNonAgentCommand("nvim")).toBe(true);
   });
 
-  it("does not match a running agent or a null command", () => {
+  it("should detect editors as non-agent", () => {
+    expect(isNonAgentCommand("nvim")).toBe(true);
+    expect(isNonAgentCommand("vim")).toBe(true);
+    expect(isNonAgentCommand("vi")).toBe(true);
+  });
+
+  it("should not detect other commands as non-agent", () => {
+    expect(isNonAgentCommand("2.1.38")).toBe(false);
     expect(isNonAgentCommand("claude")).toBe(false);
     expect(isNonAgentCommand("node")).toBe(false);
     expect(isNonAgentCommand(null)).toBe(false);

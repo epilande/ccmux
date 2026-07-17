@@ -427,19 +427,14 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // `answerPrelude: ["Escape"]` cancels the AskUserQuestion picker before the
     // reply text (the picker ignores typed literals; Escape returns to the
     // composer where the reply sends as a user message).
-    // `replyOnFinished` idle Reply sends with NO prelude: Escape at Claude's
-    // idle composer clears a draft and double-Escape opens history rewind, so a
-    // prelude there is destructive (see `resolveActionPlan`). `replyOnQuestion`
-    // reuses `answerPrelude`'s Escape-to-composer path for question waits.
-    // `permissionReplyPrelude: ["Escape"]` is deny-with-feedback: Escape cancels
-    // the prompt, then the reply sends as the next user message. Verified on
-    // Claude Code 2.1.211 across the Bash, Edit/Write diff, and MCP-tool variants.
-    // Plan (ExitPlanMode) picker, verified on Claude Code 2.1.211: option 1 is
-    // "Yes, and use auto mode" (bypass), option 2 is "manually approve edits", so
-    // `planApprove` MUST be ["2"], never ["1"] (["1"] silently enables auto mode).
-    // The digit submits immediately, no Enter. `planDeny`/`planReplyPrelude` are
-    // ["Escape"]: cancels ExitPlanMode to an empty composer with plan mode still
-    // on, where text + Enter sends as a user message.
+    // Remaining rows verified on Claude Code 2.1.211 (full detail in
+    // docs/agent-adapters.md, Claude caveats): every reply prelude is Escape,
+    // cancelling the prompt/picker to a composer where text + Enter sends as a
+    // user message; the idle (`replyOnFinished`) Reply intentionally has NO
+    // prelude. At the ExitPlanMode picker option 1 is "Yes, and use auto mode",
+    // option 2 is "manually approve edits", so `planApprove` MUST be ["2"],
+    // never ["1"] (which silently enables auto mode); the digit submits with
+    // no Enter.
     notificationActions: {
       approve: ["1"],
       deny: ["Escape"],

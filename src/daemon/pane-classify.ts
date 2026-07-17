@@ -65,13 +65,6 @@ export function isNonAgentCommand(command: string | null): boolean {
 }
 
 /**
- * Check if the pane's foreground command indicates Claude is not running.
- */
-export function isIdleCommand(command: string | null): boolean {
-  return isNonAgentCommand(command);
-}
-
-/**
  * Lines terminating a Claude prompt's command/option block (the plan picker's
  * "Would you like to proceed?" included). Single owner, shared by the
  * permission-context extractor (`notify-context.ts`) and
@@ -177,7 +170,7 @@ export async function detectPaneState(
   pane?: TmuxPane,
 ): Promise<PaneDetectionResult> {
   if (pane) {
-    if (isIdleCommand(pane.currentCommand)) {
+    if (isNonAgentCommand(pane.currentCommand)) {
       return paneDetectionResult("idle");
     }
 

@@ -27,7 +27,7 @@ import { stripControlChars } from "./notify-text";
 import { capturePane } from "./pane-io";
 import { isPlanApprovalWait } from "./notification-action";
 import {
-  PROMPT_TERMINATOR_RE as TERMINATOR_RE,
+  PROMPT_TERMINATOR_RE,
   classifyClaudePromptPane,
   matchesQuestionPickerSignature,
 } from "./pane-classify";
@@ -65,9 +65,8 @@ export interface NotifyContextDeps {
  * `reclassifyAs` corrects a stored `permission` wait to its true type at
  * delivery time, so the notifier renders the right actions before the next
  * scan's reconciler correction lands. Two cases both arrive stored as
- * `permission`: Claude's AskUserQuestion picker (pane reveals a `question`), and
- * an ExitPlanMode wait (marker wins the cascade as `waiting_permission`, so it's
- * really `plan_approval`; see `isPlanApprovalWait`).
+ * `permission`: Claude's AskUserQuestion picker (really a `question`) and an
+ * ExitPlanMode wait (really `plan_approval`; see `buildNotificationContext`).
  */
 export interface NotificationContext {
   body: string | null;
@@ -171,7 +170,7 @@ export function extractPermissionPrompt(paneText: string): string | null {
 
   let termIdx = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (TERMINATOR_RE.test(lines[i])) {
+    if (PROMPT_TERMINATOR_RE.test(lines[i])) {
       termIdx = i;
       break;
     }
@@ -183,7 +182,7 @@ export function extractPermissionPrompt(paneText: string): string | null {
   // then collect the contiguous command block. Anchoring on the LAST
   // terminator ignores a stale earlier prompt in scrollback.
   const isBoundary = (line: string): boolean =>
-    line === "" || TERMINATOR_RE.test(line);
+    line === "" || PROMPT_TERMINATOR_RE.test(line);
   let i = termIdx - 1;
   while (i >= 0 && isBoundary(lines[i])) i--;
   const block: string[] = [];
@@ -200,15 +199,15 @@ export function extractPermissionPrompt(paneText: string): string | null {
 const PLAN_HEADER_RE = /here is claude.s plan:/i;
 
 /**
- * Extract the plan body from a captured ExitPlanMode pane, the fallback for when
- * the transcript's `ExitPlanMode input.plan` is deferred out of the JSONL during
- * the wait. The box renders below a "Here is Claude's plan:" header: header, top
- * rule, plan content, bottom rule, ~10 blank padding lines, picker. Anchor on
- * the LAST header (last-wins, like the sibling extractors) so a stale plan box
- * higher in scrollback can't shadow a fresh one below it (two can share one
- * capture in the refine flow); then read DOWN from the top rule to the bottom
- * rule, dropping padding, clamped. Returns null when no header is in the capture
- * (a very long plan scrolled its top off).
+ * Extract the plan body from a captured ExitPlanMode pane, the fallback when
+ * the transcript's `input.plan` is unavailable (see `buildPlanContext`). The box
+ * renders below a "Here is Claude's plan:" header: header, top rule, plan
+ * content, bottom rule, ~10 blank padding lines, picker. Anchor on the LAST
+ * header (last-wins, like the sibling extractors) so a stale plan box higher in
+ * scrollback can't shadow a fresh one below it (two can share one capture in
+ * the refine flow); then read DOWN from the top rule to the bottom rule,
+ * dropping padding, clamped. Returns null when no header is in the capture (a
+ * very long plan scrolled its top off).
  */
 export function extractPlanPrompt(paneText: string): string | null {
   const rawLines = paneText.split("\n");
@@ -398,10 +397,9 @@ async function questionFromTranscript(
 
 /**
  * The `input.plan` markdown of the CURRENT `ExitPlanMode` wait, or null. The
- * tool_use is flushed to the JSONL only NONDETERMINISTICALLY (Claude Code 2.1.211
- * e2e saw it present and absent across consecutive waits; absent = deferred like
- * a permission-gated tool_use), so this is preferred when present and
- * `extractPlanPrompt` covers the pane when not. Currency guard, mirroring
+ * tool_use reaches the JSONL only nondeterministically during the wait (see the
+ * plan-approval bullet in docs/agent-adapters.md), so this is preferred when
+ * present and `extractPlanPrompt` covers the pane when not. Currency guard, mirroring
  * {@link lastAssistantTextIfCurrent}: a newer USER turn than the ExitPlanMode
  * tool_use means the wait was already answered, so return null rather than quote
  * a stale plan — covering both a typed user message (string content) and a plan
@@ -450,20 +448,17 @@ function currentExitPlanModePlan(entries: LogEntry[]): string | null {
 
 /**
  * Plan-approval context: the transcript `input.plan` FIRST when present, else
- * `extractPlanPrompt` over the pane (the tool_use is flushed only
- * nondeterministically, see `currentExitPlanModePlan`). That pane read needs a
- * deeper capture than a permission prompt (plan box top ~46 lines above the
- * picker), supplied by the caller via `PLAN_PANE_CAPTURE_LINES`. Returns
- * `reclassifyAs: "plan_approval"` only when the wait was STORED as a permission
- * (the marker-fresher window, see `isPlanApprovalWait`), so the subtitle rebuilds
- * from "Needs permission" to "Plan ready for review".
+ * `extractPlanPrompt` over the pane (see `currentExitPlanModePlan` for why both
+ * paths exist). The pane read needs a deeper capture than a permission prompt
+ * (plan box top ~46 lines above the picker), supplied by the caller via
+ * `PLAN_PANE_CAPTURE_LINES`. Returns `reclassifyAs: "plan_approval"` only when
+ * the wait was STORED as a permission, so the subtitle rebuilds from "Needs
+ * permission" to "Plan ready for review".
  */
 async function buildPlanContext(
   session: NotifyContextSession,
   paneText: string | null,
 ): Promise<NotificationContext> {
-  // Transcript first, else extract the plan box off the same pane capture (the
-  // ExitPlanMode tool_use is frequently deferred out of the JSONL during the wait).
   let body = session.logPath
     ? await extractFromTranscriptTail(
         session.logPath,

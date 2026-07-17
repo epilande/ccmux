@@ -107,15 +107,12 @@ export function sanitizeReply(raw: string | undefined): string {
 }
 
 /**
- * A plan-approval (ExitPlanMode) wait. Shared by `buildNotificationContext` and
- * this handler so the offer and the accept never diverge.
- *
- * The `attentionType === "permission"` arm is load-bearing: a live hook-tracked
- * plan wait is stored as permission, not `plan_approval` — Claude's `Notification`
- * hook fires ExitPlanMode as `waiting_permission`/`pending_tool: null` (2.1.211)
- * and the marker wins the cascade, so only the log's `ExitPlanMode` reaches
- * `pendingTool`. Without this arm, Approve sends the permission key `1`, which at
- * the ExitPlanMode picker selects "use auto mode".
+ * A plan-approval (ExitPlanMode) wait, per the STORED classification. Shared by
+ * `buildNotificationContext` and this handler so the offer and the accept never
+ * diverge. The `permission` arm is load-bearing: a live hook-tracked plan wait
+ * is stored as a permission (see the plan-approval bullet in
+ * docs/agent-adapters.md), and without it Approve would send the permission key
+ * at the plan picker.
  */
 export function isPlanApprovalWait(session: {
   attentionType: string | null;
@@ -150,14 +147,11 @@ type ActionPlan =
  * CURRENT state, and how it should execute. Pure (no effects), so the gate is
  * unit-testable in isolation.
  *
- * `waitTypeOverride` lets the live pane decide the plan-vs-permission split, and
- * is load-bearing: a live ExitPlanMode wait is usually stored `{ permission,
- * pendingTool: null }` (the marker reports `waiting_permission`/null tool, and the
- * `tool_use` is nondeterministically deferred out of the JSONL), so
- * `isPlanApprovalWait` is FALSE in the common plan window and only the pane shows
- * which picker is up. Absent the override (no-ambiguity agent, or a null
- * classification where `answer` falls back rather than failing closed) the stored
- * classification is used.
+ * `waitTypeOverride` is the live pane's classification of the plan-vs-permission
+ * split. When present it beats the stored classification, which is unreliable in
+ * both directions (see the `paneAuthoritative` block in the caller); absent it
+ * (no-ambiguity agent, or a null classification where `answer` falls back rather
+ * than failing closed) the stored classification is used.
  *
  * A permission/plan reply is gated on the prelude key's PRESENCE: without an
  * Escape first, text + Enter at a numbered picker selects the highlighted
