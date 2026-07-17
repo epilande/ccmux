@@ -233,6 +233,46 @@ describe("classifyClaudePromptPane", () => {
     expect(classifyClaudePromptPane(staleplanThenBash)).toBe("permission");
   });
 
+  it("returns null when a question picker renders below a lingering resolved terminator", () => {
+    // A resolved permission prompt's terminator narrative lingers in scrollback
+    // above a LIVE AskUserQuestion picker, whose numbered rows would otherwise
+    // read as a permission prompt. The picker has no terminator of its own.
+    const staleTermThenPicker = [
+      " This command requires approval",
+      " ❯ 1. Yes",
+      "   2. No",
+      "  ⏺ Ran it. Now a question:",
+      " ☐ Fav color",
+      "What's your favorite color?",
+      "❯ 1. Blue",
+      "  2. Green",
+      "  3. Type something.",
+      "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    ].join("\n");
+    expect(classifyClaudePromptPane(staleTermThenPicker)).toBeNull();
+  });
+
+  it("is inverse-safe: a stale picker above a fresh permission prompt is still permission", () => {
+    // The opposite layout: stale picker chrome higher in scrollback, then a live
+    // permission prompt below. Anchoring the picker check on the below-region
+    // (not the whole capture) keeps this a legitimate permission classification.
+    const stalePickerThenPermission = [
+      " ☐ Fav color",
+      "What's your favorite color?",
+      "❯ 1. Blue",
+      "  2. Type something.",
+      "Enter to select · ↑/↓ to navigate · Esc to cancel",
+      "  ⏺ Now a real permission prompt:",
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. Yes, don't ask again this session",
+      "   3. No",
+    ].join("\n");
+    expect(classifyClaudePromptPane(stalePickerThenPermission)).toBe(
+      "permission",
+    );
+  });
+
   it("returns null when no active prompt terminator is present", () => {
     const idle = ["  ⏺ All done.", "", " ❯ "].join("\n");
     expect(classifyClaudePromptPane(idle)).toBeNull();

@@ -29,6 +29,7 @@ import { isPlanApprovalWait } from "./notification-action";
 import {
   PROMPT_TERMINATOR_RE as TERMINATOR_RE,
   classifyClaudePromptPane,
+  matchesQuestionPickerSignature,
 } from "./pane-classify";
 import type {
   AssistantLogEntry,
@@ -246,18 +247,6 @@ const OPTION_LINE_RE = /^(\d+)\.\s/;
 /** Header chip line the picker renders above the question (e.g. "☐ Fav color");
  *  a checkbox glyph, not the question itself, so it's skipped. */
 const CHECKBOX_LINE_RE = /^[☐☑☒]/;
-
-/**
- * True when a captured pane looks like Claude's AskUserQuestion option picker:
- * a "Type something." choice plus the "Enter to select" footer. Mirrors the
- * `terminalRules` question anchors in `src/lib/agents.ts`; used delivery-time
- * to disambiguate the shared `permission_prompt` marker (see
- * docs/agent-adapters.md).
- */
-export function matchesQuestionPickerSignature(paneText: string): boolean {
-  const lower = paneText.toLowerCase();
-  return lower.includes("type something.") && lower.includes("enter to select");
-}
 
 /**
  * Extract the question text from a captured AskUserQuestion picker: a header

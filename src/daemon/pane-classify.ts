@@ -88,6 +88,20 @@ export const PROMPT_TERMINATOR_RE =
 const OPTION_ROW_RE = /(^|\s)\d+\.\s/;
 
 /**
+ * True when a captured pane looks like Claude's AskUserQuestion option picker:
+ * a "Type something." choice plus the "Enter to select" footer. Mirrors the
+ * `terminalRules` question anchors in `src/lib/agents.ts`. Used delivery-time
+ * to disambiguate the shared `permission_prompt` marker (see
+ * docs/agent-adapters.md), and by `classifyClaudePromptPane` below to fail its
+ * plan/permission classification closed when a picker sits below a lingering
+ * terminator.
+ */
+export function matchesQuestionPickerSignature(paneText: string): boolean {
+  const lower = paneText.toLowerCase();
+  return lower.includes("type something.") && lower.includes("enter to select");
+}
+
+/**
  * Classify the CURRENT Claude prompt at the bottom of a captured pane as a
  * plan-approval picker or a plain permission prompt, or null when no active
  * prompt is present. BOTTOM-ANCHORED on the LAST terminator line, so a stale
@@ -97,8 +111,10 @@ const OPTION_ROW_RE = /(^|\s)\d+\.\s/;
  * (`handleNotificationAction`) and the notifier offer (`buildNotificationContext`),
  * so the offer and the enforcement can't disagree on what the pane shows.
  *
- * A question picker (AskUserQuestion) matches no terminator here and returns
- * null; its own disambiguation lives in `notify-context.ts`.
+ * A question picker (AskUserQuestion) renders no terminator of its own, so when
+ * one sits below a lingering (resolved) terminator its numbered option rows
+ * would read as a permission prompt; the below-region is checked against the
+ * picker signature first and returns null so approve/deny fail closed.
  */
 export function classifyClaudePromptPane(
   paneText: string,
@@ -114,6 +130,12 @@ export function classifyClaudePromptPane(
   if (termIdx < 0) return null;
 
   const below = lines.slice(termIdx + 1);
+  // A question picker has no terminator of its own, so its option rows below a
+  // lingering terminator belong to the picker, not this prompt. Returning null
+  // fails approve/deny closed while the notifier's `answer` falls back to the
+  // stored type. Checked on the below-region only: the WHOLE capture would
+  // regress the inverse layout (a stale picker ABOVE a live permission prompt).
+  if (matchesQuestionPickerSignature(below.join("\n"))) return null;
   const belowText = below.join("\n").toLowerCase();
   // The plan picker is the only prompt offering an "auto mode" option and the
   // only one whose footer shows the `/.claude/plans/` path.

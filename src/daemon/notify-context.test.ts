@@ -8,9 +8,9 @@ import {
   extractPermissionPrompt,
   extractPlanPrompt,
   extractQuestionPrompt,
-  matchesQuestionPickerSignature,
   type NotifyContextSession,
 } from "./notify-context";
+import { matchesQuestionPickerSignature } from "./pane-classify";
 
 // Mirror of the module's MAX_CONTEXT_CHARS cap; kept local so the clamp test
 // stays honest without exporting the constant.
