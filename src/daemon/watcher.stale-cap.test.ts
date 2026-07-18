@@ -147,12 +147,14 @@ describe("stale working cap on initial state derivation", () => {
     const staleTime = new Date(
       Date.now() - PANE_IDLE_THRESHOLD_MS - 60_000,
     ).toISOString();
-    const content = makeAssistantEntry(staleTime, "Bash");
+    // AskUserQuestion derives "waiting" (question), which the cap doesn't
+    // target. (Bash no longer derives waiting: log-derived permission waiting
+    // was removed.)
+    const content = makeAssistantEntry(staleTime, "AskUserQuestion");
     const entries = parseLogEntries(content);
 
     const state = deriveAndCapState(entries, globalDir);
 
-    // Bash requires permission → "waiting", which the cap doesn't target
     expect(state.status).toBe("waiting");
   });
 
