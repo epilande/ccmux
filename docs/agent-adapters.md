@@ -14,8 +14,9 @@ For the general hook flow (marker shape, per-agent pane-correlation strategy, in
 | OpenCode    | `adapters/opencode/plugin-adapter.ts`, `plugin-script.ts` (install-time renderer), `aggregate.ts` (pure many→one fold), authored plugin `src/plugins/opencode/plugin.js` |
 | Pi          | `adapters/pi/hook-adapter.ts`, `extension-script.ts` (install-time renderer), authored extension `src/plugins/pi/ccmux.js`                                               |
 | Antigravity | `adapters/antigravity/hook-adapter.ts`, `hook-scripts.ts` (bash generators)                                                                                              |
+| Copilot     | `adapters/copilot/hook-adapter.ts`, `hook-scripts.ts` (marker script + hooks-JSON generators), `log-adapter.ts`, `parse.ts` (events.jsonl parsing)                       |
 
-The startup-race closer for markers written before the first scan created the pane-tracked session is the shared, agent-agnostic `reconcileSessionMarkerLinks()` in `adapters/link.ts` (keyed off `adapter.agentType`; it also re-derives native-id ownership each scan so a mis-linked id heals). Used by Cursor, OpenCode, Pi, and Antigravity (`Daemon.linkPiSessions` / `Daemon.linkAntigravitySessions`).
+The startup-race closer for markers written before the first scan created the pane-tracked session is the shared, agent-agnostic `reconcileSessionMarkerLinks()` in `adapters/link.ts` (keyed off `adapter.agentType`; it also re-derives native-id ownership each scan so a mis-linked id heals). Used by Cursor, OpenCode, Pi, Antigravity, and Copilot (`Daemon.linkPiSessions` / `Daemon.linkAntigravitySessions` / `Daemon.linkCopilotSessions`).
 
 ## Claude-specific caveats
 
@@ -75,6 +76,16 @@ The startup-race closer for markers written before the first scan created the pa
 - Each `agy` invocation writes a new `~/.gemini/antigravity-cli/log/cli-YYYYMMDD_HHMMSS.log`. Hook execution appears there as `jsonhook__<name>_<Event>_<i>_<j>` activity. Headless `agy -p` invocations fire the same hooks, so they briefly create markers that the PID-liveness sweep removes after the process exits.
 - The installed scripts write only `working` and `idle`. The adapter also maps `waiting_permission` for forward compatibility, but current permission attention comes from terminal rules matching `Requesting permission for:` or `Do you want to proceed?`. Those specific strings avoid misclassifying Antigravity's unrelated CSAT survey (`How's the CLI experience so far?`) as a permission prompt.
 
+## Copilot-specific caveats
+
+- **Waiting/permission is observed through the `notification` hook, never the deciding `permissionRequest` hook.** Copilot exposes `permissionRequest` as a DECIDING hook: its output can allow or deny the pending tool call, and a crashing/empty response would silently affect the user's approval. ccmux registers only observational events (`sessionStart`, `userPromptSubmitted`, `notification`, `agentStop`, `sessionEnd`) and reads permission attention off `notification` payloads with `notification_type: "permission_prompt"` or `"elicitation_dialog"` (other types — `agent_idle`, `agent_completed`, `shell_completed`, ... — are ignored). The single marker script exits 0 with empty stdout on every path, so it can never emit a decision.
+- **`$PPID` is the Copilot PID.** Copilot runs each hook command with the `copilot` process as its DIRECT parent, so the script derives `pid=$PPID` and `tty=$(ps -p $PPID -o tty=)` for pane correlation (verified on v1.0.71). No zsh-wrapper walk is needed (unlike Cursor).
+- **`sessionStart` is deferred and can arrive AFTER `userPromptSubmitted`.** In interactive mode Copilot fires `sessionStart` at the first prompt submission, not at UI launch (the pre-prompt phase, including the folder-trust dialog, is covered by terminal rules only), and in `-p` mode `userPromptSubmitted` was observed firing before `sessionStart` (v1.0.71). The marker script therefore treats `session-start` on an existing marker as an identity refresh that never overwrites state, so a racing prompt/notification state can't be downgraded to `idle`.
+- **events.jsonl flushes in real time, including mid-wait.** `~/.copilot/session-state/<uuid>/events.jsonl` is written incrementally and Copilot does NOT hold it open, so the log adapter tails it like a Codex rollout. Critically, `permission.requested` is flushed to disk WHILE the permission dialog is up (verified live), so the log source can catch a permission wait even without hooks — unlike Claude's deferred permission `tool_use`. Status comes from `user.message` / `assistant.turn_start` → working, `permission.requested` → waiting (permission; `kind: "shell"` → pending tool "Command"), `permission.completed` → working, and `assistant.turn_end` / `session.shutdown` / `abort` → idle.
+- **Native-id discovery via the open `session.db`, not events.jsonl.** Copilot keeps `session-state/<uuid>/session.db` open (lsof-discoverable) but append-and-closes `events.jsonl`, so the no-hooks path recovers the session UUID from the `.db` fd (`COPILOT_SESSION_FILE_PATTERN`; the daemon's lsof prefilter accepts `.db` alongside `.jsonl`). The log adapter uses its own `session-state/<uuid>/events.jsonl` pattern for the tail.
+- **`~/.copilot/hooks/` is a shared, auto-discovered drop-in dir.** Copilot loads every `*.json` there. ccmux owns exactly two namespaced files — `ccmux-copilot.json` (the hooks registration) and `ccmux-copilot.sh` (the marker script, ignored by Copilot's `*.json` scan) — and never touches other files or `~/.copilot/settings.json`. Uninstall removes only those two.
+- **The legacy `gh copilot` extension is deliberately not matched.** Process detection anchors on the argv[0] basename `copilot` (the real native binary) plus `/copilot` path forms; `gh copilot ...` (argv[0] `gh`) and the `gh-copilot` shim (a `-` precedes `copilot`) match neither, so the old extension is never treated as this agent.
+
 ## File paths
 
 ### Agent-owned (read-only except during `ccmux setup`)
@@ -97,8 +108,11 @@ The startup-race closer for markers written before the first scan created the pa
 - Antigravity hooks.json: `~/.gemini/config/hooks.json` (merged by `ccmux setup --agent antigravity`; existing files are backed up to `hooks.json.backup` before modification)
 - Antigravity hooks: `~/.gemini/config/hooks/ccmux-preinvocation.sh`, `ccmux-stop.sh`
 - Antigravity app data: `~/.gemini/antigravity-cli/` (read-only; conversations, transcripts, settings, and per-invocation logs)
+- Copilot sessions: `~/.copilot/session-state/<uuid>/` — `events.jsonl` (real-time JSONL, append-and-close, tailed by the log adapter) plus `session.db` (held open, used for lsof native-id discovery) and `workspace.yaml`
+- Copilot hooks: `~/.copilot/hooks/ccmux-copilot.json` (registration) + `~/.copilot/hooks/ccmux-copilot.sh` (marker script) (written by `ccmux setup --agent copilot`; shared drop-in dir, only these two files owned)
 
 ### ccmux-owned
 
 - Antigravity marker: `~/.config/ccmux/session-pids/antigravity-<conversationId>.json`
-- Markers: `~/.config/ccmux/session-pids/<agent_type>-<session_id>.json` (written by hook scripts for Claude/Codex/Cursor/Antigravity, the bundled plugin for OpenCode, or the bundled extension for Pi; consumed by the daemon's `HookManager`)
+- Copilot marker: `~/.config/ccmux/session-pids/copilot-<sessionId>.json`
+- Markers: `~/.config/ccmux/session-pids/<agent_type>-<session_id>.json` (written by hook scripts for Claude/Codex/Cursor/Antigravity/Copilot, the bundled plugin for OpenCode, or the bundled extension for Pi; consumed by the daemon's `HookManager`)
