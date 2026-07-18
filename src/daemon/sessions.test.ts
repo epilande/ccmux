@@ -24,6 +24,7 @@ const mockSession: Session = {
   version: null,
   pid: null,
   statusChangedAt: null,
+  attentionGeneration: 0,
   previousStatus: null,
   attentionState: null,
   lastSeenAt: null,
@@ -109,6 +110,79 @@ describe("SessionManager", () => {
     const session2 = manager.getSession("test-id");
     expect(session2?.statusChangedAt).toBe(changedAt);
     expect(session2?.previousStatus).toBe("idle");
+  });
+
+  describe("attentionGeneration", () => {
+    it("starts at 0 for a newly created session", () => {
+      const manager = new SessionManager();
+      const session = manager.createSession(
+        "test-id",
+        "/some/path/test-id.jsonl",
+      );
+      expect(session.attentionGeneration).toBe(0);
+    });
+
+    it("bumps when attentionType changes", () => {
+      const manager = new SessionManager();
+      manager.createSession("test-id", "/some/path/test-id.jsonl");
+
+      manager.updateSession("test-id", {
+        status: "waiting",
+        attentionType: "permission",
+      });
+      expect(manager.getSession("test-id")?.attentionGeneration).toBe(1);
+    });
+
+    it("bumps when pendingTool changes", () => {
+      const manager = new SessionManager();
+      manager.createSession("test-id", "/some/path/test-id.jsonl");
+
+      manager.updateSession("test-id", { pendingTool: "Bash" });
+      expect(manager.getSession("test-id")?.attentionGeneration).toBe(1);
+    });
+
+    it("bumps only once when attentionType and pendingTool both change in one call", () => {
+      const manager = new SessionManager();
+      manager.createSession("test-id", "/some/path/test-id.jsonl");
+
+      manager.updateSession("test-id", {
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash",
+      });
+      expect(manager.getSession("test-id")?.attentionGeneration).toBe(1);
+    });
+
+    it("does NOT bump on a status-only change with unchanged attention fields", () => {
+      const manager = new SessionManager();
+      manager.createSession("test-id", "/some/path/test-id.jsonl");
+
+      manager.updateSession("test-id", { status: "working" });
+      expect(manager.getSession("test-id")?.attentionGeneration).toBe(0);
+    });
+
+    it("bumps on a waiting->waiting swap where only pendingTool changes", () => {
+      const manager = new SessionManager();
+      manager.createSession("test-id", "/some/path/test-id.jsonl");
+
+      // First permission wait.
+      manager.updateSession("test-id", {
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash",
+      });
+      expect(manager.getSession("test-id")?.attentionGeneration).toBe(1);
+
+      // One wait resolves and a new same-type wait begins in the same status:
+      // status stays "waiting", attentionType stays "permission", only the
+      // pending tool flips. statusChangedAt can't catch this; the generation must.
+      manager.updateSession("test-id", {
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Write",
+      });
+      expect(manager.getSession("test-id")?.attentionGeneration).toBe(2);
+    });
   });
 
   it("initializes prompts as an empty array", () => {

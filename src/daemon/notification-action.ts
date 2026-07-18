@@ -53,6 +53,13 @@ export interface NotificationActionInput {
   action: string;
   /** Staleness token echoed from the notification payload. */
   statusChangedAt?: string;
+  /**
+   * Per-wait generation echoed from the notification payload. Enforced for
+   * `approve`/`deny`/`answer` only: a press must match the session's current
+   * `attentionGeneration` (missing = fail closed), catching a waiting->waiting
+   * swap that `statusChangedAt` can't.
+   */
+  attentionGeneration?: number;
   /** Reply text for the `answer` action. */
   userText?: string;
 }
@@ -254,13 +261,33 @@ export async function handleNotificationAction(
   }
 
   // approve / deny / answer all mutate the pane; first the staleness token must
-  // still match the edge the notification fired for. Caveat: an attentionType flip
+  // still match the edge the notification fired for. An attentionType flip
   // WITHIN `waiting` (permission -> question) doesn't bump `statusChangedAt`
-  // (stamped only on status edges), so the token can't catch it — benign for
-  // Claude, where both waiting reply variants share the Escape prelude.
+  // (stamped only on status edges); the attention generation check below
+  // covers that case.
   const tokenMatches =
     (input.statusChangedAt ?? null) === (session.statusChangedAt ?? null);
   if (!tokenMatches) {
+    deps.reNotify(session, STATE_CHANGED_BODY);
+    return {
+      code: 409,
+      ok: false,
+      error: "Session state changed since the notification fired",
+    };
+  }
+
+  // The attention generation closes the gap `statusChangedAt` leaves open: a
+  // waiting->waiting swap (one wait resolves, a new same-type wait begins)
+  // keeps `status` unchanged, so the token above still matches, but the
+  // generation advanced. Require an exact match so a press approves the wait it
+  // was fired for, never the one that silently replaced it. Fail closed on a
+  // missing input field (an older daemon build's notification carries none),
+  // and scope this to the prompt-consuming actions (`default` already returned
+  // above, so only approve/deny/answer reach here).
+  const generationMatches =
+    (input.attentionGeneration ?? null) ===
+    (session.attentionGeneration ?? null);
+  if (!generationMatches) {
     deps.reNotify(session, STATE_CHANGED_BODY);
     return {
       code: 409,

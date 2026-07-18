@@ -263,6 +263,7 @@ export class SessionManager extends EventEmitter {
       version: null,
       pid: null,
       statusChangedAt: null,
+      attentionGeneration: 0,
       previousStatus: null,
       attentionState: null,
       lastSeenAt: null,
@@ -367,6 +368,7 @@ export class SessionManager extends EventEmitter {
       version: null,
       pid: input.pid,
       statusChangedAt: null,
+      attentionGeneration: 0,
       previousStatus: null,
       attentionState: null,
       lastSeenAt: null,
@@ -410,6 +412,7 @@ export class SessionManager extends EventEmitter {
       version: input.version,
       pid: input.pid,
       statusChangedAt: null,
+      attentionGeneration: 0,
       previousStatus: null,
       attentionState: null,
       lastSeenAt: null,
@@ -452,11 +455,24 @@ export class SessionManager extends EventEmitter {
       changed = true;
     }
 
+    let pendingToolChanged = false;
     if (
       state.pendingTool !== undefined &&
       state.pendingTool !== session.pendingTool
     ) {
       session.pendingTool = state.pendingTool;
+      pendingToolChanged = true;
+      changed = true;
+    }
+
+    // Advance the attention generation once per call when the attention
+    // identity changed. This is the ONLY site that bumps it (see the field
+    // doc on Session). A waiting->waiting swap that keeps `status` unchanged
+    // is invisible to `statusChangedAt` but flips `attentionType`/`pendingTool`,
+    // so the generation moves and a press against the resolved wait is rejected.
+    // A single +1 covers both fields changing in one call.
+    if (attentionChanged || pendingToolChanged) {
+      session.attentionGeneration += 1;
       changed = true;
     }
 

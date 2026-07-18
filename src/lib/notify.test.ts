@@ -522,6 +522,23 @@ describe("deliver: ccmux-notifier", () => {
     expect(argv[argv.indexOf("--payload") + 1]).toBe('{"sessionId":"abc123"}');
   });
 
+  it("includes attentionGeneration in the payload JSON when set", async () => {
+    const argv = buildCcmuxNotifierArgv({
+      ...NOTIFIER_PAYLOAD,
+      attentionGeneration: 4,
+    })!;
+    expect(argv[argv.indexOf("--payload") + 1]).toBe(
+      '{"sessionId":"abc123","statusChangedAt":"2024-01-15T12:00:00Z","attentionGeneration":4}',
+    );
+  });
+
+  it("omits attentionGeneration from the payload JSON when unset", async () => {
+    const argv = buildCcmuxNotifierArgv(NOTIFIER_PAYLOAD)!;
+    expect(argv[argv.indexOf("--payload") + 1]).toBe(
+      '{"sessionId":"abc123","statusChangedAt":"2024-01-15T12:00:00Z"}',
+    );
+  });
+
   it("refuses to build (null) without a resolved notifierPath or callbackUrl", async () => {
     expect(buildCcmuxNotifierArgv(BASE_PAYLOAD)).toBeNull();
     expect(

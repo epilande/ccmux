@@ -142,6 +142,16 @@ export interface Session {
   pid: number | null;
   /** ISO timestamp of last status transition */
   statusChangedAt: string | null;
+  /**
+   * Monotonic per-session counter, bumped whenever the attention identity
+   * (`attentionType` or `pendingTool`) changes. Complements `statusChangedAt`:
+   * a waiting->waiting swap (one wait resolves, a new same-type wait begins)
+   * keeps `status` unchanged, so `statusChangedAt` can't catch it, but the
+   * generation still advances. A notification-action press echoes the
+   * generation it fired for and must match the session's current value, so a
+   * press against a superseded wait is rejected instead of answered blind.
+   */
+  attentionGeneration: number;
   /** Status before the last transition */
   previousStatus: SessionStatus | null;
   /** Inbox-style attention state (null/unread/read), orthogonal to status */
