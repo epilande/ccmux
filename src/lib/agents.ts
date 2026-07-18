@@ -99,20 +99,41 @@ export interface AgentDef {
   /**
    * Named tmux keys (or literal characters) an actionable notification sends
    * to answer this agent's permission prompt, applied sequentially via
-   * `sendKeyToPane`. Presence of a map is what gates Approve/Deny buttons onto
-   * a `permission` notification (v2 scope: Claude only); an agent without a map
-   * gets default-click-jump notifications with no buttons. Question-type waits
-   * use inline reply instead and don't consult `approve`/`deny`.
+   * `sendKeyToPane`. `approve`/`deny` gate the Approve/Deny buttons on a
+   * `permission` notification; without them it is click-jump only.
    *
-   * `answerPrelude` is sent (as named keys, sequentially) BEFORE the literal
-   * reply text on the `answer` action — Claude's AskUserQuestion picker ignores
-   * typed text, so `["Escape"]` cancels the picker back to the composer where
-   * the reply lands as a normal user message (see `handleNotificationAction`).
+   * `answerPrelude` keys are sent before the reply text on the `answer` action.
+   * Claude's AskUserQuestion picker ignores typed text, so `["Escape"]` cancels
+   * it back to the composer where the reply lands as a user message (see
+   * `handleNotificationAction`).
+   *
+   * `replyOnQuestion` opts `question` waits into inline Reply; `replyOnFinished`
+   * opts `finished` (idle) waits into one. Idle Reply carries NO prelude: at
+   * Claude's idle composer Escape clears a draft and double-Escape opens history
+   * rewind, so a prelude there is harmful (see `resolveActionPlan`).
+   *
+   * `permissionReplyPrelude` opts a `permission` notification into Reply and
+   * legalizes `answer` on a permission wait. This IS a deny: its keys cancel the
+   * prompt (Claude: `Escape`), then the reply text arrives as the next user
+   * message. Presence is the legality gate: without the cancel, text + Enter at
+   * a numbered picker would select the highlighted (approve) option.
+   *
+   * `planApprove`/`planDeny`/`planReplyPrelude` are the ExitPlanMode analogues
+   * of `approve`/`deny`/`permissionReplyPrelude`. ExitPlanMode renders a
+   * different picker (separate approve key; see the Claude def for the auto-mode
+   * footgun). `planApprove`/`planDeny` gate the buttons; `planReplyPrelude` gates
+   * the plan Reply.
    */
   notificationActions?: {
     approve?: string[];
     deny?: string[];
     answerPrelude?: string[];
+    permissionReplyPrelude?: string[];
+    planApprove?: string[];
+    planDeny?: string[];
+    planReplyPrelude?: string[];
+    replyOnQuestion?: boolean;
+    replyOnFinished?: boolean;
   };
   /**
    * This agent's permission-prompt marker cannot be trusted to mean a real
@@ -285,15 +306,11 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
     };
   }
   if (override.notificationActions !== undefined) {
-    // Whole-object replace (not a per-key merge): a custom map is authored as a
-    // complete approve/deny/answerPrelude set, and merging keys from the
-    // builtin default would silently graft Claude's keystrokes onto a
-    // different agent's prompt.
-    merged.notificationActions = {
-      approve: override.notificationActions.approve,
-      deny: override.notificationActions.deny,
-      answerPrelude: override.notificationActions.answerPrelude,
-    };
+    // Whole-object replace, not a per-key merge: a custom map is authored as a
+    // complete set, and grafting builtin default keys onto it would apply
+    // Claude's keystrokes to a different agent's prompt. The spread copies every
+    // field, so a new key needs no line here and can't be silently dropped.
+    merged.notificationActions = { ...override.notificationActions };
   }
   if (override.ambiguousPermissionMarker !== undefined) {
     merged.ambiguousPermissionMarker = override.ambiguousPermissionMarker;
@@ -410,10 +427,24 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // `answerPrelude: ["Escape"]` cancels the AskUserQuestion picker before the
     // reply text (the picker ignores typed literals; Escape returns to the
     // composer where the reply sends as a user message).
+    // Remaining rows verified on Claude Code 2.1.211 (full detail in
+    // docs/agent-adapters.md, Claude caveats): every reply prelude is Escape,
+    // cancelling the prompt/picker to a composer where text + Enter sends as a
+    // user message; the idle (`replyOnFinished`) Reply intentionally has NO
+    // prelude. At the ExitPlanMode picker option 1 is "Yes, and use auto mode",
+    // option 2 is "manually approve edits", so `planApprove` MUST be ["2"],
+    // never ["1"] (which silently enables auto mode); the digit submits with
+    // no Enter.
     notificationActions: {
       approve: ["1"],
       deny: ["Escape"],
       answerPrelude: ["Escape"],
+      permissionReplyPrelude: ["Escape"],
+      planApprove: ["2"],
+      planDeny: ["Escape"],
+      planReplyPrelude: ["Escape"],
+      replyOnQuestion: true,
+      replyOnFinished: true,
     },
     // AskUserQuestion fires the same `permission_prompt` payload as a real
     // permission prompt, so its marker lands as `waiting_permission`; the pane

@@ -108,6 +108,28 @@ function describeAttention(
   }
 }
 
+/** The inline Reply action, hoisted so every branch stamps the identical
+ *  literal (the macOS helper keys its categories off the exact action set). */
+const REPLY_ACTION = { id: "answer", label: "Reply" } as const;
+
+/** Approve/Deny buttons for a wait: BOTH or NEITHER. The macOS helper registers
+ *  exactly three categories (approve+deny, reply-only, approve+deny+reply), so a
+ *  lone button matches none and renders button-less. One key map is a misconfig;
+ *  drop both. Shared by the `permission` and `plan_approval` branches, which
+ *  differ only in key source. */
+function buildActionButtons(
+  approveKeys: string[] | undefined,
+  denyKeys: string[] | undefined,
+): NonNullable<NotificationPayload["actions"]> {
+  if (approveKeys?.length && denyKeys?.length) {
+    return [
+      { id: "approve", label: "Approve" },
+      { id: "deny", label: "Deny" },
+    ];
+  }
+  return [];
+}
+
 function buildTitle(session: Readonly<Session>): string {
   const agent = getAgentDisplayName(session.agentType);
   // Agent-first, then the TUI's `project:branch` ref convention (see Preview.tsx
@@ -421,13 +443,16 @@ export class Notifier {
   }
 
   /**
-   * Builds the delivered payload: the base fields (identity title + event-line
-   * subtitle) plus the contextual `body` and, for a wait, the v2 actionable
-   * extras (Approve/Deny buttons, inline Reply). Buttons appear only for a
-   * `permission` wait whose agent defines a `notificationActions` map; Reply
-   * only for a `question` wait on Claude (v2 scope). Every enrichment fails
-   * open — a null context leaves the body empty and the subtitle carrying the
-   * event on its own.
+   * Builds the delivered payload: base fields (identity title + event-line
+   * subtitle), the contextual `body`, and the actionable extras (Approve/Deny
+   * buttons, inline Reply). Buttons appear on a `permission` wait (`approve`/
+   * `deny`) and a `plan_approval` wait (`planApprove`/`planDeny`). Reply is
+   * def-driven: `permission` + `permissionReplyPrelude`, `question` +
+   * `replyOnQuestion`, `plan_approval` + `planReplyPrelude`, `finished` (idle) +
+   * `replyOnFinished`. `effectiveAttention` folds in the context's delivery-time
+   * `reclassifyAs`, so an ExitPlanMode wait stored as permission renders the plan
+   * actions. Every enrichment fails open: a null context leaves the body empty,
+   * the subtitle carrying the event alone.
    */
   private async buildPayload(
     session: Readonly<Session>,
@@ -441,6 +466,11 @@ export class Notifier {
         this.deps.buildFinishedContext ?? buildFinishedContext;
       const body = await buildFinished(session);
       if (body) payload.body = body;
+      const map = this.deps.getAgent?.(session.agentType)?.notificationActions;
+      // Reply needs a bound pane; a paneless (background / soft-evicted) row
+      // would advertise a Reply that can only 409 and discard the text.
+      if (map?.replyOnFinished && session.tmuxPane)
+        payload.reply = REPLY_ACTION;
       return payload;
     }
 
@@ -452,25 +482,40 @@ export class Notifier {
     const buildContext = this.deps.buildContext ?? buildNotificationContext;
     const context = await buildContext(session);
     const effectiveAttention = context.reclassifyAs ?? session.attentionType;
+    const map = this.deps.getAgent?.(session.agentType)?.notificationActions;
 
-    if (effectiveAttention === "permission") {
-      const map = this.deps.getAgent?.(session.agentType)?.notificationActions;
-      const actions: NotificationPayload["actions"] = [];
-      if (map?.approve && map.approve.length > 0) {
-        actions.push({ id: "approve", label: "Approve" });
+    // Every action/reply types into the pane, so a paneless (background /
+    // soft-evicted) row gets none (the button would only 409). The context
+    // body/subtitle below still enrich the informational notification.
+    if (session.tmuxPane) {
+      if (effectiveAttention === "permission") {
+        const actions = buildActionButtons(map?.approve, map?.deny);
+        if (actions.length > 0) payload.actions = actions;
+        // A permission Reply is deny-with-feedback (label stays "Reply"; deny
+        // semantics live in the handler and README). The Approve/Deny+Reply
+        // category is already registered in the macOS helper.
+        if (map?.permissionReplyPrelude?.length) {
+          payload.reply = REPLY_ACTION;
+        }
+      } else if (
+        effectiveAttention === "question" &&
+        map?.replyOnQuestion &&
+        map.answerPrelude?.length
+      ) {
+        // The prelude is half the gate (matching resolveActionPlan's question
+        // row): without a cancel key the handler refuses the reply (the picker
+        // ignores typed text), so offering the button would only 409.
+        payload.reply = REPLY_ACTION;
+      } else if (effectiveAttention === "plan_approval") {
+        // ExitPlanMode wait: same Approve/Deny + optional Reply shape as
+        // permission, but gated on the separate plan key maps (approve = the
+        // "manually approve edits" digit, never auto mode; see the def).
+        const actions = buildActionButtons(map?.planApprove, map?.planDeny);
+        if (actions.length > 0) payload.actions = actions;
+        if (map?.planReplyPrelude?.length) {
+          payload.reply = REPLY_ACTION;
+        }
       }
-      if (map?.deny && map.deny.length > 0) {
-        actions.push({ id: "deny", label: "Deny" });
-      }
-      if (actions.length > 0) payload.actions = actions;
-    } else if (
-      effectiveAttention === "question" &&
-      // v2 scope: only Claude's `answer` path is wired end to end. Gate on the
-      // agent type explicitly (question waits use inline reply, not the
-      // approve/deny key map, so there's no map presence to key off).
-      session.agentType === "claude"
-    ) {
-      payload.reply = { id: "answer", label: "Reply" };
     }
 
     // A reclassification invalidates the base SUBTITLE (built for the stored

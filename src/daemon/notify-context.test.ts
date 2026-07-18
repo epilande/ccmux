@@ -6,10 +6,11 @@ import {
   buildFinishedContext,
   buildNotificationContext,
   extractPermissionPrompt,
+  extractPlanPrompt,
   extractQuestionPrompt,
-  matchesQuestionPickerSignature,
   type NotifyContextSession,
 } from "./notify-context";
+import { matchesQuestionPickerSignature } from "./pane-classify";
 
 // Mirror of the module's MAX_CONTEXT_CHARS cap; kept local so the clamp test
 // stays honest without exporting the constant.
@@ -56,6 +57,20 @@ function userText(text: string) {
   return {
     type: "user",
     message: { role: "user", content: text },
+    timestamp: "2024-01-15T12:00:00Z",
+  };
+}
+
+/** An array-form user turn: a `tool_result` reply, which carries no user text.
+ *  A plan approval / rejection-with-feedback writes exactly this against the
+ *  ExitPlanMode tool_use. */
+function userToolResult(text: string) {
+  return {
+    type: "user",
+    message: {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "t1", content: text }],
+    },
     timestamp: "2024-01-15T12:00:00Z",
   };
 }
@@ -475,20 +490,302 @@ describe("buildNotificationContext: gating", () => {
       ),
     ).toEqual({ body: null });
   });
+});
 
-  it("returns null body for a plan_approval wait", async () => {
-    const { capturePane } = permissionSession(BORDERED_PROMPT);
+describe("extractPlanPrompt", () => {
+  /** A pane with the ExitPlanMode plan box: header, top rule, content, bottom
+   *  rule (╌ = U+254C), blank padding, then the picker. */
+  const PLAN_BOX = [
+    "  ⏺ Ready to code?",
+    "   Here is Claude's plan:",
+    "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+    "   Plan: add hello script",
+    "   Context",
+    "   Add a hello-world shell script",
+    "   Steps",
+    "   1. Create hello.sh",
+    "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+    "",
+    "  ──────────────────────────────",
+    "   Would you like to proceed?",
+    "   ❯ 1. Yes, and use auto mode",
+    "     2. Yes, manually approve edits",
+  ].join("\n");
+
+  it("extracts the plan box content, clamped, when the header is visible", () => {
+    expect(extractPlanPrompt(PLAN_BOX)).toBe(
+      "Plan: add hello script\nContext\nAdd a hello-world shell script\nSteps…",
+    );
+  });
+
+  it("returns null when the header scrolled off (not in the capture)", () => {
+    const noHeader = PLAN_BOX.split("\n").slice(3).join("\n");
+    expect(extractPlanPrompt(noHeader)).toBeNull();
+  });
+
+  it("returns null on a pane with no plan box at all", () => {
+    expect(extractPlanPrompt("just some idle output\n❯ ")).toBeNull();
+  });
+
+  it("anchors on the LAST plan box when scrollback holds an earlier one", () => {
+    // Two plan boxes share one capture (the refine flow re-renders the box); the
+    // extractor must read the LAST (fresh) plan, not the stale one above it.
+    const box = (title: string) =>
+      [
+        "   Here is Claude's plan:",
+        "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+        `   ${title}`,
+        "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+      ].join("\n");
+    const text = `${box("stale first plan")}\n  ⏺ refining...\n${box(
+      "fresh second plan",
+    )}`;
+    expect(extractPlanPrompt(text)).toBe("fresh second plan");
+  });
+});
+
+describe("buildNotificationContext: plan_approval", () => {
+  /** A long-enough plan to exercise the 4-line clamp. */
+  const PLAN_MD = [
+    "Plan: add script",
+    "Step 1: create hello.sh",
+    "Step 2: chmod +x",
+    "Step 3: run it",
+    "Step 4: verify output",
+  ].join("\n");
+  const CLAMPED =
+    "Plan: add script\nStep 1: create hello.sh\nStep 2: chmod +x\nStep 3: run it…";
+
+  /** The plan box on the pane, for the transcript-absent fallback. */
+  const PLAN_BOX_PANE = [
+    "   Here is Claude's plan:",
+    "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+    "   Ship the thing",
+    "  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+    "",
+    "  ──────────────────────────────",
+    "   Would you like to proceed?",
+    "   ❯ 1. Yes, and use auto mode",
+    "     2. Yes, manually approve edits",
+  ].join("\n");
+
+  it("falls back to the pane plan box when the transcript has no ExitPlanMode tool_use", async () => {
+    // The common wait window: ExitPlanMode's tool_use is deferred out of the
+    // JSONL, so the body comes from the pane plan box instead.
     expect(
       await buildNotificationContext(
         {
           agentType: "claude",
           logPath: null,
-          attentionType: "plan_approval",
-          pendingTool: "Bash",
+          attentionType: "permission",
+          pendingTool: null,
           tmuxPane: "%42",
           lastPrompt: null,
         },
-        { capturePane },
+        { capturePane: async () => PLAN_BOX_PANE },
+      ),
+    ).toEqual({ body: "Ship the thing", reclassifyAs: "plan_approval" });
+  });
+
+  /** A pane that classifies as the plan picker (terminator + "use auto mode"). */
+  const PLAN_PICKER_PANE = [
+    " Would you like to proceed?",
+    " ❯ 1. Yes, and use auto mode",
+    "   2. Yes, manually approve edits",
+  ].join("\n");
+
+  it("reads the ExitPlanMode input.plan from the transcript and reclassifies a permission-stored plan wait", async () => {
+    // A LIVE plan wait is stored as permission + pendingTool ExitPlanMode (the
+    // marker wins the cascade as waiting_permission). The pane confirms the plan
+    // picker; the BODY comes from the transcript (not the pane, whose plan box
+    // is unreadable), and the wait is reclassified so the subtitle rebuilds to
+    // "Plan ready for review".
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", {
+        plan: PLAN_MD,
+        planFilePath: "/x/plan.md",
+      }),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "permission",
+          pendingTool: "ExitPlanMode",
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => PLAN_PICKER_PANE },
+      ),
+    ).toEqual({ body: CLAMPED, reclassifyAs: "plan_approval" });
+  });
+
+  it("does NOT reclassify when the predicate says plan but the pane shows a permission prompt", async () => {
+    // Direction (b): a permission wait right after a plan wait can retain a
+    // stale ExitPlanMode pendingTool. The live pane overrides the predicate, so
+    // the notifier offers permission context/buttons, not plan.
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", { plan: PLAN_MD }),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "permission",
+          pendingTool: "ExitPlanMode",
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => BORDERED_PROMPT },
+      ),
+    ).toEqual({
+      body: "rtk curl -sI https://example.com/\nFetch example.com front page",
+    });
+  });
+
+  it("reclassifies to plan when the predicate says permission but the pane shows the plan picker", async () => {
+    // Direction (a): a live plan wait can arrive with pendingTool null (lost log
+    // stamp), so isPlanApprovalWait is false. The live pane overrides it back to
+    // a plan.
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", { plan: "Ship the thing" }),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "permission",
+          pendingTool: null,
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => PLAN_PICKER_PANE },
+      ),
+    ).toEqual({ body: "Ship the thing", reclassifyAs: "plan_approval" });
+  });
+
+  it("falls back to the predicate when the pane capture throws", async () => {
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", { plan: "Ship the thing" }),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "permission",
+          pendingTool: "ExitPlanMode",
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        {
+          capturePane: async () => {
+            throw new Error("tmux gone");
+          },
+        },
+      ),
+    ).toEqual({ body: "Ship the thing", reclassifyAs: "plan_approval" });
+  });
+
+  it("returns a null body when a newer user message supersedes the plan (currency guard)", async () => {
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", { plan: PLAN_MD }),
+      userText("actually, do something else"),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "permission",
+          pendingTool: "ExitPlanMode",
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => PLAN_PICKER_PANE },
+      ),
+    ).toEqual({ body: null, reclassifyAs: "plan_approval" });
+  });
+
+  it("falls back to pane extraction when a tool_result resolution supersedes the transcript plan", async () => {
+    // The plan's ExitPlanMode tool_use is still in the tail, but a NEWER
+    // array-form user turn carries a tool_result: the plan was already
+    // approved/denied. The transcript path must fail closed to null (it would
+    // otherwise return the superseded PLAN_MD), so the body comes from the pane
+    // plan box instead.
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", { plan: PLAN_MD }),
+      userToolResult("User has approved your plan. You can now start coding."),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "permission",
+          pendingTool: "ExitPlanMode",
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => PLAN_BOX_PANE },
+      ),
+    ).toEqual({ body: "Ship the thing", reclassifyAs: "plan_approval" });
+  });
+
+  it("does not reclassify a wait already stored as plan_approval", async () => {
+    const path = await writeTranscript([
+      assistantToolUse("ExitPlanMode", { plan: "Add a hello-world script" }),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "plan_approval",
+          pendingTool: null,
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => "" },
+      ),
+    ).toEqual({ body: "Add a hello-world script" });
+  });
+
+  it("returns a null body but still reclassifies when there is no transcript", async () => {
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: null,
+          attentionType: "permission",
+          pendingTool: "ExitPlanMode",
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => "" },
+      ),
+    ).toEqual({ body: null, reclassifyAs: "plan_approval" });
+  });
+
+  it("returns a null body when the transcript has no ExitPlanMode tool_use", async () => {
+    const path = await writeTranscript([
+      assistantText("just some assistant text"),
+      assistantToolUse("Bash", { command: "ls" }),
+    ]);
+    expect(
+      await buildNotificationContext(
+        {
+          agentType: "claude",
+          logPath: path,
+          attentionType: "plan_approval",
+          pendingTool: null,
+          tmuxPane: "%42",
+          lastPrompt: null,
+        },
+        { capturePane: async () => "" },
       ),
     ).toEqual({ body: null });
   });

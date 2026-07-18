@@ -7,7 +7,7 @@ import {
   type NotificationsConfig,
 } from "./notifier";
 import { SessionManager } from "./sessions";
-import { BUILTIN_AGENTS } from "../lib/agents";
+import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
 import type { NotificationPayload } from "../lib/notify";
 import { SCAN_INTERVAL_MS } from "../lib/config";
 import type { Session, SessionStatus } from "../types/session";
@@ -1016,11 +1016,61 @@ describe("Notifier", () => {
       return h.delivered[0];
     }
 
-    it("stamps Approve/Deny for a permission wait when the agent has a map", async () => {
+    /** Drives a session working -> idle and returns the single delivered
+     *  finished payload. `buildContext` is stubbed to a value that must NEVER
+     *  appear, so the assertions prove the waiting context is never consulted. */
+    async function deliverFinished(
+      getAgent?: NotifierDeps["getAgent"],
+    ): Promise<NotificationPayload> {
+      const h = createHarness();
+      const notifier = new Notifier({
+        ...h.deps,
+        getAgent,
+        buildContext: async () => ({ body: "should not appear" }),
+        buildFinishedContext: async () => "Wrapped up the refactor.",
+      });
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+      const session = h.sessionManager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: "/tmp/myapp",
+        pid: 1,
+      });
+      h.sessionManager.setLogPath(session.id, "/tmp/myapp/log.jsonl");
+      h.sessionManager.updateSession(session.id, { status: "working" });
+      await tick();
+      h.sessionManager.updateSession(session.id, { status: "idle" });
+      await flush();
+      await h.fireScheduled();
+      expect(h.delivered.length).toBe(1);
+      return h.delivered[0];
+    }
+
+    it("stamps Approve/Deny AND Reply for a permission wait on Claude", async () => {
       const payload = await deliverWaiting({
         attentionType: "permission",
         pendingTool: "Bash",
         getAgent: () => claudeAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      // Claude sets `permissionReplyPrelude`, so a permission wait also carries
+      // the deny-with-feedback Reply.
+      expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
+    });
+
+    it("stamps Approve/Deny only when the agent has no permissionReplyPrelude", async () => {
+      const noPermReplyAgent: AgentDef = {
+        ...claudeAgent,
+        notificationActions: { approve: ["1"], deny: ["Escape"] },
+      };
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Bash",
+        getAgent: () => noPermReplyAgent,
       });
       expect(payload.actions).toEqual([
         { id: "approve", label: "Approve" },
@@ -1046,6 +1096,50 @@ describe("Notifier", () => {
       expect(payload.actions).toBeUndefined();
     });
 
+    it("omits buttons for a def with only approve (both Approve+Deny or neither)", async () => {
+      const approveOnlyAgent: AgentDef = {
+        ...claudeAgent,
+        notificationActions: { approve: ["1"] },
+      };
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Bash",
+        getAgent: () => approveOnlyAgent,
+      });
+      // A lone button matches none of the macOS helper's registered categories,
+      // so it is dropped rather than shipped as a silently button-less banner.
+      expect(payload.actions).toBeUndefined();
+    });
+
+    it("stamps neither actions nor reply for a paneless (background) wait", async () => {
+      const h = createHarness();
+      const notifier = new Notifier({
+        ...h.deps,
+        getAgent: () => claudeAgent,
+        buildContext: async () => ({ body: null }),
+      });
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+      const session = h.sessionManager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: "/tmp/myapp",
+        pid: 1,
+      });
+      // Soft-evict the pane: a background/paneless row can only 409 a press.
+      // (tmuxPane is a binding, not a SessionState field, so null it directly.)
+      session.tmuxPane = null;
+      h.sessionManager.updateSession(session.id, {
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash",
+      });
+      await flush();
+      expect(h.delivered.length).toBe(1);
+      expect(h.delivered[0].actions).toBeUndefined();
+      expect(h.delivered[0].reply).toBeUndefined();
+    });
+
     it("stamps a Reply action for a Claude question wait", async () => {
       const payload = await deliverWaiting({
         attentionType: "question",
@@ -1053,6 +1147,89 @@ describe("Notifier", () => {
       });
       expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
       expect(payload.actions).toBeUndefined();
+    });
+
+    it("stamps no Reply for a question wait when the agent lacks replyOnQuestion", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "question",
+        getAgent: () => opencodeAgent,
+      });
+      expect(payload.reply).toBeUndefined();
+      expect(payload.actions).toBeUndefined();
+    });
+
+    it("stamps no Reply for a question wait when replyOnQuestion lacks an answerPrelude", async () => {
+      // Mirrors the handler's question-row gate: with no cancel key the press
+      // would 409 (the picker ignores typed text), so no button is offered.
+      // Reachable only via an override, since notificationActions is a
+      // whole-map replace and the built-in def always carries answerPrelude.
+      const noPreludeAgent: AgentDef = {
+        ...claudeAgent,
+        notificationActions: {
+          approve: ["1"],
+          deny: ["Escape"],
+          replyOnQuestion: true,
+        },
+      };
+      const payload = await deliverWaiting({
+        attentionType: "question",
+        getAgent: () => noPreludeAgent,
+      });
+      expect(payload.reply).toBeUndefined();
+      expect(payload.actions).toBeUndefined();
+    });
+
+    it("stamps Approve/Deny AND Reply for a plan_approval wait on Claude", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "plan_approval",
+        getAgent: () => claudeAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
+      expect(payload.subtitle).toBe("Plan ready for review");
+    });
+
+    it("stamps neither actions nor reply for a plan_approval wait when the agent has no plan keys", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "plan_approval",
+        getAgent: () => opencodeAgent,
+      });
+      expect(payload.actions).toBeUndefined();
+      expect(payload.reply).toBeUndefined();
+    });
+
+    it("delivery-time reclassify: a permission wait revealed as a plan gets plan actions, not permission actions", async () => {
+      // Plan-only agent: if the permission branch ran (it should NOT), there
+      // would be no approve/deny/reply, so any actions prove the plan branch ran.
+      const planOnlyAgent: AgentDef = {
+        ...claudeAgent,
+        notificationActions: {
+          planApprove: ["2"],
+          planDeny: ["Escape"],
+          planReplyPrelude: ["Escape"],
+        },
+      };
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "ExitPlanMode",
+        getAgent: () => planOnlyAgent,
+        buildContext: async () => ({
+          body: "Plan: add a hello-world script",
+          reclassifyAs: "plan_approval",
+        }),
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
+      // The subtitle rebuilds for the reclassified (plan) type, not the stored
+      // "Needs permission: ExitPlanMode".
+      expect(payload.subtitle).toBe("Plan ready for review");
+      expect(payload.body).toBe("Plan: add a hello-world script");
     });
 
     it("puts the buildContext text in the body, with the event line in the subtitle", async () => {
@@ -1109,37 +1286,26 @@ describe("Notifier", () => {
       expect(h.delivered[0].statusChangedAt).toBe(live!.statusChangedAt!);
     });
 
-    it("gives a finished notification no buttons or reply, and never consults the waiting context", async () => {
-      const h = createHarness();
-      const notifier = new Notifier({
-        ...h.deps,
-        getAgent: () => claudeAgent,
-        // The waiting-context builder must never run for a finished event.
-        buildContext: async () => ({ body: "should not appear" }),
-        buildFinishedContext: async () => "Wrapped up the refactor.",
-      });
-      notifier.start();
-      h.advanceTime(PAST_GRACE_WINDOW);
-      const session = h.sessionManager.createPaneTrackedSession({
-        agentType: "claude",
-        paneId: "%1",
-        cwd: "/tmp/myapp",
-        pid: 1,
-      });
-      h.sessionManager.setLogPath(session.id, "/tmp/myapp/log.jsonl");
-      h.sessionManager.updateSession(session.id, { status: "working" });
-      await tick();
-      h.sessionManager.updateSession(session.id, { status: "idle" });
-      await flush();
-      await h.fireScheduled();
-
-      expect(h.delivered.length).toBe(1);
-      expect(h.delivered[0].event).toBe("finished");
-      expect(h.delivered[0].subtitle).toBe("Finished");
+    it("stamps a Reply on a finished Claude notification, no buttons, and never consults the waiting context", async () => {
+      const payload = await deliverFinished(() => claudeAgent);
+      expect(payload.event).toBe("finished");
+      expect(payload.subtitle).toBe("Finished");
       // The finished body is the enrichment, not the waiting context.
-      expect(h.delivered[0].body).toBe("Wrapped up the refactor.");
-      expect(h.delivered[0].actions).toBeUndefined();
-      expect(h.delivered[0].reply).toBeUndefined();
+      expect(payload.body).toBe("Wrapped up the refactor.");
+      expect(payload.actions).toBeUndefined();
+      expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
+    });
+
+    it("stamps no Reply on a finished notification when no agent lookup is wired", async () => {
+      const payload = await deliverFinished();
+      expect(payload.reply).toBeUndefined();
+      expect(payload.actions).toBeUndefined();
+    });
+
+    it("stamps no Reply on a finished notification for an agent without replyOnFinished", async () => {
+      const payload = await deliverFinished(() => opencodeAgent);
+      expect(payload.reply).toBeUndefined();
+      expect(payload.actions).toBeUndefined();
     });
 
     it("finished body stays empty when the finished context yields nothing", async () => {

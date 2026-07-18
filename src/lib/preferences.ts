@@ -59,15 +59,27 @@ export interface AgentConfig {
   };
   /**
    * Named tmux keys sent to answer a permission prompt from a notification
-   * Approve/Deny button (see `AgentDef.notificationActions`). Defining a map
-   * for a custom agent is what opts its `permission` notifications into
-   * buttons. `answerPrelude` keys are sent before the reply text on the inline
-   * reply action (e.g. to cancel a picker that ignores typed input).
+   * Approve/Deny button (see `AgentDef.notificationActions`). Honored only when
+   * overriding a built-in agent by name; `getAgents` never copies it onto a
+   * from-scratch custom agent, so such an agent gets no buttons. `answerPrelude`
+   * keys are sent before the reply text on the inline reply action (e.g. to
+   * cancel a picker that ignores typed input). `replyOnQuestion`/`replyOnFinished`
+   * opt `question` and `finished` (idle) waits into an inline Reply.
+   * `permissionReplyPrelude` opts `permission` notifications into a Reply that
+   * denies the pending tool (keys cancel the prompt before the reply text).
+   * `planApprove`/`planDeny`/`planReplyPrelude` are the ExitPlanMode analogues
+   * of `approve`/`deny`/`permissionReplyPrelude`.
    */
   notificationActions?: {
     approve?: string[];
     deny?: string[];
     answerPrelude?: string[];
+    permissionReplyPrelude?: string[];
+    planApprove?: string[];
+    planDeny?: string[];
+    planReplyPrelude?: string[];
+    replyOnQuestion?: boolean;
+    replyOnFinished?: boolean;
   };
   /**
    * Set when this custom agent's permission marker can actually cover an
