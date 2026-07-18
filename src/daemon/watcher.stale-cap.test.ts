@@ -1,15 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { createInitialState, applyEntriesToState } from "./status-machine";
 import { SessionManager } from "./sessions";
 import { PANE_IDLE_THRESHOLD_MS } from "../lib/config";
 import { parseLogEntries } from "./parser";
-import {
-  clearPermissionCache,
-  _setGlobalSettingsDir,
-} from "../lib/permission-resolver";
 
 function makeAssistantEntry(timestamp: string, toolName = "Read") {
   return JSON.stringify({
@@ -64,24 +60,15 @@ function deriveAndCapState(
 }
 
 describe("stale working cap on initial state derivation", () => {
+  // A scratch dir used only as a `cwd` argument; status derivation no longer
+  // consults settings, so its contents are irrelevant.
   let globalDir: string;
 
   beforeEach(() => {
-    clearPermissionCache();
     globalDir = mkdtempSync(join(tmpdir(), "stale-cap-"));
-    _setGlobalSettingsDir(globalDir);
-    writeFileSync(
-      join(globalDir, "settings.json"),
-      JSON.stringify({
-        permissions: {
-          allow: ["Read", "Glob", "Grep", "Task"],
-        },
-      }),
-    );
   });
 
   afterEach(() => {
-    _setGlobalSettingsDir(null);
     rmSync(globalDir, { recursive: true, force: true });
   });
 

@@ -12,11 +12,7 @@ import {
   MAX_PROMPT_CHARS,
   MAX_PROMPTS_TOTAL_BYTES,
 } from "../lib/config";
-import {
-  clearPermissionCache,
-  _setGlobalSettingsDir,
-} from "../lib/permission-resolver";
-import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import type {
@@ -32,36 +28,13 @@ import type { Session } from "../types/session";
 
 describe("status-machine", () => {
   let testCwd: string;
-  let globalDir: string;
 
   beforeEach(() => {
-    clearPermissionCache();
     testCwd = mkdtempSync(join(tmpdir(), "sm-test-"));
-    globalDir = mkdtempSync(join(tmpdir(), "sm-global-"));
-    _setGlobalSettingsDir(globalDir);
-    // Settings that allow commonly auto-approved tools
-    writeFileSync(
-      join(globalDir, "settings.json"),
-      JSON.stringify({
-        permissions: {
-          allow: [
-            "Read",
-            "Glob",
-            "Grep",
-            "Task",
-            "ExitPlanMode",
-            "AskUserQuestion",
-            "EnterPlanMode",
-          ],
-        },
-      }),
-    );
   });
 
   afterEach(() => {
-    _setGlobalSettingsDir(null);
     rmSync(testCwd, { recursive: true, force: true });
-    rmSync(globalDir, { recursive: true, force: true });
   });
 
   describe("createInitialState", () => {
