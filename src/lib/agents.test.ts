@@ -98,16 +98,21 @@ describe("findAgentForProcess", () => {
     }
   });
 
-  it("matches Copilot via npx / .bin wrapper commands", () => {
+  it("does NOT match Copilot's node wrapper processes", () => {
+    // The npm/mise/npx wrappers (`node .../bin/copilot`, `npm exec
+    // @github/copilot`) spawn the real SEA binary as a child on the same
+    // pane tty. Matching the wrapper too would double-detect the pane and
+    // flip-flop the pane session's pid every scan, tripping the pane-reuse
+    // identity reset (clearing nativeSessionId/logPath/lastPrompt).
     expect(
-      findAgentForProcess("npm exec @github/copilot", BUILTIN_AGENTS)?.name,
-    ).toBe("copilot");
+      findAgentForProcess("npm exec @github/copilot", BUILTIN_AGENTS),
+    ).toBeNull();
     expect(
       findAgentForProcess(
         "node /Users/test/.npm/_npx/abc/node_modules/.bin/copilot",
         BUILTIN_AGENTS,
-      )?.name,
-    ).toBe("copilot");
+      ),
+    ).toBeNull();
   });
 
   it("does not treat the legacy gh copilot extension as the Copilot CLI", () => {

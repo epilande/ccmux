@@ -783,13 +783,13 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // the basename so the legacy `gh copilot` extension (argv[0] `gh`, or the
     // `gh-copilot` shim) is NOT treated as this agent.
     processMatch: /^copilot$/i,
-    // Path / npx wrapper forms. `/\/copilot` requires a slash immediately
-    // before `copilot`, so `gh-copilot` (preceded by `-`) never matches.
-    commandPatterns: [
-      /(?:^|\s)(?:npx|npm\s+exec)\s+@github\/copilot(?:\s|$)/i,
-      /\/\.bin\/copilot(?:\s|$)/i,
-      /\/copilot(?:\s|$)/i,
-    ],
+    // Deliberately NO commandPatterns: every wrapper form (`node .../bin/copilot`
+    // from npm/mise shims, `npx @github/copilot`) SPAWNS the real binary as a
+    // child that processMatch already catches, and both processes share the
+    // pane's tty. Matching the wrapper too double-detects the pane, and the
+    // per-scan pane-session upsert then flip-flops `pid` between wrapper and
+    // binary, tripping the pane-reuse identity reset every cycle (clearing
+    // nativeSessionId/logPath/lastPrompt as fast as enrichment writes them).
     // `copilot --version` prints `GitHub Copilot CLI 1.0.71.`; the default
     // version patterns extract `1.0.71` from that first line.
     versionCommand: "copilot --version",
