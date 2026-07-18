@@ -81,6 +81,13 @@ export interface NotificationPayload {
    */
   statusChangedAt?: string;
   /**
+   * Per-wait generation (`session.attentionGeneration`) echoed back alongside
+   * `statusChangedAt`. Catches a waiting->waiting swap that keeps `status`
+   * unchanged (invisible to `statusChangedAt`) so an approve/deny/answer press
+   * must match the exact wait it fired for.
+   */
+  attentionGeneration?: number;
+  /**
    * Approve/Deny action buttons for a `permission` wait (ccmux-notifier /
    * D-Bus only). Present only when the session's agent has a
    * `notificationActions` map; the ids round-trip to `/notification-action`.
@@ -442,6 +449,7 @@ export function buildCcmuxNotifierArgv(
     JSON.stringify({
       sessionId: payload.sessionId,
       statusChangedAt: payload.statusChangedAt,
+      attentionGeneration: payload.attentionGeneration,
     }),
   );
   return argv;

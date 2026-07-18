@@ -2224,6 +2224,7 @@ describe("collectPaneTrackedSources (wiring)", () => {
       version: null,
       pid: 1234,
       statusChangedAt: null,
+      attentionGeneration: 0,
       previousStatus: null,
       attentionState: null,
       lastSeenAt: null,

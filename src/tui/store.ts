@@ -186,6 +186,7 @@ export function fabricateInvokeSession(
     version: null,
     pid: null,
     statusChangedAt: event.startedAt,
+    attentionGeneration: 0,
     previousStatus: null,
     attentionState: null,
     lastSeenAt: null,

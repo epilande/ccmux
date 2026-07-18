@@ -31,6 +31,7 @@ export function mockEnrichedSession(
     originInvocationId: null,
     pid: null,
     statusChangedAt: null,
+    attentionGeneration: 0,
     previousStatus: null,
     attentionState: null,
     lastSeenAt: null,

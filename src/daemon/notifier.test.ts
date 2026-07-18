@@ -1286,6 +1286,32 @@ describe("Notifier", () => {
       expect(h.delivered[0].statusChangedAt).toBe(live!.statusChangedAt!);
     });
 
+    it("stamps attentionGeneration alongside the staleness token", async () => {
+      const h = createHarness();
+      const notifier = new Notifier({
+        ...h.deps,
+        buildContext: async () => ({ body: null }),
+      });
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+      const session = h.sessionManager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: "/tmp/myapp",
+        pid: 1,
+      });
+      h.sessionManager.updateSession(session.id, {
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash",
+      });
+      await flush();
+      const live = h.sessionManager.getSession(session.id);
+      expect(h.delivered[0].attentionGeneration).toBe(
+        live!.attentionGeneration,
+      );
+    });
+
     it("stamps a Reply on a finished Claude notification, no buttons, and never consults the waiting context", async () => {
       const payload = await deliverFinished(() => claudeAgent);
       expect(payload.event).toBe("finished");

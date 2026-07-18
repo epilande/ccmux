@@ -66,6 +66,7 @@ function mkSession(overrides: Partial<Session> = {}): Session {
     version: null,
     pid: 123,
     statusChangedAt: STAMP,
+    attentionGeneration: 0,
     previousStatus: "working",
     attentionState: null,
     lastSeenAt: null,
@@ -178,7 +179,12 @@ describe("handleNotificationAction: validation", () => {
   it("returns 404 for a missing session", async () => {
     const { deps } = makeDeps(undefined);
     const res = await handleNotificationAction(
-      { sessionId: "gone", action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: "gone",
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(404);
@@ -203,7 +209,12 @@ describe("handleNotificationAction: approve/deny", () => {
     const session = mkSession();
     const { deps, sendKeyCalls } = makeDeps(session);
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(200);
@@ -215,7 +226,12 @@ describe("handleNotificationAction: approve/deny", () => {
     const session = mkSession();
     const { deps, sendKeyCalls } = makeDeps(session);
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "deny", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(200);
@@ -226,7 +242,12 @@ describe("handleNotificationAction: approve/deny", () => {
     const session = mkSession();
     const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session);
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: "OLD" },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(409);
@@ -236,11 +257,81 @@ describe("handleNotificationAction: approve/deny", () => {
     ]);
   });
 
+  it("rejects a mismatched attentionGeneration with 409, re-notifies, and sends no key", async () => {
+    // A waiting->waiting swap advances the session's generation while the token
+    // above still matches. A press echoing the superseded generation must fail.
+    const session = mkSession({ attentionGeneration: 3 });
+    const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 2,
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: STATE_CHANGED_BODY },
+    ]);
+  });
+
+  it("rejects a missing input.attentionGeneration when the session has one (fail closed)", async () => {
+    const session = mkSession({ attentionGeneration: 1 });
+    const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+
+  it("approves when the attentionGeneration matches", async () => {
+    const session = mkSession({ attentionGeneration: 5 });
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 5,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "1" }]);
+  });
+
+  it("does NOT gate the default (jump) action on a mismatched attentionGeneration", async () => {
+    const session = mkSession({ attentionGeneration: 9 });
+    const { deps, jumpCalls, reNotifyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "default",
+        attentionGeneration: 1,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(jumpCalls).toHaveLength(1);
+    expect(reNotifyCalls).toHaveLength(0);
+  });
+
   it("rejects when status is no longer waiting", async () => {
     const session = mkSession({ status: "working" });
     const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session);
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(409);
@@ -252,7 +343,12 @@ describe("handleNotificationAction: approve/deny", () => {
     const session = mkSession({ attentionType: "question" });
     const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session);
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(409);
@@ -266,7 +362,12 @@ describe("handleNotificationAction: approve/deny", () => {
       getAgent: () => opencodeAgent,
     });
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(409);
@@ -278,7 +379,12 @@ describe("handleNotificationAction: approve/deny", () => {
     const session = mkSession({ tmuxPane: null });
     const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session);
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(409);
@@ -290,7 +396,12 @@ describe("handleNotificationAction: approve/deny", () => {
     const session = mkSession();
     const { deps } = makeDeps(session, { sendKeyResult: false });
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(500);
@@ -309,6 +420,7 @@ describe("handleNotificationAction: answer", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "use\nthe blue\r\none",
       },
       deps,
@@ -327,6 +439,7 @@ describe("handleNotificationAction: answer", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "/compact everything",
       },
       deps,
@@ -348,6 +461,7 @@ describe("handleNotificationAction: answer", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "!!! no, stop",
       },
       deps,
@@ -366,6 +480,7 @@ describe("handleNotificationAction: answer", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "#3 looks right",
       },
       deps,
@@ -384,6 +499,7 @@ describe("handleNotificationAction: answer", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "compact everything",
       },
       deps,
@@ -402,6 +518,7 @@ describe("handleNotificationAction: answer", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "teal",
       },
       deps,
@@ -436,6 +553,7 @@ describe("handleNotificationAction: answer", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "teal",
       },
       deps,
@@ -456,6 +574,7 @@ describe("handleNotificationAction: answer", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "teal",
       },
       deps,
@@ -472,6 +591,7 @@ describe("handleNotificationAction: answer", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "   \n ",
       },
       deps,
@@ -489,6 +609,7 @@ describe("handleNotificationAction: answer", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "x".repeat(MAX_NOTIFICATION_REPLY_CHARS + 1),
       },
       deps,
@@ -505,6 +626,7 @@ describe("handleNotificationAction: answer", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: "OLD",
+        attentionGeneration: 0,
         userText: "hi",
       },
       deps,
@@ -522,6 +644,7 @@ describe("handleNotificationAction: answer", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "use a safer flag",
       },
       deps,
@@ -554,6 +677,7 @@ describe("handleNotificationAction: answer", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "hi",
       },
       deps,
@@ -580,6 +704,7 @@ describe("handleNotificationAction: answer on finished (idle)", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "keep going",
       },
       deps,
@@ -605,6 +730,7 @@ describe("handleNotificationAction: answer on finished (idle)", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "keep going",
       },
       deps,
@@ -622,6 +748,7 @@ describe("handleNotificationAction: answer on finished (idle)", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: "OLD",
+        attentionGeneration: 0,
         userText: "keep going",
       },
       deps,
@@ -635,7 +762,12 @@ describe("handleNotificationAction: answer on finished (idle)", () => {
     const session = idleSession();
     const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session);
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(409);
@@ -652,7 +784,12 @@ describe("handleNotificationAction: plan_approval", () => {
     const session = planSession();
     const { deps, sendKeyCalls } = makeDeps(session);
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(200);
@@ -663,7 +800,12 @@ describe("handleNotificationAction: plan_approval", () => {
     const session = planSession();
     const { deps, sendKeyCalls } = makeDeps(session);
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "deny", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(200);
@@ -678,6 +820,7 @@ describe("handleNotificationAction: plan_approval", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "tweak step 2",
       },
       deps,
@@ -700,7 +843,12 @@ describe("handleNotificationAction: plan_approval", () => {
     });
     const { deps, sendKeyCalls } = makeDeps(session);
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(200);
@@ -721,6 +869,7 @@ describe("handleNotificationAction: plan_approval", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "hi",
       },
       deps,
@@ -743,7 +892,12 @@ describe("handleNotificationAction: plan_approval", () => {
       getAgent: () => noPlanApproveAgent,
     });
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(409);
@@ -759,7 +913,12 @@ describe("handleNotificationAction: liveness guard", () => {
       paneCommand: "zsh",
     });
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(409);
@@ -777,6 +936,7 @@ describe("handleNotificationAction: liveness guard", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "hi",
       },
       deps,
@@ -796,7 +956,12 @@ describe("handleNotificationAction: liveness guard", () => {
         paneCommand: cmd,
       });
       const res = await handleNotificationAction(
-        { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+        {
+          sessionId: session.id,
+          action: "approve",
+          statusChangedAt: STAMP,
+          attentionGeneration: 0,
+        },
         deps,
       );
       expect(res.code).toBe(409);
@@ -809,7 +974,12 @@ describe("handleNotificationAction: liveness guard", () => {
     const session = mkSession(); // permission
     const { deps, sendKeyCalls } = makeDeps(session, { paneCommand: "node" });
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(200);
@@ -822,7 +992,12 @@ describe("handleNotificationAction: liveness guard", () => {
       paneCommand: null,
     });
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(409);
@@ -841,7 +1016,12 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
       captureText: PLAN_PANE,
     });
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(200);
@@ -854,7 +1034,12 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
       captureText: PERMISSION_PANE,
     });
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(200);
@@ -872,7 +1057,12 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
       captureText: PERMISSION_PANE,
     });
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(200);
@@ -885,7 +1075,12 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
       captureText: "just some idle output, no prompt",
     });
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(409);
@@ -899,7 +1094,12 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
       captureThrows: true,
     });
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(409);
@@ -919,7 +1119,12 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
       captureText: "",
     });
     const res = await handleNotificationAction(
-      { sessionId: session.id, action: "approve", statusChangedAt: STAMP },
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
       deps,
     );
     expect(res.code).toBe(200);
@@ -954,6 +1159,7 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "tweak it",
       },
       deps,
@@ -976,6 +1182,7 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "no thanks",
       },
       deps,
@@ -1006,6 +1213,7 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "no, do not do that",
       },
       deps,
@@ -1035,6 +1243,7 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "no, do not do that",
       },
       deps,
@@ -1067,6 +1276,7 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "no, do not do that",
       },
       deps,
@@ -1092,6 +1302,7 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "no, the other one",
       },
       deps,
@@ -1115,6 +1326,7 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
         sessionId: session.id,
         action: "answer",
         statusChangedAt: STAMP,
+        attentionGeneration: 0,
         userText: "the blue one",
       },
       deps,

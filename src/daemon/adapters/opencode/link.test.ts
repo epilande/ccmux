@@ -96,6 +96,7 @@ function makeUnlinkedSession(paneId: string): Session {
     version: null,
     pid: null,
     statusChangedAt: null,
+    attentionGeneration: 0,
     previousStatus: null,
     attentionState: null,
     lastSeenAt: null,

@@ -932,6 +932,7 @@ export class DaemonServer {
       sessionId?: unknown;
       action?: unknown;
       statusChangedAt?: unknown;
+      attentionGeneration?: unknown;
       userText?: unknown;
       payload?: unknown;
     };
@@ -951,6 +952,7 @@ export class DaemonServer {
     // fields remain accepted for hand-testing, but a present `payload` wins.
     let payloadSessionId: string | undefined;
     let payloadStatusChangedAt: string | undefined;
+    let payloadAttentionGeneration: number | undefined;
     if (typeof body.payload === "string") {
       let parsed: unknown;
       try {
@@ -962,10 +964,17 @@ export class DaemonServer {
         );
       }
       if (parsed && typeof parsed === "object") {
-        const p = parsed as { sessionId?: unknown; statusChangedAt?: unknown };
+        const p = parsed as {
+          sessionId?: unknown;
+          statusChangedAt?: unknown;
+          attentionGeneration?: unknown;
+        };
         if (typeof p.sessionId === "string") payloadSessionId = p.sessionId;
         if (typeof p.statusChangedAt === "string") {
           payloadStatusChangedAt = p.statusChangedAt;
+        }
+        if (typeof p.attentionGeneration === "number") {
+          payloadAttentionGeneration = p.attentionGeneration;
         }
       }
     }
@@ -977,6 +986,11 @@ export class DaemonServer {
       payloadStatusChangedAt ??
       (typeof body.statusChangedAt === "string"
         ? body.statusChangedAt
+        : undefined);
+    const attentionGeneration =
+      payloadAttentionGeneration ??
+      (typeof body.attentionGeneration === "number"
+        ? body.attentionGeneration
         : undefined);
 
     if (sessionId === undefined || typeof body.action !== "string") {
@@ -990,6 +1004,7 @@ export class DaemonServer {
       sessionId,
       action: body.action,
       statusChangedAt,
+      attentionGeneration,
       userText: typeof body.userText === "string" ? body.userText : undefined,
     };
 

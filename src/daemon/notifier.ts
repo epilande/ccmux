@@ -168,6 +168,10 @@ function buildBasePayload(
     // The staleness token the ccmux-notifier callback echoes back so
     // `/notification-action` can reject a press whose session moved on.
     statusChangedAt: session.statusChangedAt ?? undefined,
+    // The per-wait generation echoed alongside it, so a press against a
+    // superseded waiting->waiting swap (which `statusChangedAt` can't catch)
+    // is rejected. See `Session.attentionGeneration`.
+    attentionGeneration: session.attentionGeneration,
     // ccmux-notifier delivery fields (notifierPath/callbackUrl) are stamped by
     // the daemon's delivery wrapper (src/daemon/notify-delivery.ts), which owns
     // the resolved helper path and daemon port this module doesn't have.

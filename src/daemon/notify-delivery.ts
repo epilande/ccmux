@@ -117,6 +117,7 @@ function resolveDbusActionWiring(
         sessionId: payload.sessionId,
         action: actionKey,
         statusChangedAt: payload.statusChangedAt,
+        attentionGeneration: payload.attentionGeneration,
       });
       return;
     }
@@ -125,6 +126,7 @@ function resolveDbusActionWiring(
         sessionId: payload.sessionId,
         action: "answer",
         statusChangedAt: payload.statusChangedAt,
+        attentionGeneration: payload.attentionGeneration,
         userText,
       });
       return;

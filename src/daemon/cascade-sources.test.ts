@@ -43,6 +43,7 @@ function mkSession(overrides: Partial<Session> = {}): Session {
     version: null,
     pid: null,
     statusChangedAt: null,
+    attentionGeneration: 0,
     previousStatus: null,
     attentionState: null,
     lastSeenAt: null,

@@ -391,6 +391,7 @@ describe("createNotifyDelivery: dbus routing", () => {
     const payload: NotificationPayload = {
       ...BASE_PAYLOAD,
       statusChangedAt: "t-1",
+      attentionGeneration: 6,
       actions: [
         { id: "approve", label: "Approve" },
         { id: "deny", label: "Deny" },
@@ -401,7 +402,12 @@ describe("createNotifyDelivery: dbus routing", () => {
     const onAction = fake.notifyCalls[0]?.onAction;
     onAction!("approve");
     expect(actionCalls).toEqual([
-      { sessionId: "abc123", action: "approve", statusChangedAt: "t-1" },
+      {
+        sessionId: "abc123",
+        action: "approve",
+        statusChangedAt: "t-1",
+        attentionGeneration: 6,
+      },
     ]);
   });
 

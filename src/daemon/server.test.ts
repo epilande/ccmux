@@ -181,6 +181,7 @@ function fakeSession(id: string, tmuxPane: string | null = null): Session {
     version: null,
     pid: null,
     statusChangedAt: null,
+    attentionGeneration: 0,
     previousStatus: null,
     attentionState: null,
     lastSeenAt: null,
@@ -2211,8 +2212,71 @@ describe("POST /notification-action", () => {
       sessionId: "s1",
       action: "approve",
       statusChangedAt: "t",
+      attentionGeneration: undefined,
       userText: undefined,
     });
+  });
+
+  it("extracts a numeric attentionGeneration from the opaque payload string", async () => {
+    let received: unknown = null;
+    const runner = mock(async (input: unknown) => {
+      received = input;
+      return { code: 200 as const, ok: true, action: "approve" as const };
+    });
+    const { internals } = createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runner,
+    );
+    await internals.handleRequest(
+      postBody({
+        action: "approve",
+        payload: JSON.stringify({
+          sessionId: "s1",
+          statusChangedAt: "t",
+          attentionGeneration: 7,
+        }),
+      }),
+    );
+    expect(received).toEqual({
+      sessionId: "s1",
+      action: "approve",
+      statusChangedAt: "t",
+      attentionGeneration: 7,
+      userText: undefined,
+    });
+  });
+
+  it("treats a non-numeric attentionGeneration in the payload as absent", async () => {
+    let received: { attentionGeneration?: unknown } | null = null;
+    const runner = mock(async (input: { attentionGeneration?: unknown }) => {
+      received = input;
+      return { code: 200 as const, ok: true, action: "approve" as const };
+    });
+    const { internals } = createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      runner,
+    );
+    await internals.handleRequest(
+      postBody({
+        action: "approve",
+        payload: JSON.stringify({
+          sessionId: "s1",
+          statusChangedAt: "t",
+          attentionGeneration: "not-a-number",
+        }),
+      }),
+    );
+    expect(received!.attentionGeneration).toBeUndefined();
   });
 
   it("prefers the payload's sessionId/statusChangedAt over top-level fields", async () => {
