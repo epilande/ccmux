@@ -235,11 +235,6 @@ export const MAX_PROMPT_CHARS = 240; // per-prompt truncation
 export const MAX_PROMPTS_TOTAL_BYTES = 4096; // drop-oldest ceiling
 
 /**
- * Check if a tool requires permission (settings-aware)
- */
-export { toolRequiresPermission } from "./permission-resolver";
-
-/**
  * Get daemon URL
  */
 export function getDaemonUrl(): string {

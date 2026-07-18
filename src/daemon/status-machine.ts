@@ -17,7 +17,6 @@ import type {
   AttentionType,
 } from "../types/session";
 import {
-  toolRequiresPermission,
   MAX_SESSION_PROMPTS,
   MAX_PROMPT_CHARS,
   MAX_PROMPTS_TOTAL_BYTES,
@@ -206,7 +205,6 @@ function processAssistantEntry(
   );
 
   if (toolUses.length > 0) {
-    const permissionToolIds: string[] = [];
     const taskToolIds: string[] = [];
     let hasExitPlanMode = false;
     let exitPlanModeId: string | undefined;
@@ -228,11 +226,6 @@ function processAssistantEntry(
         askUserQuestionId = tool.id;
       }
 
-      // Collect permission-required tool IDs for parallel tracking
-      if (toolRequiresPermission(tool.name, tool.input, currentState.cwd)) {
-        permissionToolIds.push(tool.id);
-      }
-
       if (tool.name === "Task") {
         taskToolIds.push(tool.id);
       }
@@ -247,21 +240,16 @@ function processAssistantEntry(
         mergedTaskIds.length > 0 ? true : currentState.hasActiveSubagent,
     };
 
-    // Permission-required tools take precedence over everything
-    if (permissionToolIds.length > 0) {
-      const existingIds = currentState.pendingToolIds || [];
-      const mergedIds = [...new Set([...existingIds, ...permissionToolIds])];
-      return {
-        ...newState,
-        status: "waiting",
-        attentionType: "permission",
-        pendingTool: permissionToolIds[0]
-          ? (toolUses.find((t) => t.id === permissionToolIds[0])?.name ?? null)
-          : null,
-        pendingToolIds: mergedIds,
-        ...taskFields,
-      };
-    }
+    // No log-derived permission waiting: a tool_use that would require
+    // permission is NOT surfaced as `waiting` here. Claude Code defers writing
+    // a permission-gated tool_use to the transcript until AFTER the user
+    // resolves the prompt (verified against Claude Code 2.1.214), so a
+    // tool_use we can see has already been approved and is executing — deriving
+    // `waiting` from it only phantom-fires under auto-accept/bypass modes,
+    // where the tool runs with no prompt on screen. Genuine prompts reach the
+    // row through the Notification-hook marker instead. See the fuller
+    // rationale on `getEffectiveStatus` below. An unresolved tool_use falls
+    // through to the working-state logic.
 
     // ExitPlanMode → waiting for plan approval
     if (hasExitPlanMode) {
@@ -299,7 +287,10 @@ function processAssistantEntry(
       };
     }
 
-    // Auto-approved tools - preserve waiting state if permission-required tools still pending
+    // A tool_use arriving while a plan/question wait is still pending
+    // (pendingToolIds tracks the ExitPlanMode/AskUserQuestion tool) must not
+    // clear that wait; carry the pending IDs forward until their tool_result
+    // resolves them in `processUserEntry`.
     const existingPendingIds = currentState.pendingToolIds || [];
     if (existingPendingIds.length > 0) {
       return { ...newState, pendingToolIds: existingPendingIds };
@@ -381,7 +372,8 @@ function processUserEntry(
     // Clear hasActiveSubagent only when ALL Task tools have completed
     const hasActiveSubagent = remainingTaskIds.length > 0;
 
-    // If there are still pending permission-required tools, stay in waiting state
+    // If there are still pending plan/question waits (ExitPlanMode /
+    // AskUserQuestion tool IDs), stay in waiting state
     if (remainingPendingIds.length > 0) {
       return {
         ...currentState,
@@ -551,17 +543,31 @@ interface EffectiveStatus {
  * anomaly: the `Agent` tool acks instantly and the lead genuinely ends its
  * turn while its agents keep working in their own logs.
  *
- * A subagent's `waiting` deliberately does NOT surface as waiting on the
- * row. It is log-derived (an unresolved tool_use reads as permission-
- * pending), so a subagent simply executing a long tool call looks
- * identical to one blocked on approval — a red badge here would false-
- * alarm on every long Bash run under bypassPermissions. Genuine
- * permission prompts surface in the lead's own pane and reach the row
- * through the higher-fidelity marker/terminal signals as the parent's own
- * `waiting`. This intentionally includes `question` (AskUserQuestion):
- * the old question-surfacing path was removed on purpose, not by
- * accident, because a subagent's prompt is answered in the lead's pane,
- * where the parent's own signals already turn the row red.
+ * Neither a subagent's `waiting` nor a MAIN transcript's unresolved
+ * tool_use is surfaced as permission-waiting from the log. The signal is
+ * log-derived, and a tool mid-execution and a genuine approval prompt are
+ * indistinguishable in the transcript: Claude Code defers writing a
+ * permission-gated tool_use until AFTER the user resolves the prompt
+ * (verified against Claude Code 2.1.214), so any tool_use we can read has
+ * already been approved and is running. Deriving `waiting` from it only
+ * phantom-fires under auto-accept/`--dangerously-skip-permissions`/
+ * `defaultMode: "auto"` (a tool executes with no prompt on screen), and
+ * would false-alarm on every long Bash run under bypassPermissions.
+ * Genuine prompts reach the row through the higher-fidelity signals: for
+ * native Claude sessions the `Notification` hook fires and the marker
+ * becomes `waiting_permission`; for pane-tracked sessions the terminal
+ * detector reads the prompt off the pane. `processAssistantEntry` was the
+ * main-transcript source of this permission inference and no longer derives
+ * it (a would-require-permission tool_use is `working`), extending the
+ * decision made earlier for subagents. ExitPlanMode/AskUserQuestion still
+ * derive their own `waiting` from the main transcript, but only as a
+ * best-effort, when-flushed signal: their tool_use is often NOT in the JSONL
+ * during the wait (AskUserQuestion's is absent, ExitPlanMode's is frequently
+ * deferred — see docs/agent-adapters.md), so the marker/pane path is the
+ * authoritative source for those too; the log inference just catches the
+ * cases where the entry is present. This intentionally includes `question`
+ * (AskUserQuestion) for subagents: a subagent's prompt is answered in the
+ * lead's pane, where the parent's own signals already turn the row red.
  *
  * Staleness is bounded by the reconciler: idle subagents self-evict via
  * updateSubagent, and silent active ones are downgraded by the stale

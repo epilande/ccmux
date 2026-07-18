@@ -304,7 +304,11 @@ export function createNotifyDelivery(deps: DeliveryDeps): {
       }
       // osascript / notify-send / command have no retraction capability.
     } catch (error) {
-      log("Notifier: retract failed", error);
+      // Debug-level, not the warn-level `log`: retraction is best-effort
+      // cleanup. A missing/unresolvable helper (e.g. a spawn ENOENT) must not
+      // error-spam the daemon log every time a wait resolves — the banner just
+      // lingers until the OS ages it out.
+      console.debug("Notifier: retract failed, ignoring", error);
     }
   }
 

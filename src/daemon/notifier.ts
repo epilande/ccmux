@@ -44,6 +44,11 @@ export interface NotifierDeps {
   isTerminalFrontmost: () => Promise<boolean>;
   getPrefs: () => Promise<{ notifications?: NotificationsConfig }>;
   deliver: (payload: NotificationPayload) => Promise<void>;
+  /** Retracts a session's delivered notification (macOS `ccmux-notifier
+   *  remove`, Linux `CloseNotification`, a no-op elsewhere). Called when a
+   *  wait we notified about resolves, so the stale banner clears itself.
+   *  Optional: absent means retraction is simply skipped. */
+  retract?: (sessionId: string) => void | Promise<void>;
   /** Resolves a session's agent definition so the payload builder can gate
    *  Approve/Deny buttons on its `notificationActions` map. Optional: absent
    *  means no session ever gets action buttons. */
@@ -235,6 +240,11 @@ export class Notifier {
    * below fires only on the non-"read" -> "read" transition, not on every
    * subsequent change event while a session sits in "read". */
   private lastAttentionState = new Map<string, AttentionState>();
+  /** Session ids with a successfully delivered `waiting` notification still
+   * live in Notification Center. Populated only on actual delivery, so a
+   * suppressed/cooled-down/undelivered wait leaves nothing to retract. Cleared
+   * (and the banner retracted) the moment the session leaves `waiting`. */
+  private deliveredWaiting = new Set<string>();
   /** Per-session generation counter for `armFinishedTimer`: bumped
    * synchronously at the start of each arm so an in-flight (awaiting
    * prefs) arm can detect a newer arm superseded it and bail without
@@ -269,6 +279,7 @@ export class Notifier {
     this.seen.clear();
     this.cooldowns.clear();
     this.lastAttentionState.clear();
+    this.deliveredWaiting.clear();
     this.armGenerations.clear();
   }
 
@@ -304,6 +315,18 @@ export class Notifier {
     if (session.statusChangedAt == null) return;
     if (this.seen.get(session.id) === session.statusChangedAt) return;
 
+    // Retract a delivered `waiting` banner the moment its wait resolves. This
+    // runs before the notification-kind gate below because a `waiting ->
+    // working` transition yields no kind (nothing new to notify) yet must
+    // still pull the now-stale "Needs permission" banner. Guarded by
+    // `deliveredWaiting` so we only ever retract a banner we actually posted
+    // for this session's wait, never an unrelated one (e.g. an older
+    // `finished`) sharing the session's notification group.
+    if (session.status !== "waiting" && this.deliveredWaiting.has(session.id)) {
+      this.deliveredWaiting.delete(session.id);
+      this.retract(session.id);
+    }
+
     const kind = decideNotification(
       session.previousStatus,
       session.status,
@@ -331,10 +354,25 @@ export class Notifier {
     }
   }
 
+  /** Fire-and-forget retraction of a session's delivered notification. The
+   * underlying delivery layer already swallows its own failures at debug
+   * level; this guard just keeps an unexpected throw off the change-event
+   * path. */
+  private retract(sessionId: string): void {
+    try {
+      void Promise.resolve(this.deps.retract?.(sessionId)).catch((error) => {
+        console.debug("Notifier: retract failed, ignoring", error);
+      });
+    } catch (error) {
+      console.debug("Notifier: retract failed, ignoring", error);
+    }
+  }
+
   private handleRemoved(sessionId: string): void {
     this.clearPendingTimer(sessionId);
     this.seen.delete(sessionId);
     this.lastAttentionState.delete(sessionId);
+    this.deliveredWaiting.delete(sessionId);
     this.armGenerations.delete(sessionId);
     const prefix = `${sessionId}:`;
     for (const key of this.cooldowns.keys()) {
@@ -548,6 +586,12 @@ export class Notifier {
     kind: NotificationEventKind,
   ): Promise<void> {
     try {
+      // Snapshot the wait's identity now, as a primitive: `session` can be a
+      // live reference into the store (mutated in place), so the post-delivery
+      // resolution check below must compare against this captured value, not a
+      // field re-read off the object.
+      const armedStatusChangedAt = session.statusChangedAt;
+
       const prefs = await this.deps.getPrefs();
       const cfg = prefs.notifications;
       if (!cfg?.enabled) return;
@@ -569,6 +613,31 @@ export class Notifier {
       this.cooldowns.set(cooldownKey, now);
       const payload = await this.buildPayload(session, kind, cfg);
       await this.deps.deliver(payload);
+      if (kind === "waiting") {
+        // The wait can resolve while delivery is in flight. handleChange
+        // already ran its retract check against the pre-delivery state (found
+        // deliveredWaiting empty) and won't re-run for that edge, so if the
+        // session has since left `waiting` (or its statusChangedAt moved),
+        // recording the banner here would strand it until the NEXT updated
+        // event. Re-read the live session and retract immediately in that
+        // case; otherwise record it so the resolving transition retracts it.
+        //
+        // "Delivered" here means the deliver call was attempted and did not
+        // visibly throw — deliverNotification swallows backend failures and
+        // resolves anyway, so a swallowed failure just makes the retract a
+        // harmless no-op.
+        const live = this.deps.sessionManager.getSession(session.id);
+        if (
+          !live ||
+          live.status !== "waiting" ||
+          live.statusChangedAt !== armedStatusChangedAt
+        ) {
+          this.deliveredWaiting.delete(session.id);
+          this.retract(session.id);
+        } else {
+          this.deliveredWaiting.add(session.id);
+        }
+      }
     } catch (error) {
       console.debug("Notifier: fire failed, dropping notification", error);
     }
