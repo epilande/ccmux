@@ -1,6 +1,7 @@
 import { AntigravityHookAdapter } from "./antigravity/hook-adapter";
 import { ClaudeHookAdapter } from "./claude/hook-adapter";
 import { CodexHookAdapter } from "./codex/hook-adapter";
+import { CopilotHookAdapter } from "./copilot/hook-adapter";
 import { CursorHookAdapter } from "./cursor/hook-adapter";
 import { OpenCodePluginAdapter } from "./opencode/plugin-adapter";
 import { PiHookAdapter } from "./pi/hook-adapter";
@@ -23,5 +24,6 @@ export function createBuiltinHookAdapters(): HookAdapter[] {
     new CursorHookAdapter(),
     new PiHookAdapter(),
     new AntigravityHookAdapter(),
+    new CopilotHookAdapter(),
   ];
 }
