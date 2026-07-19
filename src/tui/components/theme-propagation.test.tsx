@@ -37,6 +37,9 @@ describe("module-scope color resolvers follow the active theme", () => {
     expect(agentColorFor("unknown-agent")).toBe(
       catppuccinLatte.semantic.overlay,
     );
+    expect(agentColorFor("copilot")).toBe(catppuccinLatte.semantic.mauve);
+    expect(agentColorFor("antigravity")).toBe(catppuccinLatte.semantic.blue);
+    expect(agentColorFor("cursor")).toBe(catppuccinLatte.semantic.rosewater);
     expect(prStateColor("red")).toBe(catppuccinLatte.semantic.red);
     expect(prStateColor("none")).toBe(catppuccinLatte.semantic.mauve);
   });
