@@ -107,7 +107,12 @@ export interface AgentDef {
    * it back to the composer where the reply lands as a user message (see
    * `handleNotificationAction`).
    *
-   * `replyOnQuestion` opts `question` waits into inline Reply; `replyOnFinished`
+   * `replyOnQuestion` opts `question` waits into inline Reply. The capability
+   * convention is the PAIR: `replyOnQuestion: true` AND a non-empty
+   * `answerPrelude` (notifier and handler both gate on it — without a cancel
+   * key the press could only 409, so the button is never offered). This is
+   * def-presence, not agent-name: any agent whose def carries the pair gets
+   * question Reply. `replyOnFinished`
    * opts `finished` (idle) waits into one. Idle Reply carries NO prelude: at
    * Claude's idle composer Escape clears a draft and double-Escape opens history
    * rewind, so a prelude there is harmful (see `resolveActionPlan`).
@@ -836,6 +841,10 @@ export function getAgents(preferences?: Preferences): AgentDef[] {
         ? parseRegex(override.readyPattern, `agents.${name}.readyPattern`)
         : undefined,
       hooks: override.hooks,
+      notificationActions: override.notificationActions
+        ? { ...override.notificationActions }
+        : undefined,
+      ambiguousPermissionMarker: override.ambiguousPermissionMarker,
     });
   }
 

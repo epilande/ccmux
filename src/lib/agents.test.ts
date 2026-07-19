@@ -506,6 +506,51 @@ describe("agents.claude.notificationActions", () => {
   });
 });
 
+describe("agents.<custom>.notificationActions (custom-agent path)", () => {
+  it("maps notificationActions and ambiguousPermissionMarker on custom agents", () => {
+    // The custom-agent construction branch is separate from mergeAgentConfig;
+    // before this mapping existed a from-scratch agent silently lost both keys.
+    const agents = getAgents({
+      agents: {
+        myagent: {
+          processMatch: "myagent",
+          terminalRules: [],
+          notificationActions: {
+            approve: ["y"],
+            deny: ["n"],
+            permissionReplyPrelude: ["Escape"],
+            answerPrelude: ["Escape"],
+            replyOnQuestion: true,
+            replyOnFinished: true,
+          },
+          ambiguousPermissionMarker: true,
+        },
+      },
+    });
+    const custom = agents.find((a) => a.name === "myagent");
+    expect(custom?.notificationActions).toEqual({
+      approve: ["y"],
+      deny: ["n"],
+      permissionReplyPrelude: ["Escape"],
+      answerPrelude: ["Escape"],
+      replyOnQuestion: true,
+      replyOnFinished: true,
+    });
+    expect(custom?.ambiguousPermissionMarker).toBe(true);
+  });
+
+  it("leaves both unset on a custom agent that does not configure them", () => {
+    const agents = getAgents({
+      agents: {
+        myagent: { processMatch: "myagent", terminalRules: [] },
+      },
+    });
+    const custom = agents.find((a) => a.name === "myagent");
+    expect(custom?.notificationActions).toBeUndefined();
+    expect(custom?.ambiguousPermissionMarker).toBeUndefined();
+  });
+});
+
 describe("agents.<custom>.readyPattern (custom-agent path)", () => {
   // The merge path (override of a built-in) and the custom-agent path
   // (a brand-new agent with no built-in to merge into) are separate
