@@ -120,6 +120,18 @@ export const PI_EXTENSION_DIR = join(PI_AGENT_DIR, "extensions");
 export const PI_EXTENSION_FILE = join(PI_EXTENSION_DIR, "ccmux.js");
 
 /**
+ * GitHub Copilot CLI's own directory. Read-only except during
+ * `ccmux setup --agent copilot`, which drops a single hooks JSON file plus
+ * its marker script into the auto-discovered `hooks/` dir. Copilot resolves
+ * this dir as `~/.copilot` by default; a `COPILOT_HOME` env var can relocate
+ * it (the marker script honors it for the transcript path, but these
+ * constants — install target and log-watch root — assume the default).
+ * `session-state/<uuid>/events.jsonl` holds the real-time event log.
+ */
+export const COPILOT_DIR = join(homedir(), ".copilot");
+export const COPILOT_SESSION_STATE_DIR = join(COPILOT_DIR, "session-state");
+
+/**
  * ccmux's own config/state directory
  */
 export const CCMUX_DIR =

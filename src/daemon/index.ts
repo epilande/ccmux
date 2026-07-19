@@ -29,6 +29,7 @@ import { LogWatcher } from "./watcher";
 import { ClaudeLogAdapter } from "./adapters/claude/log-adapter";
 import { createBuiltinHookAdapters } from "./adapters";
 import { CodexLogAdapter } from "./adapters/codex/log-adapter";
+import { CopilotLogAdapter } from "./adapters/copilot/log-adapter";
 import type { LogAdapter, SessionMetadata } from "./log-adapter";
 import { DaemonServer } from "./server";
 import { HookManager } from "./hook-manager";
@@ -173,6 +174,8 @@ export class Daemon {
   private claudeProjectDirs: string[] = [PROJECTS_DIR];
   private codexWatcher: LogWatcher;
   private codexAdapter: CodexLogAdapter;
+  private copilotWatcher: LogWatcher;
+  private copilotAdapter: CopilotLogAdapter;
   private logAdapters: Map<string, LogAdapter> = new Map();
   private logWatchers: Map<string, LogWatcher> = new Map();
   private server: DaemonServer;
@@ -225,6 +228,14 @@ export class Daemon {
     this.logAdapters.set(this.codexAdapter.agentType, this.codexAdapter);
     this.codexWatcher = new LogWatcher(this.codexAdapter, this.sessionManager);
     this.logWatchers.set(this.codexAdapter.agentType, this.codexWatcher);
+
+    this.copilotAdapter = new CopilotLogAdapter();
+    this.logAdapters.set(this.copilotAdapter.agentType, this.copilotAdapter);
+    this.copilotWatcher = new LogWatcher(
+      this.copilotAdapter,
+      this.sessionManager,
+    );
+    this.logWatchers.set(this.copilotAdapter.agentType, this.copilotWatcher);
 
     const claudeInvoker = new ClaudeInvoker(
       defaultClaudeInvokerDeps(this.sessionManager),
@@ -472,10 +483,12 @@ export class Daemon {
     }
     for (const w of this.claudeWatchers()) w.start();
     this.codexWatcher.start();
+    this.copilotWatcher.start();
 
     await Promise.all([
       ...this.claudeWatchers().map((w) => w.ready),
       this.codexWatcher.ready,
+      this.copilotWatcher.ready,
     ]);
 
     // Initial scan - also matches existing sessions to panes
@@ -513,6 +526,7 @@ export class Daemon {
 
     await Promise.all(this.claudeWatchers().map((w) => w.stop()));
     await this.codexWatcher.stop();
+    await this.copilotWatcher.stop();
     await this.hookManager.stop();
     await this.backgroundSource?.stop();
     this.notifier.stop();
@@ -603,6 +617,7 @@ export class Daemon {
       await this.linkCursorSessions(processStartTimeByPid);
       await this.linkPiSessions(processStartTimeByPid);
       await this.linkAntigravitySessions(processStartTimeByPid);
+      await this.linkCopilotSessions(processStartTimeByPid);
       await reconcileAll(this.buildReconcilerDeps(), {
         processes,
         panes,
@@ -728,7 +743,16 @@ export class Daemon {
     try {
       const lines = await this.getLsofLines(pid);
       for (const line of lines) {
-        if (!line.startsWith("n") || !line.endsWith(".jsonl")) continue;
+        // Prefilter to the session-file extensions ccmux discovers via an
+        // open fd: Claude/Cursor/Pi keep a `.jsonl` open; Copilot keeps its
+        // `session.db` open (its events.jsonl is append-and-close). The
+        // agent's `sessionFilePattern` is the real discriminator below.
+        if (
+          !line.startsWith("n") ||
+          !(line.endsWith(".jsonl") || line.endsWith(".db"))
+        ) {
+          continue;
+        }
         const path = line.slice(1);
         const match = path.match(agent.sessionFilePattern);
         if (match?.[1]) {
@@ -1026,6 +1050,16 @@ export class Daemon {
     processStartTimeByPid: ReadonlyMap<number, number | null>,
   ): Promise<void> {
     const adapter = this.hookManager.getAdapter("antigravity");
+    if (!adapter) return;
+    const ctx = this.hookManager.getContext();
+    if (!ctx) return;
+    await reconcileSessionMarkerLinks(adapter, ctx, processStartTimeByPid);
+  }
+
+  private async linkCopilotSessions(
+    processStartTimeByPid: ReadonlyMap<number, number | null>,
+  ): Promise<void> {
+    const adapter = this.hookManager.getAdapter("copilot");
     if (!adapter) return;
     const ctx = this.hookManager.getContext();
     if (!ctx) return;

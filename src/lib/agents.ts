@@ -364,6 +364,16 @@ function normalizeInvokeMode(
 export const CODEX_SESSION_FILE_PATTERN =
   /rollout-[^/]+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
 
+/**
+ * Copilot keeps `session-state/<uuid>/session.db` open (lsof-discoverable),
+ * unlike its append-and-close `events.jsonl`. The daemon's `resolveNativeSessionId`
+ * matches this against the open `.db` fd to recover the session UUID for a
+ * pane-tracked Copilot session when hooks are not installed. Capture group 1
+ * is the UUID. The log adapter uses its own events.jsonl pattern instead.
+ */
+export const COPILOT_SESSION_FILE_PATTERN =
+  /session-state\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/session\.db$/i;
+
 export const BUILTIN_AGENTS: AgentDef[] = [
   {
     name: "claude",
@@ -763,6 +773,77 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       output: { kind: "stdout" },
     },
     hooks: { markerDir: MARKERS_DIR, type: "pi" },
+  },
+  {
+    name: "copilot",
+    displayName: "Copilot",
+    shortCode: "cp",
+    // The real Copilot CLI is a native binary whose argv[0] basename is
+    // `copilot` (e.g. .../@github/copilot-darwin-arm64/copilot). Anchored on
+    // the basename so the legacy `gh copilot` extension (argv[0] `gh`, or the
+    // `gh-copilot` shim) is NOT treated as this agent.
+    processMatch: /^copilot$/i,
+    // Deliberately NO commandPatterns: every wrapper form (`node .../bin/copilot`
+    // from npm/mise shims, `npx @github/copilot`) SPAWNS the real binary as a
+    // child that processMatch already catches, and both processes share the
+    // pane's tty. Matching the wrapper too double-detects the pane, and the
+    // per-scan pane-session upsert then flip-flops `pid` between wrapper and
+    // binary, tripping the pane-reuse identity reset every cycle (clearing
+    // nativeSessionId/logPath/lastPrompt as fast as enrichment writes them).
+    // `copilot --version` prints `GitHub Copilot CLI 1.0.71.`; the default
+    // version patterns extract `1.0.71` from that first line.
+    versionCommand: "copilot --version",
+    terminalRules: [
+      {
+        matchAny: ["do you want to run this command?"],
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Command",
+      },
+      {
+        // Folder-trust prompt shown on first launch in an untrusted dir.
+        matchAny: ["do you trust the files in this folder?"],
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: null,
+      },
+      {
+        // Copilot's working footer: "● Working · 162 B  esc interrupt".
+        // Present only while a turn is in flight.
+        matchAny: ["esc interrupt"],
+        status: "working",
+        attentionType: null,
+        pendingTool: null,
+      },
+    ],
+    errorRules: [
+      {
+        match:
+          /(?:rate|usage|message|hourly|daily|weekly)\s*limit\s+(?:was\s+)?(?:reached|exceeded|exhausted)/i,
+        kind: "rate_limit",
+      },
+    ],
+    resumeCommand: "copilot --resume {id}",
+    // Copilot holds `session-state/<uuid>/session.db` open (lsof-discoverable),
+    // so the no-hooks path can recover the native session id from it.
+    sessionFilePattern: COPILOT_SESSION_FILE_PATTERN,
+    invokeMode: {
+      // `-p` is non-interactive print mode; `--allow-all-tools` lets the turn
+      // run tools without pausing for approval (invoke has no interactive
+      // approver). `{prompt}` rides in argv like gemini/pi. `--resume {id}`
+      // continues an existing session.
+      args: ["copilot", "-p", "{prompt}", "--allow-all-tools"],
+      resumeArgs: [
+        "copilot",
+        "-p",
+        "{prompt}",
+        "--allow-all-tools",
+        "--resume",
+        "{id}",
+      ],
+      output: { kind: "stdout" },
+    },
+    hooks: { markerDir: MARKERS_DIR, type: "copilot" },
   },
 ];
 

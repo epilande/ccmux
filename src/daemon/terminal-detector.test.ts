@@ -9,6 +9,7 @@ describe("terminal-detector", () => {
   const gemini = getBuiltinAgent("gemini");
   const cursor = getBuiltinAgent("cursor");
   const antigravity = getBuiltinAgent("antigravity");
+  const copilot = getBuiltinAgent("copilot");
 
   it("detects waiting/permission prompts for Codex", () => {
     const result = detectTerminalStatus(
@@ -239,6 +240,55 @@ Do you want to proceed?`,
 How's the CLI experience so far?
 1. Great  2. Okay  3. Poor`,
         antigravity,
+      );
+      expect(result).toBeNull();
+    });
+  });
+
+  describe("copilot", () => {
+    it("detects the run-command permission dialog", () => {
+      const result = detectTerminalStatus(
+        `Do you want to run this command?
+
+  touch probe2.txt
+
+❯ 1. Yes
+  2. Yes, and don't ask again for \`touch\` in this directory
+  3. No, and tell Copilot what to do differently (Esc to stop)`,
+        copilot,
+      );
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("permission");
+      expect(result.pendingTool).toBe("Command");
+    });
+
+    it("detects the folder-trust dialog", () => {
+      const result = detectTerminalStatus(
+        `Do you trust the files in this folder?
+
+  1. Yes
+  2. Yes, and remember this folder for future sessions
+  3. No (Esc)`,
+        copilot,
+      );
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("permission");
+      expect(result.pendingTool).toBeNull();
+    });
+
+    it("detects the working footer", () => {
+      const result = detectTerminalStatus(
+        "● Working · 162 B  esc interrupt",
+        copilot,
+      );
+      expect(result.status).toBe("working");
+      expect(result.attentionType).toBeNull();
+    });
+
+    it("returns idle on the idle footer", () => {
+      const result = matchTerminalRule(
+        "/ commands · ? help · → next tab",
+        copilot,
       );
       expect(result).toBeNull();
     });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { BUILTIN_AGENTS, findAgentForProcess, getAgents } from "./agents";
+import { extractVersionFromOutput } from "../daemon/version-resolver";
 
 describe("findAgentForProcess", () => {
   it("matches Antigravity CLI commands without matching the IDE launcher", () => {
@@ -83,6 +84,65 @@ describe("findAgentForProcess", () => {
       BUILTIN_AGENTS,
     );
     expect(agent).toBeNull();
+  });
+
+  it("matches the Copilot native binary by basename and path", () => {
+    for (const command of [
+      "copilot",
+      "/opt/homebrew/lib/node_modules/@github/copilot-darwin-arm64/copilot",
+      "copilot --resume abc",
+    ]) {
+      expect(findAgentForProcess(command, BUILTIN_AGENTS)?.name).toBe(
+        "copilot",
+      );
+    }
+  });
+
+  it("does NOT match Copilot's node wrapper processes", () => {
+    // The npm/mise/npx wrappers (`node .../bin/copilot`, `npm exec
+    // @github/copilot`) spawn the real SEA binary as a child on the same
+    // pane tty. Matching the wrapper too would double-detect the pane and
+    // flip-flop the pane session's pid every scan, tripping the pane-reuse
+    // identity reset (clearing nativeSessionId/logPath/lastPrompt).
+    expect(
+      findAgentForProcess("npm exec @github/copilot", BUILTIN_AGENTS),
+    ).toBeNull();
+    expect(
+      findAgentForProcess(
+        "node /Users/test/.npm/_npx/abc/node_modules/.bin/copilot",
+        BUILTIN_AGENTS,
+      ),
+    ).toBeNull();
+  });
+
+  it("does not treat the legacy gh copilot extension as the Copilot CLI", () => {
+    // `gh copilot ...` has argv[0] `gh`; the `gh-copilot` shim has a `-`
+    // before `copilot`, so neither the basename nor the `/copilot` path
+    // pattern matches.
+    expect(
+      findAgentForProcess("gh copilot suggest", BUILTIN_AGENTS),
+    ).toBeNull();
+    expect(
+      findAgentForProcess(
+        "/Users/x/.local/share/gh/extensions/gh-copilot/gh-copilot",
+        BUILTIN_AGENTS,
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("Copilot version parsing", () => {
+  it("extracts the version from `copilot --version` output using defaults", () => {
+    // Copilot prints `GitHub Copilot CLI 1.0.71.` plus a second update-hint
+    // line; the default patterns take the first version-shaped token.
+    const copilot = BUILTIN_AGENTS.find((a) => a.name === "copilot");
+    expect(copilot?.versionPatterns).toBeUndefined();
+    expect(
+      extractVersionFromOutput(
+        "GitHub Copilot CLI 1.0.71.\nA newer version is available",
+        copilot?.versionPatterns,
+      ),
+    ).toBe("1.0.71");
   });
 });
 

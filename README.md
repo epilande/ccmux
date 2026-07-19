@@ -22,12 +22,12 @@ When running multiple AI coding agent sessions across tmux panes, it's hard to k
 
 It works with your existing tmux workflow. You don't change how you launch or run your agents; ccmux discovers what's already running in your panes, so as long as you're in tmux with a supported agent, it just works.
 
-**Built-in support for:** Claude Code, Codex, Cursor, OpenCode, Pi, Antigravity, Gemini CLI, plus [custom agent definitions](#-custom-agents) via config.
+**Built-in support for:** Claude Code, Codex, Cursor, OpenCode, Pi, Antigravity, Copilot, Gemini CLI, plus [custom agent definitions](#-custom-agents) via config.
 
 ## ✨ Features
 
 - 🎯 **Live Session States**: Every agent tracked as idle, working, or waiting (permission / plan approval / question), flagged the moment one needs you
-- 🧩 **Multi-Agent**: Claude Code, Codex, Cursor, OpenCode, Pi, Antigravity, Gemini CLI, plus custom agents via config
+- 🧩 **Multi-Agent**: Claude Code, Codex, Cursor, OpenCode, Pi, Antigravity, Copilot, Gemini CLI, plus custom agents via config
 - 🔄 **Real-Time**: Background daemon streams state changes instantly over SSE, no polling, no refresh
 - 👁️ **Live Preview**: Split-pane view of the selected session's pane content
 - ⚡ **Act in Place**: Tab into the preview to approve, answer, or type, keys go straight to that pane
@@ -272,7 +272,7 @@ echo "what is 2 + 2" | ccmux invoke claude
 git diff main | ccmux invoke claude "Review this diff"
 ```
 
-Claude runs interactively in a dedicated tmux session and returns clean text parsed from the transcript JSONL. Codex, Cursor, OpenCode, Pi, Antigravity, and Gemini run as non-interactive subprocesses (`codex exec -o`, `cursor-agent --print`, `opencode run --format json`, `pi -p`, `agy -p`, `gemini -p`) and return the agent's clean response text.
+Claude runs interactively in a dedicated tmux session and returns clean text parsed from the transcript JSONL. Codex, Cursor, OpenCode, Pi, Antigravity, Copilot, and Gemini run as non-interactive subprocesses (`codex exec -o`, `cursor-agent --print`, `opencode run --format json`, `pi -p`, `agy -p`, `copilot -p --allow-all-tools`, `gemini -p`) and return the agent's clean response text.
 
 For orchestration, name an invocation with `--id <id>`, then use `ccmux invoke list`, `ccmux invoke cancel <id>`, and `ccmux invoke result <id>` to watch, cancel, or read its full captured output by that id. See [`docs/invoke.md`](docs/invoke.md#fire-and-poll---id-list-cancel-result) for the fire-and-poll reference.
 
@@ -553,6 +553,18 @@ Uses Antigravity's global named-hook config at `~/.gemini/config/hooks.json` wit
 - `ccmux-stop.sh`: refreshes the marker as `idle` when the execution loop stops
 
 Antigravity exposes no session-start hook, so a fresh idle session remains pane-tracked until its first prompt. ccmux deliberately does not install `PreToolUse`: in Antigravity v1.1.1, an empty `{}` response silently denies the tool call. Permission attention instead comes from the native permission dialog detected in pane content.
+
+### Copilot CLI
+
+Drops one hooks file plus its marker script into Copilot's auto-discovered `~/.copilot/hooks/` dir (`ccmux-copilot.json` and `ccmux-copilot.sh`), registering observational events only:
+
+- `sessionStart`: writes the marker (`working` if the session launched with an initial prompt, else `idle`)
+- `userPromptSubmitted`: flips the marker to `working`
+- `notification`: flips to `waiting` when the payload is a permission or elicitation dialog (other notification types are ignored)
+- `agentStop`: flips back to `idle`
+- `sessionEnd`: removes the marker
+
+ccmux deliberately does not install Copilot's `permissionRequest` hook: it is a deciding hook whose output can allow or deny the tool call. Permission attention is observed through `notification` instead. Copilot's `events.jsonl` is also tailed as a log source (it flushes in real time, including the mid-wait `permission.requested`), and its held-open `session.db` backs no-hooks native-id discovery.
 
 ### Matching priority (with hooks installed)
 
