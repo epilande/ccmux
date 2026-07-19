@@ -129,7 +129,6 @@ export const PI_EXTENSION_FILE = join(PI_EXTENSION_DIR, "ccmux.js");
  * `session-state/<uuid>/events.jsonl` holds the real-time event log.
  */
 export const COPILOT_DIR = join(homedir(), ".copilot");
-export const COPILOT_HOOKS_DIR = join(COPILOT_DIR, "hooks");
 export const COPILOT_SESSION_STATE_DIR = join(COPILOT_DIR, "session-state");
 
 /**
