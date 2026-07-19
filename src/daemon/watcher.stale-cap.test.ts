@@ -1,15 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { createInitialState, applyEntriesToState } from "./status-machine";
 import { SessionManager } from "./sessions";
 import { PANE_IDLE_THRESHOLD_MS } from "../lib/config";
 import { parseLogEntries } from "./parser";
-import {
-  clearPermissionCache,
-  _setGlobalSettingsDir,
-} from "../lib/permission-resolver";
 
 function makeAssistantEntry(timestamp: string, toolName = "Read") {
   return JSON.stringify({
@@ -64,24 +60,15 @@ function deriveAndCapState(
 }
 
 describe("stale working cap on initial state derivation", () => {
+  // A scratch dir used only as a `cwd` argument; status derivation no longer
+  // consults settings, so its contents are irrelevant.
   let globalDir: string;
 
   beforeEach(() => {
-    clearPermissionCache();
     globalDir = mkdtempSync(join(tmpdir(), "stale-cap-"));
-    _setGlobalSettingsDir(globalDir);
-    writeFileSync(
-      join(globalDir, "settings.json"),
-      JSON.stringify({
-        permissions: {
-          allow: ["Read", "Glob", "Grep", "Task"],
-        },
-      }),
-    );
   });
 
   afterEach(() => {
-    _setGlobalSettingsDir(null);
     rmSync(globalDir, { recursive: true, force: true });
   });
 
@@ -147,12 +134,14 @@ describe("stale working cap on initial state derivation", () => {
     const staleTime = new Date(
       Date.now() - PANE_IDLE_THRESHOLD_MS - 60_000,
     ).toISOString();
-    const content = makeAssistantEntry(staleTime, "Bash");
+    // AskUserQuestion derives "waiting" (question), which the cap doesn't
+    // target. (Bash no longer derives waiting: log-derived permission waiting
+    // was removed.)
+    const content = makeAssistantEntry(staleTime, "AskUserQuestion");
     const entries = parseLogEntries(content);
 
     const state = deriveAndCapState(entries, globalDir);
 
-    // Bash requires permission → "waiting", which the cap doesn't target
     expect(state.status).toBe("waiting");
   });
 

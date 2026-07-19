@@ -44,6 +44,7 @@ function createHarness(
   overrides: Partial<NotifierDeps> & { startTime?: number } = {},
 ) {
   const delivered: NotificationPayload[] = [];
+  const retracted: string[] = [];
   const scheduled: ScheduledTimer[] = [];
   let nextTimerId = 1;
   let currentTime = overrides.startTime ?? PAST_GRACE_WINDOW;
@@ -73,6 +74,11 @@ function createHarness(
       (async (payload: NotificationPayload) => {
         delivered.push(payload);
       }),
+    retract:
+      overrides.retract ??
+      ((sessionId: string) => {
+        retracted.push(sessionId);
+      }),
     now: overrides.now ?? (() => currentTime),
     setTimer:
       overrides.setTimer ??
@@ -93,6 +99,7 @@ function createHarness(
     deps,
     sessionManager,
     delivered,
+    retracted,
     scheduled,
     setPrefs: (next: { notifications?: NotificationsConfig }) => {
       prefs = next;
@@ -1359,6 +1366,176 @@ describe("Notifier", () => {
       })();
       expect(payload.subtitle).toBe("Finished");
       expect(payload.body).toBe("");
+    });
+  });
+
+  describe("retract on wait resolution", () => {
+    /** Creates a session and drives it to a delivered `waiting` notification,
+     *  returning the session so the caller can resolve the wait. */
+    async function deliverWaiting(h: ReturnType<typeof createHarness>) {
+      const session = h.sessionManager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: "/tmp/myapp",
+        pid: 1,
+      });
+      h.sessionManager.updateSession(session.id, {
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash",
+      });
+      await flush();
+      return session;
+    }
+
+    it("retracts once when a delivered waiting resolves to working", async () => {
+      const h = createHarness();
+      const notifier = new Notifier(h.deps);
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+
+      const session = await deliverWaiting(h);
+      expect(h.delivered.length).toBe(1);
+      expect(h.retracted.length).toBe(0);
+
+      await tick();
+      h.sessionManager.updateSession(session.id, { status: "working" });
+      await flush();
+      expect(h.retracted).toEqual([session.id]);
+
+      // A further non-waiting update must not retract again (tracking cleared).
+      await tick();
+      h.sessionManager.updateSession(session.id, { gitBranch: "feature" });
+      await flush();
+      expect(h.retracted).toEqual([session.id]);
+    });
+
+    it("does not retract when no waiting notification was delivered", async () => {
+      const h = createHarness();
+      // Notifications disabled: the wait is observed but nothing is delivered,
+      // so there is no banner to retract when it resolves.
+      h.setPrefs({ notifications: { enabled: false } });
+      const notifier = new Notifier(h.deps);
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+
+      const session = await deliverWaiting(h);
+      expect(h.delivered.length).toBe(0);
+
+      await tick();
+      h.sessionManager.updateSession(session.id, { status: "working" });
+      await flush();
+      expect(h.retracted).toEqual([]);
+    });
+
+    it("does not retract on a waiting -> waiting attention swap", async () => {
+      const h = createHarness();
+      const notifier = new Notifier(h.deps);
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+
+      const session = await deliverWaiting(h);
+      expect(h.delivered.length).toBe(1);
+
+      // Same status, different attention: the wait is still live, so the
+      // banner must stay.
+      await tick();
+      h.sessionManager.updateSession(session.id, {
+        status: "waiting",
+        attentionType: "question",
+        pendingTool: "AskUserQuestion",
+      });
+      await flush();
+      expect(h.retracted).toEqual([]);
+    });
+
+    it("retracts the waiting banner then still delivers finished on waiting -> idle", async () => {
+      const h = createHarness();
+      const notifier = new Notifier(h.deps);
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+
+      const session = await deliverWaiting(h);
+      expect(h.delivered.length).toBe(1);
+
+      await tick();
+      h.sessionManager.updateSession(session.id, { status: "idle" });
+      await flush();
+
+      // Retract fires immediately on the resolving transition...
+      expect(h.retracted).toEqual([session.id]);
+      // ...and the separate finished notification still arms + delivers.
+      expect(h.scheduled.length).toBe(1);
+      await h.fireScheduled();
+      expect(h.delivered.some((p) => p.event === "finished")).toBe(true);
+      // Still exactly one retract.
+      expect(h.retracted).toEqual([session.id]);
+    });
+
+    it("does not retract a finished-only session (no waiting was delivered)", async () => {
+      const h = createHarness();
+      const notifier = new Notifier(h.deps);
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+
+      const session = h.sessionManager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: "/tmp/myapp",
+        pid: 1,
+      });
+      h.sessionManager.updateSession(session.id, { status: "working" });
+      await tick();
+      h.sessionManager.updateSession(session.id, { status: "idle" });
+      await flush();
+      await h.fireScheduled();
+
+      expect(h.delivered.some((p) => p.event === "finished")).toBe(true);
+      expect(h.retracted).toEqual([]);
+    });
+
+    it("retracts once when the wait resolves mid-delivery (no lingering banner)", async () => {
+      const sessionManager = new SessionManager();
+      let sessionId = "";
+      let flipped = false;
+      // Delivery flips the session to `working` before it resolves, so
+      // handleChange sees the resolving edge while deliveredWaiting is still
+      // empty (the race). The post-delivery re-check in fire() must catch it.
+      const h = createHarness({
+        sessionManager,
+        deliver: async () => {
+          if (!flipped && sessionId) {
+            flipped = true;
+            sessionManager.updateSession(sessionId, { status: "working" });
+          }
+        },
+      });
+      const notifier = new Notifier(h.deps);
+      notifier.start();
+      h.advanceTime(PAST_GRACE_WINDOW);
+
+      const session = sessionManager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: "/tmp/myapp",
+        pid: 1,
+      });
+      sessionId = session.id;
+      sessionManager.updateSession(session.id, {
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash",
+      });
+      await flush();
+
+      expect(h.retracted).toEqual([session.id]);
+
+      // deliveredWaiting must not have been left populated: a further
+      // non-waiting update would otherwise retract a second time.
+      await tick();
+      sessionManager.updateSession(session.id, { gitBranch: "feature" });
+      await flush();
+      expect(h.retracted).toEqual([session.id]);
     });
   });
 

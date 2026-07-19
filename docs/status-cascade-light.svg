@@ -32,7 +32,7 @@
   <rect x="70" y="360" width="310" height="145" rx="6" fill="#F9FAFB" stroke="#E5E7EB" stroke-width="1"/>
   <text x="225" y="380" text-anchor="middle" font-size="10" fill="#4B5563" font-weight="600">transitions</text>
   <text x="225" y="400" text-anchor="middle" font-size="10" fill="#6B7280">tool_use  →  working[tool]</text>
-  <text x="225" y="416" text-anchor="middle" font-size="10" fill="#6B7280">permission tool  →  waiting[permission]</text>
+  <text x="225" y="416" text-anchor="middle" font-size="10" fill="#6B7280">permission tool  →  working[tool]</text>
   <text x="225" y="432" text-anchor="middle" font-size="10" fill="#6B7280">ExitPlanMode  →  waiting[plan_approval]</text>
   <text x="225" y="448" text-anchor="middle" font-size="10" fill="#6B7280">AskUserQuestion  →  waiting[question]</text>
   <text x="225" y="464" text-anchor="middle" font-size="10" fill="#6B7280">result / SessionEnd  →  idle</text>

@@ -325,6 +325,9 @@ export class Daemon {
       isTerminalFrontmost: () => isTerminalFrontmost(getActiveTmuxClientPid),
       getPrefs: getPreferences,
       deliver: notifyDelivery.deliver,
+      // Same shared closure as the pane-focus retract, so it reuses the deliver
+      // path's resolved helper binary and per-backend probe cache.
+      retract: notifyDelivery.retract,
       getAgent: (agentType) => this.agents.find((a) => a.name === agentType),
     });
   }

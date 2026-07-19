@@ -12,11 +12,7 @@ import {
   MAX_PROMPT_CHARS,
   MAX_PROMPTS_TOTAL_BYTES,
 } from "../lib/config";
-import {
-  clearPermissionCache,
-  _setGlobalSettingsDir,
-} from "../lib/permission-resolver";
-import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import type {
@@ -32,36 +28,13 @@ import type { Session } from "../types/session";
 
 describe("status-machine", () => {
   let testCwd: string;
-  let globalDir: string;
 
   beforeEach(() => {
-    clearPermissionCache();
     testCwd = mkdtempSync(join(tmpdir(), "sm-test-"));
-    globalDir = mkdtempSync(join(tmpdir(), "sm-global-"));
-    _setGlobalSettingsDir(globalDir);
-    // Settings that allow commonly auto-approved tools
-    writeFileSync(
-      join(globalDir, "settings.json"),
-      JSON.stringify({
-        permissions: {
-          allow: [
-            "Read",
-            "Glob",
-            "Grep",
-            "Task",
-            "ExitPlanMode",
-            "AskUserQuestion",
-            "EnterPlanMode",
-          ],
-        },
-      }),
-    );
   });
 
   afterEach(() => {
-    _setGlobalSettingsDir(null);
     rmSync(testCwd, { recursive: true, force: true });
-    rmSync(globalDir, { recursive: true, force: true });
   });
 
   describe("createInitialState", () => {
@@ -124,7 +97,12 @@ describe("status-machine", () => {
       expect(state.attentionType).toBeNull();
     });
 
-    it("should handle assistant with permission-required tool", () => {
+    it("derives working (not waiting) from an unresolved Bash tool_use", () => {
+      // Regression: a permission-gated tool_use must NOT surface as
+      // waiting/permission from the log. Claude Code writes such a tool_use to
+      // the transcript only after the prompt is resolved, so what we can read
+      // is already approved and executing. Genuine prompts arrive via the
+      // Notification-hook marker / terminal detector, not here.
       const entry: AssistantLogEntry = {
         type: "assistant",
         uuid: "123",
@@ -144,9 +122,62 @@ describe("status-machine", () => {
       };
 
       const state = processEntry(entry, createInitialState());
-      expect(state.status).toBe("waiting");
-      expect(state.attentionType).toBe("permission");
+      expect(state.status).toBe("working");
+      expect(state.attentionType).toBeNull();
       expect(state.pendingTool).toBe("Bash");
+      expect(state.pendingToolIds).toBeUndefined();
+    });
+
+    it("stays working across bash_progress then clears on tool_result", () => {
+      // The Bash tool_use path (now working) must remain coherent with the
+      // bash_progress and tool_result transitions that follow it.
+      const assistant: AssistantLogEntry = {
+        type: "assistant",
+        uuid: "a1",
+        parentUuid: null,
+        timestamp: "2024-01-01T00:00:00Z",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool1",
+              name: "Bash",
+              input: { command: "sleep 5" },
+            },
+          ],
+        },
+      };
+      let state = processEntry(assistant, createInitialState());
+      expect(state.status).toBe("working");
+      expect(state.pendingTool).toBe("Bash");
+
+      const progress: ProgressLogEntry = {
+        type: "progress",
+        uuid: "p1",
+        parentUuid: null,
+        timestamp: "2024-01-01T00:00:01Z",
+        data: { type: "bash_progress", output: "" },
+      };
+      state = processEntry(progress, state);
+      expect(state.status).toBe("working");
+      expect(state.pendingTool).toBe("Bash");
+
+      const result: UserLogEntry = {
+        type: "user",
+        uuid: "u1",
+        parentUuid: null,
+        timestamp: "2024-01-01T00:00:02Z",
+        message: {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "tool1", content: "done" },
+          ],
+        },
+      };
+      state = processEntry(result, state);
+      expect(state.status).toBe("working");
+      expect(state.pendingTool).toBeNull();
     });
 
     it("should handle assistant with auto-approved tool", () => {
@@ -515,8 +546,8 @@ describe("status-machine", () => {
       ];
 
       const state = deriveStateFromEntries(entries);
-      expect(state.status).toBe("waiting");
-      expect(state.attentionType).toBe("permission");
+      expect(state.status).toBe("working");
+      expect(state.attentionType).toBeNull();
       expect(state.pendingTool).toBe("Bash");
     });
   });
@@ -666,7 +697,7 @@ describe("status-machine", () => {
   });
 
   describe("Bug 1: Sibling tool tracking with early returns", () => {
-    it("should detect waiting when Bash appears before Task in same message", () => {
+    it("should track Task subagent when a plain tool precedes Task in same message", () => {
       const entry: AssistantLogEntry = {
         type: "assistant",
         uuid: "123",
@@ -687,12 +718,13 @@ describe("status-machine", () => {
       };
 
       const state = processEntry(entry, createInitialState());
-      expect(state.status).toBe("waiting");
-      expect(state.attentionType).toBe("permission");
-      expect(state.pendingToolIds).toContain("t1");
+      expect(state.status).toBe("working");
+      expect(state.attentionType).toBeNull();
+      expect(state.pendingTaskIds).toContain("t2");
+      expect(state.hasActiveSubagent).toBe(true);
     });
 
-    it("should detect waiting when Bash appears before ExitPlanMode in same message", () => {
+    it("should detect plan_approval when a plain tool precedes ExitPlanMode in same message", () => {
       const entry: AssistantLogEntry = {
         type: "assistant",
         uuid: "123",
@@ -717,11 +749,11 @@ describe("status-machine", () => {
         inPlanMode: true,
       });
       expect(state.status).toBe("waiting");
-      expect(state.attentionType).toBe("permission");
-      expect(state.pendingToolIds).toContain("t1");
+      expect(state.attentionType).toBe("plan_approval");
+      expect(state.pendingToolIds).toContain("t2");
     });
 
-    it("should detect waiting when Bash appears before AskUserQuestion in same message", () => {
+    it("should detect question when a plain tool precedes AskUserQuestion in same message", () => {
       const entry: AssistantLogEntry = {
         type: "assistant",
         uuid: "123",
@@ -738,11 +770,11 @@ describe("status-machine", () => {
 
       const state = processEntry(entry, createInitialState());
       expect(state.status).toBe("waiting");
-      expect(state.attentionType).toBe("permission");
-      expect(state.pendingToolIds).toContain("t1");
+      expect(state.attentionType).toBe("question");
+      expect(state.pendingToolIds).toContain("t2");
     });
 
-    it("should track Task IDs alongside permission tool IDs", () => {
+    it("should track Task IDs alongside a plain tool", () => {
       const entry: AssistantLogEntry = {
         type: "assistant",
         uuid: "123",
@@ -787,18 +819,18 @@ describe("status-machine", () => {
         data: { type: "bash_progress", output: "" },
       };
 
-      const waitingForWrite = {
+      const waitingForPlan = {
         ...createInitialState(),
         status: "waiting" as const,
-        attentionType: "permission" as const,
-        pendingTool: "Write",
-        pendingToolIds: ["w1"],
+        attentionType: "plan_approval" as const,
+        pendingTool: "ExitPlanMode",
+        pendingToolIds: ["p1"],
       };
 
-      const state = processEntry(entry, waitingForWrite);
+      const state = processEntry(entry, waitingForPlan);
       expect(state.status).toBe("waiting");
-      expect(state.attentionType).toBe("permission");
-      expect(state.pendingTool).toBe("Write");
+      expect(state.attentionType).toBe("plan_approval");
+      expect(state.pendingTool).toBe("ExitPlanMode");
     });
   });
 
@@ -817,8 +849,8 @@ describe("status-machine", () => {
     });
   });
 
-  describe("Coverage: permission + auto-approved mix", () => {
-    it("should preserve waiting when auto-approved tool follows permission tool", () => {
+  describe("Coverage: multiple plain tools derive working", () => {
+    it("derives working when several non-waiting tools appear together", () => {
       const entry: AssistantLogEntry = {
         type: "assistant",
         uuid: "123",
@@ -837,9 +869,10 @@ describe("status-machine", () => {
         ...createInitialState(),
         cwd: testCwd,
       });
-      expect(state.status).toBe("waiting");
-      expect(state.attentionType).toBe("permission");
-      expect(state.pendingToolIds).toEqual(["t1"]);
+      expect(state.status).toBe("working");
+      expect(state.attentionType).toBeNull();
+      expect(state.pendingTool).toBe("Bash");
+      expect(state.pendingToolIds).toBeUndefined();
     });
   });
 

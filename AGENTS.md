@@ -140,16 +140,6 @@ For reliable multi-session matching, install hooks via `ccmux setup` (all agents
 
 ## Key Patterns
 
-### Tool Permission Resolution
-
-Tool permissions are resolved dynamically in `src/lib/permission-resolver.ts` by reading the user's layered Claude Code settings:
-
-1. `~/.claude/settings.json` (global)
-2. `{cwd}/.claude/settings.json` (project shared)
-3. `{cwd}/.claude/settings.local.json` (project local)
-
-Precedence: deny > ask > allow > defaultMode. Supports argument matching (e.g., `Bash(git *)`) and `acceptEdits`/`bypassPermissions` modes. Cached with 30s TTL.
-
 ### File Paths
 
 Agent-owned files (logs, hooks, settings, sessions, per-agent install paths) are catalogued in [`docs/agent-adapters.md#file-paths`](docs/agent-adapters.md#file-paths). ccmux treats them as read-only except during `ccmux setup`.
