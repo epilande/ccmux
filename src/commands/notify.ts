@@ -27,7 +27,10 @@ function buildTestPayload(
 ): NotificationPayload {
   return {
     title: "ccmux",
-    subtitle: "Finished",
+    // The bare invocation demos the real event/body split with "Finished" as
+    // the event; a caller-supplied message is delivered as-is, with no event
+    // line implying something happened that didn't.
+    subtitle: message ? undefined : "Finished",
     body: message ?? TEST_MESSAGE,
     event: "finished",
     sessionId: "notify-cli",
@@ -149,7 +152,7 @@ function printGrantInstructions(): void {
     "The permission dialog does not appear for CLI-launched apps on recent macOS; grant it manually:",
   );
   console.error(`  1. Open: ${NOTIFICATIONS_SETTINGS_DEEP_LINK}`);
-  console.error('  2. Find "ccmux-notifier" and enable "Allow notifications".');
+  console.error('  2. Find "ccmux" and enable "Allow notifications".');
   console.error(
     '  3. Set its Alert Style to "Persistent" so alerts do not auto-dismiss.',
   );
@@ -222,7 +225,7 @@ async function runCcmuxNotifierFlow(
   } else if (alertStyle !== "alert") {
     console.log(
       'Tip: set Alert Style to "Persistent" (Settings > Notifications > ' +
-        "ccmux-notifier) so alerts do not auto-dismiss after a few seconds.",
+        "ccmux) so alerts do not auto-dismiss after a few seconds.",
     );
   }
 }
