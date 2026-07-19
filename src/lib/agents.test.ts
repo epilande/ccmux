@@ -462,6 +462,15 @@ describe("built-in agent notificationActions defaults", () => {
     expect(cx?.notificationActions?.replyOnQuestion).toBeUndefined();
     expect(cx?.notificationActions?.replyOnFinished).toBeUndefined();
   });
+
+  it("cursor carries the verified Approve/Deny keys and no reply", () => {
+    const cu = BUILTIN_AGENTS.find((a) => a.name === "cursor");
+    expect(cu?.notificationActions?.approve).toEqual(["y"]);
+    expect(cu?.notificationActions?.deny).toEqual(["C-c"]);
+    expect(cu?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(cu?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(cu?.notificationActions?.replyOnFinished).toBeUndefined();
+  });
 });
 
 describe("agents.claude.notificationActions", () => {

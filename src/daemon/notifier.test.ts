@@ -1136,6 +1136,20 @@ describe("Notifier", () => {
       expect(payload.reply).toBeUndefined();
     });
 
+    it("stamps Approve/Deny for a cursor permission wait (no reply)", async () => {
+      const cursorAgent = BUILTIN_AGENTS.find((a) => a.name === "cursor")!;
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Command",
+        getAgent: () => cursorAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(payload.reply).toBeUndefined();
+    });
+
     it("suppresses opencode buttons when the aggregate has multiple concurrent waits", async () => {
       const payload = await deliverWaiting({
         attentionType: "permission",

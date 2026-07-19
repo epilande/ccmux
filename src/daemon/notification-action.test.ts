@@ -496,6 +496,44 @@ describe("handleNotificationAction: approve/deny", () => {
     expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
   });
 
+  // Cursor has no `planApprove`, so approve/deny resolve straight to the def's
+  // keys (verified e2e on cursor-agent 2026.07.01: `y` runs the highlighted
+  // "Run (once)", C-c interrupts so the command never runs and can't mis-approve).
+  const cursorSession = () =>
+    mkSession({ agentType: "cursor", pendingTool: "Command" });
+
+  it("cursor approve sends y and returns 200", async () => {
+    const session = cursorSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "y" }]);
+  });
+
+  it("cursor deny sends C-c and returns 200", async () => {
+    const session = cursorSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "C-c" }]);
+  });
+
   it("refuses approve on an aggregated row with multiple concurrent waits (409, no keys)", async () => {
     // A second server-side session began waiting between delivery and press, so
     // the shared pane's dialog may not be the one the notification described.

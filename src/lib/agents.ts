@@ -645,6 +645,40 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         kind: "rate_limit",
       },
     ],
+    // Cursor's approval overlay (verified e2e on cursor-agent
+    // 2026.07.01-41b2de7):
+    //   Run this command?
+    //     → Run (once) (y)
+    //       Add Shell(<cmd>) to allowlist? (tab)
+    //       Run Everything (shift+tab)
+    //       Skip (esc or n)
+    // `approve: ["y"]` is the absolute "Run (once)" selector (curl ran, HTTP/2
+    // 200 observed). It is deliberately NOT `["Enter"]`: the overlay is a
+    // navigable list where Enter selects the highlight, and Deny cannot rely on
+    // the highlight position.
+    //
+    // Deny is the hard case. Both `esc` and `n` open a "Reason for rejection
+    // (Enter to submit, Esc to cancel)" TEXT sub-dialog (a 2026.04.17+ change) —
+    // there is NO single-key skip. The obvious `["Escape", "Enter"]` is UNSAFE:
+    // the notification keys path fires keys only KEY_SEQUENCE_GAP_MS apart with
+    // no settle/recheck, and an Escape immediately followed by Enter can be read
+    // as one Alt+Enter (or the sub-dialog hasn't opened yet), so the Enter
+    // lands on the still-live overlay and selects the highlighted "Run (once)" —
+    // reproduced: a deny press SILENTLY APPROVED and ran curl. So Deny is
+    // `["C-c"]`: Ctrl+C interrupts the turn (the command does NOT run — verified
+    // 3/3 with cleared scrollback) and STRUCTURALLY cannot select "Run (once)",
+    // so it can never mis-approve. Cursor's Auto-review may re-request approval
+    // afterward (a fresh permission the user can deny again); that retry is
+    // Cursor behavior, not the keystroke. No `permissionReplyPrelude`/Reply: the
+    // reject-reason sub-dialog can't be driven safely from the prelude path
+    // (same ESC-coalescing footgun), and Cursor has no question wait. The
+    // workspace-trust prompt ("Workspace Trust Required") is out of scope: it
+    // has no `terminalRules` entry, so it never becomes a `permission` wait and
+    // needs no extra gating.
+    notificationActions: {
+      approve: ["y"],
+      deny: ["C-c"],
+    },
     // `--resume <chatId>` restores the chat transcript only when invoked
     // from the original workspace; cursor scopes chats per workspace_roots.
     // ccmux resumes inside the pane's shell which preserves cwd, so this
