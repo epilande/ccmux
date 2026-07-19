@@ -930,6 +930,17 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         pendingTool: "Command",
       },
       {
+        // URL-access approval ("Copilot is attempting to access the following
+        // URL: ... Do you want to allow this access?"). Copilot raises this
+        // BEFORE the shell dialog when a command touches the network, so a
+        // URL-only wait is a real permission pause the pane path must see.
+        // "Url" matches `permissionToolLabel("url")` on the log path.
+        matchAny: ["do you want to allow this access?"],
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Url",
+      },
+      {
         // Folder-trust prompt shown on first launch in an untrusted dir.
         matchAny: ["do you trust the files in this folder?"],
         status: "waiting",
@@ -952,6 +963,28 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         kind: "rate_limit",
       },
     ],
+    // Copilot's permission dialogs (verified e2e on Copilot CLI 1.0.71):
+    //   Do you want to run this command?     → 1. Yes / 2. Yes, and don't ask
+    //     again for `<cmd>` in this directory / 3. No, ... (Esc to stop)
+    //   Do you want to allow this access?    → 1. Yes / 2.-3. "Yes, and
+    //     approve all URLs from ..." variants / 4. No, ... (Esc to stop)
+    //   Do you trust the files in this folder? → 1. Yes / 2. Yes, and
+    //     remember / 3. No (Esc)
+    // Digits are absolute select-and-submit: "1" alone approved and ran the
+    // gated curl (no trailing Enter). Option "1. Yes" is position-stable
+    // across all three dialogs, but the deny row is NOT (3 on shell/trust,
+    // 4 on URL access), so deny must not be a digit. Escape uses the constant
+    // "esc to cancel" affordance: verified the tool did NOT run ("✗ Shell ...
+    // The user rejected this tool call") and the turn ended at the composer,
+    // so it structurally cannot approve. A single tool call can chain two
+    // dialogs (URL access, then shell); each is its own wait/notification and
+    // one press answers exactly one dialog. No Reply keys: no question wait,
+    // and Escape ends the turn rather than cancelling to a composer with the
+    // tool still pending.
+    notificationActions: {
+      approve: ["1"],
+      deny: ["Escape"],
+    },
     resumeCommand: "copilot --resume {id}",
     // Copilot holds `session-state/<uuid>/session.db` open (lsof-discoverable),
     // so the no-hooks path can recover the native session id from it.

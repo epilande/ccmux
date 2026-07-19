@@ -550,6 +550,15 @@ describe("built-in agent notificationActions defaults", () => {
     expect(ag?.notificationActions?.replyOnFinished).toBeUndefined();
   });
 
+  it("copilot carries the verified Approve/Deny keys and no reply", () => {
+    const cp = BUILTIN_AGENTS.find((a) => a.name === "copilot");
+    expect(cp?.notificationActions?.approve).toEqual(["1"]);
+    expect(cp?.notificationActions?.deny).toEqual(["Escape"]);
+    expect(cp?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(cp?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(cp?.notificationActions?.replyOnFinished).toBeUndefined();
+  });
+
   it("pi deliberately has no notificationActions (no tool-approval pause exists)", () => {
     const pi = BUILTIN_AGENTS.find((a) => a.name === "pi");
     expect(pi?.notificationActions).toBeUndefined();

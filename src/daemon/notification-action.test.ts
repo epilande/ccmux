@@ -610,6 +610,45 @@ describe("handleNotificationAction: approve/deny", () => {
     expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
   });
 
+  // Copilot's pickers also select-and-submit on digits (verified e2e on
+  // Copilot CLI 1.0.71: "1. Yes" is position-stable across the shell, URL,
+  // and folder-trust dialogs); deny is Escape because the deny row moves
+  // (3 on shell/trust, 4 on URL access), so a deny digit can't be trusted.
+  const copilotSession = () =>
+    mkSession({ agentType: "copilot", pendingTool: "Command" });
+
+  it("copilot approve sends 1 and returns 200", async () => {
+    const session = copilotSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "1" }]);
+  });
+
+  it("copilot deny sends Escape and returns 200", async () => {
+    const session = copilotSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+  });
+
   it("refuses approve on an aggregated row with multiple concurrent waits (409, no keys)", async () => {
     // A second server-side session began waiting between delivery and press, so
     // the shared pane's dialog may not be the one the notification described.
