@@ -4,7 +4,10 @@ import {
   isPlanApprovalWait,
   sanitizeReply,
   MAX_NOTIFICATION_REPLY_CHARS,
+  MAX_NOTIFICATION_REPLY_BODY_CHARS,
   STATE_CHANGED_BODY,
+  STATE_CHANGED_PREFILL_BODY,
+  buildUndeliveredReplyBody,
   type NotificationActionDeps,
 } from "./notification-action";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
@@ -51,6 +54,14 @@ const QUESTION_PANE = [
   " Type something.",
   " Enter to select",
 ].join("\n");
+/** A plain, EMPTY Claude composer: a bare `❯ ` line (matching the readyPattern
+ *  `/^[>❯]\s*$/`), no prompt terminator, no picker. The one pane shape the Tier-2
+ *  reply prefill will type into. */
+const COMPOSER_PANE = ["❯ ", "? for shortcuts"].join("\n");
+/** A composer already holding a draft: the `❯` line carries text, so it no longer
+ *  matches the empty-composer readyPattern. Prefill must refuse (don't type over
+ *  the user's in-progress draft). */
+const DRAFT_PANE = ["❯ existing draft", "? for shortcuts"].join("\n");
 
 function mkSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -880,7 +891,10 @@ describe("handleNotificationAction: answer", () => {
     expect(sendTextCalls).toHaveLength(0);
   });
 
-  it("rejects a stale answer with 409 + re-notify", async () => {
+  it("rejects a stale answer with 409 and PRESERVES the text in the re-notify body", async () => {
+    // Default capture is a live permission prompt (not a composer), so Tier 2
+    // prefill is refused and the reply is preserved via the Tier-1 quoted body
+    // rather than silently discarded (issue #34).
     const session = questionSession();
     const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session);
     const res = await handleNotificationAction(
@@ -895,7 +909,9 @@ describe("handleNotificationAction: answer", () => {
     );
     expect(res.code).toBe(409);
     expect(sendTextCalls).toHaveLength(0);
-    expect(reNotifyCalls).toHaveLength(1);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("hi") },
+    ]);
   });
 
   it("answers a permission wait as deny-with-feedback (Claude: Escape then text)", async () => {
@@ -1598,6 +1614,391 @@ describe("handleNotificationAction: pane-authoritative wait type", () => {
     expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]); // permissionReplyPrelude
     expect(sendTextCalls).toEqual([
       { pane: "%1", text: "the blue one", enter: true },
+    ]);
+  });
+});
+
+describe("handleNotificationAction: preserve undelivered reply (issue #34)", () => {
+  const questionSession = () =>
+    mkSession({ attentionType: "question", pendingTool: null });
+
+  it("stale token + composer pane: TYPES the reply (no Enter) and prefill body", async () => {
+    // The pane verifiably shows a bare empty composer, so the undelivered reply
+    // is prefilled without submitting; the user reviews and presses Enter.
+    const session = questionSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: COMPOSER_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "use the teal one",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "use the teal one", enter: false },
+    ]);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: STATE_CHANGED_PREFILL_BODY },
+    ]);
+  });
+
+  it("prefill defuses a leading '/' with a space (would open the slash palette)", async () => {
+    const session = questionSession();
+    const { deps, sendTextCalls } = makeDeps(session, {
+      captureText: COMPOSER_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "/compact now",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: " /compact now", enter: false },
+    ]);
+  });
+
+  it("prefill defuses a leading '!' with a space (would trip shell mode)", async () => {
+    const session = questionSession();
+    const { deps, sendTextCalls } = makeDeps(session, {
+      captureText: COMPOSER_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "!!! stop",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: " !!! stop", enter: false },
+    ]);
+  });
+
+  it("attentionGeneration mismatch + composer pane: prefills the same as a stale token", async () => {
+    const session = mkSession({
+      attentionType: "question",
+      pendingTool: null,
+      attentionGeneration: 3,
+    });
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: COMPOSER_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        attentionGeneration: 2,
+        userText: "keep going",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "keep going", enter: false },
+    ]);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: STATE_CHANGED_PREFILL_BODY },
+    ]);
+  });
+
+  it("permission-prompt pane: Tier 1 (no typing, text quoted in the body)", async () => {
+    const session = questionSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: PERMISSION_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "no thanks",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("no thanks") },
+    ]);
+  });
+
+  it("question-picker pane: Tier 1 (a picker acts on keystrokes, never type)", async () => {
+    const session = questionSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: QUESTION_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "the other one",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("the other one") },
+    ]);
+  });
+
+  it("composer holding a draft: Tier 1 (readyPattern no longer matches)", async () => {
+    const session = questionSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: DRAFT_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "my reply",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("my reply") },
+    ]);
+  });
+
+  it("foreground is a shell: Tier 1 (never type into a shell)", async () => {
+    const session = questionSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: COMPOSER_PANE,
+      paneCommand: "zsh",
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "my reply",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("my reply") },
+    ]);
+  });
+
+  it("no bound pane: Tier 1", async () => {
+    const session = mkSession({
+      attentionType: "question",
+      pendingTool: null,
+      tmuxPane: null,
+    });
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: COMPOSER_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "my reply",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("my reply") },
+    ]);
+  });
+
+  it("agent def without readyPattern: Tier 1 (no positive composer signal)", async () => {
+    const noReadyPatternAgent: AgentDef = {
+      ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
+      readyPattern: undefined,
+    };
+    const session = questionSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      getAgent: () => noReadyPatternAgent,
+      captureText: COMPOSER_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "my reply",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("my reply") },
+    ]);
+  });
+
+  it("ambiguousWait: Tier 1 even with a safe composer (shared pane, allowPrefill false)", async () => {
+    const session = questionSession();
+    session.ambiguousWait = true;
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: COMPOSER_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+        userText: "my reply",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("my reply") },
+    ]);
+  });
+
+  it("over-cap text (> MAX_NOTIFICATION_REPLY_CHARS): no prefill, truncated Tier 1 body", async () => {
+    const session = questionSession();
+    const longText = "x".repeat(MAX_NOTIFICATION_REPLY_CHARS + 1);
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: COMPOSER_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: longText,
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody(longText) },
+    ]);
+    // The quoted text is capped and ellipsized, not the full 2001 chars.
+    expect(reNotifyCalls[0].body).toContain("...");
+    expect(reNotifyCalls[0].body.length).toBeLessThan(
+      MAX_NOTIFICATION_REPLY_BODY_CHARS + 60,
+    );
+  });
+
+  it("whitespace-only userText: plain STATE_CHANGED_BODY (nothing to preserve)", async () => {
+    const session = questionSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: COMPOSER_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "   \n\t ",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: STATE_CHANGED_BODY },
+    ]);
+  });
+
+  it("sendText returns false during prefill: Tier 1 body", async () => {
+    const session = questionSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: COMPOSER_PANE,
+      sendTextResult: false,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "my reply",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    // The prefill was attempted (one sendText, no Enter) but tmux rejected it.
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "my reply", enter: false },
+    ]);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("my reply") },
+    ]);
+  });
+
+  it("capturePane throwing during prefill: Tier 1 (fails closed, no typing)", async () => {
+    const session = questionSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      captureThrows: true,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "my reply",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("my reply") },
+    ]);
+  });
+
+  it("stale approve keeps the plain STATE_CHANGED_BODY (no text to preserve)", async () => {
+    const session = mkSession();
+    const { deps, sendKeyCalls, sendTextCalls, reNotifyCalls } =
+      makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: STATE_CHANGED_BODY },
     ]);
   });
 });
