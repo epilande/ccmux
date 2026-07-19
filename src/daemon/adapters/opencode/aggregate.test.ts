@@ -19,6 +19,7 @@ describe("aggregateOpenCodeMarkers", () => {
       status: "idle",
       attentionType: null,
       pendingTool: null,
+      ambiguousWait: false,
     });
   });
 
@@ -58,6 +59,7 @@ describe("aggregateOpenCodeMarkers", () => {
     expect(agg.status).toBe("waiting");
     expect(agg.attentionType).toBe("permission");
     expect(agg.pendingTool).toBe("bash");
+    expect(agg.ambiguousWait).toBe(false);
   });
 
   it("two idle markers: status idle, metadata from newer", () => {
@@ -133,6 +135,7 @@ describe("aggregateOpenCodeMarkers", () => {
     expect(agg.status).toBe("waiting");
     expect(agg.pendingTool).toBe("edit");
     expect(agg.nativeSessionId).toBe("b");
+    expect(agg.ambiguousWait).toBe(true);
   });
 
   it("working + waiting + idle: waiting wins", () => {

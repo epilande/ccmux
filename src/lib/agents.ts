@@ -489,6 +489,27 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     ],
     // Prefer continuing in-pane without requiring session ID extraction.
     resumeCommand: "opencode --continue",
+    // OpenCode's permission dialog is a horizontal option row
+    // (`Allow once  Allow always  Reject`) navigated with Left/Right arrows;
+    // Enter confirms the highlighted option. Verified e2e on OpenCode 1.18.3:
+    // the dialog ALWAYS opens with "Allow once" (approve) highlighted, so a
+    // bare Enter approves — Reject is never the initial highlight. Digits,
+    // letters, Home/End, and Tab are all inert (only arrows move the
+    // highlight), so there is no absolute selector; Deny navigates two steps
+    // right to Reject, then Enter. Escape is NOT a clean reject — it interrupts
+    // the whole turn and leaves the session hung in `working`, so it is not
+    // used for Deny and no `permissionReplyPrelude` is offered (a reply would
+    // have no safe cancel-to-composer key). No question detection exists for
+    // OpenCode, so no `answerPrelude`/`replyOnQuestion`; `replyOnFinished` is
+    // out of scope for this commit. Buttons are additionally suppressed at
+    // delivery when this row aggregates >1 concurrently-waiting server-side
+    // session (`Session.ambiguousWait`; see `aggregateOpenCodeMarkers`) — a
+    // keystroke lands on the shared pane's currently-rendered dialog, which may
+    // not be the one the notification described.
+    notificationActions: {
+      approve: ["Enter"],
+      deny: ["Right", "Right", "Enter"],
+    },
     invokeMode: {
       // `--format json` emits one event per line; default output prints a
       // colored 2-line banner above the response that's annoying to strip
