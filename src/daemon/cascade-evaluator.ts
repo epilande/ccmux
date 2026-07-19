@@ -213,10 +213,20 @@ export function openCodeMarkerSource(
  * skips its auto-stamp-on-status-change path. The LogWatcher already
  * owns the value; the log cascade source contributes status only.
  *
- * Always emits explicit `null` for attentionType / pendingTool so the
- * Option Y cleanup invariant holds: when log is the freshest baseline
- * and no upgrade fires, stale attention fields clear through the
- * evaluator instead of needing imperative bookkeeping.
+ * On non-waiting statuses this emits explicit `null` for attentionType /
+ * pendingTool so the Option Y cleanup invariant holds: when log is the
+ * freshest baseline and no upgrade fires, stale attention fields clear
+ * through the evaluator instead of needing imperative bookkeeping. On
+ * `waiting` it propagates the session's stored attention instead: a
+ * pane-tracked agent whose log adapter derives attention (Copilot's
+ * `permission.requested`) writes waiting+permission directly, and an
+ * attention-less echo of that same waiting status would out-fresh the
+ * second-truncated marker every tick and strip the attention its own
+ * adapter just wrote (found live on Copilot: `waiting`/`attentionType:
+ * null` pinned, buttons never offered). A waiting echo with fabricated
+ * null attention is a state no source ever produced; the cleanup
+ * invariant only ever needs to clear attention when the log has moved
+ * ON from the wait (working / idle), and those paths keep the nulls.
  */
 export function logSource(session: Session): CascadeSource {
   return {
@@ -224,11 +234,18 @@ export function logSource(session: Session): CascadeSource {
     timestamp: session.lastActivityAt
       ? new Date(session.lastActivityAt).getTime()
       : 0,
-    state: {
-      status: session.status,
-      attentionType: null,
-      pendingTool: null,
-    },
+    state:
+      session.status === "waiting"
+        ? {
+            status: "waiting",
+            attentionType: session.attentionType,
+            pendingTool: session.pendingTool,
+          }
+        : {
+            status: session.status,
+            attentionType: null,
+            pendingTool: null,
+          },
   };
 }
 
