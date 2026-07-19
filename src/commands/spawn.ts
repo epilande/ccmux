@@ -13,7 +13,7 @@ export function createSpawnCommand(): Command {
     .description("Spawn a new agent session in a tmux pane")
     .argument(
       "[agent]",
-      "Agent to spawn (claude, codex, opencode, gemini)",
+      "Agent to spawn (claude, codex, copilot, opencode, gemini)",
       "claude",
     )
     .option("--cwd <dir>", "Working directory")

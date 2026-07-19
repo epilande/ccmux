@@ -173,12 +173,16 @@ function getAttentionColor(session: EnrichedSession): string {
  * reads the live `theme` after `applyTheme`, rather than freezing the default
  * palette at import time. */
 export function agentColorFor(agentType: string): string {
+  // Brand-matched colors; shared slots (blue, mauve) are intentional.
   const colors: Record<string, string> = {
     claude: theme.peach,
     codex: theme.green,
     opencode: theme.blue,
     gemini: theme.mauve,
     pi: theme.teal,
+    cursor: theme.rosewater,
+    antigravity: theme.blue,
+    copilot: theme.mauve,
   };
   return colors[agentType] ?? theme.overlay;
 }

@@ -9,6 +9,7 @@ describe("createBuiltinHookAdapters", () => {
       "antigravity",
       "claude",
       "codex",
+      "copilot",
       "cursor",
       "opencode",
       "pi",
