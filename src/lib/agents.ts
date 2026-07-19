@@ -553,6 +553,26 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     ],
     resumeCommand: "codex resume {id}",
     sessionFilePattern: CODEX_SESSION_FILE_PATTERN,
+    // Codex's permission picker (verified e2e on codex-cli 0.144.5):
+    //   › 1. Yes, proceed (y)
+    //     2. Yes, and don't ask again for `<prefix>` (p)
+    //     3. No, and tell Codex what to do differently (esc)
+    //     Press enter to confirm or esc to cancel
+    // Option 1 ("Yes, proceed") is initially highlighted, so `approve: ["Enter"]`
+    // confirms it (curl ran, HTTP 200 observed). `deny: ["Escape"]` selects
+    // option 3: it cancels the request ("✗ You canceled the request to run
+    // <cmd>", the tool does NOT run) and returns Codex to its idle composer —
+    // it interrupts the turn but does NOT kill the session, which is the desired
+    // Deny. There is no `permissionReplyPrelude`/Reply: Escape here interrupts
+    // the whole turn (not a cancel-to-composer that keeps the tool pending), and
+    // Codex has no question wait. This map targets the enter/esc picker shape
+    // (the authoritative path is the `PermissionRequest` hook marker, Codex
+    // >= 0.122); the legacy `[y/n]` prompt in `terminalRules` is a pre-0.122
+    // fallback that this Enter/Escape map does not claim to cover.
+    notificationActions: {
+      approve: ["Enter"],
+      deny: ["Escape"],
+    },
     invokeMode: {
       // `codex exec` still prints a banner + session metadata + hook events
       // on stdout; `-o <tmpfile>` writes only the final agent message to a

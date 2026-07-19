@@ -1120,6 +1120,22 @@ describe("Notifier", () => {
       expect(payload.reply).toBeUndefined();
     });
 
+    it("stamps Approve/Deny for a codex permission wait (no reply)", async () => {
+      const codexAgent = BUILTIN_AGENTS.find((a) => a.name === "codex")!;
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Bash",
+        getAgent: () => codexAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      // Codex has no permissionReplyPrelude (Escape interrupts the turn), so no
+      // deny-with-feedback Reply.
+      expect(payload.reply).toBeUndefined();
+    });
+
     it("suppresses opencode buttons when the aggregate has multiple concurrent waits", async () => {
       const payload = await deliverWaiting({
         attentionType: "permission",

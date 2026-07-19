@@ -457,6 +457,45 @@ describe("handleNotificationAction: approve/deny", () => {
     ]);
   });
 
+  // Codex, like OpenCode, has no `planApprove`, so the pane-authoritative gate
+  // never runs; approve/deny resolve straight to the def's keys (verified e2e on
+  // codex-cli 0.144.5: Enter confirms the highlighted "Yes, proceed", Escape
+  // cancels the request without running the tool).
+  const codexSession = () =>
+    mkSession({ agentType: "codex", pendingTool: "Bash" });
+
+  it("codex approve sends Enter and returns 200", async () => {
+    const session = codexSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Enter" }]);
+  });
+
+  it("codex deny sends Escape and returns 200", async () => {
+    const session = codexSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+  });
+
   it("refuses approve on an aggregated row with multiple concurrent waits (409, no keys)", async () => {
     // A second server-side session began waiting between delivery and press, so
     // the shared pane's dialog may not be the one the notification described.

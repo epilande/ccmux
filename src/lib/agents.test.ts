@@ -444,6 +444,26 @@ describe("agents.claude.readyPattern override", () => {
   });
 });
 
+describe("built-in agent notificationActions defaults", () => {
+  it("opencode carries the verified Approve/Deny keys and no reply", () => {
+    const oc = BUILTIN_AGENTS.find((a) => a.name === "opencode");
+    expect(oc?.notificationActions?.approve).toEqual(["Enter"]);
+    expect(oc?.notificationActions?.deny).toEqual(["Right", "Right", "Enter"]);
+    expect(oc?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(oc?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(oc?.notificationActions?.replyOnFinished).toBeUndefined();
+  });
+
+  it("codex carries the verified Approve/Deny keys and no reply", () => {
+    const cx = BUILTIN_AGENTS.find((a) => a.name === "codex");
+    expect(cx?.notificationActions?.approve).toEqual(["Enter"]);
+    expect(cx?.notificationActions?.deny).toEqual(["Escape"]);
+    expect(cx?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(cx?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(cx?.notificationActions?.replyOnFinished).toBeUndefined();
+  });
+});
+
 describe("agents.claude.notificationActions", () => {
   it("carries the built-in reply gates on the default Claude def", () => {
     const claude = BUILTIN_AGENTS.find((a) => a.name === "claude");
