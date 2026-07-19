@@ -534,6 +534,82 @@ describe("handleNotificationAction: approve/deny", () => {
     expect(sendKeyCalls).toEqual([{ pane: "%1", key: "C-c" }]);
   });
 
+  // Gemini has no `planApprove`, so approve/deny resolve straight to the def's
+  // keys (verified e2e on gemini-cli 0.29.5: digits select-and-submit, "1" is
+  // "Allow once"; Escape is "No, suggest changes" and cancels the request).
+  const geminiSession = () =>
+    mkSession({ agentType: "gemini", pendingTool: "Command" });
+
+  it("gemini approve sends 1 and returns 200", async () => {
+    const session = geminiSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "1" }]);
+  });
+
+  it("gemini deny sends Escape and returns 200", async () => {
+    const session = geminiSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+  });
+
+  // Antigravity's numbered list also select-and-submits on digits (verified
+  // e2e on agy 1.1.1: "1" is "Yes"); deny is Escape because the option list
+  // is dynamic (4 vs 6 rows across waits), so a deny digit can't be trusted.
+  const antigravitySession = () =>
+    mkSession({ agentType: "antigravity", pendingTool: "Command" });
+
+  it("antigravity approve sends 1 and returns 200", async () => {
+    const session = antigravitySession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "1" }]);
+  });
+
+  it("antigravity deny sends Escape and returns 200", async () => {
+    const session = antigravitySession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+  });
+
   it("refuses approve on an aggregated row with multiple concurrent waits (409, no keys)", async () => {
     // A second server-side session began waiting between delivery and press, so
     // the shared pane's dialog may not be the one the notification described.

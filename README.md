@@ -209,7 +209,7 @@ ccmux config set notifications.enabled true
 ccmux notify   # sends a test notification and prints setup diagnostics
 ```
 
-Actionable Approve/Deny buttons work for **Claude Code**, **OpenCode**, **Codex**, and **Cursor**; other agents get click-to-jump for now. Inline **Reply** is Claude Code only. Approve/Deny work on macOS and Linux; inline reply needs a notification server that advertises it (always on macOS, varies on Linux).
+Actionable Approve/Deny buttons work for **Claude Code**, **OpenCode**, **Codex**, **Cursor**, **Gemini CLI**, and **Antigravity**; Pi has no tool-approval pause, so its notifications are click-to-jump. Inline **Reply** is Claude Code only. Approve/Deny work on macOS and Linux; inline reply needs a notification server that advertises it (always on macOS, varies on Linux).
 
 For OpenCode, one server can host several sessions folded into a single row, so when more than one is waiting at once the buttons are withheld (the keystroke could land on the wrong session's dialog) and the notification is delivered informational-only.
 

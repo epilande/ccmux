@@ -471,6 +471,29 @@ describe("built-in agent notificationActions defaults", () => {
     expect(cu?.notificationActions?.replyOnQuestion).toBeUndefined();
     expect(cu?.notificationActions?.replyOnFinished).toBeUndefined();
   });
+
+  it("gemini carries the verified Approve/Deny keys and no reply", () => {
+    const gm = BUILTIN_AGENTS.find((a) => a.name === "gemini");
+    expect(gm?.notificationActions?.approve).toEqual(["1"]);
+    expect(gm?.notificationActions?.deny).toEqual(["Escape"]);
+    expect(gm?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(gm?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(gm?.notificationActions?.replyOnFinished).toBeUndefined();
+  });
+
+  it("antigravity carries the verified Approve/Deny keys and no reply", () => {
+    const ag = BUILTIN_AGENTS.find((a) => a.name === "antigravity");
+    expect(ag?.notificationActions?.approve).toEqual(["1"]);
+    expect(ag?.notificationActions?.deny).toEqual(["Escape"]);
+    expect(ag?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(ag?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(ag?.notificationActions?.replyOnFinished).toBeUndefined();
+  });
+
+  it("pi deliberately has no notificationActions (no tool-approval pause exists)", () => {
+    const pi = BUILTIN_AGENTS.find((a) => a.name === "pi");
+    expect(pi?.notificationActions).toBeUndefined();
+  });
 });
 
 describe("agents.claude.notificationActions", () => {

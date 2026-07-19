@@ -733,6 +733,26 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         kind: "agent_error",
       },
     ],
+    // Antigravity's permission list (verified e2e on agy 1.1.1):
+    //   Requesting permission for: <cmd>
+    //   Do you want to proceed?
+    //   > 1. Yes
+    //     2./3. "Yes, and always allow ..." variants
+    //     4. No   (sometimes followed by 5./6. "No, and always deny ...")
+    // Digits are absolute select-and-submit: "1" alone approved and ran the
+    // gated curl. Deny is deliberately NOT ["4"] even though it verified
+    // ("User declined the tool call"): the option list is DYNAMIC — the same
+    // prompt rendered 4 options on one wait and 6 on the next — so a deny
+    // digit can land on a different row and must not be trusted. Escape uses
+    // the constant "esc to cancel" affordance: the tool does NOT run and the
+    // turn interrupts to the composer ("Interrupted · What should Antigravity
+    // CLI do instead?"), which structurally cannot approve. No Reply keys:
+    // there is no question wait, and Escape interrupts the turn rather than
+    // cancelling to a composer with the tool still pending.
+    notificationActions: {
+      approve: ["1"],
+      deny: ["Escape"],
+    },
     resumeCommand: "agy --conversation {id}",
     executable: "agy",
     invokeMode: {
@@ -773,6 +793,22 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         pendingTool: null,
       },
     ],
+    // Gemini's permission picker (verified e2e on gemini-cli 0.29.5):
+    //   ● 1. Allow once
+    //     2. Allow for this session
+    //     3. No, suggest changes (esc)
+    // Digits are absolute select-and-submit: "1" alone approved and ran the
+    // gated curl (no trailing Enter), independent of the highlight. Escape is
+    // option 3: "Request cancelled", the tool does NOT run, and the turn ends
+    // back at the composer. Both actions are single keys, so the no-settle
+    // keys path has no coalescing surface. No Reply keys: Gemini has no
+    // question wait and no verified cancel-to-composer prelude from the
+    // picker. Detection is terminal-rules-only (no hooks adapter), so these
+    // presses ride the pane-tracked staleness tokens alone.
+    notificationActions: {
+      approve: ["1"],
+      deny: ["Escape"],
+    },
     invokeMode: {
       // gemini reads its prompt from the `-p` argument. `{prompt}` is
       // substituted with the prompt text and, because the arg carries it,
@@ -824,6 +860,19 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         kind: "rate_limit",
       },
     ],
+    // No `notificationActions` ON PURPOSE (issue #26 decision, re-verified
+    // live on pi 0.79.9: a bash curl ran in 0.1s with no prompt of any
+    // kind). pi has no tool-approval pause — tools execute immediately — so
+    // a `permission` wait can never exist and there is nothing for
+    // Approve/Deny to drive. pi DOES ship an `ask_question` tool that can
+    // pause a session on a model-initiated question, but ccmux has no pi
+    // waiting detection (the extension marker only writes working/idle and
+    // the terminal rules above only detect working), so no waiting
+    // notification ever fires and there is nothing to attach Reply to.
+    // `replyOnFinished` stays Claude-only. Revisit only if a pi release adds
+    // an approval gate (or a user installs a tool_call-gating extension,
+    // which is out of scope).
+    //
     // `pi -c` continues the most recent session in-pane (no session-id
     // extraction needed, like opencode --continue).
     resumeCommand: "pi -c",

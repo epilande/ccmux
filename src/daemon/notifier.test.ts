@@ -1150,6 +1150,36 @@ describe("Notifier", () => {
       expect(payload.reply).toBeUndefined();
     });
 
+    it("stamps Approve/Deny for a gemini permission wait (no reply)", async () => {
+      const geminiAgent = BUILTIN_AGENTS.find((a) => a.name === "gemini")!;
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Command",
+        getAgent: () => geminiAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(payload.reply).toBeUndefined();
+    });
+
+    it("stamps Approve/Deny for an antigravity permission wait (no reply)", async () => {
+      const antigravityAgent = BUILTIN_AGENTS.find(
+        (a) => a.name === "antigravity",
+      )!;
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Command",
+        getAgent: () => antigravityAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(payload.reply).toBeUndefined();
+    });
+
     it("suppresses opencode buttons when the aggregate has multiple concurrent waits", async () => {
       const payload = await deliverWaiting({
         attentionType: "permission",
