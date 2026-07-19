@@ -231,6 +231,37 @@ describe("logSource", () => {
     expect(src.timestamp).toBe(0);
   });
 
+  // Pinned regression (found live on Copilot 1.0.71): the LogWatcher wrote
+  // waiting+permission from `permission.requested`, then the next reconcile
+  // tick's log echo — fresher than the second-truncated marker — stripped
+  // the attention back to null, pinning `waiting`/`attentionType: null` and
+  // never offering notification buttons. A waiting echo must carry the
+  // stored attention; only non-waiting echoes clear it (Option Y cleanup).
+  it("waiting echo propagates the session's stored attention", () => {
+    const session = mkSession({
+      status: "waiting",
+      attentionType: "permission",
+      pendingTool: "Url",
+      lastActivityAt: "2026-05-17T10:00:00.000Z",
+    });
+    const src = logSource(session);
+    expect(src.state.status).toBe("waiting");
+    expect(src.state.attentionType).toBe("permission");
+    expect(src.state.pendingTool).toBe("Url");
+  });
+
+  it("non-waiting echo still clears attention even when stale fields linger", () => {
+    const session = mkSession({
+      status: "working",
+      attentionType: "permission",
+      pendingTool: "Command",
+      lastActivityAt: "2026-05-17T10:00:00.000Z",
+    });
+    const src = logSource(session);
+    expect(src.state.attentionType).toBeNull();
+    expect(src.state.pendingTool).toBeNull();
+  });
+
   // Pinned regression: emitting any lastActivityAt key (even with
   // undefined value) flips `"lastActivityAt" in state` to true at
   // SessionManager.updateSession, which suppresses the auto-stamp on

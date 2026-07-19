@@ -1154,6 +1154,43 @@ describe("reconcileAll", () => {
       expect(sessionManager.getSession(id)!.status).toBe("idle");
     });
 
+    it("re-captures while windowActivity is in the capture's own second (same-second race)", async () => {
+      // `window_activity` has one-second granularity: output can land in the
+      // same second AFTER a capture ran (a permission prompt finishing its
+      // draw), then the pane goes quiet and the stamp never advances. A
+      // same-second capture must therefore never seed a trusted cache entry,
+      // or the pre-draw match would be pinned forever (observed live on
+      // Antigravity: the wait screen stayed `working`).
+      let captureCalls = 0;
+      mockCapturePane = async () => {
+        captureCalls++;
+        return "Allow command?";
+      };
+
+      makeSession(sessionManager, {
+        agentType: "cursor",
+        trackingMode: "pane",
+        tmuxPane: "%2",
+      });
+
+      const nowSecond = Math.floor(Date.now() / 1000);
+      const pane = fakePane({
+        paneId: "%2",
+        tty: "ttys002",
+        windowActivity: nowSecond,
+      });
+
+      const deps = makeDeps(sessionManager, { agents: [gatedAgent] });
+      await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
+      expect(captureCalls).toBe(1);
+
+      // Unchanged windowActivity, but the cached capture ran in the same
+      // second as the stamp — it may have raced later output, so the cache
+      // is distrusted and the pane is captured again.
+      await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
+      expect(captureCalls).toBe(2);
+    });
+
     it("always captures when windowActivity is null (safe fallback)", async () => {
       let captureCalls = 0;
       mockCapturePane = async () => {

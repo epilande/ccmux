@@ -988,6 +988,13 @@ describe("Notifier", () => {
   describe("actionable payload stamping", () => {
     const claudeAgent = BUILTIN_AGENTS.find((a) => a.name === "claude")!;
     const opencodeAgent = BUILTIN_AGENTS.find((a) => a.name === "opencode")!;
+    /** An agent with NO notificationActions map at all, kept map-less by
+     *  stripping the field so it stays a valid "no map" fixture as built-in
+     *  agents gain maps. */
+    const noMapAgent: AgentDef = {
+      ...opencodeAgent,
+      notificationActions: undefined,
+    };
 
     /** Drives a session to `waiting` with the given attention type and returns
      *  the single delivered payload. `buildContext` is stubbed off by default
@@ -997,6 +1004,7 @@ describe("Notifier", () => {
       pendingTool?: string;
       getAgent?: NotifierDeps["getAgent"];
       buildContext?: NotifierDeps["buildContext"];
+      ambiguousWait?: boolean;
     }): Promise<NotificationPayload> {
       const h = createHarness();
       const notifier = new Notifier({
@@ -1017,6 +1025,9 @@ describe("Notifier", () => {
         status: "waiting",
         attentionType: opts.attentionType,
         pendingTool: opts.pendingTool ?? null,
+        ...(opts.ambiguousWait !== undefined
+          ? { ambiguousWait: opts.ambiguousWait }
+          : {}),
       });
       await flush();
       expect(h.delivered.length).toBe(1);
@@ -1090,9 +1101,110 @@ describe("Notifier", () => {
       const payload = await deliverWaiting({
         attentionType: "permission",
         pendingTool: "Bash",
-        getAgent: () => opencodeAgent,
+        getAgent: () => noMapAgent,
       });
       expect(payload.actions).toBeUndefined();
+    });
+
+    it("stamps Approve/Deny for an opencode permission wait (mapped, single wait)", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "external_directory",
+        getAgent: () => opencodeAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      // OpenCode has no permissionReplyPrelude, so no deny-with-feedback Reply.
+      expect(payload.reply).toBeUndefined();
+    });
+
+    it("stamps Approve/Deny for a codex permission wait (no reply)", async () => {
+      const codexAgent = BUILTIN_AGENTS.find((a) => a.name === "codex")!;
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Bash",
+        getAgent: () => codexAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      // Codex has no permissionReplyPrelude (Escape interrupts the turn), so no
+      // deny-with-feedback Reply.
+      expect(payload.reply).toBeUndefined();
+    });
+
+    it("stamps Approve/Deny for a cursor permission wait (no reply)", async () => {
+      const cursorAgent = BUILTIN_AGENTS.find((a) => a.name === "cursor")!;
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Command",
+        getAgent: () => cursorAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(payload.reply).toBeUndefined();
+    });
+
+    it("stamps Approve/Deny for a gemini permission wait (no reply)", async () => {
+      const geminiAgent = BUILTIN_AGENTS.find((a) => a.name === "gemini")!;
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Command",
+        getAgent: () => geminiAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(payload.reply).toBeUndefined();
+    });
+
+    it("stamps Approve/Deny for an antigravity permission wait (no reply)", async () => {
+      const antigravityAgent = BUILTIN_AGENTS.find(
+        (a) => a.name === "antigravity",
+      )!;
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Command",
+        getAgent: () => antigravityAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(payload.reply).toBeUndefined();
+    });
+
+    it("stamps Approve/Deny for a copilot permission wait (no reply)", async () => {
+      const copilotAgent = BUILTIN_AGENTS.find((a) => a.name === "copilot")!;
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "Command",
+        getAgent: () => copilotAgent,
+      });
+      expect(payload.actions).toEqual([
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(payload.reply).toBeUndefined();
+    });
+
+    it("suppresses opencode buttons when the aggregate has multiple concurrent waits", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "external_directory",
+        getAgent: () => opencodeAgent,
+        ambiguousWait: true,
+      });
+      // A keystroke would land on whichever dialog the shared pane renders, so
+      // the notification ships informational-only.
+      expect(payload.actions).toBeUndefined();
+      expect(payload.reply).toBeUndefined();
     });
 
     it("omits buttons when no agent lookup is wired", async () => {

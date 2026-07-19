@@ -59,9 +59,10 @@ export interface AgentConfig {
   };
   /**
    * Named tmux keys sent to answer a permission prompt from a notification
-   * Approve/Deny button (see `AgentDef.notificationActions`). Honored only when
-   * overriding a built-in agent by name; `getAgents` never copies it onto a
-   * from-scratch custom agent, so such an agent gets no buttons. `answerPrelude`
+   * Approve/Deny button (see `AgentDef.notificationActions`). Honored both when
+   * overriding a built-in agent by name (whole-map replace, never a per-key
+   * merge with the built-in defaults) and on a from-scratch custom agent.
+   * `answerPrelude`
    * keys are sent before the reply text on the inline reply action (e.g. to
    * cancel a picker that ignores typed input). `replyOnQuestion`/`replyOnFinished`
    * opt `question` and `finished` (idle) waits into an inline Reply.

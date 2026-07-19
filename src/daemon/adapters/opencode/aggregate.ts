@@ -7,15 +7,29 @@ import type { SessionPidMarker } from "../../session-markers";
  * is waiting > working > idle; attention/cwd/nativeSessionId are pulled
  * from the newest waiting or newest-activity marker so the sidebar
  * reflects the most recent user-relevant event.
+ *
+ * `ambiguousWait` is emitted on every fold: true when MORE THAN ONE marker
+ * is waiting_permission at once, so the notifier suppresses Approve/Deny
+ * buttons (a single keystroke lands on whichever dialog the shared pane
+ * renders, which may not be the one the notification described). See
+ * `Session.ambiguousWait`.
  */
 export function aggregateOpenCodeMarkers(
   markers: readonly SessionPidMarker[],
 ): Partial<SessionState> & { nativeSessionId?: string } {
   if (markers.length === 0) {
-    return { status: "idle", attentionType: null, pendingTool: null };
+    return {
+      status: "idle",
+      attentionType: null,
+      pendingTool: null,
+      ambiguousWait: false,
+    };
   }
 
-  const hasWaiting = markers.some((m) => m.state === "waiting_permission");
+  const waitingCount = markers.filter(
+    (m) => m.state === "waiting_permission",
+  ).length;
+  const hasWaiting = waitingCount > 0;
   const hasWorking = markers.some((m) => m.state === "working");
   const status = hasWaiting ? "waiting" : hasWorking ? "working" : "idle";
 
@@ -36,6 +50,7 @@ export function aggregateOpenCodeMarkers(
     status,
     attentionType: newestWaiting ? "permission" : null,
     pendingTool: newestWaiting?.pending_tool ?? null,
+    ambiguousWait: waitingCount > 1,
     lastActivityAt: new Date(activityMs(newest)).toISOString(),
     nativeSessionId: newest.session_id,
   };

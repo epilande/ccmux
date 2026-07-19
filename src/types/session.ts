@@ -189,6 +189,19 @@ export interface Session {
    * object means "none" (mirrors `backgroundChildren`'s `[]`).
    */
   backgroundInFlight?: BackgroundInFlight;
+  /**
+   * True when this row's `waiting[permission]` folds MORE THAN ONE
+   * concurrently-waiting server-side session into a single ccmux Session
+   * (only OpenCode aggregates this way today; see `aggregateOpenCodeMarkers`).
+   * A notification-action keystroke lands on whichever dialog the pane
+   * currently renders, which may belong to a different server-side session
+   * than the notification described, and the staleness tokens can't catch it
+   * (same ccmux session, same edge). The notifier suppresses Approve/Deny/Reply
+   * while this is true so a press can never approve the wrong session's tool.
+   * Undefined/absent for every non-aggregating agent (treated as "not
+   * ambiguous").
+   */
+  ambiguousWait?: boolean;
 }
 
 /**
@@ -233,6 +246,11 @@ export interface SessionState {
   backgroundChildren?: BackgroundChild[];
   /** Background-only: live progress from `state.json` `inFlight`. */
   backgroundInFlight?: BackgroundInFlight;
+  /** True when the fold aggregates >1 concurrently-waiting server-side
+   * session into this row (see `Session.ambiguousWait`). Emitted by
+   * `aggregateOpenCodeMarkers` on every fold (true or false) so the notifier's
+   * button suppression tracks the live waiting-marker count. */
+  ambiguousWait?: boolean;
 }
 
 /**

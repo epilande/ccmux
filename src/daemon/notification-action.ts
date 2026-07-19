@@ -296,6 +296,26 @@ export async function handleNotificationAction(
     };
   }
 
+  // Aggregating-agent ambiguity guard (OpenCode). The notifier only attaches
+  // buttons when exactly one server-side session is waiting, but a SECOND wait
+  // can begin between delivery and press, flipping the row to ambiguous. Neither
+  // staleness token catches that (a new sibling's marker doesn't change THIS
+  // row's status or attention identity), and the pane-authority gate below is
+  // Claude-shaped (it never runs for OpenCode). Refuse the press: a keystroke
+  // would land on whichever dialog the shared pane renders, possibly the wrong
+  // session's tool. `default` (jump) already returned above.
+  if (session.ambiguousWait) {
+    deps.reNotify(session, STATE_CHANGED_BODY);
+    log(
+      `notification-action: refusing ${action} on an aggregated row with multiple concurrent waits`,
+    );
+    return {
+      code: 409,
+      ok: false,
+      error: "Multiple sessions are waiting; press is ambiguous",
+    };
+  }
+
   const agentDef = deps.getAgent(session.agentType);
 
   // Pane-authoritative wait type. For an agent whose plan picker differs from its

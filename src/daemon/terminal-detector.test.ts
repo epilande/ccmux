@@ -262,6 +262,25 @@ How's the CLI experience so far?
       expect(result.pendingTool).toBe("Command");
     });
 
+    it("detects the URL-access permission dialog", () => {
+      const result = detectTerminalStatus(
+        `Copilot is attempting to access the following URL:
+
+  https://example.com
+
+Do you want to allow this access?
+
+❯ 1. Yes
+  2. Yes, and approve all URLs from "https://example.com" for the rest of the running session
+  3. Yes, and approve all URLs from "https://example.com" permanently
+  4. No, and tell Copilot what to do differently (Esc to stop)`,
+        copilot,
+      );
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("permission");
+      expect(result.pendingTool).toBe("Url");
+    });
+
     it("detects the folder-trust dialog", () => {
       const result = detectTerminalStatus(
         `Do you trust the files in this folder?

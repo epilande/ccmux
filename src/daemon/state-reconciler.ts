@@ -758,10 +758,25 @@ async function reconcilePaneTrackedClaudeSession(
  * `windowActivity === null` (tmux didn't report a timestamp) always
  * misses — falling back to per-tick capture is the safe behavior for
  * that case.
+ *
+ * Same-second guard: `window_activity` has one-second granularity, so a
+ * capture taken in the SAME second as the activity stamp may predate
+ * output that landed later within that second — and if the pane then goes
+ * quiet (a static permission prompt finishing its draw right after the
+ * capture), the stamp never advances and the stale pre-draw match would
+ * be trusted forever (observed live: Antigravity's permission prompt
+ * pinned `working`). A cached entry is therefore reused only when its
+ * capture ran in a LATER second than the activity stamp, which proves the
+ * capture saw everything the stamp covers; until then every tick
+ * re-captures.
  */
 const terminalRuleCache = new Map<
   string,
-  { windowActivity: number; ruleMatch: ReturnType<typeof matchTerminalRule> }
+  {
+    windowActivity: number;
+    capturedAtMs: number;
+    ruleMatch: ReturnType<typeof matchTerminalRule>;
+  }
 >();
 
 /**
@@ -830,15 +845,21 @@ async function reconcilePaneTrackedAgentSession(
   if (
     pane.windowActivity !== null &&
     cached !== undefined &&
-    cached.windowActivity === pane.windowActivity
+    cached.windowActivity === pane.windowActivity &&
+    // Same-second guard (see the cache doc): only trust a capture taken in
+    // a later second than the activity stamp; a same-second capture may
+    // have raced output that landed after it.
+    pane.windowActivity < Math.floor(cached.capturedAtMs / 1000)
   ) {
     ruleMatch = cached.ruleMatch;
   } else {
+    const capturedAtMs = Date.now();
     const content = await capturePane(session.tmuxPane!, 50);
     ruleMatch = matchTerminalRule(content, agent);
     if (pane.windowActivity !== null) {
       terminalRuleCache.set(session.id, {
         windowActivity: pane.windowActivity,
+        capturedAtMs,
         ruleMatch,
       });
     }

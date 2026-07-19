@@ -504,6 +504,67 @@ describe("agents.claude.readyPattern override", () => {
   });
 });
 
+describe("built-in agent notificationActions defaults", () => {
+  it("opencode carries the verified Approve/Deny keys and no reply", () => {
+    const oc = BUILTIN_AGENTS.find((a) => a.name === "opencode");
+    expect(oc?.notificationActions?.approve).toEqual(["Enter"]);
+    expect(oc?.notificationActions?.deny).toEqual(["Right", "Right", "Enter"]);
+    expect(oc?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(oc?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(oc?.notificationActions?.replyOnFinished).toBeUndefined();
+  });
+
+  it("codex carries the verified Approve/Deny keys and no reply", () => {
+    const cx = BUILTIN_AGENTS.find((a) => a.name === "codex");
+    expect(cx?.notificationActions?.approve).toEqual(["Enter"]);
+    expect(cx?.notificationActions?.deny).toEqual(["Escape"]);
+    expect(cx?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(cx?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(cx?.notificationActions?.replyOnFinished).toBeUndefined();
+  });
+
+  it("cursor carries the verified Approve/Deny keys and no reply", () => {
+    const cu = BUILTIN_AGENTS.find((a) => a.name === "cursor");
+    expect(cu?.notificationActions?.approve).toEqual(["y"]);
+    expect(cu?.notificationActions?.deny).toEqual(["C-c"]);
+    expect(cu?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(cu?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(cu?.notificationActions?.replyOnFinished).toBeUndefined();
+  });
+
+  it("gemini carries the verified Approve/Deny keys and no reply", () => {
+    const gm = BUILTIN_AGENTS.find((a) => a.name === "gemini");
+    expect(gm?.notificationActions?.approve).toEqual(["1"]);
+    expect(gm?.notificationActions?.deny).toEqual(["Escape"]);
+    expect(gm?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(gm?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(gm?.notificationActions?.replyOnFinished).toBeUndefined();
+  });
+
+  it("antigravity carries the verified Approve/Deny keys and no reply", () => {
+    const ag = BUILTIN_AGENTS.find((a) => a.name === "antigravity");
+    expect(ag?.notificationActions?.approve).toEqual(["1"]);
+    expect(ag?.notificationActions?.deny).toEqual(["Escape"]);
+    expect(ag?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(ag?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(ag?.notificationActions?.replyOnFinished).toBeUndefined();
+  });
+
+  it("copilot carries the verified Approve/Deny keys and no reply", () => {
+    const cp = BUILTIN_AGENTS.find((a) => a.name === "copilot");
+    expect(cp?.notificationActions?.approve).toEqual(["1"]);
+    expect(cp?.notificationActions?.deny).toEqual(["Escape"]);
+    expect(cp?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(cp?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(cp?.notificationActions?.replyOnFinished).toBeUndefined();
+  });
+
+  it("pi deliberately has no notificationActions (no tool-approval pause exists)", () => {
+    const pi = BUILTIN_AGENTS.find((a) => a.name === "pi");
+    expect(pi?.notificationActions).toBeUndefined();
+  });
+});
+
 describe("agents.claude.notificationActions", () => {
   it("carries the built-in reply gates on the default Claude def", () => {
     const claude = BUILTIN_AGENTS.find((a) => a.name === "claude");
@@ -563,6 +624,51 @@ describe("agents.claude.notificationActions", () => {
     const claude = agents.find((a) => a.name === "claude");
     expect(claude?.notificationActions?.replyOnQuestion).toBe(true);
     expect(claude?.notificationActions?.replyOnFinished).toBe(true);
+  });
+});
+
+describe("agents.<custom>.notificationActions (custom-agent path)", () => {
+  it("maps notificationActions and ambiguousPermissionMarker on custom agents", () => {
+    // The custom-agent construction branch is separate from mergeAgentConfig;
+    // before this mapping existed a from-scratch agent silently lost both keys.
+    const agents = getAgents({
+      agents: {
+        myagent: {
+          processMatch: "myagent",
+          terminalRules: [],
+          notificationActions: {
+            approve: ["y"],
+            deny: ["n"],
+            permissionReplyPrelude: ["Escape"],
+            answerPrelude: ["Escape"],
+            replyOnQuestion: true,
+            replyOnFinished: true,
+          },
+          ambiguousPermissionMarker: true,
+        },
+      },
+    });
+    const custom = agents.find((a) => a.name === "myagent");
+    expect(custom?.notificationActions).toEqual({
+      approve: ["y"],
+      deny: ["n"],
+      permissionReplyPrelude: ["Escape"],
+      answerPrelude: ["Escape"],
+      replyOnQuestion: true,
+      replyOnFinished: true,
+    });
+    expect(custom?.ambiguousPermissionMarker).toBe(true);
+  });
+
+  it("leaves both unset on a custom agent that does not configure them", () => {
+    const agents = getAgents({
+      agents: {
+        myagent: { processMatch: "myagent", terminalRules: [] },
+      },
+    });
+    const custom = agents.find((a) => a.name === "myagent");
+    expect(custom?.notificationActions).toBeUndefined();
+    expect(custom?.ambiguousPermissionMarker).toBeUndefined();
   });
 });
 

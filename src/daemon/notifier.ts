@@ -529,7 +529,14 @@ export class Notifier {
     // Every action/reply types into the pane, so a paneless (background /
     // soft-evicted) row gets none (the button would only 409). The context
     // body/subtitle below still enrich the informational notification.
-    if (session.tmuxPane) {
+    // An aggregating agent (OpenCode) that folds >1 concurrently-waiting
+    // server-side session into this row gets a plain notification, never
+    // buttons: the keystroke lands on whichever dialog the shared pane
+    // renders, which may belong to a different server-side session than the
+    // one described, and the staleness tokens can't catch it (same ccmux
+    // session, same edge). Only actions/reply are suppressed; the body still
+    // enriches the informational banner.
+    if (session.tmuxPane && !session.ambiguousWait) {
       if (effectiveAttention === "permission") {
         const actions = buildActionButtons(map?.approve, map?.deny);
         if (actions.length > 0) payload.actions = actions;

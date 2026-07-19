@@ -11,6 +11,13 @@ import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
 import type { Session } from "../types/session";
 
 const opencodeAgent = BUILTIN_AGENTS.find((a) => a.name === "opencode")!;
+/** An agent that carries NO notificationActions map at all. Derived by
+ *  stripping the field so the fixture stays a "no map" agent even as built-in
+ *  agents gain maps over time. */
+const noMapAgent: AgentDef = {
+  ...opencodeAgent,
+  notificationActions: undefined,
+};
 
 const STAMP = "2024-01-15T12:00:00.000Z";
 
@@ -359,7 +366,7 @@ describe("handleNotificationAction: approve/deny", () => {
   it("rejects an unmapped agent with 409 and re-notifies", async () => {
     const session = mkSession({ agentType: "opencode" });
     const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session, {
-      getAgent: () => opencodeAgent,
+      getAgent: () => noMapAgent,
     });
     const res = await handleNotificationAction(
       {
@@ -405,6 +412,261 @@ describe("handleNotificationAction: approve/deny", () => {
       deps,
     );
     expect(res.code).toBe(500);
+  });
+
+  // OpenCode has no `planApprove`, so the pane-authoritative gate never runs;
+  // approve/deny resolve straight to the def's key sequences (verified e2e on
+  // OpenCode 1.18.3: Enter approves the initially-highlighted "Allow once",
+  // Right Right Enter navigates to and confirms "Reject").
+  const opencodeSession = () =>
+    mkSession({ agentType: "opencode", pendingTool: "external_directory" });
+
+  it("opencode approve sends bare Enter and returns 200", async () => {
+    const session = opencodeSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Enter" }]);
+  });
+
+  it("opencode deny sends Right Right Enter in order and returns 200", async () => {
+    const session = opencodeSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([
+      { pane: "%1", key: "Right" },
+      { pane: "%1", key: "Right" },
+      { pane: "%1", key: "Enter" },
+    ]);
+  });
+
+  // Codex, like OpenCode, has no `planApprove`, so the pane-authoritative gate
+  // never runs; approve/deny resolve straight to the def's keys (verified e2e on
+  // codex-cli 0.144.5: Enter confirms the highlighted "Yes, proceed", Escape
+  // cancels the request without running the tool).
+  const codexSession = () =>
+    mkSession({ agentType: "codex", pendingTool: "Bash" });
+
+  it("codex approve sends Enter and returns 200", async () => {
+    const session = codexSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Enter" }]);
+  });
+
+  it("codex deny sends Escape and returns 200", async () => {
+    const session = codexSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+  });
+
+  // Cursor has no `planApprove`, so approve/deny resolve straight to the def's
+  // keys (verified e2e on cursor-agent 2026.07.01: `y` runs the highlighted
+  // "Run (once)", C-c interrupts so the command never runs and can't mis-approve).
+  const cursorSession = () =>
+    mkSession({ agentType: "cursor", pendingTool: "Command" });
+
+  it("cursor approve sends y and returns 200", async () => {
+    const session = cursorSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "y" }]);
+  });
+
+  it("cursor deny sends C-c and returns 200", async () => {
+    const session = cursorSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "C-c" }]);
+  });
+
+  // Gemini has no `planApprove`, so approve/deny resolve straight to the def's
+  // keys (verified e2e on gemini-cli 0.29.5: digits select-and-submit, "1" is
+  // "Allow once"; Escape is "No, suggest changes" and cancels the request).
+  const geminiSession = () =>
+    mkSession({ agentType: "gemini", pendingTool: "Command" });
+
+  it("gemini approve sends 1 and returns 200", async () => {
+    const session = geminiSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "1" }]);
+  });
+
+  it("gemini deny sends Escape and returns 200", async () => {
+    const session = geminiSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+  });
+
+  // Antigravity's numbered list also select-and-submits on digits (verified
+  // e2e on agy 1.1.1: "1" is "Yes"); deny is Escape because the option list
+  // is dynamic (4 vs 6 rows across waits), so a deny digit can't be trusted.
+  const antigravitySession = () =>
+    mkSession({ agentType: "antigravity", pendingTool: "Command" });
+
+  it("antigravity approve sends 1 and returns 200", async () => {
+    const session = antigravitySession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "1" }]);
+  });
+
+  it("antigravity deny sends Escape and returns 200", async () => {
+    const session = antigravitySession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+  });
+
+  // Copilot's pickers also select-and-submit on digits (verified e2e on
+  // Copilot CLI 1.0.71: "1. Yes" is position-stable across the shell, URL,
+  // and folder-trust dialogs); deny is Escape because the deny row moves
+  // (3 on shell/trust, 4 on URL access), so a deny digit can't be trusted.
+  const copilotSession = () =>
+    mkSession({ agentType: "copilot", pendingTool: "Command" });
+
+  it("copilot approve sends 1 and returns 200", async () => {
+    const session = copilotSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "1" }]);
+  });
+
+  it("copilot deny sends Escape and returns 200", async () => {
+    const session = copilotSession();
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+  });
+
+  it("refuses approve on an aggregated row with multiple concurrent waits (409, no keys)", async () => {
+    // A second server-side session began waiting between delivery and press, so
+    // the shared pane's dialog may not be the one the notification described.
+    const session = opencodeSession();
+    session.ambiguousWait = true;
+    const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
   });
 });
 

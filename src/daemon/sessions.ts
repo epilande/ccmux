@@ -484,6 +484,17 @@ export class SessionManager extends EventEmitter {
       changed = true;
     }
 
+    // Aggregating agents (OpenCode) emit this on every fold so the notifier's
+    // button suppression tracks the live waiting-marker count. Honor an explicit
+    // `false` (count dropped back to one) as well as `true`.
+    if (
+      state.ambiguousWait !== undefined &&
+      state.ambiguousWait !== session.ambiguousWait
+    ) {
+      session.ambiguousWait = state.ambiguousWait;
+      changed = true;
+    }
+
     // Update cwd/project if provided from log entries (more accurate than decoded path)
     if (state.cwd && state.cwd !== session.cwd) {
       session.cwd = state.cwd;

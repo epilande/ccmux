@@ -107,7 +107,12 @@ export interface AgentDef {
    * it back to the composer where the reply lands as a user message (see
    * `handleNotificationAction`).
    *
-   * `replyOnQuestion` opts `question` waits into inline Reply; `replyOnFinished`
+   * `replyOnQuestion` opts `question` waits into inline Reply. The capability
+   * convention is the PAIR: `replyOnQuestion: true` AND a non-empty
+   * `answerPrelude` (notifier and handler both gate on it — without a cancel
+   * key the press could only 409, so the button is never offered). This is
+   * def-presence, not agent-name: any agent whose def carries the pair gets
+   * question Reply. `replyOnFinished`
    * opts `finished` (idle) waits into one. Idle Reply carries NO prelude: at
    * Claude's idle composer Escape clears a draft and double-Escape opens history
    * rewind, so a prelude there is harmful (see `resolveActionPlan`).
@@ -494,6 +499,27 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     ],
     // Prefer continuing in-pane without requiring session ID extraction.
     resumeCommand: "opencode --continue",
+    // OpenCode's permission dialog is a horizontal option row
+    // (`Allow once  Allow always  Reject`) navigated with Left/Right arrows;
+    // Enter confirms the highlighted option. Verified e2e on OpenCode 1.18.3:
+    // the dialog ALWAYS opens with "Allow once" (approve) highlighted, so a
+    // bare Enter approves — Reject is never the initial highlight. Digits,
+    // letters, Home/End, and Tab are all inert (only arrows move the
+    // highlight), so there is no absolute selector; Deny navigates two steps
+    // right to Reject, then Enter. Escape is NOT a clean reject — it interrupts
+    // the whole turn and leaves the session hung in `working`, so it is not
+    // used for Deny and no `permissionReplyPrelude` is offered (a reply would
+    // have no safe cancel-to-composer key). No question detection exists for
+    // OpenCode, so no `answerPrelude`/`replyOnQuestion`; `replyOnFinished` is
+    // out of scope for this commit. Buttons are additionally suppressed at
+    // delivery when this row aggregates >1 concurrently-waiting server-side
+    // session (`Session.ambiguousWait`; see `aggregateOpenCodeMarkers`) — a
+    // keystroke lands on the shared pane's currently-rendered dialog, which may
+    // not be the one the notification described.
+    notificationActions: {
+      approve: ["Enter"],
+      deny: ["Right", "Right", "Enter"],
+    },
     invokeMode: {
       // `--format json` emits one event per line; default output prints a
       // colored 2-line banner above the response that's annoying to strip
@@ -537,6 +563,26 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     ],
     resumeCommand: "codex resume {id}",
     sessionFilePattern: CODEX_SESSION_FILE_PATTERN,
+    // Codex's permission picker (verified e2e on codex-cli 0.144.5):
+    //   › 1. Yes, proceed (y)
+    //     2. Yes, and don't ask again for `<prefix>` (p)
+    //     3. No, and tell Codex what to do differently (esc)
+    //     Press enter to confirm or esc to cancel
+    // Option 1 ("Yes, proceed") is initially highlighted, so `approve: ["Enter"]`
+    // confirms it (curl ran, HTTP 200 observed). `deny: ["Escape"]` selects
+    // option 3: it cancels the request ("✗ You canceled the request to run
+    // <cmd>", the tool does NOT run) and returns Codex to its idle composer —
+    // it interrupts the turn but does NOT kill the session, which is the desired
+    // Deny. There is no `permissionReplyPrelude`/Reply: Escape here interrupts
+    // the whole turn (not a cancel-to-composer that keeps the tool pending), and
+    // Codex has no question wait. This map targets the enter/esc picker shape
+    // (the authoritative path is the `PermissionRequest` hook marker, Codex
+    // >= 0.122); the legacy `[y/n]` prompt in `terminalRules` is a pre-0.122
+    // fallback that this Enter/Escape map does not claim to cover.
+    notificationActions: {
+      approve: ["Enter"],
+      deny: ["Escape"],
+    },
     invokeMode: {
       // `codex exec` still prints a banner + session metadata + hook events
       // on stdout; `-o <tmpfile>` writes only the final agent message to a
@@ -609,6 +655,40 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         kind: "rate_limit",
       },
     ],
+    // Cursor's approval overlay (verified e2e on cursor-agent
+    // 2026.07.01-41b2de7):
+    //   Run this command?
+    //     → Run (once) (y)
+    //       Add Shell(<cmd>) to allowlist? (tab)
+    //       Run Everything (shift+tab)
+    //       Skip (esc or n)
+    // `approve: ["y"]` is the absolute "Run (once)" selector (curl ran, HTTP/2
+    // 200 observed). It is deliberately NOT `["Enter"]`: the overlay is a
+    // navigable list where Enter selects the highlight, and Deny cannot rely on
+    // the highlight position.
+    //
+    // Deny is the hard case. Both `esc` and `n` open a "Reason for rejection
+    // (Enter to submit, Esc to cancel)" TEXT sub-dialog (a 2026.04.17+ change) —
+    // there is NO single-key skip. The obvious `["Escape", "Enter"]` is UNSAFE:
+    // the notification keys path fires keys only KEY_SEQUENCE_GAP_MS apart with
+    // no settle/recheck, and an Escape immediately followed by Enter can be read
+    // as one Alt+Enter (or the sub-dialog hasn't opened yet), so the Enter
+    // lands on the still-live overlay and selects the highlighted "Run (once)" —
+    // reproduced: a deny press SILENTLY APPROVED and ran curl. So Deny is
+    // `["C-c"]`: Ctrl+C interrupts the turn (the command does NOT run — verified
+    // 3/3 with cleared scrollback) and STRUCTURALLY cannot select "Run (once)",
+    // so it can never mis-approve. Cursor's Auto-review may re-request approval
+    // afterward (a fresh permission the user can deny again); that retry is
+    // Cursor behavior, not the keystroke. No `permissionReplyPrelude`/Reply: the
+    // reject-reason sub-dialog can't be driven safely from the prelude path
+    // (same ESC-coalescing footgun), and Cursor has no question wait. The
+    // workspace-trust prompt ("Workspace Trust Required") is out of scope: it
+    // has no `terminalRules` entry, so it never becomes a `permission` wait and
+    // needs no extra gating.
+    notificationActions: {
+      approve: ["y"],
+      deny: ["C-c"],
+    },
     // `--resume <chatId>` restores the chat transcript only when invoked
     // from the original workspace; cursor scopes chats per workspace_roots.
     // ccmux resumes inside the pane's shell which preserves cwd, so this
@@ -663,6 +743,26 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         kind: "agent_error",
       },
     ],
+    // Antigravity's permission list (verified e2e on agy 1.1.1):
+    //   Requesting permission for: <cmd>
+    //   Do you want to proceed?
+    //   > 1. Yes
+    //     2./3. "Yes, and always allow ..." variants
+    //     4. No   (sometimes followed by 5./6. "No, and always deny ...")
+    // Digits are absolute select-and-submit: "1" alone approved and ran the
+    // gated curl. Deny is deliberately NOT ["4"] even though it verified
+    // ("User declined the tool call"): the option list is DYNAMIC — the same
+    // prompt rendered 4 options on one wait and 6 on the next — so a deny
+    // digit can land on a different row and must not be trusted. Escape uses
+    // the constant "esc to cancel" affordance: the tool does NOT run and the
+    // turn interrupts to the composer ("Interrupted · What should Antigravity
+    // CLI do instead?"), which structurally cannot approve. No Reply keys:
+    // there is no question wait, and Escape interrupts the turn rather than
+    // cancelling to a composer with the tool still pending.
+    notificationActions: {
+      approve: ["1"],
+      deny: ["Escape"],
+    },
     resumeCommand: "agy --conversation {id}",
     executable: "agy",
     invokeMode: {
@@ -703,6 +803,22 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         pendingTool: null,
       },
     ],
+    // Gemini's permission picker (verified e2e on gemini-cli 0.29.5):
+    //   ● 1. Allow once
+    //     2. Allow for this session
+    //     3. No, suggest changes (esc)
+    // Digits are absolute select-and-submit: "1" alone approved and ran the
+    // gated curl (no trailing Enter), independent of the highlight. Escape is
+    // option 3: "Request cancelled", the tool does NOT run, and the turn ends
+    // back at the composer. Both actions are single keys, so the no-settle
+    // keys path has no coalescing surface. No Reply keys: Gemini has no
+    // question wait and no verified cancel-to-composer prelude from the
+    // picker. Detection is terminal-rules-only (no hooks adapter), so these
+    // presses ride the pane-tracked staleness tokens alone.
+    notificationActions: {
+      approve: ["1"],
+      deny: ["Escape"],
+    },
     invokeMode: {
       // gemini reads its prompt from the `-p` argument. `{prompt}` is
       // substituted with the prompt text and, because the arg carries it,
@@ -754,6 +870,19 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         kind: "rate_limit",
       },
     ],
+    // No `notificationActions` ON PURPOSE (issue #26 decision, re-verified
+    // live on pi 0.79.9: a bash curl ran in 0.1s with no prompt of any
+    // kind). pi has no tool-approval pause — tools execute immediately — so
+    // a `permission` wait can never exist and there is nothing for
+    // Approve/Deny to drive. pi DOES ship an `ask_question` tool that can
+    // pause a session on a model-initiated question, but ccmux has no pi
+    // waiting detection (the extension marker only writes working/idle and
+    // the terminal rules above only detect working), so no waiting
+    // notification ever fires and there is nothing to attach Reply to.
+    // `replyOnFinished` stays Claude-only. Revisit only if a pi release adds
+    // an approval gate (or a user installs a tool_call-gating extension,
+    // which is out of scope).
+    //
     // `pi -c` continues the most recent session in-pane (no session-id
     // extraction needed, like opencode --continue).
     resumeCommand: "pi -c",
@@ -801,6 +930,17 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         pendingTool: "Command",
       },
       {
+        // URL-access approval ("Copilot is attempting to access the following
+        // URL: ... Do you want to allow this access?"). Copilot raises this
+        // BEFORE the shell dialog when a command touches the network, so a
+        // URL-only wait is a real permission pause the pane path must see.
+        // "Url" matches `permissionToolLabel("url")` on the log path.
+        matchAny: ["do you want to allow this access?"],
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Url",
+      },
+      {
         // Folder-trust prompt shown on first launch in an untrusted dir.
         matchAny: ["do you trust the files in this folder?"],
         status: "waiting",
@@ -823,6 +963,28 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         kind: "rate_limit",
       },
     ],
+    // Copilot's permission dialogs (verified e2e on Copilot CLI 1.0.71):
+    //   Do you want to run this command?     → 1. Yes / 2. Yes, and don't ask
+    //     again for `<cmd>` in this directory / 3. No, ... (Esc to stop)
+    //   Do you want to allow this access?    → 1. Yes / 2.-3. "Yes, and
+    //     approve all URLs from ..." variants / 4. No, ... (Esc to stop)
+    //   Do you trust the files in this folder? → 1. Yes / 2. Yes, and
+    //     remember / 3. No (Esc)
+    // Digits are absolute select-and-submit: "1" alone approved and ran the
+    // gated curl (no trailing Enter). Option "1. Yes" is position-stable
+    // across all three dialogs, but the deny row is NOT (3 on shell/trust,
+    // 4 on URL access), so deny must not be a digit. Escape uses the constant
+    // "esc to cancel" affordance: verified the tool did NOT run ("✗ Shell ...
+    // The user rejected this tool call") and the turn ended at the composer,
+    // so it structurally cannot approve. A single tool call can chain two
+    // dialogs (URL access, then shell); each is its own wait/notification and
+    // one press answers exactly one dialog. No Reply keys: no question wait,
+    // and Escape ends the turn rather than cancelling to a composer with the
+    // tool still pending.
+    notificationActions: {
+      approve: ["1"],
+      deny: ["Escape"],
+    },
     resumeCommand: "copilot --resume {id}",
     // Copilot holds `session-state/<uuid>/session.db` open (lsof-discoverable),
     // so the no-hooks path can recover the native session id from it.
@@ -917,6 +1079,10 @@ export function getAgents(preferences?: Preferences): AgentDef[] {
         ? parseRegex(override.readyPattern, `agents.${name}.readyPattern`)
         : undefined,
       hooks: override.hooks,
+      notificationActions: override.notificationActions
+        ? { ...override.notificationActions }
+        : undefined,
+      ambiguousPermissionMarker: override.ambiguousPermissionMarker,
     });
   }
 
