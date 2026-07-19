@@ -173,9 +173,7 @@ function getAttentionColor(session: EnrichedSession): string {
  * reads the live `theme` after `applyTheme`, rather than freezing the default
  * palette at import time. */
 export function agentColorFor(agentType: string): string {
-  // Brand-matched slots; sharing (blue, mauve) is deliberate: brand fidelity
-  // over per-agent uniqueness. Cursor/OpenCode/Pi brands are monochrome, so
-  // cursor gets the near-neutral rosewater and opencode/pi keep their slots.
+  // Brand-matched colors; shared slots (blue, mauve) are intentional.
   const colors: Record<string, string> = {
     claude: theme.peach,
     codex: theme.green,
