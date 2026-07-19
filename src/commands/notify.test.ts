@@ -225,6 +225,44 @@ describe("ccmux notify: osascript", () => {
     }
   });
 
+  it("bare invocation labels the demo body with a 'Finished' subtitle", async () => {
+    reset();
+    const restorePlatform = withPlatform("darwin");
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runNotify();
+
+      expect(exit).toBeNull();
+      expect(deliverCalls[0]?.payload).toMatchObject({
+        subtitle: "Finished",
+        body: "Notifications are working",
+      });
+    } finally {
+      restoreExit();
+      logSpy.mockRestore();
+      restorePlatform();
+    }
+  });
+
+  it("a custom message carries no subtitle so no false event is implied", async () => {
+    reset();
+    const restorePlatform = withPlatform("darwin");
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runNotify("Build failed");
+
+      expect(exit).toBeNull();
+      expect(deliverCalls[0]?.payload).toMatchObject({
+        subtitle: undefined,
+        body: "Build failed",
+      });
+    } finally {
+      restoreExit();
+      restorePlatform();
+    }
+  });
+
   it("exits 1 when no backend resolves for the platform", async () => {
     reset();
     resolvedBackend = null;
