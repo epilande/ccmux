@@ -236,7 +236,7 @@ Configure further with `ccmux config set notifications.<key> <value>`, or edit `
 
 **`osc` (terminal escape):** writes a notification escape sequence into the session's tmux pane, so it rides the terminal stream to whatever emulator is attached, including across SSH, with no extra transport. Opt-in only (`ccmux config set notifications.backend osc`, never picked by `auto`) and informational only: no buttons, reply, sound, or retraction, and paneless background sessions are skipped. Requires `tmux set -g allow-passthrough on`. Kitty clients get OSC 99, everything else OSC 9 (`title: body`); supported by Ghostty, iTerm2, and WezTerm (OSC 9) and Kitty (OSC 99), silently ignored by Apple Terminal and Alacritty.
 
-**Remote / SSH:** run ccmux, tmux, and your agents on the remote box, set `backend` to `osc` and `allow-passthrough on` there, then attach over SSH. Notifications fire on the remote and render on the machine you're sitting at.
+This is the notification story for remote work; see [Remote / SSH](#-remote--ssh) for the full setup.
 
 > [!NOTE]
 > **Approve/Deny only send the mapped keystroke** to that session's pane (for Claude, the same key you'd press yourself). **Approve on a plan** picks "manually approve edits" (edits stay gated), never Claude's auto-accept mode. **Reply on a permission or plan notification denies the pending tool/plan** and sends your text as the next message (it cancels the prompt first, then types). If the session moved on since the notification fired, the press sends nothing and you get a fresh "state changed" notification instead; dismissing a notification never approves anything.
@@ -292,6 +292,20 @@ This repo ships a `dispatch` [Agent Skill](https://agentskills.io) that teaches 
 ```
 
 Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the same skill by copying it into their skills directory. The skill is additive glue for the ccmux CLI, which must be installed and on your `PATH`. See [`plugins/ccmux/README.md`](plugins/ccmux/README.md) for details.
+
+## 🌐 Remote / SSH
+
+ccmux tracks the sessions on the machine where it runs, so for a remote devbox, run everything there: install ccmux, tmux, and your agents on the remote host, run `ccmux setup`, and attach over SSH. Detection, hooks, the picker, and the sidebar all work at full fidelity because nothing crosses the SSH boundary; your terminal is just the window into it.
+
+The one piece that doesn't follow automatically is desktop notifications: the remote daemon has no desktop to deliver to. The `osc` backend covers this by writing notification escape sequences through the terminal stream, so banners render in the emulator you're sitting in front of (see [Notifications](#notifications) for its limits and the emulator support matrix):
+
+```bash
+# on the remote host
+ccmux config set notifications.enabled true
+ccmux config set notifications.backend osc
+tmux set -g allow-passthrough on  # add to tmux.conf to persist
+ccmux notify                      # test: a banner should appear locally
+```
 
 ## ⌨️ Keyboard Controls
 
