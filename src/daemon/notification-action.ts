@@ -47,7 +47,7 @@ export const STATE_CHANGED_PREFILL_BODY =
 /** Cap on the reply text echoed back inside the Tier-1 "not sent" body. Distinct
  *  from {@link MAX_NOTIFICATION_REPLY_CHARS} (the delivery cap): this only bounds
  *  how much text the re-notification quotes so a long paste can't blow the banner
- *  out, and the whole reply is still recoverable from the daemon log. */
+ *  out. */
 export const MAX_NOTIFICATION_REPLY_BODY_CHARS = 1000;
 
 /** Tier-1 re-notification body: the reply could not be delivered OR safely
@@ -201,12 +201,27 @@ async function tryPrefillReply(
   // A `readyPattern` IS the positive composer signal, so it doubles as the
   // "no existing draft" guard: it matches only an EMPTY composer line (Claude's
   // `/^[>❯]\s*$/`), so a composer already holding a draft no longer matches and
-  // we refuse to type over the user's in-progress text. Today only Claude (the
-  // sole Reply-capable agent) carries both `notificationActions` and a pattern.
+  // we refuse to type over the user's in-progress text.
+  //
+  // The gate requires genuine reply capability, NOT mere `notificationActions`
+  // presence: Antigravity carries both `notificationActions` (approve/deny
+  // buttons) AND a `readyPattern`, yet is not Reply-capable, so keying off
+  // `notificationActions` truthiness would let its answer text reach this path.
+  // The prompt classifiers below (`classifyClaudePromptPane`,
+  // `matchesQuestionPickerSignature`) are Claude-specific, so reply capability
+  // (any of the reply fields the notifier gates Reply on: `replyOnQuestion`,
+  // `replyOnFinished`, `permissionReplyPrelude`, `planReplyPrelude`) is the
+  // honest precondition for trusting them. True for Claude, false for
+  // Antigravity.
   const agentDef = deps.getAgent(session.agentType);
-  const readyPattern = agentDef?.notificationActions
-    ? agentDef.readyPattern
-    : undefined;
+  const na = agentDef?.notificationActions;
+  const replyCapable = !!(
+    na?.replyOnQuestion ||
+    na?.replyOnFinished ||
+    na?.permissionReplyPrelude?.length ||
+    na?.planReplyPrelude?.length
+  );
+  const readyPattern = replyCapable ? agentDef?.readyPattern : undefined;
   if (!readyPattern) return false;
 
   // Foreground liveness. The token gates run BEFORE the main liveness guard, so

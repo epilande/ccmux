@@ -1648,6 +1648,34 @@ describe("handleNotificationAction: preserve undelivered reply (issue #34)", () 
     ]);
   });
 
+  it("sanitizes a multiline/control-char reply BEFORE prefilling it", async () => {
+    // The prefill path must run the reply through sanitizeReply first, exactly
+    // like the submit path: newlines/tabs/CR collapse to single spaces (a raw
+    // newline would submit early at the composer), so the pane receives ONE
+    // typed line, not the raw multiline text.
+    const session = questionSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      captureText: COMPOSER_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "use\nthe blue\r\none",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "use the blue one", enter: false },
+    ]);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: STATE_CHANGED_PREFILL_BODY },
+    ]);
+  });
+
   it("prefill defuses a leading '/' with a space (would open the slash palette)", async () => {
     const session = questionSession();
     const { deps, sendTextCalls } = makeDeps(session, {
