@@ -1441,6 +1441,16 @@ describe("Notifier", () => {
       expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
     });
 
+    it("stamps a Reply on a finished notification for a non-Claude agent with replyOnFinished (codex)", async () => {
+      // The offer gate is def-presence, not agent-name (issue #35): codex
+      // carries `replyOnFinished: true`, so its finished notification gets the
+      // same Reply and still no buttons.
+      const codexAgent = BUILTIN_AGENTS.find((a) => a.name === "codex")!;
+      const payload = await deliverFinished(() => codexAgent);
+      expect(payload.reply).toEqual({ id: "answer", label: "Reply" });
+      expect(payload.actions).toBeUndefined();
+    });
+
     it("stamps no Reply on a finished notification when no agent lookup is wired", async () => {
       const payload = await deliverFinished();
       expect(payload.reply).toBeUndefined();
@@ -1448,7 +1458,13 @@ describe("Notifier", () => {
     });
 
     it("stamps no Reply on a finished notification for an agent without replyOnFinished", async () => {
-      const payload = await deliverFinished(() => opencodeAgent);
+      // Every builtin now carries `replyOnFinished` (issue #35), so strip the
+      // flag from a clone to keep a valid "approve/deny only" fixture.
+      const approveDenyOnly: AgentDef = {
+        ...opencodeAgent,
+        notificationActions: { approve: ["Enter"], deny: ["Escape"] },
+      };
+      const payload = await deliverFinished(() => approveDenyOnly);
       expect(payload.reply).toBeUndefined();
       expect(payload.actions).toBeUndefined();
     });

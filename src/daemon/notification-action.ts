@@ -198,21 +198,26 @@ async function tryPrefillReply(
   const pane = session.tmuxPane;
   if (!pane) return false;
 
-  // A `readyPattern` IS the positive composer signal, so it doubles as the
-  // "no existing draft" guard: it matches only an EMPTY composer line (Claude's
-  // `/^[>❯]\s*$/`), so a composer already holding a draft no longer matches and
-  // we refuse to type over the user's in-progress text.
-  //
-  // The gate requires genuine reply capability, NOT mere `notificationActions`
-  // presence: Antigravity carries both `notificationActions` (approve/deny
-  // buttons) AND a `readyPattern`, yet is not Reply-capable, so keying off
-  // `notificationActions` truthiness would let its answer text reach this path.
-  // The prompt classifiers below (`classifyClaudePromptPane`,
-  // `matchesQuestionPickerSignature`) are Claude-specific, so reply capability
-  // (any of the reply fields the notifier gates Reply on: `replyOnQuestion`,
-  // `replyOnFinished`, `permissionReplyPrelude`, `planReplyPrelude`) is the
-  // honest precondition for trusting them. True for Claude, false for
-  // Antigravity.
+  // Tier-2 prefill is scoped to Claude outright. Every "safe to type" signal
+  // below is verified against Claude's TUI only: the prompt classifiers
+  // (`classifyClaudePromptPane`, `matchesQuestionPickerSignature`) recognize
+  // Claude dialogs, and the empty-composer reading of `readyPattern` holds for
+  // Claude's `/^[>❯]\s*$/` (a drafted composer stops matching, so we never type
+  // over in-progress text). Issue #35 made other agents Reply-capable
+  // (`replyOnFinished`), so reply capability no longer implies those
+  // classifiers apply: Antigravity now carries both the flag and a
+  // `readyPattern`, but its `? for shortcuts` footer is a hint line, not an
+  // empty-composer signal: verified on agy 1.1.4 that it does vanish while a
+  // live permission dialog renders, but it stays matched while a DRAFT sits in
+  // the composer, so prefill would type over in-progress text. Widen per agent
+  // only with agent-specific prompt classifiers plus a live verification pass.
+  if (session.agentType !== "claude") return false;
+
+  // Still require genuine reply capability: a user override replaces
+  // `notificationActions` wholesale, and a def stripped of every reply field
+  // (`replyOnQuestion`, `replyOnFinished`, `permissionReplyPrelude`,
+  // `planReplyPrelude`) never offers Reply, so its stale text must not be
+  // typed either.
   const agentDef = deps.getAgent(session.agentType);
   const na = agentDef?.notificationActions;
   const replyCapable = !!(
@@ -223,6 +228,17 @@ async function tryPrefillReply(
   );
   const readyPattern = replyCapable ? agentDef?.readyPattern : undefined;
   if (!readyPattern) return false;
+
+  // Per-agent unsafe reply shapes can't be space-defused (composers strip
+  // leading whitespace before trigger detection, or fuzzy-match a command
+  // token anywhere), and prefill IS typing, so never prefill them. Same gate
+  // as the submit path.
+  const unsafePattern = na?.unsafeReplyPattern;
+  if (unsafePattern) {
+    // Reset for /g-flagged user-override regexes; `.test()` is stateful.
+    unsafePattern.lastIndex = 0;
+    if (unsafePattern.test(text)) return false;
+  }
 
   // Foreground liveness. The token gates run BEFORE the main liveness guard, so
   // a reply rejected there never reached it; re-check here so a prefill can't
@@ -576,6 +592,33 @@ export async function handleNotificationAction(
         ok: false,
         error: `Reply exceeds ${MAX_NOTIFICATION_REPLY_CHARS} characters`,
       };
+    }
+    // Per-agent unsafe reply shapes. Most composers strip leading whitespace
+    // BEFORE their trigger detection, so the space defuse below cannot
+    // neutralize a leading trigger char (verified live: Codex 0.144.5 runs a
+    // `!`-prefixed reply as a shell command with NO approval; Gemini 0.29.5
+    // trims for both `/` and `!`); Cursor's slash autocomplete fuzzy-matches
+    // a `/token` ANYWHERE and swallows the submitting Enter. Refuse
+    // fail-closed BEFORE any prelude keystroke, since a prelude cancels a
+    // live prompt, which must not happen for a reply that will never be
+    // typed. The text is preserved via re-notify (Tier 1 only: prefilling it
+    // is exactly the hazard) and the user delivers it from the pane.
+    const unsafePattern = agentDef?.notificationActions?.unsafeReplyPattern;
+    if (unsafePattern) {
+      // Reset for /g-flagged user-override regexes; `.test()` is stateful.
+      unsafePattern.lastIndex = 0;
+      if (unsafePattern.test(text)) {
+        await reNotifyPreserving(false);
+        log(
+          `notification-action: reply matches unsafeReplyPattern for agent "${session.agentType}", refusing to type`,
+        );
+        return {
+          code: 409,
+          ok: false,
+          error:
+            "Reply contains text this agent's composer cannot receive safely",
+        };
+      }
     }
     // Some waits ignore typed text and need a prelude keystroke to reach a
     // composer that accepts it (Claude's AskUserQuestion picker, or an

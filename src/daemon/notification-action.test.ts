@@ -994,6 +994,233 @@ describe("handleNotificationAction: answer on finished (idle)", () => {
     ]);
   });
 
+  it("delivers a finished reply for a non-Claude agent (codex) with NO prelude", async () => {
+    const session = mkSession({
+      id: "codex_pane2",
+      agentType: "codex",
+      status: "idle",
+      attentionType: null,
+      previousStatus: "working",
+    });
+    const { deps, sendKeyCalls, sendTextCalls } = makeDeps(session, {
+      paneCommand: "codex",
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+        userText: "looks good, continue",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "looks good, continue", enter: true },
+    ]);
+  });
+
+  it("refuses an agent-unsafe first char (codex '!') with 409 + preserved text, nothing typed", async () => {
+    // Codex runs a `!`-prefixed reply as a shell command with no approval; the
+    // space defuse does not work there, so the guard must refuse BEFORE typing.
+    const session = mkSession({
+      id: "codex_pane2",
+      agentType: "codex",
+      status: "idle",
+      attentionType: null,
+      previousStatus: "working",
+    });
+    const { deps, sendKeyCalls, sendTextCalls, reNotifyCalls } = makeDeps(
+      session,
+      { paneCommand: "codex" },
+    );
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+        userText: "!git push origin main",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      {
+        id: session.id,
+        body: buildUndeliveredReplyBody("!git push origin main"),
+      },
+    ]);
+  });
+
+  it("catches an unsafe first char behind leading whitespace (trimStart)", async () => {
+    // Codex/pi/gemini/copilot key the trigger on the first NON-whitespace
+    // char, so leading spaces in the reply must not slip the guard.
+    const session = mkSession({
+      id: "codex_pane2",
+      agentType: "codex",
+      status: "idle",
+      attentionType: null,
+      previousStatus: "working",
+    });
+    const { deps, sendTextCalls } = makeDeps(session, {
+      paneCommand: "codex",
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+        userText: "   !echo hi",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+  });
+
+  it("delivers a mid-text unsafe char verbatim (codex)", async () => {
+    // Only the FIRST non-whitespace char triggers shell mode; a mid-text `!`
+    // is inert and must flow through unchanged.
+    const session = mkSession({
+      id: "codex_pane2",
+      agentType: "codex",
+      status: "idle",
+      attentionType: null,
+      previousStatus: "working",
+    });
+    const { deps, sendTextCalls } = makeDeps(session, {
+      paneCommand: "codex",
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+        userText: "great work! ship it",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "great work! ship it", enter: true },
+    ]);
+  });
+
+  it("refuses a cursor reply with a slash-command token mid-text (positional pattern)", async () => {
+    // Cursor's slash autocomplete fuzzy-matches a whitespace-preceded /token
+    // ANYWHERE and swallows the submitting Enter when the tail matches a real
+    // command (verified: `try running /help` executed `/help model`), so its
+    // pattern is positional, not first-char.
+    const session = mkSession({
+      id: "cursor_pane4",
+      agentType: "cursor",
+      status: "idle",
+      attentionType: null,
+      previousStatus: "working",
+    });
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      paneCommand: "cursor-agent",
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+        userText: "try running /help",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("try running /help") },
+    ]);
+  });
+
+  it("delivers a cursor reply with a path slash (not a command token)", async () => {
+    // Path slashes are not preceded by whitespace, produce no popup, and must
+    // flow through untouched.
+    const session = mkSession({
+      id: "cursor_pane4",
+      agentType: "cursor",
+      status: "idle",
+      attentionType: null,
+      previousStatus: "working",
+    });
+    const { deps, sendTextCalls } = makeDeps(session, {
+      paneCommand: "cursor-agent",
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+        userText: "see src/main.ts for context",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: "see src/main.ts for context", enter: true },
+    ]);
+  });
+
+  it("refuses a gemini reply starting with '/' (whitespace-trimming composer)", async () => {
+    const session = mkSession({
+      id: "gemini_pane3",
+      agentType: "gemini",
+      status: "idle",
+      attentionType: null,
+      previousStatus: "working",
+    });
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      paneCommand: "gemini",
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+        userText: "/help me with this",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("/help me with this") },
+    ]);
+  });
+
+  it("still space-defuses a leading '/' for Claude (defusable there, not refused)", async () => {
+    const session = idleSession();
+    const { deps, sendTextCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+        userText: "/help me with this",
+      },
+      deps,
+    );
+    expect(res.code).toBe(200);
+    expect(sendTextCalls).toEqual([
+      { pane: "%1", text: " /help me with this", enter: true },
+    ]);
+  });
+
   it("rejects when the agent has no replyOnFinished with 409 + re-notify", async () => {
     const noFinishedAgent: AgentDef = {
       ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
@@ -1885,6 +2112,78 @@ describe("handleNotificationAction: preserve undelivered reply (issue #34)", () 
     expect(sendTextCalls).toHaveLength(0);
     expect(reNotifyCalls).toEqual([
       { id: session.id, body: buildUndeliveredReplyBody("my reply") },
+    ]);
+  });
+
+  it("prefill is Claude-scoped: a reply-capable non-Claude agent with a readyPattern gets Tier 1", async () => {
+    // The prefill classifiers are Claude-shaped; even a def that carries both
+    // `replyOnFinished` and a Claude-like readyPattern must not prefill when
+    // the session is another agent.
+    const codexWithReadyPattern: AgentDef = {
+      ...BUILTIN_AGENTS.find((a) => a.name === "codex")!,
+      readyPattern: /^[>❯]\s*$/,
+    };
+    const session = mkSession({
+      id: "codex_pane2",
+      agentType: "codex",
+      status: "idle",
+      attentionType: null,
+      previousStatus: "working",
+    });
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      getAgent: () => codexWithReadyPattern,
+      captureText: COMPOSER_PANE,
+      paneCommand: "codex",
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "my reply",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("my reply") },
+    ]);
+  });
+
+  it("prefill refuses agent-unsafe reply text (unsafeReplyPattern override on Claude): Tier 1", async () => {
+    // Prefill IS typing; text the composer would re-parse as a trigger must
+    // degrade to the quoted body even when everything else looks safe.
+    const claudeUnsafeBang: AgentDef = (() => {
+      const claude = BUILTIN_AGENTS.find((a) => a.name === "claude")!;
+      return {
+        ...claude,
+        notificationActions: {
+          ...claude.notificationActions,
+          unsafeReplyPattern: /^\s*!/,
+        },
+      };
+    })();
+    const session = questionSession();
+    const { deps, sendTextCalls, reNotifyCalls } = makeDeps(session, {
+      getAgent: () => claudeUnsafeBang,
+      captureText: COMPOSER_PANE,
+    });
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "answer",
+        statusChangedAt: "OLD",
+        attentionGeneration: 0,
+        userText: "!ls -la",
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendTextCalls).toHaveLength(0);
+    expect(reNotifyCalls).toEqual([
+      { id: session.id, body: buildUndeliveredReplyBody("!ls -la") },
     ]);
   });
 
