@@ -591,6 +591,45 @@ describe("built-in agent notificationActions defaults", () => {
   });
 });
 
+describe("agents.<builtin>.notificationActions unsafeReplyPattern carry-forward", () => {
+  it("carries the builtin guard forward when a partial override omits it", () => {
+    const agents = getAgents({
+      agents: {
+        codex: {
+          notificationActions: {
+            approve: ["Enter"],
+            replyOnFinished: true,
+          },
+        },
+      },
+    });
+    const codex = agents.find((a) => a.name === "codex");
+    // The builtin ships /^\s*!/ (see "codex carries the verified Approve/Deny
+    // keys" above); an override that sets other keys but omits
+    // unsafeReplyPattern must not silently re-arm unapproved shell execution.
+    expect(codex?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*!/);
+  });
+
+  it("keeps an explicit override's unsafeReplyPattern instead of the builtin's", () => {
+    const agents = getAgents({
+      agents: {
+        codex: {
+          notificationActions: {
+            approve: ["Enter"],
+            replyOnFinished: true,
+            unsafeReplyPattern: "/^custom/",
+          },
+        },
+      },
+    });
+    const codex = agents.find((a) => a.name === "codex");
+    expect(codex?.notificationActions?.unsafeReplyPattern).toEqual(/^custom/);
+    expect(codex?.notificationActions?.unsafeReplyPattern?.test("!ls")).toBe(
+      false,
+    );
+  });
+});
+
 describe("agents.claude.notificationActions", () => {
   it("carries the built-in reply gates on the default Claude def", () => {
     const claude = BUILTIN_AGENTS.find((a) => a.name === "claude");
@@ -734,6 +773,29 @@ describe("agents.<custom>.notificationActions (custom-agent path)", () => {
     const custom = agents.find((a) => a.name === "myagent");
     expect(custom?.notificationActions).toBeUndefined();
     expect(custom?.ambiguousPermissionMarker).toBeUndefined();
+  });
+
+  it("parses unsafeReplyPattern from its config string form for a fully custom agent", () => {
+    const agents = getAgents({
+      agents: {
+        myagent: {
+          processMatch: "myagent",
+          terminalRules: [],
+          notificationActions: {
+            approve: ["y"],
+            replyOnFinished: true,
+            unsafeReplyPattern: "/^\\s*!/",
+          },
+        },
+      },
+    });
+    const custom = agents.find((a) => a.name === "myagent");
+    expect(custom?.notificationActions?.unsafeReplyPattern).toBeInstanceOf(
+      RegExp,
+    );
+    expect(custom?.notificationActions?.unsafeReplyPattern?.test("  !ls")).toBe(
+      true,
+    );
   });
 });
 

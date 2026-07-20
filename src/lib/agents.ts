@@ -326,13 +326,27 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
     // Whole-object replace, not a per-key merge: a custom map is authored as a
     // complete set, and grafting builtin default keys onto it would apply
     // Claude's keystrokes to a different agent's prompt. The spread copies every
-    // field, so a new key needs no line here and can't be silently dropped —
-    // except `unsafeReplyPattern`, which arrives as a regex STRING from config
-    // and must be parsed (same contract as `readyPattern`).
+    // field, so a new key needs no line here and can't be silently dropped.
+    // `unsafeReplyPattern` arrives as a regex STRING from config and must be
+    // parsed (same contract as `readyPattern`).
     merged.notificationActions = parseNotificationActions(
       override.notificationActions,
       `agents.${base.name}.notificationActions`,
     );
+    // Deliberate exception to the whole-object replace above: unsafeReplyPattern
+    // is a safety default describing THIS builtin's composer, not a keystroke
+    // default, so an override that omits it still needs it. Carry the base
+    // guard forward unless the override explicitly re-specifies it, so a
+    // partial override can't silently re-arm unapproved shell execution on the
+    // `!`/`/`-executing agents. To intentionally disable the guard, an override
+    // must set an explicit never-match pattern.
+    if (
+      merged.notificationActions.unsafeReplyPattern === undefined &&
+      base.notificationActions?.unsafeReplyPattern !== undefined
+    ) {
+      merged.notificationActions.unsafeReplyPattern =
+        base.notificationActions.unsafeReplyPattern;
+    }
   }
   if (override.ambiguousPermissionMarker !== undefined) {
     merged.ambiguousPermissionMarker = override.ambiguousPermissionMarker;
