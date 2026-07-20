@@ -156,10 +156,15 @@ export const INVOKE_FINISHED_LINGER_MS = 6000;
  * invoke worker (codex/cursor/opencode/gemini), which creates no tmux
  * session and would otherwise be invisible. Keyed by `invocationId`.
  *
- * `project` mirrors the daemon's pane-tracked derivation
- * (`cwd.split("/").pop()`, see `sessions.ts:createPaneTrackedSession`) so
- * the row co-locates with real sessions in the same directory under
- * project/cwd grouping. `lastActivityAt` is the start time so the existing
+ * `project` uses the plain `cwd.split("/").pop()` basename, NOT the
+ * daemon's git-aware `deriveProject` (`src/daemon/project-derivation.ts`),
+ * because that resolution walks the filesystem and must stay out of the
+ * TUI process. This is a deliberate, documented divergence: the row
+ * fabricated here is a placeholder shown before the daemon reports the
+ * real session, so it snaps to the daemon's repo-aware `project` value on
+ * the first SSE update for this invocation (a worktree cwd may briefly
+ * show its own directory name instead of the main repo's before that
+ * update lands). `lastActivityAt` is the start time so the existing
  * `useTick` age column counts up live (a stuck worker reads as stale).
  */
 export function fabricateInvokeSession(

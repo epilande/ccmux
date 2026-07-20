@@ -12,6 +12,7 @@ import type {
 import { extractProjectInfo } from "./parser";
 import { appendPrompt } from "./status-machine";
 import { getSessionPidMarker } from "./session-markers";
+import { deriveProject } from "./project-derivation";
 import { findSoftEvictTargets } from "./binder/primitives";
 
 interface PaneTrackedSessionInput {
@@ -284,7 +285,7 @@ export class SessionManager extends EventEmitter {
     const paneNumberMatch = input.paneId.match(/^%(\d+)$/);
     const paneToken = paneNumberMatch ? `pane${paneNumberMatch[1]}` : "pane";
     const sessionId = `${input.agentType}_${paneToken}`;
-    const project = input.cwd.split("/").pop() || input.agentType;
+    const project = deriveProject(input.cwd, input.agentType);
 
     const existing = this.sessions.get(sessionId);
     if (existing) {
@@ -389,7 +390,7 @@ export class SessionManager extends EventEmitter {
    * only when the short drops from `roster.workers`.
    */
   createBackgroundSession(input: BackgroundSessionInput): Session {
-    const project = input.cwd.split("/").pop() || "claude";
+    const project = deriveProject(input.cwd, "claude");
 
     const session: Session = {
       id: input.daemonShort,
@@ -498,7 +499,7 @@ export class SessionManager extends EventEmitter {
     // Update cwd/project if provided from log entries (more accurate than decoded path)
     if (state.cwd && state.cwd !== session.cwd) {
       session.cwd = state.cwd;
-      session.project = state.cwd.split("/").pop() || session.project;
+      session.project = deriveProject(state.cwd, session.project);
       changed = true;
     }
 
