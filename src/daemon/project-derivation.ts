@@ -29,7 +29,11 @@ export interface DeriveProjectOptions {
  * Resolution:
  * 1. Walk parent directories from `cwd` looking for a `.git` entry,
  *    stopping at `$HOME` or the filesystem root (never scanning above the
- *    user's home directory).
+ *    user's home directory). `$HOME`'s OWN `.git` is only honored when
+ *    `cwd` IS `$HOME`; a strict descendant of `$HOME` stops at the home
+ *    boundary WITHOUT probing it, so a `~/.git` dotfiles repo (someone ran
+ *    a bare `git init` in their home) does not swallow every non-repo
+ *    directory under home into one giant "home-basename" group.
  * 2. A `.git` DIRECTORY means the main checkout: project is that
  *    directory's own basename.
  * 3. A `.git` FILE (a worktree) contains `gitdir: <path>` pointing into
@@ -81,6 +85,14 @@ function cwdBasename(cwd: string): string | null {
  * Walk up from `cwd` looking for `.git`, stopping at `homeDir` or the
  * filesystem root. Returns the git-aware project name, or null if `cwd`
  * isn't inside a git repo (caller falls back to the cwd basename).
+ *
+ * The home boundary stops the walk BEFORE probing `homeDir`'s own `.git`,
+ * but only for strict descendants (`dir !== cwd`). A user whose `$HOME` is
+ * itself a git repo (`~/.git` from dotfiles or a stray `git init`) would
+ * otherwise have every non-repo directory under home walk up, hit that
+ * `.git`, and collapse into a single group named after the home directory.
+ * A session launched AT `$HOME` (cwd === homeDir) still resolves through
+ * the probe below, so `$HOME`-is-itself-a-repo keeps its own basename.
  */
 function resolveGitAwareProject(cwd: string, homeDir: string): string | null {
   if (!isAbsolute(cwd)) return null;
@@ -88,6 +100,11 @@ function resolveGitAwareProject(cwd: string, homeDir: string): string | null {
   let dir = cwd;
 
   while (true) {
+    // Home boundary for strict descendants: stop without probing homeDir's
+    // own `.git` (see the doc comment above). When cwd === homeDir this is
+    // skipped so the probe can still claim a real `$HOME` repo.
+    if (dir === homeDir && dir !== cwd) return null;
+
     const gitPath = join(dir, ".git");
     if (existsSync(gitPath)) {
       // statSync can still throw if the entry vanishes between the
@@ -110,6 +127,8 @@ function resolveGitAwareProject(cwd: string, homeDir: string): string | null {
       return null;
     }
 
+    // Reached only when cwd === homeDir and homeDir has no `.git` (the
+    // pre-probe guard above already handles every strict descendant).
     if (dir === homeDir) return null;
     const parent = dirname(dir);
     if (parent === dir) return null; // filesystem root

@@ -123,6 +123,54 @@ describe("deriveProject", () => {
     expect(unbounded).toBe(basename(outer));
   });
 
+  it("does not let homeDir's own .git absorb a strict-descendant non-repo cwd", () => {
+    // $HOME is itself a git repo (e.g. ~/.git dotfiles). A non-repo dir
+    // under home must NOT walk up into homeDir's .git and collapse into
+    // the home basename; it resolves to its own basename instead.
+    const fakeHome = tempDir("home-git-home");
+    mkdirSync(join(fakeHome, ".git"));
+
+    const cwd = join(fakeHome, "work", "project-dir");
+    mkdirSync(cwd, { recursive: true });
+
+    const project = deriveProject(cwd, "fallback", {
+      cache: new Map(),
+      homeDir: fakeHome,
+    });
+    expect(project).toBe(basename(cwd));
+    expect(project).not.toBe(basename(fakeHome));
+  });
+
+  it("still resolves cwd === homeDir to the home basename when homeDir is itself a repo", () => {
+    const fakeHome = tempDir("home-git-self");
+    mkdirSync(join(fakeHome, ".git"));
+
+    const project = deriveProject(fakeHome, "fallback", {
+      cache: new Map(),
+      homeDir: fakeHome,
+    });
+    expect(project).toBe(basename(fakeHome));
+  });
+
+  it("resolves a real repo under home even when homeDir itself is a repo", () => {
+    // homeDir's .git must not over-block a genuine repo below it: the
+    // pre-probe guard only fires AT homeDir, so a repo strictly under home
+    // still resolves to its own root's basename.
+    const fakeHome = tempDir("home-git-nested");
+    mkdirSync(join(fakeHome, ".git"));
+
+    const repo = join(fakeHome, "projects", "repo");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    const cwd = join(repo, "src");
+    mkdirSync(cwd, { recursive: true });
+
+    const project = deriveProject(cwd, "fallback", {
+      cache: new Map(),
+      homeDir: fakeHome,
+    });
+    expect(project).toBe("repo");
+  });
+
   it("caches by cwd: a second call reuses the cached value without re-walking the filesystem", () => {
     const main = tempDir("cache-main");
     const worktreesDir = join(main, ".git", "worktrees", "wt");

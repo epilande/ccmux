@@ -159,13 +159,16 @@ export const INVOKE_FINISHED_LINGER_MS = 6000;
  * `project` uses the plain `cwd.split("/").pop()` basename, NOT the
  * daemon's git-aware `deriveProject` (`src/daemon/project-derivation.ts`),
  * because that resolution walks the filesystem and must stay out of the
- * TUI process. This is a deliberate, documented divergence: the row
- * fabricated here is a placeholder shown before the daemon reports the
- * real session, so it snaps to the daemon's repo-aware `project` value on
- * the first SSE update for this invocation (a worktree cwd may briefly
- * show its own directory name instead of the main repo's before that
- * update lands). `lastActivityAt` is the start time so the existing
- * `useTick` age column counts up live (a stuck worker reads as stale).
+ * TUI process. This divergence is permanent for the row's lifetime, not a
+ * brief placeholder: subprocess invoke rows live ONLY in the TUI (no
+ * daemon session is ever created for them, which is why the `setSessions`
+ * merge preserves them), so nothing ever updates `project` to the
+ * git-aware value. An invoke launched from a git worktree therefore groups
+ * under the worktree's directory name for its whole lifetime (the
+ * invocation duration plus the finished linger), while real sessions in
+ * that same worktree group under the main repo name. `lastActivityAt` is
+ * the start time so the existing `useTick` age column counts up live (a
+ * stuck worker reads as stale).
  */
 export function fabricateInvokeSession(
   event: InvocationStartedEvent,
