@@ -293,20 +293,6 @@ This repo ships a `dispatch` [Agent Skill](https://agentskills.io) that teaches 
 
 Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the same skill by copying it into their skills directory. The skill is additive glue for the ccmux CLI, which must be installed and on your `PATH`. See [`plugins/ccmux/README.md`](plugins/ccmux/README.md) for details.
 
-## 🌐 Remote / SSH
-
-ccmux tracks the sessions on the machine where it runs, so for a remote devbox, run everything there: install ccmux, tmux, and your agents on the remote host, run `ccmux setup`, and attach over SSH. Detection, hooks, the picker, and the sidebar all work at full fidelity because nothing crosses the SSH boundary; your terminal is just the window into it.
-
-The one piece that doesn't follow automatically is desktop notifications: the remote daemon has no desktop to deliver to. The `osc` backend covers this by writing notification escape sequences through the terminal stream, so banners render in the emulator you're sitting in front of (see [Notifications](#notifications) for its limits and the emulator support matrix):
-
-```bash
-# on the remote host
-ccmux config set notifications.enabled true
-ccmux config set notifications.backend osc
-tmux set -g allow-passthrough on  # add to tmux.conf to persist
-ccmux notify                      # test: a banner should appear locally
-```
-
 ## ⌨️ Keyboard Controls
 
 | Action                | Key                                                                                | Description                                                                                                            |
@@ -650,6 +636,20 @@ Each `terminalRules` entry must define exactly one matcher:
 Rules are evaluated top-to-bottom, and the first match wins. This lets you express broad "working" prompts and more specific multi-line waiting prompts without detector-specific logic.
 
 </details>
+
+## 🌐 Remote / SSH
+
+ccmux tracks the sessions on the machine where it runs, so for a remote devbox, run everything there: install ccmux, tmux, and your agents on the remote host, run `ccmux setup`, and attach over SSH. Detection, hooks, the picker, and the sidebar all work at full fidelity because nothing crosses the SSH boundary; your terminal is just the window into it.
+
+The one piece that doesn't follow automatically is desktop notifications: the remote daemon has no desktop to deliver to. The `osc` backend covers this by writing notification escape sequences through the terminal stream, so banners render in the emulator you're sitting in front of (see [Notifications](#notifications) for its limits and the emulator support matrix):
+
+```bash
+# on the remote host
+ccmux config set notifications.enabled true
+ccmux config set notifications.backend osc
+tmux set -g allow-passthrough on  # add to tmux.conf to persist
+ccmux notify                      # test: a banner should appear locally
+```
 
 ## 🏗️ Architecture
 
