@@ -226,13 +226,15 @@ Configure further with `ccmux config set notifications.<key> <value>`, or edit `
     "events": ["waiting", "finished"], // default both
     "sound": "Glass", // false (default) | true (platform default sound) | macOS sound name
     "delayMs": 1000, // debounce for "finished" only; "waiting" always fires immediately
-    "backend": "auto", // "auto" | "ccmux-notifier" | "osascript" | "notify-send" | "dbus" | "command"
+    "backend": "auto", // "auto" | "ccmux-notifier" | "osascript" | "notify-send" | "dbus" | "osc" | "command"
     "command": "ntfy publish agents \"$CCMUX_TITLE: $CCMUX_BODY\"", // used when backend = "command"
   },
 }
 ```
 
 `backend: "auto"` picks `ccmux-notifier` (else `osascript`) on macOS, and D-Bus (else `notify-send`) on Linux. `command` runs your own shell command with `CCMUX_*` env set (`EVENT`, `SESSION_ID`, `AGENT`, `PROJECT`, `BRANCH`, `TITLE`, `SUBTITLE`, `BODY`, `PANE`), for ntfy, Pushover, and the like. `CCMUX_BODY` is the complete text (the event line plus any context), so a script reading only it still gets something meaningful; `CCMUX_SUBTITLE` is the bare event line on its own for structured consumers.
+
+The `osc` backend delivers notifications through the terminal stream instead of a desktop API, for daemons running on a remote box; see [Remote / SSH](#-remote--ssh).
 
 > [!NOTE]
 > **Approve/Deny only send the mapped keystroke** to that session's pane (for Claude, the same key you'd press yourself). **Approve on a plan** picks "manually approve edits" (edits stay gated), never Claude's auto-accept mode. **Reply on a permission or plan notification denies the pending tool/plan** and sends your text as the next message (it cancels the prompt first, then types). If the session moved on since the notification fired, the press sends nothing and you get a fresh "state changed" notification instead; dismissing a notification never approves anything.
@@ -632,6 +634,20 @@ Each `terminalRules` entry must define exactly one matcher:
 Rules are evaluated top-to-bottom, and the first match wins. This lets you express broad "working" prompts and more specific multi-line waiting prompts without detector-specific logic.
 
 </details>
+
+## 🌐 Remote / SSH
+
+ccmux tracks the sessions on the machine where it runs, so for a remote devbox, run everything there: install ccmux, tmux, and your agents on the remote host, run `ccmux setup`, and attach over SSH. Detection, hooks, the picker, and the sidebar all work at full fidelity because nothing crosses the SSH boundary; your terminal is just the window into it.
+
+The one piece that doesn't follow automatically is desktop notifications: the remote daemon has no desktop to deliver to. The `osc` [notification backend](#notifications) covers this by writing a notification escape sequence into the session's tmux pane, so it rides the terminal stream, SSH included, and renders as a banner in the emulator you're sitting in front of. Opt-in only (never picked by `auto`) and informational only: no buttons, reply, sound, or retraction, and paneless background sessions are skipped. Kitty clients get OSC 99, everything else OSC 9 (`title: body`); supported by Ghostty, iTerm2, and WezTerm (OSC 9) and Kitty (OSC 99), silently ignored by Apple Terminal and Alacritty.
+
+```bash
+# on the remote host
+ccmux config set notifications.enabled true
+ccmux config set notifications.backend osc
+tmux set -g allow-passthrough on  # add to tmux.conf to persist
+ccmux notify                      # test: a banner should appear locally
+```
 
 ## 🏗️ Architecture
 

@@ -15,6 +15,7 @@ export type Backend =
   | "osascript"
   | "notify-send"
   | "dbus"
+  | "osc"
   | "command";
 
 export type NotificationEventKind = "waiting" | "finished";
@@ -123,10 +124,10 @@ export const DELIVER_TIMEOUT_MS = 3000;
  */
 export const NOTIFIER_DELIVER_TIMEOUT_MS = 190_000;
 
-/** "dbus" / "ccmux-notifier" / "command" have no static probe argv — see
- * {@link probeBackend}. */
+/** "dbus" / "ccmux-notifier" / "osc" / "command" have no static probe argv —
+ * see {@link probeBackend}. */
 const PROBE_ARGV: Record<
-  Exclude<Backend, "command" | "dbus" | "ccmux-notifier">,
+  Exclude<Backend, "command" | "dbus" | "ccmux-notifier" | "osc">,
   string[]
 > = {
   osascript: ["osascript", "-e", "return 0"],
@@ -218,6 +219,7 @@ const VALID_BACKENDS = new Set<Backend>([
   "osascript",
   "notify-send",
   "dbus",
+  "osc",
   "command",
 ]);
 
@@ -314,12 +316,13 @@ async function runWithTimeout(
 
 /**
  * Probes that the resolved backend's binary actually works, run once before
- * the first delivery. Three backends have no spawn-based probe here and
- * default to a harmless `true` that's never relied on: `"command"` runs an
- * arbitrary user command (nothing safe to probe), `"dbus"` is routed through
- * `DbusNotifier.probe()` by its callers first, and `"ccmux-notifier"` is
- * probed with its *resolved absolute path* in `notify-delivery.ts`
- * (`probeCcmuxNotifier`), which this module can't know.
+ * the first delivery. Four backends have no spawn-based probe here and default
+ * to a harmless `true` that's never relied on: `"command"` runs an arbitrary
+ * user command (nothing safe to probe), while `"dbus"`, `"ccmux-notifier"`,
+ * and `"osc"` are probed in the delivery layer with context this module can't
+ * know (`DbusNotifier.probe()`, the resolved helper path via
+ * `probeCcmuxNotifier`, and tmux `allow-passthrough` via
+ * `probeAllowPassthrough` respectively).
  */
 export async function probeBackend(
   backend: Backend,
@@ -328,7 +331,8 @@ export async function probeBackend(
   if (
     backend === "command" ||
     backend === "dbus" ||
-    backend === "ccmux-notifier"
+    backend === "ccmux-notifier" ||
+    backend === "osc"
   ) {
     return true;
   }
@@ -502,6 +506,11 @@ function buildArgv(
       // Connection-oriented, not spawn-oriented: real dispatch lives in
       // `DbusNotifier`. Deliberate no-op so a stray direct call to
       // `deliver("dbus", ...)` fails safe instead of throwing.
+      return null;
+    case "osc":
+      // Tty-oriented, not spawn-oriented: real dispatch is
+      // `deliverOscNotification` (`notify-osc.ts`). Same fail-safe no-op as
+      // "dbus".
       return null;
   }
 }

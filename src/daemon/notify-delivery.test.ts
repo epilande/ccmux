@@ -72,6 +72,8 @@ function createDeps(overrides: Partial<DeliveryDeps> = {}): {
   logs: string[];
   spawnCalls: { argv: string[] }[];
   actionCalls: NotificationActionInput[];
+  tmuxCaptureCalls: string[][];
+  ttyWrites: Array<{ tty: string; data: string }>;
 } {
   const delivered: Array<{ backend: string; payload: NotificationPayload }> =
     [];
@@ -79,10 +81,20 @@ function createDeps(overrides: Partial<DeliveryDeps> = {}): {
   const logs: string[] = [];
   const spawnCalls: { argv: string[] }[] = [];
   const actionCalls: NotificationActionInput[] = [];
+  const tmuxCaptureCalls: string[][] = [];
+  const ttyWrites: Array<{ tty: string; data: string }> = [];
 
   const defaultSpawn: SpawnFn = (argv) => {
     spawnCalls.push({ argv });
     return { exited: Promise.resolve(0) };
+  };
+
+  // Passthrough on, a non-kitty (generic OSC 9) client by default.
+  const defaultRunTmuxCapture = (args: string[]): string | null => {
+    tmuxCaptureCalls.push(args);
+    if (args.includes("allow-passthrough")) return "on\n";
+    if (args.includes("list-clients")) return "xterm-ghostty\n";
+    return null;
   };
 
   const deps: DeliveryDeps = {
@@ -118,13 +130,29 @@ function createDeps(overrides: Partial<DeliveryDeps> = {}): {
         ? (overrides.ccmuxPath ?? null)
         : "/opt/homebrew/bin/ccmux",
     tmuxPath: overrides.tmuxPath ?? "/opt/homebrew/bin/tmux",
+    getPaneTty: overrides.getPaneTty ?? (() => "/dev/ttys061"),
+    runTmuxCapture: overrides.runTmuxCapture ?? defaultRunTmuxCapture,
+    writeToTty:
+      overrides.writeToTty ??
+      ((tty, data) => {
+        ttyWrites.push({ tty, data });
+      }),
     createDbusNotifier:
       overrides.createDbusNotifier ?? (() => createFakeDbusNotifier().notifier),
     spawn: overrides.spawn ?? defaultSpawn,
     log: overrides.log ?? ((message) => logs.push(message)),
   };
 
-  return { deps, delivered, probeCalls, logs, spawnCalls, actionCalls };
+  return {
+    deps,
+    delivered,
+    probeCalls,
+    logs,
+    spawnCalls,
+    actionCalls,
+    tmuxCaptureCalls,
+    ttyWrites,
+  };
 }
 
 describe("createNotifyDelivery: probe-once-disable", () => {
@@ -612,5 +640,153 @@ describe("createNotifyDelivery: retract", () => {
     // reaches the (throwing) spawn and must still swallow it.
     await deliver(BASE_PAYLOAD);
     await expect(retract("abc123")).resolves.toBeUndefined();
+  });
+});
+
+describe("createNotifyDelivery: osc backend", () => {
+  it("writes the passthrough sequence to the bound pane's tty", async () => {
+    const { deps, ttyWrites, tmuxCaptureCalls } = createDeps({
+      resolveBackend: () => "osc",
+    });
+    const { deliver } = createNotifyDelivery(deps);
+
+    await deliver(BASE_PAYLOAD);
+
+    expect(ttyWrites).toHaveLength(1);
+    expect(ttyWrites[0]!.tty).toBe("/dev/ttys061");
+    // tmux passthrough framing, generic OSC 9 (non-kitty default client).
+    expect(ttyWrites[0]!.data).toContain("\x1bPtmux;");
+    expect(ttyWrites[0]!.data).toContain("]9;");
+    // Probed allow-passthrough and sniffed the client termname.
+    expect(tmuxCaptureCalls.some((a) => a.includes("allow-passthrough"))).toBe(
+      true,
+    );
+    // The termname sniff is scoped to the notification's own session via the
+    // pane target, not server-wide.
+    const listClientsCall = tmuxCaptureCalls.find((a) =>
+      a.includes("list-clients"),
+    );
+    expect(listClientsCall).toEqual([
+      "list-clients",
+      "-t",
+      BASE_PAYLOAD.pane!,
+      "-F",
+      "#{client_termname}",
+    ]);
+  });
+
+  it("emits kitty OSC 99 when an attached client is a kitty terminal", async () => {
+    const { deps, ttyWrites } = createDeps({
+      resolveBackend: () => "osc",
+      runTmuxCapture: (args) => {
+        if (args.includes("allow-passthrough")) return "on";
+        if (args.includes("list-clients")) return "xterm-kitty\n";
+        return null;
+      },
+    });
+    const { deliver } = createNotifyDelivery(deps);
+
+    await deliver(BASE_PAYLOAD);
+
+    expect(ttyWrites).toHaveLength(1);
+    expect(ttyWrites[0]!.data).toContain("]99;");
+  });
+
+  it("probes allow-passthrough once and caches the result across deliveries", async () => {
+    let passthroughProbes = 0;
+    const { deps, ttyWrites } = createDeps({
+      resolveBackend: () => "osc",
+      runTmuxCapture: (args) => {
+        if (args.includes("allow-passthrough")) {
+          passthroughProbes++;
+          return "on";
+        }
+        if (args.includes("list-clients")) return "xterm-ghostty";
+        return null;
+      },
+    });
+    const { deliver } = createNotifyDelivery(deps);
+
+    await deliver(BASE_PAYLOAD);
+    await deliver(BASE_PAYLOAD);
+
+    expect(passthroughProbes).toBe(1);
+    expect(ttyWrites).toHaveLength(2);
+  });
+
+  it("disables osc (no write, no fallback) when allow-passthrough is off, warning once", async () => {
+    let passthroughProbes = 0;
+    const { deps, ttyWrites, delivered, logs } = createDeps({
+      resolveBackend: () => "osc",
+      runTmuxCapture: (args) => {
+        if (args.includes("allow-passthrough")) {
+          passthroughProbes++;
+          return "off";
+        }
+        return null;
+      },
+    });
+    const { deliver } = createNotifyDelivery(deps);
+
+    await deliver(BASE_PAYLOAD);
+    await deliver(BASE_PAYLOAD);
+
+    expect(passthroughProbes).toBe(1);
+    expect(ttyWrites).toHaveLength(0);
+    // Explicit opt-in: no silent fallback to another backend.
+    expect(delivered).toHaveLength(0);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain("allow-passthrough");
+  });
+
+  it("skips a paneless session without warning or write", async () => {
+    const { deps, ttyWrites, logs } = createDeps({
+      resolveBackend: () => "osc",
+      getPaneTty: () => null,
+    });
+    const { deliver } = createNotifyDelivery(deps);
+
+    await deliver({ ...BASE_PAYLOAD, pane: null });
+
+    expect(ttyWrites).toHaveLength(0);
+    // Paneless is a per-delivery debug skip, not the once-per-run warning.
+    expect(logs).toHaveLength(0);
+  });
+
+  it("ignores actions and reply on the payload (informational rung)", async () => {
+    const { deps, ttyWrites } = createDeps({
+      resolveBackend: () => "osc",
+    });
+    const { deliver } = createNotifyDelivery(deps);
+
+    await deliver({
+      ...BASE_PAYLOAD,
+      event: "waiting",
+      subtitle: "Needs permission: Bash",
+      actions: [
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ],
+      reply: { id: "answer", label: "Reply" },
+    });
+
+    expect(ttyWrites).toHaveLength(1);
+    // No button/reply metadata leaks into the escape (OSC 9 carries only text).
+    expect(ttyWrites[0]!.data).not.toContain("Approve");
+    expect(ttyWrites[0]!.data).not.toContain("Reply");
+  });
+
+  it("osc retract is a no-op (no tty write, no spawn)", async () => {
+    const { deps, ttyWrites, spawnCalls } = createDeps({
+      resolveBackend: () => "osc",
+    });
+    const { deliver, retract } = createNotifyDelivery(deps);
+
+    await deliver(BASE_PAYLOAD);
+    await retract("abc123");
+
+    // Only the delivery wrote; retract added nothing.
+    expect(ttyWrites).toHaveLength(1);
+    expect(spawnCalls).toHaveLength(0);
   });
 });
