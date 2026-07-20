@@ -250,12 +250,9 @@ function runTmuxCapture(args: string[]): string | null {
 }
 
 /**
- * `ccmux notify` flow for the osc backend. Unlike the daemon (which stays
- * silent and drops), this diagnostics command explains every failure: it must
- * run inside tmux (to reach a pane tty), tmux needs `allow-passthrough` on, and
- * the escape is written to THIS command's own pane so the user sees it appear.
- * Returns true when it delivered, false when it printed an error and the caller
- * should exit non-zero.
+ * `ccmux notify` flow for the osc backend, delivered through this command's
+ * own pane. Unlike the daemon (which stays silent and drops), it explains
+ * every failure. Returns false when the caller should exit non-zero.
  */
 function runOscFlow(
   notifications: { sound?: boolean | string },
@@ -385,9 +382,6 @@ export function createNotifyCommand(): Command {
       }
 
       if (backend === "osc") {
-        // Tty-oriented, one-shot: resolve this pane's tty, check
-        // allow-passthrough, write the escape here so the user sees it. All
-        // diagnostics live in `runOscFlow`.
         if (!runOscFlow(notifications, message)) process.exit(1);
         return;
       }

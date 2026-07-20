@@ -82,18 +82,15 @@ export interface DeliveryDeps {
   /** Absolute path to `tmux` (falls back to the bare name if unresolved). */
   tmuxPath: string;
   /** Resolves a bound pane's tty device (`%N` -> "/dev/ttysNNN"), or null when
-   * the session is paneless / the pane is gone. Read fresh per delivery so the
-   * "osc" backend writes to the pane's live tty, not a delivery-time snapshot.
-   * Backed by the daemon's `paneCache`. */
+   * the session is paneless / the pane is gone. Backed by the daemon's
+   * `paneCache`, read fresh per "osc" delivery. */
   getPaneTty: (paneId: string) => string | null;
   /** Runs tmux and returns its stdout (or null on failure), for the "osc"
-   * backend's `allow-passthrough` probe and `list-clients` termname sniff.
-   * Separate from `spawn` because those need captured output, not fire-and-
-   * forget. */
+   * backend's `allow-passthrough` probe and termname sniff. Separate from
+   * `spawn` because these need captured output. */
   runTmuxCapture: (args: string[]) => string | null;
-  /** Writes the "osc" backend's passthrough sequence to a pane tty; defaults
-   * to a non-blocking `fs` write inside `deliverOscNotification`. Injectable so
-   * tests never touch a real tty. */
+  /** Writes the "osc" passthrough sequence to a pane tty. Injectable so tests
+   * never touch a real tty; defaults inside `deliverOscNotification`. */
   writeToTty?: (tty: string, data: string) => void;
   /** Constructs the dbus notifier, called at most once per closure (lazily,
    * on the first "dbus" delivery/retract) and reused afterward. Injectable so
@@ -279,10 +276,9 @@ export function createNotifyDelivery(deps: DeliveryDeps): {
       }
 
       if (backend === "osc") {
-        // Probe `allow-passthrough` once per run and cache it. Unlike dbus /
-        // ccmux-notifier, a failed probe does NOT fall back to another backend:
-        // osc is explicit opt-in, so we log the one warning naming the option
-        // and drop, rather than surprising the user with a different transport.
+        // Probed once per run. Unlike dbus / ccmux-notifier, a failed probe
+        // does NOT fall back to another backend: osc is explicit opt-in, so
+        // warn once naming the option and drop.
         let oscOk = probeResults.get("osc");
         if (oscOk === undefined) {
           oscOk = probeAllowPassthrough(deps.runTmuxCapture);
@@ -295,9 +291,8 @@ export function createNotifyDelivery(deps: DeliveryDeps): {
         }
         if (!oscOk) return;
 
-        // Per-delivery, not cached: a session's bound pane can come and go. A
-        // paneless session (background agent, or a soft-evicted pane) has
-        // nowhere to write, so skip with a debug log rather than a warning.
+        // Per-delivery, not cached: a session's bound pane can come and go.
+        // Paneless (background agent) means nowhere to write; debug-skip.
         const tty = payload.pane ? deps.getPaneTty(payload.pane) : null;
         if (!tty) {
           console.debug(

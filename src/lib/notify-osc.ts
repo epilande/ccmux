@@ -1,29 +1,17 @@
 /**
- * OSC-escape notification backend: delivers a desktop notification by writing a
- * terminal escape sequence into a tmux pane, so it rides the pane's normal
- * output stream out to whatever terminal is attached — including one on the far
- * side of an SSH connection, with no extra transport. This is the whole point
- * of the backend: notifications that cross SSH for free.
+ * OSC-escape notification backend: writes a terminal escape sequence into a
+ * tmux pane, so the notification rides the pane's output stream to the
+ * attached terminal, including across SSH, with no extra transport.
  *
- * Dependency-free (like `src/lib/notify.ts`) so both the daemon delivery layer
- * and `ccmux notify` share the exact builders. Every I/O boundary (the tmux
- * runner, the tty write) is injectable so tests never touch a real tty.
+ * Dependency-free (like `src/lib/notify.ts`) so the daemon and `ccmux notify`
+ * share the builders; every I/O boundary is injectable for tests. Kitty
+ * clients get OSC 99, everything else OSC 9, wrapped in tmux passthrough
+ * framing, which requires `allow-passthrough on|all` (probed with a
+ * once-per-daemon warning in `notify-delivery.ts`).
  *
- * Two wire formats, chosen by the attached client's terminfo name:
- *   - kitty (termname contains "kitty") -> OSC 99, kitty's structured
- *     desktop-notification protocol (separate title/body, base64 payloads).
- *   - everything else -> OSC 9, iTerm2's single-string notification (supported
- *     by Ghostty, iTerm2, WezTerm; a no-op on emulators that don't implement it).
- *
- * The sequence is wrapped in tmux's passthrough framing (`ESC Ptmux; ... ESC \`
- * with every inner ESC doubled), which requires `allow-passthrough on|all` in
- * tmux; without it tmux swallows the escape and the pane shows nothing. The
- * probe for that option lives in the delivery layer (`notify-delivery.ts`),
- * which owns the once-per-daemon warning.
- *
- * This is the informational rung: `payload.actions`/`payload.reply`/`sound` are
- * never read (there is no back-channel from a written escape), retraction is a
- * no-op, and delivery is fire-and-forget with no success signal.
+ * Informational rung: `actions`/`reply`/`sound` are never read (a written
+ * escape has no back-channel), retraction is a no-op, delivery is
+ * fire-and-forget.
  */
 
 import { openSync, writeSync, closeSync, constants } from "fs";
@@ -36,14 +24,10 @@ const ST = `${ESC}\\`;
 /** Operating System Command introducer: `ESC ]`. */
 const OSC = `${ESC}]`;
 
-/**
- * Removes C0 controls, DEL, and C1 controls from a text field before it is
- * embedded in an escape sequence. Attacker-influenceable text (the title
- * starts with a project directory basename; the body is agent output) could
- * otherwise carry a raw ESC/BEL/ST that breaks out of the OSC string and
- * injects arbitrary terminal escapes. Printable Unicode (anything >= U+00A0)
- * is untouched.
- */
+/** Removes C0 controls, DEL, and C1 controls before embedding text in an
+ * escape sequence: agent-influenced fields (project basename in the title,
+ * agent output in the body) could otherwise carry an ESC/BEL/ST that breaks
+ * out of the OSC string and injects arbitrary terminal escapes. */
 export function stripControlBytes(text: string): string {
   // eslint-disable-next-line no-control-regex
   return text.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
@@ -57,10 +41,9 @@ function stripControlBytesKeepNewlines(text: string): string {
   return text.replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, "");
 }
 
-/** Kitty groups a notification's title/body chunks by a shared identifier, and
- * a later notification reusing it replaces the earlier one in place (parity
- * with the macOS helper's `--group` and D-Bus `replaces_id`). Derive it from
- * the session id, reduced to kitty's allowed identifier charset. */
+/** Per-session kitty identifier: groups a notification's chunks, and a later
+ * notification reusing it replaces the earlier one (parity with the macOS
+ * helper's `--group` and D-Bus `replaces_id`). */
 function kittyIdentifier(sessionId: string): string {
   const cleaned = sessionId.replace(/[^a-zA-Z0-9_-]/g, "");
   return cleaned || "ccmux";
@@ -71,29 +54,25 @@ function base64(text: string): string {
 }
 
 /**
- * Builds the raw (un-wrapped) OSC 9 notification: a single `title: body`
- * string terminated by BEL. `body` is the event line and context folded
- * together; any embedded newlines are flattened to spaces so the final
- * sequence stays single-line (a bare LF written through a pane tty would be
- * mangled by the line discipline's output processing, and OSC 9 is a
- * one-line format anyway). Inputs are control-stripped.
+ * Builds the raw (un-wrapped) OSC 9 notification: a single control-stripped
+ * `title: body` string terminated by BEL. Newlines are flattened to spaces:
+ * OSC 9 is a one-line format, and a bare LF through the pane tty would be
+ * mangled by the line discipline anyway.
  */
 export function buildOsc9Sequence(title: string, body: string): string {
   const safeTitle = stripControlBytes(title);
-  // Flatten newlines to spaces BEFORE stripping so the fold separator survives
-  // as a space rather than vanishing and gluing the two lines together.
+  // Flatten before stripping so the fold separator survives as a space rather
+  // than vanishing and gluing the two lines together.
   const safeBody = stripControlBytes(body.replace(/\n/g, " ")).trim();
   const message = safeBody ? `${safeTitle}: ${safeBody}` : safeTitle;
   return `${OSC}9;${message}${BEL}`;
 }
 
 /**
- * Builds the raw (un-wrapped) kitty OSC 99 notification. Title and body are
- * base64-encoded (`e=1`), which sidesteps every payload-escaping question and
- * keeps the sequence newline-free even when the body spans multiple lines.
- * When there's no body the title chunk is marked done (`d=1`); otherwise the
- * title chunk is `d=0` and a `d=1` body chunk follows, both sharing an `i`
- * identifier so kitty groups them into one notification.
+ * Builds the raw (un-wrapped) kitty OSC 99 notification: a title chunk and a
+ * body chunk (skipped when empty) sharing an `i` identifier so kitty groups
+ * them. Payloads are base64 (`e=1`), which sidesteps payload escaping and
+ * keeps the sequence newline-free even for a multi-line body.
  */
 export function buildOsc99Sequence(
   sessionId: string,
@@ -113,12 +92,9 @@ export function buildOsc99Sequence(
   );
 }
 
-/**
- * Wraps a raw escape sequence in tmux's passthrough framing so tmux forwards
- * it to the attached client instead of interpreting it: `ESC Ptmux;` + the
- * sequence with every ESC byte doubled + `ESC \`. Requires `allow-passthrough`
- * to be on in the target tmux.
- */
+/** Wraps a raw escape in tmux's passthrough framing (`ESC Ptmux;` + sequence
+ * with every ESC doubled + `ESC \`) so tmux forwards it to the attached client
+ * instead of interpreting it. Requires `allow-passthrough`. */
 export function wrapTmuxPassthrough(sequence: string): string {
   // eslint-disable-next-line no-control-regex
   const doubled = sequence.replace(/\x1b/g, ESC + ESC);
@@ -134,12 +110,8 @@ export function isKittyTermnames(termnames: string): boolean {
     .some((name) => name.toLowerCase().includes("kitty"));
 }
 
-/**
- * Composes the final, passthrough-wrapped sequence for a payload. The subtitle
- * (event line) is folded into the body via {@link foldSubtitleIntoBody}: OSC 99
- * carries it as the structured body chunk, OSC 9 flattens it into the single
- * message string.
- */
+/** Composes the final, passthrough-wrapped sequence for a payload, folding the
+ * subtitle (event line) into the body via {@link foldSubtitleIntoBody}. */
 export function buildPassthroughSequence(
   payload: NotificationPayload,
   isKitty: boolean,
@@ -151,9 +123,9 @@ export function buildPassthroughSequence(
   return wrapTmuxPassthrough(raw);
 }
 
-/** Default tty writer: opens the pane device write-only and non-blocking (so a
- * flow-controlled or wedged pane can never hang the daemon — a full buffer
- * throws EAGAIN, which the caller swallows) and writes the sequence once. */
+/** Default tty writer: write-only and non-blocking, so a flow-controlled or
+ * wedged pane can never hang the daemon (a full buffer throws EAGAIN, which
+ * the caller swallows). */
 function defaultWriteToTty(tty: string, data: string): void {
   const fd = openSync(tty, constants.O_WRONLY | constants.O_NONBLOCK);
   try {
@@ -175,19 +147,17 @@ export interface OscDeliverDeps {
 
 /**
  * Delivers one notification by writing the passthrough-wrapped OSC sequence to
- * `tty` (the bound pane's device). Sniffs the attached client's termname to
- * pick OSC 9 vs OSC 99. Fire-and-forget: a failed tty write (device gone,
- * EACCES, EAGAIN) is logged at debug level and dropped, never thrown.
+ * `tty` (the bound pane's device). Fire-and-forget: a failed write (device
+ * gone, EACCES, EAGAIN) is logged and dropped, never thrown.
  */
 export function deliverOscNotification(
   payload: NotificationPayload,
   tty: string,
   deps: OscDeliverDeps,
 ): void {
-  // Scope the termname sniff to the notification's own session: tmux resolves a
-  // pane target (`-t %N`) to its session, so a kitty client on one session and
-  // a Ghostty client on another don't cross-contaminate the OSC 9-vs-99 choice
-  // (a server-wide sniff would misroute and silently drop the notification).
+  // Scope the sniff to the pane's own session (tmux resolves `-t %N` to its
+  // session): a kitty client elsewhere on the server must not flip the format
+  // for a session attached from a non-kitty terminal, which would drop it.
   const termnames = deps.runTmux(
     payload.pane
       ? ["list-clients", "-t", payload.pane, "-F", "#{client_termname}"]
@@ -204,13 +174,10 @@ export function deliverOscNotification(
 }
 
 /**
- * The pane-tty-independent probe: reads tmux's global `allow-passthrough` and
- * reports whether it's on. `allow-passthrough` became a pane option in tmux
- * 3.3, but a global `set -g allow-passthrough on` is the documented, common
- * way to enable it and is inherited by every pane, so a global read
- * (`show-options -gv`) is the simplest sufficient check; a user who set it only
- * on specific panes would read as off here and see the one-time warning, which
- * is an acceptable false negative for a niche configuration.
+ * Reads tmux's global `allow-passthrough`. It's technically a pane option
+ * (tmux 3.3+), but the documented way to enable it is `set -g`, inherited by
+ * every pane; a pane-only setter reads as off here and gets the one-time
+ * warning, an acceptable false negative.
  */
 export function probeAllowPassthrough(
   runTmux: (args: string[]) => string | null,

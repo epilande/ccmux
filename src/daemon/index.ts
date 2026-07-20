@@ -157,11 +157,10 @@ async function activateHostTerminal(): Promise<void> {
 }
 
 /**
- * Runs a tmux command synchronously and returns its stdout, or null on failure.
- * Synchronous (unlike the daemon's other tmux queries) because the "osc"
- * notification backend's `allow-passthrough` probe and `list-clients` termname
- * sniff run inside the synchronous escape-sequence builders; both are cheap,
- * infrequent tmux reads.
+ * Runs a tmux command synchronously and returns its stdout, or null on
+ * failure. Synchronous (unlike the daemon's other tmux queries) because the
+ * "osc" backend's probe and termname sniff run inside synchronous delivery
+ * code; both are cheap, infrequent reads.
  */
 function runTmuxCapture(tmuxPath: string, args: string[]): string | null {
   try {
@@ -415,9 +414,8 @@ export class Daemon {
         this.runNotificationAction(input),
       ccmuxPath,
       tmuxPath,
-      // "osc" backend wiring: the bound pane's tty (read fresh from paneCache
-      // per delivery) is where the passthrough escape is written; the tmux
-      // capture runner backs the allow-passthrough probe and termname sniff.
+      // "osc" backend wiring: pane tty to write to, tmux runner for its
+      // allow-passthrough probe and termname sniff.
       getPaneTty: (paneId: string) => this.paneCache.get(paneId)?.tty ?? null,
       runTmuxCapture: (args: string[]) => runTmuxCapture(tmuxPath, args),
       // `notify-delivery.ts` constructs at most one of these per daemon run,

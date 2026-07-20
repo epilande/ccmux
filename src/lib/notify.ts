@@ -316,14 +316,13 @@ async function runWithTimeout(
 
 /**
  * Probes that the resolved backend's binary actually works, run once before
- * the first delivery. Three backends have no spawn-based probe here and
- * default to a harmless `true` that's never relied on: `"command"` runs an
- * arbitrary user command (nothing safe to probe), `"dbus"` is routed through
- * `DbusNotifier.probe()` by its callers first, `"ccmux-notifier"` is probed
- * with its *resolved absolute path* in `notify-delivery.ts`
- * (`probeCcmuxNotifier`), and `"osc"` is probed via `probeAllowPassthrough`
- * (tmux `allow-passthrough`) in the same delivery layer — none of which this
- * module can know.
+ * the first delivery. Four backends have no spawn-based probe here and default
+ * to a harmless `true` that's never relied on: `"command"` runs an arbitrary
+ * user command (nothing safe to probe), while `"dbus"`, `"ccmux-notifier"`,
+ * and `"osc"` are probed in the delivery layer with context this module can't
+ * know (`DbusNotifier.probe()`, the resolved helper path via
+ * `probeCcmuxNotifier`, and tmux `allow-passthrough` via
+ * `probeAllowPassthrough` respectively).
  */
 export async function probeBackend(
   backend: Backend,
@@ -509,9 +508,9 @@ function buildArgv(
       // `deliver("dbus", ...)` fails safe instead of throwing.
       return null;
     case "osc":
-      // Tty-oriented, not spawn-oriented: real dispatch lives in
-      // `deliverOscNotification` (`notify-osc.ts`), which needs the bound
-      // pane's tty. Same deliberate fail-safe no-op as "dbus".
+      // Tty-oriented, not spawn-oriented: real dispatch is
+      // `deliverOscNotification` (`notify-osc.ts`). Same fail-safe no-op as
+      // "dbus".
       return null;
   }
 }
