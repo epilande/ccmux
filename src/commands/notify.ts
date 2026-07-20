@@ -9,6 +9,11 @@ import {
   type NotificationPayload,
 } from "../lib/notify";
 import { DbusNotifier } from "../lib/notify-dbus";
+import {
+  deliverOscNotification,
+  isKittyTermnames,
+  probeAllowPassthrough,
+} from "../lib/notify-osc";
 import { DAEMON_HOST, DAEMON_PORT } from "../lib/config";
 
 const TEST_MESSAGE = "Notifications are working";
@@ -230,6 +235,89 @@ async function runCcmuxNotifierFlow(
   }
 }
 
+/** Runs a tmux command synchronously, returning stdout or null on failure. */
+function runTmuxCapture(args: string[]): string | null {
+  try {
+    const result = Bun.spawnSync(["tmux", ...args], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    if (!result.success) return null;
+    return result.stdout.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `ccmux notify` flow for the osc backend, delivered through this command's
+ * own pane. Unlike the daemon (which stays silent and drops), it explains
+ * every failure. Returns false when the caller should exit non-zero.
+ */
+function runOscFlow(
+  notifications: { sound?: boolean | string },
+  message: string | undefined,
+): boolean {
+  const paneId = process.env.TMUX_PANE;
+  if (!process.env.TMUX || !paneId) {
+    console.error(
+      "The osc backend writes notifications through a tmux pane, so run this inside tmux.",
+    );
+    return false;
+  }
+
+  const tty = runTmuxCapture([
+    "display-message",
+    "-p",
+    "-t",
+    paneId,
+    "#{pane_tty}",
+  ])?.trim();
+  if (!tty) {
+    console.error("Could not resolve this pane's tty from tmux.");
+    return false;
+  }
+
+  if (!probeAllowPassthrough(runTmuxCapture)) {
+    console.error(
+      "tmux option allow-passthrough is not enabled; the escape sequence would be swallowed.",
+    );
+    console.error("Enable it with: tmux set -g allow-passthrough on");
+    return false;
+  }
+
+  // Stamp the pane id so delivery scopes its termname sniff to THIS session.
+  deliverOscNotification(
+    buildTestPayload(message, notifications, { pane: paneId }),
+    tty,
+    {
+      runTmux: runTmuxCapture,
+      log: (msg, error) => console.error(msg, error ?? ""),
+    },
+  );
+
+  // Script-friendly: a caller-supplied message stays quiet on success.
+  if (message) return true;
+
+  const termnames = runTmuxCapture([
+    "list-clients",
+    "-t",
+    paneId,
+    "-F",
+    "#{client_termname}",
+  ]);
+  const format =
+    termnames && isKittyTermnames(termnames) ? "OSC 99 (kitty)" : "OSC 9";
+  console.log("Backend: osc");
+  console.log(`Pane tty: ${tty}`);
+  console.log(`Sequence: ${format}`);
+  console.log(
+    "Sent. If nothing appeared, your terminal may not implement this escape " +
+      "(supported: Ghostty, iTerm2, WezTerm for OSC 9; Kitty for OSC 99).",
+  );
+  return true;
+}
+
 export function createNotifyCommand(): Command {
   return new Command("notify")
     .description(
@@ -290,6 +378,11 @@ export function createNotifyCommand(): Command {
         if (message) return;
         console.log("Backend: osascript (ccmux-notifier helper not found)");
         printOsascriptHints();
+        return;
+      }
+
+      if (backend === "osc") {
+        if (!runOscFlow(notifications, message)) process.exit(1);
         return;
       }
 
