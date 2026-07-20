@@ -226,13 +226,19 @@ Configure further with `ccmux config set notifications.<key> <value>`, or edit `
     "events": ["waiting", "finished"], // default both
     "sound": "Glass", // false (default) | true (platform default sound) | macOS sound name
     "delayMs": 1000, // debounce for "finished" only; "waiting" always fires immediately
-    "backend": "auto", // "auto" | "ccmux-notifier" | "osascript" | "notify-send" | "dbus" | "command"
+    "backend": "auto", // "auto" | "ccmux-notifier" | "osascript" | "notify-send" | "dbus" | "osc" | "command"
     "command": "ntfy publish agents \"$CCMUX_TITLE: $CCMUX_BODY\"", // used when backend = "command"
   },
 }
 ```
 
 `backend: "auto"` picks `ccmux-notifier` (else `osascript`) on macOS, and D-Bus (else `notify-send`) on Linux. `command` runs your own shell command with `CCMUX_*` env set (`EVENT`, `SESSION_ID`, `AGENT`, `PROJECT`, `BRANCH`, `TITLE`, `SUBTITLE`, `BODY`, `PANE`), for ntfy, Pushover, and the like. `CCMUX_BODY` is the complete text (the event line plus any context), so a script reading only it still gets something meaningful; `CCMUX_SUBTITLE` is the bare event line on its own for structured consumers.
+
+**`osc` (terminal escape, opt-in):** delivers the notification by writing a terminal escape sequence into the session's tmux pane, so it rides the pane's output out to whatever terminal is attached, including one across SSH, with no extra transport. It is never part of the `auto` ladder; set it explicitly with `ccmux config set notifications.backend osc`. This is an informational-only rung: no Approve/Deny buttons, no inline reply, no sound, no retraction, and paneless background-agent sessions are skipped.
+
+It needs `allow-passthrough` on in the target tmux (`tmux set -g allow-passthrough on`, or add it to `tmux.conf`); without it tmux swallows the escape. The wire format is chosen from the attached client's terminal: Kitty gets the structured OSC 99 protocol (separate title and body); everything else gets OSC 9 (a single `title: body` line). Emulator support: **OSC 9** works in Ghostty, iTerm2, and WezTerm; **OSC 99** in Kitty; Apple Terminal and Alacritty implement neither (the escape is silently ignored).
+
+Remote / SSH setup: run the ccmux daemon, tmux, and your agents on the remote box (ccmux tracks the sessions that live there), set `notifications.backend` to `osc` and `allow-passthrough on` in the remote tmux, then attach over SSH. Notifications fire on the remote and surface in your local terminal through the pane you're already viewing.
 
 > [!NOTE]
 > **Approve/Deny only send the mapped keystroke** to that session's pane (for Claude, the same key you'd press yourself). **Approve on a plan** picks "manually approve edits" (edits stay gated), never Claude's auto-accept mode. **Reply on a permission or plan notification denies the pending tool/plan** and sends your text as the next message (it cancels the prompt first, then types). If the session moved on since the notification fired, the press sends nothing and you get a fresh "state changed" notification instead; dismissing a notification never approves anything.

@@ -157,6 +157,26 @@ async function activateHostTerminal(): Promise<void> {
 }
 
 /**
+ * Runs a tmux command synchronously and returns its stdout, or null on failure.
+ * Synchronous (unlike the daemon's other tmux queries) because the "osc"
+ * notification backend's `allow-passthrough` probe and `list-clients` termname
+ * sniff run inside the synchronous escape-sequence builders; both are cheap,
+ * infrequent tmux reads.
+ */
+function runTmuxCapture(tmuxPath: string, args: string[]): string | null {
+  try {
+    const result = Bun.spawnSync([tmuxPath, ...args], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    if (!result.success) return null;
+    return result.stdout.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Main daemon class
  */
 export class Daemon {
@@ -395,6 +415,11 @@ export class Daemon {
         this.runNotificationAction(input),
       ccmuxPath,
       tmuxPath,
+      // "osc" backend wiring: the bound pane's tty (read fresh from paneCache
+      // per delivery) is where the passthrough escape is written; the tmux
+      // capture runner backs the allow-passthrough probe and termname sniff.
+      getPaneTty: (paneId: string) => this.paneCache.get(paneId)?.tty ?? null,
+      runTmuxCapture: (args: string[]) => runTmuxCapture(tmuxPath, args),
       // `notify-delivery.ts` constructs at most one of these per daemon run,
       // lazily on the first "dbus" delivery (only relevant on Linux with the
       // dbus backend resolved); `dbus-next` itself is loaded even later,

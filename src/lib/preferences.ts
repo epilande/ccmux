@@ -184,6 +184,7 @@ export const VALID_NOTIFICATION_BACKENDS = [
   "osascript",
   "notify-send",
   "dbus",
+  "osc",
   "command",
 ] as const;
 
