@@ -569,18 +569,11 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // currently-rendered dialog, which may not be the one the notification
     // described.
     //
-    // `replyOnFinished` verified live on OpenCode 1.18.3 (issue #35): the
-    // idle composer accepts literal text + Enter verbatim (multi-word and
-    // embedded quotes intact, no first-keystroke swallowing), and a leading
-    // space defuses `/` (submitted as an ordinary message, space preserved,
-    // deterministic at a clean idle composer). But OpenCode trims the leading
-    // space in front of `!` and enters SHELL MODE ("esc exit shell mode"
-    // footer), where Enter EXECUTED the text as a real shell command. Hence
-    // the `!`-leading `unsafeReplyPattern`. Known edge (documented, not
-    // gated): a composer in a transitional state (e.g. mid `/models` switch)
-    // can pop a "Select variant" autocomplete that intercepts keystrokes;
-    // a finished reply lands at a steady idle composer, and the staleness
-    // token rejects the press once the session leaves idle.
+    // `replyOnFinished` verified live on OpenCode 1.18.3 (issue #35): plain
+    // text + Enter submits verbatim, and a leading space defuses `/`. But
+    // OpenCode trims the leading space in front of `!` and enters SHELL MODE,
+    // where Enter EXECUTES the text as a real shell command. Hence the
+    // unsafeReplyPattern.
     notificationActions: {
       approve: ["Enter"],
       deny: ["Right", "Right", "Enter"],
@@ -647,14 +640,11 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // >= 0.122); the legacy `[y/n]` prompt in `terminalRules` is a pre-0.122
     // fallback that this Enter/Escape map does not claim to cover.
     //
-    // `replyOnFinished` verified live on codex-cli 0.144.5 (issue #35): the
-    // idle composer accepts literal text + Enter verbatim (multi-word and
-    // embedded quotes intact, no first-keystroke swallowing), and a leading
-    // space defuses `/`. But `!` is NOT space-defusable: Codex keys shell mode
-    // on the first NON-whitespace char, and the Enter RUNS the text as a shell
-    // command with no approval and no LLM turn (reproduced twice). A mid-text
-    // `!` is inert. Hence the `!`-leading `unsafeReplyPattern`: the accept
-    // path refuses those replies fail-closed instead of typing them.
+    // `replyOnFinished` verified live on codex-cli 0.144.5 (issue #35): plain
+    // text + Enter submits verbatim, and a leading space defuses `/`. But
+    // Codex keys shell mode on the first NON-whitespace char, so a `!`-leading
+    // reply RUNS as a shell command with no approval. Hence the
+    // unsafeReplyPattern.
     notificationActions: {
       approve: ["Enter"],
       deny: ["Escape"],
@@ -765,21 +755,16 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // needs no extra gating.
     //
     // `replyOnFinished` verified live on cursor-agent 2026.07.16-899851b
-    // (issue #35): the idle composer accepts literal text + Enter verbatim
-    // (multi-word and embedded quotes intact, no first-keystroke swallowing),
-    // and `!` is NOT a Cursor composer trigger. But Cursor's slash
-    // autocomplete is POSITIONAL, not just leading: any `/token` (leading or
-    // whitespace-preceded, even with the delivery path's defusing space in
-    // front) opens a fuzzy popup whose query is the slash-to-end tail, and
-    // when that query matches a real command the popup SWALLOWS the
-    // submitting Enter and executes the highlighted command instead
-    // (reproduced: `try running /help` executed `/help model` and opened the
-    // model picker; ` /help this is a literal...` fuzzy-matched
-    // `/help show-thinking` and replaced the draft). Path slashes
+    // (issue #35): plain text + Enter submits verbatim, and `!` is NOT a
+    // Cursor composer trigger. But Cursor's slash autocomplete is POSITIONAL,
+    // not just leading: any leading or whitespace-preceded `/token` (a
+    // defusing space in front included) opens a fuzzy popup, and when its
+    // query matches a real command the popup SWALLOWS the submitting Enter
+    // and executes the highlighted command instead. Path slashes
     // (`src/main.ts`) and matchless queries submit fine. An Escape-then-Enter
     // dismissal was rejected for the same ESC-coalescing footgun as Deny
-    // above, so the `unsafeReplyPattern` blocks any leading or
-    // whitespace-preceded `/` token instead (fail-closed, text preserved).
+    // above, so the unsafeReplyPattern blocks any leading or
+    // whitespace-preceded `/` token instead.
     notificationActions: {
       approve: ["y"],
       deny: ["C-c"],
@@ -857,19 +842,12 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // Reply keys: there is no question wait, and Escape interrupts the turn
     // rather than cancelling to a composer with the tool still pending.
     //
-    // `replyOnFinished` verified live on agy 1.1.4 (issue #35): the idle
-    // composer accepts literal text + Enter verbatim (multi-word and embedded
-    // quotes intact, no first-keystroke swallowing), and Escape at a drafted
-    // idle composer is inert (draft stays; nothing worse). But Antigravity
-    // TRIMS leading whitespace on submit and re-parses the prefixes, so the
-    // space defuse neutralizes NEITHER: ` /help ...` executed /help and
-    // DISCARDED the trailing text, and ` !...` entered shell mode (raising a
-    // Bash permission dialog). Hence the `[/!]`-leading `unsafeReplyPattern`.
-    // Also verified for the prefill scoping note in `tryPrefillReply`: the
-    // `? for shortcuts` readyPattern footer is ABSENT while a live permission
-    // dialog renders (footer becomes the Navigate/Amend hints), but it stays
-    // matched while a DRAFT sits in the composer, so it is not an
-    // empty-composer signal and prefill stays Claude-scoped.
+    // `replyOnFinished` verified live on agy 1.1.4 (issue #35): plain text +
+    // Enter submits verbatim. But Antigravity TRIMS leading whitespace on
+    // submit and re-parses the prefixes, so the space defuse neutralizes
+    // NEITHER: ` /help ...` executed /help and DISCARDED the trailing text,
+    // and ` !...` entered shell mode. Hence the `[/!]`-leading
+    // unsafeReplyPattern.
     notificationActions: {
       approve: ["1"],
       deny: ["Escape"],
@@ -929,13 +907,12 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // picker. Detection is terminal-rules-only (no hooks adapter), so these
     // presses ride the pane-tracked staleness tokens alone.
     //
-    // `replyOnFinished` verified live on gemini-cli 0.29.5 (issue #35): the
-    // idle composer accepts literal text + Enter verbatim (multi-word and
-    // embedded quotes intact, no first-keystroke swallowing). But Gemini
-    // TRIMS leading whitespace before its trigger detection, so the space
-    // defuse neutralizes NEITHER prefix: ` /help ...` executed the /help
-    // panel on Enter, and ` !...` flipped shell mode ("shell mode enabled"
-    // footer) pre-Enter. Hence the `[/!]`-leading `unsafeReplyPattern`.
+    // `replyOnFinished` verified live on gemini-cli 0.29.5 (issue #35): plain
+    // text + Enter submits verbatim. But Gemini TRIMS leading whitespace
+    // before its trigger detection, so the space defuse neutralizes NEITHER
+    // prefix: ` /help ...` executed the /help panel on Enter, and ` !...`
+    // flipped shell mode pre-Enter. Hence the `[/!]`-leading
+    // unsafeReplyPattern.
     notificationActions: {
       approve: ["1"],
       deny: ["Escape"],
@@ -1007,12 +984,10 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     //
     // `replyOnFinished` verified live on pi 0.79.9 (issue #35, the deferred
     // "decide during implementation" case): the extension marker tracks idle
-    // correctly, and the idle composer accepts literal text + Enter verbatim
-    // (multi-word and embedded quotes intact, no first-keystroke swallowing);
-    // a leading space defuses `/` (submits as a plain message). But pi strips
-    // leading whitespace before its `!` bash-trigger detection and EXECUTES
-    // the text as a shell command with no LLM turn (reproduced twice,
-    // deterministic). Hence the `!`-leading `unsafeReplyPattern`.
+    // correctly, plain text + Enter submits verbatim, and a leading space
+    // defuses `/`. But pi strips leading whitespace before its `!`
+    // bash-trigger detection and EXECUTES the text as a shell command with no
+    // LLM turn. Hence the `!`-leading unsafeReplyPattern.
     notificationActions: {
       replyOnFinished: true,
       unsafeReplyPattern: /^\s*!/,
@@ -1116,14 +1091,12 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // question wait, and Escape ends the turn rather than cancelling to a
     // composer with the tool still pending.
     //
-    // `replyOnFinished` verified live on Copilot CLI 1.0.71 (issue #35): the
-    // idle composer accepts literal text + Enter verbatim (multi-word and
-    // embedded quotes intact, no first-keystroke swallowing). But Copilot
-    // shows a leading space in the composer and TRIMS it on submit, then
-    // re-parses the prefixes, so the space defuse neutralizes NEITHER:
-    // ` /help ...` opened the help overlay, and ` !echo ...` EXECUTED as a
-    // shell command with no permission prompt (Auto mode). Hence the
-    // `[/!]`-leading `unsafeReplyPattern`.
+    // `replyOnFinished` verified live on Copilot CLI 1.0.71 (issue #35):
+    // plain text + Enter submits verbatim. But Copilot TRIMS a leading space
+    // on submit and re-parses the prefixes, so the space defuse neutralizes
+    // NEITHER: ` /help ...` opened the help overlay, and ` !echo ...`
+    // EXECUTED as a shell command with no permission prompt (Auto mode).
+    // Hence the `[/!]`-leading unsafeReplyPattern.
     notificationActions: {
       approve: ["1"],
       deny: ["Escape"],
