@@ -128,6 +128,17 @@ export interface AgentDef {
    * different picker (separate approve key; see the Claude def for the auto-mode
    * footgun). `planApprove`/`planDeny` gate the buttons; `planReplyPrelude` gates
    * the plan Reply.
+   *
+   * `unsafeReplyPattern` matches reply text this agent's composer would
+   * misparse as a command or mode trigger that the delivery path's
+   * leading-space defuse does NOT neutralize. Most agents strip leading
+   * whitespace before their trigger detection (e.g. Codex runs a `!`-leading
+   * reply as a shell command with no approval, so `/^\s*!/`); Cursor's
+   * slash-autocomplete additionally fuzzy-matches a `/token` ANYWHERE whose
+   * tail matches a real command and swallows the submitting Enter, so its
+   * pattern is positional (`/(^|\s)\/\S/`). A matching reply is refused
+   * fail-closed at the accept path (409, text preserved via re-notify)
+   * instead of typed into the pane.
    */
   notificationActions?: {
     approve?: string[];
@@ -139,6 +150,7 @@ export interface AgentDef {
     planReplyPrelude?: string[];
     replyOnQuestion?: boolean;
     replyOnFinished?: boolean;
+    unsafeReplyPattern?: RegExp;
   };
   /**
    * This agent's permission-prompt marker cannot be trusted to mean a real
@@ -315,13 +327,53 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
     // complete set, and grafting builtin default keys onto it would apply
     // Claude's keystrokes to a different agent's prompt. The spread copies every
     // field, so a new key needs no line here and can't be silently dropped.
-    merged.notificationActions = { ...override.notificationActions };
+    // `unsafeReplyPattern` arrives as a regex STRING from config and must be
+    // parsed (same contract as `readyPattern`).
+    merged.notificationActions = parseNotificationActions(
+      override.notificationActions,
+      `agents.${base.name}.notificationActions`,
+    );
+    // Deliberate exception to the whole-object replace above: unsafeReplyPattern
+    // is a safety default describing THIS builtin's composer, not a keystroke
+    // default, so an override that omits it still needs it. Carry the base
+    // guard forward unless the override explicitly re-specifies it, so a
+    // partial override can't silently re-arm unapproved shell execution on the
+    // `!`/`/`-executing agents. To intentionally disable the guard, an override
+    // must set an explicit never-match pattern.
+    if (
+      merged.notificationActions.unsafeReplyPattern === undefined &&
+      base.notificationActions?.unsafeReplyPattern !== undefined
+    ) {
+      merged.notificationActions.unsafeReplyPattern =
+        base.notificationActions.unsafeReplyPattern;
+    }
   }
   if (override.ambiguousPermissionMarker !== undefined) {
     merged.ambiguousPermissionMarker = override.ambiguousPermissionMarker;
   }
 
   return merged;
+}
+
+/**
+ * Convert a config-file `notificationActions` map (where `unsafeReplyPattern`
+ * is a regex STRING) into the runtime shape (compiled RegExp). Shared by the
+ * builtin-override merge and the custom-agent construction so the parse can't
+ * diverge between them.
+ */
+function parseNotificationActions(
+  config: NonNullable<AgentConfig["notificationActions"]>,
+  fieldName: string,
+): NonNullable<AgentDef["notificationActions"]> {
+  const { unsafeReplyPattern, ...rest } = config;
+  const parsed: NonNullable<AgentDef["notificationActions"]> = { ...rest };
+  if (unsafeReplyPattern !== undefined) {
+    parsed.unsafeReplyPattern = parseRegex(
+      unsafeReplyPattern,
+      `${fieldName}.unsafeReplyPattern`,
+    );
+  }
+  return parsed;
 }
 
 function normalizeInvokeMode(
@@ -510,15 +562,23 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // the whole turn and leaves the session hung in `working`, so it is not
     // used for Deny and no `permissionReplyPrelude` is offered (a reply would
     // have no safe cancel-to-composer key). No question detection exists for
-    // OpenCode, so no `answerPrelude`/`replyOnQuestion`; `replyOnFinished` is
-    // out of scope for this commit. Buttons are additionally suppressed at
-    // delivery when this row aggregates >1 concurrently-waiting server-side
-    // session (`Session.ambiguousWait`; see `aggregateOpenCodeMarkers`) — a
-    // keystroke lands on the shared pane's currently-rendered dialog, which may
-    // not be the one the notification described.
+    // OpenCode, so no `answerPrelude`/`replyOnQuestion`. Buttons are
+    // additionally suppressed at delivery when this row aggregates >1
+    // concurrently-waiting server-side session (`Session.ambiguousWait`; see
+    // `aggregateOpenCodeMarkers`) — a keystroke lands on the shared pane's
+    // currently-rendered dialog, which may not be the one the notification
+    // described.
+    //
+    // `replyOnFinished` verified live on OpenCode 1.18.3 (issue #35): plain
+    // text + Enter submits verbatim, and a leading space defuses `/`. But
+    // OpenCode trims the leading space in front of `!` and enters SHELL MODE,
+    // where Enter EXECUTES the text as a real shell command. Hence the
+    // unsafeReplyPattern.
     notificationActions: {
       approve: ["Enter"],
       deny: ["Right", "Right", "Enter"],
+      replyOnFinished: true,
+      unsafeReplyPattern: /^\s*!/,
     },
     invokeMode: {
       // `--format json` emits one event per line; default output prints a
@@ -579,9 +639,17 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // (the authoritative path is the `PermissionRequest` hook marker, Codex
     // >= 0.122); the legacy `[y/n]` prompt in `terminalRules` is a pre-0.122
     // fallback that this Enter/Escape map does not claim to cover.
+    //
+    // `replyOnFinished` verified live on codex-cli 0.144.5 (issue #35): plain
+    // text + Enter submits verbatim, and a leading space defuses `/`. But
+    // Codex keys shell mode on the first NON-whitespace char, so a `!`-leading
+    // reply RUNS as a shell command with no approval. Hence the
+    // unsafeReplyPattern.
     notificationActions: {
       approve: ["Enter"],
       deny: ["Escape"],
+      replyOnFinished: true,
+      unsafeReplyPattern: /^\s*!/,
     },
     invokeMode: {
       // `codex exec` still prints a banner + session metadata + hook events
@@ -685,9 +753,23 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // workspace-trust prompt ("Workspace Trust Required") is out of scope: it
     // has no `terminalRules` entry, so it never becomes a `permission` wait and
     // needs no extra gating.
+    //
+    // `replyOnFinished` verified live on cursor-agent 2026.07.16-899851b
+    // (issue #35): plain text + Enter submits verbatim, and `!` is NOT a
+    // Cursor composer trigger. But Cursor's slash autocomplete is POSITIONAL,
+    // not just leading: any leading or whitespace-preceded `/token` (a
+    // defusing space in front included) opens a fuzzy popup, and when its
+    // query matches a real command the popup SWALLOWS the submitting Enter
+    // and executes the highlighted command instead. Path slashes
+    // (`src/main.ts`) and matchless queries submit fine. An Escape-then-Enter
+    // dismissal was rejected for the same ESC-coalescing footgun as Deny
+    // above, so the unsafeReplyPattern blocks any leading or
+    // whitespace-preceded `/` token instead.
     notificationActions: {
       approve: ["y"],
       deny: ["C-c"],
+      replyOnFinished: true,
+      unsafeReplyPattern: /(^|\s)\/\S/,
     },
     // `--resume <chatId>` restores the chat transcript only when invoked
     // from the original workspace; cursor scopes chats per workspace_roots.
@@ -756,12 +838,21 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // digit can land on a different row and must not be trusted. Escape uses
     // the constant "esc to cancel" affordance: the tool does NOT run and the
     // turn interrupts to the composer ("Interrupted · What should Antigravity
-    // CLI do instead?"), which structurally cannot approve. No Reply keys:
-    // there is no question wait, and Escape interrupts the turn rather than
-    // cancelling to a composer with the tool still pending.
+    // CLI do instead?"), which structurally cannot approve. No waiting-state
+    // Reply keys: there is no question wait, and Escape interrupts the turn
+    // rather than cancelling to a composer with the tool still pending.
+    //
+    // `replyOnFinished` verified live on agy 1.1.4 (issue #35): plain text +
+    // Enter submits verbatim. But Antigravity TRIMS leading whitespace on
+    // submit and re-parses the prefixes, so the space defuse neutralizes
+    // NEITHER: ` /help ...` executed /help and DISCARDED the trailing text,
+    // and ` !...` entered shell mode. Hence the `[/!]`-leading
+    // unsafeReplyPattern.
     notificationActions: {
       approve: ["1"],
       deny: ["Escape"],
+      replyOnFinished: true,
+      unsafeReplyPattern: /^\s*[/!]/,
     },
     resumeCommand: "agy --conversation {id}",
     executable: "agy",
@@ -811,13 +902,22 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // gated curl (no trailing Enter), independent of the highlight. Escape is
     // option 3: "Request cancelled", the tool does NOT run, and the turn ends
     // back at the composer. Both actions are single keys, so the no-settle
-    // keys path has no coalescing surface. No Reply keys: Gemini has no
-    // question wait and no verified cancel-to-composer prelude from the
+    // keys path has no coalescing surface. No waiting-state Reply keys: Gemini
+    // has no question wait and no verified cancel-to-composer prelude from the
     // picker. Detection is terminal-rules-only (no hooks adapter), so these
     // presses ride the pane-tracked staleness tokens alone.
+    //
+    // `replyOnFinished` verified live on gemini-cli 0.29.5 (issue #35): plain
+    // text + Enter submits verbatim. But Gemini TRIMS leading whitespace
+    // before its trigger detection, so the space defuse neutralizes NEITHER
+    // prefix: ` /help ...` executed the /help panel on Enter, and ` !...`
+    // flipped shell mode pre-Enter. Hence the `[/!]`-leading
+    // unsafeReplyPattern.
     notificationActions: {
       approve: ["1"],
       deny: ["Escape"],
+      replyOnFinished: true,
+      unsafeReplyPattern: /^\s*[/!]/,
     },
     invokeMode: {
       // gemini reads its prompt from the `-p` argument. `{prompt}` is
@@ -870,19 +970,28 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         kind: "rate_limit",
       },
     ],
-    // No `notificationActions` ON PURPOSE (issue #26 decision, re-verified
-    // live on pi 0.79.9: a bash curl ran in 0.1s with no prompt of any
-    // kind). pi has no tool-approval pause — tools execute immediately — so
-    // a `permission` wait can never exist and there is nothing for
-    // Approve/Deny to drive. pi DOES ship an `ask_question` tool that can
-    // pause a session on a model-initiated question, but ccmux has no pi
-    // waiting detection (the extension marker only writes working/idle and
-    // the terminal rules above only detect working), so no waiting
-    // notification ever fires and there is nothing to attach Reply to.
-    // `replyOnFinished` stays Claude-only. Revisit only if a pi release adds
-    // an approval gate (or a user installs a tool_call-gating extension,
-    // which is out of scope).
+    // No Approve/Deny keys ON PURPOSE (issue #26 decision, re-verified live
+    // on pi 0.79.9: a bash curl ran in 0.1s with no prompt of any kind). pi
+    // has no tool-approval pause — tools execute immediately — so a
+    // `permission` wait can never exist and there is nothing for Approve/Deny
+    // to drive. pi DOES ship an `ask_question` tool that can pause a session
+    // on a model-initiated question, but ccmux has no pi waiting detection
+    // (the extension marker only writes working/idle and the terminal rules
+    // above only detect working), so no waiting notification ever fires and
+    // no waiting-state Reply can attach. Revisit the Approve/Deny half only
+    // if a pi release adds an approval gate (a user-installed
+    // tool_call-gating extension is out of scope).
     //
+    // `replyOnFinished` verified live on pi 0.79.9 (issue #35, the deferred
+    // "decide during implementation" case): the extension marker tracks idle
+    // correctly, plain text + Enter submits verbatim, and a leading space
+    // defuses `/`. But pi strips leading whitespace before its `!`
+    // bash-trigger detection and EXECUTES the text as a shell command with no
+    // LLM turn. Hence the `!`-leading unsafeReplyPattern.
+    notificationActions: {
+      replyOnFinished: true,
+      unsafeReplyPattern: /^\s*!/,
+    },
     // `pi -c` continues the most recent session in-pane (no session-id
     // extraction needed, like opencode --continue).
     resumeCommand: "pi -c",
@@ -978,12 +1087,21 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // The user rejected this tool call") and the turn ended at the composer,
     // so it structurally cannot approve. A single tool call can chain two
     // dialogs (URL access, then shell); each is its own wait/notification and
-    // one press answers exactly one dialog. No Reply keys: no question wait,
-    // and Escape ends the turn rather than cancelling to a composer with the
-    // tool still pending.
+    // one press answers exactly one dialog. No waiting-state Reply keys: no
+    // question wait, and Escape ends the turn rather than cancelling to a
+    // composer with the tool still pending.
+    //
+    // `replyOnFinished` verified live on Copilot CLI 1.0.71 (issue #35):
+    // plain text + Enter submits verbatim. But Copilot TRIMS a leading space
+    // on submit and re-parses the prefixes, so the space defuse neutralizes
+    // NEITHER: ` /help ...` opened the help overlay, and ` !echo ...`
+    // EXECUTED as a shell command with no permission prompt (Auto mode).
+    // Hence the `[/!]`-leading unsafeReplyPattern.
     notificationActions: {
       approve: ["1"],
       deny: ["Escape"],
+      replyOnFinished: true,
+      unsafeReplyPattern: /^\s*[/!]/,
     },
     resumeCommand: "copilot --resume {id}",
     // Copilot holds `session-state/<uuid>/session.db` open (lsof-discoverable),
@@ -1080,7 +1198,10 @@ export function getAgents(preferences?: Preferences): AgentDef[] {
         : undefined,
       hooks: override.hooks,
       notificationActions: override.notificationActions
-        ? { ...override.notificationActions }
+        ? parseNotificationActions(
+            override.notificationActions,
+            `agents.${name}.notificationActions`,
+          )
         : undefined,
       ambiguousPermissionMarker: override.ambiguousPermissionMarker,
     });

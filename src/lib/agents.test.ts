@@ -505,63 +505,128 @@ describe("agents.claude.readyPattern override", () => {
 });
 
 describe("built-in agent notificationActions defaults", () => {
-  it("opencode carries the verified Approve/Deny keys and no reply", () => {
+  it("opencode carries the verified Approve/Deny keys and finished-only Reply", () => {
     const oc = BUILTIN_AGENTS.find((a) => a.name === "opencode");
     expect(oc?.notificationActions?.approve).toEqual(["Enter"]);
     expect(oc?.notificationActions?.deny).toEqual(["Right", "Right", "Enter"]);
     expect(oc?.notificationActions?.permissionReplyPrelude).toBeUndefined();
     expect(oc?.notificationActions?.replyOnQuestion).toBeUndefined();
-    expect(oc?.notificationActions?.replyOnFinished).toBeUndefined();
+    expect(oc?.notificationActions?.replyOnFinished).toBe(true);
+    // OpenCode trims the leading space in front of `!` and enters shell mode,
+    // where Enter executes the text; `/` IS space-defusable.
+    expect(oc?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*!/);
   });
 
-  it("codex carries the verified Approve/Deny keys and no reply", () => {
+  it("codex carries the verified Approve/Deny keys and finished-only Reply", () => {
     const cx = BUILTIN_AGENTS.find((a) => a.name === "codex");
     expect(cx?.notificationActions?.approve).toEqual(["Enter"]);
     expect(cx?.notificationActions?.deny).toEqual(["Escape"]);
     expect(cx?.notificationActions?.permissionReplyPrelude).toBeUndefined();
     expect(cx?.notificationActions?.replyOnQuestion).toBeUndefined();
-    expect(cx?.notificationActions?.replyOnFinished).toBeUndefined();
+    expect(cx?.notificationActions?.replyOnFinished).toBe(true);
+    // `!` flips Codex shell mode on the first non-whitespace char and RUNS the
+    // reply with no approval; a leading space does not defuse it.
+    expect(cx?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*!/);
   });
 
-  it("cursor carries the verified Approve/Deny keys and no reply", () => {
+  it("cursor carries the verified Approve/Deny keys and finished-only Reply", () => {
     const cu = BUILTIN_AGENTS.find((a) => a.name === "cursor");
     expect(cu?.notificationActions?.approve).toEqual(["y"]);
     expect(cu?.notificationActions?.deny).toEqual(["C-c"]);
     expect(cu?.notificationActions?.permissionReplyPrelude).toBeUndefined();
     expect(cu?.notificationActions?.replyOnQuestion).toBeUndefined();
-    expect(cu?.notificationActions?.replyOnFinished).toBeUndefined();
+    expect(cu?.notificationActions?.replyOnFinished).toBe(true);
+    // Cursor's slash autocomplete fuzzy-matches a /token anywhere (leading or
+    // whitespace-preceded) and swallows the submitting Enter when the tail
+    // matches a real command, so the pattern is positional, not first-char.
+    expect(cu?.notificationActions?.unsafeReplyPattern).toEqual(/(^|\s)\/\S/);
   });
 
-  it("gemini carries the verified Approve/Deny keys and no reply", () => {
+  it("gemini carries the verified Approve/Deny keys and finished-only Reply", () => {
     const gm = BUILTIN_AGENTS.find((a) => a.name === "gemini");
     expect(gm?.notificationActions?.approve).toEqual(["1"]);
     expect(gm?.notificationActions?.deny).toEqual(["Escape"]);
     expect(gm?.notificationActions?.permissionReplyPrelude).toBeUndefined();
     expect(gm?.notificationActions?.replyOnQuestion).toBeUndefined();
-    expect(gm?.notificationActions?.replyOnFinished).toBeUndefined();
+    expect(gm?.notificationActions?.replyOnFinished).toBe(true);
+    // Gemini trims leading whitespace before trigger detection, so neither
+    // `/` (slash command) nor `!` (shell mode) is space-defusable.
+    expect(gm?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*[/!]/);
   });
 
-  it("antigravity carries the verified Approve/Deny keys and no reply", () => {
+  it("antigravity carries the verified Approve/Deny keys and finished-only Reply", () => {
     const ag = BUILTIN_AGENTS.find((a) => a.name === "antigravity");
     expect(ag?.notificationActions?.approve).toEqual(["1"]);
     expect(ag?.notificationActions?.deny).toEqual(["Escape"]);
     expect(ag?.notificationActions?.permissionReplyPrelude).toBeUndefined();
     expect(ag?.notificationActions?.replyOnQuestion).toBeUndefined();
-    expect(ag?.notificationActions?.replyOnFinished).toBeUndefined();
+    expect(ag?.notificationActions?.replyOnFinished).toBe(true);
+    // Antigravity trims leading whitespace on submit and re-parses the
+    // prefixes: `/` executes as a slash command (discarding trailing text),
+    // `!` enters shell mode.
+    expect(ag?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*[/!]/);
   });
 
-  it("copilot carries the verified Approve/Deny keys and no reply", () => {
+  it("copilot carries the verified Approve/Deny keys and finished-only Reply", () => {
     const cp = BUILTIN_AGENTS.find((a) => a.name === "copilot");
     expect(cp?.notificationActions?.approve).toEqual(["1"]);
     expect(cp?.notificationActions?.deny).toEqual(["Escape"]);
     expect(cp?.notificationActions?.permissionReplyPrelude).toBeUndefined();
     expect(cp?.notificationActions?.replyOnQuestion).toBeUndefined();
-    expect(cp?.notificationActions?.replyOnFinished).toBeUndefined();
+    expect(cp?.notificationActions?.replyOnFinished).toBe(true);
+    // Copilot trims the leading space on submit and re-parses the prefixes:
+    // `/` opens the help overlay, `!` executes as a shell command.
+    expect(cp?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*[/!]/);
   });
 
-  it("pi deliberately has no notificationActions (no tool-approval pause exists)", () => {
+  it("pi carries a finished-only Reply and deliberately no Approve/Deny (no tool-approval pause exists)", () => {
     const pi = BUILTIN_AGENTS.find((a) => a.name === "pi");
-    expect(pi?.notificationActions).toBeUndefined();
+    expect(pi?.notificationActions?.approve).toBeUndefined();
+    expect(pi?.notificationActions?.deny).toBeUndefined();
+    expect(pi?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(pi?.notificationActions?.replyOnFinished).toBe(true);
+    // pi strips leading whitespace before its `!` bash trigger and executes
+    // the text; `/` IS space-defusable (submits as a plain message).
+    expect(pi?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*!/);
+  });
+});
+
+describe("agents.<builtin>.notificationActions unsafeReplyPattern carry-forward", () => {
+  it("carries the builtin guard forward when a partial override omits it", () => {
+    const agents = getAgents({
+      agents: {
+        codex: {
+          notificationActions: {
+            approve: ["Enter"],
+            replyOnFinished: true,
+          },
+        },
+      },
+    });
+    const codex = agents.find((a) => a.name === "codex");
+    // The builtin ships /^\s*!/ (see "codex carries the verified Approve/Deny
+    // keys" above); an override that sets other keys but omits
+    // unsafeReplyPattern must not silently re-arm unapproved shell execution.
+    expect(codex?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*!/);
+  });
+
+  it("keeps an explicit override's unsafeReplyPattern instead of the builtin's", () => {
+    const agents = getAgents({
+      agents: {
+        codex: {
+          notificationActions: {
+            approve: ["Enter"],
+            replyOnFinished: true,
+            unsafeReplyPattern: "/^custom/",
+          },
+        },
+      },
+    });
+    const codex = agents.find((a) => a.name === "codex");
+    expect(codex?.notificationActions?.unsafeReplyPattern).toEqual(/^custom/);
+    expect(codex?.notificationActions?.unsafeReplyPattern?.test("!ls")).toBe(
+      false,
+    );
   });
 });
 
@@ -625,6 +690,45 @@ describe("agents.claude.notificationActions", () => {
     expect(claude?.notificationActions?.replyOnQuestion).toBe(true);
     expect(claude?.notificationActions?.replyOnFinished).toBe(true);
   });
+
+  it("parses unsafeReplyPattern from its config string form on an override", () => {
+    const agents = getAgents({
+      agents: {
+        claude: {
+          notificationActions: {
+            approve: ["1"],
+            replyOnFinished: true,
+            unsafeReplyPattern: "/^\\s*[/!]/",
+          },
+        },
+      },
+    });
+    const claude = agents.find((a) => a.name === "claude");
+    expect(claude?.notificationActions?.unsafeReplyPattern).toBeInstanceOf(
+      RegExp,
+    );
+    expect(claude?.notificationActions?.unsafeReplyPattern?.test("  !ls")).toBe(
+      true,
+    );
+    expect(
+      claude?.notificationActions?.unsafeReplyPattern?.test("plain reply"),
+    ).toBe(false);
+  });
+
+  it("throws on an invalid unsafeReplyPattern override", () => {
+    expect(() =>
+      getAgents({
+        agents: {
+          claude: {
+            notificationActions: {
+              approve: ["1"],
+              unsafeReplyPattern: "/[unclosed/",
+            },
+          },
+        },
+      }),
+    ).toThrow(/Invalid regex/);
+  });
 });
 
 describe("agents.<custom>.notificationActions (custom-agent path)", () => {
@@ -669,6 +773,29 @@ describe("agents.<custom>.notificationActions (custom-agent path)", () => {
     const custom = agents.find((a) => a.name === "myagent");
     expect(custom?.notificationActions).toBeUndefined();
     expect(custom?.ambiguousPermissionMarker).toBeUndefined();
+  });
+
+  it("parses unsafeReplyPattern from its config string form for a fully custom agent", () => {
+    const agents = getAgents({
+      agents: {
+        myagent: {
+          processMatch: "myagent",
+          terminalRules: [],
+          notificationActions: {
+            approve: ["y"],
+            replyOnFinished: true,
+            unsafeReplyPattern: "/^\\s*!/",
+          },
+        },
+      },
+    });
+    const custom = agents.find((a) => a.name === "myagent");
+    expect(custom?.notificationActions?.unsafeReplyPattern).toBeInstanceOf(
+      RegExp,
+    );
+    expect(custom?.notificationActions?.unsafeReplyPattern?.test("  !ls")).toBe(
+      true,
+    );
   });
 });
 

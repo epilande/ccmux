@@ -69,7 +69,10 @@ export interface AgentConfig {
    * `permissionReplyPrelude` opts `permission` notifications into a Reply that
    * denies the pending tool (keys cancel the prompt before the reply text).
    * `planApprove`/`planDeny`/`planReplyPrelude` are the ExitPlanMode analogues
-   * of `approve`/`deny`/`permissionReplyPrelude`.
+   * of `approve`/`deny`/`permissionReplyPrelude`. `unsafeReplyPattern` is a
+   * regex (string form, parsed like `readyPattern`) matching reply text the
+   * delivery path must refuse for this agent (composer triggers a leading
+   * space cannot defuse; see `AgentDef.notificationActions`).
    */
   notificationActions?: {
     approve?: string[];
@@ -81,6 +84,7 @@ export interface AgentConfig {
     planReplyPrelude?: string[];
     replyOnQuestion?: boolean;
     replyOnFinished?: boolean;
+    unsafeReplyPattern?: string;
   };
   /**
    * Set when this custom agent's permission marker can actually cover an
