@@ -1,5 +1,6 @@
 import { closeSync, openSync, readSync } from "fs";
 import type { LogEntry } from "../types";
+import { deriveProject } from "./project-derivation";
 
 export function parseLogEntries(content: string): LogEntry[] {
   const lines = content.trim().split("\n");
@@ -136,7 +137,7 @@ export function extractProjectInfo(logPath: string): {
 
   const encodedPath = parts[projectsIndex + 1];
   const cwd = decodeProjectPath(encodedPath);
-  const project = cwd.split("/").pop() || "unknown";
+  const project = deriveProject(cwd, "unknown");
 
   return { project, cwd };
 }

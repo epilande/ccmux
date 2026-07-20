@@ -21,6 +21,7 @@ import {
   MAX_PROMPT_CHARS,
   MAX_PROMPTS_TOTAL_BYTES,
 } from "../lib/config";
+import { deriveProject } from "./project-derivation";
 
 /**
  * Append a user prompt to the capped prompt index. Trims and truncates the
@@ -338,7 +339,9 @@ function processUserEntry(
   const { content } = entry.message;
 
   const cwd = entry.cwd || currentState.cwd;
-  const project = cwd ? cwd.split("/").pop() : currentState.project;
+  const project = cwd
+    ? deriveProject(cwd, currentState.project ?? "unknown")
+    : currentState.project;
   const version = entry.version || currentState.version;
   const gitBranch = entry.gitBranch || currentState.gitBranch;
 
