@@ -34,8 +34,32 @@ export type NotificationActionId = (typeof WHITELIST)[number];
  *  this is deliberately tighter than `MAX_SEND_TEXT_CHARS` (10k). */
 export const MAX_NOTIFICATION_REPLY_CHARS = 2000;
 
-/** Body of the "your press didn't land" re-notification. */
+/** Body of the "your press didn't land" re-notification. Used for approve/deny
+ *  (a lost click, nothing to preserve) and for an `answer` with no reply text. */
 export const STATE_CHANGED_BODY = "State changed. Check the pane.";
+
+/** Re-notification body when an undelivered reply was Tier-2 prefilled into the
+ *  pane's composer (typed, NOT submitted): the user jumps, sees their words, and
+ *  presses Enter themselves. */
+export const STATE_CHANGED_PREFILL_BODY =
+  "State changed. Your reply is typed in the pane. Review and press Enter.";
+
+/** Cap on the reply text echoed back inside the Tier-1 "not sent" body. Distinct
+ *  from {@link MAX_NOTIFICATION_REPLY_CHARS} (the delivery cap): this only bounds
+ *  how much text the re-notification quotes so a long paste can't blow the banner
+ *  out. */
+export const MAX_NOTIFICATION_REPLY_BODY_CHARS = 1000;
+
+/** Tier-1 re-notification body: the reply could not be delivered OR safely
+ *  prefilled, so quote it back (capped) so the user can copy it rather than lose
+ *  their typing. */
+export function buildUndeliveredReplyBody(text: string): string {
+  const capped =
+    text.length > MAX_NOTIFICATION_REPLY_BODY_CHARS
+      ? `${text.slice(0, MAX_NOTIFICATION_REPLY_BODY_CHARS)}...`
+      : text;
+  return `State changed. Your reply was not sent: "${capped}"`;
+}
 
 /** Delay between sequential approve/deny keystrokes, mirroring
  *  `sendLiteralToPane`'s gap so a TUI doesn't batch them into one paste. */
@@ -111,6 +135,128 @@ export function sanitizeReply(raw: string | undefined): string {
   return stripControlChars(raw, { replacement: " " })
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * Choose the re-notification body for a rejected action so a carried reply is
+ * never silently discarded, and Tier-2 prefill the reply into the composer when
+ * (and only when) the pane verifiably shows a plain, empty agent composer.
+ *
+ * Failure-mode asymmetry drives the guard: wrongly REFUSING to prefill costs the
+ * user a copy-paste from the banner (the text is still in the body); wrongly
+ * TYPING lands keystrokes on an unknown screen, and several agents' dialogs act
+ * on raw characters (Gemini/Antigravity/Copilot pickers select-and-submit on
+ * digits, Cursor on `y`, Claude's permission prompt on `1`/`2`), so a prefill on
+ * the wrong screen can EXECUTE an action. Prefill is therefore positive-signal
+ * only: it proceeds solely on a matched empty-composer `readyPattern`, never on
+ * the mere ABSENCE of a recognized prompt.
+ *
+ * Returns the body to hand to `deps.reNotify`. Never throws: any guard failure
+ * (or a throwing dep) falls through to the Tier-1 quoted-text body.
+ */
+async function preserveUndeliveredReply(
+  session: Session,
+  rawUserText: string | undefined,
+  deps: NotificationActionDeps,
+  { allowPrefill }: { allowPrefill: boolean },
+): Promise<string> {
+  const text = sanitizeReply(rawUserText);
+  // No reply to preserve (approve/deny, or an empty `answer`): the plain body.
+  if (text.length === 0) return STATE_CHANGED_BODY;
+
+  let prefilled = false;
+  if (allowPrefill) {
+    try {
+      prefilled = await tryPrefillReply(session, text, deps);
+    } catch {
+      prefilled = false;
+    }
+  }
+  if (prefilled) {
+    (deps.log ?? (() => {}))(
+      `notification-action: prefilled undelivered reply into pane ${session.tmuxPane} (not submitted)`,
+    );
+    return STATE_CHANGED_PREFILL_BODY;
+  }
+  return buildUndeliveredReplyBody(text);
+}
+
+/**
+ * Type `text` into the pane's composer WITHOUT pressing Enter, but only after a
+ * fresh, positive check that the pane is a plain empty agent composer. Returns
+ * whether the text was typed. Every gate below must hold; the first failure
+ * returns false (the caller degrades to Tier 1).
+ */
+async function tryPrefillReply(
+  session: Session,
+  text: string,
+  deps: NotificationActionDeps,
+): Promise<boolean> {
+  // Never type text the normal delivery path would 400.
+  if (text.length > MAX_NOTIFICATION_REPLY_CHARS) return false;
+
+  const pane = session.tmuxPane;
+  if (!pane) return false;
+
+  // A `readyPattern` IS the positive composer signal, so it doubles as the
+  // "no existing draft" guard: it matches only an EMPTY composer line (Claude's
+  // `/^[>❯]\s*$/`), so a composer already holding a draft no longer matches and
+  // we refuse to type over the user's in-progress text.
+  //
+  // The gate requires genuine reply capability, NOT mere `notificationActions`
+  // presence: Antigravity carries both `notificationActions` (approve/deny
+  // buttons) AND a `readyPattern`, yet is not Reply-capable, so keying off
+  // `notificationActions` truthiness would let its answer text reach this path.
+  // The prompt classifiers below (`classifyClaudePromptPane`,
+  // `matchesQuestionPickerSignature`) are Claude-specific, so reply capability
+  // (any of the reply fields the notifier gates Reply on: `replyOnQuestion`,
+  // `replyOnFinished`, `permissionReplyPrelude`, `planReplyPrelude`) is the
+  // honest precondition for trusting them. True for Claude, false for
+  // Antigravity.
+  const agentDef = deps.getAgent(session.agentType);
+  const na = agentDef?.notificationActions;
+  const replyCapable = !!(
+    na?.replyOnQuestion ||
+    na?.replyOnFinished ||
+    na?.permissionReplyPrelude?.length ||
+    na?.planReplyPrelude?.length
+  );
+  const readyPattern = replyCapable ? agentDef?.readyPattern : undefined;
+  if (!readyPattern) return false;
+
+  // Foreground liveness. The token gates run BEFORE the main liveness guard, so
+  // a reply rejected there never reached it; re-check here so a prefill can't
+  // land in a shell (where it would EXECUTE) or a terminal editor. Fail closed
+  // on a query miss.
+  const foreground = await deps.getPaneCommand(pane);
+  if (foreground === null || isNonAgentCommand(foreground)) return false;
+
+  let capture: string;
+  try {
+    capture = await deps.capturePane(pane);
+  } catch {
+    return false;
+  }
+  // A live prompt, a question picker, an empty/failed capture, or a composer
+  // that doesn't match the empty-composer pattern all fail closed. Only a
+  // non-empty capture with a matched `readyPattern` line and NO recognized
+  // prompt/picker is safe to type into.
+  if (capture.trim().length === 0) return false;
+  if (classifyClaudePromptPane(capture) !== null) return false;
+  if (matchesQuestionPickerSignature(capture)) return false;
+  const composerReady = capture.split("\n").some((line) => {
+    // Reset for /g-flagged user-override regexes; `.test()` is stateful.
+    readyPattern.lastIndex = 0;
+    return readyPattern.test(line);
+  });
+  if (!composerReady) return false;
+
+  // Same leading-`/`/`!` defuse as the submit path: a prefilled `/foo` would open
+  // the slash palette (and a later Enter could select a command), and `!foo`
+  // trips Claude's shell mode. One leading space neutralizes both without
+  // changing the visible content.
+  const toSend = /^[/!]/.test(text) ? ` ${text}` : text;
+  return deps.sendText(pane, toSend, false);
 }
 
 /**
@@ -260,6 +406,21 @@ export async function handleNotificationAction(
     return { code: 200, ok: true, action };
   }
 
+  // Every mutating-action rejection re-notifies through here so a carried reply
+  // is preserved (Tier 1: quoted in the body; Tier 2: prefilled into a verified
+  // composer) instead of silently discarded. approve/deny carry no `userText`,
+  // so the helper returns the plain STATE_CHANGED_BODY for them. `allowPrefill`
+  // is false only where the pane can't be trusted even if it looks like a
+  // composer (the ambiguous aggregated-row case below).
+  const reNotifyPreserving = async (allowPrefill: boolean): Promise<void> => {
+    deps.reNotify(
+      session,
+      await preserveUndeliveredReply(session, input.userText, deps, {
+        allowPrefill,
+      }),
+    );
+  };
+
   // approve / deny / answer all mutate the pane; first the staleness token must
   // still match the edge the notification fired for. An attentionType flip
   // WITHIN `waiting` (permission -> question) doesn't bump `statusChangedAt`
@@ -268,7 +429,7 @@ export async function handleNotificationAction(
   const tokenMatches =
     (input.statusChangedAt ?? null) === (session.statusChangedAt ?? null);
   if (!tokenMatches) {
-    deps.reNotify(session, STATE_CHANGED_BODY);
+    await reNotifyPreserving(true);
     return {
       code: 409,
       ok: false,
@@ -288,7 +449,7 @@ export async function handleNotificationAction(
     (input.attentionGeneration ?? null) ===
     (session.attentionGeneration ?? null);
   if (!generationMatches) {
-    deps.reNotify(session, STATE_CHANGED_BODY);
+    await reNotifyPreserving(true);
     return {
       code: 409,
       ok: false,
@@ -305,7 +466,10 @@ export async function handleNotificationAction(
   // would land on whichever dialog the shared pane renders, possibly the wrong
   // session's tool. `default` (jump) already returned above.
   if (session.ambiguousWait) {
-    deps.reNotify(session, STATE_CHANGED_BODY);
+    // allowPrefill FALSE: the pane is shared by multiple server-side sessions, so
+    // even a verified empty composer could belong to a different session than the
+    // reply was meant for. Preserve the text (Tier 1) but never type it.
+    await reNotifyPreserving(false);
     log(
       `notification-action: refusing ${action} on an aggregated row with multiple concurrent waits`,
     );
@@ -367,7 +531,7 @@ export async function handleNotificationAction(
     plan = resolveActionPlan(action, session, agentDef);
   }
   if (plan === null) {
-    deps.reNotify(session, STATE_CHANGED_BODY);
+    await reNotifyPreserving(true);
     return {
       code: 409,
       ok: false,
@@ -377,8 +541,9 @@ export async function handleNotificationAction(
 
   if (!session.tmuxPane) {
     // No pane to type into (soft-evicted / background). Not a keystroke race,
-    // but the press still didn't land — tell the user.
-    deps.reNotify(session, STATE_CHANGED_BODY);
+    // but the press still didn't land — tell the user. The prefill helper's own
+    // pane guard degrades to Tier 1 here (no pane to type into).
+    await reNotifyPreserving(true);
     return { code: 409, ok: false, error: "Session has no bound pane" };
   }
   const pane = session.tmuxPane;
@@ -391,7 +556,9 @@ export async function handleNotificationAction(
   // the shell is not).
   const foreground = await deps.getPaneCommand(pane);
   if (foreground === null || isNonAgentCommand(foreground)) {
-    deps.reNotify(session, STATE_CHANGED_BODY);
+    // The prefill helper re-runs this same liveness check, so it degrades to
+    // Tier 1 here (it won't type into a shell/editor either).
+    await reNotifyPreserving(true);
     log(
       `notification-action: pane foreground is "${foreground ?? "unknown"}", refusing to type`,
     );
@@ -451,7 +618,10 @@ export async function handleNotificationAction(
         promptCleared = false;
       }
       if (!promptCleared) {
-        deps.reNotify(session, STATE_CHANGED_BODY);
+        // Prelude keys were already sent; the prefill helper re-captures fresh,
+        // so it prefills only if the prompt has since cleared to a bare composer,
+        // else Tier 1.
+        await reNotifyPreserving(true);
         log(
           "notification-action: prompt still live after the reply prelude, refusing to type",
         );
