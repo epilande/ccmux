@@ -202,7 +202,8 @@ Desktop notifications on `waiting`/`finished` transitions, disabled by default. 
 
 |                                                                           **Permission → Approve / Deny**                                                                            |                                                                        **Question → inline Reply**                                                                         |
 | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------: |
-| <img alt="ccmux notification with Approve / Deny buttons for a permission prompt" src="https://github.com/user-attachments/assets/e2fb5423-eac0-47d5-ae35-b003d797e42c" width="380"> | <img alt="ccmux notification with an inline Reply field for a question" src="https://github.com/user-attachments/assets/75671613-1c19-47c0-986c-ee41fd6a9860" width="380"> |
+| <img alt="ccmux notification with Approve / Deny / Reply buttons for a permission prompt" src="https://github.com/user-attachments/assets/339571a3-52bf-44e0-8c19-e346841591a7" width="380"> | <img alt="ccmux notification with an inline Reply field for a question" src="https://github.com/user-attachments/assets/1a3aa376-51f4-4a0c-8983-810e46d826fe" width="380"> |
+
 
 ```bash
 ccmux config set notifications.enabled true
