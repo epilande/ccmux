@@ -31,9 +31,7 @@ describe("shouldPersistWidth", () => {
   it("ignores width changes that coincide with a window resize", () => {
     // Session switch / terminal resize: tmux rescaled the pane and the
     // window-resized hook will re-pin it. Must not persist the transient.
-    expect(
-      shouldPersistWidth(passing({ windowWidth: 220, prevWindowWidth: 80 })),
-    ).toBe(false);
+    expect(shouldPersistWidth(passing({ prevWindowWidth: 80 }))).toBe(false);
   });
 
   it("fails safe when window width cannot be determined", () => {
