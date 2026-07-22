@@ -1,6 +1,6 @@
 {
   "name": "ccmux",
-  "version": "1.2.1-rc.1",
+  "version": "1.2.0",
   "private": true,
   "description": "Track all your AI coding agents (Claude Code, Codex, Cursor, ...) in tmux and jump to the one that needs you",
   "license": "MIT",
