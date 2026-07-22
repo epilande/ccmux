@@ -87,7 +87,7 @@ describe("store", () => {
       expect(sorted.map((s) => s.id)).toEqual(["newer", "older"]);
     });
 
-    it("should fall back to lastActivityAt when lastUserInputAt is null", () => {
+    it("should fall back to statusChangedAt when lastUserInputAt is null", () => {
       const store = createTUIStore({ groupBy: "none" });
 
       store.actions.setSessions([
@@ -101,12 +101,54 @@ describe("store", () => {
           id: "no-input",
           status: "idle",
           lastUserInputAt: null,
-          lastActivityAt: "2024-01-01T12:30:00Z",
+          statusChangedAt: "2024-01-01T12:30:00Z",
+          // Fresher than everything else, but activity must NOT be a sort
+          // key: it churns while working (see the j/k regression below).
+          lastActivityAt: "2024-01-01T13:00:00Z",
         }),
       ]);
 
       const sorted = store.sortedSessions();
       expect(sorted.map((s) => s.id)).toEqual(["no-input", "with-input"]);
+    });
+
+    it("keeps j/k navigation advancing while working sessions emit activity", () => {
+      const store = createTUIStore({ groupBy: "none" });
+
+      // Marker/terminal-tracked agents: no lastUserInputAt, so they sort by
+      // the statusChangedAt fallback. All working, all churning activity.
+      const base = Date.parse("2024-01-15T12:00:00Z");
+      store.actions.setSessions(
+        Array.from({ length: 8 }, (_, i) =>
+          createMockSession({
+            id: `s${i}`,
+            status: "working",
+            lastUserInputAt: null,
+            statusChangedAt: new Date(base + i * 1000).toISOString(),
+            lastActivityAt: new Date(base + i * 1000).toISOString(),
+          }),
+        ),
+      );
+
+      // Press j repeatedly; between presses, agents emit activity (the SSE
+      // session_updated deltas a busy daemon streams). With lastActivityAt as
+      // a sort key this reordered the list under the cursor and navigation
+      // looped instead of reaching the bottom.
+      let clock = base + 100_000;
+      for (let press = 0; press < 20; press++) {
+        store.actions.moveSelection(1);
+        for (const id of [`s${press % 8}`, `s${(press + 3) % 8}`]) {
+          const cur = store.state.sessions.find((s) => s.id === id)!;
+          clock += 1000;
+          store.actions.updateSession({
+            ...cur,
+            lastActivityAt: new Date(clock).toISOString(),
+          });
+        }
+      }
+
+      expect(store.selectedIndex()).toBe(store.flatItems().length - 1);
+      expect(store.selectedSession()?.id).toBe("s0");
     });
 
     it("should remain stable when lastActivityAt changes but lastUserInputAt does not", () => {

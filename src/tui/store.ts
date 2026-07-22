@@ -456,11 +456,16 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       const keyed = state.sessions.map((s) => ({
         session: s,
         status: statusOrder[s.status],
-        // Within same status, sort by last user input (stable, doesn't jump while working)
+        // Within same status, sort by last user input; sessions that never
+        // get one (marker/terminal-tracked agents, invoke rows) fall back to
+        // their last status transition. Both keys are frozen while a session
+        // works. Never lastActivityAt: it refreshes continuously on working
+        // sessions, and a list that reorders between two keypresses makes j/k
+        // navigation orbit the churning rows instead of advancing.
         time: s.lastUserInputAt
           ? Date.parse(s.lastUserInputAt)
-          : s.lastActivityAt
-            ? Date.parse(s.lastActivityAt)
+          : s.statusChangedAt
+            ? Date.parse(s.statusChangedAt)
             : 0,
       }));
       keyed.sort((a, b) => a.status - b.status || b.time - a.time);
