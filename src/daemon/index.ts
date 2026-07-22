@@ -674,33 +674,44 @@ export class Daemon {
       }
     } catch (error) {
       DaemonPerf.scanEnd(scanStartNs);
-      const isDiscovery =
-        error instanceof ProcessDiscoveryError ||
-        error instanceof PaneDiscoveryError;
-      // Any scan that throws produced no fresh data, so every failure (discovery
-      // or generic) counts toward the staleness streak.
-      const reason = isDiscovery ? (error as Error).message : "scan error";
-      const alreadyDegraded = this.scanHealth.snapshot().degraded;
-      const transition = this.scanHealth.recordFailure(reason, new Date());
-      if (transition) {
-        console.error(
-          `Daemon degraded: ${transition.reason} (${SCAN_DEGRADED_THRESHOLD} consecutive scan failures); serving cached state until scans recover`,
-        );
-        this.server.broadcastDaemonHealth();
-      }
+      this.recordScanFailure(error);
+    }
+  }
 
-      if (isDiscovery) {
-        // Fail closed: skip this cycle's mutations entirely rather than act on
-        // an empty process/pane list (which would wipe sessions + markers).
-        // Retries next scan; a genuinely-empty result does not reach here.
-        // Once degraded, this line is pure per-scan spam (46h of it in #46), so
-        // suppress it and let the one-shot degraded log stand for the outage.
-        if (!alreadyDegraded && !transition) {
-          console.error(`Scan skipped: ${error.message}`);
-        }
-      } else {
-        console.error("Scan error:", error);
+  /**
+   * Fold one thrown scan into the health tracker and log it (issue #46).
+   * Extracted from `scan()`'s catch so the subtle wiring — the `reason`
+   * derivation, snapshotting `alreadyDegraded` *before* `recordFailure`, the
+   * one-shot degraded log + broadcast, and the `Scan skipped` spam-suppression
+   * predicate — is unit-testable without driving a full scan.
+   */
+  private recordScanFailure(error: unknown): void {
+    const isDiscovery =
+      error instanceof ProcessDiscoveryError ||
+      error instanceof PaneDiscoveryError;
+    // Any scan that throws produced no fresh data, so every failure (discovery
+    // or generic) counts toward the staleness streak.
+    const reason = isDiscovery ? error.message : "scan error";
+    const alreadyDegraded = this.scanHealth.snapshot().degraded;
+    const transition = this.scanHealth.recordFailure(reason, new Date());
+    if (transition) {
+      console.error(
+        `Daemon degraded: ${transition.reason} (${SCAN_DEGRADED_THRESHOLD} consecutive scan failures); serving cached state until scans recover`,
+      );
+      this.server.broadcastDaemonHealth();
+    }
+
+    if (isDiscovery) {
+      // Fail closed: skip this cycle's mutations entirely rather than act on
+      // an empty process/pane list (which would wipe sessions + markers).
+      // Retries next scan; a genuinely-empty result does not reach here.
+      // Once degraded, this line is pure per-scan spam (46h of it in #46), so
+      // suppress it and let the one-shot degraded log stand for the outage.
+      if (!alreadyDegraded && !transition) {
+        console.error(`Scan skipped: ${error.message}`);
       }
+    } else {
+      console.error("Scan error:", error);
     }
   }
 
