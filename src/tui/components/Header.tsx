@@ -7,6 +7,9 @@ interface HeaderProps {
   totalCount?: number;
   hideIdle?: boolean;
   connectionState: ConnectionState;
+  /** Daemon scans have been failing long enough to serve stale state
+   *  (issue #46); surfaces a warning segment when true. */
+  daemonDegraded?: boolean;
   dimmed?: boolean;
   /** Count of `ccmux invoke` workers currently in flight (Claude +
    *  subprocess). Shown only when nonzero. */
@@ -42,6 +45,9 @@ export const Header: Component<HeaderProps> = (props) => {
         {props.hideIdle && <text fg={c(theme.yellow)}> [active]</text>}
         {props.invokeInFlight ? (
           <text fg={c(theme.peach)}> · {props.invokeInFlight} invoking</text>
+        ) : null}
+        {props.daemonDegraded ? (
+          <text fg={c(theme.yellow)}> ⚠ daemon degraded: scans failing</text>
         ) : null}
       </box>
     </box>

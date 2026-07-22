@@ -8,6 +8,7 @@ import {
 import {
   PID_FILE,
   SCAN_INTERVAL_MS,
+  SCAN_DEGRADED_THRESHOLD,
   PROJECTS_DIR,
   CCMUX_DIR,
   DAEMON_HOST,
@@ -55,6 +56,7 @@ import {
   discoverAgentProcessesOrThrow,
   ProcessDiscoveryError,
 } from "./processes";
+import { ScanHealth } from "./scan-health";
 import {
   listTmuxPanes,
   listTmuxPanesOrThrow,
@@ -201,6 +203,9 @@ export class Daemon {
   private agents: AgentDef[] = [];
   private scanInterval: Timer | null = null;
   private running = false;
+  /** Consecutive-scan-failure tracker; drives the degraded/recovered banner
+   *  and health snapshot (issue #46). */
+  private scanHealth = new ScanHealth({ threshold: SCAN_DEGRADED_THRESHOLD });
   /** Cache of tmux panes, updated during periodic scan */
   private paneCache: Map<string, TmuxPane> = new Map();
   private hookManager = new HookManager();
@@ -311,6 +316,7 @@ export class Daemon {
       { sendLiteralToPane, sendPromptToPane },
       (input) => this.runNotificationAction(input),
       (sessionId) => this.notifyRetract(sessionId),
+      () => this.scanHealth.snapshot(),
     );
 
     this.hookManager.setContext({
@@ -658,16 +664,40 @@ export class Daemon {
 
       DaemonPerf.scanEnd(scanStartNs);
       DaemonPerf.report();
+
+      // A full scan completed: reset the failure streak. If this lifted us out
+      // of degraded, log once and re-broadcast so banners clear.
+      const recovery = this.scanHealth.recordSuccess();
+      if (recovery) {
+        console.log("Daemon recovered: scans succeeding again");
+        this.server.broadcastDaemonHealth();
+      }
     } catch (error) {
       DaemonPerf.scanEnd(scanStartNs);
-      if (
+      const isDiscovery =
         error instanceof ProcessDiscoveryError ||
-        error instanceof PaneDiscoveryError
-      ) {
+        error instanceof PaneDiscoveryError;
+      // Any scan that throws produced no fresh data, so every failure (discovery
+      // or generic) counts toward the staleness streak.
+      const reason = isDiscovery ? (error as Error).message : "scan error";
+      const alreadyDegraded = this.scanHealth.snapshot().degraded;
+      const transition = this.scanHealth.recordFailure(reason, new Date());
+      if (transition) {
+        console.error(
+          `Daemon degraded: ${transition.reason} (${SCAN_DEGRADED_THRESHOLD} consecutive scan failures); serving cached state until scans recover`,
+        );
+        this.server.broadcastDaemonHealth();
+      }
+
+      if (isDiscovery) {
         // Fail closed: skip this cycle's mutations entirely rather than act on
         // an empty process/pane list (which would wipe sessions + markers).
         // Retries next scan; a genuinely-empty result does not reach here.
-        console.error(`Scan skipped: ${error.message}`);
+        // Once degraded, this line is pure per-scan spam (46h of it in #46), so
+        // suppress it and let the one-shot degraded log stand for the outage.
+        if (!alreadyDegraded && !transition) {
+          console.error(`Scan skipped: ${error.message}`);
+        }
       } else {
         console.error("Scan error:", error);
       }
@@ -1324,6 +1354,13 @@ export class Daemon {
  * Start the daemon (entry point for daemon process)
  */
 export async function startDaemon(): Promise<void> {
+  // The daemon must not keep a deletable directory as cwd: a deleted cwd makes
+  // every subsequent `Bun.spawn` throw, which silently freezes every 5s scan
+  // (issue #46). Root is never deleted. Done here in the process entrypoint,
+  // not the Daemon constructor, so tests that instantiate Daemon in-process
+  // never chdir the test runner. All daemon spawns pass an explicit cwd or
+  // resolve via PATH, so this never changes their behavior.
+  process.chdir("/");
   redirectStdioToLogFile();
   const daemon = new Daemon();
   await daemon.start();

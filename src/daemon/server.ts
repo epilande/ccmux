@@ -15,7 +15,11 @@ import {
   type SessionManager,
   type SessionEvent,
 } from "./sessions";
-import type { SSEEvent, FinishedInvocationStatus } from "../types";
+import type {
+  SSEEvent,
+  FinishedInvocationStatus,
+  DaemonHealth,
+} from "../types";
 import type { Session, TmuxPane, EnrichedSession } from "../types/session";
 import type { AttentionTracker } from "./attention-tracker";
 import type { InvocationManager, InvocationEvent } from "./invocation-manager";
@@ -250,6 +254,9 @@ export class DaemonServer {
   private paneSendDeps: PaneSendDeps;
   private runNotificationAction: NotificationActionRunner | null;
   private retractNotification: NotificationRetractFn | null;
+  /** Reads the daemon's live scan-health snapshot. Follows the getPaneCache /
+   *  getAgentByType accessor pattern so the server never imports daemon state. */
+  private getScanHealth: () => DaemonHealth;
 
   constructor(
     sessionManager: SessionManager,
@@ -261,6 +268,7 @@ export class DaemonServer {
     paneSendDeps: PaneSendDeps = { sendLiteralToPane, sendPromptToPane },
     runNotificationAction: NotificationActionRunner | null = null,
     retractNotification: NotificationRetractFn | null = null,
+    getScanHealth: () => DaemonHealth = () => ({ degraded: false }),
   ) {
     this.sessionManager = sessionManager;
     this.getPaneCache = getPaneCache;
@@ -271,6 +279,7 @@ export class DaemonServer {
     this.paneSendDeps = paneSendDeps;
     this.runNotificationAction = runNotificationAction;
     this.retractNotification = retractNotification;
+    this.getScanHealth = getScanHealth;
 
     // Listen for session changes
     this.sessionManager.on("change", async (event: SessionEvent) => {
@@ -557,7 +566,10 @@ export class DaemonServer {
 
     if (path === "/server-info" && req.method === "GET") {
       return Response.json(
-        { socketPath: await this.getServerSocketPath() },
+        {
+          socketPath: await this.getServerSocketPath(),
+          health: this.getScanHealth(),
+        },
         { headers: corsHeaders },
       );
     }
@@ -741,6 +753,7 @@ export class DaemonServer {
       trackedSessions: allSessions.length,
       clients: this.sseClients.size,
       uptime: process.uptime(),
+      health: this.getScanHealth(),
     };
 
     return Response.json(data, { headers });
@@ -1400,6 +1413,9 @@ export class DaemonServer {
           invocations: this.invocationManager
             .listInvocations()
             .map((r) => ({ invocationId: r.invocationId, status: r.status })),
+          // Carried on init so a client joining mid-degradation banners it
+          // immediately, without waiting for the next transition broadcast.
+          health: this.getScanHealth(),
         };
         this.sendToClient(controller, initEvent);
       },
@@ -1919,5 +1935,19 @@ export class DaemonServer {
     for (const client of this.sseClients.values()) {
       this.sendToClient(client.controller, event);
     }
+  }
+
+  /**
+   * Push the daemon's current scan-health to every connected client. Called by
+   * the daemon on each degraded/recovered transition (issue #46); reads the
+   * snapshot through the same accessor as the init frame so the wire value is
+   * always consistent with what a fresh connect would see.
+   */
+  broadcastDaemonHealth(): void {
+    this.broadcastEvent({
+      type: "daemon_health",
+      timestamp: new Date().toISOString(),
+      health: this.getScanHealth(),
+    });
   }
 }

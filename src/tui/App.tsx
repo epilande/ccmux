@@ -604,6 +604,9 @@ export function App(props: AppProps) {
       onInvocationFinished: (event) => {
         store.actions.finishInvocation(event);
       },
+      onDaemonHealth: (health) => {
+        store.actions.setDaemonHealth(health);
+      },
       onConnectionStateChange: (state) => {
         batch(() => {
           store.actions.setConnectionState(state);
@@ -1184,6 +1187,7 @@ export function App(props: AppProps) {
           }
           hideIdle={store.state.hideIdle}
           connectionState={store.state.connectionState}
+          daemonDegraded={store.state.daemonHealth.degraded}
           dimmed={store.state.previewFocused}
           invokeInFlight={store.invocationInFlightCount()}
         />
