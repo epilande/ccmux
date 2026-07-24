@@ -149,7 +149,9 @@ To send review feedback back to the agent:
 2. Add any other review notes and quit hunk.
 3. Confirm **Send review comments** when the picker resumes. ccmux sends all captured notes, including short source snippets, to the agent as one prompt and stays in the picker so you can watch its status.
 
-The offer relies on hunk's session JSON commands (`hunk session list` / `session comment list`, verified against hunk 0.17.0). With an older hunk the review itself still works; the offer just doesn't appear.
+https://github.com/user-attachments/assets/4b729700-4903-44ff-8f1c-df4bc16b6f67
+
+The offer relies on hunk's session JSON commands (`hunk session list` / `session comment list`). With an older hunk the review itself still works; the offer just doesn't appear.
 
 The `reviewHandback` preference controls what happens when hunk exits:
 
@@ -164,7 +166,7 @@ ccmux review          # Review the current directory's repository
 ccmux review <id>     # Review a session's repository by id
 ```
 
-Install hunk with `brew install modem-dev/tap/hunk`. The <kbd>d</kbd> footer hint and help entry appear only when hunk is detected on `PATH` at launch.
+Install hunk with `brew install hunk`. The <kbd>d</kbd> footer hint and help entry appear only when hunk is detected on `PATH` at launch.
 
 ### Sidebar Mode
 
