@@ -7,8 +7,8 @@ interface HeaderProps {
   totalCount?: number;
   hideIdle?: boolean;
   connectionState: ConnectionState;
-  /** Daemon scans have been failing long enough to serve stale state
-   *  (issue #46); surfaces a warning segment when true. */
+  /** Daemon scans have been failing long enough to serve stale state;
+   *  surfaces a warning segment when true. */
   daemonDegraded?: boolean;
   dimmed?: boolean;
   /** Count of `ccmux invoke` workers currently in flight (Claude +

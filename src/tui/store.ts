@@ -66,7 +66,7 @@ interface TUIState {
   /** Snapshot of session IDs captured when the confirm dialog opens */
   confirmSessionIds: string[];
   connectionState: ConnectionState;
-  /** Daemon scan-health; drives the degraded warning in the header (issue #46). */
+  /** Daemon scan-health; drives the degraded warning in the header. */
   daemonHealth: DaemonHealth;
   error: string | null;
   showPreview: boolean;

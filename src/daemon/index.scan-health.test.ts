@@ -33,15 +33,17 @@ import { PaneDiscoveryError } from "./pane-discovery";
  * (issue #46): the `reason` derivation, the `alreadyDegraded`-before-
  * `recordFailure` ordering, the one-shot degraded log + broadcast, and the
  * `Scan skipped` spam-suppression predicate. The pure state machine lives in
- * `scan-health.test.ts`; this locks the wiring around it.
+ * `scan-health.test.ts`; this locks the wiring around it. Also locks the
+ * recovery wiring: `recordScanSuccess`'s one-shot recovered log + broadcast.
  */
 type DaemonInternals = {
   scanHealth: ScanHealth;
   server: { broadcastDaemonHealth: () => void };
   recordScanFailure(error: unknown): void;
+  recordScanSuccess(): void;
 };
 
-describe("Daemon recordScanFailure (scan-health wiring)", () => {
+describe("Daemon scan-health wiring", () => {
   let daemon: Daemon;
   let internals: DaemonInternals;
   let broadcasts: number;
@@ -147,5 +149,38 @@ describe("Daemon recordScanFailure (scan-health wiring)", () => {
     expect(
       errorLines().some((l) => l.startsWith("Daemon degraded: crossing")),
     ).toBe(true);
+  });
+
+  it("does nothing on success while healthy", () => {
+    internals.recordScanSuccess();
+
+    expect(logSpy.mock.calls.length).toBe(0);
+    expect(broadcasts).toBe(0);
+    expect(internals.scanHealth.snapshot()).toEqual({ degraded: false });
+  });
+
+  it("fires one recovered log + broadcast when a success ends a degraded streak", () => {
+    for (let i = 0; i < 3; i++) {
+      internals.recordScanFailure(new ProcessDiscoveryError("ps spawn failed"));
+    }
+    expect(broadcasts).toBe(1); // degraded transition
+
+    internals.recordScanSuccess();
+
+    const recoveredLogs = logSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith("Daemon recovered:"));
+    expect(recoveredLogs).toHaveLength(1);
+    expect(broadcasts).toBe(2); // degraded + recovered
+    expect(internals.scanHealth.snapshot()).toEqual({ degraded: false });
+
+    // A second success is a no-op: no extra log or broadcast.
+    internals.recordScanSuccess();
+    expect(
+      logSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((l) => l.startsWith("Daemon recovered:")),
+    ).toHaveLength(1);
+    expect(broadcasts).toBe(2);
   });
 });

@@ -1939,9 +1939,9 @@ export class DaemonServer {
 
   /**
    * Push the daemon's current scan-health to every connected client. Called by
-   * the daemon on each degraded/recovered transition (issue #46); reads the
-   * snapshot through the same accessor as the init frame so the wire value is
-   * always consistent with what a fresh connect would see.
+   * the daemon on each degraded/recovered transition; reads the snapshot
+   * through the same accessor as the init frame so the wire value is always
+   * consistent with what a fresh connect would see.
    */
   broadcastDaemonHealth(): void {
     this.broadcastEvent({

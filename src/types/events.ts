@@ -18,8 +18,8 @@ export type SSEEventType =
 
 /**
  * Daemon scan-health snapshot carried on the wire. `degraded` flips true once
- * scans have failed `SCAN_DEGRADED_THRESHOLD` times in a row (issue #46);
- * `reason` + `since` describe the streak so a client can render why and when.
+ * scans have failed `SCAN_DEGRADED_THRESHOLD` times in a row; `reason` +
+ * `since` describe the streak so a client can render why and when.
  * Defined here (not in daemon code) to keep this wire type a leaf the daemon
  * imports, never the reverse.
  */

@@ -204,7 +204,7 @@ export class Daemon {
   private scanInterval: Timer | null = null;
   private running = false;
   /** Consecutive-scan-failure tracker; drives the degraded/recovered banner
-   *  and health snapshot (issue #46). */
+   *  and health snapshot. */
   private scanHealth = new ScanHealth({ threshold: SCAN_DEGRADED_THRESHOLD });
   /** Cache of tmux panes, updated during periodic scan */
   private paneCache: Map<string, TmuxPane> = new Map();
@@ -665,13 +665,7 @@ export class Daemon {
       DaemonPerf.scanEnd(scanStartNs);
       DaemonPerf.report();
 
-      // A full scan completed: reset the failure streak. If this lifted us out
-      // of degraded, log once and re-broadcast so banners clear.
-      const recovery = this.scanHealth.recordSuccess();
-      if (recovery) {
-        console.log("Daemon recovered: scans succeeding again");
-        this.server.broadcastDaemonHealth();
-      }
+      this.recordScanSuccess();
     } catch (error) {
       DaemonPerf.scanEnd(scanStartNs);
       this.recordScanFailure(error);
@@ -679,11 +673,21 @@ export class Daemon {
   }
 
   /**
-   * Fold one thrown scan into the health tracker and log it (issue #46).
-   * Extracted from `scan()`'s catch so the subtle wiring — the `reason`
-   * derivation, snapshotting `alreadyDegraded` *before* `recordFailure`, the
-   * one-shot degraded log + broadcast, and the `Scan skipped` spam-suppression
-   * predicate — is unit-testable without driving a full scan.
+   * Reset the failure streak after a completed scan. If this lifted us out of
+   * degraded, log once and re-broadcast so banners clear. Kept separate from
+   * `scan()` so the wiring is unit-testable without driving a full scan.
+   */
+  private recordScanSuccess(): void {
+    const recovery = this.scanHealth.recordSuccess();
+    if (recovery) {
+      console.log("Daemon recovered: scans succeeding again");
+      this.server.broadcastDaemonHealth();
+    }
+  }
+
+  /**
+   * Fold one thrown scan into the health tracker and log it. Kept separate
+   * from `scan()` so the wiring is unit-testable without driving a full scan.
    */
   private recordScanFailure(error: unknown): void {
     const isDiscovery =
@@ -711,6 +715,8 @@ export class Daemon {
         console.error(`Scan skipped: ${error.message}`);
       }
     } else {
+      // Deliberately never suppressed, even once degraded: a generic throw is
+      // an unknown bug and the stack logged here is its only diagnostic.
       console.error("Scan error:", error);
     }
   }
@@ -1369,8 +1375,8 @@ export async function startDaemon(): Promise<void> {
   // every subsequent `Bun.spawn` throw, which silently freezes every 5s scan
   // (issue #46). Root is never deleted. Done here in the process entrypoint,
   // not the Daemon constructor, so tests that instantiate Daemon in-process
-  // never chdir the test runner. All daemon spawns pass an explicit cwd or
-  // resolve via PATH, so this never changes their behavior.
+  // never chdir the test runner. Daemon spawns must resolve via PATH or pass
+  // an explicit cwd, never rely on inherited cwd.
   process.chdir("/");
   redirectStdioToLogFile();
   const daemon = new Daemon();
