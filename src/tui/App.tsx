@@ -520,14 +520,30 @@ export function App(props: AppProps) {
   }
 
   /** Kill a normal session, but cancel an invoke-driven row cleanly
-   *  (see killActionPath). */
+   *  (see killActionPath). A non-OK response (e.g. the daemon refusing to
+   *  kill a background row with no stop command) surfaces via the same
+   *  action-result toast as the other failure paths above, rather than
+   *  silently dropping the failure. */
   function killOrCancelSession(id: string) {
     const session = store.state.sessions.find((s) => s.id === id);
-    if (!session) {
-      fetch(`${getDaemonUrl()}/sessions/${id}/kill`, { method: "POST" });
-      return;
-    }
-    fetch(`${getDaemonUrl()}${killActionPath(session)}`, { method: "POST" });
+    const path = session ? killActionPath(session) : `/sessions/${id}/kill`;
+    fetch(`${getDaemonUrl()}${path}`, { method: "POST" })
+      .then(async (response) => {
+        if (response.ok) return;
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        store.actions.showToast(
+          `Kill failed: ${body?.error ?? response.statusText}`,
+        );
+      })
+      .catch((err: unknown) => {
+        const message =
+          err && typeof err === "object" && "message" in err
+            ? String((err as { message: unknown }).message)
+            : String(err);
+        store.actions.showToast(`Kill failed: ${message}`);
+      });
   }
 
   function confirmDialogAction() {

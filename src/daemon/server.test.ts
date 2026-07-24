@@ -48,7 +48,7 @@ type ServerInternals = {
   handleKillSession(
     sessionId: string,
     headers: Record<string, string>,
-  ): Response;
+  ): Promise<Response>;
   handleKillAllSessions(headers: Record<string, string>): Response;
   handleSendToSession(
     sessionId: string,
@@ -782,7 +782,7 @@ describe("DaemonServer", () => {
     it("should return 404 for unknown session", async () => {
       const { internals } = createServer();
 
-      const response = internals.handleKillSession("nonexistent", {});
+      const response = await internals.handleKillSession("nonexistent", {});
       const data = (await response.json()) as { error: string };
 
       expect(response.status).toBe(404);
@@ -796,16 +796,40 @@ describe("DaemonServer", () => {
         "/Users/test/.claude/projects/-Users-test-proj/s1.jsonl",
       );
 
-      const response = internals.handleKillSession("s1", {});
+      const response = await internals.handleKillSession("s1", {});
       const data = (await response.json()) as { error: string };
 
       expect(response.status).toBe(400);
       expect(data.error).toBe("Session has no associated process");
     });
 
-    it("should refuse a background (read-only) session with 400", async () => {
+    it("should SIGTERM a normal (non-background) session's pid, unchanged from before", async () => {
       const { manager, internals } = createServer();
-      // Worker pid is supervisor-owned; ccmux must not SIGTERM it.
+      manager.createSession(
+        "s1",
+        "/Users/test/.claude/projects/-Users-test-proj/s1.jsonl",
+      );
+      manager.setPid("s1", 999999);
+
+      const killSpy = spyOn(process, "kill").mockImplementation(
+        (() => true) as typeof process.kill,
+      );
+
+      try {
+        const response = await internals.handleKillSession("s1", {});
+        const data = (await response.json()) as { success: boolean };
+
+        expect(data.success).toBe(true);
+        expect(response.status).toBe(200);
+        expect(killSpy).toHaveBeenCalledWith(999999, "SIGTERM");
+      } finally {
+        killSpy.mockRestore();
+      }
+    });
+
+    it("should run the agent's backgroundStopCommand and report success without removing the row", async () => {
+      const { manager, internals } = createServer();
+      // Worker pid is supervisor-owned; ccmux must not SIGTERM it directly.
       manager.createBackgroundSession({
         daemonShort: "sup-k",
         pid: 424242,
@@ -819,11 +843,96 @@ describe("DaemonServer", () => {
         lastActivityAt: null,
       });
 
-      const response = internals.handleKillSession("sup-k", {});
+      const originalBunSpawn = Bun.spawn;
+      let spawnedArgv: string[] | undefined;
+      Bun.spawn = ((argv: string[]) => {
+        spawnedArgv = argv;
+        return {
+          exited: Promise.resolve(0),
+          stdout: new Blob([""]).stream(),
+          stderr: new Blob([""]).stream(),
+        };
+      }) as unknown as typeof Bun.spawn;
+
+      try {
+        const response = await internals.handleKillSession("sup-k", {});
+        const data = (await response.json()) as { success: boolean };
+
+        expect(response.status).toBe(200);
+        expect(data.success).toBe(true);
+        expect(spawnedArgv).toEqual(["claude", "stop", "sup-k"]);
+        // Removal is event-driven (the roster watcher), never immediate.
+        expect(manager.getSession("sup-k")).toBeDefined();
+      } finally {
+        Bun.spawn = originalBunSpawn;
+      }
+    });
+
+    it("should return 500 with stderr when backgroundStopCommand exits nonzero", async () => {
+      const { manager, internals } = createServer();
+      manager.createBackgroundSession({
+        daemonShort: "sup-k",
+        pid: 424242,
+        cwd: "/private/tmp",
+        logPath: null,
+        version: null,
+        status: "working",
+        attentionType: null,
+        pendingTool: null,
+        lastPrompt: null,
+        lastActivityAt: null,
+      });
+
+      const originalBunSpawn = Bun.spawn;
+      Bun.spawn = ((_argv: string[]) => ({
+        exited: Promise.resolve(1),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob(["worker not found\n"]).stream(),
+      })) as unknown as typeof Bun.spawn;
+
+      try {
+        const response = await internals.handleKillSession("sup-k", {});
+        const data = (await response.json()) as { error: string };
+
+        expect(response.status).toBe(500);
+        expect(data.error).toContain("worker not found");
+      } finally {
+        Bun.spawn = originalBunSpawn;
+      }
+    });
+
+    it("should return 400 when the background session's agent has no backgroundStopCommand", async () => {
+      const claudeWithoutStop: AgentDef = {
+        ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
+        backgroundStopCommand: undefined,
+      };
+      const { manager, internals } = createServer(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        (agentType: string) =>
+          agentType === "claude" ? claudeWithoutStop : undefined,
+      );
+      manager.createBackgroundSession({
+        daemonShort: "sup-k",
+        pid: 424242,
+        cwd: "/private/tmp",
+        logPath: null,
+        version: null,
+        status: "working",
+        attentionType: null,
+        pendingTool: null,
+        lastPrompt: null,
+        lastActivityAt: null,
+      });
+
+      const response = await internals.handleKillSession("sup-k", {});
       const data = (await response.json()) as { error: string };
 
       expect(response.status).toBe(400);
       expect(data.error).toContain("read-only");
+      expect(data.error).toContain("no stop command");
     });
   });
 

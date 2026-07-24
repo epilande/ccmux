@@ -1045,6 +1045,44 @@ describe("App kill/restart dispatch routing", () => {
     }
   });
 
+  it("surfaces a non-OK kill response as a toast instead of dropping it silently", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      ({
+        ok: false,
+        status: 400,
+        statusText: "Bad Request",
+        json: async () => ({
+          error:
+            "background session is read-only; this agent has no stop command",
+        }),
+      }) as unknown as Response) as unknown as typeof fetch;
+
+    try {
+      await renderApp(120, 20, { groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "sup-k",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: null,
+          }),
+        ],
+        null,
+      );
+      await killSelected();
+      // Let the fetch rejection's .then() callback run before re-rendering.
+      await new Promise((r) => setTimeout(r, 0));
+      await setup.renderOnce();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain(squish("Kill failed:"));
+      expect(frame).toContain(squish("no stop command"));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("cancels a subprocess invoke row via /invoke/:id/cancel (never /sessions/:id/kill)", async () => {
     const { calls, restore } = captureFetch();
     try {

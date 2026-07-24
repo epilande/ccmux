@@ -69,6 +69,16 @@ export interface AgentDef {
   terminalRules: TerminalRule[];
   errorRules?: ErrorRule[];
   resumeCommand?: string;
+  /**
+   * argv to stop a paneless background session (`trackingMode: "background"`)
+   * given its daemon-short id. Only meaningful for agents with a background
+   * mode whose worker pid is owned by a supervisor process, not by ccmux —
+   * the daemon refuses to SIGTERM that pid directly and instead shells out to
+   * this command. Agents without a background mode leave this undefined,
+   * which keeps `handleKillSession` returning a 400 for their background rows
+   * (moot in practice, since none currently produce them).
+   */
+  backgroundStopCommand?: (id: string) => string[];
   sessionFilePattern?: RegExp;
   /**
    * Binary to invoke when launching a fresh interactive session.
@@ -486,6 +496,12 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // changes again.
     readyPattern: /^[>❯]\s*$/,
     hooks: { markerDir: MARKERS_DIR, type: "claude" },
+    // Stops a paneless `claude --bg` worker via Claude's own supervisor CLI.
+    // The worker pid belongs to that supervisor, not ccmux, so a direct
+    // SIGTERM would be unsafe; `claude stop <short>` asks the supervisor to
+    // tear it down, and the row disappears once the supervisor drops the
+    // short from `roster.json` (picked up by the Background Source's watcher).
+    backgroundStopCommand: (id: string) => ["claude", "stop", id],
     // Claude's numbered permission prompt: "1" quick-selects the first option
     // (approve) and submits immediately, so no trailing Enter is needed; Escape
     // cancels/denies. The lone-"1" choice is unverified against every prompt
