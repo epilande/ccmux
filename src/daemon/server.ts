@@ -625,7 +625,7 @@ export class DaemonServer {
       req.method === "POST"
     ) {
       const sessionId = path.slice("/sessions/".length, -"/kill".length);
-      return this.handleKillSession(sessionId, corsHeaders);
+      return await this.handleKillSession(sessionId, corsHeaders);
     }
 
     if (
@@ -1073,10 +1073,10 @@ export class DaemonServer {
   /**
    * Kill a session's agent process
    */
-  private handleKillSession(
+  private async handleKillSession(
     sessionId: string,
     headers: Record<string, string>,
-  ): Response {
+  ): Promise<Response> {
     const session = this.sessionManager.getSession(sessionId);
 
     if (!session) {
@@ -1086,13 +1086,43 @@ export class DaemonServer {
       );
     }
 
-    // Background rows are read-only: removal goes through `claude rm`, never
-    // a SIGTERM to the supervisor-owned worker pid.
+    // Background rows' worker pid is owned by Claude's supervisor, never by
+    // ccmux, so a direct SIGTERM is unsafe. If the agent defines a stop
+    // command, shell out to it and let the supervisor tear the worker down;
+    // otherwise the row stays read-only (400). Either way the row itself is
+    // NOT removed here: removal is event-driven, via the Background Source's
+    // roster watcher noticing the short drop out of `roster.json`.
     if (isBackgroundSession(session)) {
-      return Response.json(
-        { error: "Background sessions are read-only; remove via `claude rm`" },
-        { status: 400, headers },
-      );
+      const agent = this.getAgentByType(session.agentType);
+      if (!agent?.backgroundStopCommand) {
+        return Response.json(
+          {
+            error:
+              "background session is read-only; this agent has no stop command",
+          },
+          { status: 400, headers },
+        );
+      }
+
+      const argv = agent.backgroundStopCommand(session.id);
+      try {
+        const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
+        const exitCode = await proc.exited;
+        if (exitCode !== 0) {
+          const stderr = await new Response(proc.stderr).text();
+          return Response.json(
+            { error: `Failed to stop background session: ${stderr.trim()}` },
+            { status: 500, headers },
+          );
+        }
+      } catch (err: unknown) {
+        return Response.json(
+          { error: `Failed to stop background session: ${errorMessage(err)}` },
+          { status: 500, headers },
+        );
+      }
+
+      return Response.json({ success: true }, { headers });
     }
 
     if (!session.pid) {
