@@ -13,7 +13,19 @@ export type SSEEventType =
   | "sidebar_state"
   | "invocation_started"
   | "invocation_finished"
+  | "daemon_health"
   | "heartbeat";
+
+/**
+ * Daemon scan-health snapshot carried on the wire. `degraded` flips true once
+ * scans have failed `SCAN_DEGRADED_THRESHOLD` times in a row; `reason` +
+ * `since` describe the streak so a client can render why and when.
+ * Defined here (not in daemon code) to keep this wire type a leaf the daemon
+ * imports, never the reverse.
+ */
+export type DaemonHealth =
+  | { degraded: false }
+  | { degraded: true; reason: string; since: string };
 
 /**
  * Minimal projection of a daemon `InvocationRecord` carried in the `init`
@@ -46,6 +58,11 @@ export interface InitEvent extends BaseSSEEvent {
   sessions: EnrichedSession[];
   activePaneId: string | null;
   invocations: InvocationSnapshotEntry[];
+  /**
+   * Scan-health at connect time so a client joining mid-degradation renders the
+   * warning immediately, without waiting for the next `daemon_health` event.
+   */
+  health: DaemonHealth;
 }
 
 /**
@@ -129,6 +146,15 @@ export interface InvocationFinishedEvent extends BaseSSEEvent {
 }
 
 /**
+ * Daemon health event - broadcast on each degraded/recovered transition so
+ * connected clients flip their banner without polling.
+ */
+export interface DaemonHealthEvent extends BaseSSEEvent {
+  type: "daemon_health";
+  health: DaemonHealth;
+}
+
+/**
  * Heartbeat event
  */
 export interface HeartbeatEvent extends BaseSSEEvent {
@@ -147,4 +173,5 @@ export type SSEEvent =
   | SidebarStateEvent
   | InvocationStartedEvent
   | InvocationFinishedEvent
+  | DaemonHealthEvent
   | HeartbeatEvent;

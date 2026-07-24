@@ -8,7 +8,7 @@ import {
 import type { InvocationRecord } from "./invocation-manager";
 import { SessionManager } from "./sessions";
 import type { SessionEvent } from "./sessions";
-import type { SSEEvent } from "../types";
+import type { SSEEvent, DaemonHealth } from "../types";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
 import type { Session, TmuxPane, EnrichedSession } from "../types/session";
 import { AttentionTracker } from "./attention-tracker";
@@ -107,6 +107,7 @@ function createServer(
     sendPromptToPane: mock(async () => true),
   },
   runNotificationAction?: ConstructorParameters<typeof DaemonServer>[7],
+  getScanHealth?: ConstructorParameters<typeof DaemonServer>[9],
 ) {
   const mgr = manager ?? new SessionManager();
   const cache = paneCache ?? new Map<string, TmuxPane>();
@@ -131,6 +132,8 @@ function createServer(
     resolveHookAdapter,
     paneSendDeps,
     runNotificationAction ?? null,
+    null,
+    getScanHealth,
   );
   return {
     manager: mgr,
@@ -2162,13 +2165,83 @@ describe("getServerSocketPath and /server-info", () => {
       const res = await internals.handleRequest(
         new Request("http://localhost/server-info"),
       );
-      const data = (await res.json()) as { socketPath: string | null };
+      const data = (await res.json()) as {
+        socketPath: string | null;
+        health: DaemonHealth;
+      };
       expect(data.socketPath).toBe("/tmp/route-sock");
+      // A default (healthy) daemon reports the healthy snapshot.
+      expect(data.health).toEqual({ degraded: false });
       // The route resolves through the same cached lookup: one spawn only.
       expect(state.calls).toBe(1);
     } finally {
       restore();
     }
+  });
+
+  it("serves the degraded health snapshot via GET /server-info", async () => {
+    const degraded: DaemonHealth = {
+      degraded: true,
+      reason: "ps spawn failed",
+      since: "2024-01-15T12:00:00Z",
+    };
+    const { internals } = createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => degraded,
+    );
+    const { restore } = withSpawnQueue([{ code: 0, out: "/tmp/sock\n" }]);
+    try {
+      const res = await internals.handleRequest(
+        new Request("http://localhost/server-info"),
+      );
+      const data = (await res.json()) as {
+        socketPath: string | null;
+        health: DaemonHealth;
+      };
+      expect(data.health).toEqual(degraded);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("GET /health scan-health", () => {
+  it("reports the healthy snapshot by default", () => {
+    const { internals } = createServer();
+    const res = internals.handleHealth({});
+    return res.json().then((data) => {
+      expect((data as { health: DaemonHealth }).health).toEqual({
+        degraded: false,
+      });
+    });
+  });
+
+  it("reports the degraded snapshot when scans are failing", () => {
+    const degraded: DaemonHealth = {
+      degraded: true,
+      reason: "ps spawn failed",
+      since: "2024-01-15T12:00:00Z",
+    };
+    const { internals } = createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => degraded,
+    );
+    const res = internals.handleHealth({});
+    return res.json().then((data) => {
+      expect((data as { health: DaemonHealth }).health).toEqual(degraded);
+    });
   });
 });
 

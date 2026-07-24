@@ -15,8 +15,10 @@ async function renderHeader(props: {
   totalCount?: number;
   hideIdle?: boolean;
   connectionState?: ConnectionState;
+  daemonDegraded?: boolean;
   dimmed?: boolean;
   invokeInFlight?: number;
+  width?: number;
 }) {
   setup = await testRender(
     () => (
@@ -25,11 +27,12 @@ async function renderHeader(props: {
         totalCount={props.totalCount}
         hideIdle={props.hideIdle}
         connectionState={props.connectionState ?? "connected"}
+        daemonDegraded={props.daemonDegraded}
         dimmed={props.dimmed}
         invokeInFlight={props.invokeInFlight}
       />
     ),
-    { width: 60, height: 3 },
+    { width: props.width ?? 60, height: 3 },
   );
   await setup.renderOnce();
   return setup.captureCharFrame();
@@ -90,5 +93,17 @@ describe("Header", () => {
       const frame = await renderHeader({ connectionState: state });
       expect(frame).toContain("●");
     }
+  });
+
+  it("renders the degraded warning when daemonDegraded", async () => {
+    const frame = await renderHeader({ daemonDegraded: true, width: 80 });
+    expect(frame).toContain("daemon degraded: scans failing");
+  });
+
+  it("renders no degraded warning by default", async () => {
+    const off = await renderHeader({});
+    expect(off).not.toContain("daemon degraded");
+    const explicit = await renderHeader({ daemonDegraded: false });
+    expect(explicit).not.toContain("daemon degraded");
   });
 });

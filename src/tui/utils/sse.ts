@@ -5,6 +5,7 @@ import type {
   InvocationStartedEvent,
   InvocationFinishedEvent,
   InvocationSnapshotEntry,
+  DaemonHealth,
 } from "../../types";
 
 /**
@@ -35,6 +36,9 @@ export interface SSECallbacks {
   ) => void;
   onInvocationStarted?: (event: InvocationStartedEvent) => void;
   onInvocationFinished?: (event: InvocationFinishedEvent) => void;
+  /** Daemon scan-health, from the `daemon_health` event and the `init` frame
+   *  (older daemons omit `init.health`, so init only calls this when present). */
+  onDaemonHealth?: (health: DaemonHealth) => void;
   onConnectionStateChange: (state: ConnectionState) => void;
   onError: (error: string) => void;
 }
@@ -59,6 +63,9 @@ export function dispatchSSEEvent(
         event.activePaneId,
         event.invocations ?? [],
       );
+      // Older daemons don't send `health` on init; apply it only when present
+      // so a connect against one leaves the default healthy state intact.
+      if (event.health) callbacks.onDaemonHealth?.(event.health);
       break;
     case "session_created":
       callbacks.onSessionCreated(event.session);
@@ -84,6 +91,9 @@ export function dispatchSSEEvent(
       break;
     case "invocation_finished":
       callbacks.onInvocationFinished?.(event);
+      break;
+    case "daemon_health":
+      callbacks.onDaemonHealth?.(event.health);
       break;
   }
 }

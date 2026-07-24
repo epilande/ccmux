@@ -18,6 +18,7 @@ import type {
   InvocationFinishedEvent,
   FinishedInvocationStatus,
   InvocationSnapshotEntry,
+  DaemonHealth,
 } from "../types";
 import type { ConnectionState } from "./utils/sse";
 import type { IconStyle } from "../lib/icons";
@@ -65,6 +66,8 @@ interface TUIState {
   /** Snapshot of session IDs captured when the confirm dialog opens */
   confirmSessionIds: string[];
   connectionState: ConnectionState;
+  /** Daemon scan-health; drives the degraded warning in the header. */
+  daemonHealth: DaemonHealth;
   error: string | null;
   showPreview: boolean;
   promptDisplay: PromptDisplay;
@@ -335,6 +338,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     confirmAction: null,
     confirmSessionIds: [],
     connectionState: "disconnected",
+    daemonHealth: { degraded: false },
     error: null,
     showPreview: options.sidebar ? false : (options.initialPreview ?? false),
     promptDisplay: options.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
@@ -965,6 +969,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     setConnectionState(connectionState: ConnectionState) {
       setState("connectionState", connectionState);
+    },
+
+    setDaemonHealth(health: DaemonHealth) {
+      setState("daemonHealth", health);
     },
 
     setError(error: string | null) {

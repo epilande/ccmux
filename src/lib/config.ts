@@ -190,6 +190,14 @@ export const DAEMON_HOST = "127.0.0.1";
  * Interval configuration
  */
 export const SCAN_INTERVAL_MS = 5000;
+/**
+ * Consecutive failed scans before the daemon is considered degraded. At that
+ * point the reconciler has been serving a frozen, boot-time session list for
+ * `SCAN_DEGRADED_THRESHOLD * SCAN_INTERVAL_MS` with no visible sign of trouble
+ * (issue #46), so cross this once to surface it on the wire instead of logging
+ * a per-scan line forever.
+ */
+export const SCAN_DEGRADED_THRESHOLD = 10;
 export const WATCHER_DEBOUNCE_MS = 200;
 export const HEARTBEAT_INTERVAL_MS = 15000;
 export const HEALTH_CHECK_TIMEOUT_MS = 100;
