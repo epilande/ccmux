@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
 import type { ProcessInfo, Session, TmuxPane } from "../types/session";
 import type { PaneDetectionResult } from "./pane-classify";
+import { ProcessTree } from "./process-tree";
 
 /** Redirect STATE_FILE to a temp dir so tests don't touch real ~/.config/ccmux/state.json */
 const tempRoot = join(
@@ -1493,6 +1494,86 @@ describe("reconcileAll", () => {
           processes: [fakeProcess()],
           panes: [fakePane()],
           processTree: { findShellDescendants: () => [99999] },
+        }),
+      );
+
+      const session = sessionManager.getSession(id)!;
+      expect(session.status).toBe("working");
+    });
+  });
+
+  describe("shell classification (real ProcessTree, fixture ps output)", () => {
+    // Regression coverage for issue #52: detectToolExecution used to call
+    // findShellDescendants stubbed out, so it never exercised the real
+    // classification. These build an actual ProcessTree from canned ps
+    // output so the exact-basename fix is proven end to end through the
+    // reconciler, not just at the unit level.
+    const PS_HEADER = "  PID  PPID COMM";
+
+    function psLine(pid: number, ppid: number, comm: string): string {
+      return `${pid} ${ppid} ${comm}`;
+    }
+
+    it("stays waiting when the only Bash descendant is a language server (path contains 'sh')", async () => {
+      const id = makeSession(sessionManager, {
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash",
+        trackingMode: "native",
+        pid: 12345,
+        tmuxPane: "%1",
+        lastActivityAt: new Date().toISOString(),
+      });
+
+      const output = [
+        PS_HEADER,
+        psLine(12345, 1, "/usr/local/bin/claude"),
+        psLine(
+          54321,
+          12345,
+          "~/.local/share/mise/installs/node/26.3.0/bin/node",
+        ),
+      ].join("\n");
+      const processTree = ProcessTree.fromPsOutput(output);
+
+      await reconcileAll(
+        makeDeps(sessionManager),
+        makeSnapshot({
+          processes: [fakeProcess()],
+          panes: [fakePane()],
+          processTree,
+        }),
+      );
+
+      const session = sessionManager.getSession(id)!;
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("permission");
+    });
+
+    it("flips to working when a real shell (zsh) is a Bash descendant", async () => {
+      const id = makeSession(sessionManager, {
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash",
+        trackingMode: "native",
+        pid: 12345,
+        tmuxPane: "%1",
+        lastActivityAt: new Date().toISOString(),
+      });
+
+      const output = [
+        PS_HEADER,
+        psLine(12345, 1, "/usr/local/bin/claude"),
+        psLine(54322, 12345, "-zsh"),
+      ].join("\n");
+      const processTree = ProcessTree.fromPsOutput(output);
+
+      await reconcileAll(
+        makeDeps(sessionManager),
+        makeSnapshot({
+          processes: [fakeProcess()],
+          panes: [fakePane()],
+          processTree,
         }),
       );
 
