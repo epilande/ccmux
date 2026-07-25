@@ -1046,9 +1046,11 @@ describe("App kill/restart dispatch routing", () => {
   });
 
   it("surfaces a non-OK kill response as a toast instead of dropping it silently", async () => {
+    const urls: string[] = [];
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      ({
+    globalThis.fetch = (async (url: string | URL) => {
+      urls.push(String(url));
+      return {
         ok: false,
         status: 400,
         statusText: "Bad Request",
@@ -1056,7 +1058,8 @@ describe("App kill/restart dispatch routing", () => {
           error:
             "background session is read-only; this agent has no stop command",
         }),
-      }) as unknown as Response) as unknown as typeof fetch;
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
 
     try {
       await renderApp(120, 20, { groupBy: "none" });
@@ -1067,19 +1070,77 @@ describe("App kill/restart dispatch routing", () => {
             project: "myapp",
             cwd: "/code/myapp",
             tmuxPane: null,
+            trackingMode: "background",
           }),
         ],
         null,
       );
       await killSelected();
-      // Let the fetch rejection's .then() callback run before re-rendering.
+      // Let the response handler's .then() callback run before re-rendering.
       await new Promise((r) => setTimeout(r, 0));
       await setup.renderOnce();
       const frame = squish(setup.captureCharFrame());
       expect(frame).toContain(squish("Kill failed:"));
       expect(frame).toContain(squish("no stop command"));
+      // A background row kills through the session endpoint, never /invoke.
+      expect(urls.some((u) => u.includes("/sessions/sup-k/kill"))).toBe(true);
+      expect(urls.some((u) => u.includes("/invoke/"))).toBe(false);
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("confirms a background-row stop with a toast, since the row outlives the request", async () => {
+    const { calls, restore } = captureFetch();
+    try {
+      await renderApp(120, 20, { groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "sup-k",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: null,
+            trackingMode: "background",
+          }),
+        ],
+        null,
+      );
+      await killSelected();
+      await new Promise((r) => setTimeout(r, 0));
+      await setup.renderOnce();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain(squish("Stopping agent"));
+      expect(calls.some((c) => c.url.includes("/sessions/sup-k/kill"))).toBe(
+        true,
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("stays silent on a successful normal kill, whose pane death is its own feedback", async () => {
+    const { restore } = captureFetch();
+    try {
+      await renderApp(120, 20, { groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await killSelected();
+      await new Promise((r) => setTimeout(r, 0));
+      await setup.renderOnce();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).not.toContain(squish("Stopping agent"));
+    } finally {
+      restore();
     }
   });
 

@@ -901,6 +901,43 @@ describe("DaemonServer", () => {
       }
     });
 
+    it("should report success when the stop fails only because the worker was already gone", async () => {
+      const { manager, internals } = createServer();
+      manager.createBackgroundSession({
+        daemonShort: "sup-k",
+        pid: 424242,
+        cwd: "/private/tmp",
+        logPath: null,
+        version: null,
+        status: "working",
+        attentionType: null,
+        pendingTool: null,
+        lastPrompt: null,
+        lastActivityAt: null,
+      });
+
+      const originalBunSpawn = Bun.spawn;
+      // Verbatim `claude stop <gone-short>` output: a second `x` inside the
+      // removal window must not report a failure for a stop that landed.
+      Bun.spawn = ((_argv: string[]) => ({
+        exited: Promise.resolve(1),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob([
+          "No job matching 'sup-k'. Run 'claude agents' to list running sessions.\n",
+        ]).stream(),
+      })) as unknown as typeof Bun.spawn;
+
+      try {
+        const response = await internals.handleKillSession("sup-k", {});
+        const data = (await response.json()) as { success: boolean };
+
+        expect(response.status).toBe(200);
+        expect(data.success).toBe(true);
+      } finally {
+        Bun.spawn = originalBunSpawn;
+      }
+    });
+
     it("should return 400 when the background session's agent has no backgroundStopCommand", async () => {
       const claudeWithoutStop: AgentDef = {
         ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,

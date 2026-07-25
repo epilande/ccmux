@@ -1109,11 +1109,16 @@ export class DaemonServer {
         const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
         const exitCode = await proc.exited;
         if (exitCode !== 0) {
-          const stderr = await new Response(proc.stderr).text();
-          return Response.json(
-            { error: `Failed to stop background session: ${stderr.trim()}` },
-            { status: 500, headers },
-          );
+          const stderr = (await new Response(proc.stderr).text()).trim();
+          // A stop the supervisor has already applied is a success, not a
+          // failure: removal lags the stop, so a second `x` inside that window
+          // would otherwise report an error for a row that is on its way out.
+          if (!agent.backgroundStopAlreadyGone?.test(stderr)) {
+            return Response.json(
+              { error: `Failed to stop background session: ${stderr}` },
+              { status: 500, headers },
+            );
+          }
         }
       } catch (err: unknown) {
         return Response.json(

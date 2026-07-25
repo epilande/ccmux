@@ -79,6 +79,15 @@ export interface AgentDef {
    * (moot in practice, since none currently produce them).
    */
   backgroundStopCommand?: (id: string) => string[];
+  /**
+   * Matches `backgroundStopCommand`'s stderr when it exited nonzero only
+   * because the worker was already gone. Removal of a background row is
+   * event-driven and therefore lags the stop by a beat, so a second `x` in
+   * that window re-runs the command against a short the supervisor has
+   * already dropped; without this the daemon would report a 500 for a stop
+   * that in fact succeeded. Treated as success.
+   */
+  backgroundStopAlreadyGone?: RegExp;
   sessionFilePattern?: RegExp;
   /**
    * Binary to invoke when launching a fresh interactive session.
@@ -502,6 +511,10 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // tear it down, and the row disappears once the supervisor drops the
     // short from `roster.json` (picked up by the Background Source's watcher).
     backgroundStopCommand: (id: string) => ["claude", "stop", id],
+    // `claude stop <gone-short>` exits 1 with
+    // "No job matching '<short>'. Run 'claude agents' to list running
+    // sessions." Reported as success: the worker is stopped either way.
+    backgroundStopAlreadyGone: /\bNo job matching\b/i,
     // Claude's numbered permission prompt: "1" quick-selects the first option
     // (approve) and submits immediately, so no trailing Enter is needed; Escape
     // cancels/denies. The lone-"1" choice is unverified against every prompt

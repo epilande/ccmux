@@ -431,9 +431,10 @@ export function App(props: AppProps) {
   }
 
   function sessionMenuItems(): ContextMenuItem[] {
-    // Paneless read-only background rows get the launch actions (per-agent
-    // attach + the global agent view); Kill/Restart are pane-session
-    // concepts that do not apply.
+    // Paneless background rows get the launch actions (per-agent attach + the
+    // global agent view) plus Kill, which stops the worker through the agent's
+    // own supervisor CLI. Restart stays out: it is a pane-session concept that
+    // does not apply.
     const cm = store.state.contextMenu;
     const session = cm
       ? store.state.sessions.find((s) => s.id === cm.sessionId)
@@ -461,6 +462,12 @@ export function App(props: AppProps) {
           hint: "",
           color: theme.text,
           action: contextMenuOpenAgentView,
+        },
+        {
+          label: "Kill",
+          hint: "x",
+          color: theme.red,
+          action: () => contextMenuConfirm("kill"),
         },
         ...reviewItem,
       ];
@@ -529,7 +536,16 @@ export function App(props: AppProps) {
     const path = session ? killActionPath(session) : `/sessions/${id}/kill`;
     fetch(`${getDaemonUrl()}${path}`, { method: "POST" })
       .then(async (response) => {
-        if (response.ok) return;
+        if (response.ok) {
+          // Every other row dies with its pane, which is feedback enough. A
+          // background row is removed only once the supervisor drops it from
+          // the roster, so without this `x` reads as having done nothing and
+          // invites a retry.
+          if (session?.trackingMode === "background") {
+            store.actions.showToast("Stopping agent...");
+          }
+          return;
+        }
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
