@@ -1278,8 +1278,10 @@ export class DaemonServer {
       cancelledInvocations++;
     }
 
-    // Exclude background rows: their worker pid is owned by Claude's
-    // supervisor, not ccmux (read-only; remove via `claude rm`).
+    // Exclude background rows from this bulk sweep: ccmux never owns their
+    // worker pid (Claude's supervisor does), so stopping one means shelling out
+    // to the agent's `backgroundStopCommand` per row. Deliberate asymmetry:
+    // single-row `x` (handleKillSession) and kill-group DO stop them.
     const sessions = this.sessionManager
       .getSessions()
       .filter((s) => s.pid !== null && !isBackgroundSession(s));
