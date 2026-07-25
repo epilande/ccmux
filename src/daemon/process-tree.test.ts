@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ProcessTree } from "./process-tree";
+import { ProcessTree, shellCommKey } from "./process-tree";
 
 describe("ProcessTree", () => {
   test("build() creates a tree from ps output", async () => {
@@ -72,34 +72,113 @@ describe("ProcessTree", () => {
     expect(shells).toEqual([]);
   });
 
-  test("findShellDescendants() finds shell processes in descendants", async () => {
-    const tree = await ProcessTree.build();
-    // PID 1 (launchd on macOS) should have some shell descendants
-    const shells = tree.findShellDescendants(1);
-
-    expect(Array.isArray(shells)).toBe(true);
-    for (const pid of shells) {
-      expect(typeof pid).toBe("number");
-      const proc = tree.getProcess(pid);
-      expect(proc).toBeDefined();
-      expect(ProcessTree.SHELL_NAMES.some((s) => proc!.comm.includes(s))).toBe(
-        true,
-      );
-    }
-  });
-
-  test("findShellDescendants() returns empty for process with no shell children", async () => {
-    const tree = await ProcessTree.build();
-    // Current test process likely doesn't have shell children
-    const shells = tree.findShellDescendants(process.pid);
-    expect(Array.isArray(shells)).toBe(true);
-    // May or may not have shells depending on test runner
-  });
-
   test("SHELL_NAMES includes common shells", () => {
     expect(ProcessTree.SHELL_NAMES).toContain("bash");
     expect(ProcessTree.SHELL_NAMES).toContain("sh");
     expect(ProcessTree.SHELL_NAMES).toContain("zsh");
     expect(ProcessTree.SHELL_NAMES).toContain("fish");
+    expect(ProcessTree.SHELL_NAMES).toContain("dash");
+    expect(ProcessTree.SHELL_NAMES).toContain("ksh");
+    expect(ProcessTree.SHELL_NAMES).toContain("csh");
+    expect(ProcessTree.SHELL_NAMES).toContain("tcsh");
+    expect(ProcessTree.SHELL_NAMES).toContain("ash");
+  });
+
+  describe("shellCommKey()", () => {
+    // Positive fixtures: real shells, in the various forms macOS/Linux `comm`
+    // reports them (login-dash, bare path, path+args, bare name+args).
+    test.each([
+      ["-zsh", "zsh"],
+      ["-/bin/zsh", "zsh"],
+      ["/bin/zsh", "zsh"],
+      ["/bin/bash --noprofile --norc", "bash"],
+      ["/opt/homebrew/bin/fish", "fish"],
+      ["sh -c echo hi", "sh"],
+    ])("derives %j -> %j", (comm, expected) => {
+      expect(shellCommKey(comm)).toBe(expected);
+    });
+
+    // Negative fixtures: processes the old substring rule misclassified as
+    // shells purely because their path or name contains a shell name as a
+    // substring (e.g. ".local/share" contains "sh").
+    test.each([
+      "~/.local/share/mise/installs/node/26.3.0/bin/node",
+      "/usr/bin/login -flp user /bin/bash -c exec -l /bin/zsh",
+      "sshd-session: user [priv]",
+      "/usr/libexec/sharingd",
+      "/System/Library/CoreServices/ReportCrash",
+    ])("derives %j -> a key not in SHELL_NAMES", (comm) => {
+      expect(ProcessTree.SHELL_NAMES).not.toContain(shellCommKey(comm));
+    });
+  });
+
+  describe("findShellDescendants() against fixture ps output", () => {
+    const PS_HEADER = "  PID  PPID COMM";
+
+    function psLine(pid: number, ppid: number, comm: string): string {
+      return `${pid} ${ppid} ${comm}`;
+    }
+
+    test("finds a real shell descendant, exact match only", () => {
+      const output = [
+        PS_HEADER,
+        psLine(100, 1, "/usr/bin/claude"),
+        psLine(101, 100, "-zsh"),
+        psLine(102, 100, "~/.local/share/mise/installs/node/26.3.0/bin/node"),
+      ].join("\n");
+
+      const tree = ProcessTree.fromPsOutput(output);
+      const shells = tree.findShellDescendants(100);
+
+      expect(shells).toEqual([101]);
+    });
+
+    test("returns empty when the only descendant is a language server under a path containing 'sh'", () => {
+      const output = [
+        PS_HEADER,
+        psLine(200, 1, "/usr/bin/claude"),
+        psLine(201, 200, "~/.local/share/mise/installs/node/26.3.0/bin/node"),
+        psLine(202, 200, "/usr/libexec/sharingd"),
+      ].join("\n");
+
+      const tree = ProcessTree.fromPsOutput(output);
+      const shells = tree.findShellDescendants(200);
+
+      expect(shells).toEqual([]);
+    });
+
+    test("does not match a login wrapper that merely execs a shell as an argument", () => {
+      const output = [
+        PS_HEADER,
+        psLine(300, 1, "/usr/bin/claude"),
+        psLine(
+          301,
+          300,
+          "/usr/bin/login -flp user /bin/bash -c exec -l /bin/zsh",
+        ),
+      ].join("\n");
+
+      const tree = ProcessTree.fromPsOutput(output);
+      const shells = tree.findShellDescendants(300);
+
+      expect(shells).toEqual([]);
+    });
+
+    test("finds shells across the expanded name set (dash, ksh, csh, tcsh, ash)", () => {
+      const output = [
+        PS_HEADER,
+        psLine(400, 1, "/usr/bin/claude"),
+        psLine(401, 400, "/bin/dash"),
+        psLine(402, 400, "/bin/ksh"),
+        psLine(403, 400, "/bin/csh"),
+        psLine(404, 400, "/bin/tcsh"),
+        psLine(405, 400, "/bin/ash"),
+      ].join("\n");
+
+      const tree = ProcessTree.fromPsOutput(output);
+      const shells = tree.findShellDescendants(400);
+
+      expect(shells.sort()).toEqual([401, 402, 403, 404, 405]);
+    });
   });
 });
