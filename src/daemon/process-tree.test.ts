@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ProcessTree, shellCommKey } from "./process-tree";
+import { PS_HEADER, psLine } from "./process-tree-test-helpers";
 
 describe("ProcessTree", () => {
   test("build() creates a tree from ps output", async () => {
@@ -113,12 +114,6 @@ describe("ProcessTree", () => {
   });
 
   describe("findShellDescendants() against fixture ps output", () => {
-    const PS_HEADER = "  PID  PPID COMM";
-
-    function psLine(pid: number, ppid: number, comm: string): string {
-      return `${pid} ${ppid} ${comm}`;
-    }
-
     test("finds a real shell descendant, exact match only", () => {
       const output = [
         PS_HEADER,

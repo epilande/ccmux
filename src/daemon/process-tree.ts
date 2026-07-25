@@ -2,6 +2,7 @@
  * ProcessTree - Build and query process hierarchy in a single pass.
  * Eliminates N pgrep calls by building tree from one ps command.
  */
+import { basename } from "path";
 import { DaemonPerf } from "./perf";
 
 export interface ProcessNode {
@@ -11,24 +12,19 @@ export interface ProcessNode {
 }
 
 /**
- * Derive the exact-match shell name from a raw `comm` value: take the first
- * whitespace-delimited token (drops any trailing argv, e.g. `sh -c ...` or
- * `/bin/bash --noprofile --norc`), strip one leading `-` (login shells report
- * `-zsh`), then take the text after the last `/` (the basename).
- *
- * On macOS `comm` is a full path, so a plain substring match against
- * SHELL_NAMES false-positives on any path containing a shell name as a
- * directory component (e.g. `~/.local/share/...` matches "sh" via "share").
- * Exact matching against this derived key avoids that; never match against
- * the raw `comm` string or the joined command line.
+ * Exact-match shell basename derived from a raw `comm` value: drop trailing
+ * argv, strip one leading `-` (login shells report `-zsh`), then take the
+ * path basename. Substring matching on raw `comm` false-positives on macOS,
+ * where `comm` is a full path (e.g. `~/.local/share/...` contains "sh").
  */
 export function shellCommKey(comm: string): string {
-  const firstToken = comm.trim().split(/\s+/)[0] ?? "";
+  const trimmed = comm.trim();
+  const spaceIndex = trimmed.indexOf(" ");
+  const firstToken = spaceIndex === -1 ? trimmed : trimmed.slice(0, spaceIndex);
   const unwrapped = firstToken.startsWith("-")
     ? firstToken.slice(1)
     : firstToken;
-  const slashIndex = unwrapped.lastIndexOf("/");
-  return slashIndex >= 0 ? unwrapped.slice(slashIndex + 1) : unwrapped;
+  return basename(unwrapped);
 }
 
 export class ProcessTree {
@@ -138,6 +134,9 @@ export class ProcessTree {
     "ash",
   ];
 
+  /** O(1) lookup mirror of `SHELL_NAMES`, checked per descendant in the BFS below. */
+  private static readonly SHELL_NAMES_SET = new Set(ProcessTree.SHELL_NAMES);
+
   /**
    * Find all shell descendant processes of a given root PID
    * Used to detect when a Bash tool is actively executing
@@ -153,7 +152,7 @@ export class ProcessTree {
       visited.add(pid);
 
       const proc = this.getProcess(pid);
-      if (proc && ProcessTree.SHELL_NAMES.includes(shellCommKey(proc.comm))) {
+      if (proc && ProcessTree.SHELL_NAMES_SET.has(shellCommKey(proc.comm))) {
         shellPids.push(pid);
       }
       queue.push(...this.getChildPids(pid));
