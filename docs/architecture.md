@@ -200,11 +200,13 @@ Desktop notifications are opt-in (`notifications.enabled`) and edge-triggered on
 
 ## Background agents (paneless Claude)
 
-A third tracking mode, `background`, is owned solely by `sources/claude-background.ts` and is excluded from every reconciler arm (`reconcileOne`, `reconcileAttentionStates`, `cleanupStaleSessions`, `matchSessionsToPanes`) and from the kill paths (`handleKillSession` / `handleKillAllSessions`). These rows are Claude Code background agents (`claude --bg` / the agent view): paneless (PID + cwd + JSONL transcript, no tmux pane) and read-only (removed via `claude rm`, not killed).
+A third tracking mode, `background`, is owned solely by `sources/claude-background.ts` and is excluded from every reconciler arm (`reconcileOne`, `reconcileAttentionStates`, `cleanupStaleSessions`, `matchSessionsToPanes`). These rows are Claude Code background agents (`claude --bg` / the agent view): paneless (PID + cwd + JSONL transcript, no tmux pane), and their worker pid belongs to Claude's supervisor rather than ccmux, so ccmux never SIGTERMs it.
+
+**Stopping a background row.** `handleKillSession` does NOT exclude them: it shells out to the agent's `backgroundStopCommand` (`claude stop <short>` for Claude; agents that don't define one get a 400), mapping a nonzero exit to a 500 carrying stderr, except when that stderr matches the agent's `backgroundStopAlreadyGone` pattern (the worker was already stopped, so the row is on its way out and the stop counts as success). `claude stop`, not `claude rm`: stop leaves the conversation resumable via `claude attach`, which is what `x` means for every other row. The handler never removes the row itself, because removal is event-driven: the supervisor drops the short from `roster.json` and the source's watcher reaps it. `handleKillAllSessions` still skips background rows entirely, so the bulk sweep leaves them running while single-row `x` and kill-group stop them.
 
 The source watches Claude's own `~/.claude/daemon/roster.json` (authoritative live membership and the SOLE death signal) and each `~/.claude/jobs/<short>/state.json` (status — needed because roster mtime does not bump on the active→blocked transition). `deriveBackgroundState` (`background-state.ts`) is the pure status fold; the source diffs the roster into the `SessionManager`. Independent of hooks and pane scanning.
 
-Constructed in `Daemon.start()` only when `backgroundAgents !== false` (opt-out config gate; off means no watchers, no rows, no per-scan resync). Interactions: a peek preview plus a `claude attach` launcher.
+Constructed in `Daemon.start()` only when `backgroundAgents !== false` (opt-out config gate; off means no watchers, no rows, no per-scan resync). Interactions: a peek preview, a `claude attach` launcher, and `x` to stop the worker (see above).
 
 ## Daemon lifecycle and boot ordering
 
