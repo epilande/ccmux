@@ -77,19 +77,23 @@ type NotificationActionRunner = (
  *  focuses a pane whose session had pending attention. Fail-open. */
 type NotificationRetractFn = (sessionId: string) => Promise<void>;
 
-/** Cached git branch result */
-interface BranchCacheEntry {
+/** A cwd's git facts, both derived from one `git rev-parse` call. */
+interface GitInfo {
   branch: string | null;
-  expiresAt: number;
-}
-
-/** Cached git worktree result */
-interface WorktreeCacheEntry {
   isWorktree: boolean;
+}
+
+interface GitInfoCacheEntry {
+  info: GitInfo;
   expiresAt: number;
 }
 
-const BRANCH_CACHE_TTL_MS = 30_000;
+/** A cwd that git can't answer for: not a repo, unborn HEAD, deleted dir. */
+function unknownGitInfo(): GitInfo {
+  return { branch: null, isWorktree: false };
+}
+
+const GIT_INFO_CACHE_TTL_MS = 30_000;
 /** How often to sweep visible sessions' (cwd, branch) keys through the
  *  PR resolver. Sweeps are cheap (cached reads; only expired keys spawn
  *  gh), and worst-case PR staleness = resolver TTL + this interval. */
@@ -234,8 +238,7 @@ export class DaemonServer {
   private getPaneCache: PaneCacheGetter;
   private getAgentByType: AgentLookup;
   private visibleSessions = new Set<string>();
-  private branchCache = new Map<string, BranchCacheEntry>();
-  private worktreeCache = new Map<string, WorktreeCacheEntry>();
+  private gitInfoCache = new Map<string, GitInfoCacheEntry>();
   private prResolver: PRResolver;
   private lastActivePaneId: string | null = null;
   /**
@@ -344,54 +347,51 @@ export class DaemonServer {
     }
   }
 
-  private async getGitBranch(cwd: string): Promise<string | null> {
+  private async getGitInfo(cwd: string): Promise<GitInfo> {
     const now = Date.now();
-    const cached = this.branchCache.get(cwd);
-    if (cached && cached.expiresAt > now) return cached.branch;
+    const cached = this.gitInfoCache.get(cwd);
+    if (cached && cached.expiresAt > now) return cached.info;
 
-    let branch: string | null = null;
+    let info = unknownGitInfo();
     try {
-      const proc = Bun.spawn(
-        ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
-        { stdout: "pipe", stderr: "pipe" },
-      );
-      const exitCode = await proc.exited;
-      if (exitCode === 0) {
-        branch = (await new Response(proc.stdout).text()).trim() || null;
-      }
+      info = await this.readGitInfo(cwd);
     } catch {
-      // Not a git repo or git not available
+      // git not available or spawn failure
     }
 
-    this.branchCache.set(cwd, { branch, expiresAt: now + BRANCH_CACHE_TTL_MS });
-    return branch;
+    this.gitInfoCache.set(cwd, {
+      info,
+      expiresAt: Date.now() + GIT_INFO_CACHE_TTL_MS,
+    });
+    return info;
   }
 
-  private async isGitWorktree(cwd: string): Promise<boolean> {
-    const now = Date.now();
-    const cached = this.worktreeCache.get(cwd);
-    if (cached && cached.expiresAt > now) return cached.isWorktree;
-
-    let isWorktree = false;
-    try {
-      const proc = Bun.spawn(["git", "-C", cwd, "rev-parse", "--git-dir"], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const exitCode = await proc.exited;
-      if (exitCode === 0) {
-        const gitDir = (await new Response(proc.stdout).text()).trim();
-        isWorktree = gitDir.includes("/worktrees/");
-      }
-    } catch {
-      // Not a git repo or git not available
+  /**
+   * Read a cwd's branch and worktree flag with a single spawn:
+   * `rev-parse --abbrev-ref HEAD --git-dir` prints both, one line each, in
+   * argument order.
+   *
+   * Gated on exit 0 AND exactly two lines. A freshly `git init`ed repo has an
+   * unborn HEAD: git exits 128 but still prints a lone `HEAD` line, so parsing
+   * stdout without the gate would report a phantom `HEAD` branch for every new
+   * repo. A detached HEAD in a real repo still reports the literal `HEAD`
+   * (exit 0, two lines) — pre-existing behavior, unchanged.
+   */
+  private async readGitInfo(cwd: string): Promise<GitInfo> {
+    const proc = Bun.spawn(
+      ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD", "--git-dir"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const exitCode = await proc.exited;
+    const lines = (await new Response(proc.stdout).text()).trim().split("\n");
+    const [head, gitDir] = lines;
+    if (exitCode !== 0 || lines.length !== 2 || !head || !gitDir) {
+      return unknownGitInfo();
     }
-
-    this.worktreeCache.set(cwd, {
-      isWorktree,
-      expiresAt: now + BRANCH_CACHE_TTL_MS,
-    });
-    return isWorktree;
+    return {
+      branch: head.trim() || null,
+      isWorktree: gitDir.includes("/worktrees/"),
+    };
   }
 
   private async enrichSession(session: Session): Promise<EnrichedSession> {
@@ -401,9 +401,9 @@ export class DaemonServer {
     const paneCwd = paneInfo?.currentPath ?? null;
     // Use pane cwd (real shell state) when available, fall back to log-derived cwd
     const effectiveCwd = paneCwd ?? session.cwd;
-    const gitBranch =
-      (await this.getGitBranch(effectiveCwd)) ?? session.gitBranch;
-    const isWorktree = await this.isGitWorktree(effectiveCwd);
+    const gitInfo = await this.getGitInfo(effectiveCwd);
+    const gitBranch = gitInfo.branch ?? session.gitBranch;
+    const isWorktree = gitInfo.isWorktree;
     // Synchronous cache read; the resolver refreshes in the background and
     // onBranchPRsChanged re-broadcasts when a lookup lands a new value.
     const branchPRs = this.prResolver.get(effectiveCwd, gitBranch);

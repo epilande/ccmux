@@ -193,6 +193,40 @@ function fakeSession(id: string, tmuxPane: string | null = null): Session {
   };
 }
 
+/**
+ * Stub `Bun.spawn` for the enrichment path's `git rev-parse`, recording every
+ * git argv so spawn merging / coalescing is observable. Non-git spawns (the PR
+ * resolver's background `gh`) are answered but not recorded. `delayMs` keeps
+ * the call in flight long enough for concurrent callers to pile up; `throws`
+ * simulates a missing git binary.
+ */
+function stubGitSpawn(options: {
+  stdout?: string;
+  exitCode?: number;
+  delayMs?: number;
+  throws?: boolean;
+}) {
+  const original = Bun.spawn;
+  const state = { argv: [] as string[][] };
+  Bun.spawn = ((argv: string[]) => {
+    const isGit = argv[0] === "git";
+    if (isGit) {
+      state.argv.push(argv);
+      if (options.throws) throw new Error("spawn git ENOENT");
+    }
+    const code = isGit ? (options.exitCode ?? 0) : 0;
+    const out = isGit ? (options.stdout ?? "") : "";
+    return {
+      exited: options.delayMs
+        ? Bun.sleep(options.delayMs).then(() => code)
+        : Promise.resolve(code),
+      stdout: new Blob([out]).stream(),
+      stderr: new Blob([""]).stream(),
+    };
+  }) as unknown as typeof Bun.spawn;
+  return { state, restore: () => (Bun.spawn = original) };
+}
+
 describe("DaemonServer", () => {
   describe("sessionEventToSSE visibility tracking", () => {
     it("emits session_created for a paneless NATIVE session (visibly unbound)", async () => {
@@ -607,6 +641,53 @@ describe("DaemonServer", () => {
       const enriched = await internals.enrichSession(session);
 
       expect(enriched.gitBranch).toBeNull();
+    });
+
+    it("resolves branch and worktree from a single git spawn", async () => {
+      const { internals } = createServer();
+      const git = stubGitSpawn({
+        stdout: "feat/x\n/repo/.git/worktrees/wt\n",
+      });
+
+      try {
+        const enriched = await internals.enrichSession(fakeSession("s1"));
+
+        expect(enriched.gitBranch).toBe("feat/x");
+        expect(enriched.isWorktree).toBe(true);
+        expect(git.state.argv).toEqual([
+          [
+            "git",
+            "-C",
+            "/Users/test/proj",
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+            "--git-dir",
+          ],
+        ]);
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("treats an unborn HEAD (fresh git init) as no branch, not a phantom one", async () => {
+      // Real fixture: `git init` exits 128 on `rev-parse` but still prints a
+      // lone `HEAD` line, which an ungated parse would show as a branch.
+      const dir = mkdtempSync(join(tmpdir(), "ccmux-unborn-"));
+      try {
+        Bun.spawnSync(["git", "init", "-q", dir]);
+        const { internals } = createServer();
+        const session = fakeSession("s1");
+        session.cwd = dir;
+        session.gitBranch = null;
+
+        const enriched = await internals.enrichSession(session);
+
+        expect(enriched.gitBranch).toBeNull();
+        expect(enriched.isWorktree).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 
