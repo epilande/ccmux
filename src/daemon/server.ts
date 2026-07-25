@@ -239,6 +239,8 @@ export class DaemonServer {
   private getAgentByType: AgentLookup;
   private visibleSessions = new Set<string>();
   private gitInfoCache = new Map<string, GitInfoCacheEntry>();
+  /** Coalesces concurrent lookups for one cwd onto a single git spawn. */
+  private gitInfoInflight = new Map<string, Promise<GitInfo>>();
   private prResolver: PRResolver;
   private lastActivePaneId: string | null = null;
   /**
@@ -347,23 +349,46 @@ export class DaemonServer {
     }
   }
 
+  /**
+   * Branch + worktree for a cwd, cached and coalesced. Enrichment fans out
+   * over every visible session at once (`enrichSessions`), and sessions
+   * cluster on a handful of repos, so without the in-flight map an SSE `init`
+   * fires one git spawn per session instead of one per distinct cwd.
+   */
   private async getGitInfo(cwd: string): Promise<GitInfo> {
-    const now = Date.now();
     const cached = this.gitInfoCache.get(cwd);
-    if (cached && cached.expiresAt > now) return cached.info;
+    if (cached && cached.expiresAt > Date.now()) return cached.info;
 
-    let info = unknownGitInfo();
+    const inflight = this.gitInfoInflight.get(cwd);
+    if (inflight) return inflight;
+
+    const pending = this.resolveGitInfo(cwd);
+    this.gitInfoInflight.set(cwd, pending);
+    return pending;
+  }
+
+  /**
+   * Resolve and cache one cwd's git info. Never rejects (so a poisoned
+   * promise can't be shared by every coalesced caller), and stamps `expiresAt`
+   * at resolution time so a slow git can't hand back an already-stale entry.
+   *
+   * A thrown spawn (git missing, fork failure) is deliberately not cached —
+   * it says nothing about this cwd, so the next call retries. A non-zero exit
+   * (not a repo, deleted dir, unborn HEAD) is a real answer and is cached.
+   */
+  private async resolveGitInfo(cwd: string): Promise<GitInfo> {
     try {
-      info = await this.readGitInfo(cwd);
+      const info = await this.readGitInfo(cwd);
+      this.gitInfoCache.set(cwd, {
+        info,
+        expiresAt: Date.now() + GIT_INFO_CACHE_TTL_MS,
+      });
+      return info;
     } catch {
-      // git not available or spawn failure
+      return unknownGitInfo();
+    } finally {
+      this.gitInfoInflight.delete(cwd);
     }
-
-    this.gitInfoCache.set(cwd, {
-      info,
-      expiresAt: Date.now() + GIT_INFO_CACHE_TTL_MS,
-    });
-    return info;
   }
 
   /**

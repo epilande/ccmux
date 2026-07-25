@@ -670,6 +670,56 @@ describe("DaemonServer", () => {
       }
     });
 
+    it("coalesces concurrent lookups for one cwd onto a single git spawn", async () => {
+      const { internals } = createServer();
+      // Held in flight so all 20 callers arrive before the first resolves.
+      const git = stubGitSpawn({ stdout: "main\n/repo/.git\n", delayMs: 5 });
+
+      try {
+        const enriched = await Promise.all(
+          Array.from({ length: 20 }, (_, i) =>
+            internals.enrichSession(fakeSession(`s${i}`)),
+          ),
+        );
+
+        expect(git.state.argv).toHaveLength(1);
+        expect(enriched.every((e) => e.gitBranch === "main")).toBe(true);
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("does not cache a thrown git spawn; the next call retries", async () => {
+      const { internals } = createServer();
+      const git = stubGitSpawn({ throws: true });
+
+      try {
+        const first = await internals.enrichSession(fakeSession("s1"));
+        expect(first.gitBranch).toBeNull();
+
+        await internals.enrichSession(fakeSession("s2"));
+
+        expect(git.state.argv).toHaveLength(2);
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("caches a non-repo answer instead of re-spawning git", async () => {
+      const { internals } = createServer();
+      // Exit 128 is a real answer about this cwd (not a repo), unlike a throw.
+      const git = stubGitSpawn({ exitCode: 128 });
+
+      try {
+        await internals.enrichSession(fakeSession("s1"));
+        await internals.enrichSession(fakeSession("s2"));
+
+        expect(git.state.argv).toHaveLength(1);
+      } finally {
+        git.restore();
+      }
+    });
+
     it("treats an unborn HEAD (fresh git init) as no branch, not a phantom one", async () => {
       // Real fixture: `git init` exits 128 on `rev-parse` but still prints a
       // lone `HEAD` line, which an ungated parse would show as a branch.
