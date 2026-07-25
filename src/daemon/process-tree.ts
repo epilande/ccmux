@@ -10,6 +10,27 @@ export interface ProcessNode {
   comm: string;
 }
 
+/**
+ * Derive the exact-match shell name from a raw `comm` value: take the first
+ * whitespace-delimited token (drops any trailing argv, e.g. `sh -c ...` or
+ * `/bin/bash --noprofile --norc`), strip one leading `-` (login shells report
+ * `-zsh`), then take the text after the last `/` (the basename).
+ *
+ * On macOS `comm` is a full path, so a plain substring match against
+ * SHELL_NAMES false-positives on any path containing a shell name as a
+ * directory component (e.g. `~/.local/share/...` matches "sh" via "share").
+ * Exact matching against this derived key avoids that; never match against
+ * the raw `comm` string or the joined command line.
+ */
+export function shellCommKey(comm: string): string {
+  const firstToken = comm.trim().split(/\s+/)[0] ?? "";
+  const unwrapped = firstToken.startsWith("-")
+    ? firstToken.slice(1)
+    : firstToken;
+  const slashIndex = unwrapped.lastIndexOf("/");
+  return slashIndex >= 0 ? unwrapped.slice(slashIndex + 1) : unwrapped;
+}
+
 export class ProcessTree {
   private processes = new Map<number, ProcessNode>();
   /** Map of ppid -> child pids (parent->children index) */
@@ -21,8 +42,6 @@ export class ProcessTree {
   }
 
   static async build(): Promise<ProcessTree> {
-    const tree = new ProcessTree();
-
     try {
       DaemonPerf.incSubprocessSpawn("ps-tree");
       const proc = Bun.spawn(["ps", "-axo", "pid,ppid,comm"], {
@@ -33,27 +52,38 @@ export class ProcessTree {
       const output = await new Response(proc.stdout).text();
       await proc.exited;
 
-      const lines = output.trim().split("\n").slice(1);
-
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length < 3) continue;
-
-        const pid = parseInt(parts[0], 10);
-        const ppid = parseInt(parts[1], 10);
-        const comm = parts.slice(2).join(" ");
-
-        if (isNaN(pid) || isNaN(ppid)) continue;
-
-        const node: ProcessNode = { pid, ppid, comm };
-        tree.processes.set(pid, node);
-
-        const siblings = tree.children.get(ppid) ?? [];
-        siblings.push(pid);
-        tree.children.set(ppid, siblings);
-      }
+      return ProcessTree.fromPsOutput(output);
     } catch {
       // Return empty tree on error
+      return new ProcessTree();
+    }
+  }
+
+  /**
+   * Parse `ps -axo pid,ppid,comm` output (header row + one process per line)
+   * into a tree. Exposed so tests can build a tree from canned ps output
+   * instead of spawning a real `ps`.
+   */
+  static fromPsOutput(output: string): ProcessTree {
+    const tree = new ProcessTree();
+    const lines = output.trim().split("\n").slice(1);
+
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 3) continue;
+
+      const pid = parseInt(parts[0], 10);
+      const ppid = parseInt(parts[1], 10);
+      const comm = parts.slice(2).join(" ");
+
+      if (isNaN(pid) || isNaN(ppid)) continue;
+
+      const node: ProcessNode = { pid, ppid, comm };
+      tree.processes.set(pid, node);
+
+      const siblings = tree.children.get(ppid) ?? [];
+      siblings.push(pid);
+      tree.children.set(ppid, siblings);
     }
 
     return tree;
@@ -92,9 +122,21 @@ export class ProcessTree {
   }
 
   /**
-   * Shell process names to detect running Bash commands
+   * Shell process names to detect running Bash commands. Matched by EXACT
+   * equality against the derived basename (see `shellCommKey`), never by
+   * substring against the raw `comm` string.
    */
-  static readonly SHELL_NAMES = ["bash", "sh", "zsh", "fish"];
+  static readonly SHELL_NAMES = [
+    "bash",
+    "sh",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+    "csh",
+    "tcsh",
+    "ash",
+  ];
 
   /**
    * Find all shell descendant processes of a given root PID
@@ -111,7 +153,7 @@ export class ProcessTree {
       visited.add(pid);
 
       const proc = this.getProcess(pid);
-      if (proc && ProcessTree.SHELL_NAMES.some((s) => proc.comm.includes(s))) {
+      if (proc && ProcessTree.SHELL_NAMES.includes(shellCommKey(proc.comm))) {
         shellPids.push(pid);
       }
       queue.push(...this.getChildPids(pid));
