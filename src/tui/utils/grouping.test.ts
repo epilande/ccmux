@@ -509,6 +509,44 @@ describe("sortGroups", () => {
     const sorted = sortGroups(groups, ["nonexistent", "alpha"]);
     expect(sorted.map((g) => g.key)).toEqual(["alpha"]);
   });
+
+  const scored = (key: string, ...scores: number[]): GroupEntry => ({
+    key,
+    members: scores.map((score, i) => ({
+      ...toFiltered(mockSession({ id: `${key}-${i}` })),
+      score,
+    })),
+  });
+
+  it("orders groups by best member score during search", () => {
+    const groups = [scored("alpha", 400), scored("bravo", 3200, 100)];
+    const sorted = sortGroups(groups, [], true);
+    // bravo's single strong match (3200) beats alpha despite alphabetical
+    // order; the weak second member does not dilute it (max, not sum).
+    expect(sorted.map((g) => g.key)).toEqual(["bravo", "alpha"]);
+  });
+
+  it("lets relevance override pinning during search", () => {
+    const groups = [scored("pinned-proj", 600), scored("zeta", 3200)];
+    const sorted = sortGroups(groups, ["pinned-proj"], true);
+    expect(sorted.map((g) => g.key)).toEqual(["zeta", "pinned-proj"]);
+  });
+
+  it("breaks score ties with the pinned-then-alphabetical order", () => {
+    const groups = [
+      scored("bravo", 1000),
+      scored("alpha", 1000),
+      scored("pinned-proj", 1000),
+    ];
+    const sorted = sortGroups(groups, ["pinned-proj"], true);
+    expect(sorted.map((g) => g.key)).toEqual(["pinned-proj", "alpha", "bravo"]);
+  });
+
+  it("keeps pin/alphabetical order when not searching, even with scores present", () => {
+    const groups = [scored("zeta", 3200), scored("alpha", 400)];
+    const sorted = sortGroups(groups, [], false);
+    expect(sorted.map((g) => g.key)).toEqual(["alpha", "zeta"]);
+  });
 });
 
 describe("toVisualLine", () => {

@@ -38,6 +38,7 @@ import {
   ATTENTION_LABEL_MAX,
 } from "./session-columns";
 import { theme } from "../theme";
+import type { MatchSource } from "../utils/grouping";
 import {
   formatRelativeTime,
   formatVersion,
@@ -62,6 +63,11 @@ interface SessionItemProps {
   /** Live transcript-search snippet, shown dim in the prompt cell to explain
    * why the row matched when no prompt highlight applies. */
   transcriptSnippet?: string;
+  /** The search source that ranked this row (`FilteredSession.primarySource`).
+   * Renders a dim `[pane]`/`[transcript]`/`[cwd]` tag in the prompt cell for
+   * matches that would otherwise leave no visible trace on the row; identity
+   * and prompt matches already show highlights and get no tag. */
+  matchSource?: MatchSource;
   iconStyle?: IconStyle;
   showPreview?: boolean;
   previewWidth: number;
@@ -213,6 +219,7 @@ interface FieldRenderContext {
   dimmed?: boolean;
   sidebar?: boolean;
   transcriptSnippet?: string;
+  matchSource?: MatchSource;
   agentColor: string;
   attentionColor: string;
   attentionLabel: string | null;
@@ -450,11 +457,31 @@ const FieldCell: Component<{
       // field) keep their spot. Search highlights are windowed the same way by
       // `truncateHighlighted`, which trims to a visible-char budget while
       // keeping the matched span whole.
+      // Match-source cue: a pane/transcript/cwd-ranked match leaves no
+      // highlight anywhere on the row, so a dim `[source]` tag says why it is
+      // here. Suppressed whenever any highlight is visible (identity or
+      // prompt), which already explains the match. The tag's width comes out
+      // of the prompt budget so truncation still lands inside the row.
+      const sourceTag = (): string | null => {
+        const src = ctx.matchSource;
+        if (src !== "pane" && src !== "transcript" && src !== "cwd") {
+          return null;
+        }
+        const h = ctx.highlights;
+        if (h?.project || h?.gitBranch || h?.lastPrompt || h?.prompts) {
+          return null;
+        }
+        return src;
+      };
+      const promptBudget = () => {
+        const tag = sourceTag();
+        return ctx.maxPromptLen - (tag ? tag.length + 3 : 0);
+      };
       const text = () =>
         ctx.session.lastPrompt
           ? truncateText(
               normalizePrompt(ctx.session.lastPrompt),
-              ctx.maxPromptLen,
+              promptBudget(),
             )
           : "";
       // A matched OLDER prompt: when the newest prompt (`lastPrompt`) didn't
@@ -472,7 +499,7 @@ const FieldCell: Component<{
         if (!ctx.transcriptSnippet) return null;
         return truncateText(
           normalizePrompt(ctx.transcriptSnippet),
-          ctx.maxPromptLen,
+          promptBudget(),
         );
       };
       // The prompt is the row's flexible filler: its box grows into the
@@ -484,6 +511,13 @@ const FieldCell: Component<{
       // cell); without it a multi-span highlight renders as garbled overlap.
       return (
         <box flexGrow={1} flexShrink={1} flexDirection="row">
+          <Show when={sourceTag()}>
+            {(tag: () => string) => (
+              <box width={tag().length + 3} flexShrink={0}>
+                <text fg={dimColor(ctx, theme.overlay)}>{`[${tag()}]`}</text>
+              </box>
+            )}
+          </Show>
           <Show
             when={ctx.highlights?.lastPrompt}
             fallback={
@@ -849,6 +883,9 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     },
     get transcriptSnippet() {
       return props.transcriptSnippet;
+    },
+    get matchSource() {
+      return props.matchSource;
     },
     get agentColor() {
       return agentColor();

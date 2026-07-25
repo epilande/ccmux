@@ -149,6 +149,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
             ? item.filteredSession.transcriptSnippet
             : undefined
         }
+        matchSource={item.filteredSession.primarySource}
         iconStyle={props.iconStyle}
         showPreview={props.showPreview}
         previewWidth={props.previewWidth}
