@@ -287,13 +287,14 @@ describe("transcript-search", () => {
         { id: "s1", agentType: "claude", logPath },
         "match",
       );
-      // The two well-formed user turns match; the malformed lines are skipped
-      // without dropping the whole session (which the outer catch would do).
+      // The two well-formed user turns match (ranked newest-first); the
+      // malformed lines are skipped without dropping the whole session
+      // (which the outer catch would do).
       expect(result).not.toBeNull();
       expect(result!.matches.length).toBe(2);
       expect(result!.matches.map((m) => m.snippet)).toEqual([
-        "first match here",
         "second match here",
+        "first match here",
       ]);
     });
 
@@ -333,13 +334,13 @@ describe("transcript-search", () => {
       );
       // The bare `null` line is a JSON primitive, not an object; it must be
       // skipped without dropping the whole session (which the outer catch
-      // in `searchTranscript` would otherwise do).
+      // in `searchTranscript` would otherwise do). Matches rank newest-first.
       expect(result).not.toBeNull();
       expect(result!.matches.length).toBe(3);
       expect(result!.matches.map((m) => m.snippet)).toEqual([
-        "first match here",
-        "second match here",
         "third match here",
+        "second match here",
+        "first match here",
       ]);
     });
 
@@ -364,6 +365,182 @@ describe("transcript-search", () => {
         { maxMatches: 2 },
       );
       expect(result!.matches.length).toBe(2);
+    });
+
+    it("ranks user turns before assistant turns, newest first within a role", async () => {
+      const logPath = join(dir, "claude.jsonl");
+      // File order: old assistant, old user, new assistant, new user. The
+      // returned order must be user-newest, user-oldest, assistant-newest,
+      // assistant-oldest regardless of file position.
+      writeFileSync(
+        logPath,
+        jsonl(
+          {
+            type: "assistant",
+            uuid: "a1",
+            parentUuid: null,
+            timestamp: "2024-01-01T12:00:00Z",
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: "assistant old match" }],
+            },
+          },
+          {
+            type: "user",
+            uuid: "u1",
+            parentUuid: "a1",
+            timestamp: "2024-01-01T12:01:00Z",
+            message: { role: "user", content: "user old match" },
+          },
+          {
+            type: "assistant",
+            uuid: "a2",
+            parentUuid: "u1",
+            timestamp: "2024-01-01T12:02:00Z",
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: "assistant new match" }],
+            },
+          },
+          {
+            type: "user",
+            uuid: "u2",
+            parentUuid: "a2",
+            timestamp: "2024-01-01T12:03:00Z",
+            message: { role: "user", content: "user new match" },
+          },
+        ),
+      );
+
+      const result = await searchTranscript(
+        { id: "s1", agentType: "claude", logPath },
+        "match",
+      );
+      expect(result!.matches.map((m) => m.snippet)).toEqual([
+        "user new match",
+        "user old match",
+        "assistant new match",
+        "assistant old match",
+      ]);
+      // Shape is unchanged: role/snippet/timestamp per match.
+      expect(result!.matches[0]).toEqual({
+        role: "user",
+        snippet: "user new match",
+        timestamp: "2024-01-01T12:03:00Z",
+      });
+    });
+
+    it("sinks matches without a parseable timestamp below dated ones of the same role", async () => {
+      const logPath = join(dir, "claude.jsonl");
+      writeFileSync(
+        logPath,
+        jsonl(
+          {
+            type: "user",
+            uuid: "u1",
+            parentUuid: null,
+            message: { role: "user", content: "undated match" },
+          },
+          {
+            type: "user",
+            uuid: "u2",
+            parentUuid: "u1",
+            timestamp: "2024-01-01T12:00:00Z",
+            message: { role: "user", content: "dated match" },
+          },
+        ),
+      );
+
+      const result = await searchTranscript(
+        { id: "s1", agentType: "claude", logPath },
+        "match",
+      );
+      expect(result!.matches.map((m) => m.snippet)).toEqual([
+        "dated match",
+        "undated match",
+      ]);
+    });
+
+    it("returns the best 5 of all tail matches, still capped at 5 by default", async () => {
+      const logPath = join(dir, "claude.jsonl");
+      // Ten assistant matches followed by one user match: the old
+      // first-5-in-file-order behavior would return only assistant turns and
+      // drop the user one entirely.
+      const lines: object[] = [];
+      for (let i = 0; i < 10; i++) {
+        lines.push({
+          type: "assistant",
+          uuid: `a${i}`,
+          parentUuid: null,
+          timestamp: `2024-01-01T12:0${i}:00Z`,
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: `assistant match ${i}` }],
+          },
+        });
+      }
+      lines.push({
+        type: "user",
+        uuid: "u1",
+        parentUuid: null,
+        timestamp: "2024-01-01T13:00:00Z",
+        message: { role: "user", content: "user match last in file" },
+      });
+      writeFileSync(logPath, jsonl(...lines));
+
+      const result = await searchTranscript(
+        { id: "s1", agentType: "claude", logPath },
+        "match",
+      );
+      expect(result!.matches.length).toBe(5);
+      expect(result!.matches[0].snippet).toBe("user match last in file");
+      // The remaining four are the newest assistant matches.
+      expect(result!.matches.slice(1).map((m) => m.snippet)).toEqual([
+        "assistant match 9",
+        "assistant match 8",
+        "assistant match 7",
+        "assistant match 6",
+      ]);
+    });
+
+    it("ranks a recent user match first even when more than 25 older matches precede it", async () => {
+      const logPath = join(dir, "claude.jsonl");
+      // 30 old user matches followed by one recent user match. A count-capped
+      // candidate pool (the tail iterates oldest-first) would fill up on the
+      // old matches and never rank the recent one; collecting the whole tail
+      // must surface it at matches[0].
+      const lines: object[] = [];
+      for (let i = 0; i < 30; i++) {
+        lines.push({
+          type: "user",
+          uuid: `u${i}`,
+          parentUuid: null,
+          timestamp: `2024-01-01T12:${String(i).padStart(2, "0")}:00Z`,
+          message: { role: "user", content: `old match ${i}` },
+        });
+      }
+      lines.push({
+        type: "user",
+        uuid: "recent",
+        parentUuid: null,
+        timestamp: "2024-01-02T09:00:00Z",
+        message: { role: "user", content: "recent match wins" },
+      });
+      writeFileSync(logPath, jsonl(...lines));
+
+      const result = await searchTranscript(
+        { id: "s1", agentType: "claude", logPath },
+        "match",
+      );
+      expect(result!.matches.length).toBe(5);
+      expect(result!.matches[0].snippet).toBe("recent match wins");
+      // The rest are the newest of the old matches, newest first.
+      expect(result!.matches.slice(1).map((m) => m.snippet)).toEqual([
+        "old match 29",
+        "old match 28",
+        "old match 27",
+        "old match 26",
+      ]);
     });
 
     it("tail-truncates when the file exceeds maxBytes, dropping the partial first line", async () => {

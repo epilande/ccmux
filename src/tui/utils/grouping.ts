@@ -30,6 +30,10 @@ export const WAITING_SUBTYPES: ReadonlyArray<{
   { key: "waitingGeneric", attention: null },
 ];
 
+/** Which search source matched a session, in tier order: identity
+ * (project/branch/group key) > cwd > content (prompt > pane > transcript). */
+export type MatchSource = "identity" | "cwd" | "prompt" | "pane" | "transcript";
+
 /** A session in the filtered list with optional search highlights */
 export interface FilteredSession {
   session: EnrichedSession;
@@ -48,6 +52,14 @@ export interface FilteredSession {
   transcriptMatch?: boolean;
   /** First transcript match snippet, shown to explain why the row matched. */
   transcriptSnippet?: string;
+  /** Composite relevance score while a query is active (issue #50): the best
+   * source's tier score plus a small cross-source bonus. Absent on the
+   * empty-query path, where no ranking applies. */
+  score?: number;
+  /** Every source that matched, strongest first. */
+  matchSources?: MatchSource[];
+  /** The source whose tier produced `score`; drives the row's match cue. */
+  primarySource?: MatchSource;
 }
 
 /** Discriminated union for items in the flat render list */
@@ -193,10 +205,17 @@ export function headerGroupKeys(items: FlatItem[]): string[] {
 /**
  * Sort groups: pinned groups first (in pinned order), then unpinned
  * groups sorted alphabetically.
+ *
+ * With `byScore` (search active), groups order by their best member's
+ * relevance score instead, descending, and pinning yields: a strong match in
+ * an unpinned group outranks a weakly-matching pinned one (same precedent as
+ * search force-expanding collapsed groups). The stable sort keeps the
+ * pinned-then-alphabetical order as the tiebreak between equal scores.
  */
 export function sortGroups(
   groups: GroupEntry[],
   pinnedGroups: string[],
+  byScore = false,
 ): GroupEntry[] {
   const pinnedSet = new Set(pinnedGroups);
   const pinned: GroupEntry[] = [];
@@ -218,7 +237,13 @@ export function sortGroups(
   // Unpinned: alphabetical (stable order unaffected by session status changes)
   unpinned.sort((a, b) => a.key.localeCompare(b.key));
 
-  return [...pinned, ...unpinned];
+  const ordered = [...pinned, ...unpinned];
+  if (byScore) {
+    const best = (g: GroupEntry) =>
+      g.members.reduce((acc, m) => Math.max(acc, m.score ?? 0), 0);
+    ordered.sort((a, b) => best(b) - best(a));
+  }
+  return ordered;
 }
 
 /**
@@ -241,7 +266,11 @@ export function buildFlatItems(
     }));
   }
 
-  const sorted = sortGroups(groupSessions(filtered, groupBy), pinnedGroups);
+  const sorted = sortGroups(
+    groupSessions(filtered, groupBy),
+    pinnedGroups,
+    isSearching,
+  );
 
   const items: FlatItem[] = [];
   for (const { key, members } of sorted) {

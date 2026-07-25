@@ -25,6 +25,7 @@ async function renderItem(
     promptDisplay?: import("../../lib/preferences").PromptDisplay;
     highlights?: import("./SessionItem").SessionItemHighlights | null;
     transcriptSnippet?: string;
+    matchSource?: import("../utils/grouping").MatchSource;
   },
   width = 100,
   height = 3,
@@ -45,6 +46,7 @@ async function renderItem(
           promptDisplay={props.promptDisplay}
           highlights={props.highlights}
           transcriptSnippet={props.transcriptSnippet}
+          matchSource={props.matchSource}
         />
       </TickContext.Provider>
     ),
@@ -729,6 +731,85 @@ describe("SessionItem row 2 (subtitle)", () => {
     });
     expect(frame).toContain("ZZHIT");
     expect(frame).not.toContain("the newest message");
+  });
+
+  it("tags a pane-ranked match with a dim [pane] cue in the prompt cell", async () => {
+    const frame = await renderItem({
+      session: mockEnrichedSession({ lastPrompt: "the newest message" }),
+      // A pane-content match leaves no highlight anywhere on the row.
+      highlights: null,
+      matchSource: "pane",
+    });
+    expect(frame).toContain("[pane]");
+    expect(frame).toContain("the newest message");
+  });
+
+  it("tags a transcript-ranked match alongside its snippet", async () => {
+    const frame = await renderItem({
+      session: mockEnrichedSession({ lastPrompt: "the newest message" }),
+      highlights: { lastPrompt: null },
+      transcriptSnippet: "ZZHIT from the assistant transcript",
+      matchSource: "transcript",
+    });
+    expect(frame).toContain("[transcript]");
+    expect(frame).toContain("ZZHIT");
+  });
+
+  it("tags a cwd-ranked match whose highlights carry no visible field", async () => {
+    const frame = await renderItem({
+      session: mockEnrichedSession({ lastPrompt: "the newest message" }),
+      // A cwd fuzzy match builds a highlights object, but the cwd markup is
+      // not rendered by any cell, so the tag must still appear.
+      highlights: {
+        project: null,
+        cwd: "/Users/test/<b>Code</b>/myapp",
+        gitBranch: null,
+        lastPrompt: null,
+        prompts: null,
+      },
+      matchSource: "cwd",
+    });
+    expect(frame).toContain("[cwd]");
+  });
+
+  it("renders no tag for identity or prompt matches (highlights already visible)", async () => {
+    const identityFrame = await renderItem({
+      session: mockEnrichedSession({ lastPrompt: "the newest message" }),
+      highlights: { project: "<b>myapp</b>" },
+      matchSource: "identity",
+    });
+    expect(identityFrame).not.toContain("[identity]");
+
+    const promptFrame = await renderItem({
+      session: mockEnrichedSession({
+        lastPrompt: "the newest message",
+        prompts: ["please refactor the parser", "the newest message"],
+      }),
+      highlights: {
+        lastPrompt: null,
+        prompts: "please <b>refactor the parser</b>",
+      },
+      matchSource: "prompt",
+    });
+    expect(promptFrame).not.toContain("[prompt]");
+  });
+
+  it("suppresses the tag when a visible highlight already explains the match", async () => {
+    // Primary source is cwd (a higher tier), but the prompt substring also
+    // matched and renders highlighted; the row explains itself without a tag.
+    const frame = await renderItem({
+      session: mockEnrichedSession({ lastPrompt: "check the shared-dir now" }),
+      highlights: {
+        project: null,
+        cwd: "/tmp/<b>shared-dir</b>",
+        gitBranch: null,
+        lastPrompt: "check the <b>shared-dir</b> now",
+        prompts: null,
+      },
+      matchSource: "cwd",
+    });
+    expect(frame).not.toContain("[cwd]");
+    expect(frame).toContain("check the shared-dir now");
   });
 
   it("prefers a prompt highlight over the transcript snippet when both are present", async () => {

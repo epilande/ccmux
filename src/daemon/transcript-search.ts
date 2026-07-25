@@ -141,6 +141,14 @@ function buildSnippet(
   return snippet;
 }
 
+/** A match's time for recency ranking; missing or unparseable timestamps map
+ *  to the minimum so they sort after every dated match. */
+function matchTime(m: TranscriptMatch): number {
+  if (!m.timestamp) return Number.MIN_SAFE_INTEGER;
+  const t = Date.parse(m.timestamp);
+  return Number.isNaN(t) ? Number.MIN_SAFE_INTEGER : t;
+}
+
 /** Read the tail of a transcript, discarding a partial first line when the
  *  file was larger than the window (same idiom as `readLogTail`). */
 export async function readTranscriptTail(
@@ -218,37 +226,49 @@ export async function searchTranscript(
       return { sessionId: sess.id, matches: [] };
     }
 
+    // Collect EVERY match in the tail, then rank: the snippet the TUI shows
+    // is `matches[0]`, and a user prompt from a recent turn explains a match
+    // far better than the first assistant paragraph the file happens to
+    // contain. No collection cap: entries iterate oldest-first, so any
+    // count-based stop would keep the OLDEST candidates and starve the
+    // recency ranking of exactly the matches it wants. The pool is already
+    // bounded by the `maxBytes` tail read.
     const matches: TranscriptMatch[] = [];
+    const collect = (roleTexts: RoleText[], timestamp?: string): void => {
+      for (const { role, text } of roleTexts) {
+        const snippet = buildSnippet(text, query, leadRadius, trailRadius);
+        if (snippet) {
+          matches.push({ role, snippet, timestamp });
+        }
+      }
+    };
 
+    // `entry?.timestamp`, not `entry.timestamp`: a bare `null`/primitive line
+    // parses to a non-object entry, and an eager property read here would
+    // throw into the outer catch and drop the whole session (the extractors
+    // guard their own reads, but this one runs before them).
     if (sess.agentType === "claude") {
       const entries: LogEntry[] = parseLogEntries(content);
       for (const entry of entries) {
-        for (const { role, text } of claudeEntryTexts(entry)) {
-          const snippet = buildSnippet(text, query, leadRadius, trailRadius);
-          if (snippet) {
-            matches.push({ role, snippet, timestamp: entry.timestamp });
-            if (matches.length >= maxMatches) {
-              return { sessionId: sess.id, matches };
-            }
-          }
-        }
+        collect(claudeEntryTexts(entry), entry?.timestamp);
       }
     } else {
       const entries = parseCodexEntries(content);
       for (const entry of entries) {
-        for (const { role, text } of codexEntryTexts(entry)) {
-          const snippet = buildSnippet(text, query, leadRadius, trailRadius);
-          if (snippet) {
-            matches.push({ role, snippet, timestamp: entry.timestamp });
-            if (matches.length >= maxMatches) {
-              return { sessionId: sess.id, matches };
-            }
-          }
-        }
+        collect(codexEntryTexts(entry), entry?.timestamp);
       }
     }
 
-    return { sessionId: sess.id, matches };
+    // Rank: user turns before assistant turns, newest first within each role.
+    // Matches without a parseable timestamp sink to the end of their role
+    // block; the stable sort keeps file order as the final tiebreak.
+    matches.sort(
+      (a, b) =>
+        (a.role === "user" ? 0 : 1) - (b.role === "user" ? 0 : 1) ||
+        matchTime(b) - matchTime(a),
+    );
+
+    return { sessionId: sess.id, matches: matches.slice(0, maxMatches) };
   } catch {
     return null;
   }

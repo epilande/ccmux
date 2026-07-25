@@ -1584,6 +1584,261 @@ describe("store", () => {
 
       expect(filtered.map((f) => f.session.id)).toEqual(["hit"]);
     });
+
+    describe("relevance ranking (issue #50)", () => {
+      it("ranks an idle identity match above a waiting transcript-only match", async () => {
+        const origFetch = globalThis.fetch;
+        globalThis.fetch = (async () =>
+          ({
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  sessionId: "noisy",
+                  matches: [{ role: "user", snippet: "ccmux mentioned once" }],
+                },
+              ],
+            }),
+          }) as unknown as Response) as unknown as typeof fetch;
+        try {
+          const store = createTUIStore({ groupBy: "none" });
+          store.actions.setSessions([
+            // Waiting sorts first in the base order, but its only match is a
+            // deep transcript hit; the idle session's project IS the query.
+            createMockSession({
+              id: "noisy",
+              status: "waiting",
+              attentionType: "permission",
+              project: "other-thing",
+              cwd: "/tmp/noisy",
+              gitBranch: null,
+            }),
+            createMockSession({
+              id: "target",
+              status: "idle",
+              project: "ccmux",
+              cwd: "/tmp/target",
+              gitBranch: null,
+            }),
+          ]);
+          store.actions.setSearchQuery("ccmux");
+          await waitForDebounce();
+
+          const filtered = store.filteredSessions();
+          expect(filtered.map((f) => f.session.id)).toEqual([
+            "target",
+            "noisy",
+          ]);
+          expect(filtered[0].primarySource).toBe("identity");
+          expect(filtered[1].primarySource).toBe("transcript");
+          expect(filtered[0].score!).toBeGreaterThan(filtered[1].score!);
+        } finally {
+          globalThis.fetch = origFetch;
+        }
+      });
+
+      it("scores a newer matching prompt above an older one", () => {
+        const store = createTUIStore({ groupBy: "none" });
+        store.actions.setSessions([
+          // "stale" matched the query several prompts ago and sorts first in
+          // the base order (newer statusChangedAt); "fresh" matched in its
+          // newest prompt and must outrank it.
+          createMockSession({
+            id: "stale",
+            project: "px",
+            cwd: "/tmp/x1",
+            gitBranch: null,
+            statusChangedAt: "2024-01-01T13:00:00Z",
+            lastPrompt: "something else",
+            prompts: ["fix the flaky test", "something else"],
+          }),
+          createMockSession({
+            id: "fresh",
+            project: "py",
+            cwd: "/tmp/x2",
+            gitBranch: null,
+            statusChangedAt: "2024-01-01T12:00:00Z",
+            lastPrompt: "fix the flaky test again",
+            prompts: ["something else", "fix the flaky test again"],
+          }),
+        ]);
+
+        store.actions.setSearchQuery("flaky test");
+        const filtered = store.filteredSessions();
+        expect(filtered.map((f) => f.session.id)).toEqual(["fresh", "stale"]);
+        expect(filtered[0].primarySource).toBe("prompt");
+      });
+
+      it("adds a cross-source bonus that breaks ties but cannot jump a tier", () => {
+        const store = createTUIStore({ groupBy: "none" });
+        store.actions.setSessions([
+          // Identical identity match; "single" sorts first in the base order
+          // (newer statusChangedAt) but "corroborated" also matches on its
+          // prompt, so its bonus wins the tie.
+          createMockSession({
+            id: "single",
+            project: "ccmux",
+            cwd: "/tmp/a",
+            gitBranch: null,
+            statusChangedAt: "2024-01-01T13:00:00Z",
+          }),
+          createMockSession({
+            id: "corroborated",
+            project: "ccmux",
+            cwd: "/tmp/b",
+            gitBranch: null,
+            statusChangedAt: "2024-01-01T12:00:00Z",
+            lastPrompt: "wire ccmux into tmux",
+            prompts: ["wire ccmux into tmux"],
+          }),
+        ]);
+
+        store.actions.setSearchQuery("ccmux");
+        const filtered = store.filteredSessions();
+        expect(filtered.map((f) => f.session.id)).toEqual([
+          "corroborated",
+          "single",
+        ]);
+        // Both are identity-tier; the bonus is 50 per extra source, far less
+        // than the 1000-point tier gap.
+        expect(filtered[0].primarySource).toBe("identity");
+        expect(filtered[0].matchSources).toEqual(["identity", "prompt"]);
+        expect(filtered[0].score! - filtered[1].score!).toBe(50);
+      });
+
+      it("keeps the waiting-first base order as the tiebreak for equal scores", () => {
+        const store = createTUIStore({ groupBy: "none" });
+        store.actions.setSessions([
+          createMockSession({
+            id: "idle-match",
+            status: "idle",
+            project: "ccmux",
+            cwd: "/tmp/a",
+            gitBranch: null,
+          }),
+          createMockSession({
+            id: "waiting-match",
+            status: "waiting",
+            attentionType: "permission",
+            project: "ccmux",
+            cwd: "/tmp/b",
+            gitBranch: null,
+          }),
+        ]);
+
+        store.actions.setSearchQuery("ccmux");
+        const filtered = store.filteredSessions();
+        // Same project text, same query: identical scores. The stable sort
+        // leaves the upstream waiting-first order in place.
+        expect(filtered[0].score).toBe(filtered[1].score);
+        expect(filtered.map((f) => f.session.id)).toEqual([
+          "waiting-match",
+          "idle-match",
+        ]);
+      });
+
+      it("attaches no score on the empty-query path and keeps the base order", () => {
+        const store = createTUIStore({ groupBy: "none" });
+        store.actions.setSessions([
+          createMockSession({
+            id: "waiting",
+            status: "waiting",
+            attentionType: "permission",
+          }),
+          createMockSession({ id: "idle", status: "idle" }),
+        ]);
+
+        const filtered = store.filteredSessions();
+        expect(filtered.map((f) => f.session.id)).toEqual(["waiting", "idle"]);
+        expect(filtered[0].score).toBeUndefined();
+        expect(filtered[0].matchSources).toBeUndefined();
+        expect(filtered[0].primarySource).toBeUndefined();
+      });
+
+      it("makes the tmux session name searchable via the group key under session grouping", () => {
+        const store = createTUIStore({ groupBy: "session" });
+        store.actions.setSessions([
+          createMockSession({
+            id: "s1",
+            project: "proj",
+            cwd: "/tmp/s1",
+            gitBranch: null,
+            tmuxPane: "%1",
+            tmuxTarget: "sidequest:0.1",
+          }),
+          createMockSession({
+            id: "s2",
+            project: "proj",
+            cwd: "/tmp/s2",
+            gitBranch: null,
+            tmuxPane: "%2",
+            tmuxTarget: "other:0.1",
+          }),
+        ]);
+
+        store.actions.setSearchQuery("sidequest");
+        const filtered = store.filteredSessions();
+        expect(filtered.map((f) => f.session.id)).toEqual(["s1"]);
+        expect(filtered[0].primarySource).toBe("identity");
+      });
+
+      it("keeps the selection pinned by id when a late transcript result re-ranks the list", async () => {
+        const origFetch = globalThis.fetch;
+        globalThis.fetch = (async () =>
+          ({
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  sessionId: "s2",
+                  matches: [{ role: "user", snippet: "shared-dir noted" }],
+                },
+              ],
+            }),
+          }) as unknown as Response) as unknown as typeof fetch;
+        try {
+          const store = createTUIStore({ groupBy: "none" });
+          store.actions.setSessions([
+            // Both match only on the identical cwd (equal scores); s1 leads
+            // on the base-order tiebreak until s2's transcript hit lands and
+            // its +50 bonus flips the order.
+            createMockSession({
+              id: "s1",
+              project: "px",
+              cwd: "/tmp/shared-dir",
+              gitBranch: null,
+              statusChangedAt: "2024-01-01T13:00:00Z",
+            }),
+            createMockSession({
+              id: "s2",
+              project: "py",
+              cwd: "/tmp/shared-dir",
+              gitBranch: null,
+              statusChangedAt: "2024-01-01T12:00:00Z",
+            }),
+          ]);
+          store.actions.setSearchQuery("shared-dir");
+          expect(store.filteredSessions().map((f) => f.session.id)).toEqual([
+            "s1",
+            "s2",
+          ]);
+          // Select s1 (index 0), then let the async transcript result land.
+          store.actions.setSelectedIndex(0);
+          expect(store.state.selectedSessionId).toBe("s1");
+          await waitForDebounce();
+
+          const filtered = store.filteredSessions();
+          expect(filtered.map((f) => f.session.id)).toEqual(["s2", "s1"]);
+          // The re-rank moved the rows, not the selection: still s1, now at
+          // index 1.
+          expect(store.state.selectedSessionId).toBe("s1");
+          expect(store.selectedSession()?.id).toBe("s1");
+          expect(store.selectedIndex()).toBe(1);
+        } finally {
+          globalThis.fetch = origFetch;
+        }
+      });
+    });
   });
 
   describe("grouping", () => {

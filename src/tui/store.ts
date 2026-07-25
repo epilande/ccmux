@@ -46,6 +46,7 @@ import {
   type FlatItem,
   type GroupBy,
   type FilteredSession,
+  type MatchSource,
 } from "./utils/grouping";
 
 export type ConfirmAction =
@@ -529,8 +530,21 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     // keeping genuinely fuzzy identity lookups ("fjump" -> FlashJump,
     // "ccmx" -> ccmux; 0.5 already rejects the latter). The v2-era -10000
     // this replaces filtered nothing on the v3 scale.
+    //
+    // The group key rides along as a fifth fuzzy field (issue #50): under
+    // session/window grouping it is the tmux session/window name, which no
+    // other field covers; under project/cwd it mostly mirrors those fields,
+    // and under "none" it is "" and can never match.
+    const groupBy = state.groupBy;
     const results = fuzzysort.go(query, sorted, {
-      keys: ["project", "cwd", "gitBranch", "lastPrompt"],
+      keys: [
+        "project",
+        "cwd",
+        "gitBranch",
+        "lastPrompt",
+        (s: EnrichedSession) =>
+          groupBy === "none" ? "" : getGroupKey(s, groupBy),
+      ],
       threshold: 0.3,
     });
     const metadataMap = new Map(results.map((r) => [r.obj.id, r]));
@@ -543,13 +557,18 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     // notifications, teammate messages) can't render embedded newlines that
     // overlap in the height-1 row, and so a spaced query can match across what
     // was a newline.
-    const promptMatches = new Map<string, string>();
+    // `recency` is the matched prompt's position in the index (newest = 1,
+    // oldest = 0), feeding the score so a fresh prompt outranks a stale one.
+    const promptMatches = new Map<string, { line: string; recency: number }>();
     for (const s of sorted) {
       const prompts = s.prompts ?? [];
       for (let i = prompts.length - 1; i >= 0; i--) {
         const norm = normalizePrompt(prompts[i]);
         if (norm.toLowerCase().includes(lowerQuery)) {
-          promptMatches.set(s.id, wrapFirstMatch(norm, lowerQuery));
+          promptMatches.set(s.id, {
+            line: wrapFirstMatch(norm, lowerQuery),
+            recency: prompts.length > 1 ? i / (prompts.length - 1) : 1,
+          });
           break;
         }
       }
@@ -577,8 +596,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       ...transcript.keys(),
     ]);
 
-    // Build results preserving original sort order
-    return sorted
+    // Build result rows, each with a composite relevance score (issue #50),
+    // then order by score descending. The upstream waiting-first/recency
+    // order survives ONLY as the tiebreak: the sort is stable, so equal
+    // scores keep their original relative order. Scores are a pure function
+    // of this memo's tracked inputs (query, sessions, caches, groupBy), so a
+    // re-rank happens only when one of them changes; selection survives it
+    // because it is pinned by session id, not by index.
+    const rows = sorted
       .filter((s) => allMatchIds.has(s.id))
       .map((s) => {
         const fzResult = metadataMap.get(s.id);
@@ -607,17 +632,75 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
                 cwd: fzResult?.[1]?.highlight("<b>", "</b>") || null,
                 gitBranch: fzResult?.[2]?.highlight("<b>", "</b>") || null,
                 lastPrompt: lastPromptHl,
-                prompts: promptMatch ?? null,
+                prompts: promptMatch?.line ?? null,
               }
             : null;
+
+        // Per-key fuzzysort scores (0..1; 0 = key didn't match) split the
+        // metadata union into tiers: project/branch/group key are identity,
+        // cwd is location (long paths scatter-match, so it weighs less).
+        const identityFz = fzResult
+          ? Math.max(
+              fzResult[0]?.score ?? 0,
+              fzResult[2]?.score ?? 0,
+              fzResult[4]?.score ?? 0,
+            )
+          : 0;
+        const cwdFz = fzResult?.[1]?.score ?? 0;
+        const lastPromptFz = fzResult?.[3]?.score ?? 0;
+
+        // One contribution per matched source. Tier bases keep ordering
+        // strict: identity 3000+, cwd 2000+, prompt substring 1000+ (newer
+        // prompts higher), pane 600, transcript 400. A fuzzy-only lastPrompt
+        // hit (scatter match, no substring occurrence) is weak evidence and
+        // scores below pane. The row's score is its best contribution plus 50
+        // per additional matched source. INVARIANT: the maximum total bonus
+        // (50 x 4 extra sources = 200) must stay strictly below every gap a
+        // row could actually cross; keep it well under the smallest tier gap
+        // (pane 600 - transcript 400 = 200) when retuning either number, so
+        // corroboration can never lift a row past a stronger tier.
+        const contributions: { source: MatchSource; value: number }[] = [];
+        if (identityFz > 0) {
+          contributions.push({
+            source: "identity",
+            value: 3000 + 1000 * identityFz,
+          });
+        }
+        if (cwdFz > 0) {
+          contributions.push({ source: "cwd", value: 2000 + 500 * cwdFz });
+        }
+        if (promptMatch) {
+          contributions.push({
+            source: "prompt",
+            value: 1000 + 500 * promptMatch.recency,
+          });
+        } else if (lastPromptFz > 0) {
+          contributions.push({ source: "prompt", value: 500 * lastPromptFz });
+        }
+        if (paneMatches.has(s.id)) {
+          contributions.push({ source: "pane", value: 600 });
+        }
+        const transcriptMatch = tMatches !== undefined && tMatches.length > 0;
+        if (transcriptMatch) {
+          contributions.push({ source: "transcript", value: 400 });
+        }
+        contributions.sort((a, b) => b.value - a.value);
+        const best = contributions[0];
+
         return {
           session: s,
           highlights,
           paneMatch: paneMatches.has(s.id),
-          transcriptMatch: tMatches !== undefined && tMatches.length > 0,
+          transcriptMatch,
           transcriptSnippet: tMatches?.[0]?.snippet,
+          score: best ? best.value + 50 * (contributions.length - 1) : 0,
+          matchSources: contributions.map((c) => c.source),
+          primarySource: best?.source,
         };
       });
+
+    rows.sort((a, b) => b.score - a.score);
+    return rows;
   });
 
   const flatItems = trackedMemo("flatItems", () => {
