@@ -43,6 +43,20 @@ Per-tick the reconciler assembles a slightly different source set:
 
 A safety net: if the process PID is unknown (off-path session, crashed parent), log-file mtime caps a stale "working" to `idle` after 10 minutes (`status-machine.ts`).
 
+## Process discovery (`processes.ts`)
+
+Every scan tick lists processes with `ps`, matches each command line against the agent defs, then resolves the survivors' `cwd` and `tty` with one batched `lsof`. The tty is what makes a process bindable — the binder matches it against the pane's tty — so a process without one never becomes a session.
+
+**Where the tty comes from is platform-dependent.** On macOS `ps` is asked for `pid,ppid,etime,command` and the tty is harvested from `lsof -a -p <pids> -d cwd,0,1,2 -Ffn`, because BSD `ps` builds a full device-name table whenever the `tty` column is requested (~136ms vs ~55ms on a 1200-process machine; narrowing to specific pids doesn't avoid it). Everywhere else `ps` keeps its `tty` column and lsof stays untightened: Linux reads tty straight from procfs, so there is nothing to win, and lsof builds vary in how they honor `-d`. The two paths differ only in the tty source; `resolveDiscoveredProcesses()` is shared and takes the choice as a parameter.
+
+Three constraints on the lsof side are load-bearing and easy to undo by accident:
+
+- **`-a` is mandatory.** Without it lsof ORs the `-p` and `-d` selectors and enumerates every process on the machine. It fails silently, since the pids you asked for are all still in the flood.
+- **Read fds 0, 1, and 2 — all of them, and nothing above them.** Codex runs with fd2 on `/dev/null` while fd0/1 hold the pane tty, so no single fd suffices; and ccmux's own OSC notification backend holds _other_ panes' ttys on high fds, so a blanket "any tty-looking fd" rule would bind a session to the wrong pane.
+- **`-F` needs the `f` selector.** lsof 4.99+ emits no fd-type lines for a bare `-Fn`, so `fcwd` never appears and every cwd lookup fails silently (nothing ever binds).
+
+Filter order after lsof is also load-bearing: resolve tty → drop the tty-less → drop codex plugin hosts by cwd → `dropWrapperParents`. The plugin host must go before wrapper dedup (it is a same-tty child of the real codex, so it would evict its own parent), and the tty filter is what keeps pipe-stdio processes — subprocess-mode invokes like `codex exec`, MCP servers, language servers — from becoming phantom rows on the pane the daemon happens to be running in.
+
 ## Session-to-pane binding (the binder)
 
 A session (a discovered agent process, or a hook marker) has to be pinned to the tmux pane it lives in before the TUI can route you there. `binder/` (`scan.ts`, `assign.ts`, `migrate.ts`, `links.ts`, `cleanup.ts`, `primitives.ts`, …) owns that policy; `session-pane-match.ts` is a thin I/O wrapper — `matchSessionsToPanes` snapshots sessions + markers, calls `decideScanBindings`, and applies the emitted bindings to the real `SessionManager`.
