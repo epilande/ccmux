@@ -641,12 +641,7 @@ export class Daemon {
       );
       DaemonPerf.markerCleanupEnd(cleanupStartNs);
 
-      await this.linkCodexSessions(processes, panes, processStartTimeByPid);
-      await this.linkOpenCodeSessions(processStartTimeByPid);
-      await this.linkCursorSessions(processStartTimeByPid);
-      await this.linkPiSessions(processStartTimeByPid);
-      await this.linkAntigravitySessions(processStartTimeByPid);
-      await this.linkCopilotSessions(processStartTimeByPid);
+      await this.runLinkPasses(processes, panes, processStartTimeByPid);
       await reconcileAll(this.buildReconcilerDeps(), {
         processes,
         panes,
@@ -976,6 +971,44 @@ export class Daemon {
       console.log(
         `Watching ${this.claudeProjectDirs.length} Claude projects dirs: ${this.claudeProjectDirs.join(", ")}`,
       );
+    }
+  }
+
+  /**
+   * Run the six per-agent marker link passes concurrently. Each pass covers
+   * a disjoint agent type with no shared mutable state, and each has its own
+   * I/O fan-out (a `getPaneHostingPid` lookup per marker pid), so serializing
+   * them only adds latency. `Promise.allSettled` (not `Promise.all`) so one
+   * pass throwing doesn't abort the rest mid-tick — a real regression this
+   * replaces, since the prior sequential `await` chain did exactly that.
+   * Failures are logged per pass and otherwise swallowed; a failed pass
+   * just leaves its sessions unlinked for one more scan.
+   */
+  private async runLinkPasses(
+    processes: ProcessInfo[],
+    panes: TmuxPane[],
+    processStartTimeByPid: ReadonlyMap<number, number | null>,
+  ): Promise<void> {
+    const passes: readonly [string, () => Promise<void>][] = [
+      [
+        "codex",
+        () => this.linkCodexSessions(processes, panes, processStartTimeByPid),
+      ],
+      ["opencode", () => this.linkOpenCodeSessions(processStartTimeByPid)],
+      ["cursor", () => this.linkCursorSessions(processStartTimeByPid)],
+      ["pi", () => this.linkPiSessions(processStartTimeByPid)],
+      [
+        "antigravity",
+        () => this.linkAntigravitySessions(processStartTimeByPid),
+      ],
+      ["copilot", () => this.linkCopilotSessions(processStartTimeByPid)],
+    ];
+    const results = await Promise.allSettled(passes.map(([, run]) => run()));
+    for (let i = 0; i < results.length; i++) {
+      const result = results[i];
+      if (result.status === "rejected") {
+        console.error(`Link pass failed (${passes[i][0]}):`, result.reason);
+      }
     }
   }
 
