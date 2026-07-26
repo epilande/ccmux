@@ -437,11 +437,15 @@ export class DaemonServer {
    * `rev-parse --abbrev-ref HEAD --git-dir` prints both, one line each, in
    * argument order.
    *
-   * Gated on exit 0 AND exactly two lines. A freshly `git init`ed repo has an
-   * unborn HEAD: git exits 128 but still prints a lone `HEAD` line, so parsing
-   * stdout without the gate would report a phantom `HEAD` branch for every new
-   * repo. A detached HEAD in a real repo still reports the literal `HEAD`
-   * (exit 0, two lines), which is pre-existing behavior and unchanged.
+   * Gated on exit 0 AND exactly two lines. The exit-code check is what
+   * actually guards against a phantom `HEAD` branch: a bare repo with an
+   * unborn HEAD still prints two stdout lines ("HEAD" and a literal
+   * "--git-dir") while exiting 128, so a line-count-only gate would parse
+   * that as a real two-line answer and misreport the branch. The two-line
+   * gate stays as defense-in-depth on top of the exit-code check, not as a
+   * substitute for it. A detached HEAD in a real repo still reports the
+   * literal `HEAD` (exit 0, two lines), which is pre-existing behavior and
+   * unchanged.
    */
   private async readGitInfo(cwd: string): Promise<GitInfo> {
     const proc = Bun.spawn(
@@ -532,7 +536,13 @@ export class DaemonServer {
     // TTL plus this interval; landed changes broadcast through
     // onBranchPRsChanged like any other refresh.
     this.prSweepInterval = setInterval(() => {
-      this.sweepBranchPRs();
+      // sweepBranchPRs is synchronous; a throw here would otherwise escape
+      // uncaught from a setInterval callback and crash the daemon.
+      try {
+        this.sweepBranchPRs();
+      } catch (err) {
+        console.error("PR sweep failed:", err);
+      }
     }, PR_SWEEP_INTERVAL_MS);
 
     console.log(`Daemon server listening on ${DAEMON_HOST}:${DAEMON_PORT}`);
