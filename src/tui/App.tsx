@@ -72,6 +72,7 @@ import {
 } from "./utils/sidebar-width";
 import { createWindowVisibility } from "./utils/window-visibility";
 import { createFlashScheduler } from "./utils/pane-flash";
+import { createIdleGcScheduler } from "./utils/idle-gc";
 import { setSpinnerPaused } from "./utils/useStatusIcon";
 import { markStartup, reportStartup } from "../lib/startup-timing";
 
@@ -775,12 +776,24 @@ export function App(props: AppProps) {
     });
   }
 
-  // Sidebar: a spinner frame bump is a full-buffer redraw, so a background
-  // sidebar animating `working` sessions burns CPU on an invisible surface.
-  // The refcount survives the pause, so icons resume in place.
+  // Sidebar: react to visibility changes.
+  //   - A spinner frame bump is a full-buffer redraw, so a background sidebar
+  //     animating `working` sessions burns CPU on an invisible surface. The
+  //     refcount survives the pause, so icons resume in place.
+  //   - Collect the heap once the window has stayed hidden: with the redraws
+  //     gone, the process allocates too little for JSC's allocation-driven GC
+  //     to ever run, so it can strand its boot-time high-water mark.
   if (props.sidebar) {
-    createEffect(() => setSpinnerPaused(!isVisible()));
-    onCleanup(() => setSpinnerPaused(false));
+    const idleGc = createIdleGcScheduler();
+    createEffect(() => {
+      const visible = isVisible();
+      setSpinnerPaused(!visible);
+      idleGc.setVisible(visible);
+    });
+    onCleanup(() => {
+      setSpinnerPaused(false);
+      idleGc.cancel();
+    });
   }
 
   // Sync state across TUI instances (sidebar reads state.json changes made by picker)
