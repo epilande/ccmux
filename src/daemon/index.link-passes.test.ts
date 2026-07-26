@@ -134,4 +134,61 @@ describe("Daemon.runLinkPasses", () => {
 
     expect(calls.sort()).toEqual([...LINK_PASS_NAMES].sort());
   });
+
+  describe("log-once-per-distinct-reason suppression", () => {
+    it("logs a permanently failing pass once, not every tick", async () => {
+      installLinkPassMocks(internals, { failing: ["opencode"] });
+
+      const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+      await internals.runLinkPasses([], [], new Map());
+      await internals.runLinkPasses([], [], new Map());
+      await internals.runLinkPasses([], [], new Map());
+
+      // Same error message every tick ("opencode link pass boom"): suppressed
+      // after the first log instead of spamming once per scan forever.
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      errorSpy.mockRestore();
+    });
+
+    it("logs again once the error message for a pass changes", async () => {
+      let message = "first failure shape";
+      installLinkPassMocks(internals, {}); // wires all six to succeed
+      internals.linkOpenCodeSessions = (async () => {
+        throw new Error(message);
+      }) as never;
+
+      const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+      await internals.runLinkPasses([], [], new Map());
+      await internals.runLinkPasses([], [], new Map()); // same message, suppressed
+      message = "second failure shape";
+      await internals.runLinkPasses([], [], new Map()); // distinct message, logs again
+
+      expect(errorSpy).toHaveBeenCalledTimes(2);
+      const loggedText = errorSpy.mock.calls
+        .map((call) => call.join(" "))
+        .join("\n");
+      expect(loggedText).toContain("first failure shape");
+      expect(loggedText).toContain("second failure shape");
+      errorSpy.mockRestore();
+    });
+
+    it("logs again after a recovery even if the same message recurs", async () => {
+      let shouldFail = true;
+      installLinkPassMocks(internals, {}); // wires all six to succeed
+      internals.linkOpenCodeSessions = (async () => {
+        if (shouldFail) throw new Error("opencode link pass boom");
+      }) as never;
+
+      const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+      await internals.runLinkPasses([], [], new Map()); // fails, logs
+      await internals.runLinkPasses([], [], new Map()); // fails again, suppressed
+      shouldFail = false;
+      await internals.runLinkPasses([], [], new Map()); // recovers, clears
+      shouldFail = true;
+      await internals.runLinkPasses([], [], new Map()); // fails with the same text, logs again
+
+      expect(errorSpy).toHaveBeenCalledTimes(2);
+      errorSpy.mockRestore();
+    });
+  });
 });

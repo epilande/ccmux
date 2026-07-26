@@ -206,6 +206,12 @@ export class Daemon {
   /** Consecutive-scan-failure tracker; drives the degraded/recovered banner
    *  and health snapshot. */
   private scanHealth = new ScanHealth({ threshold: SCAN_DEGRADED_THRESHOLD });
+  /** Last error message logged per link pass name, so a structurally broken
+   *  adapter (failing the same way every scan) logs once per distinct
+   *  message instead of spamming `console.error` every 5s forever. Cleared
+   *  on a fulfilled run so a genuinely new failure after a recovery logs
+   *  again. See `runLinkPasses`. */
+  private lastLinkPassError: Map<string, string> = new Map();
   /** Cache of tmux panes, updated during periodic scan */
   private paneCache: Map<string, TmuxPane> = new Map();
   private hookManager = new HookManager();
@@ -1020,8 +1026,24 @@ export class Daemon {
     const results = await Promise.allSettled(passes.map(([, run]) => run()));
     for (let i = 0; i < results.length; i++) {
       const result = results[i];
+      const passName = passes[i][0];
       if (result.status === "rejected") {
-        console.error(`Link pass failed (${passes[i][0]}):`, result.reason);
+        const message =
+          result.reason instanceof Error
+            ? result.reason.message
+            : String(result.reason);
+        // Log once per distinct error message per pass, not every tick: a
+        // structurally broken adapter fails identically every 5s forever,
+        // and (deliberately, per the docblock above) that failure doesn't
+        // count toward scan health, so nothing else bounds the spam.
+        if (this.lastLinkPassError.get(passName) !== message) {
+          this.lastLinkPassError.set(passName, message);
+          console.error(`Link pass failed (${passName}):`, result.reason);
+        }
+      } else {
+        // Recovered (or never failed): clear so a future distinct failure
+        // logs again instead of staying muted by a stale message.
+        this.lastLinkPassError.delete(passName);
       }
     }
   }
