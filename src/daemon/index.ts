@@ -24,7 +24,7 @@ import {
   resolveExistingLogPath,
   type CodexLinkCandidate,
 } from "./binder";
-import { SessionManager, derivePaneTrackedSessionId } from "./sessions";
+import { SessionManager } from "./sessions";
 import { ClaudeBackgroundSource } from "./sources/claude-background";
 import { LogWatcher } from "./watcher";
 import { ClaudeLogAdapter } from "./adapters/claude/log-adapter";
@@ -750,18 +750,15 @@ export class Daemon {
         // already resolved a nativeSessionId for this same process: a pane
         // reuse (new pid) still needs re-resolution, but re-lsof'ing an
         // unchanged run every tick is pure waste (issue #55).
-        const existing = this.sessionManager.getSession(
-          derivePaneTrackedSessionId(pane.paneId, proc.agentType),
-        );
-        const alreadyResolved =
-          existing?.pid === proc.pid && !!existing.nativeSessionId;
         const nativeSessionId =
           proc.agentType === "claude" &&
           this.claudeRuntimeMode === "claude-no-hooks"
             ? undefined
-            : alreadyResolved
-              ? existing.nativeSessionId
-              : await this.resolveNativeSessionId(proc.pid, agent);
+            : (this.sessionManager.getResolvedNativeSessionId(
+                pane.paneId,
+                proc.agentType,
+                proc.pid,
+              ) ?? (await this.resolveNativeSessionId(proc.pid, agent)));
         const session = this.sessionManager.createPaneTrackedSession({
           agentType: proc.agentType,
           paneId: pane.paneId,

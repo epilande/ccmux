@@ -25,15 +25,13 @@ interface PaneTrackedSessionInput {
 
 /**
  * Derive a pane-tracked session's stable id from its pane + agent type.
- * `createPaneTrackedSession` uses this to find/create the row; exported so
- * callers that need to look up an existing pane-tracked session (e.g. to
- * decide whether re-resolving its `nativeSessionId` is even necessary) don't
- * have to re-derive the same scheme.
+ * `createPaneTrackedSession` uses this to find/create the row. Kept
+ * module-private: the id scheme is `SessionManager`'s implementation detail,
+ * not something callers should depend on (see
+ * `SessionManager.getResolvedNativeSessionId`, which looks up by pane
+ * without exposing it).
  */
-export function derivePaneTrackedSessionId(
-  paneId: string,
-  agentType: string,
-): string {
+function derivePaneTrackedSessionId(paneId: string, agentType: string): string {
   const paneNumberMatch = paneId.match(/^%(\d+)$/);
   const paneToken = paneNumberMatch ? `pane${paneNumberMatch[1]}` : "pane";
   return `${agentType}_${paneToken}`;
@@ -867,6 +865,25 @@ export class SessionManager extends EventEmitter {
    */
   getSession(sessionId: string): Readonly<Session> | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  /**
+   * Return the pane-tracked session's already-resolved `nativeSessionId` for
+   * this exact process, or `undefined` if there is none to reuse (no
+   * existing row, a pane hand-off to a different pid, or not yet resolved).
+   * Lets `createOrUpdatePaneTrackedSessions` skip its per-tick lsof spawn
+   * (issue #55) without depending on the pane-tracked id scheme itself.
+   */
+  getResolvedNativeSessionId(
+    paneId: string,
+    agentType: string,
+    pid: number | null,
+  ): string | undefined {
+    const existing = this.sessions.get(
+      derivePaneTrackedSessionId(paneId, agentType),
+    );
+    if (existing?.pid !== pid) return undefined;
+    return existing.nativeSessionId;
   }
 
   /**
