@@ -1,7 +1,7 @@
 import { stat } from "fs/promises";
 import { getPreferences, DEFAULT_SIDEBAR_WIDTH } from "../../lib/preferences";
 import { PREFS_FILE } from "../../lib/config";
-import { PANE_FIELD_SEP } from "../../lib/tmux-format";
+import { fetchWindowState } from "./tmux-window-state";
 
 /** Quiet period after the last pane-width change before we treat it as settled.
  * First line of defense against oscillation: lets a transient proportional
@@ -65,49 +65,6 @@ export function shouldPersistWidth(d: PersistDecision): boolean {
   return d.settledWidth !== d.configuredWidth;
 }
 
-interface WindowState {
-  windowWidth: number | null;
-  windowActive: boolean | null;
-  sessionAttached: boolean | null;
-}
-
-const UNKNOWN_WINDOW_STATE: WindowState = {
-  windowWidth: null,
-  windowActive: null,
-  sessionAttached: null,
-};
-
-async function getWindowState(): Promise<WindowState> {
-  const pane = process.env.TMUX_PANE;
-  if (!pane) return UNKNOWN_WINDOW_STATE;
-  try {
-    const format = [
-      "#{window_width}",
-      "#{window_active}",
-      "#{session_attached}",
-    ].join(PANE_FIELD_SEP);
-    const proc = Bun.spawn(
-      ["tmux", "display-message", "-p", "-t", pane, format],
-      { stdout: "pipe", stderr: "ignore" },
-    );
-    const out = (await new Response(proc.stdout).text()).trim();
-    await proc.exited;
-    const parts = out.split(PANE_FIELD_SEP);
-    if (parts.length < 3) return UNKNOWN_WINDOW_STATE;
-    const width = Number.parseInt(parts[0], 10);
-    const active = Number.parseInt(parts[1], 10);
-    // session_attached is a count of attached clients (>0 means attached).
-    const attached = Number.parseInt(parts[2], 10);
-    return {
-      windowWidth: Number.isInteger(width) ? width : null,
-      windowActive: Number.isInteger(active) ? active === 1 : null,
-      sessionAttached: Number.isInteger(attached) ? attached > 0 : null,
-    };
-  } catch {
-    return UNKNOWN_WINDOW_STATE;
-  }
-}
-
 /** Age of the last preferences write in ms, or null when the file is missing or
  * cannot be stat'd (no file → no propagation in flight → persist allowed). */
 async function getPrefsAgeMs(): Promise<number | null> {
@@ -137,14 +94,14 @@ function spawnApplyWidth(width: number): void {
  */
 export function createSidebarWidthPersister(): (width: number) => void {
   let lastWindowWidth: number | null = null;
-  void getWindowState().then((s) => {
+  void fetchWindowState().then((s) => {
     lastWindowWidth = s.windowWidth;
   });
 
   return (settledWidth: number) => {
     void (async () => {
       const [state, prefsAgeMs, prefs] = await Promise.all([
-        getWindowState(),
+        fetchWindowState(),
         getPrefsAgeMs(),
         getPreferences(),
       ]);
