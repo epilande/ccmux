@@ -24,6 +24,22 @@ interface PaneTrackedSessionInput {
 }
 
 /**
+ * Derive a pane-tracked session's stable id from its pane + agent type.
+ * `createPaneTrackedSession` uses this to find/create the row; exported so
+ * callers that need to look up an existing pane-tracked session (e.g. to
+ * decide whether re-resolving its `nativeSessionId` is even necessary) don't
+ * have to re-derive the same scheme.
+ */
+export function derivePaneTrackedSessionId(
+  paneId: string,
+  agentType: string,
+): string {
+  const paneNumberMatch = paneId.match(/^%(\d+)$/);
+  const paneToken = paneNumberMatch ? `pane${paneNumberMatch[1]}` : "pane";
+  return `${agentType}_${paneToken}`;
+}
+
+/**
  * Inputs for a Claude background (background-agent) session. Identity fields
  * follow the background-source rules: `daemonShort` is the stable
  * dedup key (`Session.id`), `nativeSessionId` is `state.json.resumeSessionId`,
@@ -282,9 +298,7 @@ export class SessionManager extends EventEmitter {
    * Create a process-only pane-tracked session for pane-tracked agents.
    */
   createPaneTrackedSession(input: PaneTrackedSessionInput): Session {
-    const paneNumberMatch = input.paneId.match(/^%(\d+)$/);
-    const paneToken = paneNumberMatch ? `pane${paneNumberMatch[1]}` : "pane";
-    const sessionId = `${input.agentType}_${paneToken}`;
+    const sessionId = derivePaneTrackedSessionId(input.paneId, input.agentType);
     const project = deriveProject(input.cwd, input.agentType);
 
     const existing = this.sessions.get(sessionId);
