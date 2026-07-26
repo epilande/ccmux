@@ -1,4 +1,12 @@
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  setSystemTime,
+} from "bun:test";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -135,5 +143,54 @@ describe("Daemon.createOrUpdatePaneTrackedSessions lsof skip (issue #55 item 2)"
     expect(lsofCalls).toBe(1);
     await internals.createOrUpdatePaneTrackedSessions([proc], [pane]);
     expect(lsofCalls).toBe(2);
+  });
+
+  describe("time-bounded skip (issue #55/#59 follow-up)", () => {
+    afterEach(() => {
+      setSystemTime();
+    });
+
+    it("keeps skipping lsof while the cached resolution is fresh", async () => {
+      const pane = fakePane("%4", "/dev/ttys005", "/Users/test/proj4");
+      const proc = fakeCopilotProcess(999, "ttys005", "/Users/test/proj4");
+
+      setSystemTime(new Date("2024-01-01T00:00:00.000Z"));
+      await internals.createOrUpdatePaneTrackedSessions([proc], [pane]);
+      expect(lsofCalls).toBe(1);
+
+      setSystemTime(new Date("2024-01-01T00:00:59.000Z")); // +59s, still fresh
+      await internals.createOrUpdatePaneTrackedSessions([proc], [pane]);
+      expect(lsofCalls).toBe(1);
+    });
+
+    it("re-spawns lsof once the cached resolution ages past the TTL and applies an id change", async () => {
+      const pane = fakePane("%5", "/dev/ttys006", "/Users/test/proj5");
+      const proc = fakeCopilotProcess(1010, "ttys006", "/Users/test/proj5");
+
+      setSystemTime(new Date("2024-01-01T00:00:00.000Z"));
+      await internals.createOrUpdatePaneTrackedSessions([proc], [pane]);
+      expect(lsofCalls).toBe(1);
+      const afterFirst = internals.sessionManager.getSession("copilot_pane5");
+      expect(afterFirst?.nativeSessionId).toBe(
+        "12345678-1234-1234-1234-1234567890ab",
+      );
+
+      // Same pid opens a new session file (e.g. `/new`, no hooks installed):
+      // lsof now reports a different session under the same pid.
+      internals.getLsofLines = async () => {
+        lsofCalls += 1;
+        return [
+          "n/Users/test/session-state/abcdefab-abcd-abcd-abcd-abcdefabcdef/session.db",
+        ];
+      };
+
+      setSystemTime(new Date("2024-01-01T00:01:01.000Z")); // +61s, stale
+      await internals.createOrUpdatePaneTrackedSessions([proc], [pane]);
+      expect(lsofCalls).toBe(2);
+      const afterSecond = internals.sessionManager.getSession("copilot_pane5");
+      expect(afterSecond?.nativeSessionId).toBe(
+        "abcdefab-abcd-abcd-abcd-abcdefabcdef",
+      );
+    });
   });
 });

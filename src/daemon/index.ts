@@ -746,10 +746,16 @@ export class Daemon {
         if (!cwd) return;
 
         const agent = this.agents.find((a) => a.name === proc.agentType);
-        // Skip the lsof spawn entirely when the pane's existing session
-        // already resolved a nativeSessionId for this same process: a pane
-        // reuse (new pid) still needs re-resolution, but re-lsof'ing an
-        // unchanged run every tick is pure waste (issue #55).
+        // Skip the lsof spawn when the pane's existing session already
+        // resolved a nativeSessionId for this same process: a pane reuse
+        // (new pid) still needs re-resolution, but re-lsof'ing an unchanged
+        // run every tick is pure waste (issue #55). The skip is time-bounded
+        // (SessionManager.NATIVE_SESSION_ID_CACHE_TTL_MS) rather than
+        // permanent: for agents without hooks installed (pi, copilot are
+        // the only ones reaching this path), the same pid can open a new
+        // session file (e.g. `/new`) mid-run, and only a periodic re-lsof
+        // catches that hand-off.
+
         const nativeSessionId =
           proc.agentType === "claude" &&
           this.claudeRuntimeMode === "claude-no-hooks"

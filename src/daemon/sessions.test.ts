@@ -1,4 +1,11 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  setSystemTime,
+  afterEach,
+} from "bun:test";
 import { SessionManager, getMarkerKey } from "./sessions";
 import type { Session } from "../types/session";
 import type { SessionPidMarker } from "./session-markers";
@@ -1165,6 +1172,53 @@ describe("SessionManager", () => {
       );
       expect(manager.getSession("codex_pane1")?.nativeSessionId).toBe(
         "held-id",
+      );
+    });
+  });
+
+  describe("getResolvedNativeSessionId TTL (issue #55 follow-up)", () => {
+    afterEach(() => {
+      setSystemTime();
+    });
+
+    it("returns the cached id while the resolution is younger than the TTL", () => {
+      const manager = new SessionManager();
+      setSystemTime(new Date("2024-01-01T00:00:00.000Z"));
+      manager.createPaneTrackedSession({
+        agentType: "copilot",
+        paneId: "%1",
+        cwd: "/x",
+        pid: 11111,
+      });
+      manager.setNativeSessionId("copilot_pane1", "session-a");
+
+      setSystemTime(new Date("2024-01-01T00:00:59.000Z")); // +59s, still fresh
+      expect(manager.getResolvedNativeSessionId("%1", "copilot", 11111)).toBe(
+        "session-a",
+      );
+    });
+
+    it("returns undefined once the cached resolution ages past the TTL, letting the caller re-resolve", () => {
+      const manager = new SessionManager();
+      setSystemTime(new Date("2024-01-01T00:00:00.000Z"));
+      manager.createPaneTrackedSession({
+        agentType: "copilot",
+        paneId: "%1",
+        cwd: "/x",
+        pid: 11111,
+      });
+      manager.setNativeSessionId("copilot_pane1", "session-a");
+
+      setSystemTime(new Date("2024-01-01T00:01:01.000Z")); // +61s, stale
+      expect(
+        manager.getResolvedNativeSessionId("%1", "copilot", 11111),
+      ).toBeUndefined();
+
+      // Simulating the caller's re-resolution landing a new id: the TTL
+      // window resets and the new id is served as cached again.
+      manager.setNativeSessionId("copilot_pane1", "session-b");
+      expect(manager.getResolvedNativeSessionId("%1", "copilot", 11111)).toBe(
+        "session-b",
       );
     });
   });
