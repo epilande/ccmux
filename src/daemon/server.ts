@@ -237,6 +237,8 @@ export class DaemonServer {
   private getPaneCache: PaneCacheGetter;
   private getAgentByType: AgentLookup;
   private visibleSessions = new Set<string>();
+  /** Rotating start index for `sweepBranchPRs`, see its docstring. */
+  private sweepOffset = 0;
   private gitInfoCache = new Map<string, GitInfoCacheEntry>();
   /** Coalesces concurrent lookups for one cwd onto a single git spawn. */
   private gitInfoInflight = new Map<string, Promise<GitInfo>>();
@@ -325,16 +327,37 @@ export class DaemonServer {
    * sweep re-derived git for every distinct visible cwd, forever, on an
    * otherwise idle machine: the git TTL is far below this interval, so it was
    * always expired by sweep time.
+   *
+   * Iteration starts at a rotating offset into the visible-session list
+   * instead of always position 0. `PRResolver.get()` bails out of starting a
+   * refresh once its concurrency cap is saturated (`inflight.size >=
+   * MAX_CONCURRENT_REFRESHES`), and that check races in list order: a fixed
+   * start order means the same handful of leading sessions always win the
+   * cap's slots and every key past them is starved forever. Advancing the
+   * offset by exactly one session per sweep (not by the cap size) needs no
+   * knowledge of the resolver's internal cap and stays correct even if that
+   * cap changes: whichever key sits at the new offset is always first in
+   * line, so it is guaranteed a refresh attempt that sweep if it is stale
+   * (the cap is >= 1). Since the offset visits every list position once per
+   * `len` sweeps, every visible key gets at least one refresh attempt within
+   * `len` sweeps in the worst case, even though in practice a cap of 4
+   * clears a cold cache much faster than that.
    */
   private sweepBranchPRs(): void {
     const paneCache = this.getPaneCache();
-    for (const session of this.sessionManager.getSessions()) {
-      if (!this.visibleSessions.has(session.id)) continue;
+    const sessions = this.sessionManager
+      .getSessions()
+      .filter((s) => this.visibleSessions.has(s.id));
+    const len = sessions.length;
+    if (len === 0) return;
+    for (let i = 0; i < len; i++) {
+      const session = sessions[(this.sweepOffset + i) % len];
       const cwd = this.effectiveCwd(session, paneCache);
       const branch =
         this.gitInfoCache.get(cwd)?.info.branch ?? session.gitBranch;
       this.prResolver.get(cwd, branch);
     }
+    this.sweepOffset = (this.sweepOffset + 1) % len;
   }
 
   /** Where a session really lives: the pane's cwd (real shell state) when it

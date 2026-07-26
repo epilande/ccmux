@@ -16,7 +16,7 @@ import { InvocationManager } from "./invocation-manager";
 import { InvocationRegistry } from "./invokers/registry";
 import { stubInvoker } from "./invokers/test-helpers";
 import type { HookAdapter } from "./hook-adapter";
-import type { PRResolver } from "./pr-resolver";
+import { PRResolver } from "./pr-resolver";
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -31,6 +31,7 @@ type ServerInternals = {
   enrichSession(session: Session): Promise<EnrichedSession>;
   sweepBranchPRs(): void;
   prResolver: PRResolver;
+  sweepOffset: number;
   onBranchPRsChanged(cwd: string, branch: string): Promise<void>;
   visibleSessions: Set<string>;
   lastSidebarState: {
@@ -614,6 +615,55 @@ describe("DaemonServer", () => {
       } finally {
         git.restore();
       }
+    });
+
+    it("gives every key a refresh attempt within `len` sweeps under the resolver's concurrency cap", async () => {
+      const { manager, internals } = createServer();
+      const KEY_COUNT = 10; // > the resolver's MAX_CONCURRENT_REFRESHES (4)
+
+      for (let i = 0; i < KEY_COUNT; i++) {
+        manager.createSession(
+          `s${i}`,
+          `/Users/test/.claude/projects/-Users-test-proj${i}/s${i}.jsonl`,
+        );
+        manager.updateSession(`s${i}`, { gitBranch: `feat/${i}` });
+        internals.visibleSessions.add(`s${i}`);
+      }
+
+      const attempted = new Set<string>();
+      // Real PRResolver (not a hand-rolled stand-in) so its actual
+      // MAX_CONCURRENT_REFRESHES=4 cap is what's under test. Each lookup
+      // resolves on its own microtask, mirroring the real world where gh
+      // calls settle well inside the sweep interval and free their slot
+      // before the next sweep runs.
+      internals.prResolver = new PRResolver({
+        lookup: async (cwd, branch) => {
+          attempted.add(`${cwd}\0${branch}`);
+          return null;
+        },
+      });
+
+      // Rotation scheme: sweepOffset advances by exactly one session per
+      // sweep, so every session becomes the iteration's starting position
+      // (and therefore first in line for the cap's slots) exactly once
+      // every `len` sweeps. That guarantees every key gets at least one
+      // refresh attempt within `len` sweeps in the worst case, so KEY_COUNT
+      // sweeps is a sound (if pessimistic) bound to assert against.
+      for (let sweep = 0; sweep < KEY_COUNT; sweep++) {
+        internals.sweepBranchPRs();
+        // Let each sweep's refresh promises settle (and free their inflight
+        // slots) before the next sweep starts, same as the real interval
+        // spacing gh calls out from sweeps.
+        await Bun.sleep(0);
+      }
+
+      const expectedKeys = new Set(
+        Array.from(
+          { length: KEY_COUNT },
+          (_, i) => `/Users/test/proj${i}\0feat/${i}`,
+        ),
+      );
+      expect(attempted).toEqual(expectedKeys);
     });
   });
 
