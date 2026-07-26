@@ -163,11 +163,16 @@ const TMP_MARKER_MAX_AGE_MS = 60 * 60 * 1000;
  *
  * Also sweeps orphaned `*.tmp*` files (interrupted tmp+rename writes) past
  * {@link TMP_MARKER_MAX_AGE_MS}: inert, but they would accumulate forever.
+ *
+ * `pendingPidReap` carries one-scan hysteresis for the PID-liveness check
+ * across calls; the caller owns the set and this updates it in place. Step 2
+ * below says why that one check is hedged and the others are not.
  */
 export function cleanupStaleMarkers(
   activePids: Set<number>,
   activeTtys: Map<number, string> | undefined,
   isSessionStillLive: (marker: SessionPidMarker) => boolean,
+  pendingPidReap: Set<string>,
 ): number {
   if (!existsSync(MARKERS_DIR)) return 0;
 
@@ -181,6 +186,8 @@ export function cleanupStaleMarkers(
       // Ignore deletion errors.
     }
   };
+
+  const proposedPidReap = new Set<string>();
 
   try {
     const entries = readdirSync(MARKERS_DIR);
@@ -244,9 +251,27 @@ export function cleanupStaleMarkers(
 
       const { path: markerPath, marker } = markers[0];
 
-      // 2. PID-liveness.
+      // 2. PID-liveness, hedged over two consecutive scans.
+      //
+      // `activePids` is the scan's process discovery, and on macOS that set is
+      // gated on a single lsof call resolving each process's tty. A one-tick
+      // omission of a live pid (lsof is racy against processes opening and
+      // closing fds) would otherwise delete the authoritative marker of a
+      // running session, taking its native session id and log path with it.
+      // So a pid must be missing on two scans in a row before its marker is
+      // reaped — the same two-scan rule stale-session cleanup uses
+      // (`binder/cleanup.ts`). The pid is part of the key so a session that
+      // re-execs under a new pid starts its own count.
+      //
+      // Only this check is hedged: the others read the marker's own contents,
+      // which do not flicker.
       if (!activePids.has(marker.pid)) {
-        tryUnlink(markerPath);
+        const reapKey = `${marker.agent_type}\0${marker.session_id}\0${marker.pid}`;
+        if (pendingPidReap.has(reapKey)) {
+          tryUnlink(markerPath);
+        } else {
+          proposedPidReap.add(reapKey);
+        }
         continue;
       }
 
@@ -269,6 +294,14 @@ export function cleanupStaleMarkers(
       if (!isSessionStillLive(marker)) {
         tryUnlink(markerPath);
       }
+    }
+
+    // Swap in this scan's proposals, so a pid that came back silently drops
+    // its pending reap. Only on the success path: a directory we could not
+    // read is not evidence that anything recovered.
+    pendingPidReap.clear();
+    for (const reapKey of proposedPidReap) {
+      pendingPidReap.add(reapKey);
     }
   } catch {
     // Ignore directory read errors.

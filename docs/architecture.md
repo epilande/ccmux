@@ -43,6 +43,16 @@ Per-tick the reconciler assembles a slightly different source set:
 
 A safety net: if the process PID is unknown (off-path session, crashed parent), log-file mtime caps a stale "working" to `idle` after 10 minutes (`status-machine.ts`).
 
+## Process discovery (`processes.ts`)
+
+Every scan tick lists processes with `ps`, matches each command line against the agent defs, then resolves the survivors' `cwd` and `tty` with one batched `lsof`. The tty is what makes a process bindable — the binder matches it against the pane's tty — so a process without one never becomes a session.
+
+**Where the tty comes from is platform-dependent**, expressed as a `DiscoveryPlatform` record chosen once. macOS leaves `tty` out of the `ps` columns and harvests it from the fds of `lsof -a -p <pids> -d cwd,0,1,2 -Ffn`, because BSD `ps` builds a full device-name table whenever the column is requested (~136ms vs ~55ms on a 1200-process machine; narrowing to specific pids doesn't avoid it). Everywhere else `ps` keeps the column and lsof stays untightened, since Linux reads tty straight from procfs and lsof builds vary in how they honor `-d`. Both records feed the same parse-and-fold, so the platform choice never spreads past that one value — and every flag in them is load-bearing in a way that fails _silently_ when undone (`-a`, exactly fds 0/1/2, the `f` field selector). Each is documented at its definition in `processes.ts`; read those before editing an invocation.
+
+**Making lsof the tty source makes it fail-closed too.** On macOS a dead lsof means every row takes `tty: null` and is filtered away, so discovery would return `[]` — indistinguishable from "no agents are running", the one answer the scan loop acts on destructively (wipe every session, delete every marker). So `batchGetProcessFdInfo` separates _lsof ran_ from _lsof did not_: a non-zero exit that still carried records is the routine case (a pid died between `ps` and the lsof call) and degrades to a few dropped rows, while a spawn exception or a non-zero exit with nothing parseable raises `ProcessDiscoveryError` and skips the cycle. Only the fd-tty platform throws; where `ps` supplies the tty, lsof contributed just the cwd and losing it is survivable. The residual single-row case — lsof succeeding but omitting one live process — is absorbed downstream by two-scan hysteresis in both session cleanup (`binder/cleanup.ts`) and marker cleanup (`cleanupStaleMarkers`).
+
+Filter order after lsof is load-bearing too: drop the tty-less → drop codex plugin hosts by cwd → `dropWrapperParents`. The plugin host must go before wrapper dedup (it is a same-tty child of the real codex, so it would evict its own parent), and the tty filter is what keeps pipe-stdio processes — subprocess-mode invokes like `codex exec`, MCP servers, language servers — from becoming phantom rows on the pane the daemon happens to be running in.
+
 ## Session-to-pane binding (the binder)
 
 A session (a discovered agent process, or a hook marker) has to be pinned to the tmux pane it lives in before the TUI can route you there. `binder/` (`scan.ts`, `assign.ts`, `migrate.ts`, `links.ts`, `cleanup.ts`, `primitives.ts`, …) owns that policy; `session-pane-match.ts` is a thin I/O wrapper — `matchSessionsToPanes` snapshots sessions + markers, calls `decideScanBindings`, and applies the emitted bindings to the real `SessionManager`.
@@ -220,45 +230,45 @@ When a scan throws `SCAN_DEGRADED_THRESHOLD` (10) times in a row (discovery fail
 
 ## Where to look in the code
 
-| Concern                                                                                                                 | Path                                          |
-| :---------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------- |
-| Daemon entry, scan loop                                                                                                 | `src/daemon/index.ts`                         |
-| Daemon process, PID file, port recovery                                                                                 | `src/daemon/lifecycle.ts`                     |
-| Per-tick reconciliation cascade                                                                                         | `src/daemon/state-reconciler.ts`              |
-| Pure freshest-wins-with-tiebreak fold                                                                                   | `src/daemon/cascade-evaluator.ts`             |
-| JSONL to state transitions                                                                                              | `src/daemon/status-machine.ts`                |
-| Regex on pane content                                                                                                   | `src/daemon/terminal-detector.ts`             |
-| Recursive log-tree watcher                                                                                              | `src/daemon/log-tree-watcher.ts`              |
+| Concern                                                                                                                  | Path                                          |
+| :----------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------- |
+| Daemon entry, scan loop                                                                                                  | `src/daemon/index.ts`                         |
+| Daemon process, PID file, port recovery                                                                                  | `src/daemon/lifecycle.ts`                     |
+| Per-tick reconciliation cascade                                                                                          | `src/daemon/state-reconciler.ts`              |
+| Pure freshest-wins-with-tiebreak fold                                                                                    | `src/daemon/cascade-evaluator.ts`             |
+| JSONL to state transitions                                                                                               | `src/daemon/status-machine.ts`                |
+| Regex on pane content                                                                                                    | `src/daemon/terminal-detector.ts`             |
+| Recursive log-tree watcher                                                                                               | `src/daemon/log-tree-watcher.ts`              |
 | Pane title / state heuristic (`classifyPaneTitle`, Braille spinner / `✳`; `detectPaneState` for Claude pane inspection) | `src/daemon/pane-classify.ts`                 |
-| `tmux capture-pane` wrapper                                                                                             | `src/daemon/pane-io.ts`                       |
-| Tmux pane listing, PID-to-pane                                                                                          | `src/daemon/pane-discovery.ts`                |
-| Session-to-pane matching policy (binder)                                                                                | `src/daemon/binder/`                          |
-| Binder I/O wrapper (`matchSessionsToPanes`)                                                                             | `src/daemon/session-pane-match.ts`            |
-| Agent process discovery                                                                                                 | `src/daemon/processes.ts`                     |
-| `ccmux-invoke-*` detached session lifecycle                                                                             | `src/daemon/detached-session.ts`              |
-| chokidar over markers, dispatch to adapters                                                                             | `src/daemon/hook-manager.ts`                  |
-| Marker file shape, cache, cleanup                                                                                       | `src/daemon/session-markers.ts`               |
-| Per-agent install + marker handling                                                                                     | `src/daemon/adapters/<agent>/hook-adapter.ts` |
-| Adapter factory (single source of truth)                                                                                | `src/daemon/adapters/index.ts`                |
-| SessionManager (EventEmitter)                                                                                           | `src/daemon/sessions.ts`                      |
-| HTTP REST + SSE on port 2269                                                                                            | `src/daemon/server.ts`                        |
-| Whole-session transcript search (`GET /search`)                                                                         | `src/daemon/transcript-search.ts`             |
-| Codex rollout line parsing (shared by adapter + search)                                                                 | `src/daemon/adapters/codex/parse.ts`          |
-| In-memory per-session prompt index (`appendPrompt`, caps in `config.ts`)                                                | `src/daemon/status-machine.ts`                |
-| `(cwd, branch)` → open-PR lookup                                                                                        | `src/daemon/pr-resolver.ts`                   |
-| Paneless Claude background-agent source                                                                                 | `src/daemon/sources/claude-background.ts`     |
-| `/invoke` request lifecycle                                                                                             | `src/daemon/invocation-manager.ts`            |
-| Subprocess invoke output store                                                                                          | `src/daemon/invocation-results.ts`            |
-| Invoker interface + capabilities                                                                                        | `src/daemon/invokers/invoker.ts`              |
-| Agent-to-invoker dispatch                                                                                               | `src/daemon/invokers/registry.ts`             |
-| Claude interactive-tmux invoker                                                                                         | `src/daemon/invokers/claude-invoker.ts`       |
-| Subprocess invoker (Codex/Cursor/etc.)                                                                                  | `src/daemon/invokers/subprocess-invoker.ts`   |
-| Notification trigger engine (debounce, gating, payload build)                                                           | `src/daemon/notifier.ts`                      |
-| Notification backend resolution + delivery (dependency-free)                                                            | `src/lib/notify.ts`                           |
-| Daemon delivery + retraction wrapper                                                                                    | `src/daemon/notify-delivery.ts`               |
-| Actionable-notification shared handler (safety rules)                                                                   | `src/daemon/notification-action.ts`           |
-| Notification body context extraction                                                                                    | `src/daemon/notify-context.ts`                |
-| Notification click/button jump routing                                                                                  | `src/daemon/notify-jump.ts`                   |
-| D-Bus notifier (buttons, inline reply, retract)                                                                         | `src/lib/notify-dbus.ts`                      |
-| macOS `ccmux-notifier` helper app (Swift)                                                                               | `notifier/`                                   |
-| Setup install/uninstall flow                                                                                            | `src/commands/setup.ts`                       |
+| `tmux capture-pane` wrapper                                                                                              | `src/daemon/pane-io.ts`                       |
+| Tmux pane listing, PID-to-pane                                                                                           | `src/daemon/pane-discovery.ts`                |
+| Session-to-pane matching policy (binder)                                                                                 | `src/daemon/binder/`                          |
+| Binder I/O wrapper (`matchSessionsToPanes`)                                                                              | `src/daemon/session-pane-match.ts`            |
+| Agent process discovery                                                                                                  | `src/daemon/processes.ts`                     |
+| `ccmux-invoke-*` detached session lifecycle                                                                              | `src/daemon/detached-session.ts`              |
+| chokidar over markers, dispatch to adapters                                                                              | `src/daemon/hook-manager.ts`                  |
+| Marker file shape, cache, cleanup                                                                                        | `src/daemon/session-markers.ts`               |
+| Per-agent install + marker handling                                                                                      | `src/daemon/adapters/<agent>/hook-adapter.ts` |
+| Adapter factory (single source of truth)                                                                                 | `src/daemon/adapters/index.ts`                |
+| SessionManager (EventEmitter)                                                                                            | `src/daemon/sessions.ts`                      |
+| HTTP REST + SSE on port 2269                                                                                             | `src/daemon/server.ts`                        |
+| Whole-session transcript search (`GET /search`)                                                                          | `src/daemon/transcript-search.ts`             |
+| Codex rollout line parsing (shared by adapter + search)                                                                  | `src/daemon/adapters/codex/parse.ts`          |
+| In-memory per-session prompt index (`appendPrompt`, caps in `config.ts`)                                                 | `src/daemon/status-machine.ts`                |
+| `(cwd, branch)` → open-PR lookup                                                                                         | `src/daemon/pr-resolver.ts`                   |
+| Paneless Claude background-agent source                                                                                  | `src/daemon/sources/claude-background.ts`     |
+| `/invoke` request lifecycle                                                                                              | `src/daemon/invocation-manager.ts`            |
+| Subprocess invoke output store                                                                                           | `src/daemon/invocation-results.ts`            |
+| Invoker interface + capabilities                                                                                         | `src/daemon/invokers/invoker.ts`              |
+| Agent-to-invoker dispatch                                                                                                | `src/daemon/invokers/registry.ts`             |
+| Claude interactive-tmux invoker                                                                                          | `src/daemon/invokers/claude-invoker.ts`       |
+| Subprocess invoker (Codex/Cursor/etc.)                                                                                   | `src/daemon/invokers/subprocess-invoker.ts`   |
+| Notification trigger engine (debounce, gating, payload build)                                                            | `src/daemon/notifier.ts`                      |
+| Notification backend resolution + delivery (dependency-free)                                                             | `src/lib/notify.ts`                           |
+| Daemon delivery + retraction wrapper                                                                                     | `src/daemon/notify-delivery.ts`               |
+| Actionable-notification shared handler (safety rules)                                                                    | `src/daemon/notification-action.ts`           |
+| Notification body context extraction                                                                                     | `src/daemon/notify-context.ts`                |
+| Notification click/button jump routing                                                                                   | `src/daemon/notify-jump.ts`                   |
+| D-Bus notifier (buttons, inline reply, retract)                                                                          | `src/lib/notify-dbus.ts`                      |
+| macOS `ccmux-notifier` helper app (Swift)                                                                                | `notifier/`                                   |
+| Setup install/uninstall flow                                                                                             | `src/commands/setup.ts`                       |
