@@ -160,12 +160,12 @@ The board renders these invokes live. The server broadcasts `invocation_started`
 
 ## PR enrichment
 
-`pr-resolver.ts` maps an agent-agnostic `(cwd, branch)` to its open PR via `gh pr list --head`. Owned by the Server (like `branchCache`). Reads are synchronous against a split-TTL cache (stale-while-revalidate; default branches skipped):
+`pr-resolver.ts` maps an agent-agnostic `(cwd, branch)` to its open PR via `gh pr list --head`. Owned by the Server (like `gitInfoCache`). Reads are synchronous against a split-TTL cache (stale-while-revalidate; default branches skipped):
 
 - Successful lookups expire after 2 min, so merges clear and new PRs appear quickly.
 - Failed lookups (null) hold for 10 min as backoff — their causes (no GitHub remote, logged-out `gh`, deleted cwd) persist on the minutes scale.
 
-Refreshes run in the background; a changed value re-broadcasts the affected sessions via `session_updated`. Because refreshes are demand-driven, the Server also sweeps enrichment over visible sessions every 2 min so a fully idle row can't serve a stale PR indefinitely (worst-case staleness ≈ TTL + sweep interval, ~4 min).
+Refreshes run in the background; a changed value re-broadcasts the affected sessions via `session_updated`. Because refreshes are demand-driven, the Server also sweeps every visible session's `(cwd, branch)` key every 2 min so a fully idle row can't serve a stale PR indefinitely (worst-case staleness ≈ TTL + sweep interval, ~4 min). The sweep reads the branch out of `gitInfoCache` (falling back to the log-derived one) rather than re-enriching, so it never spawns git — its whole job is to touch PR keys.
 
 Fail-soft: a thrown spawn disables the resolver for the daemon's lifetime only when a `Bun.which("gh")` probe confirms the binary is missing; otherwise (e.g. a deleted worktree cwd) the key is negative-cached. A non-zero `gh` exit (not a repo, no GitHub remote, unauthed) is likewise a per-key negative.
 

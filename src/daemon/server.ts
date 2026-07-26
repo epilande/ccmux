@@ -88,15 +88,16 @@ interface GitInfoCacheEntry {
   expiresAt: number;
 }
 
-/** A cwd that git can't answer for: not a repo, unborn HEAD, deleted dir. */
+/** A cwd git can't answer for: not a repo, unborn HEAD, deleted dir. */
 function unknownGitInfo(): GitInfo {
   return { branch: null, isWorktree: false };
 }
 
 const GIT_INFO_CACHE_TTL_MS = 30_000;
 /** How often to sweep visible sessions' (cwd, branch) keys through the
- *  PR resolver. Sweeps are cheap (cached reads; only expired keys spawn
- *  gh), and worst-case PR staleness = resolver TTL + this interval. */
+ *  PR resolver. Sweeps are cheap (cache reads that never spawn git; only
+ *  expired PR keys spawn gh), and worst-case PR staleness = resolver TTL +
+ *  this interval. */
 const PR_SWEEP_INTERVAL_MS = 2 * 60_000;
 
 const NATIVE_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -315,15 +316,37 @@ export class DaemonServer {
   /**
    * Touch every visible session's (cwd, branch) key so the PR resolver
    * refreshes expired entries even when no organic event re-enriches the
-   * session. Enrichment reads are cache-backed; results are discarded —
-   * the point is the `get()` side effect, and any landed change
-   * broadcasts via onBranchPRsChanged.
+   * session. Results are discarded: the point is the `get()` side effect, and
+   * any landed change broadcasts via onBranchPRsChanged.
+   *
+   * Deliberately not routed through `enrichSession`: the sweep needs a PR key,
+   * not a fresh git read. It takes the branch straight from the git cache
+   * (expired entries included, since a stale key still names the right branch
+   * far more often than not) and falls back to the log-derived branch, so a
+   * sweep never spawns git. Going through the enrich path instead meant every
+   * sweep re-derived git for every distinct visible cwd, forever, on an
+   * otherwise idle machine: the git TTL is far below this interval, so it was
+   * always expired by sweep time.
    */
-  private async sweepBranchPRs(): Promise<void> {
+  private sweepBranchPRs(): void {
+    const paneCache = this.getPaneCache();
     for (const session of this.sessionManager.getSessions()) {
       if (!this.visibleSessions.has(session.id)) continue;
-      await this.enrichSession(session);
+      const cwd = this.effectiveCwd(session, paneCache);
+      const branch =
+        this.gitInfoCache.get(cwd)?.info.branch ?? session.gitBranch;
+      this.prResolver.get(cwd, branch);
     }
+  }
+
+  /** Where a session really lives: the pane's cwd (real shell state) when it
+   *  has a live pane, else the log-derived cwd. */
+  private effectiveCwd(
+    session: Session,
+    paneCache: Map<string, TmuxPane>,
+  ): string {
+    const paneInfo = session.tmuxPane ? paneCache.get(session.tmuxPane) : null;
+    return paneInfo?.currentPath ?? session.cwd;
   }
 
   private async onBranchPRsChanged(cwd: string, branch: string) {
@@ -334,11 +357,7 @@ export class DaemonServer {
       // Cheap synchronous pre-filter on cwd before paying for the enrich:
       // on a cold cache this handler fires once per changed key, so
       // enriching every visible session here is sessions × keys calls.
-      // Mirrors enrichSession's effectiveCwd (pane cwd, else log cwd).
-      const paneInfo = session.tmuxPane
-        ? paneCache.get(session.tmuxPane)
-        : null;
-      if ((paneInfo?.currentPath ?? session.cwd) !== cwd) continue;
+      if (this.effectiveCwd(session, paneCache) !== cwd) continue;
       const enriched = await this.enrichSession(session);
       if (enriched.gitBranch !== branch) continue;
       this.broadcastEvent({
@@ -368,17 +387,18 @@ export class DaemonServer {
   }
 
   /**
-   * Resolve and cache one cwd's git info. Never rejects (so a poisoned
-   * promise can't be shared by every coalesced caller), and stamps `expiresAt`
-   * at resolution time so a slow git can't hand back an already-stale entry.
+   * Resolve and cache one cwd's git info. Never rejects, so a poisoned promise
+   * can't be shared by every coalesced caller.
    *
-   * A thrown spawn (git missing, fork failure) is deliberately not cached —
-   * it says nothing about this cwd, so the next call retries. A non-zero exit
+   * A thrown spawn (git missing, fork failure) is deliberately not cached: it
+   * says nothing about this cwd, so the next call retries. A non-zero exit
    * (not a repo, deleted dir, unborn HEAD) is a real answer and is cached.
    */
   private async resolveGitInfo(cwd: string): Promise<GitInfo> {
     try {
       const info = await this.readGitInfo(cwd);
+      // Stamped after the spawn, so a slow git can't hand back an entry that
+      // is already most of the way through its TTL.
       this.gitInfoCache.set(cwd, {
         info,
         expiresAt: Date.now() + GIT_INFO_CACHE_TTL_MS,
@@ -400,7 +420,7 @@ export class DaemonServer {
    * unborn HEAD: git exits 128 but still prints a lone `HEAD` line, so parsing
    * stdout without the gate would report a phantom `HEAD` branch for every new
    * repo. A detached HEAD in a real repo still reports the literal `HEAD`
-   * (exit 0, two lines) — pre-existing behavior, unchanged.
+   * (exit 0, two lines), which is pre-existing behavior and unchanged.
    */
   private async readGitInfo(cwd: string): Promise<GitInfo> {
     const proc = Bun.spawn(
@@ -424,8 +444,7 @@ export class DaemonServer {
     const paneInfo = session.tmuxPane ? paneCache.get(session.tmuxPane) : null;
     const tmuxTarget = paneInfo?.target ?? null;
     const paneCwd = paneInfo?.currentPath ?? null;
-    // Use pane cwd (real shell state) when available, fall back to log-derived cwd
-    const effectiveCwd = paneCwd ?? session.cwd;
+    const effectiveCwd = this.effectiveCwd(session, paneCache);
     const gitInfo = await this.getGitInfo(effectiveCwd);
     const gitBranch = gitInfo.branch ?? session.gitBranch;
     const isWorktree = gitInfo.isWorktree;
@@ -487,12 +506,12 @@ export class DaemonServer {
 
     // PR refreshes are demand-driven (a read of a stale key schedules
     // one), so a fully idle session would serve a stale PR indefinitely —
-    // e.g. a merged PR lingering as open. Sweeping enrichment over the
-    // visible sessions touches every (cwd, branch) key, capping staleness
-    // at the resolver TTL plus this interval; landed changes broadcast
-    // through onBranchPRsChanged like any other refresh.
+    // e.g. a merged PR lingering as open. Sweeping the visible sessions
+    // touches every (cwd, branch) key, capping staleness at the resolver
+    // TTL plus this interval; landed changes broadcast through
+    // onBranchPRsChanged like any other refresh.
     this.prSweepInterval = setInterval(() => {
-      void this.sweepBranchPRs();
+      this.sweepBranchPRs();
     }, PR_SWEEP_INTERVAL_MS);
 
     console.log(`Daemon server listening on ${DAEMON_HOST}:${DAEMON_PORT}`);

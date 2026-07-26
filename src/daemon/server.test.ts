@@ -16,6 +16,7 @@ import { InvocationManager } from "./invocation-manager";
 import { InvocationRegistry } from "./invokers/registry";
 import { stubInvoker } from "./invokers/test-helpers";
 import type { HookAdapter } from "./hook-adapter";
+import type { PRResolver } from "./pr-resolver";
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -28,7 +29,8 @@ import type { sendLiteralToPane, sendPromptToPane } from "./pane-io";
 type ServerInternals = {
   sessionEventToSSE(event: SessionEvent): Promise<SSEEvent | null>;
   enrichSession(session: Session): Promise<EnrichedSession>;
-  sweepBranchPRs(): Promise<void>;
+  sweepBranchPRs(): void;
+  prResolver: PRResolver;
   onBranchPRsChanged(cwd: string, branch: string): Promise<void>;
   visibleSessions: Set<string>;
   lastSidebarState: {
@@ -526,7 +528,7 @@ describe("DaemonServer", () => {
   });
 
   describe("sweepBranchPRs", () => {
-    it("enriches visible sessions only", async () => {
+    it("touches visible sessions' PR keys only", () => {
       const { manager, internals } = createServer();
       manager.createSession(
         "vis",
@@ -536,25 +538,82 @@ describe("DaemonServer", () => {
       manager.createPaneTrackedSession({
         agentType: "codex",
         paneId: "%9",
-        cwd: "/Users/test/proj",
+        cwd: "/Users/test/other",
         pid: 42,
       });
       manager.setTmuxPane("codex_pane9", null);
       internals.visibleSessions.add("vis");
+      // No cached branch for this cwd, so the key falls back to the
+      // log-derived one.
+      manager.updateSession("vis", { gitBranch: "feat/from-log" });
 
-      const seen: string[] = [];
-      const spy = spyOn(
-        internals as unknown as { enrichSession: (s: Session) => unknown },
-        "enrichSession",
-      ).mockImplementation((s: Session) => {
-        seen.push(s.id);
-        return Promise.resolve({} as EnrichedSession);
-      });
+      const seen: Array<[string | null, string | null]> = [];
+      const spy = spyOn(internals.prResolver, "get").mockImplementation(
+        (cwd: string | null, branch: string | null) => {
+          seen.push([cwd, branch]);
+          return null;
+        },
+      );
 
-      await internals.sweepBranchPRs();
+      internals.sweepBranchPRs();
 
-      expect(seen).toEqual(["vis"]);
+      expect(seen).toEqual([["/Users/test/proj", "feat/from-log"]]);
       spy.mockRestore();
+    });
+
+    it("never spawns git, even against a cold cache", () => {
+      const { manager, internals } = createServer();
+      // Installed before the session exists: creating one emits a `change`
+      // event the server enriches on its own, which would otherwise prime the
+      // cache off-camera.
+      const git = stubGitSpawn({ stdout: "feat/x\n/repo/.git\n" });
+
+      try {
+        manager.createSession(
+          "vis",
+          "/Users/test/.claude/projects/-Users-test-proj/vis.jsonl",
+        );
+        internals.visibleSessions.add("vis");
+        git.state.argv.length = 0;
+
+        internals.sweepBranchPRs();
+
+        // The sweep needs a PR key, not a fresh git read, so it reads the
+        // cache (here: empty) and falls back to the log-derived branch.
+        expect(git.state.argv).toEqual([]);
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("keys the PR lookup off the cached branch when one is warm", async () => {
+      const { manager, internals } = createServer();
+      const git = stubGitSpawn({ stdout: "feat/live\n/repo/.git\n" });
+
+      try {
+        manager.createSession(
+          "vis",
+          "/Users/test/.claude/projects/-Users-test-proj/vis.jsonl",
+        );
+        internals.visibleSessions.add("vis");
+        // Prime the cache the way the SSE init does.
+        await internals.enrichSession(manager.getSession("vis")!);
+
+        const seen: Array<string | null> = [];
+        const spy = spyOn(internals.prResolver, "get").mockImplementation(
+          (_cwd: string | null, branch: string | null) => {
+            seen.push(branch);
+            return null;
+          },
+        );
+
+        internals.sweepBranchPRs();
+
+        expect(seen).toEqual(["feat/live"]);
+        spy.mockRestore();
+      } finally {
+        git.restore();
+      }
     });
   });
 
