@@ -404,11 +404,11 @@ describe("Preview pane capture", () => {
 
     const frame = await pollFrame(15);
     expect(frame).toContain("CONTENT_FOR_%6");
-    // One settle = one capture. Six selection changes (the mount + 5 rapid
-    // moves) landing on a genuine capture storm would be 6; the debounce
-    // collapses that to (at most) the couple of captures that actually
-    // survive cancellation.
-    expect(calls).toBeLessThanOrEqual(2);
+    // Every selection change (mount included) reschedules the same debounce
+    // timer via `onCleanup`, so only the row the selection settles on ever
+    // fires a capture: exactly 1, not the 6 a genuine capture storm (mount +
+    // 5 rapid moves) would produce.
+    expect(calls).toBe(1);
   });
 });
 
