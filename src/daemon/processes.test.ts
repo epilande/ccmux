@@ -485,9 +485,12 @@ describe("resolveDiscoveredProcesses (filter order)", () => {
     });
   });
 
-  it("keeps a row whose lsof entry is missing entirely, with a null cwd", () => {
-    // The tty is already settled by this point, so a process lsof could not
-    // be read for stays discoverable; only its cwd is unknown.
+  it("keeps a ps-tty row whose lsof entry is missing entirely, with a null cwd", () => {
+    // Only reachable on the ps-tty platforms: the tty arrives in the ps row
+    // and is already settled here, so a process lsof could not be read for
+    // stays discoverable and merely loses its cwd. On the fd-tty platform a
+    // missing lsof entry means a missing tty, and the row is dropped instead
+    // — see "drops a row lsof omitted" in the fd-tty suite below.
     const [row] = resolveDiscoveredProcesses([rows[0]], new Map());
     expect(row).toMatchObject({ pid: 60, tty: "ttys077", cwd: null });
   });
@@ -740,5 +743,195 @@ describe("agent discovery failure semantics (fail-closed)", () => {
     await expect(discoverAgentProcesses([CLAUDE_AGENT_DEF])).resolves.toEqual(
       [],
     );
+  });
+});
+
+/**
+ * lsof failure semantics, run against BOTH platform records explicitly rather
+ * than the host's, because the whole point is that they diverge: on the fd-tty
+ * platform lsof is the only tty source, so losing it loses every row.
+ */
+describe("lsof failure semantics", () => {
+  const originalBunSpawn = Bun.spawn;
+
+  afterEach(() => {
+    Bun.spawn = originalBunSpawn;
+  });
+
+  interface LsofBehavior {
+    stdout?: string;
+    exitCode?: number;
+    throwOnSpawn?: boolean;
+  }
+
+  /** Renders ps rows in `platform`'s column order and scripts lsof's reply. */
+  function mockPsAndLsof(
+    platform: typeof FD_TTY_DISCOVERY,
+    rows: Array<{
+      pid: number;
+      ppid: number;
+      tty: string;
+      etime: string;
+      command: string;
+    }>,
+    lsof: LsofBehavior,
+  ): string[][] {
+    const columns = platform.psColumns.split(",");
+    const psStdout = [
+      columns.join(" ").toUpperCase(),
+      ...rows.map((r) =>
+        columns.map((c) => String(r[c as keyof typeof r])).join(" "),
+      ),
+    ].join("\n");
+
+    const spawned: string[][] = [];
+    Bun.spawn = ((cmd: string[]) => {
+      spawned.push(cmd);
+      if (cmd[0] === "ps") {
+        return {
+          stdout: new Blob([psStdout]).stream(),
+          stderr: new Blob([""]).stream(),
+          exited: Promise.resolve(0),
+        };
+      }
+      if (lsof.throwOnSpawn) throw new Error("EAGAIN: resource unavailable");
+      return {
+        stdout: new Blob([lsof.stdout ?? ""]).stream(),
+        stderr: new Blob([""]).stream(),
+        exited: Promise.resolve(lsof.exitCode ?? 0),
+      };
+    }) as unknown as typeof Bun.spawn;
+    return spawned;
+  }
+
+  const claudeRow = (pid: number, tty: string) => ({
+    pid,
+    ppid: 1,
+    tty,
+    etime: "00:05",
+    command: "claude",
+  });
+
+  /** `lsof -Ffn` records: cwd, then the pane tty on fds 0/1/2. */
+  const lsofRecords = (
+    entries: Array<{ pid: number; cwd?: string; tty?: string }>,
+  ): string =>
+    entries
+      .flatMap((e) => [
+        `p${e.pid}`,
+        ...(e.cwd ? ["fcwd", `n${e.cwd}`] : []),
+        ...(e.tty ? ["f0", `n/dev/${e.tty}`] : []),
+      ])
+      .join("\n");
+
+  describe("fd-tty platform (macOS)", () => {
+    it("throws ProcessDiscoveryError when the lsof spawn throws", async () => {
+      // Without this, every row takes tty:null, all are filtered out, and
+      // discovery returns [] — which the scan loop reads as "every agent
+      // exited" and acts on by wiping sessions and deleting every marker.
+      mockPsAndLsof(FD_TTY_DISCOVERY, [claudeRow(100, "ttys001")], {
+        throwOnSpawn: true,
+      });
+
+      await expect(
+        discoverAgentProcessesOrThrow([CLAUDE_AGENT_DEF], FD_TTY_DISCOVERY),
+      ).rejects.toBeInstanceOf(ProcessDiscoveryError);
+    });
+
+    it("throws ProcessDiscoveryError when lsof exits non-zero with no output", async () => {
+      mockPsAndLsof(FD_TTY_DISCOVERY, [claudeRow(100, "ttys001")], {
+        stdout: "",
+        exitCode: 1,
+      });
+
+      await expect(
+        discoverAgentProcessesOrThrow([CLAUDE_AGENT_DEF], FD_TTY_DISCOVERY),
+      ).rejects.toBeInstanceOf(ProcessDiscoveryError);
+    });
+
+    it("keeps working when lsof exits non-zero but still reports records", async () => {
+      // The routine case: lsof errors because a pid died between `ps` and the
+      // lsof call, while printing every other process normally. This must
+      // degrade to the rows it could resolve, NOT fail the whole scan.
+      mockPsAndLsof(
+        FD_TTY_DISCOVERY,
+        [claudeRow(100, "ttys001"), claudeRow(101, "ttys002")],
+        {
+          stdout: lsofRecords([{ pid: 100, cwd: "/repo", tty: "ttys001" }]),
+          exitCode: 1,
+        },
+      );
+
+      const processes = await discoverAgentProcessesOrThrow(
+        [CLAUDE_AGENT_DEF],
+        FD_TTY_DISCOVERY,
+      );
+      expect(processes.map((p) => p.pid)).toEqual([100]);
+      expect(processes[0]).toMatchObject({ tty: "ttys001", cwd: "/repo" });
+    });
+
+    it("drops a row lsof omitted while the call itself succeeded", async () => {
+      // No tty for pid 101 means no pane can ever hold it, so it is not a
+      // session. Cleanup hysteresis absorbs a one-scan omission of a live one.
+      mockPsAndLsof(
+        FD_TTY_DISCOVERY,
+        [claudeRow(100, "ttys001"), claudeRow(101, "ttys002")],
+        { stdout: lsofRecords([{ pid: 100, cwd: "/repo", tty: "ttys001" }]) },
+      );
+
+      const processes = await discoverAgentProcessesOrThrow(
+        [CLAUDE_AGENT_DEF],
+        FD_TTY_DISCOVERY,
+      );
+      expect(processes.map((p) => p.pid)).toEqual([100]);
+    });
+
+    it("returns [] without throwing when lsof legitimately reports nothing", async () => {
+      // Exit 0 and no records: every requested pid raced away. A real answer,
+      // not a failure.
+      mockPsAndLsof(FD_TTY_DISCOVERY, [claudeRow(100, "ttys001")], {
+        stdout: "",
+        exitCode: 0,
+      });
+
+      await expect(
+        discoverAgentProcessesOrThrow([CLAUDE_AGENT_DEF], FD_TTY_DISCOVERY),
+      ).resolves.toEqual([]);
+    });
+  });
+
+  describe("ps-tty platform (Linux and friends)", () => {
+    it("survives a hard lsof failure, keeping every row with a null cwd", async () => {
+      // `ps` already supplied the tty here, so lsof only ever contributed the
+      // cwd. Losing it must not fail the scan.
+      mockPsAndLsof(PS_TTY_DISCOVERY, [claudeRow(100, "ttys001")], {
+        throwOnSpawn: true,
+      });
+
+      const processes = await discoverAgentProcessesOrThrow(
+        [CLAUDE_AGENT_DEF],
+        PS_TTY_DISCOVERY,
+      );
+      expect(processes).toMatchObject([
+        { pid: 100, tty: "ttys001", cwd: null },
+      ]);
+    });
+
+    it("asks lsof only about rows that survived the tty filter", async () => {
+      // pid 101 has no controlling terminal, so it is dropped regardless;
+      // widening the lsof call to cover it would be pure cost.
+      const spawned = mockPsAndLsof(
+        PS_TTY_DISCOVERY,
+        [claudeRow(100, "ttys001"), claudeRow(101, "??")],
+        { stdout: lsofRecords([{ pid: 100, cwd: "/repo" }]) },
+      );
+
+      const processes = await discoverAgentProcessesOrThrow(
+        [CLAUDE_AGENT_DEF],
+        PS_TTY_DISCOVERY,
+      );
+      expect(processes.map((p) => p.pid)).toEqual([100]);
+      expect(spawned[1]).toEqual(PS_TTY_DISCOVERY.lsofArgv("100"));
+    });
   });
 });
