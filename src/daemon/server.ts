@@ -1648,9 +1648,20 @@ export class DaemonServer {
     controller: ReadableStreamDefaultController<string>,
     event: SSEEvent,
   ): void {
+    this.sendFrame(controller, `data: ${JSON.stringify(event)}\n\n`);
+  }
+
+  /**
+   * Enqueue an already-encoded SSE frame on one client. `broadcastEvent`
+   * calls this per client with a frame stringified once (issue #55 item 3),
+   * instead of each client re-running `JSON.stringify` on the same event.
+   */
+  private sendFrame(
+    controller: ReadableStreamDefaultController<string>,
+    frame: string,
+  ): void {
     try {
-      const data = `data: ${JSON.stringify(event)}\n\n`;
-      controller.enqueue(data);
+      controller.enqueue(frame);
     } catch {
       // Client disconnected - clean up dead client
       for (const [id, client] of this.sseClients.entries()) {
@@ -2044,8 +2055,12 @@ export class DaemonServer {
   }
 
   private broadcastEvent(event: SSEEvent): void {
+    // Stringify once for every client instead of once per client (issue #55
+    // item 3): matters most during event bursts with several attached
+    // picker/sidebar clients.
+    const frame = `data: ${JSON.stringify(event)}\n\n`;
     for (const client of this.sseClients.values()) {
-      this.sendToClient(client.controller, event);
+      this.sendFrame(client.controller, frame);
     }
   }
 

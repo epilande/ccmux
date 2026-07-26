@@ -206,6 +206,12 @@ export class Daemon {
   /** Consecutive-scan-failure tracker; drives the degraded/recovered banner
    *  and health snapshot. */
   private scanHealth = new ScanHealth({ threshold: SCAN_DEGRADED_THRESHOLD });
+  /** Last error message logged per link pass name, so a structurally broken
+   *  adapter (failing the same way every scan) logs once per distinct
+   *  message instead of spamming `console.error` every 5s forever. Cleared
+   *  on a fulfilled run so a genuinely new failure after a recovery logs
+   *  again. See `runLinkPasses`. */
+  private lastLinkPassError: Map<string, string> = new Map();
   /** Cache of tmux panes, updated during periodic scan */
   private paneCache: Map<string, TmuxPane> = new Map();
   private hookManager = new HookManager();
@@ -645,12 +651,7 @@ export class Daemon {
       );
       DaemonPerf.markerCleanupEnd(cleanupStartNs);
 
-      await this.linkCodexSessions(processes, panes, processStartTimeByPid);
-      await this.linkOpenCodeSessions(processStartTimeByPid);
-      await this.linkCursorSessions(processStartTimeByPid);
-      await this.linkPiSessions(processStartTimeByPid);
-      await this.linkAntigravitySessions(processStartTimeByPid);
-      await this.linkCopilotSessions(processStartTimeByPid);
+      await this.runLinkPasses(processes, panes, processStartTimeByPid);
       await reconcileAll(this.buildReconcilerDeps(), {
         processes,
         panes,
@@ -755,11 +756,25 @@ export class Daemon {
         if (!cwd) return;
 
         const agent = this.agents.find((a) => a.name === proc.agentType);
+        // Skip the lsof spawn when the pane's existing session already
+        // resolved a nativeSessionId for this same process: a pane reuse
+        // (new pid) still needs re-resolution, but re-lsof'ing an unchanged
+        // run every tick is pure waste (issue #55). The skip is time-bounded
+        // (SessionManager.NATIVE_SESSION_ID_CACHE_TTL_MS) rather than
+        // permanent: for agents without hooks installed (pi, copilot are
+        // the only ones reaching this path), the same pid can open a new
+        // session file (e.g. `/new`) mid-run, and only a periodic re-lsof
+        // catches that hand-off.
+
         const nativeSessionId =
           proc.agentType === "claude" &&
           this.claudeRuntimeMode === "claude-no-hooks"
             ? undefined
-            : await this.resolveNativeSessionId(proc.pid, agent);
+            : (this.sessionManager.getResolvedNativeSessionId(
+                pane.paneId,
+                proc.agentType,
+                proc.pid,
+              ) ?? (await this.resolveNativeSessionId(proc.pid, agent)));
         const session = this.sessionManager.createPaneTrackedSession({
           agentType: proc.agentType,
           paneId: pane.paneId,
@@ -980,6 +995,60 @@ export class Daemon {
       console.log(
         `Watching ${this.claudeProjectDirs.length} Claude projects dirs: ${this.claudeProjectDirs.join(", ")}`,
       );
+    }
+  }
+
+  /**
+   * Run the six per-agent marker link passes concurrently. Each pass covers
+   * a disjoint agent type with no shared mutable state, and each has its own
+   * I/O fan-out (a `getPaneHostingPid` lookup per marker pid), so serializing
+   * them only adds latency. `Promise.allSettled` (not `Promise.all`) so one
+   * pass throwing doesn't abort the rest mid-tick — a real regression this
+   * replaces, since the prior sequential `await` chain did exactly that.
+   * Failures are logged per pass and otherwise swallowed; a failed pass
+   * just leaves its sessions unlinked for one more scan.
+   */
+  private async runLinkPasses(
+    processes: ProcessInfo[],
+    panes: TmuxPane[],
+    processStartTimeByPid: ReadonlyMap<number, number | null>,
+  ): Promise<void> {
+    const passes: readonly [string, () => Promise<void>][] = [
+      [
+        "codex",
+        () => this.linkCodexSessions(processes, panes, processStartTimeByPid),
+      ],
+      ["opencode", () => this.linkOpenCodeSessions(processStartTimeByPid)],
+      ["cursor", () => this.linkCursorSessions(processStartTimeByPid)],
+      ["pi", () => this.linkPiSessions(processStartTimeByPid)],
+      [
+        "antigravity",
+        () => this.linkAntigravitySessions(processStartTimeByPid),
+      ],
+      ["copilot", () => this.linkCopilotSessions(processStartTimeByPid)],
+    ];
+    const results = await Promise.allSettled(passes.map(([, run]) => run()));
+    for (let i = 0; i < results.length; i++) {
+      const result = results[i];
+      const passName = passes[i][0];
+      if (result.status === "rejected") {
+        const message =
+          result.reason instanceof Error
+            ? result.reason.message
+            : String(result.reason);
+        // Log once per distinct error message per pass, not every tick: a
+        // structurally broken adapter fails identically every 5s forever,
+        // and (deliberately, per the docblock above) that failure doesn't
+        // count toward scan health, so nothing else bounds the spam.
+        if (this.lastLinkPassError.get(passName) !== message) {
+          this.lastLinkPassError.set(passName, message);
+          console.error(`Link pass failed (${passName}):`, result.reason);
+        }
+      } else {
+        // Recovered (or never failed): clear so a future distinct failure
+        // logs again instead of staying muted by a stale message.
+        this.lastLinkPassError.delete(passName);
+      }
     }
   }
 

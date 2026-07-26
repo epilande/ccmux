@@ -24,6 +24,20 @@ interface PaneTrackedSessionInput {
 }
 
 /**
+ * Derive a pane-tracked session's stable id from its pane + agent type.
+ * `createPaneTrackedSession` uses this to find/create the row. Kept
+ * module-private: the id scheme is `SessionManager`'s implementation detail,
+ * not something callers should depend on (see
+ * `SessionManager.getResolvedNativeSessionId`, which looks up by pane
+ * without exposing it).
+ */
+function derivePaneTrackedSessionId(paneId: string, agentType: string): string {
+  const paneNumberMatch = paneId.match(/^%(\d+)$/);
+  const paneToken = paneNumberMatch ? `pane${paneNumberMatch[1]}` : "pane";
+  return `${agentType}_${paneToken}`;
+}
+
+/**
  * Inputs for a Claude background (background-agent) session. Identity fields
  * follow the background-source rules: `daemonShort` is the stable
  * dedup key (`Session.id`), `nativeSessionId` is `state.json.resumeSessionId`,
@@ -149,6 +163,25 @@ export type SetNativeSessionIdResult = "set" | "noop" | "conflict";
  */
 export class SessionManager extends EventEmitter {
   private sessions: Map<string, Session> = new Map();
+
+  /**
+   * How recently `setNativeSessionId` must have landed for
+   * `getResolvedNativeSessionId` to hand back its cached value instead of
+   * telling the caller to re-resolve (issue #55 follow-up). Bounds how long
+   * a stale pane-tracked cache (no hooks installed, `/new` opened a
+   * different session file under the same pid) can point at a dead session
+   * before the daemon's periodic lsof re-resolves it.
+   */
+  private static readonly NATIVE_SESSION_ID_CACHE_TTL_MS = 60_000;
+
+  /**
+   * Last time each pane-tracked session's `nativeSessionId` was (re-)set by
+   * `setNativeSessionId`, keyed by session id. Populated by both resolution
+   * paths that call that setter: the daemon's per-tick lsof resolution and
+   * marker-backed hook adapters. Read by `getResolvedNativeSessionId` to
+   * bound how long the lsof-skip cache (issue #55) may go unrefreshed.
+   */
+  private nativeSessionResolvedAt: Map<string, number> = new Map();
 
   /**
    * Clear a pane-tracked session's per-run enrichment (status, activity,
@@ -282,9 +315,7 @@ export class SessionManager extends EventEmitter {
    * Create a process-only pane-tracked session for pane-tracked agents.
    */
   createPaneTrackedSession(input: PaneTrackedSessionInput): Session {
-    const paneNumberMatch = input.paneId.match(/^%(\d+)$/);
-    const paneToken = paneNumberMatch ? `pane${paneNumberMatch[1]}` : "pane";
-    const sessionId = `${input.agentType}_${paneToken}`;
+    const sessionId = derivePaneTrackedSessionId(input.paneId, input.agentType);
     const project = deriveProject(input.cwd, input.agentType);
 
     const existing = this.sessions.get(sessionId);
@@ -776,7 +807,12 @@ export class SessionManager extends EventEmitter {
     if (!session || session.nativeSessionId === nativeSessionId) {
       // Missing session, or an idempotent re-assignment (e.g. a resumed
       // marker re-firing). Benign: nothing to change, and callers should
-      // proceed with their follow-on enrichment as normal.
+      // proceed with their follow-on enrichment as normal. A matching
+      // re-assignment still confirms the id is current, so refresh the
+      // resolution timestamp for the lsof-skip cache.
+      if (session) {
+        this.nativeSessionResolvedAt.set(sessionId, Date.now());
+      }
       return "noop";
     }
     for (const other of this.sessions.values()) {
@@ -815,6 +851,7 @@ export class SessionManager extends EventEmitter {
     }
     session.nativeSessionId = nativeSessionId;
     session.updatedAt = new Date();
+    this.nativeSessionResolvedAt.set(sessionId, Date.now());
     this.emit("change", { type: "updated", session } as SessionEvent);
     return "set";
   }
@@ -853,6 +890,39 @@ export class SessionManager extends EventEmitter {
    */
   getSession(sessionId: string): Readonly<Session> | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  /**
+   * Return the pane-tracked session's already-resolved `nativeSessionId` for
+   * this exact process, or `undefined` if there is none to reuse (no
+   * existing row, a pane hand-off to a different pid, not yet resolved, or
+   * the resolution is older than `NATIVE_SESSION_ID_CACHE_TTL_MS`). Lets
+   * `createOrUpdatePaneTrackedSessions` skip its per-tick lsof spawn (issue
+   * #55) without depending on the pane-tracked id scheme itself.
+   *
+   * The TTL bound matters for agents whose hooks aren't installed (the
+   * pane-tracked fallback): if the same pid opens a new chat/session file
+   * (e.g. `/new`), an unbounded cache would keep pointing at the dead
+   * session forever, since nothing else re-derives `nativeSessionId` for an
+   * already-resolved row. Re-resolving periodically heals that within one
+   * TTL window instead of requiring hooks to be installed.
+   */
+  getResolvedNativeSessionId(
+    paneId: string,
+    agentType: string,
+    pid: number | null,
+  ): string | undefined {
+    const sessionId = derivePaneTrackedSessionId(paneId, agentType);
+    const existing = this.sessions.get(sessionId);
+    if (existing?.pid !== pid) return undefined;
+    const resolvedAt = this.nativeSessionResolvedAt.get(sessionId);
+    if (
+      resolvedAt === undefined ||
+      Date.now() - resolvedAt >= SessionManager.NATIVE_SESSION_ID_CACHE_TTL_MS
+    ) {
+      return undefined;
+    }
+    return existing.nativeSessionId;
   }
 
   /**

@@ -94,6 +94,11 @@ type ServerInternals = {
   invocationManager: InvocationManager;
   handleRequest(req: Request): Promise<Response>;
   getServerSocketPath(): Promise<string | null>;
+  broadcastEvent(event: SSEEvent): void;
+  sseClients: Map<
+    string,
+    { id: string; controller: { enqueue(data: string): void } }
+  >;
 };
 
 function createServer(
@@ -2889,5 +2894,69 @@ describe("POST /notification-action", () => {
       postBody({ sessionId: "s1", action: "approve" }),
     );
     expect(res.status).toBe(503);
+  });
+});
+
+describe("broadcastEvent stringify-once (issue #55 item 3)", () => {
+  function fakeController() {
+    const received: string[] = [];
+    return {
+      received,
+      controller: {
+        enqueue: (data: string) => {
+          received.push(data);
+        },
+      },
+    };
+  }
+
+  it("stringifies the event exactly once regardless of client count", () => {
+    const { internals } = createServer();
+    const clients = [fakeController(), fakeController(), fakeController()];
+    clients.forEach(({ controller }, i) => {
+      internals.sseClients.set(`client-${i}`, {
+        id: `client-${i}`,
+        controller,
+      });
+    });
+
+    const stringifySpy = spyOn(JSON, "stringify");
+    const event: SSEEvent = {
+      type: "daemon_health",
+      timestamp: "2024-01-15T12:00:00Z",
+      health: { degraded: false },
+    };
+    internals.broadcastEvent(event);
+    const callCount = stringifySpy.mock.calls.length;
+    stringifySpy.mockRestore();
+
+    expect(callCount).toBe(1);
+  });
+
+  it("sends byte-identical frames to every connected client", () => {
+    const { internals } = createServer();
+    const clients = [fakeController(), fakeController(), fakeController()];
+    clients.forEach(({ controller }, i) => {
+      internals.sseClients.set(`client-${i}`, {
+        id: `client-${i}`,
+        controller,
+      });
+    });
+
+    const event: SSEEvent = {
+      type: "daemon_health",
+      timestamp: "2024-01-15T12:00:00Z",
+      health: {
+        degraded: true,
+        reason: "test",
+        since: "2024-01-15T12:00:00Z",
+      },
+    };
+    internals.broadcastEvent(event);
+
+    const frames = clients.map((c) => c.received[0]);
+    expect(frames.every((f) => f !== undefined)).toBe(true);
+    expect(new Set(frames).size).toBe(1);
+    expect(frames[0]).toBe(`data: ${JSON.stringify(event)}\n\n`);
   });
 });
