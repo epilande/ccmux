@@ -4,12 +4,15 @@ import { join } from "path";
 import {
   parseElapsedTime,
   parseLsofFdOutput,
+  parsePsOutput,
   isCodexPluginHostCwd,
   discoverAgentProcesses,
   discoverAgentProcessesOrThrow,
   dropWrapperParents,
   resolveDiscoveredProcesses,
   ProcessDiscoveryError,
+  FD_TTY_DISCOVERY,
+  PS_TTY_DISCOVERY,
   type MatchedProcess,
   type ProcessFdInfo,
 } from "./processes";
@@ -308,6 +311,119 @@ describe("parseLsofFdOutput", () => {
   });
 });
 
+describe("discovery platforms", () => {
+  // Both records are exercised regardless of the host, so CI (ubuntu-only)
+  // still covers the macOS ps layout and the lsof flags it depends on.
+  it("pins the lsof invocation for each platform", () => {
+    // `-a` is what confines lsof to the requested pids: without it lsof ORs
+    // `-p` and `-d` and enumerates every process on the machine, silently.
+    expect(FD_TTY_DISCOVERY.lsofArgv("10,11")).toEqual([
+      "lsof",
+      "-a",
+      "-p",
+      "10,11",
+      "-d",
+      "cwd,0,1,2",
+      "-Ffn",
+    ]);
+    expect(PS_TTY_DISCOVERY.lsofArgv("10,11")).toEqual([
+      "lsof",
+      "-p",
+      "10,11",
+      "-Ffn",
+    ]);
+  });
+
+  it("puts command last and asks for tty only where ps is the source", () => {
+    expect(FD_TTY_DISCOVERY.psColumns).toBe("pid,ppid,etime,command");
+    expect(PS_TTY_DISCOVERY.psColumns).toBe("pid,ppid,tty,etime,command");
+    for (const platform of [FD_TTY_DISCOVERY, PS_TTY_DISCOVERY]) {
+      const columns = platform.psColumns.split(",");
+      expect(columns[columns.length - 1]).toBe("command");
+    }
+  });
+});
+
+describe("parsePsOutput", () => {
+  const NOW = 1_700_000_000_000;
+
+  it("reads every column off the platform's own layout", () => {
+    // Same two processes, rendered in each platform's column order. The
+    // tty-less macOS row is expected: lsof supplies that value there.
+    const fdRows = parsePsOutput(
+      [
+        "  PID  PPID     ELAPSED COMMAND",
+        "  100     1       00:05 claude --resume",
+      ].join("\n"),
+      [CLAUDE_AGENT_DEF],
+      FD_TTY_DISCOVERY,
+      NOW,
+    );
+    expect(fdRows).toEqual([
+      {
+        pid: 100,
+        ppid: 1,
+        tty: null,
+        command: "claude --resume",
+        agentType: "claude",
+        startTime: NOW - 5000,
+      },
+    ]);
+
+    const psRows = parsePsOutput(
+      [
+        "  PID  PPID TTY          ELAPSED COMMAND",
+        "  100     1 ttys001        00:05 claude --resume",
+      ].join("\n"),
+      [CLAUDE_AGENT_DEF],
+      PS_TTY_DISCOVERY,
+      NOW,
+    );
+    expect(psRows).toEqual([{ ...fdRows[0], tty: "ttys001" }]);
+  });
+
+  it("normalizes both no-terminal spellings ps uses", () => {
+    const rowFor = (tty: string) =>
+      parsePsOutput(
+        ["HEADER", `  100     1 ${tty}  00:05 claude`].join("\n"),
+        [CLAUDE_AGENT_DEF],
+        PS_TTY_DISCOVERY,
+        NOW,
+      )[0];
+
+    expect(rowFor("??").tty).toBeNull(); // BSD
+    expect(rowFor("?").tty).toBeNull(); // Linux
+    expect(rowFor("ttys001").tty).toBe("ttys001");
+  });
+
+  it("skips the header, short rows, and non-agent commands", () => {
+    const rows = parsePsOutput(
+      [
+        "  PID  PPID     ELAPSED COMMAND",
+        "  100     1       00:05 claude",
+        "  101     1       00:05 -zsh",
+        "  102     1", // truncated row
+        "  bad     1       00:05 claude",
+      ].join("\n"),
+      [CLAUDE_AGENT_DEF],
+      FD_TTY_DISCOVERY,
+      NOW,
+    );
+    expect(rows.map((r) => r.pid)).toEqual([100]);
+  });
+
+  it("keeps the whole command line and a null startTime for unparsable etime", () => {
+    const [row] = parsePsOutput(
+      ["HEADER", "  100     1          ?? claude -p 'do a thing'"].join("\n"),
+      [CLAUDE_AGENT_DEF],
+      FD_TTY_DISCOVERY,
+      NOW,
+    );
+    expect(row.command).toBe("claude -p 'do a thing'");
+    expect(row.startTime).toBeNull();
+  });
+});
+
 describe("resolveDiscoveredProcesses (filter order)", () => {
   const realCwd = join(homedir(), "Code", "myrepo");
   const pluginCwd = join(
@@ -352,8 +468,8 @@ describe("resolveDiscoveredProcesses (filter order)", () => {
     [71, { cwd: realCwd, tty: "ttys088" }],
   ]);
 
-  it("resolves tty, then filters tty-less, then plugin hosts, then wrappers", () => {
-    const resolved = resolveDiscoveredProcesses(rows, fds, true);
+  it("filters tty-less, then plugin hosts, then wrappers", () => {
+    const resolved = resolveDiscoveredProcesses(rows, fds);
 
     // 60 survives only if the plugin-host filter ran before
     // dropWrapperParents; 62 is gone only if the tty filter ran at all; 70 is
@@ -369,26 +485,11 @@ describe("resolveDiscoveredProcesses (filter order)", () => {
     });
   });
 
-  it("produces the same result from the ps tty column (non-darwin path)", () => {
-    // Same rows, but tty comes off ps and lsof reports cwd only.
-    const cwdOnly = new Map(
-      [...fds].map(([pid, info]) => [pid, { ...info, tty: null }]),
-    );
-    expect(
-      resolveDiscoveredProcesses(rows, cwdOnly, false).map((p) => p.pid),
-    ).toEqual([60, 71]);
-  });
-
-  it("ignores the ps tty column when harvesting from fds", () => {
-    // A stale/absent lsof entry drops the row rather than falling back to ps:
-    // the two sources are never mixed, so a pane can't be matched twice.
-    const stale = new Map<number, ProcessFdInfo>([
-      [60, { cwd: realCwd, tty: null }],
-    ]);
-    expect(resolveDiscoveredProcesses([rows[0]], stale, true)).toEqual([]);
-    expect(
-      resolveDiscoveredProcesses([rows[0]], stale, false).map((p) => p.tty),
-    ).toEqual(["ttys077"]);
+  it("keeps a row whose lsof entry is missing entirely, with a null cwd", () => {
+    // The tty is already settled by this point, so a process lsof could not
+    // be read for stays discoverable; only its cwd is unknown.
+    const [row] = resolveDiscoveredProcesses([rows[0]], new Map());
+    expect(row).toMatchObject({ pid: 60, tty: "ttys077", cwd: null });
   });
 });
 
@@ -471,10 +572,13 @@ describe("agent discovery failure semantics (fail-closed)", () => {
     return spawned;
   }
 
-  // ps output is column-shaped per platform: macOS drops the (expensive) tty
-  // column and harvests tty from lsof fds instead, so every discovery fixture
-  // has to supply the value through whichever source the platform reads.
-  const HARVESTS_TTY_FROM_FDS = process.platform === "darwin";
+  // These tests run against whichever platform record the host resolves to,
+  // so the fixture renders its ps columns from that record rather than
+  // re-deriving the platform check. Both records are covered directly by the
+  // parsePsOutput and "discovery platforms" suites above.
+  const HOST_PLATFORM =
+    process.platform === "darwin" ? FD_TTY_DISCOVERY : PS_TTY_DISCOVERY;
+  const COLUMNS = HOST_PLATFORM.psColumns.split(",");
 
   function psOutput(
     rows: Array<{
@@ -485,15 +589,10 @@ describe("agent discovery failure semantics (fail-closed)", () => {
       command: string;
     }>,
   ): string {
-    const header = HARVESTS_TTY_FROM_FDS
-      ? "  PID  PPID     ELAPSED COMMAND"
-      : "  PID  PPID TTY      ELAPSED COMMAND";
     return [
-      header,
+      COLUMNS.join(" ").toUpperCase(),
       ...rows.map((r) =>
-        HARVESTS_TTY_FROM_FDS
-          ? `${r.pid} ${r.ppid} ${r.etime} ${r.command}`
-          : `${r.pid} ${r.ppid} ${r.tty} ${r.etime} ${r.command}`,
+        COLUMNS.map((c) => String(r[c as keyof typeof r])).join(" "),
       ),
     ].join("\n");
   }
@@ -550,21 +649,10 @@ describe("agent discovery failure semantics (fail-closed)", () => {
     expect(processes.map((p) => p.pid)).toEqual([101]);
     expect(processes[0].tty).toBe("ttys001");
 
-    // Pin the invocations. `-a` is mandatory on the lsof side: without it
-    // lsof ORs `-p` and `-d` and enumerates every process on the machine,
-    // silently (the requested pids are all still in the flood).
-    expect(spawned[0]).toEqual([
-      "ps",
-      "-eo",
-      HARVESTS_TTY_FROM_FDS
-        ? "pid,ppid,etime,command"
-        : "pid,ppid,tty,etime,command",
-    ]);
-    expect(spawned[1]).toEqual(
-      HARVESTS_TTY_FROM_FDS
-        ? ["lsof", "-a", "-p", "100,101", "-d", "cwd,0,1,2", "-Ffn"]
-        : ["lsof", "-p", "100,101", "-Ffn"],
-    );
+    // Discovery must run the host platform record's own invocations (the
+    // flags themselves are pinned per record in "discovery platforms").
+    expect(spawned[0]).toEqual(["ps", "-eo", HOST_PLATFORM.psColumns]);
+    expect(spawned[1]).toEqual(HOST_PLATFORM.lsofArgv("100,101"));
   });
 
   it("drops an agent-matched process with no tty", async () => {
