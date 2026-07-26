@@ -230,6 +230,9 @@ export class Daemon {
   /** Unconfirmed destructive-cleanup proposals carried between scans — the
    * two-scan hysteresis state for `cleanupStaleSessions`. */
   private stalePending: ReadonlySet<string> = new Set();
+  /** The same hysteresis state for `cleanupStaleMarkers`' PID-liveness check.
+   * Owned here and updated in place by each call. */
+  private markerPidReapPending = new Set<string>();
   private invocationManager: InvocationManager;
   /** Created in start() only when `backgroundAgents !== false`; null = the
    * feature is gated off (no watchers, no resync, zero overhead). */
@@ -644,6 +647,7 @@ export class Daemon {
           this.hookManager
             .getAdapter(marker.agent_type)
             ?.isSessionStillLive(marker) ?? true,
+        this.markerPidReapPending,
       );
       DaemonPerf.markerCleanupEnd(cleanupStartNs);
 

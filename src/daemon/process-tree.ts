@@ -2,12 +2,33 @@
  * ProcessTree - Build and query process hierarchy in a single pass.
  * Eliminates N pgrep calls by building tree from one ps command.
  */
+import { basename } from "path";
 import { DaemonPerf } from "./perf";
 
 export interface ProcessNode {
   pid: number;
   ppid: number;
   comm: string;
+}
+
+/**
+ * Exact-match shell basename derived from a raw `comm` value. `ps -axo comm`
+ * never carries a space-separated argument list: on macOS it reports
+ * argv[0] only (e.g. `/bin/zsh`, or `-zsh` for a login shell), and on Linux
+ * it reports the kernel's 15-char task name. The only spaces that
+ * legitimately appear are inside the path itself (e.g. an app-bundle path
+ * like `/Applications/Foo.app/Contents/MacOS/Foo`). Derivation: strip one
+ * leading `-` (login shells report `-zsh`), then take the path basename.
+ * Command-style input (e.g. `"sh -c echo hi"`) is tolerated defensively so
+ * the function never throws, but it is not real `comm` output and is not
+ * specially parsed. Substring matching on raw `comm` false-positives on
+ * macOS, where `comm` is a full path (e.g. `/Users/.../.local/share/...`
+ * contains "sh").
+ */
+export function shellCommKey(comm: string): string {
+  const trimmed = comm.trim();
+  const unwrapped = trimmed.startsWith("-") ? trimmed.slice(1) : trimmed;
+  return basename(unwrapped);
 }
 
 export class ProcessTree {
@@ -21,8 +42,6 @@ export class ProcessTree {
   }
 
   static async build(): Promise<ProcessTree> {
-    const tree = new ProcessTree();
-
     try {
       DaemonPerf.incSubprocessSpawn("ps-tree");
       const proc = Bun.spawn(["ps", "-axo", "pid,ppid,comm"], {
@@ -33,27 +52,38 @@ export class ProcessTree {
       const output = await new Response(proc.stdout).text();
       await proc.exited;
 
-      const lines = output.trim().split("\n").slice(1);
-
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length < 3) continue;
-
-        const pid = parseInt(parts[0], 10);
-        const ppid = parseInt(parts[1], 10);
-        const comm = parts.slice(2).join(" ");
-
-        if (isNaN(pid) || isNaN(ppid)) continue;
-
-        const node: ProcessNode = { pid, ppid, comm };
-        tree.processes.set(pid, node);
-
-        const siblings = tree.children.get(ppid) ?? [];
-        siblings.push(pid);
-        tree.children.set(ppid, siblings);
-      }
+      return ProcessTree.fromPsOutput(output);
     } catch {
       // Return empty tree on error
+      return new ProcessTree();
+    }
+  }
+
+  /**
+   * Parse `ps -axo pid,ppid,comm` output (header row + one process per line)
+   * into a tree. Exposed so tests can build a tree from canned ps output
+   * instead of spawning a real `ps`.
+   */
+  static fromPsOutput(output: string): ProcessTree {
+    const tree = new ProcessTree();
+    const lines = output.trim().split("\n").slice(1);
+
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 3) continue;
+
+      const pid = parseInt(parts[0], 10);
+      const ppid = parseInt(parts[1], 10);
+      const comm = parts.slice(2).join(" ");
+
+      if (isNaN(pid) || isNaN(ppid)) continue;
+
+      const node: ProcessNode = { pid, ppid, comm };
+      tree.processes.set(pid, node);
+
+      const siblings = tree.children.get(ppid) ?? [];
+      siblings.push(pid);
+      tree.children.set(ppid, siblings);
     }
 
     return tree;
@@ -92,9 +122,28 @@ export class ProcessTree {
   }
 
   /**
-   * Shell process names to detect running Bash commands
+   * Shell process names to detect running Bash commands. Matched by EXACT
+   * equality against the derived basename (see `shellCommKey`), never by
+   * substring against the raw `comm` string. `as const` pins this as a
+   * fixed-length tuple so the `SHELL_NAMES_SET` static initializer below
+   * (which reads `SHELL_NAMES`) stays correct regardless of declaration
+   * order within the class body.
    */
-  static readonly SHELL_NAMES = ["bash", "sh", "zsh", "fish"];
+  static readonly SHELL_NAMES = [
+    "bash",
+    "sh",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+    "csh",
+    "tcsh",
+    "ash",
+  ] as const;
+
+  /** O(1) lookup mirror of `SHELL_NAMES`, checked per descendant in the BFS below. */
+  private static readonly SHELL_NAMES_SET: ReadonlySet<string> =
+    new Set<string>(ProcessTree.SHELL_NAMES);
 
   /**
    * Find all shell descendant processes of a given root PID
@@ -111,7 +160,7 @@ export class ProcessTree {
       visited.add(pid);
 
       const proc = this.getProcess(pid);
-      if (proc && ProcessTree.SHELL_NAMES.some((s) => proc.comm.includes(s))) {
+      if (proc && ProcessTree.SHELL_NAMES_SET.has(shellCommKey(proc.comm))) {
         shellPids.push(pid);
       }
       queue.push(...this.getChildPids(pid));
