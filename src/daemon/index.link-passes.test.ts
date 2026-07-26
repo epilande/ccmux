@@ -18,6 +18,16 @@ mock.module("../lib/config", () => ({
 import { Daemon } from "./index";
 import type { ProcessInfo, TmuxPane } from "../types/session";
 
+const LINK_PASS_NAMES = [
+  "codex",
+  "opencode",
+  "cursor",
+  "pi",
+  "antigravity",
+  "copilot",
+] as const;
+type LinkPassName = (typeof LINK_PASS_NAMES)[number];
+
 type LinkPassesInternals = {
   linkCodexSessions(
     processes: ProcessInfo[],
@@ -46,6 +56,35 @@ type LinkPassesInternals = {
   ): Promise<void>;
 };
 
+const LINK_PASS_METHOD: Record<LinkPassName, keyof LinkPassesInternals> = {
+  codex: "linkCodexSessions",
+  opencode: "linkOpenCodeSessions",
+  cursor: "linkCursorSessions",
+  pi: "linkPiSessions",
+  antigravity: "linkAntigravitySessions",
+  copilot: "linkCopilotSessions",
+};
+
+/**
+ * Wire all six link-pass methods on `internals` to record their name in
+ * `calls` and, for any name listed in `failing`, throw. Centralizes the
+ * six-method boilerplate every `runLinkPasses` test needs.
+ */
+function installLinkPassMocks(
+  internals: LinkPassesInternals,
+  options: { failing?: readonly LinkPassName[] } = {},
+): string[] {
+  const calls: string[] = [];
+  const failing = new Set(options.failing ?? []);
+  for (const name of LINK_PASS_NAMES) {
+    internals[LINK_PASS_METHOD[name]] = (async () => {
+      calls.push(name);
+      if (failing.has(name)) throw new Error(`${name} link pass boom`);
+    }) as never;
+  }
+  return calls;
+}
+
 describe("Daemon.runLinkPasses", () => {
   let daemon: Daemon;
   let internals: LinkPassesInternals;
@@ -56,26 +95,7 @@ describe("Daemon.runLinkPasses", () => {
   });
 
   it("runs every pass concurrently, isolating a single rejection (allSettled)", async () => {
-    const calls: string[] = [];
-    internals.linkCodexSessions = async () => {
-      calls.push("codex");
-      throw new Error("codex link pass boom");
-    };
-    internals.linkOpenCodeSessions = async () => {
-      calls.push("opencode");
-    };
-    internals.linkCursorSessions = async () => {
-      calls.push("cursor");
-    };
-    internals.linkPiSessions = async () => {
-      calls.push("pi");
-    };
-    internals.linkAntigravitySessions = async () => {
-      calls.push("antigravity");
-    };
-    internals.linkCopilotSessions = async () => {
-      calls.push("copilot");
-    };
+    const calls = installLinkPassMocks(internals, { failing: ["codex"] });
 
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     // Must not reject/throw even though the codex pass does.
@@ -84,27 +104,11 @@ describe("Daemon.runLinkPasses", () => {
     ).resolves.toBeUndefined();
     errorSpy.mockRestore();
 
-    expect(calls.sort()).toEqual([
-      "antigravity",
-      "codex",
-      "copilot",
-      "cursor",
-      "opencode",
-      "pi",
-    ]);
+    expect(calls.sort()).toEqual([...LINK_PASS_NAMES].sort());
   });
 
   it("logs the rejected pass name and reason without dropping other passes' errors", async () => {
-    internals.linkCodexSessions = async () => {};
-    internals.linkOpenCodeSessions = async () => {
-      throw new Error("opencode boom");
-    };
-    internals.linkCursorSessions = async () => {};
-    internals.linkPiSessions = async () => {
-      throw new Error("pi boom");
-    };
-    internals.linkAntigravitySessions = async () => {};
-    internals.linkCopilotSessions = async () => {};
+    installLinkPassMocks(internals, { failing: ["opencode", "pi"] });
 
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     await internals.runLinkPasses([], [], new Map());
@@ -114,45 +118,20 @@ describe("Daemon.runLinkPasses", () => {
       .map((call) => call.join(" "))
       .join("\n");
     expect(loggedText).toContain("opencode");
-    expect(loggedText).toContain("opencode boom");
+    expect(loggedText).toContain("opencode link pass boom");
     expect(loggedText).toContain("pi");
-    expect(loggedText).toContain("pi boom");
+    expect(loggedText).toContain("pi link pass boom");
     errorSpy.mockRestore();
   });
 
   it("all six passes succeed with no rejections and no error logs", async () => {
-    const calls: string[] = [];
-    internals.linkCodexSessions = async () => {
-      calls.push("codex");
-    };
-    internals.linkOpenCodeSessions = async () => {
-      calls.push("opencode");
-    };
-    internals.linkCursorSessions = async () => {
-      calls.push("cursor");
-    };
-    internals.linkPiSessions = async () => {
-      calls.push("pi");
-    };
-    internals.linkAntigravitySessions = async () => {
-      calls.push("antigravity");
-    };
-    internals.linkCopilotSessions = async () => {
-      calls.push("copilot");
-    };
+    const calls = installLinkPassMocks(internals);
 
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     await internals.runLinkPasses([], [], new Map());
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
 
-    expect(calls.sort()).toEqual([
-      "antigravity",
-      "codex",
-      "copilot",
-      "cursor",
-      "opencode",
-      "pi",
-    ]);
+    expect(calls.sort()).toEqual([...LINK_PASS_NAMES].sort());
   });
 });
