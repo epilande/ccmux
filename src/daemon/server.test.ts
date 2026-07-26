@@ -209,11 +209,11 @@ function stubGitSpawn(options: {
   throws?: boolean;
 }) {
   const original = Bun.spawn;
-  const state = { argv: [] as string[][] };
-  Bun.spawn = ((argv: string[]) => {
-    const isGit = argv[0] === "git";
+  const argv: string[][] = [];
+  Bun.spawn = ((spawned: string[]) => {
+    const isGit = spawned[0] === "git";
     if (isGit) {
-      state.argv.push(argv);
+      argv.push(spawned);
       if (options.throws) throw new Error("spawn git ENOENT");
     }
     const code = isGit ? (options.exitCode ?? 0) : 0;
@@ -226,7 +226,7 @@ function stubGitSpawn(options: {
       stderr: new Blob([""]).stream(),
     };
   }) as unknown as typeof Bun.spawn;
-  return { state, restore: () => (Bun.spawn = original) };
+  return { argv, restore: () => (Bun.spawn = original) };
 }
 
 describe("DaemonServer", () => {
@@ -574,13 +574,13 @@ describe("DaemonServer", () => {
           "/Users/test/.claude/projects/-Users-test-proj/vis.jsonl",
         );
         internals.visibleSessions.add("vis");
-        git.state.argv.length = 0;
+        git.argv.length = 0;
 
         internals.sweepBranchPRs();
 
         // The sweep needs a PR key, not a fresh git read, so it reads the
         // cache (here: empty) and falls back to the log-derived branch.
-        expect(git.state.argv).toEqual([]);
+        expect(git.argv).toEqual([]);
       } finally {
         git.restore();
       }
@@ -713,7 +713,7 @@ describe("DaemonServer", () => {
 
         expect(enriched.gitBranch).toBe("feat/x");
         expect(enriched.isWorktree).toBe(true);
-        expect(git.state.argv).toEqual([
+        expect(git.argv).toEqual([
           [
             "git",
             "-C",
@@ -741,7 +741,7 @@ describe("DaemonServer", () => {
           ),
         );
 
-        expect(git.state.argv).toHaveLength(1);
+        expect(git.argv).toHaveLength(1);
         expect(enriched.every((e) => e.gitBranch === "main")).toBe(true);
       } finally {
         git.restore();
@@ -758,7 +758,7 @@ describe("DaemonServer", () => {
 
         await internals.enrichSession(fakeSession("s2"));
 
-        expect(git.state.argv).toHaveLength(2);
+        expect(git.argv).toHaveLength(2);
       } finally {
         git.restore();
       }
@@ -773,7 +773,7 @@ describe("DaemonServer", () => {
         await internals.enrichSession(fakeSession("s1"));
         await internals.enrichSession(fakeSession("s2"));
 
-        expect(git.state.argv).toHaveLength(1);
+        expect(git.argv).toHaveLength(1);
       } finally {
         git.restore();
       }

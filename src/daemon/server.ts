@@ -89,9 +89,7 @@ interface GitInfoCacheEntry {
 }
 
 /** A cwd git can't answer for: not a repo, unborn HEAD, deleted dir. */
-function unknownGitInfo(): GitInfo {
-  return { branch: null, isWorktree: false };
-}
+const UNKNOWN_GIT_INFO: GitInfo = { branch: null, isWorktree: false };
 
 const GIT_INFO_CACHE_TTL_MS = 30_000;
 /** How often to sweep visible sessions' (cwd, branch) keys through the
@@ -405,7 +403,7 @@ export class DaemonServer {
       });
       return info;
     } catch {
-      return unknownGitInfo();
+      return UNKNOWN_GIT_INFO;
     } finally {
       this.gitInfoInflight.delete(cwd);
     }
@@ -425,17 +423,18 @@ export class DaemonServer {
   private async readGitInfo(cwd: string): Promise<GitInfo> {
     const proc = Bun.spawn(
       ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD", "--git-dir"],
-      { stdout: "pipe", stderr: "pipe" },
+      // stderr is never read, so don't pay for a pipe on this path.
+      { stdout: "pipe", stderr: "ignore" },
     );
-    const exitCode = await proc.exited;
-    const lines = (await new Response(proc.stdout).text()).trim().split("\n");
-    const [head, gitDir] = lines;
-    if (exitCode !== 0 || lines.length !== 2 || !head || !gitDir) {
-      return unknownGitInfo();
-    }
+    const [stdout, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    const lines = stdout.trim().split("\n");
+    if (exitCode !== 0 || lines.length !== 2) return UNKNOWN_GIT_INFO;
     return {
-      branch: head.trim() || null,
-      isWorktree: gitDir.includes("/worktrees/"),
+      branch: lines[0].trim() || null,
+      isWorktree: lines[1].includes("/worktrees/"),
     };
   }
 
@@ -447,7 +446,6 @@ export class DaemonServer {
     const effectiveCwd = this.effectiveCwd(session, paneCache);
     const gitInfo = await this.getGitInfo(effectiveCwd);
     const gitBranch = gitInfo.branch ?? session.gitBranch;
-    const isWorktree = gitInfo.isWorktree;
     // Synchronous cache read; the resolver refreshes in the background and
     // onBranchPRsChanged re-broadcasts when a lookup lands a new value.
     const branchPRs = this.prResolver.get(effectiveCwd, gitBranch);
@@ -466,7 +464,7 @@ export class DaemonServer {
       tmuxTarget,
       paneCwd,
       gitBranch,
-      isWorktree,
+      isWorktree: gitInfo.isWorktree,
       branchPRs,
       originInvocationId,
     };
