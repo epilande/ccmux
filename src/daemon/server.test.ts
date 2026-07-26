@@ -16,6 +16,7 @@ import { InvocationManager } from "./invocation-manager";
 import { InvocationRegistry } from "./invokers/registry";
 import { stubInvoker } from "./invokers/test-helpers";
 import type { HookAdapter } from "./hook-adapter";
+import { PRResolver } from "./pr-resolver";
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -28,7 +29,9 @@ import type { sendLiteralToPane, sendPromptToPane } from "./pane-io";
 type ServerInternals = {
   sessionEventToSSE(event: SessionEvent): Promise<SSEEvent | null>;
   enrichSession(session: Session): Promise<EnrichedSession>;
-  sweepBranchPRs(): Promise<void>;
+  sweepBranchPRs(): void;
+  prResolver: PRResolver;
+  sweepOffset: number;
   onBranchPRsChanged(cwd: string, branch: string): Promise<void>;
   visibleSessions: Set<string>;
   lastSidebarState: {
@@ -191,6 +194,40 @@ function fakeSession(id: string, tmuxPane: string | null = null): Session {
     lastPrompt: null,
     prompts: [],
   };
+}
+
+/**
+ * Stub `Bun.spawn` for the enrichment path's `git rev-parse`, recording every
+ * git argv so spawn merging / coalescing is observable. Non-git spawns (the PR
+ * resolver's background `gh`) are answered but not recorded. `delayMs` keeps
+ * the call in flight long enough for concurrent callers to pile up; `throws`
+ * simulates a missing git binary.
+ */
+function stubGitSpawn(options: {
+  stdout?: string;
+  exitCode?: number;
+  delayMs?: number;
+  throws?: boolean;
+}) {
+  const original = Bun.spawn;
+  const argv: string[][] = [];
+  Bun.spawn = ((spawned: string[]) => {
+    const isGit = spawned[0] === "git";
+    if (isGit) {
+      argv.push(spawned);
+      if (options.throws) throw new Error("spawn git ENOENT");
+    }
+    const code = isGit ? (options.exitCode ?? 0) : 0;
+    const out = isGit ? (options.stdout ?? "") : "";
+    return {
+      exited: options.delayMs
+        ? Bun.sleep(options.delayMs).then(() => code)
+        : Promise.resolve(code),
+      stdout: new Blob([out]).stream(),
+      stderr: new Blob([""]).stream(),
+    };
+  }) as unknown as typeof Bun.spawn;
+  return { argv, restore: () => (Bun.spawn = original) };
 }
 
 describe("DaemonServer", () => {
@@ -492,7 +529,7 @@ describe("DaemonServer", () => {
   });
 
   describe("sweepBranchPRs", () => {
-    it("enriches visible sessions only", async () => {
+    it("touches visible sessions' PR keys only", () => {
       const { manager, internals } = createServer();
       manager.createSession(
         "vis",
@@ -502,25 +539,131 @@ describe("DaemonServer", () => {
       manager.createPaneTrackedSession({
         agentType: "codex",
         paneId: "%9",
-        cwd: "/Users/test/proj",
+        cwd: "/Users/test/other",
         pid: 42,
       });
       manager.setTmuxPane("codex_pane9", null);
       internals.visibleSessions.add("vis");
+      // No cached branch for this cwd, so the key falls back to the
+      // log-derived one.
+      manager.updateSession("vis", { gitBranch: "feat/from-log" });
 
-      const seen: string[] = [];
-      const spy = spyOn(
-        internals as unknown as { enrichSession: (s: Session) => unknown },
-        "enrichSession",
-      ).mockImplementation((s: Session) => {
-        seen.push(s.id);
-        return Promise.resolve({} as EnrichedSession);
+      const seen: Array<[string | null, string | null]> = [];
+      const spy = spyOn(internals.prResolver, "get").mockImplementation(
+        (cwd: string | null, branch: string | null) => {
+          seen.push([cwd, branch]);
+          return null;
+        },
+      );
+
+      internals.sweepBranchPRs();
+
+      expect(seen).toEqual([["/Users/test/proj", "feat/from-log"]]);
+      spy.mockRestore();
+    });
+
+    it("never spawns git, even against a cold cache", () => {
+      const { manager, internals } = createServer();
+      // Installed before the session exists: creating one emits a `change`
+      // event the server enriches on its own, which would otherwise prime the
+      // cache off-camera.
+      const git = stubGitSpawn({ stdout: "feat/x\n/repo/.git\n" });
+
+      try {
+        manager.createSession(
+          "vis",
+          "/Users/test/.claude/projects/-Users-test-proj/vis.jsonl",
+        );
+        internals.visibleSessions.add("vis");
+        git.argv.length = 0;
+
+        internals.sweepBranchPRs();
+
+        // The sweep needs a PR key, not a fresh git read, so it reads the
+        // cache (here: empty) and falls back to the log-derived branch.
+        expect(git.argv).toEqual([]);
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("keys the PR lookup off the cached branch when one is warm", async () => {
+      const { manager, internals } = createServer();
+      const git = stubGitSpawn({ stdout: "feat/live\n/repo/.git\n" });
+
+      try {
+        manager.createSession(
+          "vis",
+          "/Users/test/.claude/projects/-Users-test-proj/vis.jsonl",
+        );
+        internals.visibleSessions.add("vis");
+        // Prime the cache the way the SSE init does.
+        await internals.enrichSession(manager.getSession("vis")!);
+
+        const seen: Array<string | null> = [];
+        const spy = spyOn(internals.prResolver, "get").mockImplementation(
+          (_cwd: string | null, branch: string | null) => {
+            seen.push(branch);
+            return null;
+          },
+        );
+
+        internals.sweepBranchPRs();
+
+        expect(seen).toEqual(["feat/live"]);
+        spy.mockRestore();
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("gives every key a refresh attempt within `len` sweeps under the resolver's concurrency cap", async () => {
+      const { manager, internals } = createServer();
+      const KEY_COUNT = 10; // > the resolver's MAX_CONCURRENT_REFRESHES (4)
+
+      for (let i = 0; i < KEY_COUNT; i++) {
+        manager.createSession(
+          `s${i}`,
+          `/Users/test/.claude/projects/-Users-test-proj${i}/s${i}.jsonl`,
+        );
+        manager.updateSession(`s${i}`, { gitBranch: `feat/${i}` });
+        internals.visibleSessions.add(`s${i}`);
+      }
+
+      const attempted = new Set<string>();
+      // Real PRResolver (not a hand-rolled stand-in) so its actual
+      // MAX_CONCURRENT_REFRESHES=4 cap is what's under test. Each lookup
+      // resolves on its own microtask, mirroring the real world where gh
+      // calls settle well inside the sweep interval and free their slot
+      // before the next sweep runs.
+      internals.prResolver = new PRResolver({
+        lookup: async (cwd, branch) => {
+          attempted.add(`${cwd}\0${branch}`);
+          return null;
+        },
       });
 
-      await internals.sweepBranchPRs();
+      // Rotation scheme: sweepOffset advances by exactly one session per
+      // sweep, so every session becomes the iteration's starting position
+      // (and therefore first in line for the cap's slots) exactly once
+      // every `len` sweeps. That guarantees every key gets at least one
+      // refresh attempt within `len` sweeps in the worst case, so KEY_COUNT
+      // sweeps is a sound (if pessimistic) bound to assert against.
+      for (let sweep = 0; sweep < KEY_COUNT; sweep++) {
+        internals.sweepBranchPRs();
+        // Let each sweep's refresh promises settle (and free their inflight
+        // slots) before the next sweep starts, same as the real interval
+        // spacing gh calls out from sweeps.
+        await Bun.sleep(0);
+      }
 
-      expect(seen).toEqual(["vis"]);
-      spy.mockRestore();
+      const expectedKeys = new Set(
+        Array.from(
+          { length: KEY_COUNT },
+          (_, i) => `/Users/test/proj${i}\0feat/${i}`,
+        ),
+      );
+      expect(attempted).toEqual(expectedKeys);
     });
   });
 
@@ -607,6 +750,103 @@ describe("DaemonServer", () => {
       const enriched = await internals.enrichSession(session);
 
       expect(enriched.gitBranch).toBeNull();
+    });
+
+    it("resolves branch and worktree from a single git spawn", async () => {
+      const { internals } = createServer();
+      const git = stubGitSpawn({
+        stdout: "feat/x\n/repo/.git/worktrees/wt\n",
+      });
+
+      try {
+        const enriched = await internals.enrichSession(fakeSession("s1"));
+
+        expect(enriched.gitBranch).toBe("feat/x");
+        expect(enriched.isWorktree).toBe(true);
+        expect(git.argv).toEqual([
+          [
+            "git",
+            "-C",
+            "/Users/test/proj",
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+            "--git-dir",
+          ],
+        ]);
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("coalesces concurrent lookups for one cwd onto a single git spawn", async () => {
+      const { internals } = createServer();
+      // Held in flight so all 20 callers arrive before the first resolves.
+      const git = stubGitSpawn({ stdout: "main\n/repo/.git\n", delayMs: 5 });
+
+      try {
+        const enriched = await Promise.all(
+          Array.from({ length: 20 }, (_, i) =>
+            internals.enrichSession(fakeSession(`s${i}`)),
+          ),
+        );
+
+        expect(git.argv).toHaveLength(1);
+        expect(enriched.every((e) => e.gitBranch === "main")).toBe(true);
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("does not cache a thrown git spawn; the next call retries", async () => {
+      const { internals } = createServer();
+      const git = stubGitSpawn({ throws: true });
+
+      try {
+        const first = await internals.enrichSession(fakeSession("s1"));
+        expect(first.gitBranch).toBeNull();
+
+        await internals.enrichSession(fakeSession("s2"));
+
+        expect(git.argv).toHaveLength(2);
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("caches a non-repo answer instead of re-spawning git", async () => {
+      const { internals } = createServer();
+      // Exit 128 is a real answer about this cwd (not a repo), unlike a throw.
+      const git = stubGitSpawn({ exitCode: 128 });
+
+      try {
+        await internals.enrichSession(fakeSession("s1"));
+        await internals.enrichSession(fakeSession("s2"));
+
+        expect(git.argv).toHaveLength(1);
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("treats an unborn HEAD (fresh git init) as no branch, not a phantom one", async () => {
+      // Real fixture: `git init` exits 128 on `rev-parse` but still prints a
+      // lone `HEAD` line, which an ungated parse would show as a branch.
+      const dir = mkdtempSync(join(tmpdir(), "ccmux-unborn-"));
+      try {
+        Bun.spawnSync(["git", "init", "-q", dir]);
+        const { internals } = createServer();
+        const session = fakeSession("s1");
+        session.cwd = dir;
+        session.gitBranch = null;
+
+        const enriched = await internals.enrichSession(session);
+
+        expect(enriched.gitBranch).toBeNull();
+        expect(enriched.isWorktree).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 

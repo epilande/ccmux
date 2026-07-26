@@ -170,12 +170,12 @@ The board renders these invokes live. The server broadcasts `invocation_started`
 
 ## PR enrichment
 
-`pr-resolver.ts` maps an agent-agnostic `(cwd, branch)` to its open PR via `gh pr list --head`. Owned by the Server (like `branchCache`). Reads are synchronous against a split-TTL cache (stale-while-revalidate; default branches skipped):
+`pr-resolver.ts` maps an agent-agnostic `(cwd, branch)` to its open PR via `gh pr list --head`. Owned by the Server (like `gitInfoCache`). Reads are synchronous against a split-TTL cache (stale-while-revalidate; default branches skipped):
 
 - Successful lookups expire after 2 min, so merges clear and new PRs appear quickly.
 - Failed lookups (null) hold for 10 min as backoff — their causes (no GitHub remote, logged-out `gh`, deleted cwd) persist on the minutes scale.
 
-Refreshes run in the background; a changed value re-broadcasts the affected sessions via `session_updated`. Because refreshes are demand-driven, the Server also sweeps enrichment over visible sessions every 2 min so a fully idle row can't serve a stale PR indefinitely (worst-case staleness ≈ TTL + sweep interval, ~4 min).
+Refreshes run in the background; a changed value re-broadcasts the affected sessions via `session_updated`. Because refreshes are demand-driven, the Server also sweeps every visible session's `(cwd, branch)` key every 2 min so a fully idle row can't serve a stale PR indefinitely. `PRResolver`'s own concurrency cap (`MAX_CONCURRENT_REFRESHES`, 4) means a cold sweep can only start refreshes for a handful of keys per pass; `sweepBranchPRs` rotates its starting position through the visible-session list by one session per sweep (`sweepOffset`) so every key gets a guaranteed refresh attempt within `len` sweeps, `len` being the number of visible sessions, rather than the same leading handful winning the cap's slots every time. Worst-case staleness is therefore TTL + `len` × sweep interval in the degenerate all-cold-cache case, though in practice the cap clears a cold cache in a small handful of sweeps. The sweep reads the branch out of `gitInfoCache` (falling back to the log-derived one) rather than re-enriching, so it never spawns git — its whole job is to touch PR keys. That is also an accepted trade: an idle session's branch label no longer self-heals off a `git checkout` run in its pane, since the sweep never re-derives git. Only an organic event (the pane's own agent doing something) or a fresh SSE connect re-reads git and picks up the new branch.
 
 Fail-soft: a thrown spawn disables the resolver for the daemon's lifetime only when a `Bun.which("gh")` probe confirms the binary is missing; otherwise (e.g. a deleted worktree cwd) the key is negative-cached. A non-zero `gh` exit (not a repo, no GitHub remote, unauthed) is likewise a per-key negative.
 
