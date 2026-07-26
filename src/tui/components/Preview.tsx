@@ -208,6 +208,15 @@ const CAPTURE_FAILED = Symbol("ccmux.preview.capture-failed");
  */
 const CROSS_SERVER = Symbol("ccmux.preview.cross-server");
 
+/**
+ * Debounce window (ms) between a selection change and the pane capture it
+ * triggers. Holding j/k through a session list would otherwise fire one
+ * `tmux capture-pane` per row landed on; nothing observes the intermediate
+ * rows' content, so only the row the selection settles on needs a capture
+ * (issue #55).
+ */
+const SELECTION_CAPTURE_DEBOUNCE_MS = 80;
+
 interface PreviewProps {
   session: EnrichedSession | null;
   onScrollboxRef?: (ref: ScrollBoxRenderable) => void;
@@ -282,7 +291,7 @@ export const Preview: Component<PreviewProps> = (props) => {
     return applyCapture(paneContent, paneContent);
   };
 
-  createEffect(async () => {
+  createEffect(() => {
     const tmuxPane = props.session?.tmuxPane;
     if (!tmuxPane) {
       lastCaptured = null;
@@ -292,7 +301,15 @@ export const Preview: Component<PreviewProps> = (props) => {
 
     lastCaptured = null;
     setContent(null);
-    await refreshPane();
+    // Debounce the capture (~80ms): this effect reruns on every selection
+    // change, so holding j/k through N rows would otherwise spawn N
+    // `tmux capture-pane` calls whose results the stale-resolve guard above
+    // immediately discards. Only the row the user actually lands on needs
+    // a capture.
+    const timer = setTimeout(() => {
+      void refreshPane();
+    }, SELECTION_CAPTURE_DEBOUNCE_MS);
+    onCleanup(() => clearTimeout(timer));
   });
 
   // Forced re-capture: the parent bumps refreshKey when it knows the pane

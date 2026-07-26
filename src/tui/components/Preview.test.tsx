@@ -291,7 +291,9 @@ describe("Preview pane capture", () => {
       { width: 100, height: 15 },
     );
     await setup.renderOnce();
-    expect(await pollFrame(5)).toContain("BEFORE_FILL");
+    // 15 steps (150ms) clears the ~80ms selection-capture debounce added for
+    // issue #55 before the initial mount capture lands.
+    expect(await pollFrame(15)).toContain("BEFORE_FILL");
 
     content = "AFTER_FILL";
     // Unfocused and un-bumped: the stale snapshot stays.
@@ -376,6 +378,37 @@ describe("Preview pane capture", () => {
       if (originalTmux === undefined) delete process.env.TMUX;
       else process.env.TMUX = originalTmux;
     }
+  });
+
+  it("debounces rapid selection changes (holding j/k) to one capture instead of one per row (issue #55)", async () => {
+    // Preview itself owns no keyboard handling (j/k lives in the parent list
+    // component), so "holding j/k through N rows" is reproduced here at
+    // Preview's actual input boundary: the `session` prop landing on a new
+    // pane once per row, faster than the row-dwell time a real key-repeat
+    // produces. Without the debounce this fires one `tmux capture-pane` per
+    // row; with it, only the row the selection settles on should capture.
+    let calls = 0;
+    captureImpl = async (pane) => {
+      calls++;
+      return `CONTENT_FOR_${pane}`;
+    };
+    const setSession = await renderReactive(
+      mockEnrichedSession({ tmuxPane: "%1", project: "row1" }),
+    );
+    // Simulate rapid j/k: land on 5 different panes a few ms apart, well
+    // under the ~80ms debounce window, before ever polling a render.
+    for (const paneId of ["%2", "%3", "%4", "%5", "%6"]) {
+      await new Promise((r) => setTimeout(r, 10));
+      setSession(mockEnrichedSession({ tmuxPane: paneId, project: paneId }));
+    }
+
+    const frame = await pollFrame(15);
+    expect(frame).toContain("CONTENT_FOR_%6");
+    // One settle = one capture. Six selection changes (the mount + 5 rapid
+    // moves) landing on a genuine capture storm would be 6; the debounce
+    // collapses that to (at most) the couple of captures that actually
+    // survive cancellation.
+    expect(calls).toBeLessThanOrEqual(2);
   });
 });
 
