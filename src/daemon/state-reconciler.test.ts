@@ -4,6 +4,8 @@ import { tmpdir } from "os";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
 import type { ProcessInfo, Session, TmuxPane } from "../types/session";
 import type { PaneDetectionResult } from "./pane-classify";
+import { ProcessTree } from "./process-tree";
+import { PS_HEADER, psLine } from "./process-tree-test-helpers";
 
 /** Redirect STATE_FILE to a temp dir so tests don't touch real ~/.config/ccmux/state.json */
 const tempRoot = join(
@@ -1499,6 +1501,61 @@ describe("reconcileAll", () => {
       const session = sessionManager.getSession(id)!;
       expect(session.status).toBe("working");
     });
+  });
+
+  describe("shell classification (real ProcessTree, fixture ps output)", () => {
+    // Regression coverage for issue #52: detectToolExecution used to call
+    // findShellDescendants stubbed out, so it never exercised the real
+    // classification. Build an actual ProcessTree from canned ps output so
+    // the exact-basename fix is proven end to end through the reconciler,
+    // not just at the unit level.
+    it.each([
+      {
+        name: "stays waiting when the only Bash descendant is a language server (path contains 'sh')",
+        descendantComm: "~/.local/share/mise/installs/node/26.3.0/bin/node",
+        expectedStatus: "waiting" as const,
+        expectedAttentionType: "permission" as Session["attentionType"],
+      },
+      {
+        name: "flips to working when a real shell (zsh) is a Bash descendant",
+        descendantComm: "-zsh",
+        expectedStatus: "working" as const,
+        expectedAttentionType: null as Session["attentionType"],
+      },
+    ])(
+      "$name",
+      async ({ descendantComm, expectedStatus, expectedAttentionType }) => {
+        const id = makeSession(sessionManager, {
+          status: "waiting",
+          attentionType: "permission",
+          pendingTool: "Bash",
+          trackingMode: "native",
+          pid: 12345,
+          tmuxPane: "%1",
+          lastActivityAt: new Date().toISOString(),
+        });
+
+        const output = [
+          PS_HEADER,
+          psLine(12345, 1, "/usr/local/bin/claude"),
+          psLine(54321, 12345, descendantComm),
+        ].join("\n");
+        const processTree = ProcessTree.fromPsOutput(output);
+
+        await reconcileAll(
+          makeDeps(sessionManager),
+          makeSnapshot({
+            processes: [fakeProcess()],
+            panes: [fakePane()],
+            processTree,
+          }),
+        );
+
+        const session = sessionManager.getSession(id)!;
+        expect(session.status).toBe(expectedStatus);
+        expect(session.attentionType).toBe(expectedAttentionType);
+      },
+    );
   });
 
   describe("waiting session protection", () => {
