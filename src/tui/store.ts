@@ -254,8 +254,9 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
    * repeatedly; without this, every pause re-captures every visible pane.
    * Content staler than a couple of seconds is irrelevant for search ranking,
    * so a cache hit within the TTL skips the `tmux capture-pane` entirely
-   * (issue #55). Not pruned: dead panes leave a small stale string behind,
-   * cheaper than the bookkeeping to evict them.
+   * (issue #55). Pruned to the current session list's panes on every effect
+   * run (below) so a closed session's entry doesn't linger forever in a
+   * long-lived TUI process.
    */
   const paneContentCache = new Map<
     string,
@@ -397,6 +398,16 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         return;
       }
       const now = Date.now();
+      const livePanes = new Set(
+        sessions.filter((s) => s.tmuxPane).map((s) => s.tmuxPane!),
+      );
+      // Bound the cache to panes this batch actually cares about: a pane
+      // that dropped out of the session list (session closed) has nothing
+      // left to look it up by, so keeping its entry around would only grow
+      // the map forever across a long-lived TUI process.
+      for (const paneId of paneContentCache.keys()) {
+        if (!livePanes.has(paneId)) paneContentCache.delete(paneId);
+      }
       const cache = new Map<string, string>();
       await Promise.all(
         sessions
