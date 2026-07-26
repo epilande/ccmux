@@ -1452,6 +1452,58 @@ describe("store", () => {
       expect(capturePaneSpy).toHaveBeenCalledWith("%1", 100);
     });
 
+    it("reuses cached pane content for a second query within the TTL (issue #55 item 5)", async () => {
+      capturePaneSpy.mockClear();
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "s1",
+          project: "zzz",
+          gitBranch: null,
+          tmuxPane: "%1",
+        }),
+      ]);
+
+      store.actions.setSearchQuery("zzz");
+      await waitForDebounce();
+      expect(capturePaneSpy).toHaveBeenCalledTimes(1);
+
+      // A second query change (natural typing pause) well inside the default
+      // 2.5s TTL must not re-capture the same pane.
+      capturePaneSpy.mockClear();
+      store.actions.setSearchQuery("zzzq");
+      await waitForDebounce();
+      expect(capturePaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("re-captures once the pane-content cache TTL has elapsed", async () => {
+      capturePaneSpy.mockClear();
+      // Tiny TTL so the expiry is observable without a multi-second test.
+      const store = createTUIStore({
+        groupBy: "none",
+        searchPaneCacheTtlMs: 10,
+      });
+      store.actions.setSessions([
+        createMockSession({
+          id: "s1",
+          project: "zzz",
+          gitBranch: null,
+          tmuxPane: "%1",
+        }),
+      ]);
+
+      store.actions.setSearchQuery("zzz");
+      await waitForDebounce();
+      expect(capturePaneSpy).toHaveBeenCalledTimes(1);
+
+      // Let the 10ms TTL lapse, then wait out the 250ms debounce again.
+      await new Promise((r) => setTimeout(r, 50));
+      capturePaneSpy.mockClear();
+      store.actions.setSearchQuery("zzzq");
+      await waitForDebounce();
+      expect(capturePaneSpy).toHaveBeenCalledTimes(1);
+    });
+
     it("matches an older prompt by substring with a single-span highlight when lastPrompt did not match", () => {
       const store = createTUIStore({ groupBy: "none" });
       store.actions.setSessions([

@@ -96,6 +96,9 @@ interface TUIStoreOptions {
   breakpoints?: BreakpointConfig;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
+  /** TTL (ms) for the search pane-content cache (issue #55). Defaults to
+   *  2500; injectable so tests can observe expiry without a multi-second wait. */
+  searchPaneCacheTtlMs?: number;
   searchTranscript?: boolean;
   groupBy?: GroupBy;
   collapsedGroups?: string[];
@@ -244,6 +247,22 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     new Map(),
   );
 
+  /**
+   * Raw per-pane capture cache (keyed by tmux pane id, not session id) with a
+   * short TTL. The search effect below debounces 250ms per keystroke pause,
+   * but typing a query with natural pauses re-triggers that debounce
+   * repeatedly; without this, every pause re-captures every visible pane.
+   * Content staler than a couple of seconds is irrelevant for search ranking,
+   * so a cache hit within the TTL skips the `tmux capture-pane` entirely
+   * (issue #55). Not pruned: dead panes leave a small stale string behind,
+   * cheaper than the bookkeeping to evict them.
+   */
+  const paneContentCache = new Map<
+    string,
+    { content: string; capturedAt: number }
+  >();
+  const paneContentCacheTtlMs = options.searchPaneCacheTtlMs ?? 2500;
+
   // Live transcript matches keyed by session id, populated by the debounced
   // /search effect below.
   const [transcriptCache, setTranscriptCache] = createSignal<
@@ -377,17 +396,28 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         setPaneCache(new Map());
         return;
       }
+      const now = Date.now();
       const cache = new Map<string, string>();
       await Promise.all(
         sessions
           .filter((s) => s.tmuxPane)
           .map(async (s) => {
+            const paneId = s.tmuxPane!;
+            const cached = paneContentCache.get(paneId);
+            if (cached && now - cached.capturedAt < paneContentCacheTtlMs) {
+              cache.set(s.id, cached.content);
+              return;
+            }
             // A gone pane has nothing to match; capturePane throws, treat as empty.
-            const content = await capturePane(
-              s.tmuxPane!,
-              searchPaneLines,
-            ).catch(() => "");
-            cache.set(s.id, stripAnsi(content));
+            const content = await capturePane(paneId, searchPaneLines).catch(
+              () => "",
+            );
+            const stripped = stripAnsi(content);
+            paneContentCache.set(paneId, {
+              content: stripped,
+              capturedAt: now,
+            });
+            cache.set(s.id, stripped);
           }),
       );
       setPaneCache(cache);
