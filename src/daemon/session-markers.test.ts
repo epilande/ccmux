@@ -132,23 +132,81 @@ describe("session-markers", () => {
   });
 
   describe("cleanupStaleMarkers", () => {
-    it("returns 0 when MARKERS_DIR does not exist", () => {
-      rmSync(testMarkersDir, { recursive: true, force: true });
-      expect(
-        cleanupStaleMarkers(new Set(), undefined, claudeLivenessCheck),
-      ).toBe(0);
+    /**
+     * The daemon-owned PID-reap hysteresis state, fresh per test and carried
+     * across the calls within one test so a scan sequence can be replayed.
+     */
+    let pidReapPending: Set<string>;
+
+    beforeEach(() => {
+      pidReapPending = new Set();
     });
 
-    it("deletes markers for dead PIDs", () => {
+    /** One scan. */
+    const cleanup = (
+      activePids: Set<number>,
+      activeTtys: Map<number, string> | undefined,
+      isSessionStillLive: (marker: SessionPidMarker) => boolean,
+    ): number =>
+      cleanupStaleMarkers(
+        activePids,
+        activeTtys,
+        isSessionStillLive,
+        pidReapPending,
+      );
+
+    it("returns 0 when MARKERS_DIR does not exist", () => {
+      rmSync(testMarkersDir, { recursive: true, force: true });
+      expect(cleanup(new Set(), undefined, claudeLivenessCheck)).toBe(0);
+    });
+
+    it("deletes markers for dead PIDs after two consecutive scans", () => {
       writeMarker("s1", makeMarker({ pid: 999, session_id: "s1" }));
       const activePids = new Set([100]);
 
-      const cleaned = cleanupStaleMarkers(
-        activePids,
-        undefined,
-        claudeLivenessCheck,
+      // First scan only proposes the reap.
+      expect(cleanup(activePids, undefined, claudeLivenessCheck)).toBe(0);
+      expect(existsSync(join(testMarkersDir, "s1.json"))).toBe(true);
+
+      expect(cleanup(activePids, undefined, claudeLivenessCheck)).toBe(1);
+      expect(existsSync(join(testMarkersDir, "s1.json"))).toBe(false);
+    });
+
+    it("keeps a marker whose PID reappears on the next scan", () => {
+      // A single scan's process discovery can omit a live process (on macOS
+      // the pid set is gated on one lsof call resolving each tty). Deleting
+      // the authoritative marker on that tick would strand a running session.
+      writeMarker("s1", makeMarker({ pid: 100, session_id: "s1" }));
+
+      expect(cleanup(new Set(), undefined, () => true)).toBe(0);
+      expect(cleanup(new Set([100]), undefined, () => true)).toBe(0);
+      // The proposal was dropped, so a later single miss starts over.
+      expect(cleanup(new Set(), undefined, () => true)).toBe(0);
+      expect(existsSync(join(testMarkersDir, "s1.json"))).toBe(true);
+    });
+
+    it("counts a re-exec under a new PID as its own first scan", () => {
+      // Same session, new pid: the previous pid's pending reap must not carry
+      // over and delete the fresh marker on its first missing scan.
+      writeMarker("s1", makeMarker({ pid: 900, session_id: "s1" }));
+      expect(cleanup(new Set(), undefined, () => true)).toBe(0);
+
+      writeMarker("s1", makeMarker({ pid: 901, session_id: "s1" }));
+      expect(cleanup(new Set(), undefined, () => true)).toBe(0);
+      expect(existsSync(join(testMarkersDir, "s1.json"))).toBe(true);
+
+      expect(cleanup(new Set(), undefined, () => true)).toBe(1);
+    });
+
+    it("still reaps a dead PID's marker without waiting on the other checks", () => {
+      // Hysteresis is scoped to PID liveness: a marker that fails the
+      // agent-specific liveness check goes on the first scan, as before.
+      writeMarker(
+        "s1",
+        makeMarker({ pid: 100, session_id: "s1", tty: "/dev/ttys001" }),
       );
-      expect(cleaned).toBe(1);
+
+      expect(cleanup(new Set([100]), undefined, () => false)).toBe(1);
       expect(existsSync(join(testMarkersDir, "s1.json"))).toBe(false);
     });
 
@@ -163,7 +221,7 @@ describe("session-markers", () => {
         makeMarker({ pid: 100, session_id: "new", timestamp: now }),
       );
 
-      const cleaned = cleanupStaleMarkers(
+      const cleaned = cleanup(
         new Set([100]),
         undefined,
         (m) => m.session_id === "new",
@@ -193,11 +251,7 @@ describe("session-markers", () => {
         }),
       );
 
-      const cleaned = cleanupStaleMarkers(
-        new Set([500]),
-        undefined,
-        () => true,
-      );
+      const cleaned = cleanup(new Set([500]), undefined, () => true);
       expect(cleaned).toBe(0);
       expect(existsSync(join(testMarkersDir, "alpha.json"))).toBe(true);
       expect(existsSync(join(testMarkersDir, "beta.json"))).toBe(true);
@@ -222,11 +276,7 @@ describe("session-markers", () => {
         }),
       );
 
-      const cleaned = cleanupStaleMarkers(
-        new Set([100]),
-        undefined,
-        claudeLivenessCheck,
-      );
+      const cleaned = cleanup(new Set([100]), undefined, claudeLivenessCheck);
       expect(cleaned).toBe(1);
       expect(existsSync(join(testMarkersDir, "dup-old.json"))).toBe(false);
       expect(existsSync(join(testMarkersDir, "dup-new.json"))).toBe(true);
@@ -243,11 +293,7 @@ describe("session-markers", () => {
       );
 
       const activeTtys = new Map([[100, "/dev/ttys999"]]);
-      const cleaned = cleanupStaleMarkers(
-        new Set([100]),
-        activeTtys,
-        claudeLivenessCheck,
-      );
+      const cleaned = cleanup(new Set([100]), activeTtys, claudeLivenessCheck);
       expect(cleaned).toBe(1);
       expect(existsSync(join(testMarkersDir, "s1.json"))).toBe(false);
     });
@@ -263,11 +309,7 @@ describe("session-markers", () => {
       );
 
       const activeTtys = new Map([[100, "/dev/ttys001"]]);
-      const cleaned = cleanupStaleMarkers(
-        new Set([100]),
-        activeTtys,
-        claudeLivenessCheck,
-      );
+      const cleaned = cleanup(new Set([100]), activeTtys, claudeLivenessCheck);
       expect(cleaned).toBe(0);
       expect(existsSync(join(testMarkersDir, "s1.json"))).toBe(true);
     });
@@ -286,11 +328,7 @@ describe("session-markers", () => {
       );
 
       const activeTtys = new Map([[100, "ttys042"]]);
-      const cleaned = cleanupStaleMarkers(
-        new Set([100]),
-        activeTtys,
-        claudeLivenessCheck,
-      );
+      const cleaned = cleanup(new Set([100]), activeTtys, claudeLivenessCheck);
       expect(cleaned).toBe(0);
       expect(existsSync(join(testMarkersDir, "s1.json"))).toBe(true);
     });
@@ -305,11 +343,7 @@ describe("session-markers", () => {
         }),
       );
 
-      const cleaned = cleanupStaleMarkers(
-        new Set([100]),
-        undefined,
-        claudeLivenessCheck,
-      );
+      const cleaned = cleanup(new Set([100]), undefined, claudeLivenessCheck);
       expect(cleaned).toBe(0);
     });
 
@@ -324,22 +358,14 @@ describe("session-markers", () => {
       );
 
       const activeTtys = new Map([[100, "/dev/ttys999"]]);
-      const cleaned = cleanupStaleMarkers(
-        new Set([100]),
-        activeTtys,
-        claudeLivenessCheck,
-      );
+      const cleaned = cleanup(new Set([100]), activeTtys, claudeLivenessCheck);
       expect(cleaned).toBe(0);
     });
 
     it("keeps markers for fresh Claude sessions before the first JSONL is written", () => {
       writeMarker("s1", makeMarker({ pid: 100, session_id: "s1" }));
 
-      const cleaned = cleanupStaleMarkers(
-        new Set([100]),
-        undefined,
-        claudeLivenessCheck,
-      );
+      const cleaned = cleanup(new Set([100]), undefined, claudeLivenessCheck);
       expect(cleaned).toBe(0);
       expect(existsSync(join(testMarkersDir, "s1.json"))).toBe(true);
     });
@@ -347,11 +373,7 @@ describe("session-markers", () => {
     it("deletes malformed marker files", () => {
       writeRawFile("bad.json", "not json");
 
-      const cleaned = cleanupStaleMarkers(
-        new Set(),
-        undefined,
-        claudeLivenessCheck,
-      );
+      const cleaned = cleanup(new Set(), undefined, claudeLivenessCheck);
       expect(cleaned).toBe(1);
       expect(existsSync(join(testMarkersDir, "bad.json"))).toBe(false);
     });
@@ -361,12 +383,10 @@ describe("session-markers", () => {
       writeMarker("s2", makeMarker({ pid: 902, session_id: "s2" }));
       writeRawFile("bad.json", "{{{{");
 
-      const cleaned = cleanupStaleMarkers(
-        new Set([100]),
-        undefined,
-        claudeLivenessCheck,
-      );
-      expect(cleaned).toBe(3);
+      // The malformed file goes immediately; the two dead PIDs need the
+      // second scan, so the count splits 1 + 2 rather than landing as 3.
+      expect(cleanup(new Set([100]), undefined, claudeLivenessCheck)).toBe(1);
+      expect(cleanup(new Set([100]), undefined, claudeLivenessCheck)).toBe(2);
     });
 
     it("calls isSessionStillLive with the full marker for each distinct session", () => {
@@ -380,7 +400,7 @@ describe("session-markers", () => {
       );
 
       const seen: SessionPidMarker[] = [];
-      cleanupStaleMarkers(new Set([100, 200]), undefined, (marker) => {
+      cleanup(new Set([100, 200]), undefined, (marker) => {
         seen.push(marker);
         return true;
       });
@@ -408,11 +428,7 @@ describe("session-markers", () => {
           30 * 24 * 60 * 60 * 1000,
         );
 
-        const cleaned = cleanupStaleMarkers(
-          new Set(),
-          undefined,
-          claudeLivenessCheck,
-        );
+        const cleaned = cleanup(new Set(), undefined, claudeLivenessCheck);
 
         expect(cleaned).toBe(2);
         expect(existsSync(bare)).toBe(false);
@@ -422,7 +438,7 @@ describe("session-markers", () => {
       it("keeps young tmp files (possible in-flight tmp+rename write)", () => {
         const young = writeAgedTmp("claude-fresh.json.tmp", 5 * 60 * 1000);
 
-        cleanupStaleMarkers(new Set(), undefined, claudeLivenessCheck);
+        cleanup(new Set(), undefined, claudeLivenessCheck);
 
         expect(existsSync(young)).toBe(true);
       });
@@ -433,7 +449,7 @@ describe("session-markers", () => {
         const mtime = new Date(Date.now() - 2 * 60 * 60 * 1000);
         utimesSync(path, mtime, mtime);
 
-        cleanupStaleMarkers(new Set(), undefined, claudeLivenessCheck);
+        cleanup(new Set(), undefined, claudeLivenessCheck);
 
         expect(existsSync(path)).toBe(true);
       });
@@ -447,7 +463,7 @@ describe("session-markers", () => {
         const mtime = new Date(Date.now() - 2 * 60 * 60 * 1000);
         utimesSync(path, mtime, mtime);
 
-        cleanupStaleMarkers(new Set([100]), undefined, () => true);
+        cleanup(new Set([100]), undefined, () => true);
 
         expect(existsSync(path)).toBe(true);
       });
