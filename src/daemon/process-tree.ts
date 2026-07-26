@@ -12,18 +12,22 @@ export interface ProcessNode {
 }
 
 /**
- * Exact-match shell basename derived from a raw `comm` value: drop trailing
- * argv, strip one leading `-` (login shells report `-zsh`), then take the
- * path basename. Substring matching on raw `comm` false-positives on macOS,
- * where `comm` is a full path (e.g. `~/.local/share/...` contains "sh").
+ * Exact-match shell basename derived from a raw `comm` value. `ps -axo comm`
+ * never carries a space-separated argument list: on macOS it reports
+ * argv[0] only (e.g. `/bin/zsh`, or `-zsh` for a login shell), and on Linux
+ * it reports the kernel's 15-char task name. The only spaces that
+ * legitimately appear are inside the path itself (e.g. an app-bundle path
+ * like `/Applications/Foo.app/Contents/MacOS/Foo`). Derivation: strip one
+ * leading `-` (login shells report `-zsh`), then take the path basename.
+ * Command-style input (e.g. `"sh -c echo hi"`) is tolerated defensively so
+ * the function never throws, but it is not real `comm` output and is not
+ * specially parsed. Substring matching on raw `comm` false-positives on
+ * macOS, where `comm` is a full path (e.g. `/Users/.../.local/share/...`
+ * contains "sh").
  */
 export function shellCommKey(comm: string): string {
   const trimmed = comm.trim();
-  const spaceIndex = trimmed.indexOf(" ");
-  const firstToken = spaceIndex === -1 ? trimmed : trimmed.slice(0, spaceIndex);
-  const unwrapped = firstToken.startsWith("-")
-    ? firstToken.slice(1)
-    : firstToken;
+  const unwrapped = trimmed.startsWith("-") ? trimmed.slice(1) : trimmed;
   return basename(unwrapped);
 }
 
@@ -120,7 +124,10 @@ export class ProcessTree {
   /**
    * Shell process names to detect running Bash commands. Matched by EXACT
    * equality against the derived basename (see `shellCommKey`), never by
-   * substring against the raw `comm` string.
+   * substring against the raw `comm` string. `as const` pins this as a
+   * fixed-length tuple so the `SHELL_NAMES_SET` static initializer below
+   * (which reads `SHELL_NAMES`) stays correct regardless of declaration
+   * order within the class body.
    */
   static readonly SHELL_NAMES = [
     "bash",
@@ -132,10 +139,11 @@ export class ProcessTree {
     "csh",
     "tcsh",
     "ash",
-  ];
+  ] as const;
 
   /** O(1) lookup mirror of `SHELL_NAMES`, checked per descendant in the BFS below. */
-  private static readonly SHELL_NAMES_SET = new Set(ProcessTree.SHELL_NAMES);
+  private static readonly SHELL_NAMES_SET: ReadonlySet<string> =
+    new Set<string>(ProcessTree.SHELL_NAMES);
 
   /**
    * Find all shell descendant processes of a given root PID

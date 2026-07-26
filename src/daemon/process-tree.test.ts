@@ -86,30 +86,55 @@ describe("ProcessTree", () => {
   });
 
   describe("shellCommKey()", () => {
-    // Positive fixtures: real shells, in the various forms macOS/Linux `comm`
-    // reports them (login-dash, bare path, path+args, bare name+args).
+    // Positive fixtures: real shells, in the forms macOS/Linux `comm` actually
+    // reports them (login-dash, bare path, path with embedded spaces from an
+    // app-bundle-style directory). `comm` is argv[0]/task name, never a
+    // space-separated argv list, so there is no "path+args" form to cover.
     test.each([
       ["-zsh", "zsh"],
       ["-/bin/zsh", "zsh"],
       ["/bin/zsh", "zsh"],
-      ["/bin/bash --noprofile --norc", "bash"],
+      ["/bin/bash", "bash"],
       ["/opt/homebrew/bin/fish", "fish"],
-      ["sh -c echo hi", "sh"],
+      // A real space-containing macOS comm path (a user directory with a
+      // space in it). The old first-whitespace-token split would have cut
+      // this at "a", missing the shell entirely; basename-only derivation
+      // resolves it correctly since it splits on "/", not spaces.
+      ["/Users/a b/bin/bash", "bash"],
     ])("derives %j -> %j", (comm, expected) => {
       expect(shellCommKey(comm)).toBe(expected);
     });
 
     // Negative fixtures: processes the old substring rule misclassified as
     // shells purely because their path or name contains a shell name as a
-    // substring (e.g. ".local/share" contains "sh").
+    // substring (e.g. ".local/share" contains "sh"). Paths use /Users/...
+    // rather than `~`, since `ps` always emits absolute paths.
     test.each([
-      "~/.local/share/mise/installs/node/26.3.0/bin/node",
-      "/usr/bin/login -flp user /bin/bash -c exec -l /bin/zsh",
+      "/Users/dev/.local/share/mise/installs/node/26.3.0/bin/node",
       "sshd-session: user [priv]",
       "/usr/libexec/sharingd",
       "/System/Library/CoreServices/ReportCrash",
+      // A real space-containing macOS comm path for a non-shell binary
+      // inside an app bundle's Helpers directory.
+      "/Applications/Elgato Stream Deck.app/Contents/Helpers/crashpad_handler",
     ])("derives %j -> a key not in SHELL_NAMES", (comm) => {
       expect(ProcessTree.SHELL_NAMES).not.toContain(shellCommKey(comm));
+    });
+
+    // Defensive-tolerance fixtures: `comm` is never actually argv-shaped
+    // (see the JSDoc on shellCommKey), but the function must not throw on
+    // command-style input if it's ever handed some by a caller. These are
+    // NOT representative of real ps output, and the derived key is
+    // incidental rather than a guarantee — in particular, the login-wrapper
+    // case below happens to end in "/bin/zsh" and so is (mis)classified as
+    // a real zsh shell, which is why every other fixture in this file is
+    // careful to stay comm-shaped rather than argv-shaped.
+    test.each([
+      ["/bin/bash --noprofile --norc", "bash --noprofile --norc"],
+      ["sh -c echo hi", "sh -c echo hi"],
+      ["/usr/bin/login -flp user /bin/bash -c exec -l /bin/zsh", "zsh"],
+    ])("tolerates command-style input %j -> %j", (comm, expected) => {
+      expect(shellCommKey(comm)).toBe(expected);
     });
   });
 
@@ -119,7 +144,11 @@ describe("ProcessTree", () => {
         PS_HEADER,
         psLine(100, 1, "/usr/bin/claude"),
         psLine(101, 100, "-zsh"),
-        psLine(102, 100, "~/.local/share/mise/installs/node/26.3.0/bin/node"),
+        psLine(
+          102,
+          100,
+          "/Users/dev/.local/share/mise/installs/node/26.3.0/bin/node",
+        ),
       ].join("\n");
 
       const tree = ProcessTree.fromPsOutput(output);
@@ -132,7 +161,11 @@ describe("ProcessTree", () => {
       const output = [
         PS_HEADER,
         psLine(200, 1, "/usr/bin/claude"),
-        psLine(201, 200, "~/.local/share/mise/installs/node/26.3.0/bin/node"),
+        psLine(
+          201,
+          200,
+          "/Users/dev/.local/share/mise/installs/node/26.3.0/bin/node",
+        ),
         psLine(202, 200, "/usr/libexec/sharingd"),
       ].join("\n");
 
@@ -142,7 +175,12 @@ describe("ProcessTree", () => {
       expect(shells).toEqual([]);
     });
 
-    test("does not match a login wrapper that merely execs a shell as an argument", () => {
+    test("tolerates a login-wrapper argv string fed in as comm (not representative of real ps output)", () => {
+      // Real `ps` comm is never argv-shaped (see shellCommKey's JSDoc), so
+      // this input can't occur in practice. It's kept here only to document
+      // the known trade-off: because the derivation no longer strips argv,
+      // a synthetic comm string that happens to end in "/bin/zsh" derives
+      // to "zsh" and is (mis)classified as a real shell descendant.
       const output = [
         PS_HEADER,
         psLine(300, 1, "/usr/bin/claude"),
@@ -156,7 +194,7 @@ describe("ProcessTree", () => {
       const tree = ProcessTree.fromPsOutput(output);
       const shells = tree.findShellDescendants(300);
 
-      expect(shells).toEqual([]);
+      expect(shells).toEqual([301]);
     });
 
     test("finds shells across the expanded name set (dash, ksh, csh, tcsh, ash)", () => {
@@ -173,7 +211,7 @@ describe("ProcessTree", () => {
       const tree = ProcessTree.fromPsOutput(output);
       const shells = tree.findShellDescendants(400);
 
-      expect(shells.sort()).toEqual([401, 402, 403, 404, 405]);
+      expect(shells.sort((a, b) => a - b)).toEqual([401, 402, 403, 404, 405]);
     });
   });
 });
