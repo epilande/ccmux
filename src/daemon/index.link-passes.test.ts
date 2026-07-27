@@ -23,6 +23,7 @@ const LINK_PASS_NAMES = [
   "opencode",
   "cursor",
   "pi",
+  "omp",
   "antigravity",
   "copilot",
 ] as const;
@@ -43,6 +44,9 @@ type LinkPassesInternals = {
   linkPiSessions(
     processStartTimeByPid: ReadonlyMap<number, number | null>,
   ): Promise<void>;
+  linkOmpSessions(
+    processStartTimeByPid: ReadonlyMap<number, number | null>,
+  ): Promise<void>;
   linkAntigravitySessions(
     processStartTimeByPid: ReadonlyMap<number, number | null>,
   ): Promise<void>;
@@ -61,14 +65,15 @@ const LINK_PASS_METHOD: Record<LinkPassName, keyof LinkPassesInternals> = {
   opencode: "linkOpenCodeSessions",
   cursor: "linkCursorSessions",
   pi: "linkPiSessions",
+  omp: "linkOmpSessions",
   antigravity: "linkAntigravitySessions",
   copilot: "linkCopilotSessions",
 };
 
 /**
- * Wire all six link-pass methods on `internals` to record their name in
+ * Wire all seven link-pass methods on `internals` to record their name in
  * `calls` and, for any name listed in `failing`, throw. Centralizes the
- * six-method boilerplate every `runLinkPasses` test needs.
+ * seven-method boilerplate every `runLinkPasses` test needs.
  */
 function installLinkPassMocks(
   internals: LinkPassesInternals,
@@ -124,7 +129,7 @@ describe("Daemon.runLinkPasses", () => {
     errorSpy.mockRestore();
   });
 
-  it("all six passes succeed with no rejections and no error logs", async () => {
+  it("all seven passes succeed with no rejections and no error logs", async () => {
     const calls = installLinkPassMocks(internals);
 
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
@@ -152,7 +157,7 @@ describe("Daemon.runLinkPasses", () => {
 
     it("logs again once the error message for a pass changes", async () => {
       let message = "first failure shape";
-      installLinkPassMocks(internals, {}); // wires all six to succeed
+      installLinkPassMocks(internals, {}); // wires all seven to succeed
       internals.linkOpenCodeSessions = (async () => {
         throw new Error(message);
       }) as never;
@@ -174,7 +179,7 @@ describe("Daemon.runLinkPasses", () => {
 
     it("logs again after a recovery even if the same message recurs", async () => {
       let shouldFail = true;
-      installLinkPassMocks(internals, {}); // wires all six to succeed
+      installLinkPassMocks(internals, {}); // wires all seven to succeed
       internals.linkOpenCodeSessions = (async () => {
         if (shouldFail) throw new Error("opencode link pass boom");
       }) as never;

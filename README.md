@@ -22,12 +22,12 @@ When running multiple AI coding agent sessions across tmux panes, it's hard to k
 
 It works with your existing tmux workflow. You don't change how you launch or run your agents; ccmux discovers what's already running in your panes, so as long as you're in tmux with a supported agent, it just works.
 
-**Built-in support for:** Claude Code, Codex, Cursor, OpenCode, Pi, Antigravity, Copilot, Gemini CLI, plus [custom agent definitions](#-custom-agents) via config.
+**Built-in support for:** Claude Code, Codex, Cursor, OpenCode, Pi, oh-my-pi, Antigravity, Copilot, Gemini CLI, plus [custom agent definitions](#-custom-agents) via config.
 
 ## ✨ Features
 
 - 🎯 **Live Session States**: Every agent tracked as idle, working, or waiting (permission / plan approval / question), flagged the moment one needs you
-- 🧩 **Multi-Agent**: Claude Code, Codex, Cursor, OpenCode, Pi, Antigravity, Copilot, Gemini CLI, plus custom agents via config
+- 🧩 **Multi-Agent**: Claude Code, Codex, Cursor, OpenCode, Pi, oh-my-pi, Antigravity, Copilot, Gemini CLI, plus custom agents via config
 - 🔄 **Real-Time**: Background daemon streams state changes instantly over SSE, no polling, no refresh
 - 👁️ **Live Preview**: Split-pane view of the selected session's pane content
 - ⚡ **Act in Place**: Tab into the preview to approve, answer, or type, keys go straight to that pane
@@ -120,7 +120,7 @@ ccmux setup
 | `ccmux config get <key>`                    | Get a single preference value                                                                                 |
 | `ccmux config list`                         | List all preferences                                                                                          |
 | `ccmux config themes`                       | List built-in themes (marks the active one)                                                                   |
-| `ccmux setup`                               | Install hooks for every supported agent found on PATH (Claude + Codex + Cursor + OpenCode + Pi + Antigravity) |
+| `ccmux setup`                               | Install hooks for every supported agent found on PATH (Claude + Codex + Cursor + OpenCode + Pi + omp + Antigravity) |
 | `ccmux setup --agent <name>`                | Limit install/uninstall/status to specific agent(s); forces install even if not found on PATH                 |
 | `ccmux setup --status`                      | Report install state without writing anything                                                                 |
 | `ccmux setup --uninstall`                   | Remove hooks (preserves user-owned hook entries)                                                              |
@@ -212,7 +212,7 @@ ccmux config set notifications.enabled true
 ccmux notify   # sends a test notification and prints setup diagnostics
 ```
 
-Actionable Approve/Deny buttons work for **Claude Code**, **OpenCode**, **Codex**, **Cursor**, **Gemini CLI**, **Antigravity**, and **Copilot**; Pi has no tool-approval pause, so it never raises a waiting notification. Inline **Reply** on waiting-state notifications (permission, plan, question) is Claude Code only; Reply on **finished** notifications works for every built-in agent. A reply the agent's composer would misread as a command (e.g. leading `!` or `/`) is refused instead of typed, and the text comes back in a follow-up notification so it isn't lost. Approve/Deny work on macOS and Linux; inline reply needs a notification server that advertises it (always on macOS, varies on Linux).
+Actionable Approve/Deny buttons work for **Claude Code**, **OpenCode**, **Codex**, **Cursor**, **Gemini CLI**, **Antigravity**, **Copilot**, and **oh-my-pi**; Pi has no tool-approval pause, so it never raises a waiting notification. Inline **Reply** on waiting-state notifications (permission, plan, question) is Claude Code only; Reply on **finished** notifications works for every built-in agent. A reply the agent's composer would misread as a command (e.g. leading `!` or `/`) is refused instead of typed, and the text comes back in a follow-up notification so it isn't lost. Approve/Deny work on macOS and Linux; inline reply needs a notification server that advertises it (always on macOS, varies on Linux).
 
 For OpenCode, one server can host several sessions folded into a single row, so when more than one is waiting at once the buttons are withheld (the keystroke could land on the wrong session's dialog) and the notification is delivered informational-only.
 
@@ -279,7 +279,7 @@ echo "what is 2 + 2" | ccmux invoke claude
 git diff main | ccmux invoke claude "Review this diff"
 ```
 
-Claude runs interactively in a dedicated tmux session and returns clean text parsed from the transcript JSONL. Codex, Cursor, OpenCode, Pi, Antigravity, Copilot, and Gemini run as non-interactive subprocesses (`codex exec -o`, `cursor-agent --print`, `opencode run --format json`, `pi -p`, `agy -p`, `copilot -p --allow-all-tools`, `gemini -p`) and return the agent's clean response text.
+Claude runs interactively in a dedicated tmux session and returns clean text parsed from the transcript JSONL. Codex, Cursor, OpenCode, Pi, oh-my-pi, Antigravity, Copilot, and Gemini run as non-interactive subprocesses (`codex exec -o`, `cursor-agent --print`, `opencode run --format json`, `pi -p`, `omp -p`, `agy -p`, `copilot -p --allow-all-tools`, `gemini -p`) and return the agent's clean response text.
 
 For orchestration, name an invocation with `--id <id>`, then use `ccmux invoke list`, `ccmux invoke cancel <id>`, and `ccmux invoke result <id>` to watch, cancel, or read its full captured output by that id. See [`docs/invoke.md`](docs/invoke.md#fire-and-poll---id-list-cancel-result) for the fire-and-poll reference.
 
@@ -551,6 +551,19 @@ Uses Pi's extension system rather than shell hooks. `ccmux setup --agent pi` dro
 - `session_shutdown`: unlinks the marker
 
 Pi runs one session per process, so there's no server-style aggregation; the daemon correlates the marker's PID to its tmux pane via process ancestry and links `nativeSessionId`.
+
+### oh-my-pi
+
+oh-my-pi (`omp`) is a hard fork of Pi that kept Pi's extension API, so ccmux integrates it the same way. `ccmux setup --agent omp` drops a single auto-discovered JS extension at `~/.omp/agent/extensions/ccmux.js`, which subscribes to the same lifecycle events as the Pi extension (`session_start`, `before_agent_start`, `agent_start` / `agent_end`, `session_shutdown`) and writes one marker per session.
+
+The difference is approvals. Unlike Pi, omp gates tool calls behind an Approve/Deny prompt, so the extension also tracks:
+
+- `tool_approval_requested`: flips state to `waiting_permission` with the gated tool's name
+- `tool_approval_resolved`: clears back to `working` once the last outstanding approval is answered (approve and deny both resume the loop)
+
+That means omp rows show a real waiting state and get actionable Approve/Deny notification buttons. omp emits these events only when you have an approval mode configured; on its default `yolo` mode nothing is gated, so nothing pauses. Installing the ccmux extension does not change that either way.
+
+Two omp-specific notes: omp resolves its config dir as `$HOME` joined with `PI_CONFIG_DIR` (default `.omp`) **verbatim**, so an absolute `PI_CONFIG_DIR` still lands under your home directory, and ccmux installs to the same place omp actually reads. And because oh-my-pi still ships as the npm package `pi-coding-agent`, ccmux checks omp before Pi when identifying a process, so a fork session is never mislabeled as Pi.
 
 ### Antigravity CLI
 

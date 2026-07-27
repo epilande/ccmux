@@ -186,6 +186,11 @@ export function agentColorFor(agentType: string): string {
     opencode: theme.blue,
     gemini: theme.mauve,
     pi: theme.teal,
+    // omp is a Pi fork and the two are routinely co-visible, so it must not
+    // reuse pi's teal. `yellow` is the only remaining slot that exists in
+    // every palette and is claimed by no other agent (blue, mauve, peach,
+    // green, teal are taken; rosewater is cursor's).
+    omp: theme.yellow,
     cursor: theme.rosewater,
     antigravity: theme.blue,
     copilot: theme.mauve,

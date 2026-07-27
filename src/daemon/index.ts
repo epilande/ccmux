@@ -999,7 +999,7 @@ export class Daemon {
   }
 
   /**
-   * Run the six per-agent marker link passes concurrently. Each pass covers
+   * Run the seven per-agent marker link passes concurrently. Each pass covers
    * a disjoint agent type with no shared mutable state, and each has its own
    * I/O fan-out (a `getPaneHostingPid` lookup per marker pid), so serializing
    * them only adds latency. `Promise.allSettled` (not `Promise.all`) so one
@@ -1021,6 +1021,7 @@ export class Daemon {
       ["opencode", () => this.linkOpenCodeSessions(processStartTimeByPid)],
       ["cursor", () => this.linkCursorSessions(processStartTimeByPid)],
       ["pi", () => this.linkPiSessions(processStartTimeByPid)],
+      ["omp", () => this.linkOmpSessions(processStartTimeByPid)],
       [
         "antigravity",
         () => this.linkAntigravitySessions(processStartTimeByPid),
@@ -1183,6 +1184,22 @@ export class Daemon {
     processStartTimeByPid: ReadonlyMap<number, number | null>,
   ): Promise<void> {
     const adapter = this.hookManager.getAdapter("pi");
+    if (!adapter) return;
+    const ctx = this.hookManager.getContext();
+    if (!ctx) return;
+    await reconcileSessionMarkerLinks(adapter, ctx, processStartTimeByPid);
+  }
+
+  /**
+   * Per-scan omp marker link pass. Identical in shape and rationale to the pi
+   * pass above: omp inherited Pi's `session_start`-at-launch behavior, so the
+   * marker beats the first process scan and this pass is what actually
+   * attaches `nativeSessionId` in practice.
+   */
+  private async linkOmpSessions(
+    processStartTimeByPid: ReadonlyMap<number, number | null>,
+  ): Promise<void> {
+    const adapter = this.hookManager.getAdapter("omp");
     if (!adapter) return;
     const ctx = this.hookManager.getContext();
     if (!ctx) return;

@@ -11,6 +11,7 @@ describe("createBuiltinHookAdapters", () => {
       "codex",
       "copilot",
       "cursor",
+      "omp",
       "opencode",
       "pi",
     ]);

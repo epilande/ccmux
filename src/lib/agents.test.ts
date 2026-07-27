@@ -129,6 +129,65 @@ describe("findAgentForProcess", () => {
       ),
     ).toBeNull();
   });
+
+  it("resolves omp before pi even though both share the pi-coding-agent path", () => {
+    // oh-my-pi is a hard fork of Pi and kept the package name
+    // `pi-coding-agent`, so pi's commandPatterns regex also matches omp's
+    // launcher. BUILTIN_AGENTS orders omp first AND omp's own pattern
+    // requires the `oh-my-pi` scope dir; both halves are load-bearing.
+    expect(
+      findAgentForProcess(
+        "node /Users/x/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+        BUILTIN_AGENTS,
+      )?.name,
+    ).toBe("omp");
+    expect(findAgentForProcess("omp", BUILTIN_AGENTS)?.name).toBe("omp");
+    expect(findAgentForProcess("omp -c", BUILTIN_AGENTS)?.name).toBe("omp");
+    expect(findAgentForProcess("pi", BUILTIN_AGENTS)?.name).toBe("pi");
+    expect(findAgentForProcess("pi -c", BUILTIN_AGENTS)?.name).toBe("pi");
+    // An upstream pi launcher path (no `oh-my-pi` component) still resolves
+    // to pi: omp's scoped pattern cannot claim it.
+    expect(
+      findAgentForProcess(
+        "node /Users/x/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
+        BUILTIN_AGENTS,
+      )?.name,
+    ).toBe("pi");
+  });
+
+  it("matches the bun-shim omp launch, where neither comm nor argv[0] is omp", () => {
+    // The real observed process on a mise/npm install (omp 17.1.3): omp's bin
+    // shim is `#!/usr/bin/env bun`, and Bun makes `process.title = "omp"` a
+    // no-op for `ps`, so the process is comm `bun` with the SYMLINK path in
+    // argv[1] — never the resolved @oh-my-pi/.../dist/cli.js target. Without
+    // the `bin/omp` commandPattern the pid stays out of the detected agent
+    // set and cleanupStaleMarkers reaps the extension's valid marker.
+    expect(
+      findAgentForProcess(
+        "bun /Users/x/.local/share/mise/installs/node/26.3.0/bin/omp --model gemini-2.5-flash",
+        BUILTIN_AGENTS,
+      )?.name,
+    ).toBe("omp");
+    expect(
+      findAgentForProcess(
+        "bun /Users/x/.local/share/mise/installs/node/26.3.0/bin/omp",
+        BUILTIN_AGENTS,
+      )?.name,
+    ).toBe("omp");
+    // Standalone/node launch: argv[0] basename is really `omp`.
+    expect(
+      findAgentForProcess("/usr/local/bin/omp", BUILTIN_AGENTS)?.name,
+    ).toBe("omp");
+  });
+
+  it("does not match omp-adjacent binaries that merely start with omp", () => {
+    // The `bin/omp` pattern's trailing `(?:\s|$)` is what keeps these out.
+    expect(findAgentForProcess("bun /x/bin/ompx", BUILTIN_AGENTS)).toBeNull();
+    expect(findAgentForProcess("/x/bin/omp-helper", BUILTIN_AGENTS)).toBeNull();
+    expect(
+      findAgentForProcess("bun /x/bin/omp-helper --flag", BUILTIN_AGENTS),
+    ).toBeNull();
+  });
 });
 
 describe("Copilot version parsing", () => {
@@ -143,6 +202,18 @@ describe("Copilot version parsing", () => {
         copilot?.versionPatterns,
       ),
     ).toBe("1.0.71");
+  });
+});
+
+describe("omp version parsing", () => {
+  it("extracts the version from `omp --version` output using defaults", () => {
+    // omp prints a single `omp/17.1.3` line; the default patterns take the
+    // version-shaped token, so omp needs no `versionPatterns` override.
+    const omp = BUILTIN_AGENTS.find((a) => a.name === "omp");
+    expect(omp?.versionPatterns).toBeUndefined();
+    expect(extractVersionFromOutput("omp/17.1.3", omp?.versionPatterns)).toBe(
+      "17.1.3",
+    );
   });
 });
 
@@ -588,6 +659,21 @@ describe("built-in agent notificationActions defaults", () => {
     // pi strips leading whitespace before its `!` bash trigger and executes
     // the text; `/` IS space-defusable (submits as a plain message).
     expect(pi?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*!/);
+  });
+
+  it("omp carries Approve/Deny keys and finished-only Reply (unlike its Pi upstream)", () => {
+    const omp = BUILTIN_AGENTS.find((a) => a.name === "omp");
+    // omp's approval select is `["Approve", "Deny"]` opened at index 0, so
+    // Enter approves; Escape cancels the select and omp resolves the call as
+    // denied ("Tool call denied by user"), which is fail-closed.
+    expect(omp?.notificationActions?.approve).toEqual(["Enter"]);
+    expect(omp?.notificationActions?.deny).toEqual(["Escape"]);
+    expect(omp?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(omp?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(omp?.notificationActions?.replyOnFinished).toBe(true);
+    // Same composer as pi: leading whitespace is stripped before the `!`
+    // bash trigger, so the space defuse does not neutralize it.
+    expect(omp?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*!/);
   });
 });
 
