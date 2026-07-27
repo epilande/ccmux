@@ -46,6 +46,13 @@ interface WindowDecision {
 
 type PersistDecision = LocalDecision & WindowDecision;
 
+/** Whether a prefs write is recent enough that this settle is another sidebar's
+ * propagation arriving rather than user intent. Unknown age means no file, so
+ * nothing is in flight. */
+function isWithinPrefsQuietPeriod(prefsAgeMs: number | null): boolean {
+  return prefsAgeMs !== null && prefsAgeMs < PREFS_QUIET_MS;
+}
+
 /**
  * The gates answerable from local state alone, split out so a settle that they
  * already reject never pays for a `tmux display-message` subprocess. Every
@@ -60,7 +67,7 @@ type PersistDecision = LocalDecision & WindowDecision;
  */
 export function passesLocalGates(d: LocalDecision): boolean {
   if (d.settledWidth < MIN_PERSIST_WIDTH) return false;
-  if (d.prefsAgeMs !== null && d.prefsAgeMs < PREFS_QUIET_MS) return false;
+  if (isWithinPrefsQuietPeriod(d.prefsAgeMs)) return false;
   return d.settledWidth !== d.configuredWidth;
 }
 
@@ -179,7 +186,7 @@ export function createSidebarWidthPersister(
         configuredWidth,
         prefsAgeMs,
       });
-      if (!local && prefsAgeMs !== null && prefsAgeMs < PREFS_QUIET_MS) return;
+      if (!local && isWithinPrefsQuietPeriod(prefsAgeMs)) return;
 
       const state = await fetchState();
       const prevWindowWidth = lastWindowWidth;

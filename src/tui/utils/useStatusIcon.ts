@@ -34,6 +34,12 @@ function startSpinnerInterval(): void {
   }, SPINNER_INTERVAL_MS);
 }
 
+function stopSpinnerInterval(): void {
+  if (!spinnerIntervalId) return;
+  untrackInterval(spinnerIntervalId);
+  spinnerIntervalId = null;
+}
+
 /**
  * Stop/restart the shared spinner without touching refcounts.
  *
@@ -49,10 +55,7 @@ export function setSpinnerPaused(paused: boolean): void {
   spinnerPaused = paused;
 
   if (paused) {
-    if (spinnerIntervalId) {
-      untrackInterval(spinnerIntervalId);
-      spinnerIntervalId = null;
-    }
+    stopSpinnerInterval();
     return;
   }
 
@@ -69,10 +72,7 @@ function acquireSpinner(): void {
 
 function releaseSpinner(): void {
   if (--spinnerRefCount <= 0) {
-    if (spinnerIntervalId) {
-      untrackInterval(spinnerIntervalId);
-      spinnerIntervalId = null;
-    }
+    stopSpinnerInterval();
     spinnerRefCount = 0;
   }
 }

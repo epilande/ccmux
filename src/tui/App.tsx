@@ -607,6 +607,14 @@ export function App(props: AppProps) {
   // debounced spawns — bounded by how fast a human switches panes — in
   // exchange for eliminating continuous redraws in every background window.
   // The picker is never gated: it is by definition what the user is looking at.
+  //
+  // Four signals drive a re-check, and it takes all four to cover every way a
+  // window goes on or off screen: SSE `active_pane` events (the common case,
+  // but the daemon suppresses them for ccmux-titled panes), terminal dimension
+  // changes (a client attach/detach resizes panes without a select hook),
+  // keypresses in the sidebar (the heal for the suppressed-event case, since a
+  // keypress means someone is looking at it), and the 30s safety poll inside
+  // the primitive (catches an attach/detach that changed no dimension).
   const visibility = props.sidebar ? createWindowVisibility() : null;
   const isVisible = (): boolean => visibility?.visible() ?? true;
 
@@ -845,10 +853,10 @@ export function App(props: AppProps) {
   function scheduleTick(ms: number) {
     if (tickTimerId) untrackInterval(tickTimerId);
     currentTickMs = ms;
-    tickTimerId = trackInterval(onTick, ms);
+    tickTimerId = trackInterval(runTick, ms);
   }
 
-  function onTick() {
+  function runTick() {
     store.bumpTick();
     const desiredMs = desiredTickMs();
     if (desiredMs !== currentTickMs) scheduleTick(desiredMs);
@@ -864,9 +872,7 @@ export function App(props: AppProps) {
           if (!visible) return;
           // Catch up the relative time labels that the slow cadence let go
           // stale, then re-arm at whatever cadence the data now wants.
-          store.bumpTick();
-          const desiredMs = desiredTickMs();
-          if (desiredMs !== currentTickMs) scheduleTick(desiredMs);
+          runTick();
         },
         { defer: true },
       ),
