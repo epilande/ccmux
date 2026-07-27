@@ -179,18 +179,18 @@ function getAttentionColor(session: EnrichedSession): string {
  * reads the live `theme` after `applyTheme`, rather than freezing the default
  * palette at import time. */
 export function agentColorFor(agentType: string): string {
-  // Brand-matched colors; shared slots (blue, mauve) are intentional.
+  // Brand-matched colors; shared slots (blue, mauve, teal) are intentional.
   const colors: Record<string, string> = {
     claude: theme.peach,
     codex: theme.green,
     opencode: theme.blue,
     gemini: theme.mauve,
     pi: theme.teal,
-    // omp is a Pi fork and the two are routinely co-visible, so it must not
-    // reuse pi's teal. `yellow` is the only remaining slot that exists in
-    // every palette and is claimed by no other agent (blue, mauve, peach,
-    // green, teal are taken; rosewater is cursor's).
-    omp: theme.yellow,
+    // omp shares pi's teal ON PURPOSE: it is a Pi fork, and the shared hue is
+    // the signal that the two are the same family. They stay tellable apart by
+    // the `pi` / `om` short code and the full label, so the color is spent on
+    // kinship rather than on a distinction those already carry.
+    omp: theme.teal,
     cursor: theme.rosewater,
     antigravity: theme.blue,
     copilot: theme.mauve,
