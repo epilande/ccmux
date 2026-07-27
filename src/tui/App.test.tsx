@@ -99,13 +99,21 @@ mock.module("./utils/review", () => ({
 // `tmux display-message` against whatever ambient TMUX_PANE the runner has and
 // makes results depend on the developer's own tmux state. Spread the real
 // module so the pure exports (parseWindowState, UNKNOWN_WINDOW_STATE) other
-// files read stay real; only the spawning fetch is pinned to a visible window.
+// files read stay real; only the spawning fetch is pinned.
+//
+// The pin does two jobs. `windowActive`/`sessionAttached` make visibility
+// deterministic. `windowWidth` is read only by the sidebar width persister,
+// which App builds with its real `applyWidth`: a live
+// `ccmux sidebar --apply-width` spawn that would rewrite the developer's own
+// ccmux.json and resize their real sidebars. A window this narrow can never
+// clear that persister's half-window ceiling for any width the degenerate gate
+// lets through, so a future resize-based test cannot reach the spawn.
 const realWindowState = await import("./utils/tmux-window-state");
 
 mock.module("./utils/tmux-window-state", () => ({
   ...realWindowState,
   fetchWindowState: async () => ({
-    windowWidth: 200,
+    windowWidth: 1,
     windowActive: true,
     sessionAttached: true,
   }),

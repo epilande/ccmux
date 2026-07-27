@@ -47,10 +47,16 @@ interface WindowDecision {
 type PersistDecision = LocalDecision & WindowDecision;
 
 /** Whether a prefs write is recent enough that this settle is another sidebar's
- * propagation arriving rather than user intent. Unknown age means no file, so
- * nothing is in flight. */
+ * propagation arriving rather than user intent. Unknown age (missing or
+ * un-stat'able file) counts as nothing in flight. */
 function isWithinPrefsQuietPeriod(prefsAgeMs: number | null): boolean {
   return prefsAgeMs !== null && prefsAgeMs < PREFS_QUIET_MS;
+}
+
+/** Whether a settled width is a squeezed layout accident rather than anything
+ * the user could have meant as a preference. */
+function isDegenerateWidth(settledWidth: number): boolean {
+  return settledWidth < MIN_PERSIST_WIDTH;
 }
 
 /**
@@ -66,7 +72,7 @@ function isWithinPrefsQuietPeriod(prefsAgeMs: number | null): boolean {
  *   3. No-op — settling at the configured width is the propagation echo.
  */
 export function passesLocalGates(d: LocalDecision): boolean {
-  if (d.settledWidth < MIN_PERSIST_WIDTH) return false;
+  if (isDegenerateWidth(d.settledWidth)) return false;
   if (isWithinPrefsQuietPeriod(d.prefsAgeMs)) return false;
   return d.settledWidth !== d.configuredWidth;
 }
@@ -155,12 +161,19 @@ async function getConfiguredWidth(): Promise<number> {
  * `--apply-width` writes prefs before it resizes, so those echoes always
  * arrive inside the quiet period.
  *
- * A rejection with quiet prefs still pays for the query, because it is the
- * window-resize re-pin: the hook resets the pane to the configured width, the
- * no-op gate rejects, and a skipped fetch would leave `lastWindowWidth` at the
- * pre-resize value. The next genuine drag would then look like it coincided
- * with a window resize and be refused. One fetch per real resize event keeps
- * the baseline honest so a re-pinned settle cannot eat the drag after it.
+ * Exactly one rejection still pays for the query: the no-op re-pin once the
+ * prefs write has aged out. That one is the window-resize re-pin: the hook
+ * resets the pane to the configured width, the no-op gate rejects, and a
+ * skipped fetch would leave `lastWindowWidth` at the pre-resize value. The next
+ * genuine drag would then look like it coincided with a window resize and be
+ * refused. One fetch per real resize event keeps the baseline honest so a
+ * re-pinned settle cannot eat the drag after it.
+ *
+ * The other two rejections skip the query: a degenerate width and a settle
+ * arriving while a prefs write is in flight. Neither is an observation of a
+ * window the user could be dragging in, so letting either consume the real
+ * observation would leave the baseline claiming the window never changed, and
+ * the artifact settle behind it would look like a genuine drag.
  */
 export function createSidebarWidthPersister(
   deps: Partial<WidthPersisterDeps> = {},
@@ -186,7 +199,17 @@ export function createSidebarWidthPersister(
         configuredWidth,
         prefsAgeMs,
       });
-      if (!local && isWithinPrefsQuietPeriod(prefsAgeMs)) return;
+      // Only the no-op rejection is worth a subprocess: it is the one that
+      // observes a window the user could have been dragging in. The other two
+      // rejections must not reach the fetch, or they consume that observation
+      // and the settle after them looks like a same-window drag.
+      if (
+        !local &&
+        (isDegenerateWidth(settledWidth) ||
+          isWithinPrefsQuietPeriod(prefsAgeMs))
+      ) {
+        return;
+      }
 
       const state = await fetchState();
       const prevWindowWidth = lastWindowWidth;

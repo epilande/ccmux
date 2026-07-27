@@ -911,7 +911,9 @@ export function App(props: AppProps) {
     // The daemon suppresses `active_pane` for ccmux-titled panes, so a sidebar
     // that is its own window's active pane never gets the event that would
     // unhide it; a keypress is the only signal that it is being looked at.
-    visibility?.refresh();
+    // Only the hidden gate needs healing: a sidebar already believed visible
+    // would spend a `tmux display-message` per keystroke to re-confirm it.
+    if (visibility && !visibility.visible()) visibility.refresh();
 
     const key = event.name;
 

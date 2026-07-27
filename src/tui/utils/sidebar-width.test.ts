@@ -217,7 +217,7 @@ describe("createSidebarWidthPersister", () => {
     expect(calls.applied).toEqual([]);
   });
 
-  it("fetches once but never persists a quiet no-op settle", async () => {
+  it("fetches once but never persists a no-op settle with no prefs write in flight", async () => {
     const { persist, calls } = persisterHarness({ configuredWidth: 40 });
     await flush();
     const afterMount = calls.fetches;
@@ -227,10 +227,34 @@ describe("createSidebarWidthPersister", () => {
     expect(calls.applied).toEqual([]);
   });
 
-  it("never persists a degenerate squeezed width", async () => {
+  it("never persists or fetches for a degenerate squeezed width", async () => {
     const { persist, calls } = persisterHarness({});
     await flush();
+    const afterMount = calls.fetches;
     persist(4);
+    await flush();
+    // A squeezed pane is not an observation of a window the user could be
+    // dragging in, so it must neither cost a subprocess nor move the baseline.
+    expect(calls.fetches).toBe(afterMount);
+    expect(calls.applied).toEqual([]);
+  });
+
+  it("does not let a degenerate settle consume a window-resize observation", async () => {
+    // The degenerate settle must not advance the baseline to the new window
+    // width, or the artifact settle behind it looks like a same-window drag.
+    const calls = { applied: [] as number[] };
+    let width = 220;
+    const persist = createSidebarWidthPersister({
+      fetchWindowState: async () => windowState({ windowWidth: width }),
+      getPrefsAgeMs: async () => null,
+      getConfiguredWidth: async () => 30,
+      applyWidth: (w) => calls.applied.push(w),
+    });
+    await flush(); // baseline 220
+    width = 100; // the window itself changed size
+    persist(5); // squeezed by the rescale
+    await flush();
+    persist(25); // the artifact the rescale settles at
     await flush();
     expect(calls.applied).toEqual([]);
   });
