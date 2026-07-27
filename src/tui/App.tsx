@@ -8,6 +8,7 @@ import {
   createSignal,
   createEffect,
   createMemo,
+  untrack,
 } from "solid-js";
 import {
   useKeyboard,
@@ -31,7 +32,6 @@ import {
   sendKeys,
   flashPane,
   flashPaneDetached,
-  isPaneInCurrentWindow,
   notifyActivePane,
   openAgentsWindow,
   openAgentAttachWindow,
@@ -70,6 +70,10 @@ import {
   createSidebarWidthPersister,
   WIDTH_SETTLE_MS,
 } from "./utils/sidebar-width";
+import { createWindowVisibility } from "./utils/window-visibility";
+import { createFlashScheduler } from "./utils/pane-flash";
+import { createIdleGcScheduler } from "./utils/idle-gc";
+import { setSpinnerPaused } from "./utils/useStatusIcon";
 import { markStartup, reportStartup } from "../lib/startup-timing";
 
 interface AppProps {
@@ -592,6 +596,28 @@ export function App(props: AppProps) {
     store.actions.hideConfirmDialog();
   }
 
+  // Sidebar only: `ccmux sidebar` runs one full TUI process per tmux window,
+  // but at most one window per attached session is on screen. Everything the
+  // rest of this component gates on `isVisible()` is work whose only product
+  // is pixels — spinner frames (a full-buffer redraw each), the tick that
+  // refreshes relative time labels, the selected-pane flash.
+  //
+  // Trade-off: a refresh costs one `tmux display-message` spawn per sidebar
+  // process, so every pane/window switch (an `active_pane` event) now pays N
+  // debounced spawns — bounded by how fast a human switches panes — in
+  // exchange for eliminating continuous redraws in every background window.
+  // The picker is never gated: it is by definition what the user is looking at.
+  //
+  // Four signals drive a re-check, and it takes all four to cover every way a
+  // window goes on or off screen: SSE `active_pane` events (the common case,
+  // but the daemon suppresses them for ccmux-titled panes), terminal dimension
+  // changes (a client attach/detach resizes panes without a select hook),
+  // keypresses in the sidebar (the heal for the suppressed-event case, since a
+  // keypress means someone is looking at it), and the 30s safety poll inside
+  // the primitive (catches an attach/detach that changed no dimension).
+  const visibility = props.sidebar ? createWindowVisibility() : null;
+  const isVisible = (): boolean => visibility?.visible() ?? true;
+
   let sseClient: SSEClient | null = null;
   let previewScrollbox: ScrollBoxRenderable | undefined;
   let helpScrollbox: ScrollBoxRenderable | undefined;
@@ -652,6 +678,10 @@ export function App(props: AppProps) {
       onActivePane: (sessionId, paneId) => {
         store.actions.setActivePaneId(paneId);
         store.actions.setActiveSessionId(sessionId);
+        // The daemon broadcasts this on every pane/window switch, which is
+        // also every moment a sidebar can become visible or hidden. Debounced
+        // inside the primitive.
+        visibility?.refresh();
       },
       onSidebarState: (selectedSessionId, selectedHeaderKey, version) => {
         // Ignore echo-back of our own broadcasts (stale version)
@@ -694,11 +724,15 @@ export function App(props: AppProps) {
   });
 
   // Sidebar: flash selected pane if it's visible in the current window.
-  // Debounced to avoid spawning tmux processes on every rapid j/k keypress.
-  // Tracks only the pane ID (not the full session object) so SSE session
-  // data updates don't re-trigger the flash.
+  // Debounced to avoid spawning tmux processes on every rapid j/k keypress,
+  // and skipped outright while this window is off screen (an invisible flash
+  // is pure cost). Tracks only the pane ID (not the full session object) so
+  // SSE session data updates don't re-trigger the flash; visibility is read
+  // untracked so regaining focus doesn't flash a pane the user didn't select.
   if (props.sidebar) {
-    let flashDebounce: Timer | null = null;
+    const flasher = createFlashScheduler({
+      visible: () => untrack(isVisible),
+    });
     const selectedPaneId = createMemo(() => {
       const id = store.state.selectedSessionId;
       if (!id) return null;
@@ -707,21 +741,9 @@ export function App(props: AppProps) {
     createEffect(() => {
       const pane = selectedPaneId();
       if (!pane) return;
-      if (flashDebounce) clearTimeout(flashDebounce);
-      flashDebounce = setTimeout(() => {
-        flashDebounce = null;
-        // Cross-server `%N` collision: this pane id belongs to the daemon's
-        // server, so "visible here" would be a different pane. Skip silently;
-        // a toast per j/k keypress would spam.
-        if (!isSameServerCached()) return;
-        isPaneInCurrentWindow(pane).then((visible) => {
-          if (visible) flashPane(pane);
-        });
-      }, 80);
+      flasher.schedule(pane);
     });
-    onCleanup(() => {
-      if (flashDebounce) clearTimeout(flashDebounce);
-    });
+    onCleanup(() => flasher.cancel());
   }
 
   // Sidebar: persist a manually dragged pane width as the new sidebar.width
@@ -732,6 +754,18 @@ export function App(props: AppProps) {
     const dims = useTerminalDimensions();
     const persistWidth = createSidebarWidthPersister();
     let widthSettleTimer: Timer | null = null;
+    createEffect(
+      on(
+        () => `${dims().width}x${dims().height}`,
+        () => {
+          // A client attaching or detaching resizes panes but fires no tmux
+          // select hook, so a dimension change is one of the few in-process
+          // signals that visibility may have flipped.
+          visibility?.refresh();
+        },
+        { defer: true },
+      ),
+    );
     createEffect(
       on(
         () => dims().width,
@@ -747,6 +781,26 @@ export function App(props: AppProps) {
     );
     onCleanup(() => {
       if (widthSettleTimer) clearTimeout(widthSettleTimer);
+    });
+  }
+
+  // Sidebar: react to visibility changes.
+  //   - A spinner frame bump is a full-buffer redraw, so a background sidebar
+  //     animating `working` sessions burns CPU on an invisible surface. The
+  //     refcount survives the pause, so icons resume in place.
+  //   - Collect the heap once the window has stayed hidden: with the redraws
+  //     gone, the process allocates too little for JSC's allocation-driven GC
+  //     to ever run, so it can strand its boot-time high-water mark.
+  if (props.sidebar) {
+    const idleGc = createIdleGcScheduler();
+    createEffect(() => {
+      const visible = isVisible();
+      setSpinnerPaused(!visible);
+      idleGc.setVisible(visible);
+    });
+    onCleanup(() => {
+      setSpinnerPaused(false);
+      idleGc.cancel();
     });
   }
 
@@ -777,27 +831,53 @@ export function App(props: AppProps) {
   // Adaptive tick: 1s when any session has a timestamp under 60s (seconds display),
   // 10s otherwise (minutes display only changes every 60s).
   // Re-evaluates the interval on each tick rather than on every session change.
-  let currentTickMs = 1000;
-  let tickTimerId: Timer;
+  const FAST_TICK_MS = 1000;
+  const SLOW_TICK_MS = 10_000;
+  let currentTickMs = FAST_TICK_MS;
+  let tickTimerId: Timer | undefined;
 
-  function onTick() {
-    store.bumpTick();
+  function desiredTickMs(): number {
+    // Nobody can read a background sidebar's time labels, and each tick
+    // repaints the whole buffer. Stay on the slow cadence until it is on
+    // screen again (which bumps the tick immediately, so labels catch up).
+    if (!isVisible()) return SLOW_TICK_MS;
 
     const now = Date.now();
     const needsFastTick = store.state.sessions.some((s) => {
       const ts = s.lastUserInputAt ?? s.lastActivityAt;
       return ts && now - Date.parse(ts) < 60_000;
     });
-    const desiredMs = needsFastTick ? 1000 : 10_000;
-
-    if (desiredMs !== currentTickMs) {
-      currentTickMs = desiredMs;
-      untrackInterval(tickTimerId);
-      tickTimerId = trackInterval(onTick, currentTickMs);
-    }
+    return needsFastTick ? FAST_TICK_MS : SLOW_TICK_MS;
   }
 
-  tickTimerId = trackInterval(onTick, currentTickMs);
+  function scheduleTick(ms: number) {
+    if (tickTimerId) untrackInterval(tickTimerId);
+    currentTickMs = ms;
+    tickTimerId = trackInterval(runTick, ms);
+  }
+
+  function runTick() {
+    store.bumpTick();
+    const desiredMs = desiredTickMs();
+    if (desiredMs !== currentTickMs) scheduleTick(desiredMs);
+  }
+
+  scheduleTick(currentTickMs);
+
+  if (props.sidebar) {
+    createEffect(
+      on(
+        () => isVisible(),
+        (visible) => {
+          if (!visible) return;
+          // Catch up the relative time labels that the slow cadence let go
+          // stale, then re-arm at whatever cadence the data now wants.
+          runTick();
+        },
+        { defer: true },
+      ),
+    );
+  }
 
   // Performance metrics (only when CCMUX_PERF=1)
   if (PERF_ENABLED) {
@@ -828,6 +908,13 @@ export function App(props: AppProps) {
   let pendingZ = false;
 
   useKeyboard((event: KeyEvent) => {
+    // The daemon suppresses `active_pane` for ccmux-titled panes, so a sidebar
+    // that is its own window's active pane never gets the event that would
+    // unhide it; a keypress is the only signal that it is being looked at.
+    // Only the hidden gate needs healing: a sidebar already believed visible
+    // would spend a `tmux display-message` per keystroke to re-confirm it.
+    if (visibility && !visibility.visible()) visibility.refresh();
+
     const key = event.name;
 
     if (store.state.showHelp) {

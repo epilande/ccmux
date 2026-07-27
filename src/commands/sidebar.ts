@@ -23,8 +23,8 @@ type SidebarPosition = "left" | "right";
  * created it. Returns "" when `CCMUX_PORT` is unset or not a valid port, using
  * the same `parseCcmuxPort` validation as config's `DAEMON_PORT`; the value is
  * an integer in (0, 65535] before interpolation, so nothing unsafe reaches the
- * command. The `--resize` hook is intentionally left bare: it only drives tmux
- * resize-pane and never connects to the daemon.
+ * command. The resize hook needs no prefix at all: it is pure shell and never
+ * starts a ccmux process (see `resizeHookCommand`).
  */
 export function ccmuxPortEnvPrefix(): string {
   const port = parseCcmuxPort(process.env.CCMUX_PORT);
@@ -93,8 +93,12 @@ export function createSidebarCommand(): Command {
         width?: number;
         socket?: string;
       }) => {
-        // --resize runs from run-shell hooks where TMUX is not set.
-        // Skip getPreferences() since width is baked into the hook command.
+        // --resize is no longer used by the hook this build registers (that is
+        // pure shell now, see resizeHookCommand), but a tmux server running
+        // since before the upgrade still holds a hook body that invokes it, and
+        // hooks live in the server until the user next toggles the sidebar off.
+        // Keep the path working: it runs from run-shell where TMUX is not set,
+        // and skips getPreferences() since the width is baked into the command.
         if (options.resize) {
           await handleResize(options.width ?? 30, options.socket);
           return;
@@ -199,8 +203,21 @@ export function parseSidebarPaneIds(output: string): string[] {
   return ids;
 }
 
+/**
+ * Whether the resize hook is registered. Older builds registered a body that
+ * booted `ccmux sidebar --resize`; the current one is pure shell and only
+ * mentions the sidebar *pane title*. Both count: a tmux server that has been
+ * running since before the upgrade still holds the old body, and recognizing it
+ * is what lets the next `--apply-width` replace it with the cheap one.
+ */
 export function parseResizeHook(output: string): boolean {
-  return hasHookLine(output, RESIZE_HOOK);
+  return output
+    .split("\n")
+    .some(
+      (line) =>
+        line.includes(RESIZE_HOOK) &&
+        (line.includes(SIDEBAR_PANE_TITLE) || line.includes("ccmux sidebar")),
+    );
 }
 
 async function tmux(...args: string[]): Promise<string> {
@@ -385,9 +402,36 @@ async function unregisterAutoOpenHook(): Promise<void> {
   await tmux("set-hook", "-g", "-u", AUTO_OPEN_HOOK);
 }
 
+/**
+ * The `window-resized` hook body: re-pin the resized window's sidebar to the
+ * baked width, in pure shell.
+ *
+ * This runs on *every* window that changes size, and a client attach or a
+ * session switch with `window-size=latest` resizes them all at once. Booting
+ * `ccmux sidebar --resize` here cost ~120ms of CLI startup per firing and then
+ * re-pinned every sidebar on the server (`list-panes -a`), so N windows meant
+ * N boots x N resize-panes. Pure shell scoped to `#{hook_window}` makes each
+ * firing two short-lived tmux clients and touches only its own window.
+ *
+ * Format escaping is load-bearing (verified live on tmux 3.6a):
+ *   - `#{socket_path}` / `#{hook_window}` expand when `run-shell` fires, so the
+ *     body already names the right server and window before /bin/sh sees it.
+ *   - `##{pane_id}` / `##{pane_title}` must survive that expansion as literal
+ *     `#{...}` for the inner `list-panes` to interpret, hence the doubled `#`.
+ * The body is single-quoted at the tmux layer, which cannot escape a quote of
+ * its own, so it deliberately contains no `'`.
+ */
+export function resizeHookCommand(width: number): string {
+  const inner = [
+    `tmux -S "#{socket_path}" list-panes -t "#{hook_window}"`,
+    `-F "##{pane_id}" -f "##{==:##{pane_title},${SIDEBAR_PANE_TITLE}}" 2>/dev/null`,
+    `| while read -r p; do tmux -S "#{socket_path}" resize-pane -t "$p" -x ${width} 2>/dev/null; done`,
+  ].join(" ");
+  return `run-shell -b '${inner}'`;
+}
+
 async function registerResizeHook(width: number): Promise<void> {
-  const cmd = `run-shell -b 'ccmux sidebar --resize --width ${width} --socket #{socket_path} >/dev/null 2>&1'`;
-  await tmux("set-hook", "-g", RESIZE_HOOK, cmd);
+  await tmux("set-hook", "-g", RESIZE_HOOK, resizeHookCommand(width));
 }
 
 async function unregisterResizeHook(): Promise<void> {

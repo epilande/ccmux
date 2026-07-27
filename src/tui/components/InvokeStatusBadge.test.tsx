@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { InvokeStatusBadge, type InvokeStatus } from "./InvokeStatusBadge";
+import { DOT_SPINNER_FRAMES } from "../../lib/icons";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup;
@@ -50,10 +51,12 @@ describe("InvokeStatusBadge", () => {
   });
 
   it("renders running with the working spinner glyph and label", async () => {
-    // dot style "working" animates over DOT_SPINNER_FRAMES; the first frame is ◐.
+    // dot style "working" animates over DOT_SPINNER_FRAMES. Which frame shows
+    // is not ours to assert: the counter is shared process-wide, so any earlier
+    // test that mounted a spinner has already advanced it.
     // The running label is "working" to match a normal active session.
     const frame = await renderBadge({ status: "running", mode: "full" });
-    expect(frame).toContain("◐");
+    expect(DOT_SPINNER_FRAMES.some((f) => frame.includes(f))).toBe(true);
     expect(frame).toContain("working");
   });
 

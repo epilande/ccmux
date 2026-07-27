@@ -4,6 +4,7 @@ import {
   parseAutoOpenHook,
   parseSidebarPaneIds,
   parseResizeHook,
+  resizeHookCommand,
   spawnDelaySeconds,
   ccmuxPortEnvPrefix,
   sidebarSpawnCmd,
@@ -172,12 +173,64 @@ describe("parseSidebarPaneIds", () => {
   });
 });
 
+describe("resizeHookCommand", () => {
+  // Verified live on tmux 3.6a: resizing one window re-pins only that window's
+  // sidebar, a sidebar-less window is a no-op, and no ccmux process is started.
+  it("emits the exact pure-shell hook body", () => {
+    expect(resizeHookCommand(30)).toBe(
+      `run-shell -b 'tmux -S "#{socket_path}" list-panes -t "#{hook_window}" ` +
+        `-F "##{pane_id}" -f "##{==:##{pane_title},ccmux-sidebar}" 2>/dev/null ` +
+        `| while read -r p; do tmux -S "#{socket_path}" resize-pane -t "$p" -x 30 2>/dev/null; done'`,
+    );
+  });
+
+  it("never boots ccmux", () => {
+    // The whole point of the rewrite: a client attach resizes every window, and
+    // a ~120ms CLI boot per firing is what made that quadratic.
+    expect(resizeHookCommand(42)).not.toContain("ccmux sidebar --resize");
+    expect(resizeHookCommand(42)).not.toContain("ccmux ");
+  });
+
+  it("scopes the work to the resized window", () => {
+    const cmd = resizeHookCommand(42);
+    expect(cmd).toContain('list-panes -t "#{hook_window}"');
+    // A global `list-panes -a` here is what re-pinned every sidebar per firing.
+    expect(cmd).not.toContain("list-panes -a");
+  });
+
+  it("escapes inner formats so only the outer ones expand at fire time", () => {
+    const cmd = resizeHookCommand(42);
+    // `#{hook_window}` / `#{socket_path}` expand when run-shell fires...
+    expect(cmd).toContain('"#{socket_path}"');
+    // ...while `##{pane_id}` / `##{pane_title}` must reach the inner list-panes
+    // as literal `#{...}`.
+    expect(cmd).toContain('-F "##{pane_id}"');
+    expect(cmd).toContain("##{pane_title}");
+    expect(cmd).not.toContain('-F "#{pane_id}"');
+  });
+
+  it("bakes the width in and stays free of single quotes", () => {
+    expect(resizeHookCommand(77)).toContain("-x 77");
+    // The body is single-quoted at the tmux layer, which cannot escape a quote.
+    const body = resizeHookCommand(77).replace(/^run-shell -b '/, "");
+    expect(body.slice(0, -1)).not.toContain("'");
+  });
+});
+
 describe("parseResizeHook", () => {
-  it("detects registered resize hook", () => {
+  it("detects the registered pure-shell resize hook", () => {
     const output = [
       "after-new-window[99] -> split-window -fhbd -l 30 'sleep 0.1 && exec ccmux sidebar'",
-      "window-resized[99] -> run-shell -b 'ccmux sidebar --resize --width 30 --socket /tmp/tmux-501/default'",
+      `window-resized[99] -> ${resizeHookCommand(30)}`,
     ].join("\n");
+    expect(parseResizeHook(output)).toBe(true);
+  });
+
+  it("still detects the legacy ccmux-booting hook body", () => {
+    // Hooks live inside a running tmux server: an upgraded build must
+    // recognize (and so be able to replace) a body registered before it.
+    const output =
+      "window-resized[99] -> run-shell -b 'ccmux sidebar --resize --width 30 --socket /tmp/tmux-501/default'";
     expect(parseResizeHook(output)).toBe(true);
   });
 

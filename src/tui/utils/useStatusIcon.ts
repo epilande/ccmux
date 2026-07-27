@@ -16,29 +16,63 @@ import { trackInterval, untrackInterval } from "./perf";
 // and ~5.5% of a core (measured); 160ms keeps the 4/6-frame spin clearly
 // animated (~640ms/rotation for dot) while cutting that steady-state cost
 // ~37%.
-const SPINNER_INTERVAL_MS = 160;
+export const SPINNER_INTERVAL_MS = 160;
 
 // --- Shared spinner signal ---
 // All "working" status icons share a single interval instead of each creating its own.
 const [spinnerFrame, setSpinnerFrame] = createSignal(0);
+/** Exported for tests: the shared frame counter every spinner icon reads. */
+export { spinnerFrame };
 let spinnerRefCount = 0;
 let spinnerIntervalId: Timer | null = null;
+let spinnerPaused = false;
+
+function startSpinnerInterval(): void {
+  if (spinnerIntervalId || spinnerPaused) return;
+  spinnerIntervalId = trackInterval(() => {
+    setSpinnerFrame((f) => f + 1);
+  }, SPINNER_INTERVAL_MS);
+}
+
+function stopSpinnerInterval(): void {
+  if (!spinnerIntervalId) return;
+  untrackInterval(spinnerIntervalId);
+  spinnerIntervalId = null;
+}
+
+/**
+ * Stop/restart the shared spinner without touching refcounts.
+ *
+ * Every frame bump is a full-buffer redraw, so a sidebar in a background
+ * window burns CPU animating something nobody can see. Pausing clears the
+ * interval while leaving `spinnerRefCount` intact, so the icons stay
+ * registered and resume in place; resuming bumps the frame once so the UI
+ * repaints immediately instead of holding the pre-pause frame for up to one
+ * interval.
+ */
+export function setSpinnerPaused(paused: boolean): void {
+  if (paused === spinnerPaused) return;
+  spinnerPaused = paused;
+
+  if (paused) {
+    stopSpinnerInterval();
+    return;
+  }
+
+  if (spinnerRefCount > 0) {
+    setSpinnerFrame((f) => f + 1);
+    startSpinnerInterval();
+  }
+}
 
 function acquireSpinner(): void {
   spinnerRefCount++;
-  if (!spinnerIntervalId) {
-    spinnerIntervalId = trackInterval(() => {
-      setSpinnerFrame((f) => f + 1);
-    }, SPINNER_INTERVAL_MS);
-  }
+  startSpinnerInterval();
 }
 
 function releaseSpinner(): void {
   if (--spinnerRefCount <= 0) {
-    if (spinnerIntervalId) {
-      untrackInterval(spinnerIntervalId);
-      spinnerIntervalId = null;
-    }
+    stopSpinnerInterval();
     spinnerRefCount = 0;
   }
 }
