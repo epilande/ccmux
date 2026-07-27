@@ -142,15 +142,18 @@ async function getConfiguredWidth(): Promise<number> {
  * echo each other.
  *
  * Gathering is staged by cost: the local gates (prefs mtime, configured width)
- * run first, and only a settle that survives them pays for the tmux query. A
- * fleet of sidebars sees every propagated resize, so the rejected path is the
- * common one and used to cost one subprocess per sidebar per resize event.
+ * run first, and a settle they reject while the prefs write is still fresh
+ * skips the tmux query entirely. That arm is the propagation echo a fleet of
+ * sidebars sees on every other sidebar's drag, and a propagated
+ * `--apply-width` writes prefs before it resizes, so those echoes always
+ * arrive inside the quiet period.
  *
- * A skipped query also means `lastWindowWidth` is not refreshed, so a window
- * resize that happened during a suppressed settle is still visible to the next
- * one. That is the conservative direction: the "did the window change since we
- * last looked?" gate keeps a real observation instead of a settle it never
- * looked at silently consuming it.
+ * A rejection with quiet prefs still pays for the query, because it is the
+ * window-resize re-pin: the hook resets the pane to the configured width, the
+ * no-op gate rejects, and a skipped fetch would leave `lastWindowWidth` at the
+ * pre-resize value. The next genuine drag would then look like it coincided
+ * with a window resize and be refused. One fetch per real resize event keeps
+ * the baseline honest so a re-pinned settle cannot eat the drag after it.
  */
 export function createSidebarWidthPersister(
   deps: Partial<WidthPersisterDeps> = {},
@@ -171,13 +174,17 @@ export function createSidebarWidthPersister(
         prefsAge(),
         configured(),
       ]);
-      if (!passesLocalGates({ settledWidth, configuredWidth, prefsAgeMs })) {
-        return;
-      }
+      const local = passesLocalGates({
+        settledWidth,
+        configuredWidth,
+        prefsAgeMs,
+      });
+      if (!local && prefsAgeMs !== null && prefsAgeMs < PREFS_QUIET_MS) return;
 
       const state = await fetchState();
       const prevWindowWidth = lastWindowWidth;
       lastWindowWidth = state.windowWidth;
+      if (!local) return;
 
       if (
         passesWindowGates({

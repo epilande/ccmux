@@ -200,23 +200,38 @@ describe("createSidebarWidthPersister", () => {
     expect(calls.applied).toEqual([]);
   });
 
-  it("does not fetch window state when the width already matches prefs", async () => {
-    const { persist, calls } = persisterHarness({ configuredWidth: 40 });
+  it("does not fetch window state for echoes of a propagated width", async () => {
+    // The propagating sidebar writes prefs before it resizes anyone, so the
+    // no-op and squeezed settles that echo back across the fleet always land
+    // inside the quiet period.
+    const { persist, calls } = persisterHarness({
+      configuredWidth: 40,
+      prefsAgeMs: PREFS_QUIET_MS - 1,
+    });
     await flush();
     const afterMount = calls.fetches;
     persist(40);
+    persist(4);
     await flush();
     expect(calls.fetches).toBe(afterMount);
     expect(calls.applied).toEqual([]);
   });
 
-  it("does not fetch window state for a degenerate squeezed width", async () => {
-    const { persist, calls } = persisterHarness({});
+  it("fetches once but never persists a quiet no-op settle", async () => {
+    const { persist, calls } = persisterHarness({ configuredWidth: 40 });
     await flush();
     const afterMount = calls.fetches;
+    persist(40);
+    await flush();
+    expect(calls.fetches).toBe(afterMount + 1);
+    expect(calls.applied).toEqual([]);
+  });
+
+  it("never persists a degenerate squeezed width", async () => {
+    const { persist, calls } = persisterHarness({});
+    await flush();
     persist(4);
     await flush();
-    expect(calls.fetches).toBe(afterMount);
     expect(calls.applied).toEqual([]);
   });
 
@@ -257,5 +272,28 @@ describe("createSidebarWidthPersister", () => {
     persist(41);
     await flush();
     expect(calls.applied).toEqual([41]);
+  });
+
+  it("keeps the baseline honest when a re-pin settles at the configured width", async () => {
+    // A window resize makes the resize hook re-pin the pane to the configured
+    // width, which the no-op gate rejects. Skipping the fetch there would leave
+    // the baseline at the pre-resize width, and the user's next drag would look
+    // like it coincided with a window resize and be silently dropped.
+    const calls = { applied: [] as number[] };
+    let width = 220;
+    const persist = createSidebarWidthPersister({
+      fetchWindowState: async () => windowState({ windowWidth: width }),
+      getPrefsAgeMs: async () => null,
+      getConfiguredWidth: async () => 30,
+      applyWidth: (w) => calls.applied.push(w),
+    });
+    await flush(); // baseline 220
+    width = 160; // the window itself changed size
+    persist(30); // the re-pin settles at the configured width
+    await flush();
+    expect(calls.applied).toEqual([]);
+    persist(45); // a genuine drag right after
+    await flush();
+    expect(calls.applied).toEqual([45]);
   });
 });

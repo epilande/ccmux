@@ -41,9 +41,10 @@ export function parseWindowState(output: string): WindowState {
 
 /**
  * One `tmux display-message` for everything a sidebar needs to know about its
- * own window. Shared by the width persister (drag vs. window-resize gating)
- * and the visibility gate (background-work suppression) so the two never
- * spawn separate processes to learn the same three fields.
+ * own window. The width persister (drag vs. window-resize gating) and the
+ * visibility gate (background-work suppression) share this one implementation,
+ * so each query is a single spawn returning all three fields. They do not
+ * share results: each caller pays for its own spawn when it asks.
  */
 export async function fetchWindowState(): Promise<WindowState> {
   const pane = process.env.TMUX_PANE;
