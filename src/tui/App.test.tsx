@@ -95,6 +95,22 @@ mock.module("./utils/review", () => ({
   runHunkReview: runHunkReviewSpy,
 }));
 
+// Sidebar renders construct the real visibility gate, which otherwise spawns
+// `tmux display-message` against whatever ambient TMUX_PANE the runner has and
+// makes results depend on the developer's own tmux state. Spread the real
+// module so the pure exports (parseWindowState, UNKNOWN_WINDOW_STATE) other
+// files read stay real; only the spawning fetch is pinned to a visible window.
+const realWindowState = await import("./utils/tmux-window-state");
+
+mock.module("./utils/tmux-window-state", () => ({
+  ...realWindowState,
+  fetchWindowState: async () => ({
+    windowWidth: 200,
+    windowActive: true,
+    sessionAttached: true,
+  }),
+}));
+
 mock.module("../lib/startup-timing", () => ({
   markStartup: () => {},
   reportStartup: () => {},
