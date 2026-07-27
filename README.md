@@ -94,40 +94,40 @@ ccmux setup
 
 ### CLI Commands
 
-| Command                                     | Description                                                                                                   |
-| :------------------------------------------ | :------------------------------------------------------------------------------------------------------------ |
-| `ccmux`                                     | Launch interactive TUI picker (default)                                                                       |
-| `ccmux picker`                              | Launch TUI with options (`--preview`, `--icons <style>`)                                                      |
-| `ccmux picker --persistent`                 | Dashboard mode (stay open after switching sessions)                                                           |
-| `ccmux spawn [agent]`                       | Spawn a new agent session in a tmux pane                                                                      |
-| `ccmux invoke [agent] "prompt"`             | Run a single agent turn and write the response to stdout ([docs](docs/invoke.md))                             |
-| `ccmux invoke list`                         | List active and recently-finished invocations (`-j` for JSON)                                                 |
-| `ccmux invoke cancel <id>`                  | Cancel a running invocation by id (idempotent)                                                                |
-| `ccmux invoke result <id>`                  | Print an invocation's full captured output (subprocess agents only)                                           |
-| `ccmux show`                                | List all active sessions                                                                                      |
-| `ccmux show --json`                         | Output sessions as JSON                                                                                       |
-| `ccmux status`                              | Show daemon and session overview                                                                              |
-| `ccmux switch <id>`                         | Switch tmux client to a session's pane                                                                        |
-| `ccmux review [id]`                         | Review a session's diff with [hunk](https://github.com/modem-dev/hunk) (defaults to cwd)                      |
-| `ccmux kill <id>`                           | Kill a session's process                                                                                      |
-| `ccmux restart <id>`                        | Kill and resume a session                                                                                     |
-| `ccmux send <id> <text>`                    | Send text to a session's tmux pane (multiline pastes as one message; `--no-enter` skips submit)               |
-| `ccmux screen [id]`                         | Capture pane content                                                                                          |
-| `ccmux screen --grep <pattern>`             | Search across all session panes                                                                               |
-| `ccmux dismiss <id>`                        | Remove a session from tracking                                                                                |
-| `ccmux daemon start\|stop\|restart\|status` | Manage the background daemon                                                                                  |
-| `ccmux config set <key> <value>`            | Set a preference                                                                                              |
-| `ccmux config get <key>`                    | Get a single preference value                                                                                 |
-| `ccmux config list`                         | List all preferences                                                                                          |
-| `ccmux config themes`                       | List built-in themes (marks the active one)                                                                   |
-| `ccmux setup`                               | Install hooks for every supported agent found on PATH (Claude + Codex + Cursor + OpenCode + Pi + omp + Antigravity) |
-| `ccmux setup --agent <name>`                | Limit install/uninstall/status to specific agent(s); forces install even if not found on PATH                 |
-| `ccmux setup --status`                      | Report install state without writing anything                                                                 |
-| `ccmux setup --uninstall`                   | Remove hooks (preserves user-owned hook entries)                                                              |
-| `ccmux debug`                               | Diagnose session tracking discrepancies                                                                       |
-| `ccmux notify [message]`                    | Send a notification via the configured backend (bare: test message + diagnostics)                             |
-| `ccmux sidebar`                             | Launch narrow sidebar TUI (no preview/footer)                                                                 |
-| `ccmux sidebar --toggle`                    | Smart toggle: spawn/kill sidebars in every window across all tmux sessions                                    |
+| Command                                     | Description                                                                                                                   |
+| :------------------------------------------ | :---------------------------------------------------------------------------------------------------------------------------- |
+| `ccmux`                                     | Launch interactive TUI picker (default)                                                                                       |
+| `ccmux picker`                              | Launch TUI with options (`--preview`, `--icons <style>`)                                                                      |
+| `ccmux picker --persistent`                 | Dashboard mode (stay open after switching sessions)                                                                           |
+| `ccmux spawn [agent]`                       | Spawn a new agent session in a tmux pane                                                                                      |
+| `ccmux invoke [agent] "prompt"`             | Run a single agent turn and write the response to stdout ([docs](docs/invoke.md))                                             |
+| `ccmux invoke list`                         | List active and recently-finished invocations (`-j` for JSON)                                                                 |
+| `ccmux invoke cancel <id>`                  | Cancel a running invocation by id (idempotent)                                                                                |
+| `ccmux invoke result <id>`                  | Print an invocation's full captured output (subprocess agents only)                                                           |
+| `ccmux show`                                | List all active sessions                                                                                                      |
+| `ccmux show --json`                         | Output sessions as JSON                                                                                                       |
+| `ccmux status`                              | Show daemon and session overview                                                                                              |
+| `ccmux switch <id>`                         | Switch tmux client to a session's pane                                                                                        |
+| `ccmux review [id]`                         | Review a session's diff with [hunk](https://github.com/modem-dev/hunk) (defaults to cwd)                                      |
+| `ccmux kill <id>`                           | Kill a session's process                                                                                                      |
+| `ccmux restart <id>`                        | Kill and resume a session                                                                                                     |
+| `ccmux send <id> <text>`                    | Send text to a session's tmux pane (multiline pastes as one message; `--no-enter` skips submit)                               |
+| `ccmux screen [id]`                         | Capture pane content                                                                                                          |
+| `ccmux screen --grep <pattern>`             | Search across all session panes                                                                                               |
+| `ccmux dismiss <id>`                        | Remove a session from tracking                                                                                                |
+| `ccmux daemon start\|stop\|restart\|status` | Manage the background daemon                                                                                                  |
+| `ccmux config set <key> <value>`            | Set a preference                                                                                                              |
+| `ccmux config get <key>`                    | Get a single preference value                                                                                                 |
+| `ccmux config list`                         | List all preferences                                                                                                          |
+| `ccmux config themes`                       | List built-in themes (marks the active one)                                                                                   |
+| `ccmux setup`                               | Install hooks for every supported agent found on PATH (Claude + Codex + Cursor + OpenCode + Pi + omp + Antigravity + Copilot) |
+| `ccmux setup --agent <name>`                | Limit install/uninstall/status to specific agent(s); forces install even if not found on PATH                                 |
+| `ccmux setup --status`                      | Report install state without writing anything                                                                                 |
+| `ccmux setup --uninstall`                   | Remove hooks (preserves user-owned hook entries)                                                                              |
+| `ccmux debug`                               | Diagnose session tracking discrepancies                                                                                       |
+| `ccmux notify [message]`                    | Send a notification via the configured backend (bare: test message + diagnostics)                                             |
+| `ccmux sidebar`                             | Launch narrow sidebar TUI (no preview/footer)                                                                                 |
+| `ccmux sidebar --toggle`                    | Smart toggle: spawn/kill sidebars in every window across all tmux sessions                                                    |
 
 The daemon starts automatically the first time you run a ccmux command (picker, show, invoke, etc.). It runs on `127.0.0.1:2269` and provides both a REST API and SSE event stream.
 
@@ -202,10 +202,9 @@ bind-key S run-shell "ccmux sidebar --toggle"
 
 Desktop notifications on `waiting`/`finished` transitions, disabled by default. When a session needs permission, or has a plan waiting for approval, the banner carries **Approve** / **Deny** buttons; permission, plan, question, and "finished" notifications also carry an inline **Reply** field, so you can answer, redirect, or send the next instruction without switching to its pane. Focusing a session's pane clears its notification.
 
-|                                                                           **Permission → Approve / Deny**                                                                            |                                                                        **Question → inline Reply**                                                                         |
-| :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------: |
+|                                                                               **Permission → Approve / Deny**                                                                                |                                                                        **Question → inline Reply**                                                                         |
+| :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------: |
 | <img alt="ccmux notification with Approve / Deny / Reply buttons for a permission prompt" src="https://github.com/user-attachments/assets/339571a3-52bf-44e0-8c19-e346841591a7" width="380"> | <img alt="ccmux notification with an inline Reply field for a question" src="https://github.com/user-attachments/assets/1a3aa376-51f4-4a0c-8983-810e46d826fe" width="380"> |
-
 
 ```bash
 ccmux config set notifications.enabled true

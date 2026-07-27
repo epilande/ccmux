@@ -70,7 +70,7 @@ Output is written to stdout without a trailing newline so command substitutions 
 | Set   | Empty      | `prompt` is stdin.                   |
 | Empty | Empty      | Error: "No prompt provided". Exit 1. |
 
-The daemon caps the combined prompt at **256 KB** to keep a misbehaving caller from streaming gigabytes of stdin into daemon memory. Exceeding the cap returns exit 1 with `Prompt exceeds maximum size of 262144 bytes`. The cap accommodates realistic piped inputs (git diffs, test logs); if you genuinely need more, splice the input into smaller follow-up turns via `--session`. Gemini, Pi, and omp carry a tighter **120 KiB** cap: their prompt rides in argv rather than stdin (`-p {prompt}`), so an over-cap prompt to those two returns exit 4 (`agent_error`) before the process spawns.
+The daemon caps the combined prompt at **256 KB** to keep a misbehaving caller from streaming gigabytes of stdin into daemon memory. Exceeding the cap returns exit 1 with `Prompt exceeds maximum size of 262144 bytes`. The cap accommodates realistic piped inputs (git diffs, test logs); if you genuinely need more, splice the input into smaller follow-up turns via `--session`. Gemini, Pi, and omp carry a tighter **120 KiB** cap: their prompt rides in argv rather than stdin (`-p {prompt}`), so an over-cap prompt to those three returns exit 4 (`agent_error`) before the process spawns.
 
 ## Multi-turn with `--session`
 

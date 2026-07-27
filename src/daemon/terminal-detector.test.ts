@@ -10,6 +10,7 @@ describe("terminal-detector", () => {
   const cursor = getBuiltinAgent("cursor");
   const antigravity = getBuiltinAgent("antigravity");
   const copilot = getBuiltinAgent("copilot");
+  const omp = getBuiltinAgent("omp");
 
   it("detects waiting/permission prompts for Codex", () => {
     const result = detectTerminalStatus(
@@ -310,6 +311,40 @@ Do you want to allow this access?
         copilot,
       );
       expect(result).toBeNull();
+    });
+  });
+
+  describe("omp", () => {
+    it("detects the working footer", () => {
+      const result = detectTerminalStatus("Working…", omp);
+      expect(result.status).toBe("working");
+      expect(result.attentionType).toBeNull();
+    });
+
+    it("does not match ASCII 'Working...' (three dots)", () => {
+      const result = matchTerminalRule("Working...", omp);
+      expect(result).toBeNull();
+    });
+
+    it("detects the approval prompt as waiting/permission", () => {
+      const result = detectTerminalStatus("Allow tool: bash", omp);
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("permission");
+      expect(result.pendingTool).toBeNull();
+    });
+
+    it("matches the approval prompt case-insensitively", () => {
+      const result = detectTerminalStatus("ALLOW TOOL: BASH", omp);
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("permission");
+      expect(result.pendingTool).toBeNull();
+    });
+
+    it("prefers the waiting rule over working when both are present", () => {
+      const result = detectTerminalStatus("Allow tool: bash\nWorking…", omp);
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("permission");
+      expect(result.pendingTool).toBeNull();
     });
   });
 });

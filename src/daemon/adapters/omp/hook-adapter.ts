@@ -189,8 +189,10 @@ export class OmpHookAdapter implements HookAdapter {
     // No teardown needed: when omp exits, session_shutdown removes the
     // marker, the process scan clears the pane-tracked session, and
     // cleanupStaleMarkers reaps any leftover by PID liveness. A session
-    // switch (/new, /resume) removes the old marker and writes a new one,
-    // whose onMarkerAdded re-links nativeSessionId.
+    // switch (/new, /resume) emits session_switch rather than pi's
+    // shutdown/start pair, and the extension's handler for it removes the old
+    // marker and writes the new one, whose onMarkerAdded re-links
+    // nativeSessionId.
   }
 }
 

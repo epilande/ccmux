@@ -38,11 +38,16 @@ import { join } from "node:path";
 /**
  * Build an omp extension bound to the given markers dir.
  *
- * omp runs ONE session per process. A session switch (`/new`, `/resume`)
- * emits `session_shutdown` for the old session, reloads extensions, then
- * emits `session_start` for the new one, so markers (keyed by session id)
- * never overlap and need no OpenCode-style aggregation. We still key all
+ * omp runs ONE session per process, so markers (keyed by session id) never
+ * overlap and need no OpenCode-style aggregation. We still key all
  * bookkeeping by session id so a re-bound instance can't cross-contaminate.
+ *
+ * Unlike upstream Pi, a session switch (`/new`, `/resume`) does NOT emit
+ * `session_shutdown` + `session_start`: omp mutates the session in place and
+ * emits `session_before_switch` then `session_switch` (verified on omp
+ * 17.1.3), never reconstructing the extension runner. The `session_switch`
+ * handler below is what keeps the old session's marker from leaking and
+ * seeds the new one.
  *
  * @param {MakeExtensionOptions} opts
  */
@@ -56,11 +61,20 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
    */
   const sessionState = new Map();
   /**
-   * Tool call ids awaiting an approval decision, per session. omp can gate
-   * several tool calls from one assistant turn, so the session stays
+   * Tool calls awaiting an approval decision, per session, as an
+   * insertion-ordered `toolCallId -> toolName`. omp can gate several tool
+   * calls from one assistant turn (shared-concurrency tools run in parallel
+   * and each requests approval before any resolves), so the session stays
    * `waiting_permission` until the LAST id resolves; resolving one of three
    * must not report the session back as working while two prompts remain.
-   * @type {Map<string, Set<string>>}
+   *
+   * `pending_tool` publishes the OLDEST outstanding entry, not the newest,
+   * because omp's dialog surface is FIFO: the prompt actually on screen is
+   * the first one requested. Newest-wins would name a tool the user cannot
+   * see, and ccmux's Approve/Deny notification would describe the wrong call.
+   * Insertion order is trustworthy because omp awaits each handler, so the
+   * requests arrive here in the same order they queue on screen.
+   * @type {Map<string, Map<string, string|undefined>>}
    */
   const pendingApprovals = new Map();
   /**
@@ -126,6 +140,16 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
         console.error("[ccmux-extension] unlink failed", err);
       }
     }
+  }
+
+  /**
+   * Tool name of the oldest outstanding approval, i.e. the prompt omp is
+   * currently showing.
+   * @param {Map<string, string|undefined>} pending
+   */
+  function headToolName(pending) {
+    for (const toolName of pending.values()) return toolName;
+    return undefined;
   }
 
   /** Resolve the active session id from the read-only session manager. */
@@ -218,12 +242,16 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
       if (!toolCallId) return;
       let pending = pendingApprovals.get(sessionId);
       if (!pending) {
-        pending = new Set();
+        pending = new Map();
         pendingApprovals.set(sessionId, pending);
       }
-      pending.add(toolCallId);
-      const toolName =
-        typeof event?.toolName === "string" ? event.toolName : undefined;
+      pending.set(
+        toolCallId,
+        typeof event?.toolName === "string" ? event.toolName : undefined,
+      );
+      // Publish the head, not this request: with two calls gated at once the
+      // second request arrives while the FIRST one's dialog is on screen.
+      const toolName = headToolName(pending);
       // omp awaits this handler before it renders the prompt, so the
       // waiting marker is on disk by the time the user can answer.
       return queue(() =>
@@ -252,12 +280,51 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
       // A resolve we cannot correlate must not pin the row at waiting
       // forever, so treat it as resolving everything outstanding.
       else pending.clear();
-      // Overlapping approvals: stay waiting until the LAST id resolves.
-      if (pending.size > 0) return;
+      // Overlapping approvals: stay waiting until the LAST id resolves, and
+      // re-publish so `pending_tool` names the dialog that just moved to the
+      // front of the FIFO queue. Answering the first of two prompts must
+      // retarget the notification at the second, not keep naming the answered
+      // one (and, before this, not name the newest one that is still buried).
+      if (pending.size > 0) {
+        const toolName = headToolName(pending);
+        return queue(() =>
+          writeMerged(sessionId, {
+            state: "waiting_permission",
+            pending_tool: toolName,
+          }),
+        );
+      }
       pendingApprovals.delete(sessionId);
       return queue(() =>
         writeMerged(sessionId, { state: "working", pending_tool: undefined }),
       );
+    });
+
+    // `/new` and `/resume` land here, not on a shutdown/start pair (see the
+    // factory doc above). omp installs the new session id BEFORE it emits, so
+    // every OTHER id we still track belongs to the session we just left: reap
+    // those markers, then seed a fresh idle marker for the current id. The
+    // daemon needs no change; the new file's chokidar add event drives the
+    // existing `onMarkerAdded` re-link.
+    omp.on("session_switch", async (_event, ctx) => {
+      const sessionId = sessionIdOf(ctx);
+      if (!sessionId) return;
+      await mkdir(markersDir, { recursive: true });
+      const stale = [...sessionState.keys()].filter((id) => id !== sessionId);
+      // A same-id switch is real (`reload()` re-enters switchSession with the
+      // current file), and the switch aborts the running turn, so drop any
+      // approval this id still had outstanding rather than publish an idle
+      // marker that a late resolve could drag back to working.
+      pendingApprovals.delete(sessionId);
+      return queue(async () => {
+        for (const id of stale) await removeMarker(id);
+        await writeMerged(sessionId, {
+          state: "idle",
+          directory: ctx.cwd,
+          transcript_path: transcriptOf(ctx),
+          pending_tool: undefined,
+        });
+      });
     });
 
     omp.on("session_shutdown", async (_event, ctx) => {

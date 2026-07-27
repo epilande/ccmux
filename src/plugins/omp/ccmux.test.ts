@@ -209,8 +209,9 @@ describe("omp ccmux extension", () => {
         { toolCallId: "call-2", toolName: "write" },
         ctx,
       );
-      // pending_tool tracks the most recent request.
-      expect(readMarker("S1").pending_tool).toBe("write");
+      // pending_tool names the OLDEST outstanding request: omp's dialog
+      // surface is FIFO, so call-1's prompt is the one on screen.
+      expect(readMarker("S1").pending_tool).toBe("bash");
 
       await handlers.get("tool_approval_resolved")!(
         { toolCallId: "call-1", approved: true },
@@ -224,6 +225,91 @@ describe("omp ccmux extension", () => {
         ctx,
       );
       expect(readMarker("S1").state).toBe("working");
+    });
+
+    it("publishes the FIRST tool while a later request is still queued behind it", async () => {
+      const { omp, handlers } = makeFakeOmp();
+      makeExtension({ markersDir, version: "1.0.0" })(omp);
+      const ctx = makeCtx("S1");
+
+      await handlers.get("session_start")!(null, ctx);
+      await handlers.get("agent_start")!(null, ctx);
+      // Two shared-concurrency bash calls: both request before either
+      // resolves, and omp shows call-1's dialog first.
+      await handlers.get("tool_approval_requested")!(
+        { toolCallId: "call-1", toolName: "bash" },
+        ctx,
+      );
+      expect(readMarker("S1").pending_tool).toBe("bash");
+
+      await handlers.get("tool_approval_requested")!(
+        { toolCallId: "call-2", toolName: "web_fetch" },
+        ctx,
+      );
+
+      const marker = readMarker("S1");
+      expect(marker.state).toBe("waiting_permission");
+      expect(marker.pending_tool).toBe("bash");
+    });
+
+    it("re-publishes the next tool name when the head approval resolves", async () => {
+      const { omp, handlers } = makeFakeOmp();
+      makeExtension({ markersDir, version: "1.0.0" })(omp);
+      const ctx = makeCtx("S1");
+
+      await handlers.get("session_start")!(null, ctx);
+      await handlers.get("tool_approval_requested")!(
+        { toolCallId: "call-1", toolName: "bash" },
+        ctx,
+      );
+      await handlers.get("tool_approval_requested")!(
+        { toolCallId: "call-2", toolName: "web_fetch" },
+        ctx,
+      );
+      await handlers.get("tool_approval_resolved")!(
+        { toolCallId: "call-1", toolName: "bash", approved: true },
+        ctx,
+      );
+
+      // Answering the first prompt retargets the row at the second, which is
+      // now the dialog on screen. Still waiting, new name.
+      const marker = readMarker("S1");
+      expect(marker.state).toBe("waiting_permission");
+      expect(marker.pending_tool).toBe("web_fetch");
+    });
+
+    it("keeps naming the head tool when approvals resolve out of order", async () => {
+      const { omp, handlers } = makeFakeOmp();
+      makeExtension({ markersDir, version: "1.0.0" })(omp);
+      const ctx = makeCtx("S1");
+
+      await handlers.get("session_start")!(null, ctx);
+      await handlers.get("tool_approval_requested")!(
+        { toolCallId: "call-1", toolName: "bash" },
+        ctx,
+      );
+      await handlers.get("tool_approval_requested")!(
+        { toolCallId: "call-2", toolName: "web_fetch" },
+        ctx,
+      );
+      // The second request resolves first (omp's fail-closed no-UI path can
+      // land on any outstanding id).
+      await handlers.get("tool_approval_resolved")!(
+        { toolCallId: "call-2", approved: false },
+        ctx,
+      );
+
+      const marker = readMarker("S1");
+      expect(marker.state).toBe("waiting_permission");
+      expect(marker.pending_tool).toBe("bash");
+
+      await handlers.get("tool_approval_resolved")!(
+        { toolCallId: "call-1", approved: true },
+        ctx,
+      );
+      const after = readMarker("S1");
+      expect(after.state).toBe("working");
+      expect(after.pending_tool).toBeUndefined();
     });
 
     it("clears the pending set on agent_end so a leaked id can't pin the next turn", async () => {
@@ -313,6 +399,146 @@ describe("omp ccmux extension", () => {
       );
       expect(readMarker("S1").state).toBe("waiting_permission");
       expect(readMarker("S2").state).toBe("idle");
+    });
+  });
+
+  describe("session_switch", () => {
+    // omp's /new and /resume mutate the session in place and emit only
+    // session_before_switch + session_switch, so this handler (not a
+    // shutdown/start pair) is what reaps the old marker and seeds the new one.
+    const switchEvent = (reason: "new" | "resume") => ({
+      type: "session_switch",
+      reason,
+      previousSessionFile: "/home/u/.omp/agent/sessions/x/old.jsonl",
+    });
+
+    it("reaps the old session's marker and seeds an idle marker for the new id", async () => {
+      const { omp, handlers } = makeFakeOmp();
+      makeExtension({
+        markersDir,
+        version: "1.0.0",
+        now: () => 1_700_000_000_000,
+      })(omp);
+      const oldCtx = makeCtx("S1", "/home/u/.omp/agent/sessions/x/old.jsonl");
+
+      await handlers.get("session_start")!(null, oldCtx);
+      await handlers.get("before_agent_start")!({ prompt: "old work" }, oldCtx);
+      expect(existsSync(markerPath("S1"))).toBe(true);
+
+      // /new installs the new id BEFORE emitting, so the handler's ctx
+      // already reports S2.
+      const newCtx = makeCtx("S2", "/home/u/.omp/agent/sessions/x/new.jsonl");
+      await handlers.get("session_switch")!(switchEvent("new"), newCtx);
+
+      expect(existsSync(markerPath("S1"))).toBe(false);
+      const marker = readMarker("S2");
+      expect(marker.agent_type).toBe("omp");
+      expect(marker.session_id).toBe("S2");
+      expect(marker.pid).toBe(process.pid);
+      expect(marker.state).toBe("idle");
+      expect(marker.directory).toBe("/repo");
+      expect(marker.transcript_path).toBe(
+        "/home/u/.omp/agent/sessions/x/new.jsonl",
+      );
+      expect(marker.state_timestamp).toBe(1_700_000_000);
+      // The old session's prompt must not ride along onto the new row.
+      expect(marker.last_prompt).toBeUndefined();
+    });
+
+    it("drops the old session's in-memory state so its marker is not rewritten", async () => {
+      const { omp, handlers } = makeFakeOmp();
+      makeExtension({ markersDir, version: "1.0.0" })(omp);
+      const oldCtx = makeCtx("S1");
+
+      await handlers.get("session_start")!(null, oldCtx);
+      const newCtx = makeCtx("S2");
+      await handlers.get("session_switch")!(switchEvent("resume"), newCtx);
+
+      // A stray late event for the abandoned session must not resurrect its
+      // marker file.
+      await handlers.get("tool_approval_resolved")!(
+        { toolCallId: "call-1", approved: true },
+        oldCtx,
+      );
+      expect(existsSync(markerPath("S1"))).toBe(false);
+      expect(readMarker("S2").state).toBe("idle");
+    });
+
+    it("clears approvals left outstanding by the switched-away session", async () => {
+      const { omp, handlers } = makeFakeOmp();
+      makeExtension({ markersDir, version: "1.0.0" })(omp);
+      const oldCtx = makeCtx("S1");
+
+      await handlers.get("session_start")!(null, oldCtx);
+      await handlers.get("agent_start")!(null, oldCtx);
+      await handlers.get("tool_approval_requested")!(
+        { toolCallId: "call-1", toolName: "bash" },
+        oldCtx,
+      );
+      expect(readMarker("S1").state).toBe("waiting_permission");
+
+      // The switch aborts the turn while the prompt is still open.
+      const newCtx = makeCtx("S2");
+      await handlers.get("session_switch")!(switchEvent("new"), newCtx);
+
+      // The next turn on the NEW session starts from a clean slate: the
+      // abandoned id cannot pin it at waiting, and its late resolve cannot
+      // drag the idle row up to working.
+      await handlers.get("tool_approval_resolved")!(
+        { toolCallId: "call-1", approved: false },
+        newCtx,
+      );
+      expect(readMarker("S2").state).toBe("idle");
+
+      await handlers.get("agent_start")!(null, newCtx);
+      await handlers.get("tool_approval_requested")!(
+        { toolCallId: "call-2", toolName: "edit" },
+        newCtx,
+      );
+      expect(readMarker("S2").state).toBe("waiting_permission");
+      expect(readMarker("S2").pending_tool).toBe("edit");
+    });
+
+    it("clears a same-id switch's pending approval (reload re-enters switchSession)", async () => {
+      const { omp, handlers } = makeFakeOmp();
+      makeExtension({ markersDir, version: "1.0.0" })(omp);
+      const ctx = makeCtx("S1");
+
+      await handlers.get("session_start")!(null, ctx);
+      await handlers.get("agent_start")!(null, ctx);
+      await handlers.get("tool_approval_requested")!(
+        { toolCallId: "call-1", toolName: "bash" },
+        ctx,
+      );
+
+      await handlers.get("session_switch")!(switchEvent("resume"), ctx);
+
+      const marker = readMarker("S1");
+      expect(marker.state).toBe("idle");
+      expect(marker.pending_tool).toBeUndefined();
+
+      // A late resolve for the aborted approval must not write working.
+      await handlers.get("tool_approval_resolved")!(
+        { toolCallId: "call-1", approved: true },
+        ctx,
+      );
+      expect(readMarker("S1").state).toBe("idle");
+    });
+
+    it("no-ops when the switch lands with no resolvable session id", async () => {
+      const { omp, handlers } = makeFakeOmp();
+      makeExtension({ markersDir, version: "1.0.0" })(omp);
+      const ctx = makeCtx("S1");
+
+      await handlers.get("session_start")!(null, ctx);
+      // Bailing (rather than treating every tracked id as stale) keeps an
+      // unreadable session id from deleting the live session's marker.
+      await handlers.get("session_switch")!(
+        switchEvent("new"),
+        makeCtx(undefined),
+      );
+
+      expect(existsSync(markerPath("S1"))).toBe(true);
     });
   });
 });
