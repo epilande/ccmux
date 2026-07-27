@@ -131,10 +131,8 @@ describe("findAgentForProcess", () => {
   });
 
   it("resolves omp before pi even though both share the pi-coding-agent path", () => {
-    // oh-my-pi is a hard fork of Pi and kept the package name
-    // `pi-coding-agent`, so pi's commandPatterns regex also matches omp's
-    // launcher. BUILTIN_AGENTS orders omp first AND omp's own pattern
-    // requires the `oh-my-pi` scope dir; both halves are load-bearing.
+    // Guards both halves of the fix for the shared `pi-coding-agent` package
+    // name: the BUILTIN_AGENTS ordering and omp's `oh-my-pi` scope dir.
     expect(
       findAgentForProcess(
         "node /Users/x/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
@@ -156,12 +154,9 @@ describe("findAgentForProcess", () => {
   });
 
   it("matches the bun-shim omp launch, where neither comm nor argv[0] is omp", () => {
-    // The real observed process on a mise/npm install (omp 17.1.3): omp's bin
-    // shim is `#!/usr/bin/env bun`, and Bun makes `process.title = "omp"` a
-    // no-op for `ps`, so the process is comm `bun` with the SYMLINK path in
-    // argv[1] — never the resolved @oh-my-pi/.../dist/cli.js target. Without
-    // the `bin/omp` commandPattern the pid stays out of the detected agent
-    // set and cleanupStaleMarkers reaps the extension's valid marker.
+    // These are the literal `ps` strings a mise/npm install produces, where
+    // the bun shim hides `process.title` (see
+    // docs/agent-adapters.md#omp-specific-caveats).
     expect(
       findAgentForProcess(
         "bun /Users/x/.local/share/mise/installs/node/26.3.0/bin/omp --model gemini-2.5-flash",
@@ -663,16 +658,14 @@ describe("built-in agent notificationActions defaults", () => {
 
   it("omp carries Approve/Deny keys and finished-only Reply (unlike its Pi upstream)", () => {
     const omp = BUILTIN_AGENTS.find((a) => a.name === "omp");
-    // omp's approval select is `["Approve", "Deny"]` opened at index 0, so
-    // Enter approves; Escape cancels the select and omp resolves the call as
-    // denied ("Tool call denied by user"), which is fail-closed.
+    // Enter and Escape are the only safe keys for omp's two-option approval
+    // select (see docs/agent-adapters.md#omp-specific-caveats).
     expect(omp?.notificationActions?.approve).toEqual(["Enter"]);
     expect(omp?.notificationActions?.deny).toEqual(["Escape"]);
     expect(omp?.notificationActions?.permissionReplyPrelude).toBeUndefined();
     expect(omp?.notificationActions?.replyOnQuestion).toBeUndefined();
     expect(omp?.notificationActions?.replyOnFinished).toBe(true);
-    // Same composer as pi: leading whitespace is stripped before the `!`
-    // bash trigger, so the space defuse does not neutralize it.
+    // Same composer as pi, so the same `!` bash-trigger guard applies.
     expect(omp?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*!/);
   });
 });

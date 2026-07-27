@@ -123,29 +123,19 @@ export const PI_EXTENSION_FILE = join(PI_EXTENSION_DIR, "ccmux.js");
  * oh-my-pi's own directory. Read-only except during `ccmux setup --agent omp`,
  * which drops a bundled JS extension into the auto-discovered extensions dir.
  *
- * The `PI_CONFIG_DIR` join is deliberately BUG-COMPATIBLE with omp. omp
- * resolves its config root as `path.join(homedir(), process.env.PI_CONFIG_DIR
- * || ".omp")` (`@oh-my-pi/pi-utils` `dirs.ts` `getBaseConfigRoot()` ->
- * `getConfigDirName()`), joining the env value VERBATIM instead of treating an
- * absolute path as absolute. Live-verified on omp 17.1.3:
- * `PI_CONFIG_DIR=/tmp/absolute-test omp config path` prints
- * `~/tmp/absolute-test/agent`, not `/tmp/absolute-test/agent`. Node's
- * `join(home, "/tmp/x")` reproduces that exactly, so we install where omp
- * actually looks. Do NOT "fix" this to `resolve()`: that would write the
- * extension somewhere omp never reads. omp's own
- * `test/discovery/pi-config-dir.test.ts` locks the behavior in upstream.
+ * The `PI_CONFIG_DIR` join below is deliberately BUG-COMPATIBLE with omp,
+ * which joins the env value VERBATIM instead of treating an absolute path as
+ * absolute, so an absolute override still lands under `$HOME`. Do NOT "fix"
+ * this to `resolve()`: that would write the extension somewhere omp never
+ * reads. The env var really is named `PI_CONFIG_DIR` (fork inheritance from
+ * Pi) and upstream pi does NOT honor it, so the `PI_*` constants above stay
+ * unconditional `~/.pi`. Evidence and the upstream source are in
+ * docs/agent-adapters.md#omp-specific-caveats.
  *
- * Note the env var really is named `PI_CONFIG_DIR` (fork inheritance from Pi).
- * Upstream pi does NOT honor it, so the `PI_*` constants above stay
- * unconditional `~/.pi`.
- *
- * TODO(hardening): omp has three more relocations this constant does not
- * model, all verified in `dirs.ts` on 17.1.3: `PI_CODING_AGENT_DIR` overrides
- * the agent dir outright, `OMP_PROFILE`/`PI_PROFILE` redirect to
- * `<root>/profiles/<name>/agent`, and on Linux/macOS an EXISTING
- * `$XDG_DATA_HOME/omp` (etc.) redirects state. Shelling out to
- * `omp config path` at setup time would resolve all four at once; deferred
- * because setup must stay fast and offline-safe.
+ * TODO(hardening): three further omp relocations are not modeled here
+ * (`PI_CODING_AGENT_DIR`, the `OMP_PROFILE`/`PI_PROFILE` profile dirs, and
+ * XDG state redirection); see the same doc section for why resolving them via
+ * `omp config path` at setup time is deferred.
  */
 export const OMP_AGENT_DIR = join(
   homedir(),

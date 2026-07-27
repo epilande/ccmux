@@ -964,52 +964,27 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     displayName: "omp",
     shortCode: "om",
     // MUST stay immediately BEFORE the `pi` entry: `findAgentForProcess` is
-    // first-match-wins over this array, and pi's `commandPatterns` regex
-    // (`/pi-coding-agent[/\\]dist[/\\]cli\.js/i`) also matches omp's resolved
-    // launcher path, because oh-my-pi is a hard fork of Pi that kept the npm
-    // package name `@oh-my-pi/pi-coding-agent`. If pi were evaluated first, an
-    // omp process launched by that path would be labeled Pi. The reverse can
-    // never happen: omp's `dist/cli.js` pattern below requires the `oh-my-pi`
-    // path component, which upstream pi's path lacks.
+    // first-match-wins over this array, and pi's `commandPatterns` regex also
+    // matches omp's resolved launcher path (the fork kept the npm package name
+    // `@oh-my-pi/pi-coding-agent`), so pi-first would label omp sessions Pi.
     //
-    // omp DOES set `process.title = APP_NAME` (= `"omp"`, `@oh-my-pi/pi-utils`
-    // `dirs.ts`) at the top of its CLI entrypoint, but do NOT rely on that:
-    // the npm bin shim's shebang is `#!/usr/bin/env bun`, and under Bun the
-    // assignment is a NO-OP as far as `ps` is concerned. Verified on omp 17.1.3
-    // with a two-line script that sets `process.title = "omp"` and sleeps: run
-    // under `bun`, `ps` reports comm `bun` and args `bun /tmp/title-test.js`;
-    // run under `node`, it reports `omp` for both. (pi is unaffected because
-    // ITS cli.js shebang is `#!/usr/bin/env node`, so pi's title rewrite really
-    // does reach `ps`.) Hence two launch shapes to cover:
-    //
-    //   1. Standalone binary / node-launched: argv[0] basename really is `omp`
-    //      (e.g. `omp`, `/usr/local/bin/omp`) -> `processMatch` catches it.
-    //   2. npm/mise bun shim (the common install): the live process is
-    //      comm `bun`, args `bun /Users/x/.../node/26.3.0/bin/omp --model ...`
-    //      -> neither comm nor argv[0] is ever `omp`, so only the launcher
-    //      path in argv[1] identifies it. That is one process, not a wrapper
-    //      plus a child (the shebang exec replaces bun's argv), so matching it
-    //      cannot double-detect the pane the way Copilot's node wrapper would.
-    //
-    // Anchored `/^omp$/i` rather than `\bomp\b` for pi's reason: the token is
-    // short and a loose match would claim unrelated commands.
+    // Detection must NOT rely on `process.title`: omp sets it, but its npm bin
+    // shim runs under Bun, where the assignment is a no-op as far as `ps` is
+    // concerned. `processMatch` and the `bin/omp` pattern below cover two
+    // different launch shapes and BOTH are required; dropping either makes the
+    // pid invisible to detection, and `cleanupStaleMarkers` then reaps the
+    // extension's valid marker. Full evidence, including the two-line `ps`
+    // experiment and the observed process shapes, is in
+    // docs/agent-adapters.md#omp-specific-caveats.
     processMatch: /^omp$/i,
     commandPatterns: [
-      // Shape 2 above. `ps` shows the SYMLINK the shim lives at (`.../bin/omp`),
-      // never the resolved `@oh-my-pi/pi-coding-agent/dist/cli.js` target, so
-      // this is the only stable signal for a bun-shim launch. The trailing
-      // `(?:\s|$)` keeps `/bin/ompx` and `/bin/omp-helper` out, and the
-      // required `/bin/` component keeps a bare word `omp` inside someone's
-      // prompt or flags from matching. It cannot collide with pi: pi's
-      // launcher token is `bin/pi`, and pi under node is caught by comm
-      // anyway. No separate pattern is needed for a full-path argv[0] like
-      // `/usr/local/bin/omp` -- `processMatch` already matches on the basename,
-      // and this pattern covers it a second time regardless.
+      // Bun-shim launches, where `ps` shows only the shim SYMLINK path. The
+      // trailing `(?:\s|$)` keeps `/bin/ompx` and `/bin/omp-helper` out, and
+      // the required `/bin/` component keeps a bare word `omp` in someone's
+      // prompt or flags from matching.
       /[/\\]bin[/\\]omp(?:\s|$)/i,
-      // Direct `bun /path/to/@oh-my-pi/pi-coding-agent/dist/cli.js` launches
-      // (no shim), and the sub-millisecond window before `process.title` is
-      // set on the node/standalone path. Scoped to the `oh-my-pi` dir so it
-      // can never claim upstream pi.
+      // Direct `dist/cli.js` launches. Keep it scoped to the `oh-my-pi` dir:
+      // unscoped, it would also claim upstream pi's launcher path.
       /oh-my-pi[/\\]pi-coding-agent[/\\]dist[/\\]cli\.js/i,
     ],
     // `omp --version` prints `omp/17.1.3` on its first line. The default
@@ -1066,29 +1041,15 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         kind: "rate_limit",
       },
     ],
-    // omp's approval prompt (read from `src/extensibility/extensions/
-    // wrapper.ts` on omp 17.1.3), which is where it diverges from Pi:
-    //   Allow tool: <name>
-    //   › Approve
-    //     Deny
-    // The select is built as `uiContext.select(prompt, ["Approve", "Deny"])`
-    // with no `initialIndex`, so `HookSelectorComponent` opens on index 0 =
-    // Approve and Enter confirms exactly that. There are no digit shortcuts
-    // to mis-fire on: printable keys feed the selector's fuzzy search box,
-    // and only Enter commits.
-    //
-    // Escape is fail-closed. It hits `matchesSelectCancel`, the select
-    // resolves to `undefined`, and `approved = choice === "Approve"` is
-    // false, so omp emits `tool_approval_resolved {approved: false}` and
-    // throws `Tool call denied by user: <name>`. The gated tool does NOT
-    // run, and the turn returns to the composer rather than ending the
-    // session. No `permissionReplyPrelude`: Escape here is the Deny itself,
-    // not a cancel-to-composer that leaves the tool pending.
-    //
-    // `replyOnFinished` carries over from pi unchanged: omp trims leading
-    // whitespace before its `!` bash-mode detection in the composer, so the
-    // leading-space defuse does NOT neutralize `!` and a `!`-leading reply
-    // would execute as a shell command with no approval.
+    // Approvals are where omp diverges from Pi. Its `["Approve", "Deny"]`
+    // select opens on index 0, so `Enter` approves and nothing else may be
+    // used: there are no digit shortcuts, because printable keys feed the
+    // selector's fuzzy search. `Escape` is the Deny itself (fail-closed, the
+    // gated tool does not run), NOT a cancel-to-composer, which is why no
+    // `permissionReplyPrelude` is set. `unsafeReplyPattern` must stay: omp
+    // trims leading whitespace before its `!` bash-mode check, so the
+    // leading-space defuse does not neutralize a `!`-leading reply.
+    // See docs/agent-adapters.md#omp-specific-caveats.
     notificationActions: {
       approve: ["Enter"],
       deny: ["Escape"],

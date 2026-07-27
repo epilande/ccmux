@@ -62,18 +62,9 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
   const sessionState = new Map();
   /**
    * Tool calls awaiting an approval decision, per session, as an
-   * insertion-ordered `toolCallId -> toolName`. omp can gate several tool
-   * calls from one assistant turn (shared-concurrency tools run in parallel
-   * and each requests approval before any resolves), so the session stays
-   * `waiting_permission` until the LAST id resolves; resolving one of three
-   * must not report the session back as working while two prompts remain.
-   *
-   * `pending_tool` publishes the OLDEST outstanding entry, not the newest,
-   * because omp's dialog surface is FIFO: the prompt actually on screen is
-   * the first one requested. Newest-wins would name a tool the user cannot
-   * see, and ccmux's Approve/Deny notification would describe the wrong call.
-   * Insertion order is trustworthy because omp awaits each handler, so the
-   * requests arrive here in the same order they queue on screen.
+   * insertion-ordered `toolCallId -> toolName`. One assistant turn can gate
+   * several calls at once, so this is a map rather than a single id; what the
+   * outstanding set means for the marker lives in `publishApprovals`.
    * @type {Map<string, Map<string, string|undefined>>}
    */
   const pendingApprovals = new Map();
@@ -144,12 +135,38 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
 
   /**
    * Tool name of the oldest outstanding approval, i.e. the prompt omp is
-   * currently showing.
+   * currently showing. `Map` iterates in insertion order, so the first value
+   * is the head of the queue (and `undefined` when nothing is outstanding).
    * @param {Map<string, string|undefined>} pending
    */
   function headToolName(pending) {
-    for (const toolName of pending.values()) return toolName;
-    return undefined;
+    return pending.values().next().value;
+  }
+
+  /**
+   * Publish what the outstanding approvals imply, the single place the FIFO
+   * invariant lives. Two rules, both load-bearing: stay `waiting_permission`
+   * until the LAST id resolves (reporting `working` mid-wait would clear the
+   * row's attention while prompts are still on screen), and name the OLDEST
+   * entry, because omp's dialog surface is FIFO and newest-wins would point
+   * ccmux's Approve/Deny notification at a tool the user cannot see.
+   * Insertion order is trustworthy because omp awaits each handler. Full
+   * rationale in `docs/agent-adapters.md#omp-specific-caveats`.
+   *
+   * Returns the queued write so a handler can await the marker hitting disk.
+   * @param {string} sessionId
+   * @param {Map<string, string|undefined>} pending
+   */
+  function publishApprovals(sessionId, pending) {
+    /** @type {MarkerState} */
+    const patch =
+      pending.size > 0
+        ? {
+            state: "waiting_permission",
+            pending_tool: headToolName(pending),
+          }
+        : { state: "working", pending_tool: undefined };
+    return queue(() => writeMerged(sessionId, patch));
   }
 
   /** Resolve the active session id from the read-only session manager. */
@@ -249,17 +266,10 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
         toolCallId,
         typeof event?.toolName === "string" ? event.toolName : undefined,
       );
-      // Publish the head, not this request: with two calls gated at once the
-      // second request arrives while the FIRST one's dialog is on screen.
-      const toolName = headToolName(pending);
-      // omp awaits this handler before it renders the prompt, so the
-      // waiting marker is on disk by the time the user can answer.
-      return queue(() =>
-        writeMerged(sessionId, {
-          state: "waiting_permission",
-          pending_tool: toolName,
-        }),
-      );
+      // Returning the queued write matters: omp awaits this handler before
+      // it renders the prompt, so the waiting marker is on disk by the time
+      // the user can answer.
+      return publishApprovals(sessionId, pending);
     });
 
     // Fires for BOTH outcomes (approve and deny) and for the no-UI/aborted
@@ -280,24 +290,11 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
       // A resolve we cannot correlate must not pin the row at waiting
       // forever, so treat it as resolving everything outstanding.
       else pending.clear();
-      // Overlapping approvals: stay waiting until the LAST id resolves, and
-      // re-publish so `pending_tool` names the dialog that just moved to the
-      // front of the FIFO queue. Answering the first of two prompts must
-      // retarget the notification at the second, not keep naming the answered
-      // one (and, before this, not name the newest one that is still buried).
-      if (pending.size > 0) {
-        const toolName = headToolName(pending);
-        return queue(() =>
-          writeMerged(sessionId, {
-            state: "waiting_permission",
-            pending_tool: toolName,
-          }),
-        );
-      }
-      pendingApprovals.delete(sessionId);
-      return queue(() =>
-        writeMerged(sessionId, { state: "working", pending_tool: undefined }),
-      );
+      // Re-publishing (rather than only writing `working` on the last
+      // resolve) is what retargets the notification at the prompt that just
+      // moved to the front of the queue.
+      if (pending.size === 0) pendingApprovals.delete(sessionId);
+      return publishApprovals(sessionId, pending);
     });
 
     // `/new` and `/resume` land here, not on a shutdown/start pair (see the

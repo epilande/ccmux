@@ -19,8 +19,9 @@ import {
   type HookAdapterOutcome,
   type HookManagerContext,
 } from "../../hook-adapter";
+import { markerStatusState } from "../../cascade-evaluator";
 import type { SessionPidMarker } from "../../session-markers";
-import type { SessionState, SessionStatus } from "../../../types/session";
+import type { SessionState } from "../../../types/session";
 
 const CCMUX_VERSION: string = pkg.version;
 
@@ -211,29 +212,17 @@ async function findTargetSession(
  * Map an omp marker into the SessionState fields the adapter owns. Unlike
  * pi's projection, `waiting_permission` is reachable: omp gates tool calls
  * behind an Approve/Deny select whenever the user has an approval mode
- * configured, and the extension reports the gated tool name. The tuple is
- * identical to the Antigravity adapter's so the notifier fires the same
- * permission notification (with Approve/Deny actions) for both.
+ * configured, and the extension reports the gated tool name. The
+ * status/attention tuple comes from the cascade's own `markerStatusState`,
+ * so this add-time write and every later reconcile agree by construction;
+ * only `lastPrompt`/`lastActivityAt` are the adapter's to add.
  */
 function stateFromOmpMarker(marker: SessionPidMarker): Partial<SessionState> {
-  const lastActivityAt = marker.state_timestamp
-    ? new Date(marker.state_timestamp * 1000).toISOString()
-    : undefined;
-  if (marker.state === "waiting_permission") {
-    return {
-      status: "waiting",
-      attentionType: "permission",
-      pendingTool: marker.pending_tool ?? null,
-      lastPrompt: marker.last_prompt,
-      lastActivityAt,
-    };
-  }
-  const status: SessionStatus = marker.state === "working" ? "working" : "idle";
   return {
-    status,
-    attentionType: null,
-    pendingTool: null,
+    ...markerStatusState(marker),
     lastPrompt: marker.last_prompt,
-    lastActivityAt,
+    lastActivityAt: marker.state_timestamp
+      ? new Date(marker.state_timestamp * 1000).toISOString()
+      : undefined,
   };
 }

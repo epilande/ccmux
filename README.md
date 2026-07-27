@@ -562,7 +562,7 @@ The difference is approvals. Unlike Pi, omp gates tool calls behind an Approve/D
 
 That means omp rows show a real waiting state and get actionable Approve/Deny notification buttons. omp emits these events only when you have an approval mode configured; on its default `yolo` mode nothing is gated, so nothing pauses. Installing the ccmux extension does not change that either way.
 
-Two omp-specific notes: omp resolves its config dir as `$HOME` joined with `PI_CONFIG_DIR` (default `.omp`) **verbatim**, so an absolute `PI_CONFIG_DIR` still lands under your home directory, and ccmux installs to the same place omp actually reads. And because oh-my-pi still ships as the npm package `pi-coding-agent`, ccmux checks omp before Pi when identifying a process, so a fork session is never mislabeled as Pi.
+One omp-specific note on where the extension lands: omp resolves its config dir as `$HOME` joined with `PI_CONFIG_DIR` (default `.omp`) **verbatim**, so an absolute `PI_CONFIG_DIR` still ends up under your home directory. ccmux installs to the same place omp actually reads.
 
 ### Antigravity CLI
 
