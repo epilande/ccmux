@@ -902,6 +902,11 @@ export function App(props: AppProps) {
   let pendingZ = false;
 
   useKeyboard((event: KeyEvent) => {
+    // The daemon suppresses `active_pane` for ccmux-titled panes, so a sidebar
+    // that is its own window's active pane never gets the event that would
+    // unhide it; a keypress is the only signal that it is being looked at.
+    visibility?.refresh();
+
     const key = event.name;
 
     if (store.state.showHelp) {
