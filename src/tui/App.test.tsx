@@ -1600,6 +1600,67 @@ describe("App pane-switch feedback and server scoping", () => {
       restoreTmux();
     }
   });
+
+  // Search mode hands every printable key to the input, so navigation is
+  // limited to the keys it can't consume. ^n/^p always worked; the arrows
+  // used to fall through to the input and leave the selection stuck on the
+  // first match. Enter is the observable side of "which row is selected".
+  describe("arrow navigation while searching", () => {
+    async function renderTwoSessions() {
+      await renderApp(120, 20, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            tmuxPane: "%20",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      setup.mockInput.pressKey("/");
+      await setup.renderOnce();
+    }
+
+    it("selects the next match on down arrow", async () => {
+      const restoreFetch = withServerInfo(null); // fail-open: guard passes
+      try {
+        await renderTwoSessions();
+        setup.mockInput.pressArrow("down");
+        await setup.renderOnce();
+        setup.mockInput.pressEnter();
+        await settle();
+        expect(switchToPaneSpy).toHaveBeenCalledWith("%20");
+      } finally {
+        restoreFetch();
+      }
+    });
+
+    it("selects the previous match on up arrow", async () => {
+      const restoreFetch = withServerInfo(null);
+      try {
+        await renderTwoSessions();
+        // Move down with ^n so the up arrow is the only key under test.
+        setup.mockInput.pressKey("n", { ctrl: true });
+        await setup.renderOnce();
+        setup.mockInput.pressArrow("up");
+        await setup.renderOnce();
+        setup.mockInput.pressEnter();
+        await settle();
+        expect(switchToPaneSpy).toHaveBeenCalledWith("%10");
+      } finally {
+        restoreFetch();
+      }
+    });
+  });
 });
 
 describe("App invoke row rendering", () => {

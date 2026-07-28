@@ -36,7 +36,7 @@ export const Footer: Component<FooterProps> = (props) => {
         </Match>
         <Match when={props.searchMode}>
           <text fg={theme.overlay}>
-            type to search · ^n/^p nav · enter{" "}
+            type to search · ↑/↓ or ^n/^p nav · enter{" "}
             {props.persistent ? "switch" : "select"} · esc cancel
           </text>
         </Match>
