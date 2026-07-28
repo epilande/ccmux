@@ -665,8 +665,28 @@ describe("built-in agent notificationActions defaults", () => {
     expect(omp?.notificationActions?.permissionReplyPrelude).toBeUndefined();
     expect(omp?.notificationActions?.replyOnQuestion).toBeUndefined();
     expect(omp?.notificationActions?.replyOnFinished).toBe(true);
-    // Same composer as pi, so the same `!` bash-trigger guard applies.
-    expect(omp?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*!/);
+    // omp trims before BOTH its `!` bash trigger and its slash-command
+    // dispatch, so neither is space-defusable (live-verified on 17.1.3: a
+    // defused ` /new` destroyed the session, and a spaceless ` /<token>`
+    // left the fuzzy selector open so Enter invoked an arbitrary match).
+    // Guard both leading triggers.
+    expect(omp?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*[/!]/);
+  });
+
+  it("omp unsafeReplyPattern refuses the live-verified destructive reply shapes", () => {
+    const pattern = BUILTIN_AGENTS.find((a) => a.name === "omp")
+      ?.notificationActions?.unsafeReplyPattern;
+    expect(pattern).toBeDefined();
+    // Each of these reached omp's dispatcher despite the leading-space
+    // defuse in the live repro; all must be refused fail-closed.
+    expect(pattern!.test("/new")).toBe(true);
+    expect(pattern!.test("  /clear")).toBe(true);
+    expect(pattern!.test("/Users/me/foo.ts")).toBe(true);
+    expect(pattern!.test("!rm -rf /tmp/x")).toBe(true);
+    expect(pattern!.test("  !ls")).toBe(true);
+    // Plain replies must still pass.
+    expect(pattern!.test("looks good, ship it")).toBe(false);
+    expect(pattern!.test("see src/lib/agents.ts")).toBe(false);
   });
 });
 

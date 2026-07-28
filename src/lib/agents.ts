@@ -1046,15 +1046,24 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // used: there are no digit shortcuts, because printable keys feed the
     // selector's fuzzy search. `Escape` is the Deny itself (fail-closed, the
     // gated tool does not run), NOT a cancel-to-composer, which is why no
-    // `permissionReplyPrelude` is set. `unsafeReplyPattern` must stay: omp
-    // trims leading whitespace before its `!` bash-mode check, so the
-    // leading-space defuse does not neutralize a `!`-leading reply.
+    // `permissionReplyPrelude` is set. `unsafeReplyPattern` must stay, and it
+    // covers `/` as well as `!`: omp's composer trims the submitted text
+    // BEFORE both its `!` bash-mode check and its slash-command dispatch
+    // (`editor.onSubmit` trims first thing), so the leading-space defuse
+    // neutralizes neither trigger. Live-verified on omp 17.1.3: a defused
+    // ` /new` still dispatched and DESTROYED the session ("New session
+    // started"), and a spaceless ` /<token>` left the fuzzy command selector
+    // open so the submitting Enter selected an arbitrary fuzzy match (it
+    // invoked an unrelated skill). Slash text containing a space falls
+    // through omp's dispatcher as a normal message, but the guard stays
+    // fail-closed on all of it -- which `/`-shape is destructive depends on
+    // the user's installed commands and skills.
     // See docs/agent-adapters.md#omp-specific-caveats.
     notificationActions: {
       approve: ["Enter"],
       deny: ["Escape"],
       replyOnFinished: true,
-      unsafeReplyPattern: /^\s*!/,
+      unsafeReplyPattern: /^\s*[/!]/,
     },
     // `omp -c` continues the most recent session in-pane (no session-id
     // extraction needed), same shape as `pi -c`. Id-based resume does exist --
