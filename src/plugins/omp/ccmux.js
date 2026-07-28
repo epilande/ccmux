@@ -5,16 +5,14 @@
 // Source: github.com/epilande/ccmux
 //
 // omp is a hard fork of Pi and kept Pi's extension API, so this file is a
-// near-copy of src/plugins/pi/ccmux.js. It is duplicated rather than shared
-// because the two agents install into different dirs, write different
-// marker prefixes, and diverge on approval tracking (omp HAS a tool-approval
-// pause; Pi does not). A shared module would have to be parameterized on all
-// three and would still ship as two rendered files.
+// near-copy of src/plugins/pi/ccmux.js. Kept separate because the two agents
+// install into different dirs, write different marker prefixes, and diverge
+// on approval tracking (omp has a tool-approval pause; Pi does not).
 //
-// omp auto-discovers both *.ts and *.js extensions from
-// `<agent dir>/extensions/`, so this plain-JS file runs unchanged under
-// whichever runtime (node or bun) launched omp. Authored as JS (not TS) so it
-// stays out of ccmux's own TypeScript compilation.
+// omp auto-discovers both *.ts and *.js extensions, so this plain-JS file
+// runs unchanged under whichever runtime (node or bun) launched omp.
+// Authored as JS (not TS) so it stays out of ccmux's own TypeScript
+// compilation.
 
 import { writeFile, rename, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -42,12 +40,12 @@ import { join } from "node:path";
  * overlap and need no OpenCode-style aggregation. We still key all
  * bookkeeping by session id so a re-bound instance can't cross-contaminate.
  *
- * Unlike upstream Pi, a session switch (`/new`, `/resume`) does NOT emit
+ * Unlike upstream Pi, a session switch (`/new`, `/resume`) does not emit
  * `session_shutdown` + `session_start`: omp mutates the session in place and
- * emits `session_before_switch` then `session_switch` (verified on omp
- * 17.1.3), never reconstructing the extension runner. The `session_switch`
- * handler below is what keeps the old session's marker from leaking and
- * seeds the new one.
+ * emits `session_switch` (`session_branch` for `/branch`). Both change the
+ * session id, so both are bound to the shared `rebindToCurrentSession`
+ * handler below, which keeps the old session's marker from leaking and seeds
+ * the new one.
  *
  * @param {MakeExtensionOptions} opts
  */
@@ -63,8 +61,7 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
   /**
    * Tool calls awaiting an approval decision, per session, as an
    * insertion-ordered `toolCallId -> toolName`. One assistant turn can gate
-   * several calls at once, so this is a map rather than a single id; what the
-   * outstanding set means for the marker lives in `publishApprovals`.
+   * several calls at once; see `publishApprovals` for what the set means.
    * @type {Map<string, Map<string, string|undefined>>}
    */
   const pendingApprovals = new Map();
@@ -135,8 +132,7 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
 
   /**
    * Tool name of the oldest outstanding approval, i.e. the prompt omp is
-   * currently showing. `Map` iterates in insertion order, so the first value
-   * is the head of the queue (and `undefined` when nothing is outstanding).
+   * currently showing (`Map` iterates in insertion order).
    * @param {Map<string, string|undefined>} pending
    */
   function headToolName(pending) {
@@ -144,14 +140,12 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
   }
 
   /**
-   * Publish what the outstanding approvals imply, the single place the FIFO
-   * invariant lives. Two rules, both load-bearing: stay `waiting_permission`
-   * until the LAST id resolves (reporting `working` mid-wait would clear the
-   * row's attention while prompts are still on screen), and name the OLDEST
-   * entry, because omp's dialog surface is FIFO and newest-wins would point
-   * ccmux's Approve/Deny notification at a tool the user cannot see.
-   * Insertion order is trustworthy because omp awaits each handler. Full
-   * rationale in `docs/agent-adapters.md#omp-specific-caveats`.
+   * Publish what the outstanding approvals imply. Two rules, both
+   * load-bearing: stay `waiting_permission` until the last id resolves
+   * (reporting `working` mid-wait would clear the row's attention while
+   * prompts are still on screen), and name the oldest entry, because omp's
+   * dialog surface is FIFO and newest-wins would point ccmux's Approve/Deny
+   * notification at a tool the user cannot see.
    *
    * Returns the queued write so a handler can await the marker hitting disk.
    * @param {string} sessionId
@@ -244,13 +238,10 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
       );
     });
 
-    // omp emits the approval pair only when `approvalCheck.required` AND an
-    // extension has a handler for one of them (the `hasHandlers` gate in
-    // src/extensibility/extensions/wrapper.ts, verified on omp 17.1.3).
-    // Subscribing therefore does NOT force approval pauses on the default
-    // `yolo` mode; it only makes the pauses observable for users who have
-    // configured an approval mode. This is the one behavior where omp
-    // diverges from Pi, which has no approval pause at all.
+    // omp emits the approval pair only when an approval is actually required,
+    // so subscribing does not force pauses on the default `yolo` mode; it
+    // only makes configured pauses observable. This is the one behavior where
+    // omp diverges from Pi, which has no approval pause at all.
     omp.on("tool_approval_requested", async (event, ctx) => {
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
@@ -266,13 +257,13 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
         toolCallId,
         typeof event?.toolName === "string" ? event.toolName : undefined,
       );
-      // Returning the queued write matters: omp awaits this handler before
-      // it renders the prompt, so the waiting marker is on disk by the time
-      // the user can answer.
+      // omp awaits this handler before it renders the prompt, so returning
+      // the queued write puts the waiting marker on disk by the time the
+      // user can answer.
       return publishApprovals(sessionId, pending);
     });
 
-    // Fires for BOTH outcomes (approve and deny) and for the no-UI/aborted
+    // Fires for both outcomes (approve and deny) and for the no-UI/aborted
     // paths omp resolves fail-closed. The agent loop resumes either way,
     // so `working` is right for both; `agent_end` still delivers the final
     // idle when the turn actually finishes.
@@ -290,28 +281,27 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
       // A resolve we cannot correlate must not pin the row at waiting
       // forever, so treat it as resolving everything outstanding.
       else pending.clear();
-      // Re-publishing (rather than only writing `working` on the last
-      // resolve) is what retargets the notification at the prompt that just
-      // moved to the front of the queue.
+      // Re-publish so the notification retargets the prompt that just moved
+      // to the front of the queue.
       if (pending.size === 0) pendingApprovals.delete(sessionId);
       return publishApprovals(sessionId, pending);
     });
 
-    // `/new` and `/resume` land here, not on a shutdown/start pair (see the
-    // factory doc above). omp installs the new session id BEFORE it emits, so
-    // every OTHER id we still track belongs to the session we just left: reap
-    // those markers, then seed a fresh idle marker for the current id. The
-    // daemon needs no change; the new file's chokidar add event drives the
-    // existing `onMarkerAdded` re-link.
-    omp.on("session_switch", async (_event, ctx) => {
+    // `/new`, `/resume`, and `/branch` land here, not on a shutdown/start pair
+    // (see the factory doc above). omp installs the new session id before it
+    // emits, so every other id we still track belongs to the session we just
+    // left: reap those markers, then seed a fresh idle marker for the current
+    // id. The new file's chokidar add event drives the existing
+    // `onMarkerAdded` re-link.
+    const rebindToCurrentSession = async (_event, ctx) => {
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
       await mkdir(markersDir, { recursive: true });
       const stale = [...sessionState.keys()].filter((id) => id !== sessionId);
-      // A same-id switch is real (`reload()` re-enters switchSession with the
-      // current file), and the switch aborts the running turn, so drop any
-      // approval this id still had outstanding rather than publish an idle
-      // marker that a late resolve could drag back to working.
+      // A same-id rebind is real (`reload()` re-enters switchSession), and
+      // the rebind aborts the running turn, so drop any outstanding approval
+      // rather than publish an idle marker that a late resolve could drag
+      // back to working.
       pendingApprovals.delete(sessionId);
       return queue(async () => {
         for (const id of stale) await removeMarker(id);
@@ -322,7 +312,26 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
           pending_tool: undefined,
         });
       });
-    });
+    };
+
+    omp.on("session_switch", rebindToCurrentSession);
+
+    // `session_branch` is the same id-changing event class as `session_switch`,
+    // just reached through `/branch` and the `app.session.fork` keybinding;
+    // omp mints the fresh id before emitting, so the handler sees the new id
+    // exactly as it does for a switch. Without this the old marker leaks for
+    // the life of the process, and the per-scan link pass cannot heal the row
+    // because it skips sessions already holding a marker-matched id.
+    //
+    // Deliberately NOT registered for `session_tree`: a tree switch moves a
+    // leaf within the same session and leaves the session id untouched.
+    omp.on("session_branch", rebindToCurrentSession);
+
+    // Forward-compat alias: upstream pi-mono renamed `session_branch` ->
+    // `session_fork`. omp has not taken the rename yet but tracks upstream,
+    // so subscribing to both keeps a future omp from regressing to the
+    // leaked-marker bug this handler fixes; an unused handler costs nothing.
+    omp.on("session_fork", rebindToCurrentSession);
 
     omp.on("session_shutdown", async (_event, ctx) => {
       const sessionId = sessionIdOf(ctx);

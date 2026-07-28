@@ -549,6 +549,8 @@ Both use Pi's extension system rather than shell hooks (oh-my-pi, `omp`, is a ha
 - `agent_start` / `agent_end`: flips state to `working` / `idle` (these bracket one full user prompt, so the row never flickers mid-response the way per-turn events would)
 - `session_shutdown`: unlinks the marker
 
+omp additionally handles the in-place session swaps that change the session id (`session_switch` for `/new` and `/resume`, `session_branch` for `/branch` and fork): each reaps the old session's marker and seeds a fresh one for the new id, since omp mutates the session in place rather than emitting a shutdown/start pair.
+
 Both run one session per process, so there's no server-style aggregation; the daemon correlates the marker's PID to its tmux pane via process ancestry and links `nativeSessionId`.
 
 Approvals are where the two diverge. Unlike Pi, omp gates tool calls behind an Approve/Deny prompt, so its extension also tracks `tool_approval_requested` (flips to `waiting_permission` with the gated tool's name) and `tool_approval_resolved` (clears back to `working` once the last outstanding approval is answered; approve and deny both resume the loop). omp rows show a real waiting state and get actionable Approve/Deny buttons; Pi rows never raise one. omp emits these events only when an approval mode is configured; on its default `yolo` mode nothing is gated, and installing the ccmux extension does not change that either way.

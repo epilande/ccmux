@@ -54,6 +54,17 @@ function startExtension(now?: () => number): Fire {
     handlers.get(event)!(payload, ctx);
 }
 
+/** The event names the extension subscribes to, for registration guards. */
+function registeredEvents(): string[] {
+  const names: string[] = [];
+  makeExtension({ markersDir, version: "1.0.0" })({
+    on: (event) => {
+      names.push(event);
+    },
+  });
+  return names;
+}
+
 function markerPath(sessionId: string): string {
   return join(markersDir, `omp-${sessionId}.json`);
 }
@@ -221,8 +232,6 @@ describe("omp ccmux extension", () => {
 
       await fire("session_start");
       await fire("agent_start");
-      // Two shared-concurrency bash calls: both request before either
-      // resolves, and omp shows call-1's dialog first.
       await fire("tool_approval_requested", {
         toolCallId: "call-1",
         toolName: "bash",
@@ -257,8 +266,7 @@ describe("omp ccmux extension", () => {
         approved: true,
       });
 
-      // Answering the first prompt retargets the row at the second, which is
-      // now the dialog on screen. Still waiting, new name.
+      // Still waiting, but named after the prompt now on screen.
       const marker = readMarker("S1");
       expect(marker.state).toBe("waiting_permission");
       expect(marker.pending_tool).toBe("web_fetch");
@@ -276,7 +284,7 @@ describe("omp ccmux extension", () => {
         toolCallId: "call-2",
         toolName: "web_fetch",
       });
-      // The second request resolves first (omp's fail-closed no-UI path can
+      // The second request resolves first (the fail-closed no-UI path can
       // land on any outstanding id).
       await fire("tool_approval_resolved", {
         toolCallId: "call-2",
@@ -304,8 +312,7 @@ describe("omp ccmux extension", () => {
         toolCallId: "call-1",
         toolName: "bash",
       });
-      // Turn aborted while the prompt was open: agent_end lands with the id
-      // still outstanding.
+      // Aborted turn: agent_end lands with the id still outstanding.
       await fire("agent_end");
       expect(readMarker("S1").state).toBe("idle");
       expect(readMarker("S1").pending_tool).toBeUndefined();
@@ -382,9 +389,8 @@ describe("omp ccmux extension", () => {
   });
 
   describe("session_switch", () => {
-    // omp's /new and /resume mutate the session in place and emit only
-    // session_before_switch + session_switch, so this handler (not a
-    // shutdown/start pair) is what reaps the old marker and seeds the new one.
+    // omp's /new and /resume mutate the session in place and emit
+    // session_switch, not pi's shutdown/start pair.
     const switchEvent = (reason: "new" | "resume") => ({
       type: "session_switch",
       reason,
@@ -399,7 +405,7 @@ describe("omp ccmux extension", () => {
       await fire("before_agent_start", { prompt: "old work" }, oldCtx);
       expect(existsSync(markerPath("S1"))).toBe(true);
 
-      // /new installs the new id BEFORE emitting, so the handler's ctx
+      // /new installs the new id before emitting, so the handler's ctx
       // already reports S2.
       const newCtx = makeCtx("S2", "/home/u/.omp/agent/sessions/x/new.jsonl");
       await fire("session_switch", switchEvent("new"), newCtx);
@@ -455,9 +461,8 @@ describe("omp ccmux extension", () => {
       const newCtx = makeCtx("S2");
       await fire("session_switch", switchEvent("new"), newCtx);
 
-      // The next turn on the NEW session starts from a clean slate: the
-      // abandoned id cannot pin it at waiting, and its late resolve cannot
-      // drag the idle row up to working.
+      // The new session starts from a clean slate: the abandoned id cannot
+      // pin it at waiting, and its late resolve cannot drag it up to working.
       await fire(
         "tool_approval_resolved",
         { toolCallId: "call-1", approved: false },
@@ -508,6 +513,101 @@ describe("omp ccmux extension", () => {
       await fire("session_switch", switchEvent("new"), makeCtx(undefined));
 
       expect(existsSync(markerPath("S1"))).toBe(true);
+    });
+  });
+
+  describe("session_branch", () => {
+    // `/branch` and `app.session.fork` mint a fresh session id exactly the
+    // way /new and /resume do, but emit `session_branch` instead of
+    // `session_switch`.
+    const branchEvent = () => ({
+      type: "session_branch",
+      previousSessionFile: "/home/u/.omp/agent/sessions/x/old.jsonl",
+    });
+
+    it("reaps the old session's marker and seeds an idle marker for the branched id", async () => {
+      const fire = startExtension(() => 1_700_000_000_000);
+      const oldCtx = makeCtx("S1", "/home/u/.omp/agent/sessions/x/old.jsonl");
+
+      await fire("session_start", null, oldCtx);
+      await fire("before_agent_start", { prompt: "pre-branch work" }, oldCtx);
+      expect(existsSync(markerPath("S1"))).toBe(true);
+
+      const newCtx = makeCtx("S2", "/home/u/.omp/agent/sessions/x/new.jsonl");
+      await fire("session_branch", branchEvent(), newCtx);
+
+      expect(existsSync(markerPath("S1"))).toBe(false);
+      const marker = readMarker("S2");
+      expect(marker.session_id).toBe("S2");
+      expect(marker.state).toBe("idle");
+      expect(marker.transcript_path).toBe(
+        "/home/u/.omp/agent/sessions/x/new.jsonl",
+      );
+      // The pre-branch prompt must not ride along onto the branched row.
+      expect(marker.last_prompt).toBeUndefined();
+    });
+
+    it("clears approvals left outstanding by the branched-away session", async () => {
+      const fire = startExtension();
+      const oldCtx = makeCtx("S1");
+
+      await fire("session_start", null, oldCtx);
+      await fire("agent_start", null, oldCtx);
+      await fire(
+        "tool_approval_requested",
+        { toolCallId: "call-1", toolName: "bash" },
+        oldCtx,
+      );
+      expect(readMarker("S1").state).toBe("waiting_permission");
+
+      const newCtx = makeCtx("S2");
+      await fire("session_branch", branchEvent(), newCtx);
+
+      // The abandoned approval cannot pin the branched session at waiting.
+      await fire(
+        "tool_approval_resolved",
+        { toolCallId: "call-1", approved: false },
+        newCtx,
+      );
+      expect(readMarker("S2").state).toBe("idle");
+    });
+
+    it("no-ops when the branch lands with no resolvable session id", async () => {
+      const fire = startExtension();
+
+      await fire("session_start");
+      await fire("session_branch", branchEvent(), makeCtx(undefined));
+
+      expect(existsSync(markerPath("S1"))).toBe(true);
+    });
+
+    it("rebinds on the post-rename session_fork alias too", async () => {
+      // Upstream renamed session_branch -> session_fork; omp still emits the
+      // old name but tracks upstream, so both must rebind.
+      const fire = startExtension();
+
+      await fire("session_start", null, makeCtx("S1"));
+      expect(existsSync(markerPath("S1"))).toBe(true);
+
+      await fire(
+        "session_fork",
+        { type: "session_fork", previousSessionFile: undefined },
+        makeCtx("S2"),
+      );
+
+      expect(existsSync(markerPath("S1"))).toBe(false);
+      expect(readMarker("S2").state).toBe("idle");
+    });
+
+    it("subscribes to every id-changing rebind event, but not session_tree", () => {
+      const events = registeredEvents();
+
+      expect(events).toContain("session_switch");
+      expect(events).toContain("session_branch");
+      expect(events).toContain("session_fork");
+      // `session_tree` moves a leaf within the current session, so the id is
+      // untouched and rebinding would be wrong.
+      expect(events).not.toContain("session_tree");
     });
   });
 });
