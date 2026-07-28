@@ -22,12 +22,12 @@ When running multiple AI coding agent sessions across tmux panes, it's hard to k
 
 It works with your existing tmux workflow. You don't change how you launch or run your agents; ccmux discovers what's already running in your panes, so as long as you're in tmux with a supported agent, it just works.
 
-**Built-in support for:** Claude Code, Codex, Cursor, OpenCode, Pi (+ oh-my-pi), Antigravity, Copilot, Gemini CLI, plus [custom agent definitions](#-custom-agents) via config.
+**Built-in support for:** Claude Code, Codex, Cursor, OpenCode, Pi, Antigravity, Copilot, Gemini CLI, plus [custom agent definitions](#-custom-agents) via config.
 
 ## ✨ Features
 
 - 🎯 **Live Session States**: Every agent tracked as idle, working, or waiting (permission / plan approval / question), flagged the moment one needs you
-- 🧩 **Multi-Agent**: Claude Code, Codex, Cursor, OpenCode, Pi (+ oh-my-pi), Antigravity, Copilot, Gemini CLI, plus custom agents via config
+- 🧩 **Multi-Agent**: Claude Code, Codex, Cursor, OpenCode, Pi, Antigravity, Copilot, Gemini CLI, plus custom agents via config
 - 🔄 **Real-Time**: Background daemon streams state changes instantly over SSE, no polling, no refresh
 - 👁️ **Live Preview**: Split-pane view of the selected session's pane content
 - ⚡ **Act in Place**: Tab into the preview to approve, answer, or type, keys go straight to that pane
