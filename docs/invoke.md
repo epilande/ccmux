@@ -26,7 +26,8 @@ ccmux invoke "explain what this repo does"
 ccmux invoke [agent] [prompt] [options]
 
 Arguments:
-  agent     Agent to invoke (claude, codex, cursor, opencode, pi, gemini).
+  agent     Agent to invoke (claude, codex, cursor, opencode, pi, omp,
+            gemini).
             Default: claude. If the first positional doesn't match a known
             agent, it's treated as the prompt and agent defaults to claude.
   prompt    Prompt text. Optional if stdin is piped.
@@ -52,7 +53,7 @@ Exit codes:
        claude` for the interactive tmux path. Subprocess agents do not
        need hooks installed.)
   4    agent_error. Agent-attributable failures: login expired,
-       `--session` rejected (Gemini/Pi), agent did not produce a session
+       `--session` rejected (Gemini/Pi/omp), agent did not produce a session
        within 30s, subprocess produced empty output with stderr.
   124  timeout (the invocation's `--timeout` budget was exhausted)
   130  user cancelled (SIGINT)
@@ -69,7 +70,7 @@ Output is written to stdout without a trailing newline so command substitutions 
 | Set   | Empty      | `prompt` is stdin.                   |
 | Empty | Empty      | Error: "No prompt provided". Exit 1. |
 
-The daemon caps the combined prompt at **256 KB** to keep a misbehaving caller from streaming gigabytes of stdin into daemon memory. Exceeding the cap returns exit 1 with `Prompt exceeds maximum size of 262144 bytes`. The cap accommodates realistic piped inputs (git diffs, test logs); if you genuinely need more, splice the input into smaller follow-up turns via `--session`. Gemini and Pi carry a tighter **120 KiB** cap: their prompt rides in argv rather than stdin (`-p {prompt}`), so an over-cap prompt to those two returns exit 4 (`agent_error`) before the process spawns.
+The daemon caps the combined prompt at **256 KB** to keep a misbehaving caller from streaming gigabytes of stdin into daemon memory. Exceeding the cap returns exit 1 with `Prompt exceeds maximum size of 262144 bytes`. The cap accommodates realistic piped inputs (git diffs, test logs); if you genuinely need more, splice the input into smaller follow-up turns via `--session`. Gemini, Pi, and omp carry a tighter **120 KiB** cap: their prompt rides in argv rather than stdin (`-p {prompt}`), so an over-cap prompt to those three returns exit 4 (`agent_error`) before the process spawns.
 
 ## Multi-turn with `--session`
 
@@ -82,6 +83,7 @@ The daemon caps the combined prompt at **256 KB** to keep a misbehaving caller f
 | Cursor   | `cursor-agent --resume <conversation_id>`, workspace-scoped; `--cwd` must match. |
 | OpenCode | `opencode run --session <id>`, by id.                                            |
 | Pi       | Not supported. Returns exit 4 (`agent_error`).                                   |
+| omp      | Not supported. Returns exit 4 (`agent_error`).                                   |
 | Gemini   | Not supported. Returns exit 4 (`agent_error`).                                   |
 
 The returned `sessionId` (visible via the daemon `POST /invoke` response, not the text output) is the native agent id you can pass back as `--session <id>` for follow-ups, or to the agent directly outside ccmux for `--resume`.
@@ -154,7 +156,7 @@ Prints the invocation's full captured output from the daemon's ephemeral result 
 | 2    | No longer available (reaped, never written, or the daemon restarted).                           |
 | 1    | Transport error (daemon unreachable), or a malformed id (exits 1 before contacting the daemon). |
 
-> **Only subprocess invokes write a result file.** Codex, Cursor, OpenCode, Gemini, and Pi buffer their full stdout/stderr and persist it at finish. Claude invokes drive an interactive tmux session with no stdout buffer, so their full output **is** the text returned inline on the original invoke. `ccmux invoke result <claude-id>` therefore always reports "no longer available" (exit 2).
+> **Only subprocess invokes write a result file.** Codex, Cursor, OpenCode, Gemini, Pi, and omp buffer their full stdout/stderr and persist it at finish. Claude invokes drive an interactive tmux session with no stdout buffer, so their full output **is** the text returned inline on the original invoke. `ccmux invoke result <claude-id>` therefore always reports "no longer available" (exit 2).
 
 The result store is deliberately ephemeral: a per-daemon-process `0700` directory under the OS temp dir (random path), capped at ~5 MiB per invocation (output beyond that is truncated with a marker). It is lost on daemon restart, reboot, or the OS `/tmp` reaper. Treat `result` as "read it soon after it finishes," not a durable log.
 
@@ -177,6 +179,7 @@ Each agent runs in one of two paths, chosen by whether the agent has an `invokeM
 | Subprocess  | Codex    | `codex exec --skip-git-repo-check -o <tmpfile> [resume <id>]`, no tmux pane. | Final assistant message from the tmpfile. Clean.                      |
 | Subprocess  | Cursor   | `cursor-agent --print [--resume <id>]`, no tmux pane.                        | Raw stdout from the subprocess.                                       |
 | Subprocess  | Pi       | `pi -p {prompt}`, prompt in argv, no tmux pane.                              | Raw stdout from the subprocess. `--session` is rejected.              |
+| Subprocess  | omp      | `omp -p {prompt}`, prompt in argv, no tmux pane.                             | Raw stdout from the subprocess. `--session` is rejected.              |
 | Subprocess  | Gemini   | `gemini -p {prompt}`, prompt in argv, no tmux pane.                          | Raw stdout from the subprocess. `--session` is rejected.              |
 
 Output **semantics** are committed (the response is in there); subprocess-path exit codes and message wording are not (see Stability commitments).
@@ -210,14 +213,14 @@ Custom agents declared under `agents.*` in `~/.config/ccmux/ccmux.json` can ship
 
 - The ccmux daemon must be running. `ccmux invoke` starts it automatically via `ensureDaemon()` if needed.
 - For Claude only, hooks must be installed (`ccmux setup --agent claude`). Without them the daemon cannot derive an authoritative session id for the interactive tmux path, and invoke fails fast with exit code 3 (`hooks_missing`).
-- Subprocess agents (Codex / Cursor / OpenCode / Gemini / Pi) do not need hooks installed for `ccmux invoke`. They are still useful to install for normal `ccmux picker` / `sidebar` session tracking.
+- Subprocess agents (Codex / Cursor / OpenCode / Gemini / Pi / omp) do not need hooks installed for `ccmux invoke`. They are still useful to install for normal `ccmux picker` / `sidebar` session tracking.
 - Custom agents declared under `agents.*` in `~/.config/ccmux/ccmux.json` are invokable too. With an `invokeMode` they take the subprocess path; without one they take the interactive tmux path and skip the hooks precheck (no built-in hook adapter to gate against).
 
 ## Observability
 
 Claude invocations run in a dedicated `ccmux-invoke-<short-id>` tmux session and show up in `ccmux picker` / `sidebar` like any other ccmux session while in flight. The session is killed automatically when the turn completes (or on timeout / cancel).
 
-Subprocess-path agents (Codex / Cursor / OpenCode / Gemini / Pi) do not create a tmux session, but they still appear on the board as paneless worker rows: a running spinner while in flight, then their terminal outcome (`✓` done / `✗` failed / `⊘` cancelled) lingering for a few seconds before the row clears. The header shows an `N invoking` count of every in-flight invoke (Claude and subprocess alike), and under session / window grouping the paneless rows collect under a dedicated `(invoke)` group rather than `(no tmux)`. Killing or restarting one of these rows from the board cancels the invocation (`POST /invoke/<id>/cancel`); a one-shot worker has no real session to kill or restart. The board's kill-all reaps in-flight invokes too: the daemon cancels every running invocation it knows about (the authoritative set), so kill-all unwinds Claude and subprocess workers cleanly rather than stranding them.
+Subprocess-path agents (Codex / Cursor / OpenCode / Gemini / Pi / omp) do not create a tmux session, but they still appear on the board as paneless worker rows: a running spinner while in flight, then their terminal outcome (`✓` done / `✗` failed / `⊘` cancelled) lingering for a few seconds before the row clears. The header shows an `N invoking` count of every in-flight invoke (Claude and subprocess alike), and under session / window grouping the paneless rows collect under a dedicated `(invoke)` group rather than `(no tmux)`. Killing or restarting one of these rows from the board cancels the invocation (`POST /invoke/<id>/cancel`); a one-shot worker has no real session to kill or restart. The board's kill-all reaps in-flight invokes too: the daemon cancels every running invocation it knows about (the authoritative set), so kill-all unwinds Claude and subprocess workers cleanly rather than stranding them.
 
 > Settling a Claude invoke by killing its `ccmux-invoke-<id>` tmux session directly (rather than via `ccmux invoke cancel`, `Ctrl-C`, or the board's kill binding) does not clear it immediately: the daemon keeps polling for the turn end until the per-invocation timeout (`--timeout`, default 300s), so the `N invoking` count can linger until then. Cancel through the CLI or the board for a clean, immediate unwind.
 

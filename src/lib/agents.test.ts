@@ -129,6 +129,60 @@ describe("findAgentForProcess", () => {
       ),
     ).toBeNull();
   });
+
+  it("resolves omp before pi even though both share the pi-coding-agent path", () => {
+    // Guards both halves of the fix for the shared `pi-coding-agent` package
+    // name: the BUILTIN_AGENTS ordering and omp's `oh-my-pi` scope dir.
+    expect(
+      findAgentForProcess(
+        "node /Users/x/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+        BUILTIN_AGENTS,
+      )?.name,
+    ).toBe("omp");
+    expect(findAgentForProcess("omp", BUILTIN_AGENTS)?.name).toBe("omp");
+    expect(findAgentForProcess("omp -c", BUILTIN_AGENTS)?.name).toBe("omp");
+    expect(findAgentForProcess("pi", BUILTIN_AGENTS)?.name).toBe("pi");
+    expect(findAgentForProcess("pi -c", BUILTIN_AGENTS)?.name).toBe("pi");
+    // An upstream pi launcher path (no `oh-my-pi` component) still resolves
+    // to pi: omp's scoped pattern cannot claim it.
+    expect(
+      findAgentForProcess(
+        "node /Users/x/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
+        BUILTIN_AGENTS,
+      )?.name,
+    ).toBe("pi");
+  });
+
+  it("matches the bun-shim omp launch, where neither comm nor argv[0] is omp", () => {
+    // These are the literal `ps` strings a mise/npm install produces, where
+    // the bun shim hides `process.title` (see
+    // docs/agent-adapters.md#omp-specific-caveats).
+    expect(
+      findAgentForProcess(
+        "bun /Users/x/.local/share/mise/installs/node/26.3.0/bin/omp --model gemini-2.5-flash",
+        BUILTIN_AGENTS,
+      )?.name,
+    ).toBe("omp");
+    expect(
+      findAgentForProcess(
+        "bun /Users/x/.local/share/mise/installs/node/26.3.0/bin/omp",
+        BUILTIN_AGENTS,
+      )?.name,
+    ).toBe("omp");
+    // Standalone/node launch: argv[0] basename is really `omp`.
+    expect(
+      findAgentForProcess("/usr/local/bin/omp", BUILTIN_AGENTS)?.name,
+    ).toBe("omp");
+  });
+
+  it("does not match omp-adjacent binaries that merely start with omp", () => {
+    // The `bin/omp` pattern's trailing `(?:\s|$)` is what keeps these out.
+    expect(findAgentForProcess("bun /x/bin/ompx", BUILTIN_AGENTS)).toBeNull();
+    expect(findAgentForProcess("/x/bin/omp-helper", BUILTIN_AGENTS)).toBeNull();
+    expect(
+      findAgentForProcess("bun /x/bin/omp-helper --flag", BUILTIN_AGENTS),
+    ).toBeNull();
+  });
 });
 
 describe("Copilot version parsing", () => {
@@ -143,6 +197,18 @@ describe("Copilot version parsing", () => {
         copilot?.versionPatterns,
       ),
     ).toBe("1.0.71");
+  });
+});
+
+describe("omp version parsing", () => {
+  it("extracts the version from `omp --version` output using defaults", () => {
+    // omp prints a single `omp/17.1.3` line; the default patterns take the
+    // version-shaped token, so omp needs no `versionPatterns` override.
+    const omp = BUILTIN_AGENTS.find((a) => a.name === "omp");
+    expect(omp?.versionPatterns).toBeUndefined();
+    expect(extractVersionFromOutput("omp/17.1.3", omp?.versionPatterns)).toBe(
+      "17.1.3",
+    );
   });
 });
 
@@ -588,6 +654,39 @@ describe("built-in agent notificationActions defaults", () => {
     // pi strips leading whitespace before its `!` bash trigger and executes
     // the text; `/` IS space-defusable (submits as a plain message).
     expect(pi?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*!/);
+  });
+
+  it("omp carries Approve/Deny keys and finished-only Reply (unlike its Pi upstream)", () => {
+    const omp = BUILTIN_AGENTS.find((a) => a.name === "omp");
+    // Enter and Escape are the only safe keys for omp's two-option approval
+    // select (see docs/agent-adapters.md#omp-specific-caveats).
+    expect(omp?.notificationActions?.approve).toEqual(["Enter"]);
+    expect(omp?.notificationActions?.deny).toEqual(["Escape"]);
+    expect(omp?.notificationActions?.permissionReplyPrelude).toBeUndefined();
+    expect(omp?.notificationActions?.replyOnQuestion).toBeUndefined();
+    expect(omp?.notificationActions?.replyOnFinished).toBe(true);
+    // omp trims before BOTH its `!` bash trigger and its slash-command
+    // dispatch, so neither is space-defusable (live-verified on 17.1.3: a
+    // defused ` /new` destroyed the session, and a spaceless ` /<token>`
+    // left the fuzzy selector open so Enter invoked an arbitrary match).
+    // Guard both leading triggers.
+    expect(omp?.notificationActions?.unsafeReplyPattern).toEqual(/^\s*[/!]/);
+  });
+
+  it("omp unsafeReplyPattern refuses the live-verified destructive reply shapes", () => {
+    const pattern = BUILTIN_AGENTS.find((a) => a.name === "omp")
+      ?.notificationActions?.unsafeReplyPattern;
+    expect(pattern).toBeDefined();
+    // Each of these reached omp's dispatcher despite the leading-space
+    // defuse in the live repro; all must be refused fail-closed.
+    expect(pattern!.test("/new")).toBe(true);
+    expect(pattern!.test("  /clear")).toBe(true);
+    expect(pattern!.test("/Users/me/foo.ts")).toBe(true);
+    expect(pattern!.test("!rm -rf /tmp/x")).toBe(true);
+    expect(pattern!.test("  !ls")).toBe(true);
+    // Plain replies must still pass.
+    expect(pattern!.test("looks good, ship it")).toBe(false);
+    expect(pattern!.test("see src/lib/agents.ts")).toBe(false);
   });
 });
 

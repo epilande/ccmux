@@ -120,6 +120,24 @@ export const PI_EXTENSION_DIR = join(PI_AGENT_DIR, "extensions");
 export const PI_EXTENSION_FILE = join(PI_EXTENSION_DIR, "ccmux.js");
 
 /**
+ * oh-my-pi's own directory. Read-only except during `ccmux setup --agent omp`,
+ * which drops a bundled JS extension into the auto-discovered extensions dir.
+ * The `PI_CONFIG_DIR` join below is deliberately BUG-COMPATIBLE with omp,
+ * which joins the env value verbatim, so do NOT "fix" this to `resolve()`:
+ * that would write the extension somewhere omp never reads. Upstream pi does
+ * not honor the env var, so the `PI_*` constants above stay unconditional
+ * `~/.pi`. Further omp relocations (profile dirs, XDG state) are deliberately
+ * not modeled; evidence in docs/agent-adapters.md#omp-specific-caveats.
+ */
+export const OMP_AGENT_DIR = join(
+  homedir(),
+  process.env.PI_CONFIG_DIR || ".omp",
+  "agent",
+);
+export const OMP_EXTENSION_DIR = join(OMP_AGENT_DIR, "extensions");
+export const OMP_EXTENSION_FILE = join(OMP_EXTENSION_DIR, "ccmux.js");
+
+/**
  * GitHub Copilot CLI's own directory. Read-only except during
  * `ccmux setup --agent copilot`, which drops a single hooks JSON file plus
  * its marker script into the auto-discovered `hooks/` dir. Copilot resolves

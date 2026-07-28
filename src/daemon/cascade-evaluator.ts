@@ -343,7 +343,12 @@ export function terminalSource(
   };
 }
 
-function markerStatusState(marker: SessionPidMarker): CascadeState {
+/**
+ * The canonical marker `state` -> status/attention projection. Exported so
+ * hook adapters that write the same tuple directly (rather than through the
+ * cascade) share one definition instead of re-deriving it and drifting.
+ */
+export function markerStatusState(marker: SessionPidMarker): CascadeState {
   if (marker.state === "waiting_permission") {
     return {
       status: "waiting",

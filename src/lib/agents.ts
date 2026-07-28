@@ -960,6 +960,104 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     },
   },
   {
+    name: "omp",
+    displayName: "omp",
+    shortCode: "om",
+    // MUST stay immediately BEFORE the `pi` entry: `findAgentForProcess` is
+    // first-match-wins over this array, and pi's `commandPatterns` regex also
+    // matches omp's resolved launcher path (the fork kept the npm package name
+    // `@oh-my-pi/pi-coding-agent`), so pi-first would label omp sessions Pi.
+    //
+    // Detection cannot rely on `process.title` (omp sets it, but its Bun bin
+    // shim never propagates it to `ps`). `processMatch` and the `bin/omp`
+    // pattern below cover two different launch shapes and both are required;
+    // dropping either makes the pid invisible to detection, and
+    // `cleanupStaleMarkers` then reaps the extension's valid marker. Full
+    // evidence in docs/agent-adapters.md#omp-specific-caveats.
+    processMatch: /^omp$/i,
+    commandPatterns: [
+      // Bun-shim launches, where `ps` shows only the shim symlink path. The
+      // trailing `(?:\s|$)` keeps `/bin/ompx` out, and the required `/bin/`
+      // component keeps a bare word `omp` in someone's prompt from matching.
+      /[/\\]bin[/\\]omp(?:\s|$)/i,
+      // Direct `dist/cli.js` launches, scoped to the `oh-my-pi` dir so it
+      // can't also claim upstream pi's launcher path.
+      /oh-my-pi[/\\]pi-coding-agent[/\\]dist[/\\]cli\.js/i,
+    ],
+    versionCommand: "omp --version",
+    // No-hooks fallback; the extension marker is the authoritative source via
+    // the cascade when `ccmux setup --agent omp` has run. Waiting stays FIRST
+    // (`matchTerminalRule` returns the first match): the working label is
+    // model-supplied and unpredictable, so waiting-first keeps any overlap
+    // from masking a real permission wait.
+    terminalRules: [
+      {
+        // Body of omp's approval prompt (`Allow tool: <name>`, rendered above
+        // an Approve/Deny select). `pendingTool` is null because terminal
+        // rules match fixed substrings; the marker path fills in the real
+        // name.
+        matchAny: ["allow tool:"],
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: null,
+      },
+      {
+        // `Working…` (real U+2026, unlike pi's ASCII `Working...`) is only
+        // omp's default loader label. Once the model streams an intent, the
+        // label becomes that intent text (e.g. `⠧ Run touch command ⟦esc⟧`),
+        // so this rule only covers the pre-intent window; the marker carries
+        // `working` the rest of the time. There is no `Thinking…` label. Same
+        // caveat as pi: do NOT key on "interrupt".
+        matchAny: ["working…"],
+        status: "working",
+        attentionType: null,
+        pendingTool: null,
+      },
+    ],
+    errorRules: [
+      {
+        match:
+          /(?:rate|usage|message|hourly|daily|weekly)\s*limit\s+(?:was\s+)?(?:reached|exceeded|exhausted)/i,
+        kind: "rate_limit",
+      },
+    ],
+    // Approvals are where omp diverges from Pi. Its Approve/Deny select opens
+    // on index 0, so `Enter` approves; there are no digit shortcuts, because
+    // printable keys feed the selector's fuzzy search. `Escape` is the Deny
+    // itself (fail-closed, the gated tool does not run), not a
+    // cancel-to-composer, which is why no `permissionReplyPrelude` is set.
+    // `unsafeReplyPattern` must stay and must keep covering `/` as well as
+    // `!`: omp's composer trims the submitted text before both its `!`
+    // bash-mode check and its slash-command dispatch, so the leading-space
+    // defuse neutralizes neither trigger (live-verified: a defused ` /new`
+    // still destroyed the session).
+    notificationActions: {
+      approve: ["Enter"],
+      deny: ["Escape"],
+      replyOnFinished: true,
+      unsafeReplyPattern: /^\s*[/!]/,
+    },
+    // `omp -c` continues the most recent session in-pane (no session-id
+    // extraction needed), same shape as `pi -c`.
+    resumeCommand: "omp -c",
+    // omp writes its JSONL transcript to
+    // ~/.omp/agent/sessions/<encoded-cwd>/<ts>_<uuidv7>.jsonl, the same
+    // filename shape as pi's, so the pattern is reused verbatim. ccmux does
+    // not parse the transcript in v1; the pattern is recorded for when a
+    // log-tail adapter lands.
+    sessionFilePattern:
+      /_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i,
+    invokeMode: {
+      // omp reads the prompt from `-p` and prints the final assistant text
+      // to stdout, then exits 0 (print mode). `{prompt}` rides in argv like
+      // gemini and pi. Resume in print mode is unverified, so we do not
+      // expose resumeArgs (sessionId is rejected at the daemon).
+      args: ["omp", "-p", "{prompt}"],
+      output: { kind: "stdout" },
+    },
+    hooks: { markerDir: MARKERS_DIR, type: "omp" },
+  },
+  {
     name: "pi",
     displayName: "Pi",
     shortCode: "pi",

@@ -259,6 +259,14 @@ function inferVersionFromPackageJson(
           return version;
         } else if (agent.name === "codex" && name === "@openai/codex") {
           return version;
+        } else if (
+          agent.name === "omp" &&
+          name === "@oh-my-pi/pi-coding-agent"
+        ) {
+          // oh-my-pi ships as `@oh-my-pi/pi-coding-agent`, which contains
+          // "pi" but not "omp", so the generic `name.includes(agent.name)`
+          // check above never fires for it.
+          return version;
         }
       } catch {
         // Ignore malformed package.json and keep searching.

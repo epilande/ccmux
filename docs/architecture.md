@@ -118,7 +118,7 @@ The entire interface between ccmux and the agent is one JSON file per session, w
   timestamp: number,
   state?: "idle" | "working" | "waiting_permission",
   state_timestamp?: number,      // Fresher than `timestamp` if set
-  pending_tool?: string,         // From PermissionRequest hook (Codex/Cursor)
+  pending_tool?: string,         // From PermissionRequest hook (Codex/Cursor), tool_approval_requested (omp)
   permission_context?: string,
   directory?: string,            // OpenCode only
   title?: string,                // OpenCode only
@@ -135,6 +135,7 @@ The entire interface between ccmux and the agent is one JSON file per session, w
 | Cursor      | 4 shell scripts (`sessionStart`, `sessionEnd`, `beforeSubmitPrompt`, `stop`) via `~/.cursor/hooks.json`. Scripts walk PID ancestry to find the real `cursor-agent` PID (Cursor invokes hooks via `/bin/zsh -c`, so `$PPID` is a transient shell).                                                 | PID-ancestry: `ctx.getPaneHostingPid(marker.pid)` |
 | OpenCode    | One JS plugin at `~/.config/opencode/plugin/ccmux.js` subscribed to OpenCode's message bus (no shell hooks; pure `node:fs/promises` so the same file runs on Bun or Node).                                                                                                                        | PID-ancestry; one server hosts N sessions         |
 | Pi          | One JS extension at `~/.pi/agent/extensions/ccmux.js` subscribed to Pi's lifecycle events (no shell hooks; pure `node:fs/promises`, auto-discovered and loaded via jiti). Writes the marker at `session_start`, which fires at launch with full identity (pid, session id, transcript path, cwd). | PID-ancestry; one session per process             |
+| omp         | One JS extension at `~/.omp/agent/extensions/ccmux.js` subscribed to omp's lifecycle events (oh-my-pi is a hard fork of Pi and kept its extension API, so the file is a near-copy of Pi's). Adds approval tracking: `tool_approval_requested`/`resolved` drive `waiting_permission`, which Pi has no equivalent for.                | PID-ancestry; one session per process             |
 | Antigravity | 2 shell scripts (`PreInvocation`, `Stop`) via global `~/.gemini/config/hooks.json`. The first `PreInvocation` creates the marker because Antigravity exposes no session-start hook.                                                                                                               | TTY match with PID-ancestry fallback              |
 
 ### Lifecycle (`hook-manager.ts`)
@@ -143,7 +144,7 @@ The entire interface between ccmux and the agent is one JSON file per session, w
 2. Agent fires hook, script writes marker file.
 3. `HookManager.start()` first replays existing on-disk markers (covers "daemon was down when agent booted"), then opens chokidar with `ignoreInitial: true`.
 4. Add event triggers `adapter.onMarkerAdded(marker, ctx)`. The adapter locates the matching pane-tracked session, sets `nativeSessionId`, `logPath`, `cwd`, and (Claude) starts log-tailing. A marker written before the daemon's first scan created the pane-tracked session would otherwise be orphaned; the shared, agent-agnostic `reconcileSessionMarkerLinks()` (`adapters/link.ts`, keyed off `adapter.agentType`) closes that race on the next scan and re-derives native-id ownership each scan so a mis-linked id heals.
-5. Per-turn signals (Claude `Notification`, Codex `PermissionRequest`, Cursor `beforeSubmitPrompt`, OpenCode `permission.asked`, Pi `agent_start`/`agent_end`, Antigravity `PreInvocation`/`Stop`) update the marker's `state` and `state_timestamp`. The next reconcile tick picks them up via the freshest-wins cascade (`evaluateCascade()`).
+5. Per-turn signals (Claude `Notification`, Codex `PermissionRequest`, Cursor `beforeSubmitPrompt`, OpenCode `permission.asked`, Pi `agent_start`/`agent_end`, omp `agent_start`/`agent_end` plus `tool_approval_requested`/`tool_approval_resolved`, Antigravity `PreInvocation`/`Stop`) update the marker's `state` and `state_timestamp`. The next reconcile tick picks them up via the freshest-wins cascade (`evaluateCascade()`).
 6. Cleanup: `cleanupStaleMarkers()` groups by `(agent_type, session_id)`, dedupes, and applies a 3-level liveness check (PID, TTY, adapter callback `isSessionStillLive`); any failed check unlinks the marker.
 
 ### OpenCode aggregation
