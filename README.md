@@ -22,12 +22,12 @@ When running multiple AI coding agent sessions across tmux panes, it's hard to k
 
 It works with your existing tmux workflow. You don't change how you launch or run your agents; ccmux discovers what's already running in your panes, so as long as you're in tmux with a supported agent, it just works.
 
-**Built-in support for:** Claude Code, Codex, Cursor, OpenCode, Pi, oh-my-pi, Antigravity, Copilot, Gemini CLI, plus [custom agent definitions](#-custom-agents) via config.
+**Built-in support for:** Claude Code, Codex, Cursor, OpenCode, Pi (+ oh-my-pi), Antigravity, Copilot, Gemini CLI, plus [custom agent definitions](#-custom-agents) via config.
 
 ## ✨ Features
 
 - 🎯 **Live Session States**: Every agent tracked as idle, working, or waiting (permission / plan approval / question), flagged the moment one needs you
-- 🧩 **Multi-Agent**: Claude Code, Codex, Cursor, OpenCode, Pi, oh-my-pi, Antigravity, Copilot, Gemini CLI, plus custom agents via config
+- 🧩 **Multi-Agent**: Claude Code, Codex, Cursor, OpenCode, Pi (+ oh-my-pi), Antigravity, Copilot, Gemini CLI, plus custom agents via config
 - 🔄 **Real-Time**: Background daemon streams state changes instantly over SSE, no polling, no refresh
 - 👁️ **Live Preview**: Split-pane view of the selected session's pane content
 - ⚡ **Act in Place**: Tab into the preview to approve, answer, or type, keys go straight to that pane
@@ -540,29 +540,18 @@ Uses OpenCode's plugin system rather than shell hooks. `ccmux setup --agent open
 
 Because one OpenCode server can host many sessions, the daemon folds all markers sharing a server PID into the single ccmux Session for the tmux pane that hosts the server. Status is worst-of (`waiting > working > idle`); `cwd` and `nativeSessionId` come from the newest-activity marker, while `pendingTool` and the attention indicator come from the newest-waiting marker.
 
-### Pi
+### Pi / oh-my-pi
 
-Uses Pi's extension system rather than shell hooks. `ccmux setup --agent pi` drops a single auto-discovered JS extension at `~/.pi/agent/extensions/ccmux.js`. The extension subscribes to Pi's lifecycle events and writes one marker per session:
+Both use Pi's extension system rather than shell hooks (oh-my-pi, `omp`, is a hard fork of Pi that kept the extension API). `ccmux setup --agent pi` / `--agent omp` drops a single auto-discovered JS extension at `~/.pi/agent/extensions/ccmux.js` or `~/.omp/agent/extensions/ccmux.js`. The extension subscribes to the agent's lifecycle events and writes one marker per session:
 
-- `session_start`: marker with the session id, transcript path, and cwd (Pi fires this at launch, so the marker carries full identity immediately)
+- `session_start`: marker with the session id, transcript path, and cwd (fired at launch, so the marker carries full identity immediately)
 - `before_agent_start`: captures the user's last prompt (1 KB cap)
 - `agent_start` / `agent_end`: flips state to `working` / `idle` (these bracket one full user prompt, so the row never flickers mid-response the way per-turn events would)
 - `session_shutdown`: unlinks the marker
 
-Pi runs one session per process, so there's no server-style aggregation; the daemon correlates the marker's PID to its tmux pane via process ancestry and links `nativeSessionId`.
+Both run one session per process, so there's no server-style aggregation; the daemon correlates the marker's PID to its tmux pane via process ancestry and links `nativeSessionId`.
 
-### oh-my-pi
-
-oh-my-pi (`omp`) is a hard fork of Pi that kept Pi's extension API, so ccmux integrates it the same way. `ccmux setup --agent omp` drops a single auto-discovered JS extension at `~/.omp/agent/extensions/ccmux.js`, which subscribes to the same lifecycle events as the Pi extension (`session_start`, `before_agent_start`, `agent_start` / `agent_end`, `session_shutdown`) and writes one marker per session.
-
-The difference is approvals. Unlike Pi, omp gates tool calls behind an Approve/Deny prompt, so the extension also tracks:
-
-- `tool_approval_requested`: flips state to `waiting_permission` with the gated tool's name
-- `tool_approval_resolved`: clears back to `working` once the last outstanding approval is answered (approve and deny both resume the loop)
-
-That means omp rows show a real waiting state and get actionable Approve/Deny notification buttons. omp emits these events only when you have an approval mode configured; on its default `yolo` mode nothing is gated, so nothing pauses. Installing the ccmux extension does not change that either way.
-
-One omp-specific note on where the extension lands: omp resolves its config dir as `$HOME` joined with `PI_CONFIG_DIR` (default `.omp`) **verbatim**, so an absolute `PI_CONFIG_DIR` still ends up under your home directory. ccmux installs to the same place omp actually reads.
+Approvals are where the two diverge. Unlike Pi, omp gates tool calls behind an Approve/Deny prompt, so its extension also tracks `tool_approval_requested` (flips to `waiting_permission` with the gated tool's name) and `tool_approval_resolved` (clears back to `working` once the last outstanding approval is answered; approve and deny both resume the loop). omp rows show a real waiting state and get actionable Approve/Deny buttons; Pi rows never raise one. omp emits these events only when an approval mode is configured; on its default `yolo` mode nothing is gated, and installing the ccmux extension does not change that either way.
 
 ### Antigravity CLI
 
