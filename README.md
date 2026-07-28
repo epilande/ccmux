@@ -324,11 +324,11 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 <details>
 <summary><strong>Search mode keys</strong></summary>
 
-| Action           | Key                                   |
-| :--------------- | :------------------------------------ |
-| Navigate results | <kbd>Ctrl+N</kbd> / <kbd>Ctrl+P</kbd> |
-| Select           | <kbd>Enter</kbd>                      |
-| Cancel           | <kbd>Esc</kbd>                        |
+| Action           | Key                                                                  |
+| :--------------- | :------------------------------------------------------------------- |
+| Navigate results | <kbd>↑</kbd> / <kbd>↓</kbd> or <kbd>Ctrl+N</kbd> / <kbd>Ctrl+P</kbd> |
+| Select           | <kbd>Enter</kbd>                                                     |
+| Cancel           | <kbd>Esc</kbd>                                                       |
 
 </details>
 
