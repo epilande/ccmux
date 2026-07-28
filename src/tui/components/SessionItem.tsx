@@ -186,10 +186,8 @@ export function agentColorFor(agentType: string): string {
     opencode: theme.blue,
     gemini: theme.mauve,
     pi: theme.teal,
-    // omp shares pi's teal ON PURPOSE: it is a Pi fork, and the shared hue is
-    // the signal that the two are the same family. They stay tellable apart by
-    // the `pi` / `om` short code and the full label, so the color is spent on
-    // kinship rather than on a distinction those already carry.
+    // omp shares pi's teal on purpose: it is a Pi fork, and the shared hue
+    // signals the family; the short codes and labels tell them apart.
     omp: theme.teal,
     cursor: theme.rosewater,
     antigravity: theme.blue,

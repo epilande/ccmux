@@ -122,20 +122,12 @@ export const PI_EXTENSION_FILE = join(PI_EXTENSION_DIR, "ccmux.js");
 /**
  * oh-my-pi's own directory. Read-only except during `ccmux setup --agent omp`,
  * which drops a bundled JS extension into the auto-discovered extensions dir.
- *
  * The `PI_CONFIG_DIR` join below is deliberately BUG-COMPATIBLE with omp,
- * which joins the env value VERBATIM instead of treating an absolute path as
- * absolute, so an absolute override still lands under `$HOME`. Do NOT "fix"
- * this to `resolve()`: that would write the extension somewhere omp never
- * reads. The env var really is named `PI_CONFIG_DIR` (fork inheritance from
- * Pi) and upstream pi does NOT honor it, so the `PI_*` constants above stay
- * unconditional `~/.pi`. Evidence and the upstream source are in
- * docs/agent-adapters.md#omp-specific-caveats.
- *
- * TODO(hardening): three further omp relocations are not modeled here
- * (`PI_CODING_AGENT_DIR`, the `OMP_PROFILE`/`PI_PROFILE` profile dirs, and
- * XDG state redirection); see the same doc section for why resolving them via
- * `omp config path` at setup time is deferred.
+ * which joins the env value verbatim, so do NOT "fix" this to `resolve()`:
+ * that would write the extension somewhere omp never reads. Upstream pi does
+ * not honor the env var, so the `PI_*` constants above stay unconditional
+ * `~/.pi`. Further omp relocations (profile dirs, XDG state) are deliberately
+ * not modeled; evidence in docs/agent-adapters.md#omp-specific-caveats.
  */
 export const OMP_AGENT_DIR = join(
   homedir(),

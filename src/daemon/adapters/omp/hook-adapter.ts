@@ -49,25 +49,17 @@ function inspectInstalledExtension(path: string): {
  * oh-my-pi (omp) extension-based hook integration.
  *
  * omp is a hard fork of Pi that kept Pi's extension API, so this adapter is
- * structurally the Pi adapter with one addition: omp HAS a tool-approval
+ * structurally the Pi adapter with one addition: omp has a tool-approval
  * pause, so its marker can carry `waiting_permission` and this adapter
  * projects a real permission wait.
  *
  * - Install writes a single auto-discovered file
- *   (`~/.omp/agent/extensions/ccmux.js`) with a sentinel first line
- *   (`// ccmux-extension v<version>`) so we only ever overwrite/delete a
- *   file ccmux wrote. omp discovers both `*.ts` and `*.js`, so the `.js`
- *   form keeps the template out of ccmux's TypeScript build.
+ *   (`~/.omp/agent/extensions/ccmux.js`) with a sentinel first line so we
+ *   only ever overwrite/delete a file ccmux wrote.
  * - Marker handling is 1:1 (omp runs one session per process).
  *   `onMarkerAdded` correlates `marker.pid` -> pane -> session via PID
  *   ancestry and links `nativeSessionId`; subsequent state flips ride the
- *   generic cascade (`genericMarkerSource`) on marker change, which already
- *   maps `waiting_permission` -> waiting/permission/pending_tool.
- *
- * The extension writes a marker at `session_start` (which omp fires at
- * launch with full identity), flips it working/idle on `agent_start`/
- * `agent_end`, flips it waiting on `tool_approval_requested`/`resolved`,
- * and removes it on `session_shutdown`.
+ *   generic cascade (`genericMarkerSource`) on marker change.
  */
 export class OmpHookAdapter implements HookAdapter {
   readonly agentType = "omp";
@@ -189,11 +181,9 @@ export class OmpHookAdapter implements HookAdapter {
   ): Promise<void> {
     // No teardown needed: when omp exits, session_shutdown removes the
     // marker, the process scan clears the pane-tracked session, and
-    // cleanupStaleMarkers reaps any leftover by PID liveness. A session
-    // switch (/new, /resume) emits session_switch rather than pi's
-    // shutdown/start pair, and the extension's handler for it removes the old
-    // marker and writes the new one, whose onMarkerAdded re-links
-    // nativeSessionId.
+    // cleanupStaleMarkers reaps any leftover by PID liveness. Session
+    // switches are handled by the extension, which removes the old marker
+    // and writes a new one, whose onMarkerAdded re-links nativeSessionId.
   }
 }
 
@@ -210,12 +200,10 @@ async function findTargetSession(
 
 /**
  * Map an omp marker into the SessionState fields the adapter owns. Unlike
- * pi's projection, `waiting_permission` is reachable: omp gates tool calls
- * behind an Approve/Deny select whenever the user has an approval mode
- * configured, and the extension reports the gated tool name. The
- * status/attention tuple comes from the cascade's own `markerStatusState`,
- * so this add-time write and every later reconcile agree by construction;
- * only `lastPrompt`/`lastActivityAt` are the adapter's to add.
+ * pi's projection, `waiting_permission` is reachable. The status/attention
+ * tuple comes from the cascade's own `markerStatusState`, so this add-time
+ * write and every later reconcile agree by construction; only
+ * `lastPrompt`/`lastActivityAt` are the adapter's to add.
  */
 function stateFromOmpMarker(marker: SessionPidMarker): Partial<SessionState> {
   return {

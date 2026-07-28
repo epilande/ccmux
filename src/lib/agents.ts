@@ -968,47 +968,34 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // matches omp's resolved launcher path (the fork kept the npm package name
     // `@oh-my-pi/pi-coding-agent`), so pi-first would label omp sessions Pi.
     //
-    // Detection must NOT rely on `process.title`: omp sets it, but its npm bin
-    // shim runs under Bun, where the assignment is a no-op as far as `ps` is
-    // concerned. `processMatch` and the `bin/omp` pattern below cover two
-    // different launch shapes and BOTH are required; dropping either makes the
-    // pid invisible to detection, and `cleanupStaleMarkers` then reaps the
-    // extension's valid marker. Full evidence, including the two-line `ps`
-    // experiment and the observed process shapes, is in
-    // docs/agent-adapters.md#omp-specific-caveats.
+    // Detection cannot rely on `process.title` (omp sets it, but its Bun bin
+    // shim never propagates it to `ps`). `processMatch` and the `bin/omp`
+    // pattern below cover two different launch shapes and both are required;
+    // dropping either makes the pid invisible to detection, and
+    // `cleanupStaleMarkers` then reaps the extension's valid marker. Full
+    // evidence in docs/agent-adapters.md#omp-specific-caveats.
     processMatch: /^omp$/i,
     commandPatterns: [
-      // Bun-shim launches, where `ps` shows only the shim SYMLINK path. The
-      // trailing `(?:\s|$)` keeps `/bin/ompx` and `/bin/omp-helper` out, and
-      // the required `/bin/` component keeps a bare word `omp` in someone's
-      // prompt or flags from matching.
+      // Bun-shim launches, where `ps` shows only the shim symlink path. The
+      // trailing `(?:\s|$)` keeps `/bin/ompx` out, and the required `/bin/`
+      // component keeps a bare word `omp` in someone's prompt from matching.
       /[/\\]bin[/\\]omp(?:\s|$)/i,
-      // Direct `dist/cli.js` launches. Keep it scoped to the `oh-my-pi` dir:
-      // unscoped, it would also claim upstream pi's launcher path.
+      // Direct `dist/cli.js` launches, scoped to the `oh-my-pi` dir so it
+      // can't also claim upstream pi's launcher path.
       /oh-my-pi[/\\]pi-coding-agent[/\\]dist[/\\]cli\.js/i,
     ],
-    // `omp --version` prints `omp/17.1.3` on its first line. The default
-    // version patterns pull `17.1.3` out of that, so no `versionPatterns`
-    // override is needed.
     versionCommand: "omp --version",
     // No-hooks fallback; the extension marker is the authoritative source via
-    // the cascade when `ccmux setup --agent omp` has run. Lean on the marker,
-    // because omp's loader label is DYNAMIC and these rules are correspondingly
-    // weak (see the working rule below).
-    //
-    // Waiting stays FIRST (`matchTerminalRule` returns the first match). Not
-    // because the two co-occur -- e2e showed the approval prompt renders with
-    // the spinner carrying a per-intent label (`⠧ Run touch command ⟦esc⟧`),
-    // NOT the literal `Working…` -- but because the label is model-supplied and
-    // therefore unpredictable. Waiting-first is free and keeps any future
-    // literal-`Working…` overlap from masking a real permission wait.
+    // the cascade when `ccmux setup --agent omp` has run. Waiting stays FIRST
+    // (`matchTerminalRule` returns the first match): the working label is
+    // model-supplied and unpredictable, so waiting-first keeps any overlap
+    // from masking a real permission wait.
     terminalRules: [
       {
-        // Body of omp's approval prompt: `Allow tool: <name>` (verified in
-        // `src/tools/approval.ts` `formatApprovalPrompt` on omp 17.1.3),
-        // rendered above an `["Approve", "Deny"]` select. `pendingTool` is
-        // null because `TerminalRule` matches fixed substrings and cannot
-        // capture the tool name; the marker path fills it in for real.
+        // Body of omp's approval prompt (`Allow tool: <name>`, rendered above
+        // an Approve/Deny select). `pendingTool` is null because terminal
+        // rules match fixed substrings; the marker path fills in the real
+        // name.
         matchAny: ["allow tool:"],
         status: "waiting",
         attentionType: "permission",
@@ -1016,17 +1003,10 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       },
       {
         // `Working…` (real U+2026, unlike pi's ASCII `Working...`) is only
-        // omp's DEFAULT loader label (`#defaultWorkingMessage` in
-        // `src/modes/interactive-mode.ts`). Once the model streams an intent,
-        // `#updateWorkingMessageFromIntent` (`controllers/event-controller.ts`)
-        // replaces it with that intent plus the interrupt hint, e.g.
-        // `⠧ Run touch command ⟦esc⟧`, and the literal is gone for the rest of
-        // the turn. So this rule really only covers the pre-intent window; the
-        // marker is what carries `working` the rest of the time. Nothing
-        // broader is attempted because the replacement text is model-supplied,
-        // and the hint's brackets are theme glyphs (`theme.format.bracket*`).
-        // There is no `Thinking…` label. The only ASCII `Working...` left is
-        // print mode's stderr line, which never reaches a tracked pane. Same
+        // omp's default loader label. Once the model streams an intent, the
+        // label becomes that intent text (e.g. `⠧ Run touch command ⟦esc⟧`),
+        // so this rule only covers the pre-intent window; the marker carries
+        // `working` the rest of the time. There is no `Thinking…` label. Same
         // caveat as pi: do NOT key on "interrupt".
         matchAny: ["working…"],
         status: "working",
@@ -1041,24 +1021,16 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         kind: "rate_limit",
       },
     ],
-    // Approvals are where omp diverges from Pi. Its `["Approve", "Deny"]`
-    // select opens on index 0, so `Enter` approves and nothing else may be
-    // used: there are no digit shortcuts, because printable keys feed the
-    // selector's fuzzy search. `Escape` is the Deny itself (fail-closed, the
-    // gated tool does not run), NOT a cancel-to-composer, which is why no
-    // `permissionReplyPrelude` is set. `unsafeReplyPattern` must stay, and it
-    // covers `/` as well as `!`: omp's composer trims the submitted text
-    // BEFORE both its `!` bash-mode check and its slash-command dispatch
-    // (`editor.onSubmit` trims first thing), so the leading-space defuse
-    // neutralizes neither trigger. Live-verified on omp 17.1.3: a defused
-    // ` /new` still dispatched and DESTROYED the session ("New session
-    // started"), and a spaceless ` /<token>` left the fuzzy command selector
-    // open so the submitting Enter selected an arbitrary fuzzy match (it
-    // invoked an unrelated skill). Slash text containing a space falls
-    // through omp's dispatcher as a normal message, but the guard stays
-    // fail-closed on all of it -- which `/`-shape is destructive depends on
-    // the user's installed commands and skills.
-    // See docs/agent-adapters.md#omp-specific-caveats.
+    // Approvals are where omp diverges from Pi. Its Approve/Deny select opens
+    // on index 0, so `Enter` approves; there are no digit shortcuts, because
+    // printable keys feed the selector's fuzzy search. `Escape` is the Deny
+    // itself (fail-closed, the gated tool does not run), not a
+    // cancel-to-composer, which is why no `permissionReplyPrelude` is set.
+    // `unsafeReplyPattern` must stay and must keep covering `/` as well as
+    // `!`: omp's composer trims the submitted text before both its `!`
+    // bash-mode check and its slash-command dispatch, so the leading-space
+    // defuse neutralizes neither trigger (live-verified: a defused ` /new`
+    // still destroyed the session).
     notificationActions: {
       approve: ["Enter"],
       deny: ["Escape"],
@@ -1066,19 +1038,13 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       unsafeReplyPattern: /^\s*[/!]/,
     },
     // `omp -c` continues the most recent session in-pane (no session-id
-    // extraction needed), same shape as `pi -c`. Id-based resume does exist --
-    // omp prints `Resume this session with omp --resume <session-id>` on exit
-    // (`interactive-mode.ts`) -- but `-c` is what the in-pane relaunch wants,
-    // and resume in PRINT mode stays unverified, so `invokeMode.resumeArgs`
-    // below is still deliberately unexposed.
+    // extraction needed), same shape as `pi -c`.
     resumeCommand: "omp -c",
     // omp writes its JSONL transcript to
-    // ~/.omp/agent/sessions/<encoded-cwd>/<ts>_<uuidv7>.jsonl. The id comes
-    // from `Bun.randomUUIDv7()` (`mintSessionId` in
-    // `src/session/session-manager.ts`), so the filename shape is identical
-    // to pi's and the pattern is reused verbatim. ccmux does not parse the
-    // transcript in v1; the pattern is recorded for a future log-tail
-    // adapter.
+    // ~/.omp/agent/sessions/<encoded-cwd>/<ts>_<uuidv7>.jsonl, the same
+    // filename shape as pi's, so the pattern is reused verbatim. ccmux does
+    // not parse the transcript in v1; the pattern is recorded for when a
+    // log-tail adapter lands.
     sessionFilePattern:
       /_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i,
     invokeMode: {

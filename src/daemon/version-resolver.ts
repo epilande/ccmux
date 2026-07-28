@@ -265,8 +265,7 @@ function inferVersionFromPackageJson(
         ) {
           // oh-my-pi ships as `@oh-my-pi/pi-coding-agent`, which contains
           // "pi" but not "omp", so the generic `name.includes(agent.name)`
-          // check above never fires for it. Exact match rather than a
-          // substring so an unrelated package can't claim an omp version.
+          // check above never fires for it.
           return version;
         }
       } catch {

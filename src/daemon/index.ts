@@ -1191,10 +1191,9 @@ export class Daemon {
   }
 
   /**
-   * Per-scan omp marker link pass. Identical in shape and rationale to the pi
-   * pass above: omp inherited Pi's `session_start`-at-launch behavior, so the
-   * marker beats the first process scan and this pass is what actually
-   * attaches `nativeSessionId` in practice.
+   * Per-scan omp marker link pass, identical in shape and rationale to the
+   * pi pass above: the marker beats the first process scan, so this pass is
+   * what actually attaches `nativeSessionId` in practice.
    */
   private async linkOmpSessions(
     processStartTimeByPid: ReadonlyMap<number, number | null>,
