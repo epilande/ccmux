@@ -957,12 +957,14 @@ export function App(props: AppProps) {
     }
 
     if (store.state.searchMode) {
-      if (key === "n" && event.ctrl) {
+      // The search input owns the text keys, so selection movement is limited
+      // to the keys it does not consume: ctrl-n/ctrl-p and the arrows.
+      if (key === "down" || (key === "n" && event.ctrl)) {
         store.actions.moveSelection(1);
         event.preventDefault();
         return;
       }
-      if (key === "p" && event.ctrl) {
+      if (key === "up" || (key === "p" && event.ctrl)) {
         store.actions.moveSelection(-1);
         event.preventDefault();
         return;
