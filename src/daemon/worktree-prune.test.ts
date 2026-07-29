@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -760,6 +761,33 @@ describe("selectPRForBranch", () => {
     expect(selectPRForBranch([row({ headRefOid: "old" })], "tip")).toBeNull();
   });
 
+  /**
+   * REGRESSION GUARD. Do not delete as a duplicate of the case above: that
+   * one describes branch-name reuse, this one describes work in progress,
+   * and only this one explains why `branchDeletionFor` needs no force gate.
+   *
+   * The scenario: a PR is squash-merged, and the author keeps working in the
+   * worktree and COMMITS. Those commits are on no remote and are not in the
+   * squash, so if the row were classified `pr-merged` the run would force
+   * delete the branch, remove the directory, and drop the per-worktree
+   * reflog, taking all three recovery handles in one pass.
+   *
+   * What prevents it is this function and nothing else: the later commit
+   * moves the tip away from the PR's head, so the merged PR stops matching
+   * and the row falls through to a reason that uses a safe `-d`.
+   */
+  it("ignores a merged PR when the branch has commits made after the merge", () => {
+    const mergedAtOldTip = row({
+      number: 1,
+      state: "MERGED",
+      headRefOid: "the-commit-that-was-merged",
+    });
+
+    expect(
+      selectPRForBranch([mergedAtOldTip], "a-commit-made-after-the-merge"),
+    ).toBeNull();
+  });
+
   it("ignores a closed PR that cannot be proven to be this branch", () => {
     const rows = [row({ state: "CLOSED", headRefOid: "old" })];
     expect(selectPRForBranch(rows, "tip")).toBeNull();
@@ -1166,5 +1194,121 @@ describe("dirty re-check before removal", () => {
     expect(result.outcomes[0].removed).toBe(false);
     expect(result.outcomes[0].error).toContain("became dirty");
     expect(existsSync(wt)).toBe(true);
+  });
+});
+
+/**
+ * The post-merge-commit scenario end to end against a real repo, driving the
+ * REAL `ghPRStateLookup` through a stub `gh` on PATH.
+ *
+ * Pinned here as well as at `selectPRForBranch` because this is the level the
+ * finding was originally proven at, and because only the whole chain shows
+ * the property: `scanRepo` does no identity filtering of its own, so
+ * injecting a `lookupPR` stub would bypass the exact code under test.
+ *
+ * The sequence is simply what happens after a review lands:
+ *   1. `feat/pr` is squash-merged; the remote branch is auto-deleted.
+ *   2. The author keeps working in that worktree and commits.
+ *   3. Those commits exist on no remote and are not in the squash.
+ */
+describe("A1: a branch with commits made after its PR merged", () => {
+  let binDir: string;
+  let originalPath: string | undefined;
+
+  /** Stub `gh` reporting one MERGED PR at `head`, honoring `--state open`. */
+  function stubGh(head: string): void {
+    const rows = JSON.stringify([
+      {
+        number: 1,
+        url: "https://github.com/o/r/pull/1",
+        state: "MERGED",
+        isCrossRepository: false,
+        headRefOid: head,
+      },
+    ]);
+    writeFileSync(
+      join(binDir, "gh"),
+      "#!/bin/bash\n" +
+        // The daemon's open-PR resolver asks with `--state open`; only the
+        // `--state all` lookup should see the merged PR.
+        'for a in "$@"; do [ "$a" = "open" ] && { echo "[]"; exit 0; }; done\n' +
+        `cat <<'JSON'\n${rows}\nJSON\n`,
+      { mode: 0o755 },
+    );
+  }
+
+  /** Squash-merge `branch`, delete its remote ref, then commit again in `wt`. */
+  async function mergeThenKeepWorking(
+    repo: string,
+    remote: string,
+    wt: string,
+    branch: string,
+  ): Promise<{ prHead: string; afterTip: string }> {
+    const prHead = await git(wt, ["rev-parse", "HEAD"]);
+    await git(repo, ["merge", "--squash", branch]);
+    await git(repo, ["commit", "-m", `squash: ${branch}`]);
+    await git(remote, ["update-ref", "-d", `refs/heads/${branch}`]);
+    writeFileSync(join(wt, "after-merge.txt"), "work nobody else has\n");
+    await git(wt, ["add", "-A"]);
+    await git(wt, ["commit", "-m", "post-merge work"]);
+    return { prHead, afterTip: await git(wt, ["rev-parse", "HEAD"]) };
+  }
+
+  beforeEach(() => {
+    binDir = join(root, "fakebin");
+    mkdirSync(binDir, { recursive: true });
+    originalPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${originalPath}`;
+  });
+
+  afterEach(() => {
+    process.env.PATH = originalPath;
+  });
+
+  it("is never classified pr-merged, and keeps a safe branch deletion", async () => {
+    const { repo, remote } = await makeRepo("post-merge-commit");
+    const wt = await addWorktree(repo, "feat/pr", { push: true });
+    const { prHead, afterTip } = await mergeThenKeepWorking(
+      repo,
+      remote,
+      wt,
+      "feat/pr",
+    );
+    expect(afterTip).not.toBe(prHead);
+    stubGh(prHead);
+
+    // No `lookupPR` override: the real gh path runs, tip resolution included.
+    const scan = await scanRepo(repo);
+
+    const candidate = scan.candidates.find((c) => c.branch === "feat/pr");
+    expect(candidate?.reason).not.toBe("pr-merged");
+    expect(candidate?.branchDeletion).not.toBe("force");
+  });
+
+  it("survives a real prune run with its branch and commit intact", async () => {
+    const { repo, remote } = await makeRepo("post-merge-survives");
+    const wt = await addWorktree(repo, "feat/pr2", { push: true });
+    const { prHead } = await mergeThenKeepWorking(repo, remote, wt, "feat/pr2");
+    stubGh(prHead);
+    const unpublished = await git(wt, ["rev-parse", "HEAD"]);
+
+    const scan = await scanRepo(repo);
+    const result = await runPrune(scan.candidates, {
+      stateFiles: [],
+      log: () => {},
+    });
+
+    // The worktree directory may well go, which is fine and expected. What
+    // must not happen is losing the branch, and with it the only reference
+    // to that commit.
+    expect(result.outcomes[0]?.branchDeleted).toBe(false);
+    const branches = await git(repo, ["branch", "--format=%(refname:short)"]);
+    expect(branches.split("\n")).toContain("feat/pr2");
+    const stillReachable = await runGit(repo, [
+      "rev-parse",
+      "--verify",
+      unpublished,
+    ]);
+    expect(stillReachable.exitCode).toBe(0);
   });
 });
