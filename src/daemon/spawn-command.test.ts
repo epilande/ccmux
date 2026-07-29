@@ -78,9 +78,35 @@ describe("buildTmuxSpawnArgv", () => {
     ]);
   });
 
-  it("inserts the new window after the target window", () => {
+  it("appends at the end of a session, which renumbers nothing", () => {
+    // The implicit case. `-a -t @window` was verified live to insert at
+    // the next index and shift EVERY later window up, so a plain
+    // `ccmux spawn` would silently renumber the caller's windows.
     expect(
-      buildTmuxSpawnArgv({ split: false, cwd: "/w", target: "@7" }),
+      buildTmuxSpawnArgv({
+        split: false,
+        cwd: "/w",
+        placement: { kind: "session", id: "$3" },
+      }),
+    ).toEqual([
+      "new-window",
+      "-t",
+      "$3:",
+      "-c",
+      "/w",
+      "-P",
+      "-F",
+      "#{pane_id}",
+    ]);
+  });
+
+  it("inserts after a window only when one was named explicitly", () => {
+    expect(
+      buildTmuxSpawnArgv({
+        split: false,
+        cwd: "/w",
+        placement: { kind: "window", id: "@7" },
+      }),
     ).toEqual([
       "new-window",
       "-a",
@@ -101,7 +127,11 @@ describe("buildTmuxSpawnArgv", () => {
 
   it("splits the target pane when one is given", () => {
     expect(
-      buildTmuxSpawnArgv({ split: "h", cwd: "/w", target: "%12" }),
+      buildTmuxSpawnArgv({
+        split: "h",
+        cwd: "/w",
+        placement: { kind: "pane", id: "%12" },
+      }),
     ).toEqual([
       "split-window",
       "-h",
@@ -113,6 +143,18 @@ describe("buildTmuxSpawnArgv", () => {
       "-F",
       "#{pane_id}",
     ]);
+  });
+
+  it("ignores a non-pane placement on the split path", () => {
+    // A split can only target a pane; a session/window placement must not
+    // leak through as a `-t` tmux would resolve to something else.
+    expect(
+      buildTmuxSpawnArgv({
+        split: "v",
+        cwd: "/w",
+        placement: { kind: "session", id: "$3" },
+      }),
+    ).not.toContain("-t");
   });
 });
 
@@ -259,17 +301,11 @@ describe("buildAgentSpawnCommand", () => {
     }
   });
 
-  it("treats $ replacement patterns in the binary and session id as literal", () => {
-    // Same bug class on the other two placeholders. Neither is remote
-    // input, but both come from a config file rather than from ccmux.
-    expect(
-      buildAgentSpawnCommand({
-        agent: agentWith({ promptCommand: "{bin} '{prompt}'" }),
-        binary: "$&bin",
-        prompt: "hi",
-      }),
-    ).toEqual({ ok: true, value: "$&bin 'hi'" });
-
+  it("treats $ replacement patterns in the session id as literal", () => {
+    // Same bug class on the {id} placeholder. Not remote input, but it
+    // comes from a marker file rather than from ccmux, and the result is
+    // typed into a shell. (The {bin} analogue is refused outright now —
+    // see the launcher-quoting test.)
     expect(
       buildAgentSpawnCommand({
         agent: agentWith({ resumeCommand: "codex resume {id}" }),
@@ -277,6 +313,56 @@ describe("buildAgentSpawnCommand", () => {
         resume: "$`x",
       }),
     ).toEqual({ ok: true, value: "codex resume $`x" });
+  });
+
+  it("keeps a binary containing {prompt} from relocating the prompt", () => {
+    // Sequential substitution ({bin} then {prompt}) let a binary carrying
+    // the literal text `{prompt}` move the prompt to wherever the binary
+    // landed — outside the quotes the guard had just verified. One pass
+    // over an alternation never revisits substituted text.
+    const result = buildAgentSpawnCommand({
+      agent: agentWith({ promptCommand: "{bin} '{prompt}'" }),
+      binary: "evil{prompt}",
+      prompt: "P",
+    });
+    expect(result).toEqual({ ok: true, value: "evil{prompt} 'P'" });
+  });
+
+  it("refuses a launcher that could break the prompt's quoting", () => {
+    // The binary is substituted after the template's quoting is checked,
+    // so it must not be able to change that quoting.
+    for (const binary of ["ev'il", 'ev"il', "ev`il", "ev$il", "ev\\il"]) {
+      expect(
+        buildAgentSpawnCommand({
+          agent: agentWith({ promptCommand: "{bin} '{prompt}'" }),
+          binary,
+          prompt: "hi",
+        }).ok,
+      ).toBe(false);
+    }
+  });
+
+  it("refuses a non-string promptCommand from config", () => {
+    // ccmux.json can hold any JSON. This runs outside the route's try
+    // block, so a TypeError here would surface as an opaque 500.
+    const result = buildAgentSpawnCommand({
+      agent: agentWith({ promptCommand: 123 as unknown as string }),
+      binary: "x",
+      prompt: "hi",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("promptCommand");
+  });
+
+  it("refuses an empty prompt instead of silently spawning bare", () => {
+    // `if (prompt)` was falsy for "", so `--prompt ""` spawned a bare
+    // agent AND slipped past the no-promptCommand refusal.
+    const bare = buildAgentSpawnCommand({
+      agent: agentWith({ promptCommand: undefined, name: "flagless" }),
+      binary: "flagless",
+      prompt: "",
+    });
+    expect(bare.ok).toBe(false);
   });
 
   it("refuses a template whose single quotes are nested in double quotes", () => {
@@ -297,9 +383,30 @@ describe("buildAgentSpawnCommand", () => {
     }
   });
 
+  it("refuses templates whose quoting cannot be proven safe", () => {
+    // Each of these was verified to pass the original one-character peek.
+    // The odd-quote-count case leaves the placeholder unquoted (and the
+    // shell at a PS2 continuation swallowing input); the command
+    // substitution ones re-split the prompt after expansion.
+    for (const template of [
+      "{bin} ' '{prompt}'",
+      "{bin} $(echo '{prompt}')",
+      "{bin} `echo '{prompt}'`",
+      `{bin} "pre'{prompt}'post"`,
+    ]) {
+      expect(
+        buildAgentSpawnCommand({
+          agent: agentWith({ promptCommand: template }),
+          binary: "x",
+          prompt: "hi",
+        }).ok,
+      ).toBe(false);
+    }
+  });
+
   it("refuses a template with unbalanced quotes", () => {
     // Would leave the pane's shell waiting for a closing quote.
-    for (const template of ["{bin} '{prompt}", `{bin} "x '{prompt}'`]) {
+    for (const template of ["{bin} '{prompt}", "{bin} x '{prompt}''"]) {
       expect(
         buildAgentSpawnCommand({
           agent: agentWith({ promptCommand: template }),

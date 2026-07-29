@@ -40,16 +40,54 @@ export function normalizeSplit(value: unknown): BuildResult<ResolvedSplit> {
   };
 }
 
-/** Validate the wire `target` field as a tmux pane id (`%12`). */
+/** Validate a wire pane-id field (`target` / `callerPane`). */
 export function normalizeTarget(
   value: unknown,
+  field = "target",
 ): BuildResult<string | undefined> {
-  if (value === undefined || value === null)
+  if (value === undefined || value === null || value === "")
     return { ok: true, value: undefined };
   if (typeof value !== "string" || !PANE_ID_PATTERN.test(value)) {
     return {
       ok: false,
-      error: `Invalid 'target' field: expected a tmux pane id such as "%12"`,
+      error: `Invalid '${field}' field: expected a tmux pane id such as "%12"`,
+    };
+  }
+  return { ok: true, value };
+}
+
+/**
+ * Control characters the prompt may not contain. A NUL in particular
+ * survives shell escaping but makes `Bun.spawn` reject the argv — and it
+ * would do so AFTER the pane exists, leaving an orphan behind and
+ * returning an opaque 500, which is a repeatable pane leak. Tab, newline,
+ * and carriage return are deliberately allowed: multi-line prompts are
+ * normal, and single quotes keep them inert.
+ */
+const FORBIDDEN_PROMPT_CONTROL_CHARS = /[\x00-\x08\x0b\x0c\x0e-\x1f]/;
+
+/**
+ * Validate the wire `prompt` field. Absent stays absent; anything present
+ * must be a non-blank string free of control characters. Empty is
+ * rejected rather than ignored: `--prompt ""` silently spawning a bare
+ * agent (and slipping past the refusal an agent without `promptCommand`
+ * would otherwise get) is worse than a clear error.
+ */
+export function normalizePrompt(
+  value: unknown,
+): BuildResult<string | undefined> {
+  if (value === undefined || value === null)
+    return { ok: true, value: undefined };
+  if (typeof value !== "string") {
+    return { ok: false, error: `Invalid 'prompt' field: expected a string` };
+  }
+  if (value.trim() === "") {
+    return { ok: false, error: `Invalid 'prompt' field: must not be empty` };
+  }
+  if (FORBIDDEN_PROMPT_CONTROL_CHARS.test(value)) {
+    return {
+      ok: false,
+      error: `Invalid 'prompt' field: must not contain control characters`,
     };
   }
   return { ok: true, value };
@@ -66,22 +104,32 @@ export function escapeSingleQuoted(value: string): string {
 }
 
 /**
- * Substitute EVERY occurrence of a placeholder with a literal value.
+ * Substitute every placeholder in ONE pass.
  *
- * Deliberately not `String.replace`: with a string replacement, `$&`,
- * "$`", "$'", and `$$` in the REPLACEMENT are expansion patterns, so a
- * prompt containing "$`" would splice the text before the match back
+ * Two properties matter, and both are load-bearing:
+ *
+ * A function replacer, never a string one. With a string replacement,
+ * `$&`, "$`", "$'", and `$$` in the REPLACEMENT are expansion patterns,
+ * so a prompt containing "$`" would splice the text before the match back
  * into the command — closing the quoted word and handing the rest of the
- * prompt to the shell as syntax. `join` performs no such expansion.
- * Replacing every occurrence (rather than the first) also keeps a
- * literal `{prompt}` out of a template that uses the placeholder twice.
+ * prompt to the shell as syntax. A function replacer's return value is
+ * used literally.
+ *
+ * One pass, never sequential passes. Substituting `{bin}` and then
+ * `{prompt}` lets a value substituted first contain a later placeholder:
+ * a `command` preference or `executable` of `x{prompt}` would relocate
+ * the prompt to wherever the binary landed, outside the quotes the guard
+ * verified. A single regex alternation consumes each placeholder exactly
+ * once and never revisits substituted text.
  */
-export function substituteAll(
+export function substitutePlaceholders(
   template: string,
-  placeholder: string,
-  value: string,
+  values: Record<string, string>,
 ): string {
-  return template.split(placeholder).join(value);
+  const names = Object.keys(values);
+  if (names.length === 0) return template;
+  const pattern = new RegExp(`\\{(${names.join("|")})\\}`, "g");
+  return template.replace(pattern, (_match, name: string) => values[name]!);
 }
 
 type QuoteState = "none" | "single" | "double";
@@ -89,23 +137,29 @@ type QuoteState = "none" | "single" | "double";
 /**
  * Walk a template the way `sh` reads it, recording the quoting state at
  * each `{prompt}` and whether the template ends with every quote closed.
- * Placeholders are skipped over as inert text, which is exactly what the
- * substituted values are: the prompt is single-quote escaped, and `{bin}`
- * is substituted before this runs so the string scanned here is the one
- * the shell will actually see.
+ *
+ * Both placeholders are skipped as inert text, which is what their
+ * substituted values are: the prompt is single-quote escaped, and the
+ * binary is separately required to be quote-neutral (see
+ * `binaryIsQuoteNeutral`) precisely so that skipping it here is sound.
  */
 function scanPromptPlaceholders(template: string): {
   balanced: boolean;
   states: QuoteState[];
 } {
-  const PLACEHOLDER = "{prompt}";
+  const PROMPT = "{prompt}";
+  const BIN = "{bin}";
   let state: QuoteState = "none";
   const states: QuoteState[] = [];
 
   for (let i = 0; i < template.length; ) {
-    if (template.startsWith(PLACEHOLDER, i)) {
+    if (template.startsWith(PROMPT, i)) {
       states.push(state);
-      i += PLACEHOLDER.length;
+      i += PROMPT.length;
+      continue;
+    }
+    if (template.startsWith(BIN, i)) {
+      i += BIN.length;
       continue;
     }
     const char = template[i];
@@ -133,22 +187,46 @@ function scanPromptPlaceholders(template: string): {
 }
 
 /**
+ * Constructs that make a template impossible to reason about safely. A
+ * double quote means the single quotes around `{prompt}` may be inert
+ * (`{bin} "pre'{prompt}'post"` expands `$(...)` straight out of prompt
+ * text); backticks and `$(` mean part of the command is the OUTPUT of
+ * another command, so even a correctly quoted prompt is re-split by the
+ * shell after substitution. None of them are needed to name a launcher,
+ * and false assurance is worse than no check, so they are refused
+ * outright rather than modelled.
+ */
+const UNSAFE_TEMPLATE_CONSTRUCT = /["`]|\$\(/;
+
+/**
  * A `promptCommand` template is only safe if every `{prompt}` sits in a
  * genuine single-quoted context, because that is the quoting
  * `escapeSingleQuoted` produces. Checking only the adjacent characters is
  * not enough: in `sh -c "{bin} '{prompt}'"` the placeholder is flanked by
  * single quotes, but the enclosing word is double-quoted, where `'` is an
- * ordinary character and the escaping is inert — `"` closes the word and
- * `$(...)` is expanded. Templates come from the user's config file, which
- * is trusted to name a command but must not be able to turn prompt text
- * into shell syntax, so anything this cannot prove safe is refused.
- * Module-private: the check presupposes the escaping it guards.
+ * ordinary character and the escaping is inert. Templates come from the
+ * user's config file, which is trusted to name a command but must not be
+ * able to turn prompt text into shell syntax, so anything this cannot
+ * prove safe is refused. Module-private: the check presupposes the
+ * escaping it guards.
  */
 function promptPlaceholderIsQuoted(template: string): boolean {
+  if (UNSAFE_TEMPLATE_CONSTRUCT.test(template)) return false;
   const { balanced, states } = scanPromptPlaceholders(template);
   return (
     balanced && states.length > 0 && states.every((state) => state === "single")
   );
+}
+
+/**
+ * The binary is substituted into the template AFTER its quoting has been
+ * verified, so it must not be able to change that quoting. Rejecting the
+ * quote and expansion characters keeps `{bin}` inert, which is what lets
+ * `scanPromptPlaceholders` skip over it. Ordinary paths (including ones
+ * with spaces, which were already broken by the unquoted `{bin}`) pass.
+ */
+function binaryIsQuoteNeutral(binary: string): boolean {
+  return !/['"`$\\]/.test(binary);
 }
 
 export interface AgentCommandInput {
@@ -182,14 +260,17 @@ export function buildAgentSpawnCommand(
     return {
       ok: true,
       value: agent.resumeCommand
-        ? substituteAll(agent.resumeCommand, "{id}", resume)
+        ? substitutePlaceholders(agent.resumeCommand, { id: resume })
         : `${binary} --resume ${resume}`,
     };
   }
 
-  if (prompt) {
+  // `prompt !== undefined`, not truthiness: an empty prompt must reach the
+  // refusal below rather than quietly spawning a bare agent. The route
+  // rejects blank prompts before this, so anything arriving here is real.
+  if (prompt !== undefined) {
     const template = agent.promptCommand;
-    if (!template) {
+    if (template === undefined) {
       return {
         ok: false,
         error:
@@ -197,53 +278,83 @@ export function buildAgentSpawnCommand(
           `Set 'agents.${agent.name}.promptCommand' in ccmux.json (e.g. "{bin} '{prompt}'").`,
       };
     }
-    // `{bin}` first, so the quoting check runs over the string the shell
-    // will actually see rather than over the un-substituted template.
-    const withBinary = substituteAll(template, "{bin}", binary);
-    if (!promptPlaceholderIsQuoted(withBinary)) {
+    // A config file can hold any JSON, and this runs outside the route's
+    // try block, so a non-string would surface as an opaque 500.
+    if (typeof template !== "string") {
+      return {
+        ok: false,
+        error: `Invalid 'agents.${agent.name}.promptCommand': expected a string.`,
+      };
+    }
+    if (!binaryIsQuoteNeutral(binary)) {
       return {
         ok: false,
         error:
-          `Invalid promptCommand for agent '${agent.name}': every {prompt} placeholder ` +
-          `must sit inside single quotes that are not themselves nested in double ` +
-          `quotes, and the template's quotes must be balanced (e.g. "{bin} '{prompt}'").`,
+          `Cannot spawn '${agent.name}' with a prompt: its launcher (${binary}) contains ` +
+          `a quote, backslash, or '$', which would break the quoting around the prompt.`,
+      };
+    }
+    if (!promptPlaceholderIsQuoted(template)) {
+      return {
+        ok: false,
+        error:
+          `Invalid 'agents.${agent.name}.promptCommand': every {prompt} placeholder must sit ` +
+          `inside balanced single quotes, and the template may not contain double quotes, ` +
+          `backticks, or '$(' (e.g. "{bin} '{prompt}'").`,
       };
     }
     return {
       ok: true,
-      value: substituteAll(withBinary, "{prompt}", escapeSingleQuoted(prompt)),
+      value: substitutePlaceholders(template, {
+        bin: binary,
+        prompt: escapeSingleQuoted(prompt),
+      }),
     };
   }
 
   return { ok: true, value: binary };
 }
 
+/**
+ * Where tmux should put the new pane or window. Resolution needs a tmux
+ * round-trip, so the caller does it and passes the answer in.
+ *
+ * - `pane` (`%12`) splits that pane. Only meaningful for a split.
+ * - `window` (`@7`) inserts a new window immediately after it, which
+ *   RENUMBERS every later window in that session. That is the right
+ *   behavior only when the user named a target explicitly.
+ * - `session` (`$3`) appends at the end of that session, renumbering
+ *   nothing. This is the implicit case: the caller just wants the window
+ *   in their own session rather than in whichever session the daemon
+ *   happens to consider current.
+ *
+ * `new-window` cannot take a pane id at all ("can't specify pane here"),
+ * and targeting an occupied index without `-a` fails with "index in use",
+ * which is why neither form is a raw pane id.
+ */
+export type SpawnPlacement =
+  | { kind: "pane"; id: string }
+  | { kind: "window"; id: string }
+  | { kind: "session"; id: string };
+
 export interface TmuxSpawnArgvInput {
   split: ResolvedSplit;
   cwd: string;
-  /**
-   * Where to place the new pane/window. For a split this is the tmux
-   * pane id to split. For a new window it must already be resolved to a
-   * WINDOW id (`@7`): `new-window -t %12` fails with "can't specify pane
-   * here", and targeting an occupied index without `-a` fails with
-   * "index in use", so the window form is created with `-a` (insert
-   * after the caller's window). Resolution lives in the caller because
-   * it needs a tmux round-trip.
-   */
-  target?: string;
+  placement?: SpawnPlacement;
 }
 
 /** argv for the tmux command that creates the pane, minus the binary. */
 export function buildTmuxSpawnArgv(input: TmuxSpawnArgvInput): string[] {
-  const { split, cwd, target } = input;
+  const { split, cwd, placement } = input;
   const argv: string[] = [];
 
   if (split) {
     argv.push("split-window", `-${split}`);
-    if (target) argv.push("-t", target);
+    if (placement?.kind === "pane") argv.push("-t", placement.id);
   } else {
     argv.push("new-window");
-    if (target) argv.push("-a", "-t", target);
+    if (placement?.kind === "window") argv.push("-a", "-t", placement.id);
+    else if (placement?.kind === "session") argv.push("-t", `${placement.id}:`);
   }
 
   argv.push("-c", cwd, "-P", "-F", "#{pane_id}");

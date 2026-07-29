@@ -2976,9 +2976,14 @@ describe("POST /spawn", () => {
   ) {
     const original = Bun.spawn;
     const argv: string[][] = [];
+    const defaults: Record<string, { code: number; out: string }> = {
+      // Pane probe: `#{window_id} #{session_id}` for a live pane.
+      "display-message": { code: 0, out: "@9 $3\n" },
+    };
     Bun.spawn = ((spawned: string[]) => {
       argv.push(spawned);
-      const next = outcomes[spawned[1] ?? ""] ?? { code: 0, out: "%99\n" };
+      const key = spawned[1] ?? "";
+      const next = outcomes[key] ?? defaults[key] ?? { code: 0, out: "%99\n" };
       return {
         exited: Promise.resolve(next.code),
         stdout: new Blob([next.out]).stream(),
@@ -3059,7 +3064,10 @@ describe("POST /spawn", () => {
         }),
       );
       expect(res.status).toBe(200);
-      expect(argv[0]).toEqual([
+      // The pane is probed first so a stale target is a 400 on this path
+      // too, rather than tmux's raw stderr as a 500.
+      expect(argv[0]?.[1]).toBe("display-message");
+      expect(argv[1]).toEqual([
         "tmux",
         "split-window",
         "-h",
@@ -3089,13 +3097,12 @@ describe("POST /spawn", () => {
     }
   });
 
-  it("resolves a target pane to its window before creating a new window", async () => {
+  it("inserts after the window of an EXPLICIT target pane", async () => {
     // `new-window -t %pane` fails outright ("can't specify pane here"),
-    // so the pane is translated and the window inserted after it.
+    // so the pane is translated. `-a` is accepted here because the user
+    // named the target, even though it renumbers the windows after it.
     const { internals } = serverForAgents([promptAgent]);
-    const { argv, restore } = withTmuxRecorder({
-      "display-message": { code: 0, out: "@9\n" },
-    });
+    const { argv, restore } = withTmuxRecorder();
     try {
       const res = await internals.handleRequest(
         spawnRequest({ agent: "prompty", cwd, target: "%5", detach: true }),
@@ -3119,20 +3126,142 @@ describe("POST /spawn", () => {
     }
   });
 
-  it("rejects a target pane tmux cannot resolve", async () => {
-    // tmux exits 0 with empty output for a pane that has closed, so the
-    // empty answer has to be caught rather than passed on as a target.
+  it("appends to the caller's SESSION for an implicit caller pane", async () => {
+    // Verified live: `-a -t @window` shifts every later window's index,
+    // so a plain `ccmux spawn` must not use it. Targeting the session
+    // appends at the end and renumbers nothing, while still landing in
+    // the caller's session rather than the daemon's current one.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, callerPane: "%5", detach: true }),
+      );
+      expect(res.status).toBe(200);
+      expect(argv[1]).toEqual([
+        "tmux",
+        "new-window",
+        "-t",
+        "$3:",
+        "-c",
+        cwd,
+        "-P",
+        "-F",
+        "#{pane_id}",
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("splits the caller's pane when no explicit target is given", async () => {
+    // For a split the two fields mean the same thing: split HERE.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      await internals.handleRequest(
+        spawnRequest({
+          agent: "prompty",
+          cwd,
+          split: "v",
+          callerPane: "%5",
+          detach: true,
+        }),
+      );
+      expect(argv[1]?.slice(1)).toEqual([
+        "split-window",
+        "-v",
+        "-t",
+        "%5",
+        "-c",
+        cwd,
+        "-P",
+        "-F",
+        "#{pane_id}",
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects a stale target the same way on both branches", async () => {
+    // Previously asymmetric: the split path surfaced tmux's raw stderr as
+    // a 500 while the new-window path returned a clean 400.
+    for (const split of [false, "h"]) {
+      const { internals } = serverForAgents([promptAgent]);
+      const { argv, restore } = withTmuxRecorder({
+        "display-message": { code: 0, out: "\n" },
+      });
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ agent: "prompty", cwd, split, target: "%404" }),
+        );
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as { error: string }).error).toContain(
+          "%404",
+        );
+        // Nothing was created, so there is nothing to clean up.
+        expect(argv).toHaveLength(1);
+      } finally {
+        restore();
+      }
+    }
+  });
+
+  it("rejects a prompt with a NUL before creating any pane", async () => {
+    // NUL survives shell escaping but makes Bun.spawn reject the argv,
+    // which used to happen AFTER the pane existed: an orphaned pane and
+    // an opaque 500, repeatable as a pane leak.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, prompt: "a\u0000b" }),
+      );
+      expect(res.status).toBe(400);
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects an empty or non-string prompt", async () => {
+    // `--prompt ""` used to spawn a bare agent AND bypass the refusal an
+    // agent without promptCommand should get; a number threw a TypeError
+    // outside the route's try block, surfacing as an opaque 500.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      for (const prompt of ["", "   ", 123]) {
+        const res = await internals.handleRequest(
+          spawnRequest({ agent: "prompty", cwd, prompt }),
+        );
+        expect(res.status).toBe(400);
+      }
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("kills the new pane when the command cannot be sent", async () => {
+    // The pane exists by then, so a failure that leaves it behind strands
+    // an empty shell the caller never asked for.
     const { internals } = serverForAgents([promptAgent]);
     const { argv, restore } = withTmuxRecorder({
-      "display-message": { code: 0, out: "\n" },
+      "send-keys": { code: 1, out: "" },
     });
     try {
       const res = await internals.handleRequest(
-        spawnRequest({ agent: "prompty", cwd, target: "%404", detach: true }),
+        spawnRequest({ agent: "prompty", cwd, detach: true }),
       );
-      expect(res.status).toBe(400);
-      expect(((await res.json()) as { error: string }).error).toContain("%404");
-      expect(argv).toHaveLength(1);
+      expect(res.status).toBe(500);
+      expect(argv.map((a) => a[1])).toEqual([
+        "new-window",
+        "send-keys",
+        "kill-pane",
+      ]);
+      expect(argv[2]).toEqual(["tmux", "kill-pane", "-t", "%99"]);
     } finally {
       restore();
     }

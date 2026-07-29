@@ -9,16 +9,18 @@ import {
 import { getPreferences } from "../lib/preferences";
 import {
   capturePane,
-  resolveWindowIdForPane,
+  resolvePaneLocation,
   sendLiteralToPane,
   sendPromptToPane,
 } from "./pane-io";
 import {
   buildAgentSpawnCommand,
   buildTmuxSpawnArgv,
+  normalizePrompt,
   normalizeSplit,
   normalizeTarget,
-  substituteAll,
+  substitutePlaceholders,
+  type SpawnPlacement,
   type SpawnSplit,
 } from "./spawn-command";
 import type { AgentDef } from "../lib/agents";
@@ -1314,7 +1316,9 @@ export class DaemonServer {
         );
       }
       const resumeId = getMarkerKey(session);
-      restartCommand = substituteAll(agent.resumeCommand, "{id}", resumeId);
+      restartCommand = substitutePlaceholders(agent.resumeCommand, {
+        id: resumeId,
+      });
     } else {
       const { command = "claude" } = await getPreferences();
       restartCommand = session.nativeSessionId
@@ -1697,9 +1701,10 @@ export class DaemonServer {
       agent?: string;
       cwd?: string;
       resume?: string;
-      prompt?: string;
+      prompt?: unknown;
       split?: SpawnSplit;
       target?: string;
+      callerPane?: string;
       detach?: boolean;
     };
     try {
@@ -1711,13 +1716,7 @@ export class DaemonServer {
       );
     }
 
-    const {
-      agent: agentName = "claude",
-      cwd,
-      resume,
-      prompt,
-      detach = false,
-    } = body;
+    const { agent: agentName = "claude", cwd, resume, detach = false } = body;
 
     if (!cwd || typeof cwd !== "string") {
       return Response.json(
@@ -1735,6 +1734,10 @@ export class DaemonServer {
     }
     const split = splitResult.value;
 
+    // `target` is an explicit placement request; `callerPane` is merely
+    // where the request came from. They differ for a new window: an
+    // explicit target inserts next to it (renumbering later windows),
+    // while the caller's pane only pins the SESSION, appending at the end.
     const targetResult = normalizeTarget(body.target);
     if (!targetResult.ok) {
       return Response.json(
@@ -1743,6 +1746,24 @@ export class DaemonServer {
       );
     }
     const target = targetResult.value;
+
+    const callerPaneResult = normalizeTarget(body.callerPane, "callerPane");
+    if (!callerPaneResult.ok) {
+      return Response.json(
+        { error: callerPaneResult.error },
+        { status: 400, headers },
+      );
+    }
+    const callerPane = callerPaneResult.value;
+
+    const promptResult = normalizePrompt(body.prompt);
+    if (!promptResult.ok) {
+      return Response.json(
+        { error: promptResult.error },
+        { status: 400, headers },
+      );
+    }
+    const prompt = promptResult.value;
 
     // `resume` is interpolated into a shell command typed into the pane, so an
     // unconstrained value is command injection. Constrain it like `/invoke`.
@@ -1804,23 +1825,36 @@ export class DaemonServer {
     }
     const command = commandResult.value;
 
-    // `new-window` cannot take a pane id ("can't specify pane here"), so the
-    // caller's pane is resolved to its window and the window is created right
-    // after it. A pane that has since closed resolves to an empty string.
-    let resolvedTarget = target;
-    if (target && !split) {
-      const windowId = await resolveWindowIdForPane(target);
-      if (!windowId) {
+    // Resolve placement. The pane is probed even on the split path, where
+    // tmux would report its own failure, so that a stale pane is one
+    // consistent 400 rather than a 400 on one branch and a raw-stderr 500
+    // on the other.
+    const placementPane = target ?? callerPane;
+    let placement: SpawnPlacement | undefined;
+    if (placementPane) {
+      const location = await resolvePaneLocation(placementPane);
+      if (!location) {
         return Response.json(
-          { error: `Unknown target pane: ${target}` },
+          { error: `Unknown target pane: ${placementPane}` },
           { status: 400, headers },
         );
       }
-      resolvedTarget = windowId;
+      if (split) {
+        placement = { kind: "pane", id: placementPane };
+      } else if (target) {
+        // Explicitly named: put the window right after that one, even
+        // though tmux renumbers the windows after it.
+        placement = { kind: "window", id: location.windowId };
+      } else {
+        // Implicit: the caller only means "my session", so append at the
+        // end. Inserting here would shift every later window's index and
+        // break `select-window -t N` muscle memory and bindings.
+        placement = { kind: "session", id: location.sessionId };
+      }
     }
 
     // Create tmux pane
-    const tmuxArgv = buildTmuxSpawnArgv({ split, cwd, target: resolvedTarget });
+    const tmuxArgv = buildTmuxSpawnArgv({ split, cwd, placement });
     const tmuxCmd = tmuxArgv[0];
     try {
       const proc = Bun.spawn(["tmux", ...tmuxArgv], {
@@ -1838,7 +1872,28 @@ export class DaemonServer {
 
       const paneId = (await new Response(proc.stdout).text()).trim();
 
-      // Send the agent command into the new pane
+      // Past this point the pane exists, so every failure has to take it
+      // back down. Leaving it would strand an empty shell the caller never
+      // asked for, and a caller retrying a failing spawn would pile them up.
+      const killPane = async (): Promise<void> => {
+        try {
+          await Bun.spawn(["tmux", "kill-pane", "-t", paneId], {
+            stdout: "pipe",
+            stderr: "pipe",
+          }).exited;
+        } catch {
+          // Best effort: the original failure is what we report.
+        }
+      };
+
+      // Send the agent command into the new pane.
+      //
+      // No `-l --`, unlike `sendLiteralToPane`'s policy for user-typed
+      // content: this string is a COMMAND for the shell, and it always
+      // begins with the agent binary, so it can't start with a `-` that
+      // send-keys would read as a flag. Prompt text only ever appears
+      // inside it as a single-quoted argument, so no part of it can be
+      // interpreted as a tmux key name.
       const sendProc = Bun.spawn(
         ["tmux", "send-keys", "-t", paneId, command, "Enter"],
         { stdout: "pipe", stderr: "pipe" },
@@ -1846,6 +1901,7 @@ export class DaemonServer {
       const sendExit = await sendProc.exited;
       if (sendExit !== 0) {
         const stderr = await new Response(sendProc.stderr).text();
+        await killPane();
         return Response.json(
           { error: `Failed to send command to pane: ${stderr.trim()}` },
           { status: 500, headers },

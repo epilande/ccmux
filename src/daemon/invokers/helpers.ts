@@ -7,7 +7,7 @@ import type {
   TextBlock,
 } from "../../types/log";
 import type { InvokeErrorKind, InvokeFailure, InvokeInput } from "./types";
-import { substituteAll } from "../spawn-command";
+import { substitutePlaceholders } from "../spawn-command";
 
 /**
  * Walk a list of Claude transcript entries looking for a turn-end marker
@@ -108,7 +108,9 @@ export function buildClaudeLaunchCommand(input: InvokeInput): string {
   const binary = input.claudeBinary ?? "claude";
   if (!input.sessionId) return binary;
   if (input.agent.resumeCommand) {
-    return substituteAll(input.agent.resumeCommand, "{id}", input.sessionId);
+    return substitutePlaceholders(input.agent.resumeCommand, {
+      id: input.sessionId,
+    });
   }
   return `${binary} --resume ${input.sessionId}`;
 }
