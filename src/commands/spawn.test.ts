@@ -223,3 +223,18 @@ describe("ccmux spawn --split parsing", () => {
     ).rejects.toThrow(/ccmux spawn codex --split/);
   });
 });
+
+describe("--base requires --worktree", () => {
+  // `--base` alone is inert. Silently ignoring a flag someone typed costs a
+  // confused debugging session, and unlike `--split` without a target there
+  // is no sensible thing the command can do with it.
+  it("exits with a clear error", async () => {
+    const proc = Bun.spawnSync(
+      ["bun", "run", "src/index.ts", "spawn", "claude", "--base", "main"],
+      { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(proc.exitCode).toBe(1);
+    expect(proc.stderr.toString()).toContain("--base requires --worktree");
+  });
+});

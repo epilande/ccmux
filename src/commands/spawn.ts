@@ -134,6 +134,15 @@ export function createSpawnCommand(): Command {
         // string. Both become an object, since the daemon accepts one shape;
         // `--base` without `--worktree` is a no-op flag rather than an error,
         // matching how the other placement options behave in isolation.
+        // `--base` alone is inert, and silently ignoring a flag someone typed
+        // costs a confused debugging session. Unlike `--split` without a
+        // target, which still does something sensible, this expresses an
+        // intent the command cannot honor at all.
+        if (options.base !== undefined && options.worktree === undefined) {
+          console.error("--base requires --worktree");
+          process.exit(1);
+        }
+
         const worktree =
           options.worktree === undefined
             ? undefined

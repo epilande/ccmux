@@ -2172,11 +2172,24 @@ export class DaemonServer {
       spawnCwd = created.result.path;
     }
 
+    /**
+     * Decorate a failure that happens AFTER the worktree was created.
+     *
+     * The worktree is deliberately not rolled back: create-or-open makes a
+     * retry correct, and unwinding would risk deleting a worktree that
+     * already existed. But that only helps if the user is told, otherwise
+     * they are left wondering whether to clean it up by hand.
+     */
+    const withWorktreeNote = (error: string): string =>
+      worktreeInfo?.created
+        ? `${error} (the worktree '${worktreeInfo.name}' was created at ${worktreeInfo.path} and left in place; re-running the same command will reuse it)`
+        : error;
+
     // Resolve agent definition (custom agents from config are also valid)
     const agent = this.getAgentByType(agentName);
     if (!agent) {
       return Response.json(
-        { error: `Unknown agent: ${agentName}` },
+        { error: withWorktreeNote(`Unknown agent: ${agentName}`) },
         { status: 400, headers },
       );
     }
@@ -2196,7 +2209,7 @@ export class DaemonServer {
     });
     if (!commandResult.ok) {
       return Response.json(
-        { error: commandResult.error },
+        { error: withWorktreeNote(commandResult.error) },
         { status: 400, headers },
       );
     }
@@ -2212,7 +2225,7 @@ export class DaemonServer {
       const location = await resolvePaneLocation(placementPane);
       if (!location) {
         return Response.json(
-          { error: `Unknown target pane: ${placementPane}` },
+          { error: withWorktreeNote(`Unknown target pane: ${placementPane}`) },
           { status: 400, headers },
         );
       }
@@ -2247,7 +2260,7 @@ export class DaemonServer {
       if (exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();
         return Response.json(
-          { error: `tmux ${tmuxCmd} failed: ${stderr.trim()}` },
+          { error: withWorktreeNote(`tmux ${tmuxCmd} failed: ${stderr.trim()}`) },
           { status: 500, headers },
         );
       }
@@ -2285,7 +2298,7 @@ export class DaemonServer {
         const stderr = await new Response(sendProc.stderr).text();
         await killPane();
         return Response.json(
-          { error: `Failed to send command to pane: ${stderr.trim()}` },
+          { error: withWorktreeNote(`Failed to send command to pane: ${stderr.trim()}`) },
           { status: 500, headers },
         );
       }
@@ -2308,7 +2321,7 @@ export class DaemonServer {
       );
     } catch (err: unknown) {
       return Response.json(
-        { error: `Failed to spawn session: ${errorMessage(err)}` },
+        { error: withWorktreeNote(`Failed to spawn session: ${errorMessage(err)}`) },
         { status: 500, headers },
       );
     }

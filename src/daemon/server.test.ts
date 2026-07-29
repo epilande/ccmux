@@ -4009,6 +4009,60 @@ describe("POST /spawn with a worktree", () => {
     }
   });
 
+  /**
+   * The worktree is deliberately NOT rolled back when a later step fails, so
+   * the error has to say it is there. Otherwise the user is left wondering
+   * whether to clean it up by hand.
+   */
+  it("says the worktree survives when a later step fails", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "no-such-agent",
+        cwd: repo,
+        worktree: { name: "left-behind" },
+      });
+      const body = (await res.json()) as { error: string };
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("Unknown agent");
+      expect(body.error).toContain("left-behind");
+      expect(body.error).toContain("will reuse it");
+      // And it really is on disk, as the message claims.
+      expect(existsSync(join(repo, ".claude", "worktrees", "left-behind"))).toBe(
+        true,
+      );
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("does not mention a worktree when one was merely opened", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "reused" },
+      });
+      const res = await spawnInto(internals, {
+        agent: "no-such-agent",
+        cwd: repo,
+        worktree: { name: "reused" },
+      });
+      const body = (await res.json()) as { error: string };
+
+      expect(body.error).toContain("Unknown agent");
+      expect(body.error).not.toContain("was created");
+    } finally {
+      tmux.restore();
+    }
+  });
+
   it("spawns into the ordinary cwd when no worktree is requested", async () => {
     const repo = makeRepo();
     const { internals } = createServer();
