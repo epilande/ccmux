@@ -102,6 +102,8 @@ Full daemon internals — the binder's D1/D2/D3 guards, the recursive log-tree w
 
 Built with @opentui/solid. Entry point: `src/tui/App.tsx` with reactive store in `src/tui/store.ts`. Components live in `src/tui/components/`.
 
+The new-session dialog (`n`, or the right-click menus) is driven by `NEW_SESSION_FIELDS` in `store.ts` plus a matching `NewSessionDraft` key per field — focus movement, the option keys, and the rendered rows all read that list, so adding a field means adding an entry rather than touching the key handling. Its wire behavior (`GET /agents`, and why placement travels as `callerPane` rather than `target`) is in [`docs/architecture.md`](docs/architecture.md).
+
 ### Data Flow
 
 ```

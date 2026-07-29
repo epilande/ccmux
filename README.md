@@ -321,6 +321,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Jump to first/last    | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd>                                            | Go to top / bottom                                                                                                     |
 | Jump to session       | <kbd>1</kbd>–<kbd>9</kbd>                                                          | Switch directly to session N                                                                                           |
 | Switch to session     | <kbd>Enter</kbd>                                                                   | Switch tmux to the selected pane                                                                                       |
+| New session           | <kbd>n</kbd>                                                                       | Open the new-session dialog (agent, placement, prompt; directory derived from the selected row)                        |
 | Search                | <kbd>/</kbd>                                                                       | Enter fuzzy search mode                                                                                                |
 | Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel                                                                                            |
 | Scroll preview        | <kbd>Ctrl+D</kbd> / <kbd>Ctrl+U</kbd>                                              | Half-page scroll in preview                                                                                            |
@@ -340,6 +341,23 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Cycle group-by        | <kbd>b</kbd>                                                                       | Cycle through group-by modes                                                                                           |
 | Help                  | <kbd>?</kbd>                                                                       | Show keyboard shortcuts overlay                                                                                        |
 | Quit                  | <kbd>q</kbd> / <kbd>Esc</kbd>                                                      | Exit the picker                                                                                                        |
+
+<details>
+<summary><strong>New session dialog keys</strong></summary>
+
+Opened with <kbd>n</kbd>, or from the right-click menu on a session row or a group header. Every field has a default, so <kbd>n</kbd> <kbd>Enter</kbd> spawns straight away.
+
+| Action              | Key                                                        |
+| :------------------ | :--------------------------------------------------------- |
+| Next / prev field   | <kbd>Tab</kbd> / <kbd>Shift+Tab</kbd>                      |
+| Move within a field | <kbd>j</kbd> / <kbd>k</kbd> or <kbd>↑</kbd> / <kbd>↓</kbd> |
+| Pick by number      | <kbd>1</kbd>–<kbd>9</kbd>                                  |
+| Spawn               | <kbd>Enter</kbd>                                           |
+| Cancel              | <kbd>Esc</kbd>                                             |
+
+The working directory is derived, not typed: a session row uses that session's directory, a group header uses the group's, and no selection falls back to where the picker was launched. The picker jumps to the new pane and closes; the sidebar spawns into the window's main area without stealing focus.
+
+</details>
 
 <details>
 <summary><strong>Search mode keys</strong></summary>
