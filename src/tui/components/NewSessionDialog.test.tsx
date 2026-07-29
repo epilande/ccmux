@@ -136,6 +136,41 @@ describe("NewSessionDialog", () => {
     expect(frame).not.toContain("Split right");
   });
 
+  it("keeps the placements distinguishable at the real sidebar rail", async () => {
+    // A 30-column rail leaves 8 columns for the label, which truncated
+    // `New window`/`Split right`/`Split down` to `New`/`Split`/`Split` —
+    // two of three indistinguishable, with number keys that still worked.
+    const frame = await renderDialog({ width: 30, height: 30 });
+    expect(frame).toContain("Window");
+    expect(frame).toContain("Right");
+    expect(frame).toContain("Down");
+    const lines = frame.split("\n");
+    expect(lines.filter((l) => l.includes("Split")).length).toBe(0);
+    // And nothing runs past the dialog's own border.
+    const widest = Math.max(...lines.map((l) => l.trimEnd().length));
+    expect(widest).toBeLessThanOrEqual(30);
+  });
+
+  it("marks the focused field without relying on colour", async () => {
+    // The number keys are scoped to the focused field, so which field has
+    // focus has to survive a colourless terminal.
+    const onAgent = await renderDialog({ draft: draft({ field: "agent" }) });
+    expect(onAgent).toContain(">Agent");
+    expect(onAgent).not.toContain(">Placement");
+    setup.renderer.destroy();
+
+    const onPlacement = await renderDialog({
+      draft: draft({ field: "placement" }),
+    });
+    expect(onPlacement).toContain(">Placement");
+    expect(onPlacement).not.toContain(">Agent");
+    setup.renderer.destroy();
+
+    const onPrompt = await renderDialog({ draft: draft({ field: "prompt" }) });
+    expect(onPrompt).toContain(">Prompt");
+    expect(onPrompt).not.toContain(">Placement");
+  });
+
   it("stacks the placements on a sidebar-width surface", async () => {
     // At a 34-column rail the row cannot hold three options at any label
     // length, and clipping would hide two of the three choices.

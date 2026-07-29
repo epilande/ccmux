@@ -13,10 +13,11 @@ import { shortenCwd, truncateText } from "../utils/format";
 import { agentColorFor } from "./SessionItem";
 import { theme } from "../theme";
 
-/** Width of the label gutter ("Placement" is the longest label). */
-const LABEL_WIDTH = 10;
+/** Width of the label gutter: focus marker (1) + "Placement" (9, the
+ *  longest label) + one column of air before the content. */
+const LABEL_WIDTH = 11;
 /** Wide enough for the placement row's full labels; see COMPACT_CONTENT_WIDTH. */
-const MAX_WIDTH = 64;
+const MAX_WIDTH = 65;
 const MIN_WIDTH = 24;
 /** Rows that belong to no field: border (2), title, blank, directory. Every
  *  other row is a field's, counted from NEW_SESSION_FIELDS below. */
@@ -25,7 +26,8 @@ const FIXED_CHROME_ROWS = 5;
 const KEY_HINT_ROWS = 2;
 /** Content width the placement row's full labels need (number, brackets,
  *  and gaps included). Below it the row switches to the short labels and
- *  the key-hint line drops its middle segment. */
+ *  the key-hint line drops its middle segment. MAX_WIDTH is sized to leave
+ *  exactly this much. */
 const COMPACT_CONTENT_WIDTH = 49;
 /** Content width the placement row needs even with the short labels. Below
  *  it the options stack vertically, which is the sidebar's 30-column rail:
@@ -91,6 +93,23 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const compact = () => contentWidth() < COMPACT_CONTENT_WIDTH;
   const stacked = () => contentWidth() < STACKED_CONTENT_WIDTH;
 
+  /**
+   * The label to draw for a placement option.
+   *
+   * Stacking gives each option its own row, but a row is not unlimited: at
+   * the sidebar's real 30-column rail the dialog is 26 wide and the label
+   * column is 8, which renders `New window` / `Split right` / `Split down`
+   * as `New` / `Split` / `Split` — two of the three indistinguishable. The
+   * full label is therefore used only when it actually fits, and the short
+   * label (which exists for exactly this) is the fallback in both layouts.
+   */
+  const placementLabel = (option: PlacementOption): string => {
+    // The row also spends a 2-wide number cell and two 1-wide bracket cells.
+    const room = contentWidth() - 4;
+    if (!stacked()) return compact() ? option.compactLabel : option.label;
+    return option.label.length <= room ? option.label : option.compactLabel;
+  };
+
   const showKeyHints = () => props.showKeyHints !== false;
   const hintRows = () => (showKeyHints() ? KEY_HINT_ROWS : 0);
 
@@ -128,24 +147,39 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
       0,
     );
 
-  /** The agent list is the only field that can grow past a screen; cap it at
-   *  what every other row has left over, and scroll the rest. */
+  /** Where the visible slice of the agent list starts. Split from the slice
+   *  itself so the rows can derive their absolute number from it without the
+   *  slice having to carry a wrapper object per entry (see below). */
+  const agentWindowStart = createMemo(() => {
+    const list = agents();
+    const room = Math.max(
+      1,
+      dims().height - FIXED_CHROME_ROWS - hintRows() - otherFieldRows("agent"),
+    );
+    return optionWindow(
+      list.length,
+      selectedAgentIndex(),
+      Math.min(room, list.length),
+    ).start;
+  });
+
+  /**
+   * The agent list is the only field that can grow past a screen; cap it at
+   * what every other row has left over, and scroll the rest.
+   *
+   * Returns the raw slice, NOT `{agent, index}` wrappers. `<For>` is keyed by
+   * reference, so freshly minted wrappers made every visible row tear down
+   * and rebuild on each j/k; the underlying agent objects are stable, so
+   * slicing them directly lets it reuse the rows and move only the marker.
+   */
   const visibleAgents = createMemo(() => {
     const list = agents();
     const room = Math.max(
       1,
       dims().height - FIXED_CHROME_ROWS - hintRows() - otherFieldRows("agent"),
     );
-    const { start, end } = optionWindow(
-      list.length,
-      selectedAgentIndex(),
-      Math.min(room, list.length),
-    );
-    return list.slice(start, end).map((agent, offset) => ({
-      agent,
-      /** Absolute position, so the number key shown is the one that picks it. */
-      index: start + offset,
-    }));
+    const start = agentWindowStart();
+    return list.slice(start, start + Math.min(room, list.length));
   });
 
   const height = () =>
@@ -159,8 +193,35 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         ),
     );
 
-  const labelColor = (field: NewSessionField) =>
-    props.draft.field === field ? theme.blue : theme.overlay;
+  /**
+   * A field's label cell, carrying a one-character focus marker.
+   *
+   * Colour alone is not enough here: the number keys are scoped to the
+   * FOCUSED field, so a viewer who can't tell which label is highlighted
+   * can press `2` believing they are on Agent, get "Split right", and spawn
+   * with no confirmation step. The selections themselves already use
+   * colour-safe markers (`>` and `[brackets]`); this closes the last one.
+   *
+   * Marker (1) plus label cell (the rest of the gutter) is exactly the
+   * width the content column is measured against, so nothing reflows.
+   */
+  const FieldLabel: Component<{ field: NewSessionField; text: string }> = (
+    labelProps,
+  ) => {
+    const focused = () => props.draft.field === labelProps.field;
+    return (
+      <box flexDirection="row" width={LABEL_WIDTH} height={1}>
+        <box width={1}>
+          <text fg={theme.blue}>{focused() ? ">" : ""}</text>
+        </box>
+        <box width={LABEL_WIDTH - 1}>
+          <text fg={focused() ? theme.blue : theme.overlay}>
+            {labelProps.text}
+          </text>
+        </box>
+      </box>
+    );
+  };
 
   const cwdLabel = () =>
     truncateText(shortenCwd(props.draft.cwd), contentWidth());
@@ -207,9 +268,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
       <box height={1} />
 
       <box flexDirection="row">
-        <box width={LABEL_WIDTH}>
-          <text fg={labelColor("agent")}>Agent</text>
-        </box>
+        <FieldLabel field="agent" text="Agent" />
         <box flexDirection="column" flexGrow={1}>
           <Show
             when={props.agents !== null}
@@ -224,32 +283,37 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               }
             >
               <For each={visibleAgents()}>
-                {(entry) => (
-                  <box
-                    height={1}
-                    flexDirection="row"
-                    onMouseDown={(event) => {
-                      if (event.button !== MouseButton.LEFT) return;
-                      props.onFocusField("agent");
-                      props.onSelectAgent(entry.agent.name);
-                    }}
-                  >
-                    <box width={2}>
-                      <text fg={theme.green}>
-                        {entry.agent.name === props.draft.agent ? ">" : ""}
+                {(agent, i) => {
+                  /** Absolute position, so the number key shown is the one
+                   *  that picks it even when the list has scrolled. */
+                  const number = () => agentWindowStart() + i() + 1;
+                  return (
+                    <box
+                      height={1}
+                      flexDirection="row"
+                      onMouseDown={(event) => {
+                        if (event.button !== MouseButton.LEFT) return;
+                        props.onFocusField("agent");
+                        props.onSelectAgent(agent.name);
+                      }}
+                    >
+                      <box width={2}>
+                        <text fg={theme.green}>
+                          {agent.name === props.draft.agent ? ">" : ""}
+                        </text>
+                      </box>
+                      {/* Only the first nine get a number key. */}
+                      <box width={2}>
+                        <text fg={theme.overlay}>
+                          {number() <= 9 ? `${number()}` : ""}
+                        </text>
+                      </box>
+                      <text fg={agentColorFor(agent.name)}>
+                        {agent.displayName}
                       </text>
                     </box>
-                    {/* Only the first nine get a number key. */}
-                    <box width={2}>
-                      <text fg={theme.overlay}>
-                        {entry.index < 9 ? `${entry.index + 1}` : ""}
-                      </text>
-                    </box>
-                    <text fg={agentColorFor(entry.agent.name)}>
-                      {entry.agent.displayName}
-                    </text>
-                  </box>
-                )}
+                  );
+                }}
               </For>
             </Show>
           </Show>
@@ -257,9 +321,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
       </box>
 
       <box flexDirection="row">
-        <box width={LABEL_WIDTH} height={1}>
-          <text fg={labelColor("placement")}>Placement</text>
-        </box>
+        <FieldLabel field="placement" text="Placement" />
         <box
           flexDirection={stacked() ? "column" : "row"}
           flexGrow={1}
@@ -294,11 +356,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                     <text fg={theme.green}>{selected() ? "[" : ""}</text>
                   </box>
                   <text fg={selected() ? theme.green : theme.subtext}>
-                    {/* Stacked has a row to itself, so it can afford the full
-                        label even though it is the narrowest surface. */}
-                    {compact() && !stacked()
-                      ? option.compactLabel
-                      : option.label}
+                    {placementLabel(option)}
                   </text>
                   <box width={1}>
                     <text fg={theme.green}>{selected() ? "]" : ""}</text>
@@ -311,9 +369,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
       </box>
 
       <box flexDirection="row" height={1}>
-        <box width={LABEL_WIDTH}>
-          <text fg={labelColor("prompt")}>Prompt</text>
-        </box>
+        <FieldLabel field="prompt" text="Prompt" />
         <input
           value={props.draft.prompt}
           onInput={props.onPromptInput}
@@ -329,7 +385,9 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
       </box>
 
       <box flexDirection="row" height={1}>
-        <box width={LABEL_WIDTH}>
+        {/* Not a field: derived, never focused, so it only pads past the
+            marker column to stay aligned with the labels above. */}
+        <box width={LABEL_WIDTH} paddingLeft={1}>
           <text fg={theme.overlay}>Directory</text>
         </box>
         <text fg={theme.subtext}>{cwdLabel()}</text>
@@ -371,8 +429,12 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
             <text fg={theme.red}>
               <strong>esc</strong>
             </text>
-            <box width={1} />
-            <text fg={theme.overlay}>cancel</text>
+            {/* At the real 30-column rail even this two-hint line overruns
+                the border; Esc needs no gloss, so its word is what goes. */}
+            <Show when={!stacked()}>
+              <box width={1} />
+              <text fg={theme.overlay}>cancel</text>
+            </Show>
           </box>
         </box>
       </Show>
