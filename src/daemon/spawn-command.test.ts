@@ -330,8 +330,16 @@ describe("buildAgentSpawnCommand", () => {
 
   it("refuses a launcher that could break the prompt's quoting", () => {
     // The binary is substituted after the template's quoting is checked,
-    // so it must not be able to change that quoting.
-    for (const binary of ["ev'il", 'ev"il', "ev`il", "ev$il", "ev\\il"]) {
+    // so it must not be able to change how the rest parses. The backtick
+    // and `$(` cases would swallow the prompt into a command substitution.
+    for (const binary of [
+      "ev'il",
+      'ev"il',
+      "ev`il",
+      "ev\\il",
+      "ev$(id)il",
+      "x$(",
+    ]) {
       expect(
         buildAgentSpawnCommand({
           agent: agentWith({ promptCommand: "{bin} '{prompt}'" }),
@@ -340,6 +348,38 @@ describe("buildAgentSpawnCommand", () => {
         }).ok,
       ).toBe(false);
     }
+  });
+
+  it("allows a launcher using ordinary parameter expansion", () => {
+    // `$HOME/.local/bin/claude` is a plausible `command` preference. The
+    // shell expands it when the line is typed into the pane, and the
+    // result is not re-scanned for quotes, so it cannot reach the
+    // prompt's quoting. Refusing it also made the SAME config work on a
+    // bare spawn while erroring with --prompt.
+    for (const binary of [
+      "$HOME/.local/bin/claude",
+      "${HOME}/bin/claude",
+      "$CLAUDE_BIN",
+    ]) {
+      expect(
+        buildAgentSpawnCommand({
+          agent: agentWith({ promptCommand: "{bin} '{prompt}'" }),
+          binary,
+          prompt: "hi",
+        }),
+      ).toEqual({ ok: true, value: `${binary} 'hi'` });
+    }
+  });
+
+  it("treats a launcher the same way with and without a prompt", () => {
+    // The asymmetry is the real defect: one config, two paths, one of
+    // which 400s. Whatever the guard decides must hold for both.
+    const binary = "$HOME/.local/bin/claude";
+    const agent = agentWith({ promptCommand: "{bin} '{prompt}'" });
+    const bare = buildAgentSpawnCommand({ agent, binary });
+    const withPrompt = buildAgentSpawnCommand({ agent, binary, prompt: "hi" });
+    expect(bare.ok).toBe(true);
+    expect(withPrompt.ok).toBe(true);
   });
 
   it("refuses a non-string promptCommand from config", () => {

@@ -220,13 +220,24 @@ function promptPlaceholderIsQuoted(template: string): boolean {
 
 /**
  * The binary is substituted into the template AFTER its quoting has been
- * verified, so it must not be able to change that quoting. Rejecting the
- * quote and expansion characters keeps `{bin}` inert, which is what lets
- * `scanPromptPlaceholders` skip over it. Ordinary paths (including ones
- * with spaces, which were already broken by the unquoted `{bin}`) pass.
+ * verified, so it must not be able to change how the rest of the command
+ * parses. That is what lets `scanPromptPlaceholders` skip over `{bin}`.
+ *
+ * Refused: quotes and backslash (they move the quote state directly), and
+ * the command-substitution openers, which swallow the prompt into a
+ * command rather than passing it as an argument (`x$(` yields
+ * `x$( 'prompt'`, and a stray backtick does the same).
+ *
+ * Allowed: ordinary parameter expansion. `$HOME/.local/bin/claude` is a
+ * thoroughly plausible `command` preference that the shell expands when
+ * the line is typed into the pane, exactly as it did before this guard
+ * existed. Expansion happens after quote parsing and its result is not
+ * re-scanned for quotes, so it cannot reach the prompt's quoting.
+ * Refusing it would also have been asymmetric: the same config still
+ * worked on the bare-spawn path and only errored with `--prompt`.
  */
 function binaryIsQuoteNeutral(binary: string): boolean {
-  return !/['"`$\\]/.test(binary);
+  return !/['"`\\]/.test(binary) && !binary.includes("$(");
 }
 
 export interface AgentCommandInput {
@@ -291,7 +302,8 @@ export function buildAgentSpawnCommand(
         ok: false,
         error:
           `Cannot spawn '${agent.name}' with a prompt: its launcher (${binary}) contains ` +
-          `a quote, backslash, or '$', which would break the quoting around the prompt.`,
+          `a quote, a backslash, or a command substitution, which would break the quoting ` +
+          `around the prompt.`,
       };
     }
     if (!promptPlaceholderIsQuoted(template)) {
