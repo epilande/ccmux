@@ -16,11 +16,14 @@ import {
   copyFileSync,
   existsSync,
   readFileSync,
+  readdirSync,
   renameSync,
+  statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 
 /**
  * One agent's state file, described as "a JSON object at `file` whose
@@ -65,6 +68,10 @@ export interface StateCleanupResult {
  * check keeps `/a/bc` from matching root `/a/b`.
  */
 export function isUnderPath(entry: string, root: string): boolean {
+  // A root of "" or "/" is under everything, so it would sweep the entire
+  // projects map. No caller passes one today; refusing here means none ever
+  // can by accident.
+  if (root === "" || root === sep) return false;
   if (entry === root) return true;
   const prefix = root.endsWith(sep) ? root : root + sep;
   return entry.startsWith(prefix);
@@ -107,13 +114,26 @@ function projectsOf(
   return projects as Record<string, unknown>;
 }
 
-/** Every state entry whose directory no longer exists — the backlog. */
+/**
+ * State entries whose directory no longer exists — the backlog `--state`
+ * clears.
+ *
+ * An entry only counts as an orphan when its PARENT directory still exists.
+ * Absence alone is not evidence of deletion: an unmounted external drive or a
+ * disconnected network share makes every path on it vanish at once, and
+ * without this rule a single `--state` run would drop the state for every
+ * project on that volume in one write. A genuinely deleted worktree leaves
+ * its parent (`…/worktrees/`) behind, so real orphans are still found, and
+ * the ambiguous case is skipped rather than guessed.
+ */
 export function findOrphanEntries(state: AgentStateFile): string[] {
   const read = readStateObject(state.file);
   if (!read.ok) return [];
   const projects = projectsOf(read.data, state.projectsKey);
   if (!projects) return [];
-  return Object.keys(projects).filter((path) => !existsSync(path));
+  return Object.keys(projects).filter(
+    (path) => !existsSync(path) && existsSync(dirname(path)),
+  );
 }
 
 export interface CleanStateOptions {
@@ -128,11 +148,17 @@ export interface CleanStateOptions {
  * file, after copying the file aside.
  *
  * The backup is not decoration: this is a read-modify-write of a file the
- * agent owns and may rewrite at any moment, so a concurrent write can be lost
- * either way. The window is kept to the smallest possible (parse, delete,
- * atomic rename) and the copy is what makes the loss recoverable. The rewrite
- * is 2-space JSON, matching how Claude Code formats the file, so a cleaned
- * file stays diffable against its backup.
+ * agent owns and rewrites constantly — a prune running from the daemon while
+ * Claude Code is live is the NORMAL case, not a corner. The file is stat'd
+ * before the read and again immediately before the rename, and the write is
+ * abandoned if it changed in between, so a concurrent write becomes a
+ * reported skip instead of silent wholesale loss. The remaining window is the
+ * few milliseconds between the last stat and the rename, and the timestamped
+ * copy is what makes even that recoverable.
+ *
+ * The rewrite is 2-space JSON with no trailing newline, byte-matching how
+ * Claude Code formats the file, so a cleaned file stays diffable against its
+ * backup.
  */
 export function cleanStateEntries(
   state: AgentStateFile,
@@ -147,6 +173,12 @@ export function cleanStateEntries(
   };
   if (paths.length === 0) return base;
 
+  // A user who runs only Codex or only Cursor has no `~/.claude.json`, and
+  // "nothing to clean" is the right answer for them, not an error printed on
+  // every otherwise-successful prune.
+  if (!existsSync(state.file)) return base;
+
+  const before = fingerprint(state.file);
   const read = readStateObject(state.file);
   if (!read.ok) return { ...base, error: read.error };
 
@@ -164,7 +196,10 @@ export function cleanStateEntries(
   const stamp = (options.now?.() ?? new Date())
     .toISOString()
     .replace(/[:.]/g, "-");
-  const backupPath = `${state.file}.ccmux-backup-${stamp}`;
+  // The pid disambiguates two cleanups landing in the same millisecond, which
+  // would otherwise produce the same filename and have the second (already
+  // cleaned) copy overwrite the first, losing the pre-state entirely.
+  const backupPath = `${state.file}.ccmux-backup-${stamp}-${process.pid}`;
   try {
     copyFileSync(state.file, backupPath);
   } catch (err) {
@@ -178,7 +213,24 @@ export function cleanStateEntries(
 
   const tmp = `${state.file}.ccmux-tmp-${process.pid}`;
   try {
-    writeFileSync(tmp, JSON.stringify(read.data, null, 2) + "\n");
+    // Last check before the swap. If the agent rewrote the file while we were
+    // parsing it, our in-memory copy is already stale and renaming it over the
+    // top would discard whatever it just wrote.
+    const after = fingerprint(state.file);
+    if (
+      before &&
+      after &&
+      (before.mtimeMs !== after.mtimeMs || before.size !== after.size)
+    ) {
+      return {
+        ...base,
+        backupPath,
+        error:
+          "the file changed while it was being cleaned (the agent wrote to it); " +
+          "nothing was modified, re-run to try again",
+      };
+    }
+    writeFileSync(tmp, JSON.stringify(read.data, null, 2));
     renameSync(tmp, state.file);
   } catch (err) {
     return {
@@ -188,5 +240,44 @@ export function cleanStateEntries(
     };
   }
 
+  pruneOldBackups(state.file);
   return { ...base, removed, backupPath };
+}
+
+/** mtime+size snapshot used to detect a concurrent write. */
+function fingerprint(file: string): { mtimeMs: number; size: number } | null {
+  try {
+    const st = statSync(file);
+    return { mtimeMs: st.mtimeMs, size: st.size };
+  } catch {
+    return null;
+  }
+}
+
+/** How many timestamped backups of one state file to keep. */
+const MAX_BACKUPS = 3;
+
+/**
+ * Keep the newest {@link MAX_BACKUPS} backups and unlink the rest. The real
+ * `~/.claude.json` is ~400KB, and one copy per prune run accumulates without
+ * bound otherwise. Names sort lexicographically in timestamp order, so the
+ * newest are simply the last ones.
+ */
+function pruneOldBackups(file: string): void {
+  const dir = dirname(file);
+  const prefix = `${basename(file)}.ccmux-backup-`;
+  try {
+    const backups = readdirSync(dir)
+      .filter((name) => name.startsWith(prefix))
+      .sort();
+    for (const name of backups.slice(0, -MAX_BACKUPS)) {
+      try {
+        unlinkSync(join(dir, name));
+      } catch {
+        // A backup we cannot remove is not worth failing the cleanup over.
+      }
+    }
+  } catch {
+    // Directory unreadable; leaving old backups is harmless.
+  }
 }
