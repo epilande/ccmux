@@ -1,4 +1,8 @@
-import { getDaemonUrl, SIDEBAR_PANE_TITLE } from "../../lib/config";
+import {
+  getDaemonUrl,
+  isCcmuxPane,
+  SIDEBAR_PANE_TITLE,
+} from "../../lib/config";
 import { PANE_FIELD_SEP } from "../../lib/tmux-format";
 import { theme } from "../theme";
 
@@ -423,6 +427,87 @@ export async function findRestorePane(): Promise<string | null> {
     const output = await new Response(proc.stdout).text();
     if ((await proc.exited) !== 0) return null;
     return parseRestoreCandidate(output, self);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pick the pane a TUI surface was launched over, from
+ * "#{pane_id}<sep>#{pane_title}<sep>#{pane_active}" lines for its window.
+ *
+ * ccmux's own titled surfaces (`ccmux-sidebar`, a persistent
+ * `ccmux-picker`) are always excluded: asking one of those to split "the
+ * current pane" would halve the 30-column rail or the board itself.
+ *
+ * `excludeSelf` covers the UNTITLED case, and it is surface-dependent, not
+ * a constant. A sidebar persists, so its own pane must never be the target.
+ * An inline one-shot picker is the opposite: it vacates its pane the moment
+ * it spawns, so its pane is exactly where the user is and exactly where the
+ * split belongs. Excluding it there halves the NEIGHBOUR — someone's editor
+ * — and in a single-pane window resolves to null, dropping placement
+ * entirely. A popup picker is not a pane at all, so neither rule reaches it.
+ *
+ * Falls back to the first eligible pane when the active one is ccmux's, and
+ * to null when the window holds nothing else — the caller then spawns
+ * without a placement rather than guessing at a foreign window.
+ */
+export function parseLaunchPane(
+  output: string,
+  selfPane: string | null,
+  options: { excludeSelf?: boolean } = {},
+): string | null {
+  let active: string | null = null;
+  let first: string | null = null;
+
+  for (const line of output.split("\n")) {
+    if (!line) continue;
+    const [paneId, title, isActive] = line.split(PANE_FIELD_SEP);
+    if (!paneId) continue;
+    if (options.excludeSelf && paneId === selfPane) continue;
+    if (isCcmuxPane(title ?? null)) continue;
+    if (first === null) first = paneId;
+    if (isActive === "1") active = paneId;
+  }
+
+  return active ?? first;
+}
+
+/**
+ * Resolve the pane this TUI is sitting over, for spawn placement.
+ *
+ * Resolved per spawn rather than cached at launch. A cached pane goes stale:
+ * a long-lived sidebar records its neighbour at startup, the neighbour is
+ * closed hours later, and from then on every spawn 400s with "Unknown target
+ * pane" until the sidebar restarts. Nothing else changes between launch and
+ * spawn — `TMUX_PANE` is fixed for the process — so resolving late is
+ * strictly more correct, and one `tmux list-panes` on an explicit user
+ * action is not a cost worth caching against.
+ */
+export async function resolveLaunchPane(
+  options: { excludeSelf?: boolean } = {},
+): Promise<string | null> {
+  if (!process.env.TMUX) return null;
+  const selfPane = process.env.TMUX_PANE ?? null;
+  try {
+    const proc = Bun.spawn(
+      [
+        "tmux",
+        "list-panes",
+        // Target our OWN window when we have a pane. Bare `list-panes`
+        // resolves the session's CURRENT window, which is not necessarily
+        // ours — a sidebar in a background window would enumerate someone
+        // else's panes and spawn there. A popup has no pane, and for it the
+        // client's current window is exactly what it is drawn over.
+        ...(selfPane ? ["-t", selfPane] : []),
+        "-F",
+        ["#{pane_id}", "#{pane_title}", "#{pane_active}"].join(PANE_FIELD_SEP),
+      ],
+      { stdout: "pipe", stderr: "ignore" },
+    );
+    const output = await new Response(proc.stdout).text();
+    if ((await proc.exited) !== 0) return null;
+    return parseLaunchPane(output, selfPane, options);
   } catch {
     return null;
   }
