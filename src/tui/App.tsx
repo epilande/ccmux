@@ -92,6 +92,7 @@ interface AppProps {
   promptDisplay?: PromptDisplay;
   persistent?: boolean;
   sidebar?: boolean;
+  lastSpawnAgent?: string;
   reviewHandback?: Preferences["reviewHandback"];
 }
 
@@ -119,6 +120,7 @@ export function App(props: AppProps) {
     hideIdle: props.hideIdle,
     promptDisplay: props.promptDisplay,
     sidebar: props.sidebar,
+    lastSpawnAgent: props.lastSpawnAgent,
   });
   markStartup("store_created");
 

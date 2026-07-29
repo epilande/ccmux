@@ -2919,4 +2919,114 @@ describe("store", () => {
       expect(store.isSidebarVersionNewer(2)).toBe(true);
     });
   });
+
+  describe("new session dialog", () => {
+    it("opens with the given context and the default placement/prompt", () => {
+      const store = createTUIStore();
+
+      store.actions.openNewSessionDialog({ cwd: "/repo", agent: "codex" });
+
+      expect(store.state.newSession).toEqual({
+        cwd: "/repo",
+        agent: "codex",
+        placement: "window",
+        prompt: "",
+        field: "agent",
+      });
+    });
+
+    it("closes any open context menu when it opens", () => {
+      const store = createTUIStore();
+      store.actions.showContextMenu("s1", 3, 4);
+
+      store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+
+      expect(store.state.contextMenu).toBeNull();
+      expect(store.state.groupContextMenu).toBeNull();
+    });
+
+    it("closes back to null", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+
+      store.actions.closeNewSessionDialog();
+
+      expect(store.state.newSession).toBeNull();
+    });
+
+    it("cycles field focus in both directions and wraps", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("placement");
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("prompt");
+      // Wraps forward past the last field...
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("agent");
+      // ...and backward past the first.
+      store.actions.moveNewSessionField(-1);
+      expect(store.state.newSession?.field).toBe("prompt");
+    });
+
+    it("updates agent, placement, prompt, and field", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+
+      store.actions.setNewSessionAgent("pi");
+      store.actions.setNewSessionPlacement("split-h");
+      store.actions.setNewSessionPrompt("fix the tests");
+      store.actions.setNewSessionField("prompt");
+
+      expect(store.state.newSession).toEqual({
+        cwd: "/repo",
+        agent: "pi",
+        placement: "split-h",
+        prompt: "fix the tests",
+        field: "prompt",
+      });
+    });
+
+    it("ignores draft edits while the dialog is closed", () => {
+      const store = createTUIStore();
+
+      store.actions.setNewSessionAgent("pi");
+      store.actions.setNewSessionPlacement("split-v");
+      store.actions.setNewSessionPrompt("hi");
+      store.actions.moveNewSessionField(1);
+
+      expect(store.state.newSession).toBeNull();
+    });
+
+    it("restores the last spawned agent from persisted state", () => {
+      const store = createTUIStore({ lastSpawnAgent: "codex" });
+      expect(store.state.lastSpawnAgent).toBe("codex");
+    });
+
+    it("persists the last spawned agent, and only when it changes", async () => {
+      const persisted: Record<string, unknown>[] = [];
+      const store = _createTUIStore({
+        onPersistState: (updates) => persisted.push(updates),
+      });
+
+      store.actions.setLastSpawnAgent("codex");
+      await waitForDebounce();
+      expect(store.state.lastSpawnAgent).toBe("codex");
+      expect(persisted).toEqual([{ lastSpawnAgent: "codex" }]);
+
+      // Re-spawning the same agent is not a state change worth a disk write.
+      store.actions.setLastSpawnAgent("codex");
+      await waitForDebounce();
+      expect(persisted).toEqual([{ lastSpawnAgent: "codex" }]);
+    });
+
+    it("picks up a last spawned agent written by another instance", () => {
+      const store = createTUIStore({ lastSpawnAgent: "claude" });
+
+      store.actions.reloadUIState({ lastSpawnAgent: "opencode" });
+
+      expect(store.state.lastSpawnAgent).toBe("opencode");
+    });
+  });
 });

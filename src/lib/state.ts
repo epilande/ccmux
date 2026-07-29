@@ -21,6 +21,10 @@ export interface UIState {
   showPrompt?: boolean;
   hideIdle?: boolean;
   groupBy?: GroupBy;
+  /** Agent last spawned from the picker's new-session dialog. Persisted
+   *  because the one-shot picker exits as soon as it spawns, so the
+   *  "last agent" default only survives on disk. */
+  lastSpawnAgent?: string;
 }
 
 /**

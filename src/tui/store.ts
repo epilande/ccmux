@@ -56,6 +56,43 @@ export type ConfirmAction =
   | "restart"
   | "send-review";
 
+/** Where the new session's pane goes, in the dialog's vocabulary.
+ *  `split-h`/`split-v` are tmux's own directions (`-h` is left/right). */
+export type NewSessionPlacement = "window" | "split-h" | "split-v";
+
+export type NewSessionField = "agent" | "placement" | "prompt";
+
+/**
+ * The dialog's fields, in focus order. Everything about the dialog is driven
+ * off this list plus a matching `NewSessionDraft` key: focus movement, the
+ * rendered rows, and which field the option keys apply to. Adding the
+ * worktree destination field (issue #69) means adding an entry here, a draft
+ * key, and one render branch — no rework of the key handling.
+ */
+export const NEW_SESSION_FIELDS: readonly NewSessionField[] = [
+  "agent",
+  "placement",
+  "prompt",
+];
+
+/**
+ * In-progress "new session" request. Every field has a usable default, so
+ * the dialog can be accepted with a single Enter.
+ *
+ * `cwd` is derived from the row the dialog was opened over and shown but
+ * never edited: the picker already knows which directory the user means,
+ * and a free-text path field would be the slowest part of a flow whose
+ * point is speed.
+ */
+export interface NewSessionDraft {
+  cwd: string;
+  agent: string;
+  placement: NewSessionPlacement;
+  prompt: string;
+  /** Which field the option/text keys currently apply to. */
+  field: NewSessionField;
+}
+
 interface TUIState {
   sessions: EnrichedSession[];
   selectedSessionId: string | null;
@@ -81,6 +118,12 @@ interface TUIState {
   toastMessage: string | null;
   contextMenu: { sessionId: string; x: number; y: number } | null;
   groupContextMenu: { groupKey: string; x: number; y: number } | null;
+  /** Open new-session dialog, or null when it is closed. */
+  newSession: NewSessionDraft | null;
+  /** Agent last spawned from the dialog, the default when the selected row
+   *  offers none. Persisted, because the one-shot picker exits on spawn and
+   *  an in-process memory would never be read again. */
+  lastSpawnAgent: string | null;
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   groupBy: GroupBy;
@@ -104,6 +147,8 @@ interface TUIStoreOptions {
   collapsedGroups?: string[];
   pinnedGroups?: string[];
   hideIdle?: boolean;
+  /** Last agent spawned from the new-session dialog, restored from UIState. */
+  lastSpawnAgent?: string;
   sidebar?: boolean;
   /** Override state persistence (pass no-op in tests) */
   onPersistState?: (updates: Partial<UIState>) => void;
@@ -374,6 +419,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     toastMessage: null,
     contextMenu: null,
     groupContextMenu: null,
+    newSession: null,
+    lastSpawnAgent: options.lastSpawnAgent ?? null,
     columns: options.columns,
     breakpoints: options.breakpoints,
     groupBy: options.groupBy ?? DEFAULT_GROUP_BY,
@@ -1141,6 +1188,68 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("groupContextMenu", null);
     },
 
+    /**
+     * Open the new-session dialog over a derived context. `cwd` and the
+     * default `agent` are resolved by the caller, which is the only place
+     * that knows what the selection means (a session row, a group header,
+     * or nothing at all).
+     */
+    openNewSessionDialog(init: { cwd: string; agent: string }) {
+      batch(() => {
+        setState("contextMenu", null);
+        setState("groupContextMenu", null);
+        setState("newSession", {
+          cwd: init.cwd,
+          agent: init.agent,
+          placement: "window",
+          prompt: "",
+          field: NEW_SESSION_FIELDS[0]!,
+        });
+      });
+    },
+
+    closeNewSessionDialog() {
+      setState("newSession", null);
+    },
+
+    /** Move focus by `delta` fields, wrapping at both ends. */
+    moveNewSessionField(delta: number) {
+      const draft = state.newSession;
+      if (!draft) return;
+      const count = NEW_SESSION_FIELDS.length;
+      const current = NEW_SESSION_FIELDS.indexOf(draft.field);
+      const next = (((current + delta) % count) + count) % count;
+      setState("newSession", "field", NEW_SESSION_FIELDS[next]!);
+    },
+
+    setNewSessionField(field: NewSessionField) {
+      if (!state.newSession) return;
+      setState("newSession", "field", field);
+    },
+
+    setNewSessionAgent(agent: string) {
+      if (!state.newSession) return;
+      setState("newSession", "agent", agent);
+    },
+
+    setNewSessionPlacement(placement: NewSessionPlacement) {
+      if (!state.newSession) return;
+      setState("newSession", "placement", placement);
+    },
+
+    setNewSessionPrompt(prompt: string) {
+      if (!state.newSession) return;
+      setState("newSession", "prompt", prompt);
+    },
+
+    /** Remember the agent a spawn actually used, so the next dialog opened
+     *  without an agent in context defaults to it. */
+    setLastSpawnAgent(agent: string) {
+      if (state.lastSpawnAgent === agent) return;
+      setState("lastSpawnAgent", agent);
+      persistUIState({ lastSpawnAgent: agent });
+    },
+
     togglePreview() {
       if (options.sidebar) return;
       const next = !state.showPreview;
@@ -1265,6 +1374,9 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         }
         if (freshState.pinnedGroups !== undefined) {
           setPinnedGroups(freshState.pinnedGroups);
+        }
+        if (freshState.lastSpawnAgent !== undefined) {
+          setState("lastSpawnAgent", freshState.lastSpawnAgent);
         }
       });
     },
