@@ -19,6 +19,7 @@ import {
   branchDeletionFor,
   describeIgnoredFiles,
   ghPRStateLookup,
+  isRepoAdminDir,
   normalizePath,
   paneListIncludes,
   runPrune,
@@ -941,5 +942,195 @@ describe("paneListIncludes", () => {
     expect(paneListIncludes(listing, "%99")).toBe(false);
     expect(paneListIncludes(listing, "%")).toBe(false);
     expect(paneListIncludes("", "%1")).toBe(false);
+  });
+});
+
+/**
+ * The `upstream-gone` deviation, pinned. A deleted remote branch is a strong
+ * hint but NOT proof of a merge, so this reason uses the safe `-d`. When git
+ * then refuses because the branch really does carry unmerged commits, the
+ * worktree still goes and the branch survives with the refusal reported —
+ * that combination is the whole point, so it is asserted rather than assumed.
+ */
+describe("branch deletion refusal", () => {
+  it("removes the worktree but keeps an unmerged branch, and says why", async () => {
+    const { repo, remote } = await makeRepo("refusal");
+    const wt = await addWorktree(repo, "feat/unmerged", { push: true });
+    await git(remote, ["update-ref", "-d", "refs/heads/feat/unmerged"]);
+    const scan = await scanRepo(repo, { lookupPR: noPR });
+    expect(scan.candidates[0]).toMatchObject({
+      reason: "upstream-gone",
+      branchDeletion: "safe",
+    });
+
+    const result = await runPrune(scan.candidates, {
+      stateFiles: [],
+      log: () => {},
+    });
+
+    expect(result.outcomes[0].removed).toBe(true);
+    expect(result.outcomes[0].branchDeleted).toBe(false);
+    expect(existsSync(wt)).toBe(false);
+    const step = result.outcomes[0].steps.find(
+      (s) => s.step === "delete branch",
+    );
+    expect(step?.ok).toBe(false);
+    expect(step?.detail).toContain("kept:");
+    expect(step?.detail).toContain("not fully merged");
+    const branches = await git(repo, ["branch", "--format=%(refname:short)"]);
+    expect(branches.split("\n")).toContain("feat/unmerged");
+  });
+});
+
+/**
+ * A tag sharing a branch's name outranks the branch in git's revision
+ * disambiguation, so an unmerged branch answered "yes" to the ancestry check
+ * and lost its directory on a false reason.
+ */
+describe("tag shadowing", () => {
+  it("does not call a branch merged because a same-named tag is", async () => {
+    const { repo } = await makeRepo("tag-shadow");
+    const wt = await addWorktree(repo, "release");
+    // A tag named exactly like the branch, pointing at something merged.
+    await git(repo, ["tag", "release", "main"]);
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+
+    expect(scan.candidates).toEqual([]);
+    expect(existsSync(wt)).toBe(true);
+  });
+});
+
+describe("reclaimRepoMetadata blast radius", () => {
+  it("leaves a user-locked worktree of the same repo untouched", async () => {
+    const { repo } = await makeRepo("blast");
+    const target = await addWorktree(repo, "feat/target");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/target"]);
+    // A second worktree the user locked, whose path is currently missing —
+    // git's own documented reason for locking (external drive, network share).
+    const external = await addWorktree(repo, "feat/external");
+    await git(repo, ["worktree", "lock", external]);
+    rmSync(external, { recursive: true, force: true });
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+    expect(scan.candidates.map((c) => c.name)).toEqual(["feat-target"]);
+    await runPrune(scan.candidates, { stateFiles: [], log: () => {} });
+
+    // The locked registration must survive: the user never selected it.
+    // Compared by basename, since the deleted path can no longer be resolved
+    // through symlinks the way git recorded it.
+    const list = await git(repo, ["worktree", "list", "--porcelain"]);
+    expect(list).toContain("feat-external");
+    expect(list).not.toContain("feat-target");
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it("does not prune the repo at all when every candidate was refused", async () => {
+    const { repo } = await makeRepo("blast-refused");
+    const wt = await addWorktree(repo, "feat/dirty-only");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/dirty-only"]);
+    writeFileSync(join(wt, "scratch.txt"), "work\n");
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+
+    const result = await runPrune(scan.candidates, {
+      stateFiles: [],
+      log: () => {},
+    });
+
+    expect(result.outcomes[0].removed).toBe(false);
+    expect(
+      result.outcomes[0].steps.some((s) => s.step === "git worktree prune"),
+    ).toBe(false);
+  });
+});
+
+describe("isRepoAdminDir", () => {
+  it("accepts this repo's worktree admin dirs and nothing else", () => {
+    expect(isRepoAdminDir("/r/.git/worktrees/a", "/r")).toBe(true);
+    expect(isRepoAdminDir("/r/.git/worktrees/a/sub", "/r")).toBe(true);
+    expect(isRepoAdminDir("/r/.git", "/r")).toBe(false);
+    expect(isRepoAdminDir("/elsewhere/.git/worktrees/a", "/r")).toBe(false);
+    expect(isRepoAdminDir("/etc", "/r")).toBe(false);
+  });
+});
+
+describe("background sessions", () => {
+  it("is never signalled, but still counts for the working gate", async () => {
+    const { repo } = await makeRepo("bg");
+    const wt = await addWorktree(repo, "feat/bg");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/bg"]);
+    const scan = await scanRepo(repo, {
+      skipFetch: true,
+      lookupPR: noPR,
+      sessionsFor: (path) =>
+        path === normalizePath(wt)
+          ? [
+              session({
+                status: "idle",
+                pid: 4242,
+                tmuxPane: null,
+                background: true,
+              }),
+            ]
+          : [],
+    });
+    const killed: number[] = [];
+
+    const result = await runPrune(scan.candidates, {
+      stateFiles: [],
+      log: () => {},
+      killProcess: (pid) => {
+        killed.push(pid);
+      },
+    });
+
+    expect(killed).toEqual([]);
+    expect(
+      result.outcomes[0].steps.some((s) => s.step === "skip background agent"),
+    ).toBe(true);
+  });
+
+  it("blocks the whole worktree when a background agent is working", async () => {
+    const { repo } = await makeRepo("bg-working");
+    const wt = await addWorktree(repo, "feat/bg2");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/bg2"]);
+
+    const scan = await scanRepo(repo, {
+      skipFetch: true,
+      lookupPR: noPR,
+      sessionsFor: (path) =>
+        path === normalizePath(wt)
+          ? [session({ status: "working", background: true })]
+          : [],
+    });
+
+    expect(scan.candidates).toEqual([]);
+    expect(scan.skipped[0].reason).toContain("working");
+  });
+});
+
+/**
+ * Dirtiness is decided at scan time but acted on many seconds later, so it is
+ * re-checked at the point of no return.
+ */
+describe("dirty re-check before removal", () => {
+  it("refuses a worktree that became dirty after it was listed", async () => {
+    const { repo } = await makeRepo("recheck");
+    const wt = await addWorktree(repo, "feat/recheck");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/recheck"]);
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+    expect(scan.candidates[0].dirty).toBe(false);
+
+    // Someone edits in the worktree between the scan and the removal.
+    writeFileSync(join(wt, "just-typed.txt"), "unsaved work\n");
+
+    const result = await runPrune(scan.candidates, {
+      stateFiles: [],
+      log: () => {},
+    });
+
+    expect(result.outcomes[0].removed).toBe(false);
+    expect(result.outcomes[0].error).toContain("became dirty");
+    expect(existsSync(wt)).toBe(true);
   });
 });

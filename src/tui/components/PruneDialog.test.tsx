@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
+import { createMockKeys } from "@opentui/core/testing";
 import type { PruneCandidate, PruneScan } from "../../daemon/worktree-prune";
 import { PruneDialog, partitionSelection } from "./PruneDialog";
 
@@ -190,5 +191,224 @@ describe("partitionSelection", () => {
     );
     expect(removable).toEqual([]);
     expect(blockedDirty).toEqual([]);
+  });
+});
+
+/**
+ * Keyboard behaviour. These are the interactions that decide whether
+ * uncommitted work is deleted, so they are driven through real key events
+ * rather than by calling the handlers directly.
+ */
+describe("PruneDialog keys", () => {
+  const clean = candidate({ path: "/repo/wt/clean", name: "clean" });
+  const dirty = candidate({
+    path: "/repo/wt/dirty",
+    name: "dirty",
+    dirty: true,
+    untracked: 1,
+  });
+
+  async function renderWithKeys(
+    scan: PruneScan,
+    opts: { compact?: boolean; onClose?: () => void } = {},
+  ) {
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () =>
+      new Response(JSON.stringify(scan), {
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof fetch);
+    setup = await testRender(
+      () => (
+        <PruneDialog
+          repo={null}
+          compact={opts.compact}
+          onClose={opts.onClose ?? (() => {})}
+        />
+      ),
+      { width: 90, height: 20 },
+    );
+    await setup.renderOnce();
+    await Promise.resolve();
+    await setup.renderOnce();
+    const keys = createMockKeys(setup.renderer);
+    return {
+      keys,
+      frame: async () => {
+        await setup!.renderOnce();
+        return setup!.captureCharFrame();
+      },
+    };
+  }
+
+  it("selects with space and counts it", async () => {
+    const { keys, frame } = await renderWithKeys({
+      candidates: [clean],
+      skipped: [],
+    });
+
+    keys.pressKey(" ");
+    expect(await frame()).toContain("enter prune 1");
+  });
+
+  // Space alone must never arm a dirty row: that is the whole gate.
+  it("does not count a dirty row selected with space alone", async () => {
+    const { keys, frame } = await renderWithKeys({
+      candidates: [dirty],
+      skipped: [],
+    });
+
+    keys.pressKey(" ");
+    const shown = await frame();
+    expect(shown).toContain("[x]");
+    expect(shown).toContain("enter prune 0");
+  });
+
+  it("arms a dirty row with D and disarms it again", async () => {
+    const { keys, frame } = await renderWithKeys({
+      candidates: [dirty],
+      skipped: [],
+    });
+
+    keys.pressKey("D", { shift: true });
+    expect(await frame()).toContain("enter prune 1");
+    keys.pressKey("D", { shift: true });
+    expect(await frame()).toContain("enter prune 0");
+  });
+
+  // Lowercase `d` used to opt in AND auto-select, putting deletion of
+  // uncommitted work three keystrokes from the cursor on a vim operator key.
+  it("ignores lowercase d", async () => {
+    const { keys, frame } = await renderWithKeys({
+      candidates: [dirty],
+      skipped: [],
+    });
+
+    keys.pressKey("d");
+    const shown = await frame();
+    expect(shown).toContain("[ ]");
+    expect(shown).toContain("enter prune 0");
+  });
+
+  it("selects only clean rows with a", async () => {
+    const { keys, frame } = await renderWithKeys({
+      candidates: [clean, dirty],
+      skipped: [],
+    });
+
+    keys.pressKey("a");
+    expect(await frame()).toContain("enter prune 1");
+  });
+
+  // A dirty opt-in must not outlive the selection that carried it.
+  it("clears a dirty opt-in when a deselects everything", async () => {
+    const { keys, frame } = await renderWithKeys({
+      candidates: [dirty],
+      skipped: [],
+    });
+
+    keys.pressKey("D", { shift: true });
+    expect(await frame()).toContain("enter prune 1");
+    keys.pressKey("a"); // deselects: the only row is dirty
+    expect(await frame()).toContain("enter prune 0");
+    keys.pressKey(" "); // reselect by hand, with no fresh D
+    expect(await frame()).toContain("enter prune 0");
+  });
+
+  it("drops the opt-in when the row is deselected directly", async () => {
+    const { keys, frame } = await renderWithKeys({
+      candidates: [dirty],
+      skipped: [],
+    });
+
+    keys.pressKey("D", { shift: true });
+    keys.pressKey(" "); // deselect
+    keys.pressKey(" "); // reselect
+    expect(await frame()).toContain("enter prune 0");
+  });
+
+  it("names the destructive case at the confirmation step", async () => {
+    const { keys, frame } = await renderWithKeys({
+      candidates: [dirty],
+      skipped: [],
+    });
+
+    keys.pressKey("D", { shift: true });
+    keys.pressEnter();
+    expect(await frame()).toContain("INCLUDING 1 with uncommitted work");
+  });
+
+  it("does not advance to confirm with nothing effective", async () => {
+    const { keys, frame } = await renderWithKeys({
+      candidates: [dirty],
+      skipped: [],
+    });
+
+    keys.pressKey(" ");
+    keys.pressEnter();
+    const shown = await frame();
+    expect(shown).not.toContain("y / n");
+    expect(shown).toContain("enter prune 0");
+  });
+
+  it("backs out of confirm with n", async () => {
+    const { keys, frame } = await renderWithKeys({
+      candidates: [clean],
+      skipped: [],
+    });
+
+    keys.pressKey(" ");
+    keys.pressEnter();
+    expect(await frame()).toContain("y / n");
+    keys.pressKey("n");
+    expect(await frame()).toContain("enter prune 1");
+  });
+
+  it("closes on q", async () => {
+    let closed = 0;
+    const { keys } = await renderWithKeys(
+      { candidates: [clean], skipped: [] },
+      { onClose: () => closed++ },
+    );
+
+    keys.pressKey("q");
+    expect(closed).toBe(1);
+  });
+
+  it("keeps the live count visible in compact mode", async () => {
+    const { keys, frame } = await renderWithKeys(
+      { candidates: [clean], skipped: [] },
+      { compact: true },
+    );
+
+    const before = await frame();
+    expect(before).toContain("enter 0");
+    keys.pressKey(" ");
+    expect(await frame()).toContain("enter 1");
+  });
+});
+
+/**
+ * A ~40-column sidebar truncates from the right, so the compact layout puts
+ * the dirty warning on its own line. Sharing one with the reason cut the
+ * warning in half and lost the only text explaining why the row is held back.
+ */
+describe("PruneDialog compact layout", () => {
+  const dirty = candidate({ dirty: true, untracked: 1, detail: "merged into origin/main" });
+
+  it("keeps the whole dirty warning readable at sidebar width", async () => {
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () =>
+      new Response(JSON.stringify({ candidates: [dirty], skipped: [] }), {
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof fetch);
+    setup = await testRender(
+      () => <PruneDialog repo={null} compact onClose={() => {}} />,
+      { width: 44, height: 16 },
+    );
+    await setup.renderOnce();
+    await Promise.resolve();
+    await setup.renderOnce();
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("DIRTY, press D to include");
+    expect(frame).toContain("merged into origin/main");
   });
 });

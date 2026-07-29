@@ -1,4 +1,12 @@
-import { describe, it, expect, spyOn, afterAll, mock } from "bun:test";
+import {
+  describe,
+  it,
+  expect,
+  spyOn,
+  afterAll,
+  afterEach,
+  mock,
+} from "bun:test";
 import {
   DaemonServer,
   rejectCrossOriginBrowser,
@@ -18,6 +26,7 @@ import { stubInvoker } from "./invokers/test-helpers";
 import type { HookAdapter } from "./hook-adapter";
 import { PRResolver } from "./pr-resolver";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -3269,5 +3278,177 @@ describe("broadcastEvent stringify-once (issue #55 item 3)", () => {
     expect(frames.every((f) => f !== undefined)).toBe(true);
     expect(new Set(frames).size).toBe(1);
     expect(frames[0]).toBe(`data: ${JSON.stringify(event)}\n\n`);
+  });
+});
+
+/**
+ * Worktree prune endpoints.
+ *
+ * The property under test is the one the design leans on hardest and the one
+ * prose alone cannot guarantee: `POST /worktrees/prune` takes PATHS, re-scans
+ * in this process, and refuses anything the fresh scan does not currently
+ * classify as removable. Without that, a stale client list is a delete
+ * primitive.
+ */
+describe("worktree prune endpoints", () => {
+  let root: string;
+
+  function makePruneFixture(): { repo: string; worktree: string } {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-prune-endpoint-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    const worktree = join(root, "wt");
+    runFixtureGit(repo, "worktree", "add", "-b", "feat/done", worktree, "main");
+    writeFileSync(join(worktree, "a.txt"), "a\n");
+    runFixtureGit(worktree, "add", "-A");
+    runFixtureGit(worktree, "commit", "-m", "work");
+    runFixtureGit(repo, "merge", "--no-ff", "-m", "merge", "feat/done");
+    return { repo, worktree };
+  }
+
+  /** A server whose session list puts one session inside `cwd`. */
+  function serverFor(cwd: string) {
+    const ctx = createServer();
+    ctx.manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd,
+      pid: null,
+    });
+    return ctx;
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  async function post(
+    internals: ServerInternals,
+    body: unknown,
+  ): Promise<Response> {
+    return internals.handleRequest(
+      new Request("http://127.0.0.1:2269/worktrees/prune", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  it("lists a merged worktree as a candidate", async () => {
+    const { repo, worktree } = makePruneFixture();
+    const { internals } = serverFor(repo);
+
+    const res = await internals.handleRequest(
+      new Request("http://127.0.0.1:2269/worktrees/prune-candidates"),
+    );
+    const body = (await res.json()) as { candidates: Array<{ path: string }> };
+
+    expect(res.status).toBe(200);
+    expect(body.candidates.map((c) => c.path)).toContain(
+      realpathSync(worktree),
+    );
+  });
+
+  // The core guarantee: a path the fresh scan does not classify is refused,
+  // not removed. This covers a stale client list, a replayed request, and a
+  // hand-written POST naming something outside the candidate set.
+  it("rejects a path the fresh scan does not classify as removable", async () => {
+    const { repo } = makePruneFixture();
+    const { internals } = serverFor(repo);
+    const outsider = join(root, "not-a-candidate");
+    mkdirSync(outsider, { recursive: true });
+
+    const res = await post(internals, { paths: [outsider] });
+    const body = (await res.json()) as { error: string };
+
+    expect(res.status).toBe(409);
+    expect(body.error).toContain("Not currently removable");
+    // And it is still there.
+    expect(existsSync(outsider)).toBe(true);
+  });
+
+  it("rejects the main checkout even though a session lives there", async () => {
+    const { repo } = makePruneFixture();
+    const { internals } = serverFor(repo);
+
+    const res = await post(internals, { paths: [repo] });
+
+    expect(res.status).toBe(409);
+    expect(existsSync(repo)).toBe(true);
+  });
+
+  it("refuses an empty selection", async () => {
+    const { repo } = makePruneFixture();
+    const { internals } = serverFor(repo);
+
+    const res = await post(internals, { paths: [] });
+    const body = (await res.json()) as { error: string };
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("No worktrees selected");
+  });
+
+  it("refuses a dirty worktree that carries no opt-in, and keeps it on disk", async () => {
+    const { repo, worktree } = makePruneFixture();
+    writeFileSync(join(worktree, "uncommitted.txt"), "work\n");
+    const { internals } = serverFor(repo);
+
+    const res = await post(internals, { paths: [worktree] });
+    const body = (await res.json()) as {
+      outcomes: Array<{ removed: boolean; error?: string }>;
+    };
+
+    expect(res.status).toBe(200);
+    expect(body.outcomes[0].removed).toBe(false);
+    expect(body.outcomes[0].error).toContain("not opted in");
+    expect(existsSync(worktree)).toBe(true);
+  });
+
+  it("removes a dirty worktree once its path carries the opt-in", async () => {
+    const { repo, worktree } = makePruneFixture();
+    writeFileSync(join(worktree, "uncommitted.txt"), "work\n");
+    const { internals } = serverFor(repo);
+
+    const res = await post(internals, {
+      paths: [worktree],
+      allowDirty: [worktree],
+    });
+    const body = (await res.json()) as {
+      outcomes: Array<{ removed: boolean }>;
+    };
+
+    expect(body.outcomes[0].removed).toBe(true);
+    expect(existsSync(worktree)).toBe(false);
+  });
+
+  it("changes nothing under dryRun", async () => {
+    const { repo, worktree } = makePruneFixture();
+    const { internals } = serverFor(repo);
+
+    const res = await post(internals, { paths: [worktree], dryRun: true });
+    const body = (await res.json()) as { dryRun: boolean };
+
+    expect(body.dryRun).toBe(true);
+    expect(existsSync(worktree)).toBe(true);
+  });
+
+  // Duplicate spellings of one worktree used to produce several outcomes for
+  // the same directory, and branch deletion always resolved the first, so a
+  // successful run rendered as a wall of errors.
+  it("collapses duplicate and aliased spellings of one path", async () => {
+    const { repo, worktree } = makePruneFixture();
+    const { internals } = serverFor(repo);
+
+    const res = await post(internals, {
+      paths: [worktree, worktree, `${worktree}/`],
+    });
+    const body = (await res.json()) as { outcomes: unknown[] };
+
+    expect(body.outcomes).toHaveLength(1);
   });
 });
