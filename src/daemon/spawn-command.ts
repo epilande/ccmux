@@ -36,7 +36,7 @@ export function normalizeSplit(value: unknown): BuildResult<ResolvedSplit> {
   if (value === "h" || value === "v") return { ok: true, value };
   return {
     ok: false,
-    error: 'Invalid \'split\' field: expected true, false, "h", or "v"',
+    error: `Invalid 'split' field: expected true, false, "h", or "v"`,
   };
 }
 
@@ -49,7 +49,7 @@ export function normalizeTarget(
   if (typeof value !== "string" || !PANE_ID_PATTERN.test(value)) {
     return {
       ok: false,
-      error: "Invalid 'target' field: expected a tmux pane id such as \"%12\"",
+      error: `Invalid 'target' field: expected a tmux pane id such as "%12"`,
     };
   }
   return { ok: true, value };
@@ -70,9 +70,10 @@ export function escapeSingleQuoted(value: string): string {
  * sits inside single quotes: that is the quoting `escapeSingleQuoted`
  * assumes. A bare or double-quoted placeholder would let prompt text
  * reach the shell as syntax, so a template that gets it wrong is
- * refused rather than silently executed.
+ * refused rather than silently executed. Kept module-private so the check
+ * cannot be used apart from the escaping it presupposes.
  */
-export function promptPlaceholderIsQuoted(template: string): boolean {
+function promptPlaceholderIsQuoted(template: string): boolean {
   const idx = template.indexOf("{prompt}");
   if (idx < 0) return false;
   const before = template[idx - 1];
