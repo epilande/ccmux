@@ -7,6 +7,37 @@ import {
   afterEach,
   mock,
 } from "bun:test";
+import { join as joinPath } from "path";
+import { tmpdir as osTmpdir } from "os";
+
+/**
+ * Redirect CCMUX_HOME before anything imports `lib/config`, whose
+ * STATE_FILE is frozen at module load.
+ *
+ * `handleActivePaneNotification` reaches `AttentionTracker.save()`, which
+ * writes state.json. Running this file ALONE therefore rewrote the
+ * developer's real ~/.config/ccmux/state.json; a full `bun test` only
+ * escaped it because another test file happens to set CCMUX_HOME
+ * process-wide first, which is accidental and order-dependent. AGENTS.md
+ * documents single-file runs as normal, so this file protects itself.
+ *
+ * The env var alone is not enough — `import` statements are hoisted, so
+ * `lib/config` has already frozen STATE_FILE by the time this line runs.
+ * The module mock is what actually redirects it, matching
+ * `index.no-hooks.test.ts`; the env var covers the paths that re-read
+ * CCMUX_HOME at call time.
+ */
+const serverTestHome = joinPath(
+  osTmpdir(),
+  `ccmux-server-test-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+);
+process.env.CCMUX_HOME = serverTestHome;
+
+const actualCcmuxConfig = await import("../lib/config");
+mock.module("../lib/config", () => ({
+  ...actualCcmuxConfig,
+  STATE_FILE: joinPath(serverTestHome, "state.json"),
+}));
 import {
   DaemonServer,
   rejectCrossOriginBrowser,
