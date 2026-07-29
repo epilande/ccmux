@@ -68,6 +68,12 @@ export function partitionSelection(
   return { removable, blockedDirty };
 }
 
+/** Dirty rows stay flagged yellow unless the cursor is on them. */
+function rowColor(candidate: PruneCandidate, isCursor: boolean): string {
+  if (isCursor) return theme.text;
+  return candidate.dirty ? theme.yellow : theme.subtext;
+}
+
 /** Green for a proven merge, blue for the inferred one, peach for closed. */
 function reasonColor(reason: PruneCandidate["reason"]): string {
   switch (reason) {
@@ -236,11 +242,6 @@ export const PruneDialog: Component<PruneDialogProps> = (props) => {
 
     if (listBox) listBox.scrollTo(Math.max(0, index() - 2));
   });
-
-  const rowColor = (candidate: PruneCandidate, isCursor: boolean): string => {
-    if (isCursor) return theme.text;
-    return candidate.dirty ? theme.yellow : theme.subtext;
-  };
 
   return (
     <box

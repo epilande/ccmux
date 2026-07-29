@@ -401,17 +401,24 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Open the prune surface scoped to this group's repo. The repo comes off a
-   * session in the group rather than the group key: a group key is a display
-   * label, while `mainRepoRoot` is the same value for a worktree and its main
-   * checkout, which is exactly what the scan keys off.
+   * Repo to scope a prune scan to: the selected session's, or — when a group
+   * header is selected — one from the group. The repo comes off a session
+   * rather than the group key because a group key is a display label, while
+   * `mainRepoRoot` is the same value for a worktree and its main checkout,
+   * which is exactly what the scan keys off. Null scans every known repo.
    */
+  function selectedRepoRoot(): string | null {
+    return (
+      store.selectedSession()?.mainRepoRoot ??
+      store.selectedGroupSessions().find((s) => s.mainRepoRoot)?.mainRepoRoot ??
+      null
+    );
+  }
+
   function groupContextMenuPrune() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
-    const repo =
-      store.selectedGroupSessions().find((s) => s.mainRepoRoot)?.mainRepoRoot ??
-      null;
+    const repo = selectedRepoRoot();
     store.actions.hideGroupContextMenu();
     store.actions.showPrune(repo);
   }
@@ -1164,12 +1171,7 @@ export function App(props: AppProps) {
       case "w":
         // Scoped to the selected row's repo when there is one, so `W` on a
         // group behaves like the group menu's item; global otherwise.
-        store.actions.showPrune(
-          store.selectedSession()?.mainRepoRoot ??
-            store.selectedGroupSessions().find((s) => s.mainRepoRoot)
-              ?.mainRepoRoot ??
-            null,
-        );
+        store.actions.showPrune(selectedRepoRoot());
         event.preventDefault();
         break;
 
