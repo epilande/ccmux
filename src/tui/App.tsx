@@ -17,7 +17,7 @@ import {
 } from "@opentui/solid";
 import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../types/session";
-import { createTUIStore, TickContext } from "./store";
+import { createTUIStore, TickContext, type NewSessionPlacement } from "./store";
 import { killActionPath, restartActionPath } from "./utils/invoke-actions";
 import {
   formatReviewPrompt,
@@ -109,6 +109,19 @@ function errText(err: unknown): string {
   }
   return String(err);
 }
+
+/** The directory a session stands for: its pane's cwd when the daemon has
+ *  one, since that follows the agent as it cds, else where it started. */
+function sessionCwd(session: EnrichedSession): string {
+  return session.paneCwd ?? session.cwd;
+}
+
+/** `POST /spawn`'s `split` for each placement: a new window is no split. */
+const SPAWN_SPLIT: Record<NewSessionPlacement, "h" | "v" | false> = {
+  window: false,
+  "split-h": "h",
+  "split-v": "v",
+};
 
 export function App(props: AppProps) {
   const renderer = useRenderer();
@@ -287,7 +300,7 @@ export function App(props: AppProps) {
 
   function reviewSession(session: EnrichedSession) {
     if (reviewInFlight) return;
-    const cwd = session.paneCwd ?? session.cwd;
+    const cwd = sessionCwd(session);
     if (!cwd) {
       store.actions.showToast("Review failed: no working directory");
       return;
@@ -450,10 +463,7 @@ export function App(props: AppProps) {
     if (!session) return;
     // Works for paneless background rows too: their cwd is known, and
     // placement is resolved from the picker's launch pane, not the row's.
-    openNewSession({
-      cwd: session.paneCwd ?? session.cwd,
-      agent: session.agentType,
-    });
+    openNewSession({ cwd: sessionCwd(session), agent: session.agentType });
   }
 
   function groupContextMenuNewSession() {
@@ -461,7 +471,7 @@ export function App(props: AppProps) {
     if (!cm) return;
     const first = store.selectedGroupSessions()[0];
     store.actions.hideGroupContextMenu();
-    openNewSession({ cwd: first ? (first.paneCwd ?? first.cwd) : pickerCwd() });
+    openNewSession({ cwd: first ? sessionCwd(first) : pickerCwd() });
   }
 
   function contextMenuReview() {
@@ -675,10 +685,8 @@ export function App(props: AppProps) {
    * The context a dialog opened over `item` inherits.
    *
    * cwd is derived, never asked: a session row means that session's
-   * directory (its pane's cwd when the daemon has one, since that follows
-   * the agent as it cds), a group header means the directory the group
-   * stands for, and no selection at all falls back to where the picker was
-   * launched.
+   * directory, a group header means the directory the group stands for, and
+   * no selection at all falls back to where the picker was launched.
    */
   function newSessionContext(item: FlatItem | null): {
     cwd: string;
@@ -686,11 +694,11 @@ export function App(props: AppProps) {
   } {
     if (item?.type === "session") {
       const session = item.filteredSession.session;
-      return { cwd: session.paneCwd ?? session.cwd, agent: session.agentType };
+      return { cwd: sessionCwd(session), agent: session.agentType };
     }
     if (item?.type === "header") {
       const first = item.members[0]?.session;
-      if (first) return { cwd: first.paneCwd ?? first.cwd };
+      if (first) return { cwd: sessionCwd(first) };
     }
     return { cwd: pickerCwd() };
   }
@@ -722,54 +730,59 @@ export function App(props: AppProps) {
   });
 
   /**
-   * The options j/k and the number keys apply to, for whichever field has
-   * focus. Every option field goes through this one path, so the worktree
-   * destination field (#69) needs only its own case here and in
-   * `applyFocusedOption`.
+   * The choices j/k and the number keys apply to, for whichever field has
+   * focus: its options, the one currently held, and how to select another.
+   * Null for a field with no options (the prompt, which owns its own keys).
+   * Every option field goes through this one path, so the worktree
+   * destination field (#69) needs only its own case here.
    */
-  function focusedOptions(): string[] {
+  function focusedOptionField(): {
+    options: string[];
+    value: string;
+    select: (value: string) => void;
+  } | null {
     const draft = store.state.newSession;
-    if (draft?.field === "agent") {
-      return (spawnableAgents() ?? []).map((agent) => agent.name);
-    }
-    if (draft?.field === "placement") {
-      return PLACEMENT_OPTIONS.map((option) => option.value);
-    }
-    return [];
-  }
-
-  function focusedOptionValue(): string | null {
-    const draft = store.state.newSession;
-    if (draft?.field === "agent") return draft.agent;
-    if (draft?.field === "placement") return draft.placement;
-    return null;
-  }
-
-  function applyFocusedOption(value: string): void {
-    const draft = store.state.newSession;
-    if (draft?.field === "agent") {
-      store.actions.setNewSessionAgent(value);
-      return;
-    }
-    if (draft?.field === "placement") {
-      const option = PLACEMENT_OPTIONS.find((o) => o.value === value);
-      if (option) store.actions.setNewSessionPlacement(option.value);
+    if (!draft) return null;
+    switch (draft.field) {
+      case "agent":
+        return {
+          options: (spawnableAgents() ?? []).map((agent) => agent.name),
+          value: draft.agent,
+          select: store.actions.setNewSessionAgent,
+        };
+      case "placement":
+        return {
+          options: PLACEMENT_OPTIONS.map((option) => option.value),
+          value: draft.placement,
+          // Looked up rather than cast: only a real option gets through.
+          select: (value) => {
+            const option = PLACEMENT_OPTIONS.find((o) => o.value === value);
+            if (option) store.actions.setNewSessionPlacement(option.value);
+          },
+        };
+      default:
+        return null;
     }
   }
 
   /** Clamped, not wrapping: in a three-item list, `k` teleporting to the
    *  bottom reads as a misfire rather than a nicety. */
   function moveNewSessionOption(delta: number): void {
-    const options = focusedOptions();
-    if (options.length === 0) return;
-    const current = Math.max(0, options.indexOf(focusedOptionValue() ?? ""));
-    const next = Math.min(Math.max(current + delta, 0), options.length - 1);
-    applyFocusedOption(options[next]!);
+    const field = focusedOptionField();
+    if (!field || field.options.length === 0) return;
+    const current = Math.max(0, field.options.indexOf(field.value));
+    const next = Math.min(
+      Math.max(current + delta, 0),
+      field.options.length - 1,
+    );
+    field.select(field.options[next]!);
   }
 
   function pickNewSessionOption(index: number): void {
-    const value = focusedOptions()[index];
-    if (value !== undefined) applyFocusedOption(value);
+    const field = focusedOptionField();
+    if (!field) return;
+    const value = field.options[index];
+    if (value !== undefined) field.select(value);
   }
 
   async function submitNewSession(): Promise<void> {
@@ -813,12 +826,7 @@ export function App(props: AppProps) {
         body: JSON.stringify({
           agent: agent.name,
           cwd: draft.cwd,
-          split:
-            draft.placement === "split-h"
-              ? "h"
-              : draft.placement === "split-v"
-                ? "v"
-                : false,
+          split: SPAWN_SPLIT[draft.placement],
           // `callerPane`, not `target`: the daemon reads an explicit target
           // as "insert a window right here", which renumbers every later
           // window in the session and breaks `select-window -t N` muscle
