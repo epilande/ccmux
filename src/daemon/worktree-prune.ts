@@ -403,6 +403,12 @@ export async function scanRepos(
   return { candidates, skipped };
 }
 
+/**
+ * Outcome of closing one pane. `already-gone` is a success: the pane closed
+ * along with the agent that owned it.
+ */
+export type PaneCloseResult = "closed" | "already-gone" | "failed";
+
 /** One recorded action, for the run log both surfaces print. */
 export interface PruneStep {
   step: string;
@@ -437,7 +443,7 @@ export interface PruneDeps {
   git?: GitRun;
   /** Injectable for tests; defaults to `process.kill`. */
   killProcess?: (pid: number, signal: NodeJS.Signals | 0) => void;
-  closePane?: (paneId: string) => Promise<boolean>;
+  closePane?: (paneId: string) => Promise<PaneCloseResult>;
   sleep?: (ms: number) => Promise<void>;
   stateFiles?: AgentStateFile[];
   now?: () => Date;
@@ -467,9 +473,9 @@ function defaultKill(pid: number, signal: NodeJS.Signals | 0): void {
   process.kill(pid, signal);
 }
 
-async function defaultClosePane(paneId: string): Promise<boolean> {
+async function tmuxOk(args: string[]): Promise<boolean> {
   try {
-    const proc = Bun.spawn(["tmux", "kill-pane", "-t", paneId], {
+    const proc = Bun.spawn(["tmux", ...args], {
       stdout: "ignore",
       stderr: "ignore",
     });
@@ -477,6 +483,26 @@ async function defaultClosePane(paneId: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Close a pane, treating a pane that is already gone as success.
+ *
+ * Stopping the agent very often closes its own pane — that is what happens
+ * whenever the agent is the pane's process rather than a child of a surviving
+ * shell — so `kill-pane` failing with "can't find pane" is the SUCCESS path,
+ * not an error. Reporting it as a failure made a clean run look broken.
+ */
+async function defaultClosePane(paneId: string): Promise<PaneCloseResult> {
+  if (await tmuxOk(["kill-pane", "-t", paneId])) return "closed";
+  const stillThere = await tmuxOk([
+    "display-message",
+    "-p",
+    "-t",
+    paneId,
+    "#{pane_id}",
+  ]);
+  return stillThere ? "failed" : "already-gone";
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -527,12 +553,14 @@ async function stopSessions(
     }
 
     if (session.tmuxPane) {
-      const ok = await closePane(session.tmuxPane);
-      if (ok) closed.push(session.tmuxPane);
+      const result = await closePane(session.tmuxPane);
+      if (result !== "failed") closed.push(session.tmuxPane);
       steps.push({
         step: "close pane",
-        ok,
-        detail: `${session.tmuxTarget ?? session.tmuxPane}`,
+        ok: result !== "failed",
+        detail:
+          `${session.tmuxTarget ?? session.tmuxPane}` +
+          (result === "already-gone" ? " (closed with its agent)" : ""),
       });
     }
   }
@@ -692,6 +720,14 @@ export async function runPrune(
 }
 
 /**
+ * git's refusals come with multi-line `hint:` advice aimed at a terminal; a
+ * step detail wants the one line that says what happened.
+ */
+function firstLine(text: string): string {
+  return text.trim().split("\n")[0]?.trim() ?? "";
+}
+
+/**
  * Delete the local branches of worktrees that were actually removed, per each
  * candidate's {@link BranchDeletion} policy. A refused delete (unmerged
  * branch, `-d` without proof) is reported and the branch survives — the
@@ -720,7 +756,7 @@ async function deleteBranches(
       ok: outcome.branchDeleted,
       detail: outcome.branchDeleted
         ? `${candidate.branch} (git branch ${flag})`
-        : `${candidate.branch} kept: ${res.stderr.trim() || `git branch ${flag} exited ${res.exitCode}`}`,
+        : `${candidate.branch} kept: ${firstLine(res.stderr) || `git branch ${flag} exited ${res.exitCode}`}`,
     });
     if (outcome.branchDeleted) {
       log(`ccmux: deleted branch ${candidate.branch} in ${candidate.repoRoot}`);

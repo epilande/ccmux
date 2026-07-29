@@ -515,11 +515,35 @@ describe("runPrune", () => {
       },
       closePane: async (paneId) => {
         order.push(`close:${paneId}`);
-        return true;
+        return "closed";
       },
     });
 
     expect(order).toEqual(["kill:4242", "close:%9"]);
+    expect(result.outcomes[0].panesClosed).toEqual(["%9"]);
+  });
+
+  // Stopping the agent frequently closes its own pane, so a `kill-pane` that
+  // finds nothing is the success path — reporting it as a failure made a
+  // clean run read as broken.
+  it("counts a pane that closed with its agent as closed, not failed", async () => {
+    const { candidate } = await candidateFor("run-pane-gone", "feat/pane-gone");
+    const withSession: PruneCandidate = {
+      ...candidate,
+      sessions: [session({ pid: null, tmuxPane: "%9" })],
+    };
+
+    const result = await runPrune([withSession], {
+      stateFiles: [],
+      log: () => {},
+      closePane: async () => "already-gone",
+    });
+
+    const closeStep = result.outcomes[0].steps.find(
+      (s) => s.step === "close pane",
+    );
+    expect(closeStep?.ok).toBe(true);
+    expect(closeStep?.detail).toContain("closed with its agent");
     expect(result.outcomes[0].panesClosed).toEqual(["%9"]);
   });
 
