@@ -396,6 +396,22 @@ export async function resolveBaseRefs(
  * A squash or rebase merge does NOT satisfy this (the tip commit never
  * appears on the base), which is why the PR-derived reasons exist alongside
  * it rather than on top of it.
+ *
+ * A branch sitting exactly ON a base tip is NOT merged, even though ancestry
+ * says yes (a commit is an ancestor of itself). That shape is a brand new
+ * worktree: `git worktree add -b feat/x <path> main` gives the branch the
+ * base's tip and nothing else, so treating it as merged offered a worktree
+ * created seconds ago, still holding a live agent, for removal under "merged
+ * into main", branch deletion included. There is nothing else locally to tell
+ * the two apart, since zero commits of your own and every commit already
+ * upstream are the same refs.
+ *
+ * This deliberately also suppresses a branch that was FAST-FORWARD merged and
+ * then left where it was. Accepted: `pr-merged` and `upstream-gone` still
+ * catch those, and losing a reason costs a cleanup while keeping it cost live
+ * work. Do not "fix" it with `git rev-list --count <base>..<branch> == 0`
+ * either. That count is also 0 for a genuinely merged branch, so it suppresses
+ * the reason entirely rather than just this shape.
  */
 export async function isMergedInto(
   repoRoot: string,
@@ -403,10 +419,15 @@ export async function isMergedInto(
   baseRefs: string[],
   git: GitRun = runGit,
 ): Promise<boolean> {
+  const branchRef = `refs/heads/${branch}`;
+  const tips = await readTips(repoRoot, [branchRef, ...baseRefs], git);
+  const branchTip = tips.get(branchRef);
+
   for (const base of baseRefs) {
     // Never call a branch "merged into itself": the default branch's own
     // worktree would otherwise classify as removable.
     if (base === branch || base.endsWith(`/${branch}`)) continue;
+    if (branchTip && tips.get(base) === branchTip) continue;
     const res = await git(repoRoot, [
       "merge-base",
       "--is-ancestor",
@@ -415,12 +436,38 @@ export async function isMergedInto(
       // branch's name silently answered this question about the tag. An
       // unmerged branch then classified `merged-locally` and lost its
       // directory on a false reason.
-      `refs/heads/${branch}`,
+      branchRef,
       base,
     ]);
     if (res.exitCode === 0) return true;
   }
   return false;
+}
+
+/**
+ * Commit SHA per ref, resolved in one `rev-parse`.
+ *
+ * All or nothing: git interleaves its "unknown revision" complaint with the
+ * SHAs it did resolve, so a short reply cannot be mapped back to the refs that
+ * produced it. An empty map means "no equality knowledge", which leaves
+ * {@link isMergedInto} on the ancestry answer alone.
+ */
+async function readTips(
+  repoRoot: string,
+  refs: string[],
+  git: GitRun,
+): Promise<Map<string, string>> {
+  const res = await git(
+    repoRoot,
+    ["rev-parse"].concat(refs.map((ref) => `${ref}^{commit}`)),
+  );
+  if (res.exitCode !== 0) return new Map();
+  const lines = res.stdout
+    .trim()
+    .split("\n")
+    .map((line) => line.trim());
+  if (lines.length !== refs.length) return new Map();
+  return new Map(refs.map((ref, i) => [ref, lines[i]]));
 }
 
 export interface UpstreamState {
