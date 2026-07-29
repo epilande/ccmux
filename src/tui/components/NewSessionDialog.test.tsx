@@ -334,6 +334,27 @@ describe("NewSessionDialog destination", () => {
     expect(frame).not.toContain("New worktree:");
   });
 
+  /**
+   * The destination shares its label rule with Placement, so a sidebar-width
+   * surface has to keep BOTH choices readable and on their own rows — the
+   * same failure the placements had, where two options rendered identically.
+   */
+  it("stacks and abbreviates the destinations on a sidebar-width surface", async () => {
+    const frame = await renderDialog({ width: 34, height: 30 });
+
+    // The capitalized short labels, which only the abbreviated forms carry
+    // (`This checkout` / `New worktree` spell theirs differently), on rows of
+    // their own rather than sharing one.
+    const lines = frame.split("\n");
+    const hereRow = lines.findIndex((line) => line.includes("Here"));
+    const worktreeRow = lines.findIndex((line) => line.includes("Worktree"));
+    expect(hereRow).toBeGreaterThanOrEqual(0);
+    expect(worktreeRow).toBeGreaterThanOrEqual(0);
+    expect(worktreeRow).not.toBe(hereRow);
+    const widest = Math.max(...lines.map((line) => line.trimEnd().length));
+    expect(widest).toBeLessThanOrEqual(34);
+  });
+
   // The dialog grows a row per field; the height is derived from the field
   // list so a new one cannot silently clip the row below it.
   it("keeps the directory row visible with the destination row present", async () => {

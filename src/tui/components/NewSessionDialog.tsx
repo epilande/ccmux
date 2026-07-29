@@ -109,25 +109,21 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const stacked = () => contentWidth() < STACKED_CONTENT_WIDTH;
 
   /**
-   * The label to draw for a placement option.
+   * The label to draw for a numbered option, shared by Placement and Where.
    *
    * Stacking gives each option its own row, but a row is not unlimited: at
    * the sidebar's real 30-column rail the dialog is 26 wide and the label
    * column is 8, which renders `New window` / `Split right` / `Split down`
-   * as `New` / `Split` / `Split` — two of the three indistinguishable. The
-   * full label is therefore used only when it actually fits, and the short
-   * label (which exists for exactly this) is the fallback in both layouts.
+   * as `New` / `Split` / `Split` — two of the three indistinguishable, and
+   * `This checkout` / `New worktree` the same way. The full label is
+   * therefore used only when it actually fits, and the short label (which
+   * exists for exactly this) is the fallback in both layouts.
    */
-  const placementLabel = (option: PlacementOption): string => {
+  const optionLabel = (option: {
+    label: string;
+    compactLabel: string;
+  }): string => {
     // The row also spends a 2-wide number cell and two 1-wide bracket cells.
-    const room = contentWidth() - 4;
-    if (!stacked()) return compact() ? option.compactLabel : option.label;
-    return option.label.length <= room ? option.label : option.compactLabel;
-  };
-
-  /** Same width rule as `placementLabel`: the full label only when it fits,
-   *  since the sidebar rail would otherwise render both choices identically. */
-  const destinationLabel = (option: DestinationOption): string => {
     const room = contentWidth() - 4;
     if (!stacked()) return compact() ? option.compactLabel : option.label;
     return option.label.length <= room ? option.label : option.compactLabel;
@@ -147,10 +143,9 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
 
   /**
    * How many rows each field occupies. Exhaustive over `NewSessionField` by
-   * type, which is the point: a field added to `NEW_SESSION_FIELDS` (issue
-   * #69's worktree destination is next) fails to compile until its height
-   * is declared here. The previous hand-summed constant type-checked fine
-   * and silently clipped the bottom row instead.
+   * type, which is the point: a field added to `NEW_SESSION_FIELDS` fails to
+   * compile until its height is declared here. The previous hand-summed
+   * constant type-checked fine and silently clipped the bottom row instead.
    */
   const fieldRows: Record<NewSessionField, () => number> = {
     // Declared before `visibleAgents` but never CALLED before it exists:
@@ -380,7 +375,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                     <text fg={theme.green}>{selected() ? "[" : ""}</text>
                   </box>
                   <text fg={selected() ? theme.green : theme.subtext}>
-                    {placementLabel(option)}
+                    {optionLabel(option)}
                   </text>
                   <box width={1}>
                     <text fg={theme.green}>{selected() ? "]" : ""}</text>
@@ -423,7 +418,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                  prompt as it is typed, which is also the answer to "where
                  did that branch name come from". */
               const label = () => {
-                const base = destinationLabel(option);
+                const base = optionLabel(option);
                 if (option.value !== "worktree") return base;
                 const slug = slugFromPrompt(props.draft.prompt);
                 if (!slug) return base;
@@ -434,9 +429,12 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 // option also spends its label and a 2-wide margin.
                 const spent = stacked()
                   ? 4
-                  : 8 + destinationLabel(DESTINATION_OPTIONS[0]!).length + 2;
+                  : 8 + optionLabel(DESTINATION_OPTIONS[0]!).length + 2;
                 const room = contentWidth() - spent;
-                return truncateText(`${base}: ${slug}`, Math.max(base.length, room));
+                return truncateText(
+                  `${base}: ${slug}`,
+                  Math.max(base.length, room),
+                );
               };
               return (
                 <box
