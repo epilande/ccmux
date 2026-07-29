@@ -1,4 +1,5 @@
 import { Command, InvalidArgumentError } from "commander";
+import { resolve } from "node:path";
 import { getDaemonUrl } from "../lib/config";
 import { ensureDaemon } from "./shared";
 import { PANE_ID_PATTERN, type SpawnSplit } from "../daemon/spawn-command";
@@ -43,6 +44,22 @@ function callerPane(daemonSocket: string | null): string | undefined {
   const pane = process.env.TMUX_PANE;
   if (!pane || !PANE_ID_PATTERN.test(pane)) return undefined;
   return isSameTmuxServer(daemonSocket) ? pane : undefined;
+}
+
+/**
+ * The directory the new agent should start in.
+ *
+ * `bin/ccmux` cds into the package root for module resolution and carries
+ * the real invocation directory in `CCMUX_CALLER_PWD`, so `process.cwd()`
+ * alone would start every agent inside the ccmux install (see
+ * `src/commands/review.ts` and `src/commands/sidebar.ts` for the same
+ * restoration). An explicit `--cwd` is resolved against the caller's
+ * directory too, so a relative one means what the user typed rather than
+ * something relative to the install.
+ */
+function resolveSpawnCwd(explicit?: string): string {
+  const callerPwd = process.env.CCMUX_CALLER_PWD ?? process.cwd();
+  return explicit ? resolve(callerPwd, explicit) : callerPwd;
 }
 
 /** The daemon's tmux socket, or null when it can't be determined. */
@@ -102,7 +119,7 @@ export function createSpawnCommand(): Command {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               agent,
-              cwd: options.cwd ?? process.cwd(),
+              cwd: resolveSpawnCwd(options.cwd),
               resume: options.resume,
               prompt: options.prompt,
               split: options.split ?? false,
