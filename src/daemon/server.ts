@@ -23,6 +23,7 @@ import {
   normalizeTarget,
   substitutePlaceholders,
   NATIVE_SESSION_ID_PATTERN,
+  type BuildResult,
   type SpawnPlacement,
   type SpawnSplit,
 } from "./spawn-command";
@@ -108,6 +109,14 @@ type NotificationActionRunner = (
  *  sharing the delivery closure's backend/dbus state). Fired when the user
  *  focuses a pane whose session had pending attention. Fail-open. */
 type NotificationRetractFn = (sessionId: string) => Promise<void>;
+
+/** The session a `POST /spawn` fork continues from. The native id is carried
+ *  alongside the session because it is what the fork command interpolates,
+ *  and `resolveForkSource` has already established that it is present. */
+interface ForkSource {
+  session: Readonly<Session>;
+  nativeSessionId: string;
+}
 
 /** A cwd's git facts, all derived from one `git rev-parse` call. */
 interface GitInfo {
@@ -2043,14 +2052,10 @@ export class DaemonServer {
     fork?: unknown;
     resume?: string;
     prompt?: unknown;
-  }):
-    | {
-        ok: true;
-        value?: { session: Readonly<Session>; nativeSessionId: string };
-      }
-    | { ok: false; error: string } {
+  }): BuildResult<ForkSource | undefined> {
     const { fork } = body;
-    if (fork === undefined || fork === null) return { ok: true };
+    if (fork === undefined || fork === null)
+      return { ok: true, value: undefined };
 
     if (typeof fork !== "string" || !NATIVE_SESSION_ID_PATTERN.test(fork)) {
       return { ok: false, error: "Invalid 'fork' field" };
