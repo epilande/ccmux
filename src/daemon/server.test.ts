@@ -157,6 +157,50 @@ function createServer(
   };
 }
 
+/**
+ * Environment for the real-git fixtures below, hermetic in both directions.
+ *
+ * Identity is supplied explicitly because a CI runner has none in any config
+ * scope and refuses git's implicit fallback ("no email was given and
+ * auto-detection is disabled"), while a developer machine infers one and
+ * commits happily. A fixture that inherits the ambient identity therefore
+ * passes locally and fails on CI, and it fails *late*: the empty commit
+ * leaves HEAD unborn, `worktree add` builds an unborn worktree, and
+ * `readGitInfo`'s exit-code guard correctly reports no git facts — so the
+ * breakage surfaces as a null `mainRepoRoot` several steps from its cause.
+ *
+ * Both config scopes are neutered in the other direction, so a developer's
+ * own settings (`commit.gpgsign`, hooks, templates) can't reach in either.
+ */
+const GIT_FIXTURE_ENV: Record<string, string> = {
+  ...(process.env as Record<string, string>),
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_AUTHOR_NAME: "ccmux test",
+  GIT_AUTHOR_EMAIL: "test@ccmux.invalid",
+  GIT_COMMITTER_NAME: "ccmux test",
+  GIT_COMMITTER_EMAIL: "test@ccmux.invalid",
+};
+
+/**
+ * Run one git setup command for a real-git fixture, throwing on a non-zero
+ * exit. Every fixture command goes through this so a broken setup fails at
+ * the step that broke, naming git's own error, instead of surviving to a
+ * later assertion that reports a misleading value.
+ */
+function runFixtureGit(cwd: string, ...args: string[]): void {
+  const proc = Bun.spawnSync(["git", "-C", cwd, ...args], {
+    env: GIT_FIXTURE_ENV,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (proc.exitCode !== 0) {
+    throw new Error(
+      `fixture setup failed: git ${args.join(" ")} exited ${proc.exitCode}: ${proc.stderr.toString().trim()}`,
+    );
+  }
+}
+
 function fakePane(overrides: Partial<TmuxPane> = {}): TmuxPane {
   return {
     paneId: "%1",
@@ -938,13 +982,9 @@ describe("DaemonServer", () => {
       const worktree = join(root, "trees", "feature");
       try {
         mkdirSync(main);
-        const git = (...args: string[]) =>
-          Bun.spawnSync(["git", "-C", main, ...args], {
-            env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" },
-          });
-        Bun.spawnSync(["git", "init", "-q", "-b", "main", main]);
-        git("commit", "-q", "--allow-empty", "-m", "init");
-        git("worktree", "add", "-q", "-b", "feature", worktree);
+        runFixtureGit(main, "init", "-q", "-b", "main");
+        runFixtureGit(main, "commit", "-q", "--allow-empty", "-m", "init");
+        runFixtureGit(main, "worktree", "add", "-q", "-b", "feature", worktree);
 
         const { internals } = createServer();
         const mainSession = fakeSession("s1");
@@ -972,7 +1012,7 @@ describe("DaemonServer", () => {
       // lone `HEAD` line, which an ungated parse would show as a branch.
       const dir = mkdtempSync(join(tmpdir(), "ccmux-unborn-"));
       try {
-        Bun.spawnSync(["git", "init", "-q", dir]);
+        runFixtureGit(dir, "init", "-q");
         const { internals } = createServer();
         const session = fakeSession("s1");
         session.cwd = dir;
