@@ -15,7 +15,7 @@ import {
   applyWorktreeFileSetup,
   createWorktree,
   readSymlinkDirectories,
-  readWorktreeIncludes,
+  resolveWorktreeIncludes,
   resolveBase,
   resolveWorktreeName,
   slugFromPrompt,
@@ -180,19 +180,45 @@ describe("file setup", () => {
     expect(readSymlinkDirectories(repo)).toEqual(["node_modules"]);
   });
 
-  it("reads .worktreeinclude, ignoring blanks and comments", () => {
-    const repo = join(root, "inc");
-    mkdirSync(repo, { recursive: true });
-    expect(readWorktreeIncludes(repo)).toEqual([]);
-
-    writeFileSync(
-      join(repo, ".worktreeinclude"),
-      "# a comment\n\n.claude/settings.local.json\n  .env  \n",
-    );
-    expect(readWorktreeIncludes(repo)).toEqual([
-      ".claude/settings.local.json",
-      ".env",
+  /**
+   * `.worktreeinclude` is GITIGNORE SYNTAX under a dual filter: a path is
+   * included only if it matches a pattern AND is gitignored. Both halves are
+   * delegated to git, so this exercises the real thing against a fixture
+   * rather than asserting on a hand-rolled parse.
+   */
+  it("resolves .worktreeinclude patterns under the dual filter", async () => {
+    const repo = await makeRepo("includes");
+    writeFileSync(join(repo, ".gitignore"), "node_modules/\n.env\n*.local\n");
+    // Matches a pattern below, but is TRACKED: must never be duplicated.
+    writeFileSync(join(repo, "config.local"), "tracked\n");
+    writeFileSync(join(repo, ".worktreeinclude"), ".env\n*.local\nnotes.txt\n");
+    await git(repo, [
+      "add",
+      "-f",
+      ".gitignore",
+      ".worktreeinclude",
+      "config.local",
     ]);
+    await git(repo, ["commit", "-m", "config"]);
+
+    writeFileSync(join(repo, ".env"), "SECRET=1\n");
+    writeFileSync(join(repo, "app.local"), "settings\n");
+    // Gitignored but matches no include pattern.
+    mkdirSync(join(repo, "node_modules"), { recursive: true });
+    writeFileSync(join(repo, "node_modules", "dep.js"), "x\n");
+    // Matches a pattern but is NOT gitignored, so the dual filter drops it.
+    writeFileSync(join(repo, "notes.txt"), "notes\n");
+
+    const resolved = await resolveWorktreeIncludes(repo);
+
+    expect(resolved.sort()).toEqual([".env", "app.local"]);
+    expect(resolved).not.toContain("config.local");
+    expect(resolved).not.toContain("notes.txt");
+  });
+
+  it("resolves nothing when there is no .worktreeinclude", async () => {
+    const repo = await makeRepo("no-includes");
+    expect(await resolveWorktreeIncludes(repo)).toEqual([]);
   });
 
   it("symlinks configured directories and copies included files", async () => {
@@ -205,6 +231,11 @@ describe("file setup", () => {
       JSON.stringify({ worktree: { symlinkDirectories: ["node_modules"] } }),
     );
     writeFileSync(join(repo, ".worktreeinclude"), ".env\n");
+    // Gitignored as well as matched: the include contract is a dual filter,
+    // so a pattern alone would (correctly) resolve to nothing.
+    writeFileSync(join(repo, ".gitignore"), "node_modules/\n.env\n");
+    await git(repo, ["add", "-f", ".gitignore"]);
+    await git(repo, ["commit", "-m", "ignore"]);
     writeFileSync(join(repo, ".env"), "SECRET=1\n");
     const wt = join(root, "target");
     mkdirSync(wt, { recursive: true });

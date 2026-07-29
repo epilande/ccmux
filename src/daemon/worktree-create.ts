@@ -194,24 +194,57 @@ export function readSymlinkDirectories(mainRepoRoot: string): string[] {
 }
 
 /**
- * Read `.worktreeinclude`: one repo-relative path per line, with `#`
- * comments and blank lines ignored.
+ * Resolve `.worktreeinclude` to the concrete files to copy.
  *
- * These are the gitignored files a checkout needs but git will not bring
- * (`.claude/settings.local.json`, `.env`), which is exactly why they have to
- * be handled here: `git worktree add` produces a tracked-files-only checkout.
+ * The file is GITIGNORE SYNTAX, not a list of literal paths, and the contract
+ * is a dual filter: a path is included only if it matches a pattern AND is
+ * gitignored. The second half is what stops a tracked file from being
+ * duplicated into the worktree, where it would shadow the checkout's own copy
+ * and silently diverge from it.
+ *
+ * Both halves are delegated to git rather than reimplemented, because
+ * gitignore semantics (negation, anchoring, directory-only patterns,
+ * precedence) are far too subtle to reproduce by hand:
+ *
+ * - `--others --ignored --exclude-from=<file>` lists untracked paths matching
+ *   the include patterns. `--others` is what excludes tracked files.
+ * - `--others --ignored --exclude-standard` lists everything the repo's own
+ *   ignore rules cover.
+ *
+ * The intersection is the contract. Verified on a fixture: a file that is
+ * untracked and matches an include pattern but is NOT gitignored appears in
+ * the first list alone and is correctly absent from the intersection.
  */
-export function readWorktreeIncludes(mainRepoRoot: string): string[] {
+export async function resolveWorktreeIncludes(
+  mainRepoRoot: string,
+  git: GitRun = runGit,
+): Promise<string[]> {
   const includePath = join(mainRepoRoot, ".worktreeinclude");
   if (!existsSync(includePath)) return [];
-  try {
-    return readFileSync(includePath, "utf-8")
+
+  const [matching, ignored] = await Promise.all([
+    git(mainRepoRoot, [
+      "ls-files",
+      "--others",
+      "--ignored",
+      `--exclude-from=${includePath}`,
+    ]),
+    git(mainRepoRoot, [
+      "ls-files",
+      "--others",
+      "--ignored",
+      "--exclude-standard",
+    ]),
+  ]);
+  if (matching.exitCode !== 0 || ignored.exitCode !== 0) return [];
+
+  const lines = (out: string): string[] =>
+    out
       .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line !== "" && !line.startsWith("#"));
-  } catch {
-    return [];
-  }
+      .map((l) => l.trim())
+      .filter((l) => l !== "");
+  const ignoredSet = new Set(lines(ignored.stdout));
+  return lines(matching.stdout).filter((path) => ignoredSet.has(path));
 }
 
 /**
@@ -236,6 +269,35 @@ function isInside(parent: string, candidate: string): boolean {
  * worktrees, so a ccmux-created worktree is indistinguishable from one the
  * agent made and needs no ccmux-specific configuration.
  *
+ * WHAT IS CONTRACT AND WHAT IS NOT. This reimplements another tool's
+ * behavior, so it is worth being explicit about how much each part is
+ * guaranteed, because the answers differ and the undocumented ones can drift
+ * with a Claude Code release:
+ *
+ * - DOCUMENTED: `.worktreeinclude` is gitignore syntax, it COPIES rather than
+ *   symlinks, and it applies a dual filter (matches a pattern AND is
+ *   gitignored). Both halves are delegated to git in
+ *   {@link resolveWorktreeIncludes} rather than reimplemented.
+ * - OBSERVED, not documented: `worktree.symlinkDirectories` produces an
+ *   ABSOLUTE symlink into the main checkout. Verified by inspecting the
+ *   agent-created worktrees in this repo, every one of which has
+ *   `node_modules -> <main>/node_modules`. If a future Claude Code switches
+ *   to relative links, worktrees will still work; they will merely differ.
+ * - CONSERVATIVE CHOICES where behavior could not be pinned down, each
+ *   picked so the failure mode is a worktree that needs one manual step
+ *   rather than one that lost something: a missing source is skipped instead
+ *   of failing the spawn; an existing target is never overwritten, so a
+ *   checked-out path of the same name is never replaced by a link; and every
+ *   step is reported in the result so a user can see what was applied and
+ *   why their worktree looks the way it does.
+ *
+ * Known upstream interactions worth remembering: writing to a symlinked file
+ * replaces the symlink with a regular file (atomic rename), and
+ * `git worktree remove` refuses to remove symlinks as untracked entries.
+ * Neither breaks ccmux's own prune, which renames the directory aside and
+ * calls `git worktree prune` rather than `git worktree remove`, and whose
+ * recursive delete unlinks symlinks instead of following them.
+ *
  * Symlinks for `worktree.symlinkDirectories` (a shared `node_modules` is the
  * point: copying it would be slow and would double the disk cost of every
  * worktree), copies for `.worktreeinclude` (local settings and secrets, where
@@ -249,6 +311,7 @@ function isInside(parent: string, candidate: string): boolean {
 export async function applyWorktreeFileSetup(
   mainRepoRoot: string,
   worktreePath: string,
+  git: GitRun = runGit,
 ): Promise<{ symlinked: string[]; included: string[] }> {
   const symlinked: string[] = [];
   const included: string[] = [];
@@ -271,7 +334,7 @@ export async function applyWorktreeFileSetup(
     }
   }
 
-  for (const entry of readWorktreeIncludes(mainRepoRoot)) {
+  for (const entry of await resolveWorktreeIncludes(mainRepoRoot, git)) {
     const source = join(mainRepoRoot, entry);
     const target = join(worktreePath, entry);
     if (!isInside(worktreePath, target)) continue;
