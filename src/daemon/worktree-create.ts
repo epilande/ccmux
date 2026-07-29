@@ -302,13 +302,8 @@ function isInside(parent: string, candidate: string): boolean {
  * calls `git worktree prune` rather than `git worktree remove`, and whose
  * recursive delete unlinks symlinks instead of following them.
  *
- * One more observed difference, deliberate rather than accidental: Claude
- * Code LOCKS a worktree for the lifetime of its session (`git worktree list`
- * shows `locked` with a reason naming the session and pid) and ccmux does
- * not. The effect is benign and arguably useful — ccmux's prune skips locked
- * worktrees, so a checkout with a live Claude session is protected from
- * cleanup by that lock alone, while a ccmux-created worktree stays prunable
- * as soon as its agent exits.
+ * Locking is the one observed behavior deliberately not copied; see
+ * divergence 2 in this file's header for why.
  *
  * Symlinks for `worktree.symlinkDirectories` (a shared `node_modules` is the
  * point: copying it would be slow and would double the disk cost of every
