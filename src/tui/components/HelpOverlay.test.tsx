@@ -80,6 +80,10 @@ describe("HelpOverlay", () => {
     expect(ref!.scrollTop).toBe(0);
   });
 
+  // HEIGHT 12 IS DELIBERATE — do not raise it. This is the scroll test, and a
+  // taller viewport makes it pass while exercising nothing: the content would
+  // fit, `scrollTop` would still be 0, and the assertions would hold. Raising
+  // it deletes the coverage it exists for.
   it("shows all sections in short viewport via scrollbox", async () => {
     let ref: ScrollBoxRenderable | undefined;
     setup = await testRender(
@@ -98,14 +102,16 @@ describe("HelpOverlay", () => {
 });
 
 describe("HelpOverlay sidebar mode", () => {
+  // The sidebar help is a stacked (key-above-description) scrollbox, so
+  // "renders all sections" only holds in a viewport tall enough for the whole
+  // list: it needs roughly twice the entry count in rows. Height is set well
+  // past the content rather than to the exact fit — at the exact fit, adding
+  // any shortcut fails an unrelated section's assertion instead, which is how
+  // both `n` and `W` independently ended up raising this number.
   async function renderSidebarHelp() {
-    // Tall enough to hold every section at once: sidebar mode stacks key and
-    // description on separate lines, so the frame has to fit roughly twice the
-    // entry count. A viewport that only just fits turns any new shortcut into
-    // a failure of an unrelated assertion.
     setup = await testRender(() => <HelpOverlay sidebar />, {
       width: 100,
-      height: 60,
+      height: 70,
     });
     await setup.renderOnce();
     return setup.captureCharFrame();
@@ -139,7 +145,7 @@ describe("HelpOverlay sidebar mode", () => {
   it("renders all sections in narrow viewport", async () => {
     setup = await testRender(() => <HelpOverlay sidebar />, {
       width: 30,
-      height: 60,
+      height: 70,
     });
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
@@ -160,6 +166,25 @@ describe("HelpOverlay reviewable", () => {
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
     expect(frame).toContain("Review diff (hunk)");
+  });
+
+  it("keeps the last row visible with every Actions row present", async () => {
+    // The tallest the two-column layout ever gets: `reviewable` adds `d` on
+    // top of `n` and `F`. Overflow here is SILENT — the scrollbox scrolls,
+    // the trailing section slides out of frame, and the overlay still looks
+    // fine — so this asserts the BOTTOM of the tallest column rather than
+    // the top. Two features have already had to raise these heights; this is
+    // what turns the next overflow into a failing test instead of a bug
+    // report about a missing Quit row.
+    setup = await testRender(() => <HelpOverlay reviewable />, {
+      width: 100,
+      height: 30,
+    });
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Fork session");
+    expect(frame).toContain("Other");
+    expect(frame).toContain("Quit");
   });
 
   it("omits the review diff row when not reviewable", async () => {

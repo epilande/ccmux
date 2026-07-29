@@ -36,6 +36,7 @@ interface TUIOptions {
   promptDisplay?: PromptDisplay;
   persistent?: boolean;
   sidebar?: boolean;
+  lastSpawnAgent?: string;
   theme?: ThemeConfig;
   reviewHandback?: Preferences["reviewHandback"];
   forkableAgents?: string[];
@@ -130,6 +131,7 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
         promptDisplay={options.promptDisplay}
         persistent={options.persistent}
         sidebar={options.sidebar}
+        lastSpawnAgent={options.lastSpawnAgent}
         reviewHandback={options.reviewHandback}
         forkableAgents={options.forkableAgents}
       />

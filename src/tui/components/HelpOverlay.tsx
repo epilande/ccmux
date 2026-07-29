@@ -22,6 +22,7 @@ const leftGroups = (sidebar?: boolean, reviewable?: boolean): Group[] => [
     section: "Actions",
     items: [
       { key: "Enter", desc: "Switch to session" },
+      { key: "n", desc: "New session" },
       { key: "/", desc: "Search" },
       { key: "f", desc: "Toggle hide idle" },
       { key: "F", desc: "Fork session" },

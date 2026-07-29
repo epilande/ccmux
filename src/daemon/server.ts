@@ -27,7 +27,8 @@ import {
   type SpawnPlacement,
   type SpawnSplit,
 } from "./spawn-command";
-import type { AgentDef } from "../lib/agents";
+import { getAgents, type AgentDef } from "../lib/agents";
+import { listSpawnableAgents, spawnBinaryFor } from "../lib/spawnable-agents";
 import {
   getMarkerKey,
   isBackgroundSession,
@@ -795,6 +796,10 @@ export class DaemonServer {
         },
         { headers: corsHeaders },
       );
+    }
+
+    if (path === "/agents" && req.method === "GET") {
+      return await this.handleGetSpawnableAgents(corsHeaders);
     }
 
     if (path === "/sessions" && req.method === "GET") {
@@ -2094,6 +2099,48 @@ export class DaemonServer {
   }
 
   /**
+   * The agents this machine can start, for the picker's new-session dialog.
+   *
+   * Names are enumerated from the config, but every one is then resolved
+   * through the daemon's OWN lookup — the same one `POST /spawn` uses — and
+   * dropped if it isn't there. The daemon builds its agent list once at
+   * boot, so reading the config directly would list an agent added since
+   * then and have Enter answer "Unknown agent". Listing only what /spawn
+   * will accept keeps the menu honest; a newly configured agent appears
+   * after `ccmux daemon restart`, which its hooks need anyway.
+   *
+   * Resolved per request rather than cached: this is asked for only when
+   * that dialog opens, and a cache would hide an agent installed on PATH
+   * since boot (which needs no restart).
+   */
+  private async handleGetSpawnableAgents(
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    try {
+      const preferences = await getPreferences();
+      const known = getAgents(preferences)
+        .map((agent) => this.getAgentByType(agent.name))
+        .filter((agent): agent is AgentDef => agent !== undefined);
+      return Response.json(
+        {
+          agents: listSpawnableAgents(known, {
+            claudeCommand: preferences.command,
+          }),
+        },
+        { headers },
+      );
+    } catch (err: unknown) {
+      // `getAgents` throws on a malformed custom-agent block, and the
+      // message names the offending key — worth surfacing rather than
+      // leaving the dialog with an empty list and no explanation.
+      return Response.json(
+        { error: `Failed to resolve agents: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
+    }
+  }
+
+  /**
    * Spawn a new agent session in a tmux pane
    */
   private async handleSpawn(
@@ -2228,10 +2275,7 @@ export class DaemonServer {
 
     // Build agent command
     const preferences = await getPreferences();
-    const cmd =
-      agentName === "claude"
-        ? (preferences.command ?? "claude")
-        : (agent.executable ?? agentName);
+    const cmd = spawnBinaryFor(agent, preferences.command);
 
     // The two builders are deliberately separate functions: forking is a
     // different command shape, and keeping its construction out of the

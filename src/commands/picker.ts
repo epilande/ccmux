@@ -101,6 +101,7 @@ export function createPickerCommand(): Command {
           hideIdle: uiState.hideIdle,
           promptDisplay: resolvePromptDisplay(uiState, prefs.promptDisplay),
           persistent,
+          lastSpawnAgent: uiState.lastSpawnAgent,
           reviewHandback: prefs.reviewHandback,
           forkableAgents: forkableAgentNames(prefs),
           theme: prefs.theme,

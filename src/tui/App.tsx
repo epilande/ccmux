@@ -17,7 +17,7 @@ import {
 } from "@opentui/solid";
 import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../types/session";
-import { createTUIStore, TickContext } from "./store";
+import { createTUIStore, TickContext, type NewSessionPlacement } from "./store";
 import { killActionPath, restartActionPath } from "./utils/invoke-actions";
 import {
   formatReviewPrompt,
@@ -35,6 +35,7 @@ import {
   notifyActivePane,
   openAgentsWindow,
   openAgentAttachWindow,
+  resolveLaunchPane,
   type OpenAgentsResult,
 } from "./utils/tmux";
 import { isSameServerCached, setDaemonSocketPath } from "./utils/server-guard";
@@ -55,9 +56,14 @@ import { Preview } from "./components/Preview";
 import { Toast } from "./components/Toast";
 import { GroupPreview } from "./components/GroupPreview";
 import { ConfirmationDialog } from "./components/ConfirmationDialog";
+import {
+  NewSessionDialog,
+  PLACEMENT_OPTIONS,
+} from "./components/NewSessionDialog";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { PruneDialog } from "./components/PruneDialog";
 import { HelpOverlay } from "./components/HelpOverlay";
+import type { SpawnableAgent } from "../lib/spawnable-agents";
 import { theme } from "./theme";
 import type { IconStyle } from "../lib/icons";
 import type {
@@ -77,13 +83,6 @@ import { createIdleGcScheduler } from "./utils/idle-gc";
 import { setSpinnerPaused } from "./utils/useStatusIcon";
 import { markStartup, reportStartup } from "../lib/startup-timing";
 
-/** Readable text for a rejected fetch, for the toast that reports it. */
-function errorMessage(err: unknown): string {
-  return err && typeof err === "object" && "message" in err
-    ? String((err as { message: unknown }).message)
-    : String(err);
-}
-
 interface AppProps {
   initialPreview?: boolean;
   iconStyle?: IconStyle;
@@ -100,6 +99,7 @@ interface AppProps {
   promptDisplay?: PromptDisplay;
   persistent?: boolean;
   sidebar?: boolean;
+  lastSpawnAgent?: string;
   reviewHandback?: Preferences["reviewHandback"];
   /**
    * Agents that declare a `forkCommand` (see `forkableAgentNames`). Gates the
@@ -107,6 +107,37 @@ interface AppProps {
    */
   forkableAgents?: string[];
 }
+
+/** Message text for a rejected fetch/parse, for a toast. */
+function errText(err: unknown): string {
+  if (err && typeof err === "object" && "message" in err) {
+    return String((err as { message: unknown }).message);
+  }
+  return String(err);
+}
+
+/** The directory a session stands for: its pane's cwd when the daemon has
+ *  one, since that follows the agent as it cds, else where it started. */
+function sessionCwd(session: EnrichedSession): string {
+  return session.paneCwd ?? session.cwd;
+}
+
+/** Shown when the daemon predates `GET /agents`. Exported for the test that
+ *  pins the wording to the restart the fix actually needs. */
+export const STALE_DAEMON_HINT =
+  "Daemon is out of date - run `ccmux daemon restart`";
+
+/** Groupings whose header stands for one directory, so a new session opened
+ *  over it can inherit that directory. `session` and `window` group by tmux
+ *  location, which says nothing about where their members live. */
+const GROUPINGS_BY_DIRECTORY = new Set<GroupBy>(["project", "cwd"]);
+
+/** `POST /spawn`'s `split` for each placement: a new window is no split. */
+const SPAWN_SPLIT: Record<NewSessionPlacement, "h" | "v" | false> = {
+  window: false,
+  "split-h": "h",
+  "split-v": "v",
+};
 
 export function App(props: AppProps) {
   const renderer = useRenderer();
@@ -132,6 +163,7 @@ export function App(props: AppProps) {
     hideIdle: props.hideIdle,
     promptDisplay: props.promptDisplay,
     sidebar: props.sidebar,
+    lastSpawnAgent: props.lastSpawnAgent,
   });
   markStartup("store_created");
 
@@ -284,7 +316,7 @@ export function App(props: AppProps) {
 
   function reviewSession(session: EnrichedSession) {
     if (reviewInFlight) return;
-    const cwd = session.paneCwd ?? session.cwd;
+    const cwd = sessionCwd(session);
     if (!cwd) {
       store.actions.showToast("Review failed: no working directory");
       return;
@@ -436,16 +468,35 @@ export function App(props: AppProps) {
       })
       .catch((err: unknown) => {
         forkInFlight = false;
-        store.actions.showToast(`Fork failed: ${errorMessage(err)}`);
+        store.actions.showToast(`Fork failed: ${errText(err)}`);
       });
   }
 
-  function handleRowActivate(item: FlatItem, index: number) {
-    if (
+  /**
+   * Whether an overlay currently owns the screen.
+   *
+   * The keyboard handler returns early for each of these before it reaches
+   * the main switch, so they are already modal for keys. The mouse handlers
+   * read the SAME predicate rather than repeating the list, because the
+   * repeated list is what let two overlays ship modal for the keyboard and
+   * transparent to clicks: neither this dialog nor the prune dialog was
+   * added to it. A centered dialog leaves rows visible above and below, so
+   * a click landing on one is a real click on a real row — in the one-shot
+   * picker that meant switching panes and exiting, silently discarding a
+   * half-filled dialog.
+   */
+  function modalOverlayOpen(): boolean {
+    return (
       store.state.showHelp ||
       store.state.confirmMode ||
-      store.state.previewFocused
-    ) {
+      store.state.previewFocused ||
+      store.state.newSession !== null ||
+      store.state.prune !== null
+    );
+  }
+
+  function handleRowActivate(item: FlatItem, index: number) {
+    if (modalOverlayOpen()) {
       return;
     }
     if (store.state.contextMenu || store.state.groupContextMenu) {
@@ -462,11 +513,7 @@ export function App(props: AppProps) {
     index: number,
     event: MouseEvent,
   ) {
-    if (
-      store.state.showHelp ||
-      store.state.confirmMode ||
-      store.state.previewFocused
-    ) {
+    if (modalOverlayOpen()) {
       return;
     }
     store.actions.setSelectedIndex(index);
@@ -574,6 +621,25 @@ export function App(props: AppProps) {
     if (session) forkSession(session);
   }
 
+  function contextMenuNewSession() {
+    const cm = store.state.contextMenu;
+    if (!cm) return;
+    const session = store.state.sessions.find((s) => s.id === cm.sessionId);
+    store.actions.hideContextMenu();
+    if (!session) return;
+    // Works for paneless background rows too: their cwd is known, and
+    // placement is resolved from the picker's launch pane, not the row's.
+    openNewSession({ cwd: sessionCwd(session), agent: session.agentType });
+  }
+
+  function groupContextMenuNewSession() {
+    const cm = store.state.groupContextMenu;
+    if (!cm) return;
+    const first = store.selectedGroupSessions()[0];
+    store.actions.hideGroupContextMenu();
+    openNewSession({ cwd: first ? sessionCwd(first) : pickerCwd() });
+  }
+
   function contextMenuReview() {
     const cm = store.state.contextMenu;
     if (!cm) return;
@@ -601,6 +667,12 @@ export function App(props: AppProps) {
           },
         ]
       : [];
+    const newSessionItem: ContextMenuItem = {
+      label: "New session here",
+      hint: "n",
+      color: theme.text,
+      action: contextMenuNewSession,
+    };
     if (session?.trackingMode === "background") {
       return [
         {
@@ -615,6 +687,7 @@ export function App(props: AppProps) {
           color: theme.text,
           action: contextMenuOpenAgentView,
         },
+        newSessionItem,
         {
           label: "Kill",
           hint: "x",
@@ -644,7 +717,7 @@ export function App(props: AppProps) {
         color: theme.green,
         action: contextMenuAttach,
       },
-      ...forkItem,
+      newSessionItem,
       {
         label: "Kill",
         hint: "x",
@@ -657,6 +730,11 @@ export function App(props: AppProps) {
         color: theme.peach,
         action: () => contextMenuConfirm("restart"),
       },
+      // Last of the always-present actions on purpose. This item appears and
+      // disappears reactively (an SSE update that drops `nativeSessionId`
+      // removes it), and anything above Kill would slide Kill under a cursor
+      // already hovering the old position.
+      ...forkItem,
       ...reviewItem,
     ];
   }
@@ -670,6 +748,12 @@ export function App(props: AppProps) {
         hint: "space",
         color: theme.text,
         action: groupContextMenuToggleCollapse,
+      },
+      {
+        label: "New session here",
+        hint: "n",
+        color: theme.text,
+        action: groupContextMenuNewSession,
       },
       {
         label: "Pin to Top",
@@ -726,8 +810,364 @@ export function App(props: AppProps) {
         );
       })
       .catch((err: unknown) => {
-        store.actions.showToast(`Kill failed: ${errorMessage(err)}`);
+        store.actions.showToast(`Kill failed: ${errText(err)}`);
       });
+  }
+
+  // --- New session dialog (issue #65) ---
+
+  /** Spawnable agents from the daemon; null until `/agents` answers. */
+  const [spawnableAgents, setSpawnableAgents] = createSignal<
+    SpawnableAgent[] | null
+  >(null);
+  const [agentsError, setAgentsError] = createSignal<string | null>(null);
+  /** In-flight `/agents` fetch, so opening the dialog twice in quick
+   *  succession doesn't issue two. Cleared when it settles, so each open
+   *  refreshes — a days-old sidebar would otherwise never notice an agent
+   *  installed since it started. */
+  let agentsInFlight: Promise<void> | null = null;
+  /** Drops a second Enter while a spawn is in flight, which would otherwise
+   *  open two panes for one intent. */
+  let spawnInFlight = false;
+
+  /**
+   * The pane to place the new session against. The sidebar must never target
+   * its own rail (it persists, and splitting it halves the strip); an inline
+   * picker must target exactly its own pane, because it vacates it on spawn
+   * and anything else halves a bystander's pane instead.
+   */
+  const resolveSpawnPane = (): Promise<string | null> =>
+    resolveLaunchPane({ excludeSelf: props.sidebar === true }).catch(
+      () => null,
+    );
+
+  /**
+   * Where the picker itself was launched from. `bin/ccmux` cds into the
+   * package root for module resolution and carries the real invocation
+   * directory in `CCMUX_CALLER_PWD`, so `process.cwd()` alone would start
+   * every agent inside the ccmux install (same restoration as
+   * `commands/spawn.ts`).
+   */
+  const pickerCwd = (): string => process.env.CCMUX_CALLER_PWD ?? process.cwd();
+
+  /**
+   * Refresh the agent list. Called on every dialog open, and kept off the
+   * launch path: the picker is startup-sensitive and most launches never
+   * open the dialog. Re-fetching per open is what lets a long-lived sidebar
+   * pick up an agent installed since it started.
+   */
+  function ensureSpawnableAgents(): void {
+    if (agentsInFlight) return;
+    // Back to "loading" rather than leaving the previous error on screen: a
+    // retry that still shows the old red line reads as not having retried.
+    if (agentsError() !== null) {
+      batch(() => {
+        setAgentsError(null);
+        setSpawnableAgents(null);
+      });
+    }
+    agentsInFlight = fetch(`${getDaemonUrl()}/agents`)
+      .then(async (response) => {
+        const body = (await response.json().catch(() => null)) as {
+          agents?: SpawnableAgent[];
+          error?: string;
+        } | null;
+        if (!response.ok) {
+          // The daemon is machine-wide and long-lived, so "new client, old
+          // daemon" is the likeliest failure right after an upgrade — and
+          // it presents as a 404, since `/agents` simply isn't routed yet.
+          // A bare "HTTP 404" in the Agent field just looks broken, so name
+          // the cause and the one-line fix (the same restart requirement
+          // docs/architecture.md states for config-added agents).
+          if (response.status === 404) {
+            throw new Error(STALE_DAEMON_HINT);
+          }
+          throw new Error(body?.error ?? `HTTP ${response.status}`);
+        }
+        batch(() => {
+          setAgentsError(null);
+          setSpawnableAgents(body?.agents ?? []);
+        });
+      })
+      .catch((err: unknown) => {
+        // A daemon restarted mid-session must not leave the dialog
+        // permanently empty, and the next open retries.
+        batch(() => {
+          setAgentsError(errText(err));
+          setSpawnableAgents([]);
+        });
+      })
+      .finally(() => {
+        agentsInFlight = null;
+      });
+  }
+
+  /**
+   * The context a dialog opened over `item` inherits.
+   *
+   * cwd is derived, never asked: a session row means that session's
+   * directory, a group header means the directory the group stands for, and
+   * no selection at all falls back to where the picker was launched.
+   *
+   * A header only stands for a directory under a directory-shaped grouping.
+   * Grouped by tmux session or window, its members can span unrelated
+   * repositories, so the first member's cwd would be an arbitrary pick —
+   * the picker's own directory is at least a defensible default.
+   */
+  function newSessionContext(item: FlatItem | null): {
+    cwd: string;
+    agent?: string;
+  } {
+    if (item?.type === "session") {
+      const session = item.filteredSession.session;
+      return { cwd: sessionCwd(session), agent: session.agentType };
+    }
+    if (
+      item?.type === "header" &&
+      GROUPINGS_BY_DIRECTORY.has(store.state.groupBy)
+    ) {
+      const first = item.members[0]?.session;
+      if (first) return { cwd: sessionCwd(first) };
+    }
+    return { cwd: pickerCwd() };
+  }
+
+  function openNewSession(context: { cwd: string; agent?: string }): void {
+    // Mirrors `reviewSession`: refuse at the point of intent rather than
+    // opening a dialog with a blank Directory row whose Enter round-trips
+    // to a 400 from the daemon.
+    if (!context.cwd) {
+      store.actions.showToast("Can't start here: no working directory");
+      return;
+    }
+    ensureSpawnableAgents();
+    store.actions.openNewSessionDialog({
+      cwd: context.cwd,
+      // The row's own agent, else whatever was spawned last (persisted, so
+      // it survives the one-shot picker exiting), else the first listed.
+      agent:
+        context.agent ??
+        store.state.lastSpawnAgent ??
+        spawnableAgents()?.[0]?.name ??
+        "claude",
+    });
+  }
+
+  // The dialog opens before `/agents` answers, and the row's own agent may
+  // not even be spawnable here (detected by pane scanning, absent from
+  // PATH). Reconcile once the list lands rather than leaving a draft that
+  // would 400 on Enter.
+  createEffect(() => {
+    const list = spawnableAgents();
+    const draft = store.state.newSession;
+    if (!list || list.length === 0 || !draft) return;
+    if (list.some((agent) => agent.name === draft.agent)) return;
+    store.actions.setNewSessionAgent(list[0]!.name);
+  });
+
+  /**
+   * The choices j/k and the number keys apply to, for whichever field has
+   * focus: its options, the one currently held, and how to select another.
+   * Null for a field with no options (the prompt, which owns its own keys).
+   * Every option field goes through this one path, so the worktree
+   * destination field (#69) needs only its own case here.
+   */
+  function focusedOptionField(): {
+    options: string[];
+    value: string;
+    select: (value: string) => void;
+  } | null {
+    const draft = store.state.newSession;
+    if (!draft) return null;
+    switch (draft.field) {
+      case "agent":
+        return {
+          options: (spawnableAgents() ?? []).map((agent) => agent.name),
+          value: draft.agent,
+          select: store.actions.setNewSessionAgent,
+        };
+      case "placement":
+        return {
+          options: PLACEMENT_OPTIONS.map((option) => option.value),
+          value: draft.placement,
+          // Looked up rather than cast: only a real option gets through.
+          select: (value) => {
+            const option = PLACEMENT_OPTIONS.find((o) => o.value === value);
+            if (option) store.actions.setNewSessionPlacement(option.value);
+          },
+        };
+      default:
+        return null;
+    }
+  }
+
+  /** Clamped, not wrapping: in a three-item list, `k` teleporting to the
+   *  bottom reads as a misfire rather than a nicety. */
+  function moveNewSessionOption(delta: number): void {
+    const field = focusedOptionField();
+    if (!field || field.options.length === 0) return;
+    const current = Math.max(0, field.options.indexOf(field.value));
+    const next = Math.min(
+      Math.max(current + delta, 0),
+      field.options.length - 1,
+    );
+    field.select(field.options[next]!);
+  }
+
+  function pickNewSessionOption(index: number): void {
+    const field = focusedOptionField();
+    if (!field) return;
+    const value = field.options[index];
+    if (value !== undefined) field.select(value);
+  }
+
+  async function submitNewSession(): Promise<void> {
+    const draft = store.state.newSession;
+    if (!draft || spawnInFlight) return;
+
+    const list = spawnableAgents();
+    if (list === null) {
+      store.actions.showToast("Still loading agents...");
+      return;
+    }
+    const agent = list.find((a) => a.name === draft.agent);
+    if (!agent) {
+      store.actions.showToast(
+        agentsError() ?? "No agents available to spawn",
+        3000,
+      );
+      return;
+    }
+    const prompt = draft.prompt.trim();
+    if (prompt && !agent.supportsPrompt) {
+      store.actions.showToast(
+        `${agent.displayName} can't start with a prompt`,
+        3000,
+      );
+      return;
+    }
+    // Placement carries a `%N` from OUR tmux server; against a daemon
+    // watching a different one it would resolve to an unrelated pane, and
+    // the agent would start where nobody is looking.
+    if (!ensureSameServer()) return;
+
+    // The sidebar spawns without stealing focus; the picker's whole purpose
+    // is to put you in the new pane, so it jumps and gets out of the way.
+    const detach = props.sidebar === true;
+    spawnInFlight = true;
+    let spawned: { paneId?: string } | null = null;
+    try {
+      const callerPane = await resolveSpawnPane();
+      // A sidebar alone in its window has nothing to split but itself, and
+      // the daemon's placement-less `split-window` would halve the rail.
+      // Degrade to a new window and say so, rather than mangling the board.
+      let split = SPAWN_SPLIT[draft.placement];
+      if (split !== false && callerPane === null && props.sidebar) {
+        split = false;
+        store.actions.showToast("No pane to split here; opened a window");
+      }
+      const response = await fetch(`${getDaemonUrl()}/spawn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agent: agent.name,
+          cwd: draft.cwd,
+          split,
+          // `callerPane`, not `target`: the daemon reads an explicit target
+          // as "insert a window right here", which renumbers every later
+          // window in the session and breaks `select-window -t N` muscle
+          // memory. The picker only means "my session/pane" — which for a
+          // split is still exactly this pane.
+          callerPane: callerPane ?? undefined,
+          prompt: prompt || undefined,
+          detach,
+        }),
+      });
+      const body = (await response.json().catch(() => null)) as {
+        paneId?: string;
+        error?: string;
+      } | null;
+      if (response.ok) {
+        spawned = body ?? {};
+      } else {
+        // Leave the dialog open: every 400 here (agent can't take a prompt,
+        // cwd is gone) is something the user can fix in place.
+        store.actions.showToast(
+          `Spawn failed: ${body?.error ?? response.statusText}`,
+          4000,
+        );
+      }
+    } catch (err: unknown) {
+      store.actions.showToast(`Spawn failed: ${errText(err)}`, 4000);
+    } finally {
+      spawnInFlight = false;
+    }
+    if (!spawned) return;
+
+    // The pane EXISTS from here on, so nothing below may report a spawn
+    // failure. Remembering the agent is best-effort for exactly that reason:
+    // an unwritable ~/.config would otherwise surface as "Spawn failed", and
+    // the user — reasonably — would press Enter again and get a second pane.
+    await store.actions.setLastSpawnAgent(agent.name).catch(() => {});
+    store.actions.closeNewSessionDialog();
+    if (detach) {
+      store.actions.showToast(`Spawned ${agent.displayName}`);
+      return;
+    }
+    // The daemon already selected the new pane's window; tell the other
+    // boards so their active-row highlight doesn't lag a scan behind.
+    if (spawned.paneId) notifyActivePane(spawned.paneId);
+    if (!props.persistent) process.exit(0);
+  }
+
+  function handleNewSessionKey(event: KeyEvent): void {
+    const draft = store.state.newSession;
+    if (!draft) return;
+    const key = event.name;
+
+    if (key === "escape") {
+      store.actions.closeNewSessionDialog();
+      event.preventDefault();
+      return;
+    }
+    if (key === "return" || key === "enter") {
+      void submitNewSession();
+      event.preventDefault();
+      return;
+    }
+    if (key === "tab" || key === "backtab") {
+      store.actions.moveNewSessionField(
+        key === "backtab" || event.shift ? -1 : 1,
+      );
+      event.preventDefault();
+      return;
+    }
+
+    // The prompt input owns every remaining key while it has focus, so a
+    // prompt can contain `j`, `3`, or anything else a field shortcut would
+    // otherwise swallow. Field movement there is limited to the keys the
+    // input doesn't consume, exactly as in search mode.
+    if (draft.field === "prompt") {
+      if (key === "down" || (key === "n" && event.ctrl)) {
+        store.actions.moveNewSessionField(1);
+        event.preventDefault();
+      } else if (key === "up" || (key === "p" && event.ctrl)) {
+        store.actions.moveNewSessionField(-1);
+        event.preventDefault();
+      }
+      return;
+    }
+
+    if (key === "j" || key === "down") {
+      moveNewSessionOption(1);
+    } else if (key === "k" || key === "up") {
+      moveNewSessionOption(-1);
+    } else if (key >= "1" && key <= "9") {
+      pickNewSessionOption(parseInt(key, 10) - 1);
+    }
+    // Everything else is swallowed: the dialog is modal, and letting `q`
+    // through would quit the picker mid-edit.
+    event.preventDefault();
   }
 
   function confirmDialogAction() {
@@ -1118,6 +1558,11 @@ export function App(props: AppProps) {
       return;
     }
 
+    if (store.state.newSession) {
+      handleNewSessionKey(event);
+      return;
+    }
+
     if (store.state.contextMenu || store.state.groupContextMenu) {
       store.actions.hideContextMenu();
       store.actions.hideGroupContextMenu();
@@ -1247,8 +1692,13 @@ export function App(props: AppProps) {
       case "n":
         if (event.ctrl) {
           store.actions.moveSelection(1);
-          event.preventDefault();
+        } else if (!event.shift) {
+          openNewSession(newSessionContext(store.selectedFlatItem()));
         }
+        // Shift+N falls through deliberately: every other capital in this
+        // switch is its own action, so silently treating `N` as `n` would
+        // claim a key some later feature wants.
+        event.preventDefault();
         break;
 
       case "G":
@@ -1588,6 +2038,7 @@ export function App(props: AppProps) {
             previewFocused={store.state.previewFocused}
             persistent={props.persistent}
             groupBy={store.state.groupBy}
+            newSessionMode={store.state.newSession !== null}
             reviewable={reviewEnabled}
           />
         </Show>
@@ -1618,6 +2069,23 @@ export function App(props: AppProps) {
               store.actions.hideConfirmDialog();
             }}
           />
+        </Show>
+
+        <Show when={store.state.newSession}>
+          {(draft: () => NonNullable<typeof store.state.newSession>) => (
+            <NewSessionDialog
+              draft={draft()}
+              agents={spawnableAgents()}
+              agentsError={agentsError()}
+              onFocusField={store.actions.setNewSessionField}
+              onSelectAgent={store.actions.setNewSessionAgent}
+              onSelectPlacement={store.actions.setNewSessionPlacement}
+              onPromptInput={store.actions.setNewSessionPrompt}
+              onSubmit={() => void submitNewSession()}
+              onCancel={store.actions.closeNewSessionDialog}
+              showKeyHints={props.sidebar === true}
+            />
+          )}
         </Show>
 
         <Show when={store.state.prune}>

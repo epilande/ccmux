@@ -7,6 +7,37 @@ import {
   afterEach,
   mock,
 } from "bun:test";
+import { join as joinPath } from "path";
+import { tmpdir as osTmpdir } from "os";
+
+/**
+ * Redirect CCMUX_HOME before anything imports `lib/config`, whose
+ * STATE_FILE is frozen at module load.
+ *
+ * `handleActivePaneNotification` reaches `AttentionTracker.save()`, which
+ * writes state.json. Running this file ALONE therefore rewrote the
+ * developer's real ~/.config/ccmux/state.json; a full `bun test` only
+ * escaped it because another test file happens to set CCMUX_HOME
+ * process-wide first, which is accidental and order-dependent. AGENTS.md
+ * documents single-file runs as normal, so this file protects itself.
+ *
+ * The env var alone is not enough — `import` statements are hoisted, so
+ * `lib/config` has already frozen STATE_FILE by the time this line runs.
+ * The module mock is what actually redirects it, matching
+ * `index.no-hooks.test.ts`; the env var covers the paths that re-read
+ * CCMUX_HOME at call time.
+ */
+const serverTestHome = joinPath(
+  osTmpdir(),
+  `ccmux-server-test-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+);
+process.env.CCMUX_HOME = serverTestHome;
+
+const actualCcmuxConfig = await import("../lib/config");
+mock.module("../lib/config", () => ({
+  ...actualCcmuxConfig,
+  STATE_FILE: joinPath(serverTestHome, "state.json"),
+}));
 import {
   DaemonServer,
   rejectCrossOriginBrowser,
@@ -18,6 +49,7 @@ import { SessionManager } from "./sessions";
 import type { SessionEvent } from "./sessions";
 import type { SSEEvent, DaemonHealth } from "../types";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
+import type { SpawnableAgent } from "../lib/spawnable-agents";
 import type { Session, TmuxPane, EnrichedSession } from "../types/session";
 import { AttentionTracker } from "./attention-tracker";
 import { InvocationManager } from "./invocation-manager";
@@ -2919,6 +2951,50 @@ describe("getServerSocketPath and /server-info", () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe("GET /agents", () => {
+  it("serves spawnable agents as JSON", async () => {
+    const { internals } = createServer();
+    const res = await internals.handleRequest(
+      new Request("http://localhost/agents"),
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { agents: SpawnableAgent[] };
+    expect(Array.isArray(data.agents)).toBe(true);
+    // Which agents are installed is a property of the machine, so assert the
+    // shape and the invariant instead: every entry is a real agent name, so
+    // the dialog can hand any of them straight back to POST /spawn.
+    for (const agent of data.agents) {
+      expect(typeof agent.name).toBe("string");
+      expect(typeof agent.displayName).toBe("string");
+      expect(typeof agent.shortCode).toBe("string");
+      expect(typeof agent.supportsPrompt).toBe("boolean");
+    }
+    const names = data.agents.map((a) => a.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("lists only agents the spawn path can resolve", async () => {
+    // The daemon resolves its agent list once at boot. A name the config
+    // knows but this daemon doesn't must not reach the dialog, or Enter
+    // would answer "Unknown agent" for something the menu offered.
+    const { internals } = createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (agentType: string) =>
+        agentType === "claude"
+          ? BUILTIN_AGENTS.find((a) => a.name === "claude")
+          : undefined,
+    );
+    const res = await internals.handleRequest(
+      new Request("http://localhost/agents"),
+    );
+    const data = (await res.json()) as { agents: SpawnableAgent[] };
+    expect(data.agents.every((a) => a.name === "claude")).toBe(true);
   });
 });
 
