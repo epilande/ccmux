@@ -57,7 +57,7 @@ function printSkipped(skipped: PruneSkip[]): void {
   if (skipped.length === 0) return;
   console.log(`\nNot offered (${skipped.length}):`);
   for (const skip of skipped) {
-    console.log(`  ${skip.path} — ${skip.reason}`);
+    console.log(`  ${skip.path}: ${skip.reason}`);
   }
 }
 
@@ -83,6 +83,11 @@ function printResult(result: PruneRunResult): void {
     console.log(
       `\n  ${state.agent} state: ${action} ${state.removed.length} entr${state.removed.length === 1 ? "y" : "ies"} from ${state.file}`,
     );
+    // Named, not just counted. `--state` sweeps every recorded directory that
+    // is absent right now, which on a real machine is dominated by ordinary
+    // repos that simply are not checked out, so a bare count tells the user
+    // nothing about what they just agreed to lose.
+    for (const path of state.removed) console.log(`      ${path}`);
     if (state.backupPath) console.log(`    backup: ${state.backupPath}`);
   }
 }
@@ -298,10 +303,13 @@ export function createWorktreeCommand(): Command {
   worktree
     .command("prune")
     .description("Remove worktrees whose work is finished")
-    .option("--dry-run", "Show what would be removed without removing anything")
+    .option(
+      "--dry-run",
+      "Show what would be removed without removing anything (still runs 'git fetch --prune' per repo, which updates remote-tracking refs)",
+    )
     .option(
       "--state",
-      "Also drop agent state entries for directories deleted outside ccmux",
+      "Also drop agent state entries for recorded directories that do not exist right now",
     )
     .option("--repo <path>", "Limit to one repository's worktrees")
     .action(async (options: PruneOptions) => {

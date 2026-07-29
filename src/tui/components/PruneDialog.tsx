@@ -29,6 +29,17 @@ import { theme } from "../theme";
 
 type Phase = "loading" | "list" | "confirm" | "running" | "done" | "error";
 
+/**
+ * The `running` phase deliberately swallows every key — a delete midway
+ * through is not something to cancel — but that makes an unbounded request a
+ * trap: a wedged daemon would leave the overlay permanently unusable with no
+ * exit but killing the pane. Both requests therefore land in the error phase
+ * rather than hanging. The scan is a network-bound `gh` fan-out; the run can
+ * legitimately spend minutes deleting large trees.
+ */
+const SCAN_TIMEOUT_MS = 60_000;
+const RUN_TIMEOUT_MS = 10 * 60_000;
+
 interface PruneDialogProps {
   /** Main checkout to scope the scan to; null scans every known repo. */
   repo: string | null;
@@ -115,10 +126,14 @@ export const PruneDialog: Component<PruneDialogProps> = (props) => {
    *  confirmation step and not only on the rows. */
   const ignoredCount = () =>
     effective().reduce((n, c) => n + c.ignoredFiles.length, 0);
+  /** Selected dirty rows that WILL be deleted (their opt-in is live). */
+  const includedDirty = () => effective().filter((c) => c.dirty);
 
   onMount(() => {
     const query = props.repo ? `?repo=${encodeURIComponent(props.repo)}` : "";
-    fetch(`${getDaemonUrl()}/worktrees/prune-candidates${query}`)
+    fetch(`${getDaemonUrl()}/worktrees/prune-candidates${query}`, {
+      signal: AbortSignal.timeout(SCAN_TIMEOUT_MS),
+    })
       .then(async (response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = (await response.json()) as PruneScan;
@@ -134,8 +149,18 @@ export const PruneDialog: Component<PruneDialogProps> = (props) => {
   function toggleSelected(path: string): void {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
+      if (next.has(path)) {
+        next.delete(path);
+        // Deselecting revokes the dirty opt-in with it. Otherwise the opt-in
+        // outlives the selection and re-arms invisibly when the row is picked
+        // again, with no second `D` and nothing on screen to say so.
+        setDirtyOk((ok) => {
+          if (!ok.has(path)) return ok;
+          const copy = new Set(ok);
+          copy.delete(path);
+          return copy;
+        });
+      } else next.add(path);
       return next;
     });
   }
@@ -166,6 +191,7 @@ export const PruneDialog: Component<PruneDialogProps> = (props) => {
         source: "picker",
         repo: props.repo,
       }),
+      signal: AbortSignal.timeout(RUN_TIMEOUT_MS),
     })
       .then(async (response) => {
         const data = (await response.json()) as PruneRunResult & {
@@ -227,11 +253,24 @@ export const PruneDialog: Component<PruneDialogProps> = (props) => {
       }
       case "a":
         // "All" means all CLEAN rows: a bulk key must never be the thing that
-        // opts a dirty worktree in.
+        // opts a dirty worktree in. Clearing the opt-ins matters as much as
+        // the selection — a stale `dirtyOk` left behind would silently re-arm
+        // the moment the row was selected again by hand.
         setSelected(new Set(list.filter((c) => !c.dirty).map((c) => c.path)));
+        setDirtyOk(new Set<string>());
         break;
+      // Shift+D only, matching every hint and the row label. A bare `d` also
+      // opted in AND auto-selected, which put deleting uncommitted work three
+      // keystrokes from the cursor on a key many people hold as a vim
+      // operator prefix.
+      //
+      // Both spellings are matched because terminals disagree: the key
+      // arrives as name `"d"` with `shift` set, not as `"D"`. Testing only
+      // `case "D"` made the opt-in unreachable, which the keyboard tests
+      // caught.
       case "D":
       case "d": {
+        if (key !== "D" && !event.shift) break;
         const candidate = list[index()];
         if (candidate) toggleDirtyOk(candidate);
         break;
@@ -320,29 +359,46 @@ export const PruneDialog: Component<PruneDialogProps> = (props) => {
                           {`  ${candidate.branch ?? "detached"}`}
                         </text>
                       </box>
+                      {/* Compact mode gives the dirty warning its own line.
+                          Sharing one with the reason meant a ~40-column
+                          sidebar cut the warning in half, losing the only
+                          text that explains why the row is held back. */}
+                      <Show when={candidate.dirty && props.compact}>
+                        <box height={1} flexDirection="row" paddingLeft={5}>
+                          <text fg={opted() ? theme.red : theme.yellow}>
+                            {opted()
+                              ? "DIRTY, will be deleted"
+                              : "DIRTY, press D to include"}
+                          </text>
+                        </box>
+                      </Show>
                       <box height={1} flexDirection="row" paddingLeft={5}>
                         <text fg={reasonColor(candidate.reason)}>
                           {candidate.detail}
                         </text>
-                        <Show when={candidate.sessions.length > 0}>
+                        <Show
+                          when={candidate.sessions.length > 0 && !props.compact}
+                        >
                           <text fg={theme.overlay}>
                             {`  [${candidate.sessions
                               .map((s) => `${s.agentType} ${s.status}`)
                               .join(", ")}]`}
                           </text>
                         </Show>
-                        <Show when={candidate.dirty}>
+                        <Show when={candidate.dirty && !props.compact}>
                           <text fg={opted() ? theme.red : theme.yellow}>
                             {`  DIRTY ${candidate.modified}m/${candidate.untracked}u${
                               opted()
-                                ? " — will be deleted (D)"
-                                : " — press D to include"
+                                ? ", will be deleted (D)"
+                                : ", press D to include"
                             }`}
                           </text>
                         </Show>
                         <Show when={candidate.ignoredFiles.length > 0}>
                           <text fg={theme.peach}>
-                            {`  +${describeIgnoredFiles(candidate.ignoredFiles, 2)}`}
+                            {props.compact
+                              ? `  +${candidate.ignoredFiles.length} ignored`
+                              : `  +${describeIgnoredFiles(candidate.ignoredFiles, 2)}`}
                           </text>
                         </Show>
                       </box>
@@ -406,11 +462,16 @@ export const PruneDialog: Component<PruneDialogProps> = (props) => {
           </text>
         </Show>
         <Show when={phase() === "confirm"}>
-          <text fg={theme.text}>
+          {/* Red whenever uncommitted work is actually going, so the one
+              irreversible case does not read like the routine one. */}
+          <text fg={includedDirty().length > 0 ? theme.red : theme.text}>
             {`Delete ${effective().length} worktree(s)` +
               `, ${effective().filter((c) => c.branch && c.branchDeletion !== "none").length} branch(es)` +
               (ignoredCount() > 0
                 ? `, ${ignoredCount()} ignored file(s)`
+                : "") +
+              (includedDirty().length > 0
+                ? `, INCLUDING ${includedDirty().length} with uncommitted work`
                 : "") +
               (blockedDirty().length > 0
                 ? `, skipping ${blockedDirty().length} dirty`

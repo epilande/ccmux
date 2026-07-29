@@ -1169,6 +1169,11 @@ export function App(props: AppProps) {
 
       case "W":
       case "w":
+        // Shift+W only, like every other capital action in this switch. Both
+        // spellings are matched because the key arrives as name `"w"` with
+        // `shift` set rather than as `"W"`; gating on the modifier is what
+        // keeps a bare `w` from opening a destructive surface.
+        if (key !== "W" && !event.shift) break;
         // Scoped to the selected row's repo when there is one, so `W` on a
         // group behaves like the group menu's item; global otherwise.
         store.actions.showPrune(selectedRepoRoot());
