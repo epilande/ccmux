@@ -123,6 +123,18 @@ mock.module("./utils/tmux-window-state", () => ({
   }),
 }));
 
+// App builds its own store, whose persistence writes the REAL state.json
+// under the developer's ~/.config/ccmux. Any test that changes a persisted
+// setting (a spawn's last-agent memory, `f`, `p`, `b`) would otherwise
+// rewrite their live UI state. `getUIState` stays real: the sidebar's
+// state-file watcher reads it, and reading is harmless.
+const realUiState = await import("../lib/state");
+
+mock.module("../lib/state", () => ({
+  ...realUiState,
+  setUIState: async () => {},
+}));
+
 mock.module("../lib/startup-timing", () => ({
   markStartup: () => {},
   reportStartup: () => {},

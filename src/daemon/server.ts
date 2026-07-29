@@ -1795,17 +1795,30 @@ export class DaemonServer {
 
   /**
    * The agents this machine can start, for the picker's new-session dialog.
-   * Resolved per request rather than cached: it is asked for only when that
-   * dialog opens, and a cache would hide an agent installed since boot.
+   *
+   * Names are enumerated from the config, but every one is then resolved
+   * through the daemon's OWN lookup — the same one `POST /spawn` uses — and
+   * dropped if it isn't there. The daemon builds its agent list once at
+   * boot, so reading the config directly would list an agent added since
+   * then and have Enter answer "Unknown agent". Listing only what /spawn
+   * will accept keeps the menu honest; a newly configured agent appears
+   * after `ccmux daemon restart`, which its hooks need anyway.
+   *
+   * Resolved per request rather than cached: this is asked for only when
+   * that dialog opens, and a cache would hide an agent installed on PATH
+   * since boot (which needs no restart).
    */
   private async handleGetSpawnableAgents(
     headers: Record<string, string>,
   ): Promise<Response> {
     try {
       const preferences = await getPreferences();
+      const known = getAgents(preferences)
+        .map((agent) => this.getAgentByType(agent.name))
+        .filter((agent): agent is AgentDef => agent !== undefined);
       return Response.json(
         {
-          agents: listSpawnableAgents(getAgents(preferences), {
+          agents: listSpawnableAgents(known, {
             claudeCommand: preferences.command,
           }),
         },

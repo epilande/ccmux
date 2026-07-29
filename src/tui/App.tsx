@@ -842,7 +842,9 @@ export function App(props: AppProps) {
         );
         return;
       }
-      store.actions.setLastSpawnAgent(agent.name);
+      // Awaited, not fired and forgotten: the one-shot picker exits a few
+      // lines below and would otherwise cut the write off mid-flight.
+      await store.actions.setLastSpawnAgent(agent.name);
       store.actions.closeNewSessionDialog();
       if (detach) {
         store.actions.showToast(`Spawned ${agent.displayName}`);

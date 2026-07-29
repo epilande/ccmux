@@ -2935,6 +2935,27 @@ describe("GET /agents", () => {
     const names = data.agents.map((a) => a.name);
     expect(new Set(names).size).toBe(names.length);
   });
+
+  it("lists only agents the spawn path can resolve", async () => {
+    // The daemon resolves its agent list once at boot. A name the config
+    // knows but this daemon doesn't must not reach the dialog, or Enter
+    // would answer "Unknown agent" for something the menu offered.
+    const { internals } = createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (agentType: string) =>
+        agentType === "claude"
+          ? BUILTIN_AGENTS.find((a) => a.name === "claude")
+          : undefined,
+    );
+    const res = await internals.handleRequest(
+      new Request("http://localhost/agents"),
+    );
+    const data = (await res.json()) as { agents: SpawnableAgent[] };
+    expect(data.agents.every((a) => a.name === "claude")).toBe(true);
+  });
 });
 
 describe("GET /health scan-health", () => {

@@ -506,7 +506,9 @@ describe("store", () => {
     it("should persist showPreview state", async () => {
       const persisted: Record<string, unknown>[] = [];
       const store = createTUIStore({
-        onPersistState: (updates) => persisted.push(updates),
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
       });
 
       store.actions.togglePreview();
@@ -625,7 +627,9 @@ describe("store", () => {
     it("should persist hideIdle state", async () => {
       const persisted: Record<string, unknown>[] = [];
       const store = createTUIStore({
-        onPersistState: (updates) => persisted.push(updates),
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
       });
 
       store.actions.toggleHideIdle();
@@ -681,7 +685,9 @@ describe("store", () => {
     it("should persist promptDisplay state", async () => {
       const persisted: Record<string, unknown>[] = [];
       const store = createTUIStore({
-        onPersistState: (updates) => persisted.push(updates),
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
       });
 
       store.actions.cyclePrompt();
@@ -765,7 +771,9 @@ describe("store", () => {
     it("should persist groupBy and clear collapsed/pinned groups", async () => {
       const persisted: Record<string, unknown>[] = [];
       const store = createTUIStore({
-        onPersistState: (updates) => persisted.push(updates),
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
       });
 
       store.actions.cycleGroupBy();
@@ -2039,7 +2047,9 @@ describe("store", () => {
       const persisted: Record<string, unknown>[] = [];
       const store = createTUIStore({
         groupBy: "project",
-        onPersistState: (updates) => persisted.push(updates),
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
       });
       store.actions.setSessions([
         createMockSession({ id: "a", project: "alpha" }),
@@ -2060,7 +2070,9 @@ describe("store", () => {
       const persisted: Record<string, unknown>[] = [];
       const store = createTUIStore({
         groupBy: "project",
-        onPersistState: (updates) => persisted.push(updates),
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
       });
       store.actions.setSessions([
         createMockSession({ id: "a", project: "alpha" }),
@@ -2083,7 +2095,9 @@ describe("store", () => {
       const persisted: Record<string, unknown>[] = [];
       const store = createTUIStore({
         groupBy: "project",
-        onPersistState: (updates) => persisted.push(updates),
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
       });
       store.actions.setSessions([
         createMockSession({ id: "a", project: "alpha" }),
@@ -2102,7 +2116,9 @@ describe("store", () => {
       const store = createTUIStore({
         groupBy: "project",
         collapsedGroups: ["alpha", "beta"],
-        onPersistState: (updates) => persisted.push(updates),
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
       });
       store.actions.setSessions([
         createMockSession({ id: "a", project: "alpha" }),
@@ -2119,7 +2135,9 @@ describe("store", () => {
       const store = createTUIStore({
         groupBy: "project",
         collapsedGroups: ["stale-group"],
-        onPersistState: (updates) => persisted.push(updates),
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
       });
       store.actions.setSessions([
         createMockSession({ id: "a", project: "alpha" }),
@@ -2784,7 +2802,9 @@ describe("store", () => {
       const persisted: Record<string, unknown>[] = [];
       const store = createTUIStore({
         groupBy: "none",
-        onPersistState: (updates) => persisted.push(updates),
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
       });
       store.actions.setSessions([
         createMockSession({ id: "a" }),
@@ -3007,16 +3027,20 @@ describe("store", () => {
     it("persists the last spawned agent, and only when it changes", async () => {
       const persisted: Record<string, unknown>[] = [];
       const store = _createTUIStore({
-        onPersistState: (updates) => persisted.push(updates),
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
       });
 
-      store.actions.setLastSpawnAgent("codex");
-      await waitForDebounce();
+      await store.actions.setLastSpawnAgent("codex");
       expect(store.state.lastSpawnAgent).toBe("codex");
+      // Written straight through, NOT through the 300ms debounce: the
+      // one-shot picker exits the moment its spawn lands, so a queued write
+      // would never reach disk.
       expect(persisted).toEqual([{ lastSpawnAgent: "codex" }]);
 
       // Re-spawning the same agent is not a state change worth a disk write.
-      store.actions.setLastSpawnAgent("codex");
+      await store.actions.setLastSpawnAgent("codex");
       await waitForDebounce();
       expect(persisted).toEqual([{ lastSpawnAgent: "codex" }]);
     });

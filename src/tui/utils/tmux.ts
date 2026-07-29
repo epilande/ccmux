@@ -472,11 +472,18 @@ export function parseLaunchPane(
  */
 export async function resolveLaunchPane(): Promise<string | null> {
   if (!process.env.TMUX) return null;
+  const selfPane = process.env.TMUX_PANE ?? null;
   try {
     const proc = Bun.spawn(
       [
         "tmux",
         "list-panes",
+        // Target our OWN window when we have a pane. Bare `list-panes`
+        // resolves the session's CURRENT window, which is not necessarily
+        // ours — a sidebar in a background window would enumerate someone
+        // else's panes and spawn there. A popup has no pane, and for it the
+        // client's current window is exactly what it is drawn over.
+        ...(selfPane ? ["-t", selfPane] : []),
         "-F",
         ["#{pane_id}", "#{pane_title}", "#{pane_active}"].join(PANE_FIELD_SEP),
       ],
@@ -484,7 +491,7 @@ export async function resolveLaunchPane(): Promise<string | null> {
     );
     const output = await new Response(proc.stdout).text();
     if ((await proc.exited) !== 0) return null;
-    return parseLaunchPane(output, process.env.TMUX_PANE ?? null);
+    return parseLaunchPane(output, selfPane);
   } catch {
     return null;
   }

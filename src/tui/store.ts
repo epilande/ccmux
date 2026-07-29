@@ -151,7 +151,7 @@ interface TUIStoreOptions {
   lastSpawnAgent?: string;
   sidebar?: boolean;
   /** Override state persistence (pass no-op in tests) */
-  onPersistState?: (updates: Partial<UIState>) => void;
+  onPersistState?: (updates: Partial<UIState>) => void | Promise<void>;
   /** How long a finished invoke row lingers before removal. Defaults to
    *  INVOKE_FINISHED_LINGER_MS; lowered in tests. */
   invokeFinishedLingerMs?: number;
@@ -1242,12 +1242,21 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("newSession", "prompt", prompt);
     },
 
-    /** Remember the agent a spawn actually used, so the next dialog opened
-     *  without an agent in context defaults to it. */
-    setLastSpawnAgent(agent: string) {
-      if (state.lastSpawnAgent === agent) return;
+    /**
+     * Remember the agent a spawn actually used, so the next dialog opened
+     * without an agent in context defaults to it.
+     *
+     * Written straight through rather than through the debounce, and the
+     * write is returned so the caller can await it: the one-shot picker
+     * calls `process.exit(0)` the instant its spawn lands, which is exactly
+     * the case this value exists for and exactly the case a 300ms timer
+     * never survives. A spawn is a deliberate, rare event, so it does not
+     * need the keypress-churn coalescing the debounce is there for.
+     */
+    setLastSpawnAgent(agent: string): Promise<void> {
+      if (state.lastSpawnAgent === agent) return Promise.resolve();
       setState("lastSpawnAgent", agent);
-      persistUIState({ lastSpawnAgent: agent });
+      return Promise.resolve(persistStateFn({ lastSpawnAgent: agent }));
     },
 
     togglePreview() {
