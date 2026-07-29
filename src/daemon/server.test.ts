@@ -3861,3 +3861,168 @@ describe("worktree prune endpoints", () => {
     expect(body.outcomes).toHaveLength(1);
   });
 });
+
+/**
+ * `POST /spawn` with a worktree destination.
+ *
+ * tmux is stubbed but git is NOT: the whole point of the endpoint half is
+ * that a real worktree exists at a real path before the pane is created, and
+ * a stubbed git would assert nothing about that. Non-tmux commands therefore
+ * pass through to the real `Bun.spawn`.
+ */
+describe("POST /spawn with a worktree", () => {
+  let root: string;
+
+  function withTmuxOnlyStub() {
+    const original = Bun.spawn;
+    const argv: string[][] = [];
+    Bun.spawn = ((spawned: string[], opts?: unknown) => {
+      if (spawned[0] !== "tmux") {
+        return (original as (a: string[], b?: unknown) => unknown)(
+          spawned,
+          opts,
+        );
+      }
+      argv.push(spawned);
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob(["%99\n"]).stream(),
+        stderr: new Blob([""]).stream(),
+      };
+    }) as unknown as typeof Bun.spawn;
+    return { argv, restore: () => (Bun.spawn = original) };
+  }
+
+  function makeRepo(): string {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-spawn-wt-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    return repo;
+  }
+
+  async function spawnInto(
+    internals: ServerInternals,
+    body: Record<string, unknown>,
+  ): Promise<Response> {
+    return internals.handleRequest(
+      new Request("http://127.0.0.1:2269/spawn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("creates the worktree and spawns the pane in it", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "fix-thing" },
+      });
+      const body = (await res.json()) as {
+        worktree?: { path: string; name: string; branch: string; created: boolean };
+      };
+
+      expect(res.status).toBe(200);
+      expect(body.worktree?.name).toBe("fix-thing");
+      expect(body.worktree?.created).toBe(true);
+      expect(existsSync(body.worktree!.path)).toBe(true);
+      // The contract that matters: the pane was opened in the worktree, not
+      // in the cwd the request named.
+      const paneArgv = tmux.argv.find((a) => a.includes("-c"));
+      expect(paneArgv?.[paneArgv.indexOf("-c") + 1]).toBe(body.worktree!.path);
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("derives the name from the prompt when none is given", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        prompt: "fix sidebar flicker on resize",
+        worktree: {},
+      });
+      const body = (await res.json()) as { worktree?: { name: string } };
+
+      expect(body.worktree?.name).toBe("fix-sidebar-flicker");
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("rejects a worktree request with neither a name nor a prompt", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: {},
+      });
+      const body = (await res.json()) as { error: string };
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("needs a name");
+      // And no pane was opened for a request that could not be satisfied.
+      expect(tmux.argv).toEqual([]);
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("rejects a worktree request outside a git repository", async () => {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-spawn-nogit-"));
+    const plain = join(root, "plain");
+    mkdirSync(plain, { recursive: true });
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: plain,
+        worktree: { name: "nope" },
+      });
+      const body = (await res.json()) as { error: string };
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("Not inside a git repository");
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("spawns into the ordinary cwd when no worktree is requested", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, { agent: "claude", cwd: repo });
+      const body = (await res.json()) as { worktree?: unknown };
+
+      expect(res.status).toBe(200);
+      expect(body.worktree).toBeUndefined();
+      const paneArgv = tmux.argv.find((a) => a.includes("-c"));
+      expect(paneArgv?.[paneArgv.indexOf("-c") + 1]).toBe(repo);
+    } finally {
+      tmux.restore();
+    }
+  });
+});

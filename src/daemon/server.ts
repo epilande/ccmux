@@ -20,10 +20,12 @@ import {
   normalizePrompt,
   normalizeSplit,
   normalizeTarget,
+  normalizeWorktreeRequest,
   substitutePlaceholders,
   type SpawnPlacement,
   type SpawnSplit,
 } from "./spawn-command";
+import { createWorktree, type WorktreeCreation } from "./worktree-create";
 import type { AgentDef } from "../lib/agents";
 import {
   getMarkerKey,
@@ -2045,6 +2047,7 @@ export class DaemonServer {
       target?: string;
       callerPane?: string;
       detach?: boolean;
+      worktree?: unknown;
     };
     try {
       body = (await req.json()) as typeof body;
@@ -2134,6 +2137,41 @@ export class DaemonServer {
       );
     }
 
+    // A worktree destination replaces the cwd for everything downstream, so it
+    // is resolved here: past this point the handler is the ordinary spawn
+    // path, and placement, split direction and per-agent prompt handling apply
+    // to the new checkout without knowing it is one.
+    const worktreeRequest = normalizeWorktreeRequest(body.worktree);
+    if (!worktreeRequest.ok) {
+      return Response.json(
+        { error: worktreeRequest.error },
+        { status: 400, headers },
+      );
+    }
+    let spawnCwd = cwd;
+    let worktreeInfo: WorktreeCreation | undefined;
+    if (worktreeRequest.value) {
+      const gitInfo = await this.getGitInfo(cwd);
+      if (!gitInfo.mainRepoRoot) {
+        return Response.json(
+          { error: `Not inside a git repository: ${cwd}` },
+          { status: 400, headers },
+        );
+      }
+      const created = await createWorktree(gitInfo.mainRepoRoot, {
+        ...worktreeRequest.value,
+        prompt: prompt ?? undefined,
+      });
+      if (!created.ok) {
+        return Response.json(
+          { error: created.error },
+          { status: 400, headers },
+        );
+      }
+      worktreeInfo = created.result;
+      spawnCwd = created.result.path;
+    }
+
     // Resolve agent definition (custom agents from config are also valid)
     const agent = this.getAgentByType(agentName);
     if (!agent) {
@@ -2193,7 +2231,12 @@ export class DaemonServer {
     }
 
     // Create tmux pane
-    const tmuxArgv = buildTmuxSpawnArgv({ split, cwd, placement, detach });
+    const tmuxArgv = buildTmuxSpawnArgv({
+      split,
+      cwd: spawnCwd,
+      placement,
+      detach,
+    });
     const tmuxCmd = tmuxArgv[0];
     try {
       const proc = Bun.spawn(["tmux", ...tmuxArgv], {
@@ -2256,7 +2299,13 @@ export class DaemonServer {
         await selectProc.exited;
       }
 
-      return Response.json({ success: true, paneId, command }, { headers });
+      // `worktree` is echoed back because the caller asked for a destination
+      // it did not name: the path and branch are decided here, and `created`
+      // distinguishes a fresh worktree from one that was opened.
+      return Response.json(
+        { success: true, paneId, command, worktree: worktreeInfo },
+        { headers },
+      );
     } catch (err: unknown) {
       return Response.json(
         { error: `Failed to spawn session: ${errorMessage(err)}` },

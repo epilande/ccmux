@@ -10,6 +10,7 @@ import {
   escapeSingleQuoted,
   normalizeSplit,
   normalizeTarget,
+  normalizeWorktreeRequest,
 } from "./spawn-command";
 
 const claudeAgent: AgentDef = getBuiltinAgent("claude");
@@ -610,5 +611,46 @@ describe("escapeSingleQuoted", () => {
 
   it("leaves shell metacharacters alone (the quotes contain them)", () => {
     expect(escapeSingleQuoted("$(id); `id` && x")).toBe("$(id); `id` && x");
+  });
+});
+
+describe("normalizeWorktreeRequest", () => {
+  it("treats absent, null and false as no worktree", () => {
+    for (const value of [undefined, null, false]) {
+      expect(normalizeWorktreeRequest(value)).toEqual({
+        ok: true,
+        value: undefined,
+      });
+    }
+  });
+
+  it("accepts an empty object as opt-in with everything derived", () => {
+    expect(normalizeWorktreeRequest({})).toEqual({ ok: true, value: {} });
+  });
+
+  it("carries name and base through", () => {
+    expect(normalizeWorktreeRequest({ name: "fix-thing", base: "main" })).toEqual(
+      { ok: true, value: { name: "fix-thing", base: "main" } },
+    );
+  });
+
+  it("drops empty members rather than passing blanks downstream", () => {
+    expect(normalizeWorktreeRequest({ name: "", base: null })).toEqual({
+      ok: true,
+      value: {},
+    });
+  });
+
+  it("rejects a non-object and a non-string member", () => {
+    const notObject = normalizeWorktreeRequest("please");
+    expect(notObject.ok).toBe(false);
+    if (!notObject.ok) expect(notObject.error).toContain("expected an object");
+
+    const arrays = normalizeWorktreeRequest([{ name: "x" }]);
+    expect(arrays.ok).toBe(false);
+
+    const badName = normalizeWorktreeRequest({ name: 7 });
+    expect(badName.ok).toBe(false);
+    if (!badName.ok) expect(badName.error).toContain("worktree.name");
   });
 });
