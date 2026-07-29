@@ -328,6 +328,20 @@ function detailFor(
  * stays on the safe `-d` — a deleted remote branch is a strong hint, not
  * proof, so an unmerged branch survives with a reported failure instead of
  * being force-deleted on a guess. `pr-closed` keeps the branch entirely.
+ *
+ * What stops `pr-merged`'s force from destroying unpublished work is the
+ * identity rule in {@link selectPRForBranch}, not a check here: the reason
+ * only applies when the PR's head SHA equals the local tip, so a branch that
+ * has moved on since the merge no longer matches and falls through to a
+ * reason that uses `-d`.
+ *
+ * Do NOT add a `git rev-list --count <branch> --not --remotes` gate on the
+ * force. It reads like the obvious safety net and has been proposed several
+ * times, but a squash merge never puts the branch's own commits on any
+ * remote, so that count is greater than zero for EVERY correctly
+ * squash-merged branch. Gating on it downgrades every `pr-merged` to `-d`,
+ * which then refuses, leaving behind exactly the branches this feature exists
+ * to clean up.
  */
 export function branchDeletionFor(reason: PruneReason): BranchDeletion {
   switch (reason) {
