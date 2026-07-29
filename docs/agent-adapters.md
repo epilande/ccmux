@@ -46,6 +46,24 @@ Two quoting rules are enforced in `spawn-command.ts`, both because prompt text i
 - Substitution never goes through `String.replace` with a string replacement, which expands `$&`, `` $` ``, `$'`, and `$$` **in the replacement**. A prompt of ``$`; touch ./PWNED; #`` would otherwise splice the preceding template text back in, reopen the quoted word, and execute. Substitution is split/join instead.
 - The template's quoting is parsed the way `sh` reads it, and every `{prompt}` must land in a real single-quoted context with the template balanced. Checking only the adjacent characters is not enough: in `sh -c "{bin} '{prompt}'"` the placeholder looks single-quoted but the enclosing word is double-quoted, where `'` is ordinary, `"` closes the word, and `$(...)` is expanded.
 
+## Forking a session
+
+Fork (`F` in the picker, the context menu's **Fork**, `ccmux spawn --fork <id>`) starts a new session whose conversation continues an existing one's history while leaving that session untouched. It is declared per agent in `AgentDef.forkCommand` (`{id}` = the source's native session id, optional `{bin}` = the resolved launcher), built by `buildAgentForkCommand` in `src/daemon/spawn-command.ts`.
+
+**Claude Code is the only built-in that declares one**, `claude --resume {id} --fork-session`. Its `--help` is explicit: "--fork-session: When resuming, create a new session ID instead of reusing the original". Verified live against a running original: the fork gets its own session id and its own transcript file, replays the history, and the source session keeps its id, its transcript, and its ability to continue.
+
+Fork is deliberately not enabled for the rest, and adding one is not a matter of pattern-matching the resume flag:
+
+- A bare `--resume` (Codex, Cursor, Copilot) re-opens **the same session id**, and none of the three documents a fork-style "new id" flag. Whether two live processes on one rollout/session file interleave safely or the second writer simply wins is untested, and the losing side of that bet is the session the user asked to preserve.
+- `opencode --continue`, `pi -c`, and `omp -c` take no id at all: they mean "the most recent session", which is not necessarily the row the user forked from.
+
+So an agent earns a `forkCommand` only after someone has checked, against a **live** original, that the new process gets a distinct session id and that the original is unharmed. Until then the picker hides Fork for it and the route returns a 400 (there is no guess-and-hope path). A user who has verified an agent themselves can set `agents.<name>.forkCommand` in `ccmux.json`.
+
+Two structural notes for anyone extending this:
+
+- Command construction (`buildAgentForkCommand`) is kept separate from pane placement (`buildTmuxSpawnArgv` and the route's placement resolution). `POST /spawn`'s fork path adds no targeting of its own: the caller passes `split`/`target` exactly as for any other spawn, and an explicit `cwd` overrides the source's. That is what lets a fork-into-a-worktree destination reuse the command half unchanged.
+- Forking mid-turn is safe for Claude and is not gated. The source writes only to its own transcript and the fork only reads it, so a fork taken while the original is working replays the history up to that point (the in-flight turn's not-yet-written output is simply absent from the copy).
+
 ## Claude-specific caveats
 
 - **AskUserQuestion looks exactly like a permission prompt to the hook.** Claude fires the `Notification` hook for its AskUserQuestion option picker with the EXACT same payload as a real permission prompt (`{"message":"Claude needs your permission","notification_type":"permission_prompt"}`, verified on Claude Code 2.1.209/2.1.210). There is no distinguishing signal in the payload, so `STATE_NOTIFY_HOOK_SCRIPT` maps both to marker state `waiting_permission`. Claude also does NOT flush the picker's `tool_use` to the JSONL during the wait (same deferred-write behavior as permission-gated tools), so the transcript is silent about it too. **The pane is the only source that distinguishes the two:** the picker renders numbered options plus a "Type something." choice and an "Enter to select" footer, and shows NEITHER "requires approval" nor "Do you want to proceed?". Claude's `terminalRules` classify it as `attentionType: "question"`, and the reconciler relabels the marker candidate via `correctAmbiguousPermissionMarker` (gated by `AgentDef.ambiguousPermissionMarker`) before the cascade fold. The notifier repeats the same pane check at delivery time to cover the one-scan race (`buildNotificationContext` → `reclassifyAs`).

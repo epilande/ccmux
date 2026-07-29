@@ -118,9 +118,11 @@ Agent processes/logs --> Watcher --> Parser --> Status Machine --> Session Manag
 
 ### Agent Definitions
 
-Built-in agents: `src/lib/agents.ts`. Each `AgentDef` includes: `processMatch`, `commandPatterns`, `terminalRules`, `errorRules`, `executable`, `resumeCommand`, `promptCommand`, `sessionFilePattern`, `versionCommand`, `hooks`, `invokeMode`, `readyPattern`.
+Built-in agents: `src/lib/agents.ts`. Each `AgentDef` includes: `processMatch`, `commandPatterns`, `terminalRules`, `errorRules`, `executable`, `resumeCommand`, `promptCommand`, `forkCommand`, `sessionFilePattern`, `versionCommand`, `hooks`, `invokeMode`, `readyPattern`.
 
 `promptCommand` (the interactive-with-initial-prompt shape used by `ccmux spawn --prompt`) is per-agent and non-obvious — `--prompt` means one-shot print mode for three of the built-ins. See [`docs/agent-adapters.md#spawning-with-an-initial-prompt`](docs/agent-adapters.md#spawning-with-an-initial-prompt) before adding or changing one.
+
+`forkCommand` (branch a conversation into a new session, leaving the original alone) is Claude-only: for every other built-in, what a resume does to a still-running original is unverified, and a wrong guess damages the session the user asked to preserve. Do not add one without checking it live. See [`docs/agent-adapters.md#forking-a-session`](docs/agent-adapters.md#forking-a-session).
 
 Custom agents via `agents` key in `~/.config/ccmux/ccmux.json` (types in `src/lib/preferences.ts` -> `AgentConfig`).
 
