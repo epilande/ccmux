@@ -20,6 +20,14 @@ export type ResolvedSplit = false | SplitDirection;
 /** A tmux pane id, the only accepted shape for `target`. */
 export const PANE_ID_PATTERN = /^%\d+$/;
 
+/**
+ * The only accepted shape for a session id that gets interpolated into a
+ * shell command (`resume`, `fork`). Deliberately narrower than any agent's
+ * real id format: everything in it is inert to the shell, so no escaping is
+ * needed downstream and no template can be broken out of.
+ */
+export const NATIVE_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
 export type BuildResult<T> =
   | { ok: true; value: T }
   | { ok: false; error: string };
@@ -325,6 +333,73 @@ export function buildAgentSpawnCommand(
   }
 
   return { ok: true, value: binary };
+}
+
+export interface AgentForkCommandInput {
+  agent: AgentDef;
+  /** Resolved launcher binary, substituted for `{bin}` (see above). */
+  binary: string;
+  /** The SOURCE session's native id, substituted for `{id}`. */
+  sessionId: string;
+}
+
+/**
+ * Build the shell command that continues `sessionId`'s conversation in a
+ * new session, leaving the source untouched.
+ *
+ * Kept separate from `buildAgentSpawnCommand` and from every placement
+ * concern (`buildTmuxSpawnArgv`, the route's `SpawnPlacement` resolution)
+ * on purpose: forking into a git worktree is the same command with a
+ * different `cwd` and destination, so that feature reuses this function
+ * unchanged and only swaps the placement half.
+ *
+ * There is no quoting scan like `promptCommand`'s, because nothing
+ * free-form is interpolated: `{id}` is constrained to
+ * `NATIVE_SESSION_ID_PATTERN` right here, and `{bin}` is the same value
+ * the bare-spawn path already sends to the shell verbatim.
+ */
+export function buildAgentForkCommand(
+  input: AgentForkCommandInput,
+): BuildResult<string> {
+  const { agent, binary, sessionId } = input;
+  const template = agent.forkCommand;
+
+  if (template === undefined) {
+    return {
+      ok: false,
+      error:
+        `Agent '${agent.name}' does not support forking a session. ` +
+        `Set 'agents.${agent.name}.forkCommand' in ccmux.json (e.g. "{bin} --resume {id} --fork-session") ` +
+        `once you have verified that resuming a live session leaves it undisturbed.`,
+    };
+  }
+  // A config file can hold any JSON, and this runs outside the route's try
+  // block, so a non-string would surface as an opaque 500.
+  if (typeof template !== "string") {
+    return {
+      ok: false,
+      error: `Invalid 'agents.${agent.name}.forkCommand': expected a string.`,
+    };
+  }
+  // Without `{id}` the command starts a FRESH session: the pane appears, the
+  // agent runs, and the history the user asked to branch is silently absent.
+  // A refusal is far easier to act on than that.
+  if (!template.includes("{id}")) {
+    return {
+      ok: false,
+      error:
+        `Invalid 'agents.${agent.name}.forkCommand': must contain the {id} placeholder, ` +
+        `otherwise the fork would start a fresh session instead of continuing this one.`,
+    };
+  }
+  if (!NATIVE_SESSION_ID_PATTERN.test(sessionId)) {
+    return { ok: false, error: `Invalid session id: ${sessionId}` };
+  }
+
+  return {
+    ok: true,
+    value: substitutePlaceholders(template, { id: sessionId, bin: binary }),
+  };
 }
 
 /**
