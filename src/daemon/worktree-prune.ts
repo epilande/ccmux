@@ -101,6 +101,12 @@ export interface PruneCandidate {
   dirty: boolean;
   modified: number;
   untracked: number;
+  /**
+   * Ignored files that would be deleted with the directory (`.env` and
+   * friends). Not part of `dirty` — surfaced so the user can see them, since
+   * nothing else in git or in a backup would bring them back.
+   */
+  ignoredFiles: string[];
   branchDeletion: BranchDeletion;
   /** `.git/worktrees/<name>`, captured while the worktree still exists. */
   adminDir: string | null;
@@ -121,12 +127,73 @@ export interface PruneScan {
   skipped: PruneSkip[];
 }
 
+/** One `gh pr list --json` row, with the fields that establish identity. */
+export interface GhPRRow {
+  number: number;
+  url: string;
+  state: string;
+  /** PR head lives in a fork, not in this repo. */
+  isCrossRepository?: boolean;
+  /** SHA of the PR's head commit — the only reliable branch identity. */
+  headRefOid?: string;
+}
+
+/**
+ * Pick the PR that describes THIS worktree's branch, from everything `gh`
+ * returned for the branch NAME.
+ *
+ * `gh pr list --head <branch>` matches on the name alone — it has no syntax
+ * for qualifying an owner ("<owner>:<branch>" is explicitly unsupported) — so
+ * the reply mixes in every fork's PR and every earlier reuse of that name. On
+ * `cli/cli`, `--head patch-1` returns 25 PRs from 25 different forks, three of
+ * them MERGED. Taking any of those as proof would classify a local `patch-1`
+ * as `pr-merged`, which is the one reason that force-deletes the branch.
+ *
+ * Two asymmetric rules, because the two directions have opposite costs:
+ *
+ * - OPEN wins over everything, from ANY repo, without an identity check. An
+ *   open PR is the state that makes a worktree NOT removable, so a false
+ *   positive here only skips a cleanup, while a false negative deletes live
+ *   work. This is also why it is checked before merged and closed: a branch
+ *   with both a merged PR and a currently open one is being worked on.
+ * - MERGED and CLOSED justify removal, so they must be PROVEN to be about
+ *   this branch: same repository (never a fork), and a head SHA equal to the
+ *   local branch tip. The SHA is what defeats name reuse — a new `feat/x`
+ *   sharing a name with a long-merged `feat/x` has a different tip, so the
+ *   old PR no longer speaks for it.
+ *
+ * `localTip` null (git could not resolve the branch) fails closed: no PR can
+ * be proven to match, so nothing merged or closed is reported.
+ */
+export function selectPRForBranch(
+  rows: GhPRRow[],
+  localTip: string | null,
+): PRState | null {
+  const asState = (row: GhPRRow): PRState => ({
+    number: row.number,
+    url: row.url,
+    state: row.state as PRState["state"],
+  });
+
+  const open = rows.find((r) => r.state === "OPEN");
+  if (open) return asState(open);
+
+  if (!localTip) return null;
+  const mine = rows.filter(
+    (r) => r.isCrossRepository !== true && r.headRefOid === localTip,
+  );
+  const merged = mine.find((r) => r.state === "MERGED");
+  if (merged) return asState(merged);
+  const closed = mine.find((r) => r.state === "CLOSED");
+  return closed ? asState(closed) : null;
+}
+
 /**
  * Default PR lookup. `--state all` is what separates this from the daemon's
  * open-PR resolver: a merged or closed PR is precisely the state that
  * resolver filters out, and precisely the state that makes a worktree
- * removable. Returns the most conclusive PR when a branch has several
- * (reopened, re-pushed): merged beats open beats closed.
+ * removable. See {@link selectPRForBranch} for how one of the returned PRs is
+ * proven to be about this branch rather than a namesake.
  */
 export const ghPRStateLookup: PRStateLookup = async (cwd, branch) => {
   try {
@@ -140,33 +207,30 @@ export const ghPRStateLookup: PRStateLookup = async (cwd, branch) => {
         "--state",
         "all",
         "--json",
-        "number,url,state",
+        "number,url,state,isCrossRepository,headRefOid",
+        // Generous, because the identity filter runs client-side: a popular
+        // branch name can bury this repo's own PR under dozens of fork PRs,
+        // and a truncated page would read as "no PR" or, worse, surface only
+        // a namesake.
         "--limit",
-        "10",
+        "100",
       ],
-      { cwd, stdout: "pipe", stderr: "ignore" },
+      // `env` passed explicitly rather than inherited: Bun resolves the
+      // binary against the env it is GIVEN, so without this a test cannot put
+      // a stub `gh` on PATH and this function stays untestable.
+      { cwd, stdout: "pipe", stderr: "ignore", env: { ...process.env } },
     );
     const exitCode = await proc.exited;
     if (exitCode !== 0) return null;
-    const rows = (await new Response(proc.stdout).json()) as Array<{
-      number: number;
-      url: string;
-      state: string;
-    }>;
-    const rank = (state: string): number =>
-      state === "MERGED" ? 0 : state === "OPEN" ? 1 : 2;
-    const best = rows
-      .filter(
-        (r) =>
-          r.state === "MERGED" || r.state === "OPEN" || r.state === "CLOSED",
-      )
-      .sort((a, b) => rank(a.state) - rank(b.state))[0];
-    if (!best) return null;
-    return {
-      number: best.number,
-      url: best.url,
-      state: best.state as PRState["state"],
-    };
+    const rows = (await new Response(proc.stdout).json()) as GhPRRow[];
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const tip = await runGit(cwd, [
+      "rev-parse",
+      "--verify",
+      `${branch}^{commit}`,
+    ]);
+    const localTip = tip.exitCode === 0 ? tip.stdout.trim() : null;
+    return selectPRForBranch(rows, localTip);
   } catch {
     return null;
   }
@@ -202,6 +266,19 @@ export function normalizePath(path: string): string {
   } catch {
     return path;
   }
+}
+
+/**
+ * One-line summary of the ignored files a removal would take with it, or ""
+ * when there are none. Shared by every surface so the truncation rule — and
+ * therefore what a user is shown before confirming — is defined once.
+ */
+export function describeIgnoredFiles(files: string[], max = 3): string {
+  if (files.length === 0) return "";
+  const shown = files.slice(0, max);
+  const rest = files.length - shown.length;
+  const names = shown.join(", ") + (rest > 0 ? `, +${rest} more` : "");
+  return `${files.length} ignored file${files.length === 1 ? "" : "s"} (${names})`;
 }
 
 function detailFor(
@@ -384,6 +461,7 @@ async function classifyOne(
       dirty: dirtyState.dirty,
       modified: dirtyState.modified,
       untracked: dirtyState.untracked,
+      ignoredFiles: dirtyState.ignoredFiles,
       branchDeletion: branchDeletionFor(reason),
       adminDir: readAdminDir(path),
       sessions,
@@ -497,6 +575,37 @@ async function tmuxOk(args: string[]): Promise<boolean> {
 }
 
 /**
+ * Whether a pane id is still live, by membership in the pane list.
+ *
+ * Deliberately not `display-message -t <id>`: for a pane that no longer
+ * exists tmux prints an empty line and exits ZERO, so an exit-code probe
+ * reports every dead pane as alive. Listing and matching is unambiguous.
+ */
+async function paneExists(paneId: string): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(["tmux", "list-panes", "-a", "-F", "#{pane_id}"], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const [out, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    // A tmux that cannot be reached at all tells us nothing; assume the pane
+    // is gone rather than reporting a failure we can't substantiate.
+    if (exitCode !== 0) return false;
+    return paneListIncludes(out, paneId);
+  } catch {
+    return false;
+  }
+}
+
+/** Membership test over `tmux list-panes -F '#{pane_id}'` output. */
+export function paneListIncludes(output: string, paneId: string): boolean {
+  return output.split("\n").some((line) => line.trim() === paneId);
+}
+
+/**
  * Close a pane, treating a pane that is already gone as success.
  *
  * Stopping the agent very often closes its own pane — that is what happens
@@ -506,14 +615,7 @@ async function tmuxOk(args: string[]): Promise<boolean> {
  */
 async function defaultClosePane(paneId: string): Promise<PaneCloseResult> {
   if (await tmuxOk(["kill-pane", "-t", paneId])) return "closed";
-  const stillThere = await tmuxOk([
-    "display-message",
-    "-p",
-    "-t",
-    paneId,
-    "#{pane_id}",
-  ]);
-  return stillThere ? "failed" : "already-gone";
+  return (await paneExists(paneId)) ? "failed" : "already-gone";
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -654,6 +756,13 @@ export async function runPrune(
             ? ` — DIRTY: ${candidate.modified} modified, ${candidate.untracked} untracked`
             : ""),
       });
+      if (candidate.ignoredFiles.length > 0) {
+        steps.push({
+          step: "would delete ignored",
+          ok: true,
+          detail: describeIgnoredFiles(candidate.ignoredFiles, 10),
+        });
+      }
       if (candidate.branch && candidate.branchDeletion !== "none") {
         steps.push({
           step: "would delete branch",
@@ -662,6 +771,17 @@ export async function runPrune(
         });
       }
       continue;
+    }
+
+    // Recorded before the directory moves: once it is gone, nothing else in
+    // the log says these files ever existed, and they are the ones no git
+    // history can bring back.
+    if (candidate.ignoredFiles.length > 0) {
+      steps.push({
+        step: "deleting ignored",
+        ok: true,
+        detail: describeIgnoredFiles(candidate.ignoredFiles, 10),
+      });
     }
 
     outcome.panesClosed = await stopSessions(candidate, options, steps);

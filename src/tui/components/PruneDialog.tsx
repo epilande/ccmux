@@ -8,6 +8,7 @@ import type {
   PruneRunResult,
   PruneScan,
 } from "../../daemon/worktree-prune";
+import { describeIgnoredFiles } from "../../daemon/worktree-prune";
 import { theme } from "../theme";
 
 /**
@@ -109,6 +110,11 @@ export const PruneDialog: Component<PruneDialogProps> = (props) => {
   /** Selected rows that will actually be removed (dirty ones need `D`). */
   const effective = () => partition().removable;
   const blockedDirty = () => partition().blockedDirty;
+  /** Ignored files riding along with the current selection — nothing in git
+   *  or in the trash window brings these back, so they are named at the
+   *  confirmation step and not only on the rows. */
+  const ignoredCount = () =>
+    effective().reduce((n, c) => n + c.ignoredFiles.length, 0);
 
   onMount(() => {
     const query = props.repo ? `?repo=${encodeURIComponent(props.repo)}` : "";
@@ -334,6 +340,11 @@ export const PruneDialog: Component<PruneDialogProps> = (props) => {
                             }`}
                           </text>
                         </Show>
+                        <Show when={candidate.ignoredFiles.length > 0}>
+                          <text fg={theme.peach}>
+                            {`  +${describeIgnoredFiles(candidate.ignoredFiles, 2)}`}
+                          </text>
+                        </Show>
                       </box>
                     </box>
                   );
@@ -398,6 +409,9 @@ export const PruneDialog: Component<PruneDialogProps> = (props) => {
           <text fg={theme.text}>
             {`Delete ${effective().length} worktree(s)` +
               `, ${effective().filter((c) => c.branch && c.branchDeletion !== "none").length} branch(es)` +
+              (ignoredCount() > 0
+                ? `, ${ignoredCount()} ignored file(s)`
+                : "") +
               (blockedDirty().length > 0
                 ? `, skipping ${blockedDirty().length} dirty`
                 : "") +

@@ -141,34 +141,69 @@ export interface DirtyState {
   modified: number;
   /** Untracked files (directories collapse to one entry, as git prints them). */
   untracked: number;
+  /**
+   * Individual ignored FILES, by path — `.env`, `.env.local`, a local config.
+   * Ignored DIRECTORIES (`node_modules/`, `dist/`) are deliberately excluded:
+   * git collapses them to a single entry, and they are regenerable build
+   * output, so counting them would flag every worktree alike.
+   *
+   * Not part of `dirty` — see {@link readDirtyState}.
+   */
+  ignoredFiles: string[];
 }
 
 /**
- * Uncommitted OR untracked changes, from one `git status --porcelain`.
+ * Uncommitted, untracked and ignored content, from one `git status`.
  *
  * Untracked counts as dirty deliberately: the whole point of the flag is
  * "you would lose work", and an untracked scratch file, a stashed-by-hand
  * patch, or an unstaged fix is exactly the work that a worktree whose branch
- * is already merged still holds. Ignored files are NOT counted — build output
- * and `node_modules` would otherwise flag every worktree.
+ * is already merged still holds.
+ *
+ * Ignored files are collected but NOT counted as dirty, which is a deliberate
+ * split rather than an oversight. Plain `--porcelain` hides them entirely, so
+ * a worktree whose only uncommitted content is a gitignored `.env` reported
+ * perfectly clean and could be swept up by "select all" — and since the trash
+ * directory is deleted at the end of the same run, an unbackupable file would
+ * be gone with no recovery window. They are surfaced so the user sees them
+ * before the directory goes away. Folding them into `dirty` instead would
+ * fire the opt-in gate on essentially every worktree (a stray `.DS_Store` is
+ * an ignored file), and a gate that always fires trains people to clear it
+ * reflexively, which is worse than no gate for the case it exists to catch.
  */
 export async function readDirtyState(
   worktreePath: string,
   git: GitRun = runGit,
 ): Promise<DirtyState> {
-  const res = await git(worktreePath, ["status", "--porcelain"]);
+  const res = await git(worktreePath, [
+    "status",
+    "--porcelain",
+    "--ignored=matching",
+  ]);
   // An unreadable worktree is reported dirty: refusing to remove something we
   // could not inspect is the safe direction for a destructive action.
-  if (res.exitCode !== 0) return { dirty: true, modified: 0, untracked: 0 };
+  if (res.exitCode !== 0) {
+    return { dirty: true, modified: 0, untracked: 0, ignoredFiles: [] };
+  }
 
   let modified = 0;
   let untracked = 0;
+  const ignoredFiles: string[] = [];
   for (const line of res.stdout.split("\n")) {
     if (line.trim() === "") continue;
-    if (line.startsWith("??")) untracked++;
+    if (line.startsWith("!!")) {
+      const path = line.slice(3).trim();
+      // A trailing slash is git's marker for a collapsed ignored directory.
+      if (path && !path.endsWith("/")) ignoredFiles.push(path);
+    } else if (line.startsWith("??")) untracked++;
     else modified++;
   }
-  return { dirty: modified + untracked > 0, modified, untracked };
+  return {
+    dirty: modified + untracked > 0,
+    modified,
+    untracked,
+    ignoredFiles,
+  };
 }
 
 /**

@@ -29,6 +29,7 @@ function candidate(overrides: Partial<PruneCandidate> = {}): PruneCandidate {
     dirty: false,
     modified: 0,
     untracked: 0,
+    ignoredFiles: [],
     branchDeletion: "force",
     adminDir: null,
     sessions: [],

@@ -8,6 +8,7 @@ import type {
   PruneScan,
   PruneSkip,
 } from "../daemon/worktree-prune";
+import { describeIgnoredFiles } from "../daemon/worktree-prune";
 
 /**
  * `ccmux worktree prune` — the CLI half of issue #68's cleanup.
@@ -33,6 +34,11 @@ function describeDirty(candidate: PruneCandidate): string {
   return `  DIRTY: ${bits.join(", ") || "uninspectable"}`;
 }
 
+function describeIgnored(candidate: PruneCandidate): string {
+  const summary = describeIgnoredFiles(candidate.ignoredFiles);
+  return summary ? `  also deletes ${summary}` : "";
+}
+
 function printCandidates(candidates: PruneCandidate[]): void {
   const width = String(candidates.length).length;
   candidates.forEach((candidate, i) => {
@@ -41,7 +47,7 @@ function printCandidates(candidates: PruneCandidate[]): void {
       `  ${index}. ${candidate.repoName}/${candidate.name}  (${candidate.branch ?? "detached"})`,
     );
     console.log(
-      `     ${candidate.detail}${describeSessions(candidate)}${describeDirty(candidate)}`,
+      `     ${candidate.detail}${describeSessions(candidate)}${describeDirty(candidate)}${describeIgnored(candidate)}`,
     );
     console.log(`     ${candidate.path}`);
   });
@@ -244,6 +250,24 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
         `, ${branches.length} local branch${branches.length === 1 ? "" : "es"}` +
         `, and close ${panes.length} pane${panes.length === 1 ? "" : "s"}.`,
     );
+    // Listed at the decision point, not only on the rows: someone who picked
+    // with 'a' never read the rows, and these files exist in no git history
+    // and no backup.
+    const ignoring = selected.filter((c) => c.ignoredFiles.length > 0);
+    if (ignoring.length > 0) {
+      const total = ignoring.reduce((n, c) => n + c.ignoredFiles.length, 0);
+      console.log(
+        `It will also delete ${total} ignored file${total === 1 ? "" : "s"} that git does not track:`,
+      );
+      for (const candidate of ignoring) {
+        console.log(
+          `  ${candidate.name}: ${candidate.ignoredFiles.slice(0, 5).join(", ")}` +
+            (candidate.ignoredFiles.length > 5
+              ? `, +${candidate.ignoredFiles.length - 5} more`
+              : ""),
+        );
+      }
+    }
     if (cleanState) {
       console.log("It will also drop state entries for paths already deleted.");
     }

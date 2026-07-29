@@ -17,15 +17,25 @@ import {
 } from "./agent-state";
 import {
   branchDeletionFor,
+  describeIgnoredFiles,
+  ghPRStateLookup,
   normalizePath,
+  paneListIncludes,
   runPrune,
   scanRepo,
+  selectPRForBranch,
   trashPathFor,
+  type GhPRRow,
   type PRState,
   type PruneCandidate,
   type WorktreeSession,
 } from "./worktree-prune";
-import { parseWorktreeList, readAdminDir, runGit } from "./worktree-git";
+import {
+  parseWorktreeList,
+  readAdminDir,
+  readDirtyState,
+  runGit,
+} from "./worktree-git";
 
 /**
  * These tests drive REAL git against throwaway fixture repos under the OS
@@ -666,5 +676,270 @@ describe("agent state cleanup", () => {
     expect(result.removed).toEqual([]);
     expect(result.backupPath).toBeNull();
     expect(readFileSync(state.file, "utf-8")).toBe(before);
+  });
+});
+
+/**
+ * `gh pr list --head <branch>` matches the branch NAME across the whole
+ * network — every fork's PR and every earlier reuse of that name. Verified
+ * against a real repo while writing these: `--head patch-1` on cli/cli
+ * returns 25 PRs from 25 different fork owners, three of them MERGED. Taking
+ * any of those as proof classifies a local `patch-1` as `pr-merged`, the one
+ * reason that force-deletes the branch.
+ */
+describe("selectPRForBranch", () => {
+  const row = (overrides: Partial<GhPRRow> = {}): GhPRRow => ({
+    number: 1,
+    url: "https://github.com/o/r/pull/1",
+    state: "MERGED",
+    isCrossRepository: false,
+    headRefOid: "tip",
+    ...overrides,
+  });
+
+  it("accepts a same-repo merged PR whose head is the branch tip", () => {
+    expect(selectPRForBranch([row()], "tip")).toMatchObject({
+      number: 1,
+      state: "MERGED",
+    });
+  });
+
+  it("ignores merged PRs from forks that share the branch name", () => {
+    const forks = [
+      row({ number: 13296, isCrossRepository: true, headRefOid: "e40c592e" }),
+      row({ number: 13273, isCrossRepository: true, headRefOid: "993d4bb6" }),
+      row({
+        number: 13126,
+        isCrossRepository: true,
+        headRefOid: "ba333082",
+        state: "CLOSED",
+      }),
+    ];
+
+    expect(selectPRForBranch(forks, "tip")).toBeNull();
+  });
+
+  // A branch name reused after the original was merged and deleted: same
+  // repo, but a different tip, so the old PR does not speak for this branch.
+  it("ignores a same-repo merged PR whose head is a different commit", () => {
+    expect(selectPRForBranch([row({ headRefOid: "old" })], "tip")).toBeNull();
+  });
+
+  it("ignores a closed PR that cannot be proven to be this branch", () => {
+    const rows = [row({ state: "CLOSED", headRefOid: "old" })];
+    expect(selectPRForBranch(rows, "tip")).toBeNull();
+  });
+
+  it("accepts a closed PR that is proven to be this branch", () => {
+    const rows = [row({ state: "CLOSED" })];
+    expect(selectPRForBranch(rows, "tip")).toMatchObject({ state: "CLOSED" });
+  });
+
+  // An open PR is the state that makes a worktree NOT removable, so it has to
+  // dominate: a branch carrying both a merged PR and a live one is in use.
+  it("lets an open PR win over a merged one", () => {
+    const rows = [
+      row({ number: 5, state: "MERGED" }),
+      row({ number: 9, state: "OPEN" }),
+    ];
+    expect(selectPRForBranch(rows, "tip")).toMatchObject({
+      number: 9,
+      state: "OPEN",
+    });
+  });
+
+  it("honors an open PR even from a fork, since that only skips cleanup", () => {
+    const rows = [
+      row({
+        number: 9,
+        state: "OPEN",
+        isCrossRepository: true,
+        headRefOid: "x",
+      }),
+    ];
+    expect(selectPRForBranch(rows, "tip")).toMatchObject({ state: "OPEN" });
+  });
+
+  // Fail closed: with no local tip nothing can be proven, so nothing that
+  // would justify a removal is reported.
+  it("reports nothing removable when the branch tip is unknown", () => {
+    expect(selectPRForBranch([row()], null)).toBeNull();
+    expect(selectPRForBranch([row({ state: "OPEN" })], null)).toMatchObject({
+      state: "OPEN",
+    });
+  });
+
+  it("returns null for an empty reply", () => {
+    expect(selectPRForBranch([], "tip")).toBeNull();
+  });
+});
+
+/**
+ * Drives the real `ghPRStateLookup` (spawn, JSON parse, tip resolution) with
+ * a fake `gh` on PATH, against a real fixture repo. Previously uncovered:
+ * every classification test injects `lookupPR` instead.
+ */
+describe("ghPRStateLookup", () => {
+  let binDir: string;
+  let originalPath: string | undefined;
+
+  async function withFakeGh(
+    repo: string,
+    branch: string,
+    reply: unknown,
+  ): Promise<PRState | null> {
+    writeFileSync(
+      join(binDir, "gh"),
+      `#!/bin/bash\ncat <<'JSON'\n${JSON.stringify(reply)}\nJSON\n`,
+      { mode: 0o755 },
+    );
+    return ghPRStateLookup(repo, branch);
+  }
+
+  beforeEach(() => {
+    binDir = join(root, "fakebin");
+    require("node:fs").mkdirSync(binDir, { recursive: true });
+    originalPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${originalPath}`;
+  });
+
+  afterEach(() => {
+    process.env.PATH = originalPath;
+  });
+
+  it("resolves the local branch tip and matches it against the PR head", async () => {
+    const { repo } = await makeRepo("gh-lookup");
+    const wt = await addWorktree(repo, "feat/looked-up");
+    const tip = await git(wt, ["rev-parse", "HEAD"]);
+
+    const matched = await withFakeGh(wt, "feat/looked-up", [
+      {
+        number: 42,
+        url: "u",
+        state: "MERGED",
+        isCrossRepository: false,
+        headRefOid: tip,
+      },
+    ]);
+    expect(matched).toMatchObject({ number: 42, state: "MERGED" });
+
+    const namesake = await withFakeGh(wt, "feat/looked-up", [
+      {
+        number: 7,
+        url: "u",
+        state: "MERGED",
+        isCrossRepository: false,
+        headRefOid: "0000000000000000000000000000000000000000",
+      },
+    ]);
+    expect(namesake).toBeNull();
+  });
+
+  it("returns null when gh fails", async () => {
+    const { repo } = await makeRepo("gh-fails");
+    writeFileSync(join(binDir, "gh"), "#!/bin/bash\nexit 1\n", { mode: 0o755 });
+    expect(await ghPRStateLookup(repo, "feat/x")).toBeNull();
+  });
+
+  it("returns null for malformed output instead of throwing", async () => {
+    const { repo } = await makeRepo("gh-garbage");
+    writeFileSync(join(binDir, "gh"), "#!/bin/bash\necho 'not json'\n", {
+      mode: 0o755,
+    });
+    expect(await ghPRStateLookup(repo, "feat/x")).toBeNull();
+  });
+});
+
+describe("ignored files", () => {
+  it("reports ignored files that a plain status hides, without collapsing dirs", async () => {
+    const { repo } = await makeRepo("ignored");
+    const wt = await addWorktree(repo, "feat/ignored");
+    writeFileSync(join(wt, ".gitignore"), "node_modules/\n.env\n");
+    await git(wt, ["add", ".gitignore"]);
+    await git(wt, ["commit", "-qm", "ignore"]);
+    writeFileSync(join(wt, ".env"), "SECRET=1\n");
+    await mkdir(join(wt, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(join(wt, "node_modules", "pkg", "index.js"), "x\n");
+
+    const state = await readDirtyState(wt);
+
+    // The precious file is named; the regenerable directory is not counted.
+    expect(state.ignoredFiles).toEqual([".env"]);
+    // And it stays OUT of the dirty gate, which exists for tracked work.
+    expect(state.dirty).toBe(false);
+  });
+
+  it("surfaces ignored files on the candidate", async () => {
+    const { repo } = await makeRepo("ignored-candidate");
+    const wt = await addWorktree(repo, "feat/ignored2");
+    writeFileSync(join(wt, ".gitignore"), ".env\n");
+    await git(wt, ["add", ".gitignore"]);
+    await git(wt, ["commit", "-qm", "ignore"]);
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/ignored2"]);
+    writeFileSync(join(wt, ".env"), "SECRET=1\n");
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+
+    expect(scan.candidates[0].ignoredFiles).toEqual([".env"]);
+  });
+
+  it("records the ignored files in a dry run so they are visible first", async () => {
+    const { repo } = await makeRepo("ignored-dry");
+    const wt = await addWorktree(repo, "feat/ignored3");
+    writeFileSync(join(wt, ".gitignore"), ".env\n");
+    await git(wt, ["add", ".gitignore"]);
+    await git(wt, ["commit", "-qm", "ignore"]);
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/ignored3"]);
+    writeFileSync(join(wt, ".env"), "SECRET=1\n");
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+
+    const result = await runPrune(scan.candidates, {
+      dryRun: true,
+      stateFiles: [],
+      log: () => {},
+    });
+
+    const step = result.outcomes[0].steps.find(
+      (s) => s.step === "would delete ignored",
+    );
+    expect(step?.detail).toContain(".env");
+  });
+});
+
+describe("describeIgnoredFiles", () => {
+  it("returns nothing for an empty list", () => {
+    expect(describeIgnoredFiles([])).toBe("");
+  });
+
+  it("names the files and counts the overflow", () => {
+    expect(describeIgnoredFiles([".env"])).toBe("1 ignored file (.env)");
+    expect(describeIgnoredFiles([".env", ".env.local"])).toBe(
+      "2 ignored files (.env, .env.local)",
+    );
+    expect(describeIgnoredFiles(["a", "b", "c", "d", "e"])).toBe(
+      "5 ignored files (a, b, c, +2 more)",
+    );
+  });
+});
+
+/**
+ * Pane liveness is decided by MEMBERSHIP in the pane list, not by the exit
+ * code of a `display-message -t <id>` probe: tmux exits 0 with empty output
+ * for a pane that no longer exists, which reported every self-closed pane as
+ * a failure. Verified against a live tmux server: `display-message -p -t %99
+ * '#{pane_id}'` on a dead id prints "" and exits 0.
+ */
+describe("paneListIncludes", () => {
+  const listing = "%1\n%2\n%12\n";
+
+  it("matches an id that is present", () => {
+    expect(paneListIncludes(listing, "%1")).toBe(true);
+    expect(paneListIncludes(listing, "%12")).toBe(true);
+  });
+
+  it("rejects an id that is absent, including prefix lookalikes", () => {
+    expect(paneListIncludes(listing, "%99")).toBe(false);
+    expect(paneListIncludes(listing, "%")).toBe(false);
+    expect(paneListIncludes("", "%1")).toBe(false);
   });
 });
