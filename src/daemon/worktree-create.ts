@@ -278,11 +278,21 @@ function isInside(parent: string, candidate: string): boolean {
  *   symlinks, and it applies a dual filter (matches a pattern AND is
  *   gitignored). Both halves are delegated to git in
  *   {@link resolveWorktreeIncludes} rather than reimplemented.
- * - OBSERVED, not documented: `worktree.symlinkDirectories` produces an
- *   ABSOLUTE symlink into the main checkout. Verified by inspecting the
- *   agent-created worktrees in this repo, every one of which has
- *   `node_modules -> <main>/node_modules`. If a future Claude Code switches
- *   to relative links, worktrees will still work; they will merely differ.
+ * - OBSERVED against the real implementation (`claude --worktree` run on a
+ *   throwaway fixture, so these are its actual outputs rather than
+ *   inferences) and NOT documented, so any of it can drift with a release:
+ *   the placement is the same `<main>/.claude/worktrees/<name>`;
+ *   `symlinkDirectories` produces an ABSOLUTE symlink into the main checkout;
+ *   an entry whose source does not exist is skipped rather than failing; and
+ *   a NESTED entry (`nested/cache`) was not linked at all, where this
+ *   implementation does create it, having already made the parent directory.
+ *   Doing slightly more there is harmless: the link points at real content
+ *   the repo asked to share.
+ * - CONFIRMED by experiment rather than taken on trust: `.worktreeinclude`
+ *   really does leave tracked files alone. A tracked file matching an include
+ *   pattern, modified in the main working copy, arrived in the new worktree
+ *   with the COMMITTED content, proving git's checkout supplied it and the
+ *   include pass did not copy over the top.
  * - CONSERVATIVE CHOICES where behavior could not be pinned down, each
  *   picked so the failure mode is a worktree that needs one manual step
  *   rather than one that lost something: a missing source is skipped instead
@@ -297,6 +307,14 @@ function isInside(parent: string, candidate: string): boolean {
  * Neither breaks ccmux's own prune, which renames the directory aside and
  * calls `git worktree prune` rather than `git worktree remove`, and whose
  * recursive delete unlinks symlinks instead of following them.
+ *
+ * One more observed difference, deliberate rather than accidental: Claude
+ * Code LOCKS a worktree for the lifetime of its session (`git worktree list`
+ * shows `locked` with a reason naming the session and pid) and ccmux does
+ * not. The effect is benign and arguably useful — ccmux's prune skips locked
+ * worktrees, so a checkout with a live Claude session is protected from
+ * cleanup by that lock alone, while a ccmux-created worktree stays prunable
+ * as soon as its agent exits.
  *
  * Symlinks for `worktree.symlinkDirectories` (a shared `node_modules` is the
  * point: copying it would be slow and would double the disk cost of every
