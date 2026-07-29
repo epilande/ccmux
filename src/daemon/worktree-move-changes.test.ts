@@ -282,6 +282,141 @@ describe("moveChangesToWorktree", () => {
     expect(await stashCount(repo)).toBe(1);
   });
 
+  it("keeps work the source gains WHILE the move runs", async () => {
+    // The reason there is no `git reset --hard` on the source. An agent in
+    // that pane keeps working during the seconds this takes, and a reset at
+    // the end would delete files this function never stashed and could not
+    // put back. `stash push` already left the source clean, so the reset
+    // would buy nothing and cost exactly this.
+    const repo = await makeRepo();
+    dirty(repo);
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      createWorktree: async ({ name }) => {
+        // Mid-operation, after the stash: the pane's agent writes a file and
+        // edits a tracked one, neither of which is part of the move.
+        writeFileSync(join(repo, "written-during.txt"), "concurrent\n");
+        writeFileSync(join(repo, "tracked.txt"), "touched during\n");
+        const path = join(root, "wt", name ?? "moved");
+        await git(repo, ["worktree", "add", "-b", "moved", path, "HEAD"]);
+        return { path };
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    // Both survive. A reset would have destroyed the first outright and
+    // reverted the second.
+    expect(readFileSync(join(repo, "written-during.txt"), "utf-8")).toBe(
+      "concurrent\n",
+    );
+    expect(readFileSync(join(repo, "tracked.txt"), "utf-8")).toBe(
+      "touched during\n",
+    );
+  });
+
+  it("keeps the stash recoverable on EVERY failure after the stash", async () => {
+    // The invariant that matters more than any single happy path: once the
+    // changes have left the working tree, no failure may leave them
+    // unreachable, and the ref has to be reported so they can be recovered
+    // by hand.
+    // The expected reason is pinned per case, so this cannot quietly become
+    // three copies of the same failure path.
+    const failures: {
+      label: string;
+      reason: string;
+      create: (repo: string) => CreateWorktree;
+      untracked?: "move" | "copy" | "leave";
+    }[] = [
+      {
+        label: "creation throws",
+        reason: "create-failed",
+        create: () => async () => {
+          throw new Error("boom");
+        },
+      },
+      {
+        label: "apply conflicts",
+        reason: "apply-failed",
+        create: (repo) => async () => {
+          const path = join(root, "wt", "conflict");
+          await git(repo, ["worktree", "add", "--detach", path, "diverged"]);
+          return { path };
+        },
+      },
+      {
+        label: "untracked copy fails",
+        reason: "copy-failed",
+        untracked: "copy",
+        create: (repo) => async () => {
+          const path = join(root, "wt", "copyfail");
+          // Based on a commit where `collides` is a FILE, while the source
+          // has it as an untracked DIRECTORY, so the copy cannot land.
+          await git(repo, ["worktree", "add", "--detach", path, "hasfile"]);
+          return { path };
+        },
+      },
+    ];
+
+    for (const { label, reason, create, untracked } of failures) {
+      const repo = await makeRepo(`repo-${label.replace(/\s+/g, "-")}`);
+      // A base whose content conflicts with the stashed edit.
+      await git(repo, ["checkout", "-b", "diverged"]);
+      writeFileSync(join(repo, "tracked.txt"), "diverged\n");
+      await git(repo, ["commit", "-am", "diverge"]);
+      // A base where `collides` is a committed file.
+      await git(repo, ["checkout", "main"]);
+      await git(repo, ["checkout", "-b", "hasfile"]);
+      writeFileSync(join(repo, "collides"), "i am a file\n");
+      await git(repo, ["add", "collides"]);
+      await git(repo, ["commit", "-m", "add collides"]);
+      await git(repo, ["checkout", "main"]);
+
+      writeFileSync(join(repo, "tracked.txt"), "edited\n");
+      await mkdir(join(repo, "collides"), { recursive: true });
+      writeFileSync(join(repo, "collides", "inner.txt"), "nested\n");
+
+      const result = await moveChangesToWorktree({
+        source: repo,
+        untracked,
+        createWorktree: create(repo),
+      });
+
+      expect(`${label}: ok=${result.ok}`).toBe(`${label}: ok=false`);
+      if (result.ok) continue;
+      expect(`${label}: ${result.reason}`).toBe(`${label}: ${reason}`);
+      expect(result.stashSha, `${label} reports the stash`).toBeDefined();
+      expect(await stashCount(repo), `${label} keeps the stash`).toBe(1);
+      // Recoverable in the strongest sense: the content is still in there.
+      const show = await git(repo, ["show", `${result.stashSha}:tracked.txt`]);
+      expect(show, `${label} stash holds the work`).toBe("edited");
+      // And the user is not left staring at an empty checkout either.
+      expect(result.sourceRestored, `${label} restores the source`).toBe(true);
+      expect(readFileSync(join(repo, "tracked.txt"), "utf-8")).toBe("edited\n");
+    }
+  });
+
+  it("copies untracked files with no stash when there is nothing tracked", async () => {
+    // `copy` with only untracked work never needs the stash at all, so the
+    // stack is left completely untouched.
+    const repo = await makeRepo();
+    writeFileSync(join(repo, "new.txt"), "brand new\n");
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      untracked: "copy",
+      createWorktree: realCreator(repo),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(readFileSync(join(result.worktreePath, "new.txt"), "utf-8")).toBe(
+      "brand new\n",
+    );
+    expect(existsSync(join(repo, "new.txt"))).toBe(true);
+    expect(await stashCount(repo)).toBe(0);
+  });
+
   it("rolls back a conflicting apply, keeping the stash and the worktree gone", async () => {
     // A worktree based on a commit that touched the same lines is the real
     // way this conflicts: the stash cannot apply cleanly onto that base.
