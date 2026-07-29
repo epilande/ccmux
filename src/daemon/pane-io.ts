@@ -57,6 +57,30 @@ export async function getPaneCurrentCommand(
 }
 
 /**
+ * Resolve the window (`@7`) containing a pane. Needed by `POST /spawn`
+ * because `new-window -t` refuses a pane id outright ("can't specify pane
+ * here"), while callers naturally know their own `$TMUX_PANE`. tmux exits 0
+ * with empty output for a pane that no longer exists, so an empty result is
+ * folded into null alongside real failures.
+ */
+export async function resolveWindowIdForPane(
+  paneId: string,
+): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(
+      ["tmux", "display-message", "-p", "-t", paneId, "-F", "#{window_id}"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const output = (await new Response(proc.stdout).text()).trim();
+    const exitCode = await proc.exited;
+    if (exitCode !== 0 || !output) return null;
+    return output;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Send literal text to a pane, then optionally press Enter.
  * Mirrors the pattern in server.ts handleSendToSession: uses 'send-keys -l --'
  * so strings like 'Enter', 'C-c', 'Space' inside the text are NOT interpreted

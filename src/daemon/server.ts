@@ -7,7 +7,19 @@ import {
   isCcmuxPane,
 } from "../lib/config";
 import { getPreferences } from "../lib/preferences";
-import { capturePane, sendLiteralToPane, sendPromptToPane } from "./pane-io";
+import {
+  capturePane,
+  resolveWindowIdForPane,
+  sendLiteralToPane,
+  sendPromptToPane,
+} from "./pane-io";
+import {
+  buildAgentSpawnCommand,
+  buildTmuxSpawnArgv,
+  normalizeSplit,
+  normalizeTarget,
+  type SpawnSplit,
+} from "./spawn-command";
 import type { AgentDef } from "../lib/agents";
 import {
   getMarkerKey,
@@ -1685,7 +1697,8 @@ export class DaemonServer {
       cwd?: string;
       resume?: string;
       prompt?: string;
-      split?: boolean;
+      split?: SpawnSplit;
+      target?: string;
       detach?: boolean;
     };
     try {
@@ -1702,7 +1715,6 @@ export class DaemonServer {
       cwd,
       resume,
       prompt,
-      split = false,
       detach = false,
     } = body;
 
@@ -1712,6 +1724,24 @@ export class DaemonServer {
         { status: 400, headers },
       );
     }
+
+    const splitResult = normalizeSplit(body.split);
+    if (!splitResult.ok) {
+      return Response.json(
+        { error: splitResult.error },
+        { status: 400, headers },
+      );
+    }
+    const split = splitResult.value;
+
+    const targetResult = normalizeTarget(body.target);
+    if (!targetResult.ok) {
+      return Response.json(
+        { error: targetResult.error },
+        { status: 400, headers },
+      );
+    }
+    const target = targetResult.value;
 
     // `resume` is interpolated into a shell command typed into the pane, so an
     // unconstrained value is command injection. Constrain it like `/invoke`.
@@ -1758,28 +1788,44 @@ export class DaemonServer {
       agentName === "claude"
         ? (preferences.command ?? "claude")
         : (agent.executable ?? agentName);
-    let command: string;
 
-    if (resume) {
-      if (agent.resumeCommand) {
-        command = agent.resumeCommand.replace("{id}", resume);
-      } else {
-        command = `${cmd} --resume ${resume}`;
+    const commandResult = buildAgentSpawnCommand({
+      agent,
+      binary: cmd,
+      resume,
+      prompt,
+    });
+    if (!commandResult.ok) {
+      return Response.json(
+        { error: commandResult.error },
+        { status: 400, headers },
+      );
+    }
+    const command = commandResult.value;
+
+    // `new-window` cannot take a pane id ("can't specify pane here"), so the
+    // caller's pane is resolved to its window and the window is created right
+    // after it. A pane that has since closed resolves to an empty string.
+    let resolvedTarget = target;
+    if (target && !split) {
+      const windowId = await resolveWindowIdForPane(target);
+      if (!windowId) {
+        return Response.json(
+          { error: `Unknown target pane: ${target}` },
+          { status: 400, headers },
+        );
       }
-    } else if (prompt) {
-      const escaped = prompt.replace(/'/g, "'\\''");
-      command = `${cmd} --prompt '${escaped}'`;
-    } else {
-      command = cmd;
+      resolvedTarget = windowId;
     }
 
     // Create tmux pane
-    const tmuxCmd = split ? "split-window" : "new-window";
+    const tmuxArgv = buildTmuxSpawnArgv({ split, cwd, target: resolvedTarget });
+    const tmuxCmd = tmuxArgv[0];
     try {
-      const proc = Bun.spawn(
-        ["tmux", tmuxCmd, "-c", cwd, "-P", "-F", "#{pane_id}"],
-        { stdout: "pipe", stderr: "pipe" },
-      );
+      const proc = Bun.spawn(["tmux", ...tmuxArgv], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
       const exitCode = await proc.exited;
       if (exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();

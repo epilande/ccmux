@@ -2960,3 +2960,244 @@ describe("broadcastEvent stringify-once (issue #55 item 3)", () => {
     expect(frames[0]).toBe(`data: ${JSON.stringify(event)}\n\n`);
   });
 });
+
+describe("POST /spawn", () => {
+  // Every argv here is executed against the user's live tmux server, and
+  // the built command string is typed into the new pane and submitted
+  // with Enter. Both are pinned end to end through the route.
+
+  /**
+   * Stub `Bun.spawn`, recording every argv. Outcomes are matched by tmux
+   * subcommand so a test only has to describe the calls it cares about;
+   * anything unlisted succeeds with empty output.
+   */
+  function withTmuxRecorder(
+    outcomes: Record<string, { code: number; out: string }> = {},
+  ) {
+    const original = Bun.spawn;
+    const argv: string[][] = [];
+    Bun.spawn = ((spawned: string[]) => {
+      argv.push(spawned);
+      const next = outcomes[spawned[1] ?? ""] ?? { code: 0, out: "%99\n" };
+      return {
+        exited: Promise.resolve(next.code),
+        stdout: new Blob([next.out]).stream(),
+        stderr: new Blob([""]).stream(),
+      };
+    }) as unknown as typeof Bun.spawn;
+    return { argv, restore: () => (Bun.spawn = original) };
+  }
+
+  const promptAgent: AgentDef = {
+    ...BUILTIN_AGENTS.find((a) => a.name === "claude")!,
+    name: "prompty",
+    promptCommand: "{bin} '{prompt}'",
+    executable: "prompty",
+  };
+  const noPromptAgent: AgentDef = {
+    ...promptAgent,
+    name: "flagless",
+    executable: "flagless",
+    promptCommand: undefined,
+  };
+
+  function spawnRequest(body: Record<string, unknown>) {
+    return new Request("http://localhost/spawn", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function serverForAgents(agents: AgentDef[]) {
+    return createServer(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (name: string) =>
+        agents.find((a) => a.name === name) ??
+        BUILTIN_AGENTS.find((a) => a.name === name),
+    );
+  }
+
+  const cwd = tmpdir();
+
+  it("creates a new window with no target by default", async () => {
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, detach: true }),
+      );
+      expect(res.status).toBe(200);
+      expect(argv[0]).toEqual([
+        "tmux",
+        "new-window",
+        "-c",
+        cwd,
+        "-P",
+        "-F",
+        "#{pane_id}",
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("splits the target pane left/right for split 'h'", async () => {
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({
+          agent: "prompty",
+          cwd,
+          split: "h",
+          target: "%5",
+          detach: true,
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(argv[0]).toEqual([
+        "tmux",
+        "split-window",
+        "-h",
+        "-t",
+        "%5",
+        "-c",
+        cwd,
+        "-P",
+        "-F",
+        "#{pane_id}",
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps the legacy boolean split on tmux's stacked default", async () => {
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, split: true, detach: true }),
+      );
+      expect(argv[0]?.slice(1, 3)).toEqual(["split-window", "-v"]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("resolves a target pane to its window before creating a new window", async () => {
+    // `new-window -t %pane` fails outright ("can't specify pane here"),
+    // so the pane is translated and the window inserted after it.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder({
+      "display-message": { code: 0, out: "@9\n" },
+    });
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, target: "%5", detach: true }),
+      );
+      expect(res.status).toBe(200);
+      expect(argv[0]?.[1]).toBe("display-message");
+      expect(argv[1]).toEqual([
+        "tmux",
+        "new-window",
+        "-a",
+        "-t",
+        "@9",
+        "-c",
+        cwd,
+        "-P",
+        "-F",
+        "#{pane_id}",
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects a target pane tmux cannot resolve", async () => {
+    // tmux exits 0 with empty output for a pane that has closed, so the
+    // empty answer has to be caught rather than passed on as a target.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder({
+      "display-message": { code: 0, out: "\n" },
+    });
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, target: "%404", detach: true }),
+      );
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("%404");
+      expect(argv).toHaveLength(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects an unknown split direction and a non-pane target", async () => {
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const bad = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, split: "horizontal" }),
+      );
+      expect(bad.status).toBe(400);
+      const badTarget = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, target: "@3" }),
+      );
+      expect(badTarget.status).toBe(400);
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("types the agent's promptCommand into the pane", async () => {
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({
+          agent: "prompty",
+          cwd,
+          prompt: "don't stop",
+          detach: true,
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(argv[1]).toEqual([
+        "tmux",
+        "send-keys",
+        "-t",
+        "%99",
+        "prompty 'don'\\''t stop'",
+        "Enter",
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("refuses a prompt spawn for an agent with no promptCommand", async () => {
+    // The old code emitted `--prompt` for every agent, which silently
+    // means one-shot print mode (Copilot) or an unknown flag (pi).
+    const { internals } = serverForAgents([noPromptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "flagless", cwd, prompt: "hi" }),
+      );
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain(
+        "promptCommand",
+      );
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+});
