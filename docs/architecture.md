@@ -182,6 +182,32 @@ Fail-soft: a thrown spawn disables the resolver for the daemon's lifetime only w
 
 The lookup also fetches `reviewDecision` and `statusCheckRollup`, folding the rollup daemon-side via `foldChecks` (mirrors gh's PR-status rollup as shown by `gh pr view` / `gh pr status`; empty rollup = `"none"`, never `"passing"`) into the `reviewDecision` / `ciStatus` fields on each `BranchPR` that drive the TUI's PR-cell color. `samePRs` compares these, so a CI or review flip re-broadcasts the session even when id and href are unchanged. Feeds `EnrichedSession.branchPRs`; the TUI's `pr` field prefers background rows' authoritative `backgroundChildren` and falls back to this.
 
+## Worktree pruning
+
+`worktree-prune.ts` answers "which of this repo's worktrees are finished" and, separately, performs the removal. The split is load-bearing: `scanRepos` only reads, and its output is the **only** input `runPrune` accepts. `POST /worktrees/prune` therefore takes paths, re-scans in-process, and rejects (409) any path the fresh scan does not currently classify as removable — a stale client list, a replayed request, or a hand-written POST cannot delete a directory that has since become active.
+
+**Repo inventory.** Sessions are the only repo list the daemon has, and the right one: the scan collects every `mainRepoRoot` across live sessions, so a repo ccmux has never seen an agent in is never offered. One session anywhere in a repo (its main checkout included) brings that repo's whole worktree list into scope, so an abandoned worktree with no session of its own is still found.
+
+**Reason precedence** (strongest evidence first, `worktree-git.ts` supplying each check):
+
+1. `pr-merged` — `gh pr list --state all` says merged. The only signal that survives squash and rebase merges, and the only one that justifies a forced branch delete.
+2. `merged-locally` — `merge-base --is-ancestor` against the default branch. Locally provable, so `git branch -d` suffices.
+3. `upstream-gone` — `%(upstream:track)` reports `[gone]` after the per-repo `git fetch --prune`. The shape auto-delete-on-merge leaves, but **not** proof of a merge, so it also uses the safe `-d` and reports a refusal rather than forcing.
+4. `pr-closed` — closed without merging. The worktree is finished; the branch is kept.
+
+An **open** PR (checked against the existing `PRResolver` cache first, so the common case costs no `gh` call), a **working** session, a user **lock**, a detached HEAD, and the main checkout all mean "not a candidate". Dirty (uncommitted or untracked) worktrees are candidates but are flagged, never pre-selected, and refused by `runPrune` unless their path appears in `allowDirtyPaths` — the gate is enforced in the destructive core so both surfaces inherit it.
+
+**Run phases**, in this order for a reason:
+
+1. Stop each session's agent, then close its pane (a `kill-pane` that finds nothing is success: stopping the agent usually takes its pane with it).
+2. Rename the directory to a dot-prefixed trash sibling in the same parent — atomic, cross-device-proof, frees the path even while a shell holds it as cwd.
+3. Clear stale `locked` markers (an interrupted `worktree add` leaves entries `git worktree prune` refuses to touch) and run `git worktree prune`.
+4. Delete branches. **After** the prune, not before: until the admin entry is gone git still considers the branch checked out in a worktree and refuses to delete it with or without `-D`.
+5. Drop the removed paths (and everything nested under them) from each agent state file, backing the file up first.
+6. Delete the trash directories, so their contents survive for the whole run.
+
+**State cleanup** (`agent-state.ts`) treats a state file as "a JSON object whose `projects` key maps absolute directory paths to opaque state". Claude Code's `~/.claude.json` is the only one wired up; adding another agent is one descriptor. `--state` additionally sweeps entries whose directory no longer exists — the backlog from worktrees deleted outside ccmux.
+
 ## Whole-session search
 
 TUI search unions four sources so a query can match more than the last prompt. Three are instant and client-side (fuzzy over the four identity fields; substring over an in-memory prompt index; substring over captured pane content); the fourth reads live transcripts on demand via the daemon.
@@ -258,6 +284,9 @@ When a scan throws `SCAN_DEGRADED_THRESHOLD` (10) times in a row (discovery fail
 | Codex rollout line parsing (shared by adapter + search)                                                                 | `src/daemon/adapters/codex/parse.ts`          |
 | In-memory per-session prompt index (`appendPrompt`, caps in `config.ts`)                                                | `src/daemon/status-machine.ts`                |
 | `(cwd, branch)` → open-PR lookup                                                                                        | `src/daemon/pr-resolver.ts`                   |
+| Worktree enumeration + git facts for pruning (`worktree list --porcelain`, dirty, ancestry, upstream)                   | `src/daemon/worktree-git.ts`                  |
+| Prune candidate classification + removal run                                                                            | `src/daemon/worktree-prune.ts`                |
+| Per-directory agent state cleanup (`~/.claude.json` `projects`)                                                         | `src/daemon/agent-state.ts`                   |
 | Paneless Claude background-agent source                                                                                 | `src/daemon/sources/claude-background.ts`     |
 | `/invoke` request lifecycle                                                                                             | `src/daemon/invocation-manager.ts`            |
 | Subprocess invoke output store                                                                                          | `src/daemon/invocation-results.ts`            |
