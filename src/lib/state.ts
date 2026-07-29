@@ -1,4 +1,4 @@
-import { mkdirSync } from "fs";
+import { mkdirSync, renameSync, unlinkSync } from "fs";
 import { dirname } from "path";
 import { STATE_FILE } from "./config";
 import type { GroupBy, PromptDisplay } from "./preferences";
@@ -61,11 +61,37 @@ export async function getUIState(): Promise<UIState> {
 }
 
 /**
- * Merge updates into the state file
+ * Merge updates into the state file.
+ *
+ * Written to a temp file and renamed, the same way the session markers are.
+ * The rename is atomic, so a reader (or a crash) sees either the old file or
+ * the new one, never a half-written one — which matters because
+ * `getUIState` swallows a parse error and returns `{}`, so a truncated file
+ * silently discards every persisted setting rather than reporting anything.
+ *
+ * This is still a read-modify-write with no lock, and it is genuinely
+ * concurrent: every picker and sidebar writes here, and so does the daemon's
+ * `AttentionTracker`. Atomicity bounds the damage to "one writer's keys lose
+ * to another's" instead of "the file is gone"; a lock would be the next step
+ * if that ever proves not enough.
+ *
+ * The temp name carries the pid so two processes renaming at the same moment
+ * cannot land on each other's partial file.
  */
 export async function setUIState(updates: Partial<UIState>): Promise<void> {
   const current = await getUIState();
   const merged = { ...current, ...updates };
   mkdirSync(dirname(STATE_FILE), { recursive: true });
-  await Bun.write(STATE_FILE, JSON.stringify(merged, null, 2) + "\n");
+  const tmp = `${STATE_FILE}.${process.pid}.tmp`;
+  try {
+    await Bun.write(tmp, JSON.stringify(merged, null, 2) + "\n");
+    renameSync(tmp, STATE_FILE);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // Nothing to clean up, or we never got as far as creating it.
+    }
+    throw err;
+  }
 }

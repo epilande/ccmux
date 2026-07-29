@@ -3045,6 +3045,29 @@ describe("store", () => {
       expect(persisted).toEqual([{ lastSpawnAgent: "codex" }]);
     });
 
+    it("carries a pending debounced write to disk with it", async () => {
+      // `f` then `n` Enter inside 300ms: the queued hideIdle would die with
+      // the process, since the picker exits as soon as the spawn lands.
+      const persisted: Record<string, unknown>[] = [];
+      const store = _createTUIStore({
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
+      });
+
+      store.actions.toggleHideIdle();
+      await store.actions.setLastSpawnAgent("codex");
+
+      expect(persisted).toEqual([
+        { hideIdle: true, lastSpawnAgent: "codex" },
+      ]);
+
+      // The queue is now empty, so the cancelled timer can't fire a second,
+      // stale write afterwards.
+      await waitForDebounce();
+      expect(persisted).toHaveLength(1);
+    });
+
     it("picks up a last spawned agent written by another instance", () => {
       const store = createTUIStore({ lastSpawnAgent: "claude" });
 

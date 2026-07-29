@@ -357,6 +357,25 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       statePersistTimer = null;
     }, 300);
   }
+
+  /**
+   * Write `updates` immediately, carrying any debounced batch with them.
+   *
+   * Bypassing the queue rather than flushing it loses whatever is sitting in
+   * it: press `f` and then spawn within 300ms and the pending `hideIdle`
+   * dies with the process, because the caller exits as soon as this
+   * resolves. Cancelling the timer and folding `pendingUpdates` in turns the
+   * exit-adjacent write into a flush of everything outstanding.
+   */
+  function flushUIState(updates: Partial<UIState>): Promise<void> {
+    if (statePersistTimer) {
+      clearTimeout(statePersistTimer);
+      statePersistTimer = null;
+    }
+    const merged = { ...pendingUpdates, ...updates };
+    pendingUpdates = {};
+    return Promise.resolve(persistStateFn(merged));
+  }
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Invocation ids currently in flight (every invoke, Claude included).
@@ -1263,17 +1282,18 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
      * Remember the agent a spawn actually used, so the next dialog opened
      * without an agent in context defaults to it.
      *
-     * Written straight through rather than through the debounce, and the
-     * write is returned so the caller can await it: the one-shot picker
-     * calls `process.exit(0)` the instant its spawn lands, which is exactly
-     * the case this value exists for and exactly the case a 300ms timer
-     * never survives. A spawn is a deliberate, rare event, so it does not
-     * need the keypress-churn coalescing the debounce is there for.
+     * Flushed rather than queued, and the write is returned so the caller
+     * can await it: the one-shot picker calls `process.exit(0)` the instant
+     * its spawn lands, which is exactly the case this value exists for and
+     * exactly the case a 300ms timer never survives. A spawn is a
+     * deliberate, rare event, so it does not need the keypress-churn
+     * coalescing the debounce is there for — and flushing (rather than
+     * bypassing) takes any pending `f`/`p`/`b` toggle to disk with it.
      */
     setLastSpawnAgent(agent: string): Promise<void> {
       if (state.lastSpawnAgent === agent) return Promise.resolve();
       setState("lastSpawnAgent", agent);
-      return Promise.resolve(persistStateFn({ lastSpawnAgent: agent }));
+      return flushUIState({ lastSpawnAgent: agent });
     },
 
     togglePreview() {
