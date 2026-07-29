@@ -63,11 +63,18 @@ export type NewSessionPlacement = "window" | "split-h" | "split-v";
 export type NewSessionField = "agent" | "placement" | "prompt";
 
 /**
- * The dialog's fields, in focus order. Everything about the dialog is driven
- * off this list plus a matching `NewSessionDraft` key: focus movement, the
- * rendered rows, and which field the option keys apply to. Adding the
- * worktree destination field (issue #69) means adding an entry here, a draft
- * key, and one render branch — no rework of the key handling.
+ * The dialog's fields, in focus order. Focus movement, which field the
+ * option keys apply to, the rendered rows, and the dialog's own height all
+ * derive from this list plus a matching `NewSessionDraft` key, so adding a
+ * field (issue #69's worktree destination is next) is additive rather than
+ * a rework of the key handling.
+ *
+ * Additive is not the same as one line: the store action and open-time
+ * default, App's option lookups, and the component's props, render branch,
+ * and `fieldRows` entry all need the new case. TypeScript names each one —
+ * `fieldRows` is a `Record<NewSessionField, …>` for exactly that reason,
+ * since the height it replaced was a hand-summed constant that compiled
+ * fine and clipped a row at runtime.
  */
 export const NEW_SESSION_FIELDS: readonly NewSessionField[] = [
   "agent",

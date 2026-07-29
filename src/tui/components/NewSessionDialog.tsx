@@ -3,10 +3,11 @@ import { createMemo, For, Show } from "solid-js";
 import { useTerminalDimensions } from "@opentui/solid";
 import { MouseButton } from "@opentui/core";
 import type { SpawnableAgent } from "../../lib/spawnable-agents";
-import type {
-  NewSessionDraft,
-  NewSessionField,
-  NewSessionPlacement,
+import {
+  NEW_SESSION_FIELDS,
+  type NewSessionDraft,
+  type NewSessionField,
+  type NewSessionPlacement,
 } from "../store";
 import { shortenCwd, truncateText } from "../utils/format";
 import { agentColorFor } from "./SessionItem";
@@ -17,10 +18,9 @@ const LABEL_WIDTH = 10;
 /** Wide enough for the placement row's full labels; see COMPACT_CONTENT_WIDTH. */
 const MAX_WIDTH = 64;
 const MIN_WIDTH = 24;
-/** Rows the dialog spends on everything except the agent and placement
- *  lists and the optional key hints: border (2), title, blank, prompt,
- *  directory. */
-const CHROME_ROWS = 6;
+/** Rows that belong to no field: border (2), title, blank, directory. Every
+ *  other row is a field's, counted from NEW_SESSION_FIELDS below. */
+const FIXED_CHROME_ROWS = 5;
 /** The blank spacer plus the key-hint row, when the dialog draws its own. */
 const KEY_HINT_ROWS = 2;
 /** Content width the placement row's full labels need (number, brackets,
@@ -92,7 +92,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const stacked = () => contentWidth() < STACKED_CONTENT_WIDTH;
 
   const showKeyHints = () => props.showKeyHints !== false;
-  const chromeRows = () => CHROME_ROWS + (showKeyHints() ? KEY_HINT_ROWS : 0);
+  const hintRows = () => (showKeyHints() ? KEY_HINT_ROWS : 0);
 
   const agents = createMemo(() => props.agents ?? []);
   const selectedAgentIndex = createMemo(() => {
@@ -103,15 +103,38 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     () => agents()[selectedAgentIndex()] ?? null,
   );
 
+  /**
+   * How many rows each field occupies. Exhaustive over `NewSessionField` by
+   * type, which is the point: a field added to `NEW_SESSION_FIELDS` (issue
+   * #69's worktree destination is next) fails to compile until its height
+   * is declared here. The previous hand-summed constant type-checked fine
+   * and silently clipped the bottom row instead.
+   */
+  const fieldRows: Record<NewSessionField, () => number> = {
+    // Declared before `visibleAgents` but never CALLED before it exists:
+    // `otherFieldRows("agent")` is the only caller during that window and
+    // it filters this entry out. createMemo runs eagerly, so the ordering
+    // is load-bearing, not stylistic.
+    agent: () => Math.max(1, visibleAgents().length),
+    placement: () => (stacked() ? PLACEMENT_OPTIONS.length : 1),
+    prompt: () => 1,
+  };
+
+  /** Rows claimed by every field but `except`. Lets the scrollable agent
+   *  list size itself without consulting its own (circular) row count. */
+  const otherFieldRows = (except: NewSessionField): number =>
+    NEW_SESSION_FIELDS.filter((field) => field !== except).reduce(
+      (total, field) => total + fieldRows[field](),
+      0,
+    );
+
   /** The agent list is the only field that can grow past a screen; cap it at
-   *  what is left after the chrome and the placement rows, and scroll the
-   *  rest. */
+   *  what every other row has left over, and scroll the rest. */
   const visibleAgents = createMemo(() => {
     const list = agents();
-    const placementRows = stacked() ? PLACEMENT_OPTIONS.length : 1;
     const room = Math.max(
       1,
-      dims().height - 2 - chromeRows() - placementRows,
+      dims().height - FIXED_CHROME_ROWS - hintRows() - otherFieldRows("agent"),
     );
     const { start, end } = optionWindow(
       list.length,
@@ -125,11 +148,16 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     }));
   });
 
-  const agentRows = () => Math.max(1, visibleAgents().length);
-  const placementRows = () => (stacked() ? PLACEMENT_OPTIONS.length : 1);
-
   const height = () =>
-    Math.min(dims().height, agentRows() + placementRows() + chromeRows());
+    Math.min(
+      dims().height,
+      FIXED_CHROME_ROWS +
+        hintRows() +
+        NEW_SESSION_FIELDS.reduce(
+          (total, field) => total + fieldRows[field](),
+          0,
+        ),
+    );
 
   const labelColor = (field: NewSessionField) =>
     props.draft.field === field ? theme.blue : theme.overlay;

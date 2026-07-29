@@ -387,7 +387,9 @@ Opened with <kbd>n</kbd>, or from the right-click menu on a session row or a gro
 | Spawn               | <kbd>Enter</kbd>                                           |
 | Cancel              | <kbd>Esc</kbd>                                             |
 
-The working directory is derived, not typed: a session row uses that session's directory, a group header uses the group's, and no selection falls back to where the picker was launched. The picker jumps to the new pane and closes; the sidebar spawns into the window's main area without stealing focus.
+Movement and number keys apply to the focused field, so <kbd>2</kbd> picks the second agent on the Agent field and the second placement on the Placement field. In the Prompt field every key is text, so <kbd>↑</kbd> / <kbd>↓</kbd> (or <kbd>Ctrl</kbd>+<kbd>P</kbd> / <kbd>Ctrl</kbd>+<kbd>N</kbd>) move between fields there instead.
+
+The working directory is derived, not typed: a session row uses that session's directory, a group header uses the group's, and no selection falls back to where the picker was launched. The picker jumps to the new pane, and a one-shot picker then closes while a `--persistent` board stays open; the sidebar spawns into the window's main area without stealing focus.
 
 </details>
 
