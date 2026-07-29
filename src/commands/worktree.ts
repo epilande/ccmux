@@ -156,13 +156,14 @@ interface PruneOptions {
 async function runPruneCommand(options: PruneOptions): Promise<void> {
   await ensureDaemon();
 
+  const cleanState = options.state === true;
   const scan = await fetchCandidates(options.repo);
   const { candidates } = scan;
 
   if (candidates.length === 0) {
     console.log("No worktrees are ready to prune.");
     printSkipped(scan.skipped);
-    if (!options.state) return;
+    if (!cleanState) return;
   } else {
     console.log(`\nPrunable worktrees (${candidates.length}):\n`);
     printCandidates(candidates);
@@ -174,7 +175,7 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
       paths: candidates.map((c) => c.path),
       allowDirty: [],
       dryRun: true,
-      cleanState: options.state === true,
+      cleanState,
       repo: options.repo,
     });
     printResult(result);
@@ -225,7 +226,7 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
       }
     }
 
-    if (selected.length === 0 && !options.state) {
+    if (selected.length === 0 && !cleanState) {
       console.log("Nothing selected.");
       return;
     }
@@ -243,7 +244,7 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
         `, ${branches.length} local branch${branches.length === 1 ? "" : "es"}` +
         `, and close ${panes.length} pane${panes.length === 1 ? "" : "s"}.`,
     );
-    if (options.state) {
+    if (cleanState) {
       console.log("It will also drop state entries for paths already deleted.");
     }
     const confirm = await rl.question("Proceed? [y/N] ");
@@ -256,7 +257,7 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
       paths: selected.map((c) => c.path),
       allowDirty,
       dryRun: false,
-      cleanState: options.state === true,
+      cleanState,
       repo: options.repo,
     });
     printResult(result);
