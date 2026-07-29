@@ -2,7 +2,12 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, unlinkSync } from "fs";
 import { tmpdir } from "os";
 import { join, basename, relative } from "path";
-import { deriveProject } from "./project-derivation";
+import {
+  deriveProject,
+  deriveProjectInfo,
+  worktreeFacts,
+  type ProjectInfo,
+} from "./project-derivation";
 
 const cleanupDirs: string[] = [];
 
@@ -180,10 +185,10 @@ describe("deriveProject", () => {
     const gitFile = join(worktree, ".git");
     writeFileSync(gitFile, `gitdir: ${worktreesDir}\n`);
 
-    const cache = new Map<string, string>();
+    const cache = new Map<string, ProjectInfo>();
     const first = deriveProject(worktree, "fallback", { cache });
     expect(first).toBe(basename(main));
-    expect(cache.get(worktree)).toBe(basename(main));
+    expect(cache.get(worktree)?.project).toBe(basename(main));
 
     // Remove the .git file so a fresh (uncached) walk would find nothing
     // and fall back to the worktree's own basename instead.
@@ -194,13 +199,94 @@ describe("deriveProject", () => {
     expect(second).not.toBe(basename(worktree));
   });
 
+  it("carries the worktree facts the walk already resolved", () => {
+    // The invoke path reads these instead of spawning git, so they have to
+    // agree with the daemon's git-dir vs common-dir answer for each shape.
+    const main = tempDir("info-main");
+    mkdirSync(join(main, ".git"));
+    const mainInfo = deriveProjectInfo(main, "fallback", { cache: new Map() });
+    expect(mainInfo).toEqual({
+      project: basename(main),
+      isWorktree: false,
+      mainRepoRoot: main,
+      worktreeRoot: main,
+    });
+
+    const wtMain = tempDir("info-wt-main");
+    const worktreesDir = join(wtMain, ".git", "worktrees", "feature-z");
+    mkdirSync(worktreesDir, { recursive: true });
+    const worktree = tempDir("info-wt");
+    writeFileSync(join(worktree, ".git"), `gitdir: ${worktreesDir}\n`);
+    expect(
+      deriveProjectInfo(worktree, "fallback", { cache: new Map() }),
+    ).toEqual({
+      project: basename(wtMain),
+      isWorktree: true,
+      // The worktree's own root, which is what NAMES it - not the cwd.
+      worktreeRoot: worktree,
+      mainRepoRoot: wtMain,
+    });
+
+    // A submodule's `.git` FILE is not a worktree, and its gitdir names no
+    // checkout root.
+    const superRepo = tempDir("info-super");
+    const moduleGitdir = join(superRepo, ".git", "modules", "sub");
+    mkdirSync(moduleGitdir, { recursive: true });
+    const submodule = tempDir("info-sub");
+    writeFileSync(join(submodule, ".git"), `gitdir: ${moduleGitdir}\n`);
+    expect(
+      deriveProjectInfo(submodule, "fallback", { cache: new Map() }),
+    ).toEqual({
+      project: basename(submodule),
+      isWorktree: false,
+      mainRepoRoot: null,
+      worktreeRoot: null,
+    });
+
+    const plain = tempDir("info-non-git");
+    expect(deriveProjectInfo(plain, "fallback", { cache: new Map() })).toEqual({
+      project: basename(plain),
+      isWorktree: false,
+      mainRepoRoot: null,
+      worktreeRoot: null,
+    });
+  });
+
+  it("differs from git only by under-claiming, on the layouts it doesn't cover", () => {
+    // Both divergences from `worktreeFacts` come from requiring a literal
+    // `/.git/worktrees/` component. Pinned so the scope in the docstring
+    // stays honest rather than aspirational.
+    const bareRoot = tempDir("bare-host");
+    const bare = join(bareRoot, "repo.git");
+    const bareWorktreeGitdir = join(bare, "worktrees", "feat");
+    mkdirSync(bareWorktreeGitdir, { recursive: true });
+    const bareWorktree = tempDir("bare-wt");
+    writeFileSync(
+      join(bareWorktree, ".git"),
+      `gitdir: ${bareWorktreeGitdir}\n`,
+    );
+
+    const walked = deriveProjectInfo(bareWorktree, "fallback", {
+      cache: new Map(),
+    });
+    // The walk sees no `/.git/worktrees/` and falls back to the cwd name...
+    expect(walked.isWorktree).toBe(false);
+    expect(walked.project).toBe(basename(bareWorktree));
+    // ...while git, asked directly, calls it a worktree of a bare repo with
+    // no main checkout to name.
+    expect(worktreeFacts(bareWorktree, bareWorktreeGitdir, bare)).toEqual({
+      isWorktree: true,
+      mainRepoRoot: null,
+    });
+  });
+
   it("uses a separate result per cwd within the same cache", () => {
     const a = tempDir("cache-a");
     mkdirSync(join(a, ".git"));
     const b = tempDir("cache-b");
     mkdirSync(join(b, ".git"));
 
-    const cache = new Map<string, string>();
+    const cache = new Map<string, ProjectInfo>();
     expect(deriveProject(a, "fallback", { cache })).toBe(basename(a));
     expect(deriveProject(b, "fallback", { cache })).toBe(basename(b));
     expect(cache.size).toBe(2);

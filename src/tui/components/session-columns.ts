@@ -549,6 +549,12 @@ export interface ProjectCellInput {
   dirname: string;
   branch: string | null;
   isWorktree: boolean;
+  /**
+   * The prefix carries repo identity rather than path context (a worktree
+   * row's `<repo>/<worktree>`), so it outranks the dirname when the cell has
+   * to shrink. Path prefixes keep the default order (prefix first).
+   */
+  repoPrefix?: boolean;
 }
 
 /** Display strings for the project cell after fitting to a width budget. */
@@ -575,17 +581,54 @@ function branchLabelFor(
   return ":" + shown + (isWorktree ? "+" : "");
 }
 
-/** Shorten a branch label to `avail` chars using the `~` marker; "" if too tight. */
+/** Narrowest branch label that still renders: ":" + one char + "~" + the
+ *  worktree "+". Anything less and `shortenBranchLabel` returns "". */
+function minBranchLabelWidth(isWorktree: boolean): number {
+  return 3 + (isWorktree ? 1 : 0);
+}
+
+/**
+ * Shorten a branch label to `avail` chars using the `~` marker; "" if too
+ * tight. "Too tight" counts the worktree `+` as well as the ":" and one
+ * usable char, because a label that keeps a one-char body plus both markers
+ * would come back WIDER than the room it was given — and on a worktree row
+ * that single overspent char is enough to push the repo out of the cell.
+ */
 function shortenBranchLabel(
   branch: string,
   isWorktree: boolean,
   avail: number,
 ): string {
-  if (avail < 3) return ""; // no room for ":" plus a usable char
   const wt = isWorktree ? "+" : "";
+  if (avail < minBranchLabelWidth(isWorktree)) return "";
   const bodyLen = Math.max(1, avail - 1 /* colon */ - 1 /* ~ */ - wt.length);
   if (branch.length <= bodyLen) return ":" + branch + wt;
   return ":" + branch.slice(0, bodyLen) + "~" + wt;
+}
+
+/** Fit the prefix into `avail` chars; dropped entirely under 2 usable ones. */
+function fitPrefix(prefix: string, avail: number): string {
+  if (avail < 2) return "";
+  return prefix.length > avail ? truncateText(prefix, avail) : prefix;
+}
+
+/** The dirname is the cell's last identifiable part, so it holds this many
+ *  chars even when the budget says otherwise. */
+const DIRNAME_FLOOR = 5;
+/** Floor for a dirname that shares the cell with a repo prefix: the repo is
+ *  the identity there, so the worktree name gives up more before the repo
+ *  gives up anything. */
+const WORKTREE_NAME_FLOOR = 3;
+
+/** Fit the dirname into `avail` chars, never below `floor` (the caller
+ *  absorbs the overflow elsewhere). */
+function fitDirname(
+  dirname: string,
+  avail: number,
+  floor = DIRNAME_FLOOR,
+): string {
+  if (dirname.length <= avail) return dirname;
+  return truncateText(dirname, Math.max(floor, avail));
 }
 
 /**
@@ -593,46 +636,88 @@ function shortenBranchLabel(
  * clipping: any shortening shows `…` (or the existing `~` for the branch).
  * Shrink order matches the design: prefix first (drop it under 2 usable
  * chars), then the dirname (kept to a small floor), then the branch as a last
- * resort. When everything already fits, the rendering is unchanged.
+ * resort.
+ *
+ * A `repoPrefix` cell (a worktree's `<repo>/<worktree>`) reverses the first
+ * two, since the repo a worktree belongs to is worth more than the tail of
+ * its own directory name, and it renders the repo all-or-nothing. A
+ * *truncated* repo is the worst of both: `claude-t…work…` names no repo and
+ * swallows the `/` that made the pair read as a path, while still charging
+ * for the characters. So the repo is either shown whole or dropped, and the
+ * worktree name takes the freed space back at its normal floor. That also
+ * keeps the cell inside `budget`: sizing a truncated prefix against a
+ * floored dirname and then re-floating the dirname made the two steps
+ * disagree and overflow into the neighbouring column.
+ *
+ * The branch yields before identity does on those cells: `maxBranchLen` alone
+ * let a long branch spell itself out while the repo dropped and the worktree
+ * name fell to a stub, which is backwards for a row whose whole purpose is
+ * saying which tree it is.
  */
 export function fitProjectCell(
   input: ProjectCellInput,
   budget: number,
   maxBranchLen: number,
 ): ProjectCellDisplay {
-  const { prefix, dirname, branch, isWorktree } = input;
+  const { prefix, dirname, branch, isWorktree, repoPrefix } = input;
   let branchLabel = branch
     ? branchLabelFor(branch, isWorktree, maxBranchLen)
     : "";
-  const branchWidth = branchLabel.length;
 
-  if (prefix.length + dirname.length + branchWidth <= budget) {
+  if (branch && repoPrefix) {
+    // Reserve what `<repo>/<worktree>` needs to stay a label (the repo whole,
+    // the worktree name at its floor) before the branch claims the rest.
+    //
+    // Only when the cell can pay for BOTH, though. Below that the repo is
+    // dropping whatever the branch does, so squeezing the branch buys
+    // nothing; and buying the repo by dropping the branch outright makes the
+    // branch blink out of existence as the terminal *widens* into the band
+    // where the repo starts fitting.
+    const identityReserve =
+      prefix.length + Math.min(dirname.length, WORKTREE_NAME_FLOOR);
+    const minBranch = minBranchLabelWidth(isWorktree);
+    if (
+      identityReserve + minBranch <= budget &&
+      branchLabel.length > budget - identityReserve
+    ) {
+      branchLabel = shortenBranchLabel(
+        branch,
+        isWorktree,
+        budget - identityReserve,
+      );
+    }
+  }
+
+  // What the path parts get to share once the branch label has its width.
+  const pathBudget = budget - branchLabel.length;
+
+  if (prefix.length + dirname.length <= pathBudget) {
     return { prefix, dirname, branchLabel };
   }
 
-  // 1. Shrink the prefix first: give it whatever is left after dirname+branch.
-  const availForPrefix = budget - dirname.length - branchWidth;
-  let outPrefix: string;
-  if (availForPrefix < 2) {
-    outPrefix = "";
-  } else if (prefix.length > availForPrefix) {
-    outPrefix = truncateText(prefix, availForPrefix);
-  } else {
-    outPrefix = prefix;
-  }
-  if (outPrefix.length + dirname.length + branchWidth <= budget) {
-    return { prefix: outPrefix, dirname, branchLabel };
-  }
+  let outPrefix = prefix;
+  let outDirname = dirname;
 
-  // 2. Prefix minimal but dirname+branch still overflow: truncate the dirname,
-  //    keeping a small floor so it stays identifiable.
-  const DIRNAME_FLOOR = 5;
-  const availForDirname = budget - outPrefix.length - branchWidth;
-  const outDirname =
-    dirname.length <= availForDirname
-      ? dirname
-      : truncateText(dirname, Math.max(DIRNAME_FLOOR, availForDirname));
-  if (outPrefix.length + outDirname.length + branchWidth <= budget) {
+  if (repoPrefix) {
+    // 1. Shrink the worktree name first, keeping the repo whole.
+    outDirname = fitDirname(
+      dirname,
+      pathBudget - prefix.length,
+      WORKTREE_NAME_FLOOR,
+    );
+    if (prefix.length + outDirname.length > pathBudget) {
+      // 2. Even at its floor the pair doesn't fit: drop the repo whole (never
+      //    a stub) and give the worktree name the entire path budget back.
+      outPrefix = "";
+      outDirname = fitDirname(dirname, pathBudget);
+    }
+  } else {
+    // 1. Shrink the prefix first: give it what's left after dirname+branch.
+    outPrefix = fitPrefix(prefix, pathBudget - dirname.length);
+    // 2. Then the dirname, kept to a small floor so it stays identifiable.
+    outDirname = fitDirname(dirname, pathBudget - outPrefix.length);
+  }
+  if (outPrefix.length + outDirname.length <= pathBudget) {
     return { prefix: outPrefix, dirname: outDirname, branchLabel };
   }
 
