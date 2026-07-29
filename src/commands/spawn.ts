@@ -137,9 +137,8 @@ export function createSpawnCommand(): Command {
         const optedOut = options.target !== undefined && !explicitTarget;
 
         // `--worktree` bare is `true` from commander, `--worktree x` is the
-        // string. Both become an object, since the daemon accepts one shape;
-        // `--base` without `--worktree` is a no-op flag rather than an error,
-        // matching how the other placement options behave in isolation.
+        // string. Both become an object, since the daemon accepts one shape.
+        //
         // `--base` alone is inert, and silently ignoring a flag someone typed
         // costs a confused debugging session. Unlike `--split` without a
         // target, which still does something sensible, this expresses an

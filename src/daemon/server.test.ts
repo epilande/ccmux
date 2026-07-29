@@ -3973,6 +3973,62 @@ describe("POST /spawn", () => {
       }
     });
 
+    it("refuses a fork into a new worktree, creating nothing", async () => {
+      // Same wall as the explicit-cwd refusal above, reached a different way:
+      // a fork into a worktree sends no `cwd` at all, so that check passes and
+      // the relocation only appears once the worktree resolves. The source cwd
+      // is a REAL repo here, so the worktree would genuinely have been created
+      // had the refusal come later — which is what the directory assertion
+      // pins down.
+      //
+      // The name is load-bearing. A fork carries no prompt, so a BARE
+      // `worktree: {}` is already refused with "a worktree needs a name" and
+      // would make this test pass against no guard at all. Measured with the
+      // guard disabled: named, the same request answers 200 and creates the
+      // worktree.
+      const repo = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-fw-")));
+      Bun.spawnSync(["git", "init", "-q", repo]);
+      Bun.spawnSync(
+        ["git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "x"],
+        {
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "t",
+            GIT_AUTHOR_EMAIL: "t@t",
+            GIT_COMMITTER_NAME: "t",
+            GIT_COMMITTER_EMAIL: "t@t",
+          },
+        },
+      );
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const source = manager.createPaneTrackedSession({
+        agentType: "forky",
+        paneId: "%3",
+        cwd: repo,
+        pid: 4242,
+        nativeSessionId: "src-sid",
+      });
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({
+            fork: source.id,
+            worktree: { name: "forked" },
+            detach: true,
+          }),
+        );
+        expect(res.status).toBe(400);
+        const { error } = (await res.json()) as { error: string };
+        expect(error).toContain("into a new worktree");
+        expect(error).toContain(repo);
+        expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
+        expect(argv).toHaveLength(0);
+      } finally {
+        restore();
+        rmSync(repo, { recursive: true, force: true });
+      }
+    });
+
     it("refuses a paneless background row daemon-side too", async () => {
       // The picker hides Fork for these, but that is a DISPLAY gate. Verified
       // by review that a hand-rolled request reached tmux and spawned a
@@ -4349,7 +4405,12 @@ describe("POST /spawn with a worktree", () => {
         worktree: { name: "fix-thing" },
       });
       const body = (await res.json()) as {
-        worktree?: { path: string; name: string; branch: string; created: boolean };
+        worktree?: {
+          path: string;
+          name: string;
+          branch: string;
+          created: boolean;
+        };
       };
 
       expect(res.status).toBe(200);
@@ -4448,9 +4509,9 @@ describe("POST /spawn with a worktree", () => {
       expect(body.error).toContain("left-behind");
       expect(body.error).toContain("will reuse it");
       // And it really is on disk, as the message claims.
-      expect(existsSync(join(repo, ".claude", "worktrees", "left-behind"))).toBe(
-        true,
-      );
+      expect(
+        existsSync(join(repo, ".claude", "worktrees", "left-behind")),
+      ).toBe(true);
     } finally {
       tmux.restore();
     }

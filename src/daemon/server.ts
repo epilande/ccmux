@@ -2331,6 +2331,26 @@ export class DaemonServer {
         { status: 400, headers },
       );
     }
+    // A worktree destination is a different directory, so it runs into exactly
+    // the wall `resolveForkSource` refuses an explicit `cwd` for: the fork
+    // would start in the new checkout and find no conversation there. That
+    // check cannot catch this one, because a fork into a worktree sends no
+    // `cwd` at all and only becomes a relocation once the worktree resolves.
+    // Refused BEFORE the worktree is created, so a rejected request leaves no
+    // directory and no branch behind.
+    if (forkSource && worktreeRequest.value) {
+      return Response.json(
+        {
+          error:
+            `Cannot fork ${forkSource.session.agentType} into a new worktree. ` +
+            `A resumed session is resolved against the project directory for its cwd, ` +
+            `so the fork would start in the worktree and find no conversation. ` +
+            `Spawn a fresh session into the worktree, or fork in ${forkSource.session.cwd}.`,
+        },
+        { status: 400, headers },
+      );
+    }
+
     let spawnCwd = cwd;
     let worktreeInfo: WorktreeCreation | undefined;
     if (worktreeRequest.value) {
@@ -2449,7 +2469,9 @@ export class DaemonServer {
       if (exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();
         return Response.json(
-          { error: withWorktreeNote(`tmux ${tmuxCmd} failed: ${stderr.trim()}`) },
+          {
+            error: withWorktreeNote(`tmux ${tmuxCmd} failed: ${stderr.trim()}`),
+          },
           { status: 500, headers },
         );
       }
@@ -2487,7 +2509,11 @@ export class DaemonServer {
         const stderr = await new Response(sendProc.stderr).text();
         await killPane();
         return Response.json(
-          { error: withWorktreeNote(`Failed to send command to pane: ${stderr.trim()}`) },
+          {
+            error: withWorktreeNote(
+              `Failed to send command to pane: ${stderr.trim()}`,
+            ),
+          },
           { status: 500, headers },
         );
       }
@@ -2510,7 +2536,11 @@ export class DaemonServer {
       );
     } catch (err: unknown) {
       return Response.json(
-        { error: withWorktreeNote(`Failed to spawn session: ${errorMessage(err)}`) },
+        {
+          error: withWorktreeNote(
+            `Failed to spawn session: ${errorMessage(err)}`,
+          ),
+        },
         { status: 500, headers },
       );
     }
