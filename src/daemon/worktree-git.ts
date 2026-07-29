@@ -3,13 +3,20 @@
  * answering the four questions that make one removable (is it dirty, is its
  * branch merged, is its upstream gone, what does its admin dir look like).
  *
- * Every call goes through an injectable {@link GitRun} so the classification
- * above it can be exercised against fixture repos without mocking `Bun.spawn`,
- * and so a caller that already knows a repo is unreachable can stub it out.
+ * Every GIT call goes through an injectable {@link GitRun} so the
+ * classification above it can be exercised against fixture repos without
+ * mocking `Bun.spawn`, and so a caller that already knows a repo is
+ * unreachable can stub it out. The file also reads a little repo-adjacent
+ * CONFIG straight off disk ({@link readSymlinkDirectories}), which does not
+ * go through that seam because there is no subprocess to inject; those
+ * readers take their root paths as arguments instead, which is what makes
+ * them testable.
+ *
  * Nothing here mutates a repo; the removal side lives in `worktree-prune.ts`.
  */
 
 import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export interface GitResult {
@@ -136,29 +143,59 @@ export async function listWorktrees(
 }
 
 /**
- * Read `worktree.symlinkDirectories` from a repo's `.claude/settings.json`.
+ * Read `worktree.symlinkDirectories` from Claude Code's MERGED settings.
  *
  * Claude Code uses this to share a directory (typically `node_modules`) into
  * the worktrees it creates, by symlink. ccmux reads it for the opposite
  * reason: to recognize such a link and not mistake it for the user's own
  * uncommitted work.
  *
+ * All three scopes are consulted, because Claude Code resolves this key from
+ * merged settings and the schema puts no scope restriction on it. USER scope
+ * matters most in practice: a machine-wide "share node_modules" preference is
+ * the natural place to set this once rather than per repo, and reading only
+ * the project file would leave exactly those users with the bug this exists
+ * to fix and no way to see why.
+ *
+ * Precedence is Claude Code's own, highest first, with a defined list
+ * REPLACING rather than extending the one below it: `.claude/settings.local
+ * .json`, then `.claude/settings.json`, then `~/.claude/settings.json`. That
+ * mirrors what the tool would actually have symlinked, which is the thing
+ * being recognized.
+ *
  * Absent file, unreadable file, malformed JSON and a missing key are all the
- * same answer, an empty list. This is optional convenience config, so a parse
- * failure must not change how a destructive feature behaves.
+ * same answer, "this scope says nothing", so the next one down is consulted.
+ * This is optional convenience config: a parse failure must not change how a
+ * destructive feature behaves.
  */
-export function readSymlinkDirectories(mainRepoRoot: string): string[] {
-  const settingsPath = join(mainRepoRoot, ".claude", "settings.json");
-  if (!existsSync(settingsPath)) return [];
+export function readSymlinkDirectories(
+  mainRepoRoot: string,
+  homeDir: string = homedir(),
+): string[] {
+  const scopes = [
+    join(mainRepoRoot, ".claude", "settings.local.json"),
+    join(mainRepoRoot, ".claude", "settings.json"),
+    join(homeDir, ".claude", "settings.json"),
+  ];
+  for (const path of scopes) {
+    const dirs = readSymlinkDirectoriesFrom(path);
+    if (dirs) return dirs;
+  }
+  return [];
+}
+
+/** One settings file's list, or null when it does not define the key. */
+function readSymlinkDirectoriesFrom(settingsPath: string): string[] | null {
   try {
     const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as {
       worktree?: { symlinkDirectories?: unknown };
     };
     const dirs = parsed.worktree?.symlinkDirectories;
-    if (!Array.isArray(dirs)) return [];
+    if (!Array.isArray(dirs)) return null;
     return dirs.filter((d): d is string => typeof d === "string" && d !== "");
   } catch {
-    return [];
+    // Missing, unreadable or malformed: this scope simply says nothing.
+    return null;
   }
 }
 
@@ -257,6 +294,12 @@ export async function readDirtyState(
  * the entry really is a symlink on disk. A real directory of that name, or a
  * symlink the user made for their own reasons, still counts as dirt.
  *
+ * Matching is on the WHOLE path git reported, so a configured `node_modules`
+ * does not exempt `packages/foo/node_modules`. That is deliberate and fails
+ * closed: a monorepo symlinking per-package directories keeps reading dirty
+ * until it lists those paths explicitly, which is the right default for a
+ * gate in front of a deletion.
+ *
  * WHY EXEMPTING IS SAFE, which matters more than the narrowness. The obvious
  * worry is "this symlink could point at anything, including real work". It
  * could, and that is still safe, because the blast radius is not what the
@@ -269,8 +312,12 @@ export async function readDirtyState(
  * separate untracked entry that this exemption does not name.
  *
  * `lstatSync`, not `statSync`: `stat` follows the link and reports the
- * TARGET's type, so it would answer "directory" for a symlink and, worse,
- * would let a real directory of the configured name pass as one.
+ * TARGET's type, so `isSymbolicLink()` comes back false for EVERYTHING,
+ * including a genuine symlink. The exemption would then silently never fire
+ * and every setup symlink would read as dirt again, which is the bug this
+ * exists to fix. Measured: `stat(link).isSymbolicLink()` is false while
+ * `lstat(link).isSymbolicLink()` is true. The failure is closed rather than
+ * open, so it costs correctness rather than safety, but it is invisible.
  */
 function isSetupSymlink(
   worktreePath: string,

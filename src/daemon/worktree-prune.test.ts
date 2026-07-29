@@ -37,6 +37,7 @@ import {
   parseWorktreeList,
   readAdminDir,
   readDirtyState,
+  readSymlinkDirectories,
   runGit,
 } from "./worktree-git";
 
@@ -1400,5 +1401,87 @@ describe("setup symlinks are not dirt", () => {
     expect(existsSync(wt)).toBe(false);
     // The link was followed by nobody: the main checkout keeps its directory.
     expect(existsSync(join(repo, "node_modules"))).toBe(true);
+  });
+
+  // A plain FILE of the configured name is not a symlink, so the exemption
+  // must not apply. Correct already; pinned so it stays that way.
+  it("still counts a plain FILE of the configured name", async () => {
+    const { repo } = await makeRepo("plain-file");
+    const wt = await addWorktree(repo, "feat/file");
+    writeFileSync(join(wt, "node_modules"), "not a directory\n");
+
+    const state = await readDirtyState(wt, undefined, {
+      setupSymlinks: ["node_modules"],
+    });
+
+    expect(state.dirty).toBe(true);
+  });
+});
+
+/**
+ * Claude Code resolves `worktree.symlinkDirectories` from MERGED settings, so
+ * reading only the project file would miss the user-scope case — which is the
+ * natural place to put a machine-wide "share node_modules" preference, and
+ * therefore exactly the user who would keep the bug with no signal why.
+ */
+describe("readSymlinkDirectories scopes", () => {
+  function writeSettings(dir: string, dirs: string[] | null): void {
+    mkdirSync(join(dir, ".claude"), { recursive: true });
+    writeFileSync(
+      join(dir, ".claude", "settings.json"),
+      JSON.stringify(
+        dirs === null ? {} : { worktree: { symlinkDirectories: dirs } },
+      ),
+    );
+  }
+
+  it("reads user scope when the project says nothing", () => {
+    const repo = join(root, "repo-user");
+    const home = join(root, "home-user");
+    mkdirSync(repo, { recursive: true });
+    writeSettings(home, ["node_modules"]);
+
+    expect(readSymlinkDirectories(repo, home)).toEqual(["node_modules"]);
+  });
+
+  it("lets project scope replace user scope", () => {
+    const repo = join(root, "repo-proj");
+    const home = join(root, "home-proj");
+    writeSettings(repo, ["vendor"]);
+    writeSettings(home, ["node_modules"]);
+
+    expect(readSymlinkDirectories(repo, home)).toEqual(["vendor"]);
+  });
+
+  it("lets settings.local.json win over both", () => {
+    const repo = join(root, "repo-local");
+    const home = join(root, "home-local");
+    writeSettings(repo, ["vendor"]);
+    writeSettings(home, ["node_modules"]);
+    writeFileSync(
+      join(repo, ".claude", "settings.local.json"),
+      JSON.stringify({ worktree: { symlinkDirectories: ["local-only"] } }),
+    );
+
+    expect(readSymlinkDirectories(repo, home)).toEqual(["local-only"]);
+  });
+
+  // A scope that merely EXISTS without the key must not shadow the one below.
+  it("falls through a scope that does not define the key", () => {
+    const repo = join(root, "repo-empty");
+    const home = join(root, "home-empty");
+    writeSettings(repo, null);
+    writeSettings(home, ["node_modules"]);
+
+    expect(readSymlinkDirectories(repo, home)).toEqual(["node_modules"]);
+  });
+
+  it("returns nothing when no scope defines it", () => {
+    const repo = join(root, "repo-none");
+    const home = join(root, "home-none");
+    mkdirSync(repo, { recursive: true });
+    mkdirSync(home, { recursive: true });
+
+    expect(readSymlinkDirectories(repo, home)).toEqual([]);
   });
 });

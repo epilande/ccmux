@@ -916,6 +916,11 @@ export async function runPrune(
     if (!allowDirty.has(candidate.path)) {
       // Same setup-symlink exemption as the scan, or a worktree that passed
       // the list would be refused here for the link the tooling itself made.
+      //
+      // Re-read rather than reusing the scan's value, unlike the once-per-repo
+      // read there: this is the point of no return, and the settings file may
+      // have changed since the list was built. One small file read against a
+      // directory deletion is not a cost worth optimizing.
       const fresh = await readDirtyState(candidate.path, git, {
         setupSymlinks: readSymlinkDirectories(candidate.repoRoot),
       });
