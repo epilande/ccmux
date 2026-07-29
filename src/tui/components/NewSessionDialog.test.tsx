@@ -126,12 +126,27 @@ describe("NewSessionDialog", () => {
     expect(frame).not.toContain("[New window]");
   });
 
-  it("abbreviates the placements when the dialog is narrow", async () => {
-    const frame = await renderDialog({ width: 44 });
+  it("abbreviates the placements when the row is short of room", async () => {
+    const frame = await renderDialog({ width: 60 });
     expect(frame).toContain("[Window]");
     expect(frame).toContain("Right");
     expect(frame).toContain("Down");
     expect(frame).not.toContain("Split right");
+  });
+
+  it("stacks the placements on a sidebar-width surface", async () => {
+    // At a 34-column rail the row cannot hold three options at any label
+    // length, and clipping would hide two of the three choices.
+    const frame = await renderDialog({ width: 34, height: 30 });
+    const lines = frame.split("\n");
+    const placement = lines.filter((line) => line.includes("New window"));
+    expect(placement).toHaveLength(1);
+    expect(placement[0]).toContain("[New window]");
+    expect(lines.some((line) => line.includes("Split right"))).toBe(true);
+    expect(lines.some((line) => line.includes("Split down"))).toBe(true);
+    // Nothing runs past the dialog's own border.
+    const widest = Math.max(...lines.map((line) => line.trimEnd().length));
+    expect(widest).toBeLessThanOrEqual(34);
   });
 
   it("shows the typed prompt", async () => {

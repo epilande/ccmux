@@ -17,13 +17,17 @@ const LABEL_WIDTH = 10;
 /** Wide enough for the placement row's full labels; see COMPACT_CONTENT_WIDTH. */
 const MAX_WIDTH = 64;
 const MIN_WIDTH = 24;
-/** Rows the dialog spends on everything except the agent list: border (2),
- *  title, blank, placement, prompt, directory, blank, key hints. */
-const CHROME_ROWS = 9;
+/** Rows the dialog spends on everything except the agent and placement
+ *  lists: border (2), title, blank, prompt, directory, blank, key hints. */
+const CHROME_ROWS = 8;
 /** Content width the placement row's full labels need (number, brackets,
  *  and gaps included). Below it the row switches to the short labels and
  *  the key-hint line drops its middle segment. */
 const COMPACT_CONTENT_WIDTH = 49;
+/** Content width the placement row needs even with the short labels. Below
+ *  it the options stack vertically, which is the sidebar's 30-column rail:
+ *  clipping the row would hide two of the three choices entirely. */
+const STACKED_CONTENT_WIDTH = 33;
 
 interface PlacementOption {
   value: NewSessionPlacement;
@@ -74,6 +78,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dims().width - 4));
   const contentWidth = () => Math.max(1, width() - LABEL_WIDTH - 4);
   const compact = () => contentWidth() < COMPACT_CONTENT_WIDTH;
+  const stacked = () => contentWidth() < STACKED_CONTENT_WIDTH;
 
   const agents = createMemo(() => props.agents ?? []);
   const selectedAgentIndex = createMemo(() => {
@@ -85,10 +90,12 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   );
 
   /** The agent list is the only field that can grow past a screen; cap it at
-   *  what is left after the fixed chrome and scroll the rest. */
+   *  what is left after the chrome and the placement rows, and scroll the
+   *  rest. */
   const visibleAgents = createMemo(() => {
     const list = agents();
-    const room = Math.max(1, dims().height - 2 - CHROME_ROWS);
+    const placementRows = stacked() ? PLACEMENT_OPTIONS.length : 1;
+    const room = Math.max(1, dims().height - 2 - CHROME_ROWS - placementRows);
     const { start, end } = optionWindow(
       list.length,
       selectedAgentIndex(),
@@ -102,7 +109,10 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   });
 
   const agentRows = () => Math.max(1, visibleAgents().length);
-  const height = () => Math.min(dims().height, agentRows() + CHROME_ROWS);
+  const placementRows = () => (stacked() ? PLACEMENT_OPTIONS.length : 1);
+
+  const height = () =>
+    Math.min(dims().height, agentRows() + placementRows() + CHROME_ROWS);
 
   const labelColor = (field: NewSessionField) =>
     props.draft.field === field ? theme.blue : theme.overlay;
@@ -110,14 +120,22 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const cwdLabel = () =>
     truncateText(shortenCwd(props.draft.cwd), contentWidth());
 
-  /** Empty until a prompt is typed; then it says whether this agent can take
-   *  one, which is per-agent and not otherwise discoverable. */
+  /** Says whether this agent can take a prompt at all, which is per-agent
+   *  and not otherwise discoverable. Shortened on a narrow surface, where
+   *  the full sentence would run past the border. */
   const promptPlaceholder = () => {
     const agent = selectedAgent();
-    if (agent && !agent.supportsPrompt) {
-      return `${agent.displayName} can't start with a prompt`;
-    }
-    return "Optional first message...";
+    const text =
+      agent && !agent.supportsPrompt
+        ? stacked()
+          ? "no prompt support"
+          : `${agent.displayName} can't start with a prompt`
+        : stacked()
+          ? "Optional prompt..."
+          : "Optional first message...";
+    // The input draws its placeholder in full, past its own box, so the
+    // fit has to be enforced here rather than left to the layout.
+    return truncateText(text, contentWidth());
   };
 
   return (
@@ -193,17 +211,22 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         </box>
       </box>
 
-      <box flexDirection="row" height={1}>
-        <box width={LABEL_WIDTH}>
+      <box flexDirection="row">
+        <box width={LABEL_WIDTH} height={1}>
           <text fg={labelColor("placement")}>Placement</text>
         </box>
-        <box flexDirection="row" flexGrow={1}>
+        <box
+          flexDirection={stacked() ? "column" : "row"}
+          flexGrow={1}
+          onMouseDown={() => props.onFocusField("placement")}
+        >
           <For each={PLACEMENT_OPTIONS}>
             {(option, index) => (
               <box
+                height={1}
                 flexDirection="row"
                 flexShrink={0}
-                marginRight={2}
+                marginRight={stacked() ? 0 : 2}
                 onMouseDown={(event) => {
                   if (event.button !== MouseButton.LEFT) return;
                   props.onFocusField("placement");
@@ -216,8 +239,8 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 <box width={2}>
                   <text fg={theme.overlay}>{`${index() + 1}`}</text>
                 </box>
-                {/* Brackets, not colour alone: the placements share one row
-                    with no selection gutter. Each bracket gets its own
+                {/* Brackets, not colour alone: the placements have no
+                    selection gutter of their own. Each bracket gets a
                     fixed-width box so choosing an option never reflows the
                     row, and so the marker survives a colourless terminal. */}
                 <box width={1}>
@@ -232,7 +255,9 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                       : theme.subtext
                   }
                 >
-                  {compact() ? option.compactLabel : option.label}
+                  {/* Stacked has a row to itself, so it can afford the full
+                      label even though it is the narrowest surface. */}
+                  {compact() && !stacked() ? option.compactLabel : option.label}
                 </text>
                 <box width={1}>
                   <text fg={theme.green}>
