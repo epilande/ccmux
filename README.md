@@ -115,6 +115,7 @@ ccmux setup
 | `ccmux screen [id]`                         | Capture pane content                                                                                                          |
 | `ccmux screen --grep <pattern>`             | Search across all session panes                                                                                               |
 | `ccmux dismiss <id>`                        | Remove a session from tracking                                                                                                |
+| `ccmux worktree prune`                      | Remove worktrees whose work is finished (`--dry-run`, `--state`, `--repo <path>`)                                             |
 | `ccmux daemon start\|stop\|restart\|status` | Manage the background daemon                                                                                                  |
 | `ccmux config set <key> <value>`            | Set a preference                                                                                                              |
 | `ccmux config get <key>`                    | Get a single preference value                                                                                                 |
@@ -288,6 +289,36 @@ has verified; for anything else (including custom agents) ccmux refuses the
 spawn rather than guessing a flag, and you can teach it the right shape with
 `promptCommand` in your agent config.
 
+### Pruning Worktrees
+
+Agents create git worktrees faster than anyone cleans them up, and the ones where work actually happened are the ones that stick around. After a branch is merged (and auto-deleted on GitHub), three leftovers stay on your machine: the worktree directory, the local branch, and often a tmux pane with a finished agent in it.
+
+<kbd>W</kbd> in the picker (or `Prune Worktrees` on a group header, or `ccmux worktree prune`) lists the worktrees whose work is finished, and why each one is removable:
+
+| Reason           | Meaning                                                                |
+| :--------------- | :--------------------------------------------------------------------- |
+| `PR merged`      | GitHub says the branch's PR was merged (survives squash/rebase merges) |
+| `merged locally` | The branch tip is an ancestor of the default branch                    |
+| `upstream gone`  | The branch had an upstream and it's gone after a `fetch --prune`       |
+| `PR closed`      | The PR was closed without merging; the branch is kept                  |
+
+Removing a worktree deletes its directory, attempts to delete the local branch, closes the leftover pane once its agent has exited, prunes git's metadata, and drops the directory's entry from `~/.claude.json`. Branch deletion follows the evidence rather than the reason: a merged PR is force-deleted (`git branch -D`, since a squash merge leaves the tip unmerged by git's definition), `merged locally` and `upstream gone` use the safe `git branch -d` and report a refusal if git says the branch still holds unmerged work, and `PR closed` keeps the branch entirely.
+
+Safety rules, in short: a worktree with a **working** agent is never offered, nothing is pre-selected, dirty worktrees (uncommitted or untracked changes) need their own <kbd>D</kbd> opt-in on top of being selected and are re-checked immediately before deletion, gitignored files that would be deleted are listed before you confirm, and the main checkout is never a candidate.
+
+Each directory is renamed to a `.ccmux-trash-<name>-<timestamp>` sibling before being deleted, so the path frees immediately and the contents survive for the length of the run. If ccmux is interrupted mid-run, look for that directory next to where the worktree was: `mv .ccmux-trash-<name>-<timestamp> <name>` restores it, and `git worktree repair <name>` re-links it to the repo.
+
+```bash
+ccmux worktree prune             # Interactive confirm list
+ccmux worktree prune --dry-run   # Show what would go, change nothing
+ccmux worktree prune --state     # Also drop agent state entries (see below)
+ccmux worktree prune --repo ~/p  # Limit to one repository
+```
+
+`--state` removes `~/.claude.json` entries for **any** recorded directory that does not exist right now, not only former worktrees, so an ordinary repo you have not checked out will be dropped too. Entries whose parent directory is also missing are skipped, which keeps an unmounted external drive or a disconnected network share from taking every project on it with them. The removed paths are printed, and the file is copied to `~/.claude.json.ccmux-backup-<timestamp>-<pid>` first (the newest three are kept).
+
+There is no `--yes` and no automatic mode; removals are always confirmed interactively. `--dry-run` changes nothing on disk, though it still runs `git fetch --prune` per repo, which is what makes the `upstream gone` signal visible and does update remote-tracking refs.
+
 ### Programmatic Invocation
 
 `ccmux invoke` runs a single agent turn and writes the response to stdout, so you can use real agents in shell pipelines and scripts. See [`docs/invoke.md`](docs/invoke.md) for the full reference.
@@ -330,6 +361,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Reconnect             | <kbd>R</kbd>                                                                       | Reconnect to the daemon SSE stream                                                                                     |
 | Kill session          | <kbd>x</kbd>                                                                       | Kill the selected session's process                                                                                    |
 | Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions                                                                                              |
+| Prune worktrees       | <kbd>W</kbd>                                                                       | Open the prune list for finished worktrees (multi-select, confirmation)                                                |
 | Review and hand back  | <kbd>d</kbd>                                                                       | Review with [hunk](https://github.com/modem-dev/hunk), then offer to send notes to the agent (requires `hunk` on PATH) |
 | Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state                                                                                           |
 | Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)                                                                                    |

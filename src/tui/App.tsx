@@ -56,6 +56,7 @@ import { Toast } from "./components/Toast";
 import { GroupPreview } from "./components/GroupPreview";
 import { ConfirmationDialog } from "./components/ConfirmationDialog";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
+import { PruneDialog } from "./components/PruneDialog";
 import { HelpOverlay } from "./components/HelpOverlay";
 import { theme } from "./theme";
 import type { IconStyle } from "../lib/icons";
@@ -399,6 +400,29 @@ export function App(props: AppProps) {
     }
   }
 
+  /**
+   * Repo to scope a prune scan to: the selected session's, or — when a group
+   * header is selected — one from the group. The repo comes off a session
+   * rather than the group key because a group key is a display label, while
+   * `mainRepoRoot` is the same value for a worktree and its main checkout,
+   * which is exactly what the scan keys off. Null scans every known repo.
+   */
+  function selectedRepoRoot(): string | null {
+    return (
+      store.selectedSession()?.mainRepoRoot ??
+      store.selectedGroupSessions().find((s) => s.mainRepoRoot)?.mainRepoRoot ??
+      null
+    );
+  }
+
+  function groupContextMenuPrune() {
+    const cm = store.state.groupContextMenu;
+    if (!cm) return;
+    const repo = selectedRepoRoot();
+    store.actions.hideGroupContextMenu();
+    store.actions.showPrune(repo);
+  }
+
   function groupContextMenuToggleCollapse() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
@@ -520,6 +544,12 @@ export function App(props: AppProps) {
         hint: ">",
         color: theme.blue,
         action: () => groupContextMenuPin("bottom"),
+      },
+      {
+        label: "Prune Worktrees",
+        hint: "W",
+        color: theme.peach,
+        action: groupContextMenuPrune,
       },
       {
         label: "Kill Group",
@@ -931,6 +961,13 @@ export function App(props: AppProps) {
       return;
     }
 
+    // The prune overlay owns every key while it is up (it registers its own
+    // handler), so nothing here may also act on them.
+    if (store.state.prune) {
+      event.preventDefault();
+      return;
+    }
+
     if (store.state.confirmMode) {
       if (key === "y" || key === "Y" || key === "return" || key === "enter") {
         confirmDialogAction();
@@ -1127,6 +1164,19 @@ export function App(props: AppProps) {
             store.actions.showConfirmDialog(null, "kill-group", ids);
           }
         }
+        event.preventDefault();
+        break;
+
+      case "W":
+      case "w":
+        // Shift+W only, like every other capital action in this switch. Both
+        // spellings are matched because the key arrives as name `"w"` with
+        // `shift` set rather than as `"W"`; gating on the modifier is what
+        // keeps a bare `w` from opening a destructive surface.
+        if (key !== "W" && !event.shift) break;
+        // Scoped to the selected row's repo when there is one, so `W` on a
+        // group behaves like the group menu's item; global otherwise.
+        store.actions.showPrune(selectedRepoRoot());
         event.preventDefault();
         break;
 
@@ -1418,6 +1468,16 @@ export function App(props: AppProps) {
               store.actions.hideConfirmDialog();
             }}
           />
+        </Show>
+
+        <Show when={store.state.prune}>
+          {(prune: () => NonNullable<typeof store.state.prune>) => (
+            <PruneDialog
+              repo={prune().repo}
+              compact={props.sidebar}
+              onClose={store.actions.hidePrune}
+            />
+          )}
         </Show>
 
         <Show when={store.state.contextMenu}>

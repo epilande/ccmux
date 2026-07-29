@@ -99,9 +99,13 @@ describe("HelpOverlay", () => {
 
 describe("HelpOverlay sidebar mode", () => {
   async function renderSidebarHelp() {
+    // Tall enough to hold every section at once: sidebar mode stacks key and
+    // description on separate lines, so the frame has to fit roughly twice the
+    // entry count. A viewport that only just fits turns any new shortcut into
+    // a failure of an unrelated assertion.
     setup = await testRender(() => <HelpOverlay sidebar />, {
       width: 100,
-      height: 50,
+      height: 60,
     });
     await setup.renderOnce();
     return setup.captureCharFrame();
@@ -135,7 +139,7 @@ describe("HelpOverlay sidebar mode", () => {
   it("renders all sections in narrow viewport", async () => {
     setup = await testRender(() => <HelpOverlay sidebar />, {
       width: 30,
-      height: 50,
+      height: 60,
     });
     await setup.renderOnce();
     const frame = setup.captureCharFrame();

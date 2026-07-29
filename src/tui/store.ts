@@ -74,6 +74,15 @@ interface TUIState {
   promptDisplay: PromptDisplay;
   previewFocused: boolean;
   showHelp: boolean;
+  /**
+   * The worktree-prune overlay, or null when closed. `repo` scopes the scan
+   * to one main checkout (opened from a group header) and is null for the
+   * global keybinding. Everything else the overlay needs — the candidate
+   * list, the selection, the run log — is local to the component: it is
+   * fetched on open and discarded on close, so it would only be stale state
+   * for the rest of the picker's life.
+   */
+  prune: { repo: string | null } | null;
   iconStyle: IconStyle;
   previewWidth: number;
   activePaneId: string | null;
@@ -367,6 +376,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     promptDisplay: options.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
     previewFocused: false,
     showHelp: false,
+    prune: null,
     iconStyle: options.iconStyle ?? "dot",
     previewWidth: options.previewWidth ?? 40,
     activePaneId: null,
@@ -1205,6 +1215,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     hideHelp() {
       setState("showHelp", false);
+    },
+
+    showPrune(repo: string | null) {
+      setState("prune", { repo });
+    },
+
+    hidePrune() {
+      setState("prune", null);
     },
 
     resizePreview(delta: number) {
