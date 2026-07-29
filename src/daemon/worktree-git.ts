@@ -256,6 +256,21 @@ export async function readDirtyState(
  * Narrow on purpose: only names the repo actually configured, and only when
  * the entry really is a symlink on disk. A real directory of that name, or a
  * symlink the user made for their own reasons, still counts as dirt.
+ *
+ * WHY EXEMPTING IS SAFE, which matters more than the narrowness. The obvious
+ * worry is "this symlink could point at anything, including real work". It
+ * could, and that is still safe, because the blast radius is not what the
+ * link points AT: deleting a symlink never touches its target. The worst an
+ * exemption can cost is the link itself, which the tooling can recreate.
+ * Verified end to end: a worktree whose only untracked entry was
+ * `node_modules -> <a directory of real files>` was exempted, pruned with no
+ * dirty opt-in, and the target came through with its contents intact. Real
+ * work sitting INSIDE the worktree is unaffected either way, since it is a
+ * separate untracked entry that this exemption does not name.
+ *
+ * `lstatSync`, not `statSync`: `stat` follows the link and reports the
+ * TARGET's type, so it would answer "directory" for a symlink and, worse,
+ * would let a real directory of the configured name pass as one.
  */
 function isSetupSymlink(
   worktreePath: string,
