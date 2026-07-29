@@ -1,11 +1,73 @@
-import { Command } from "commander";
+import { Command, InvalidArgumentError } from "commander";
+import { resolve } from "node:path";
 import { getDaemonUrl } from "../lib/config";
 import { ensureDaemon } from "./shared";
+import { PANE_ID_PATTERN, type SpawnSplit } from "../daemon/spawn-command";
+import { isSameTmuxServer } from "../lib/tmux-server";
+import { BUILTIN_AGENTS } from "../lib/agents";
 
 interface SpawnResponse {
   success: boolean;
   paneId: string;
   command: string;
+}
+
+/**
+ * `--split` with no value keeps tmux's default (stacked) direction; an
+ * explicit `h`/`v` is tmux's own vocabulary, so `h` is a left/right split.
+ */
+function parseSplit(value: string): SpawnSplit {
+  if (value === "h" || value === "v") return value;
+  // `ccmux spawn --split codex` is an easy slip, and the generic message
+  // reads like the direction is wrong rather than the argument order.
+  const hint = BUILTIN_AGENTS.some((a) => a.name === value)
+    ? ` To spawn ${value} in a split, put the agent first: ccmux spawn ${value} --split.`
+    : "";
+  throw new InvalidArgumentError(
+    `Expected 'h' (left/right) or 'v' (stacked).${hint}`,
+  );
+}
+
+/**
+ * The pane the CLI was run from. Sent as `callerPane` rather than
+ * `target`: it means "my session/pane", not "put the window here", and
+ * the daemon treats the two differently (an explicit target inserts a
+ * window next to it and renumbers later windows; the caller's pane only
+ * pins the session).
+ *
+ * Dropped when the daemon is watching a DIFFERENT tmux server, because
+ * `%N` ids are unique only within one server and collide across them
+ * (see lib/tmux-server.ts and the invariant in pane-discovery.ts); a
+ * stale-looking id would otherwise resolve to an unrelated pane.
+ */
+function callerPane(daemonSocket: string | null): string | undefined {
+  const pane = process.env.TMUX_PANE;
+  if (!pane || !PANE_ID_PATTERN.test(pane)) return undefined;
+  return isSameTmuxServer(daemonSocket) ? pane : undefined;
+}
+
+/**
+ * The directory the new agent should start in.
+ *
+ * `bin/ccmux` cds into the package root for module resolution and carries
+ * the real invocation directory in `CCMUX_CALLER_PWD`, so `process.cwd()`
+ * alone would start every agent inside the ccmux install (see
+ * `src/commands/review.ts` and `src/commands/sidebar.ts` for the same
+ * restoration). An explicit `--cwd` is resolved against the caller's
+ * directory too, so a relative one means what the user typed rather than
+ * something relative to the install.
+ */
+function resolveSpawnCwd(explicit?: string): string {
+  const callerPwd = process.env.CCMUX_CALLER_PWD ?? process.cwd();
+  return explicit ? resolve(callerPwd, explicit) : callerPwd;
+}
+
+/** The daemon's tmux socket, or null when it can't be determined. */
+async function daemonTmuxSocket(): Promise<string | null> {
+  const res = await fetch(`${getDaemonUrl()}/server-info`).catch(() => null);
+  if (!res || !res.ok) return null;
+  const data = (await res.json()) as { socketPath: string | null };
+  return data.socketPath;
 }
 
 export function createSpawnCommand(): Command {
@@ -19,7 +81,15 @@ export function createSpawnCommand(): Command {
     .option("--cwd <dir>", "Working directory")
     .option("--resume <session-id>", "Resume an existing session")
     .option("--prompt <text>", "Initial prompt to send")
-    .option("--split", "Split current pane instead of new window")
+    .option(
+      "--split [direction]",
+      "Split current pane instead of new window ('h' left/right, 'v' stacked)",
+      parseSplit,
+    )
+    .option(
+      "--target <pane-id>",
+      "tmux pane to split or place next to ('none' to ignore the current pane)",
+    )
     .option("--detach", "Don't switch to the new pane after spawning")
     .action(
       async (
@@ -28,11 +98,20 @@ export function createSpawnCommand(): Command {
           cwd?: string;
           resume?: string;
           prompt?: string;
-          split?: boolean;
+          split?: SpawnSplit;
+          target?: string;
           detach?: boolean;
         },
       ) => {
         await ensureDaemon();
+
+        // `--target none` (or an empty value) opts out of placement
+        // entirely, letting tmux pick as it did before targeting existed.
+        const explicitTarget =
+          options.target === "none" || options.target === ""
+            ? undefined
+            : options.target;
+        const optedOut = options.target !== undefined && !explicitTarget;
 
         try {
           const response = await fetch(`${getDaemonUrl()}/spawn`, {
@@ -40,10 +119,14 @@ export function createSpawnCommand(): Command {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               agent,
-              cwd: options.cwd ?? process.cwd(),
+              cwd: resolveSpawnCwd(options.cwd),
               resume: options.resume,
               prompt: options.prompt,
               split: options.split ?? false,
+              target: explicitTarget,
+              callerPane: optedOut
+                ? undefined
+                : callerPane(await daemonTmuxSocket()),
               detach: options.detach ?? false,
             }),
           });

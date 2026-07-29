@@ -262,11 +262,31 @@ Launch new agent sessions directly from the CLI:
 ccmux spawn                          # Spawn claude (default) in a new tmux window
 ccmux spawn codex                    # Spawn a specific agent
 ccmux spawn --split                  # Split current pane instead of new window
+ccmux spawn --split h                # Split left/right ('v' is the stacked default)
+ccmux spawn --target %12             # Split (or place the window next to) a specific pane
 ccmux spawn --detach                 # Don't switch to the new pane
 ccmux spawn --cwd ~/proj             # Set working directory
 ccmux spawn --resume <id>            # Resume an existing session
 ccmux spawn --prompt "fix the tests" # Send an initial prompt
 ```
+
+Split directions use tmux's own vocabulary: `h` puts the new pane beside the
+old one, `v` stacks it below. Run inside tmux, `ccmux spawn` uses the pane you
+ran it from, so the new pane or window lands in your session rather than
+wherever the daemon happens to consider "current". A new window is appended at
+the end of your session, which leaves every existing window index alone; pass
+`--target <pane-id>` to insert one directly after that pane's window instead
+(tmux renumbers the windows after it), or `--target none` to let tmux place it.
+
+Targeting a pane in a _different_ tmux session creates the pane there but does
+not move you to it, so pair that with `--detach`
+(see [#75](https://github.com/epilande/ccmux/issues/75)).
+
+`--prompt` starts the agent interactively with the prompt already submitted.
+It is supported for the agents whose interactive-with-prompt invocation ccmux
+has verified; for anything else (including custom agents) ccmux refuses the
+spawn rather than guessing a flag, and you can teach it the right shape with
+`promptCommand` in your agent config.
 
 ### Programmatic Invocation
 
@@ -609,11 +629,24 @@ The built-in agents are the happy path: they ship with hook integration for auth
           "pendingTool": "Command"
         }
       ],
-      "resumeCommand": "myagent resume {id}"
+      "resumeCommand": "myagent resume {id}",
+      "promptCommand": "{bin} '{prompt}'"
     }
   }
 }
 ```
+
+`promptCommand` is what `ccmux spawn --prompt` types into the new pane. It
+must start an **interactive** session with the prompt submitted, not a
+one-shot/print run. `{prompt}` is the prompt text and has to stay wrapped in
+single quotes, because that is the quoting ccmux escapes for. ccmux reads the
+template the way `sh` does and refuses it unless every `{prompt}` lands in a
+real single-quoted context with the template's quotes balanced, so an unquoted
+or double-quoted placeholder is rejected, and so is one whose single quotes sit
+inside double quotes (`sh -c "agent '{prompt}'"`), where `'` is just an
+ordinary character and the escaping would do nothing. The optional `{bin}`
+resolves to the agent's launcher, so a wrapper binary or `executable` override
+survives.
 
 You can also override built-in agent settings by using the agent's name as the key (e.g., `"claude"`, `"codex"`). An override of `notificationActions` (the notification button/reply keystroke map) **replaces the whole map**, it is not merged key by key; it also controls the reply surfaces (`replyOnQuestion`, `replyOnFinished`, `permissionReplyPrelude`, the `plan*` keys, and the `unsafeReplyPattern` reply guard, written as a regex string like `readyPattern`), so any key you leave out is dropped rather than inherited from the built-in default. Copy across every key you still want when you override it. The one exception is `unsafeReplyPattern`: it is carried forward from the built-in as a safety default even when your override omits it, so a partial override can't accidentally re-enable unapproved shell execution through a reply. To disable it on purpose, set an explicit never-match pattern (e.g. `"/(?!x)x/"`).
 
@@ -625,6 +658,7 @@ You can also override built-in agent settings by using the agent's name as the k
 | `versionCommand`      | No       | Command to get agent version                                                        |
 | `versionPatterns`     | No       | Regex patterns to extract version from output                                       |
 | `resumeCommand`       | No       | Command template for restarting (`{id}` placeholder)                                |
+| `promptCommand`       | No       | Command template for `spawn --prompt` (`{prompt}` placeholder, single-quoted)       |
 | `sessionFilePattern`  | No       | Regex to extract session ID from log filenames                                      |
 | `executable`          | No       | Command used to launch the agent (defaults to key)                                  |
 | `hooks`               | No       | `{ type }` (built-in override only; internal)                                       |
