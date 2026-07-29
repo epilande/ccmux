@@ -19,6 +19,26 @@ For the general hook flow (marker shape, per-agent pane-correlation strategy, in
 
 The startup-race closer for markers written before the first scan created the pane-tracked session is the shared, agent-agnostic `reconcileSessionMarkerLinks()` in `adapters/link.ts` (keyed off `adapter.agentType`; it also re-derives native-id ownership each scan so a mis-linked id heals). Used by Cursor, OpenCode, Pi, omp, Antigravity, and Copilot (`Daemon.linkPiSessions` / `Daemon.linkOmpSessions` / `Daemon.linkAntigravitySessions` / `Daemon.linkCopilotSessions`).
 
+## Spawning with an initial prompt
+
+`POST /spawn` / `ccmux spawn --prompt` must start an **interactive** session with the prompt submitted. There is no shared flag for that, and the wrong choice fails silently: a print/one-shot flag still runs, it just exits after one turn instead of leaving a session behind. Each agent's shape is declared in `AgentDef.promptCommand` (`src/lib/agents.ts`) and pinned by a table test in `src/daemon/spawn-command.test.ts`. Verified by reading each CLI's own `--help` on a machine with all nine installed:
+
+| Agent       | Interactive-with-prompt        | What the help says                                                                                                                               |
+| :---------- | :----------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude      | `claude '<prompt>'`            | `claude [options] [command] [prompt]`; "starts an interactive session by default, use -p/--print" for one-shot                                   |
+| Codex       | `codex '<prompt>'`             | `codex [OPTIONS] [PROMPT]`; "[PROMPT] Optional user prompt to start the session"; `codex exec` is one-shot                                       |
+| Cursor      | `cursor-agent '<prompt>'`      | `agent [options] [command] [prompt...]`; "prompt Initial prompt for the agent"; `-p/--print` is one-shot                                         |
+| OpenCode    | `opencode --prompt '<prompt>'` | default TUI command's "--prompt prompt to use"; the positional is a PROJECT PATH; `opencode run` is one-shot                                     |
+| Pi          | `pi '<prompt>'`                | `pi [options] [@files...] [messages...]`; no `--prompt` flag exists; `--print/-p` is one-shot                                                    |
+| omp         | `omp '<prompt>'`               | "ARGUMENTS MESSAGES Messages to send"; `-p/--print` is one-shot                                                                                  |
+| Antigravity | `agy -i '<prompt>'`            | **`--prompt` is documented as "Alias for --print"**; `-i/--prompt-interactive` is "Run an initial prompt interactively and continue the session" |
+| Copilot     | `copilot -i '<prompt>'`        | `-i, --interactive <prompt>` "Start interactive mode and automatically execute this prompt"; `-p/--prompt` is "non-interactive"                  |
+| Gemini      | `gemini -i '<prompt>'`         | `-p/--prompt` is "non-interactive (headless) mode"; `-i/--prompt-interactive` is "Execute the provided prompt and continue in interactive mode"  |
+
+So `<binary> --prompt '<text>'`, which ccmux emitted for every agent before this table existed, was correct for exactly one of the nine (OpenCode). For Antigravity, Copilot, and Gemini it silently selected one-shot print mode; for the other five `--prompt` is not a flag at all.
+
+Only `{prompt}` (mandatory, and it must stay inside single quotes) and `{bin}` (optional, the resolved launcher) are substituted. Agents with no `promptCommand` — including every custom agent that has not declared one — refuse prompt spawns with a 400 rather than guessing.
+
 ## Claude-specific caveats
 
 - **AskUserQuestion looks exactly like a permission prompt to the hook.** Claude fires the `Notification` hook for its AskUserQuestion option picker with the EXACT same payload as a real permission prompt (`{"message":"Claude needs your permission","notification_type":"permission_prompt"}`, verified on Claude Code 2.1.209/2.1.210). There is no distinguishing signal in the payload, so `STATE_NOTIFY_HOOK_SCRIPT` maps both to marker state `waiting_permission`. Claude also does NOT flush the picker's `tool_use` to the JSONL during the wait (same deferred-write behavior as permission-gated tools), so the transcript is silent about it too. **The pane is the only source that distinguishes the two:** the picker renders numbered options plus a "Type something." choice and an "Enter to select" footer, and shows NEITHER "requires approval" nor "Do you want to proceed?". Claude's `terminalRules` classify it as `attentionType: "question"`, and the reconciler relabels the marker candidate via `correctAmbiguousPermissionMarker` (gated by `AgentDef.ambiguousPermissionMarker`) before the cascade fold. The notifier repeats the same pane check at delivery time to cover the one-scan race (`buildNotificationContext` → `reclassifyAs`).

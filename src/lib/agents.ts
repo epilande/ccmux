@@ -70,6 +70,22 @@ export interface AgentDef {
   errorRules?: ErrorRule[];
   resumeCommand?: string;
   /**
+   * Shell command template that starts an INTERACTIVE session with an
+   * initial prompt already submitted, used by `POST /spawn`. `{prompt}`
+   * is the prompt text and must be wrapped in single quotes (the spawn
+   * builder escapes for exactly that quoting and refuses a template that
+   * gets it wrong); `{bin}` is the resolved launcher binary, so a
+   * `command` preference or an `executable` override survives the
+   * template.
+   *
+   * Undefined means "this agent has no verified interactive-with-prompt
+   * invocation", and prompt spawns are refused for it. There is no safe
+   * default: `--prompt` is one-shot print mode for Copilot and does not
+   * exist for pi, so guessing produces a session that silently does the
+   * wrong thing. Per-agent findings live in `docs/agent-adapters.md`.
+   */
+  promptCommand?: string;
+  /**
    * argv to stop a paneless background session (`trackingMode: "background"`)
    * given its daemon-short id. Only meaningful for agents with a background
    * mode whose worker pid is owned by a supervisor process, not by ccmux —
@@ -314,6 +330,9 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
   if (override.resumeCommand !== undefined) {
     merged.resumeCommand = override.resumeCommand;
   }
+  if (override.promptCommand !== undefined) {
+    merged.promptCommand = override.promptCommand;
+  }
   if (override.sessionFilePattern !== undefined) {
     merged.sessionFilePattern = parseRegex(
       override.sessionFilePattern,
@@ -456,6 +475,9 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     shortCode: "cc",
     processMatch: /\bclaude\b/i,
     versionCommand: "claude --version",
+    // "claude [options] [command] [prompt]" — "starts an interactive session
+    // by default, use -p/--print for non-interactive output" (claude --help).
+    promptCommand: "{bin} '{prompt}'",
     sessionFilePattern:
       /\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i,
     terminalRules: [
@@ -580,6 +602,10 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     ],
     // Prefer continuing in-pane without requiring session ID extraction.
     resumeCommand: "opencode --continue",
+    // The lone flag-shaped case: opencode's default TUI command documents
+    // "--prompt  prompt to use", and its positional is a PROJECT PATH, not a
+    // prompt. (`opencode run` is the non-interactive one.)
+    promptCommand: "{bin} --prompt '{prompt}'",
     // OpenCode's permission dialog is a horizontal option row
     // (`Allow once  Allow always  Reject`) navigated with Left/Right arrows;
     // Enter confirms the highlighted option. Verified e2e on OpenCode 1.18.3:
@@ -651,6 +677,9 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       },
     ],
     resumeCommand: "codex resume {id}",
+    // "codex [OPTIONS] [PROMPT]" — "[PROMPT] Optional user prompt to start the
+    // session"; `codex exec` is the non-interactive subcommand.
+    promptCommand: "{bin} '{prompt}'",
     sessionFilePattern: CODEX_SESSION_FILE_PATTERN,
     // Codex's permission picker (verified e2e on codex-cli 0.144.5):
     //   › 1. Yes, proceed (y)
@@ -805,6 +834,9 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // ccmux resumes inside the pane's shell which preserves cwd, so this
     // is fine in practice.
     resumeCommand: "cursor-agent --resume {id}",
+    // "agent [options] [command] [prompt...]" — "prompt  Initial prompt for
+    // the agent"; -p/--print is the non-interactive mode.
+    promptCommand: "{bin} '{prompt}'",
     // `cursor` on PATH is the IDE GUI launcher (Cursor.app/.../bin/code);
     // the CLI agent ships as `cursor-agent`.
     executable: "cursor-agent",
@@ -884,6 +916,10 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       unsafeReplyPattern: /^\s*[/!]/,
     },
     resumeCommand: "agy --conversation {id}",
+    // agy's `--prompt` is documented as "Alias for --print" (one-shot), so the
+    // interactive form is the separate "-i / --prompt-interactive  Run an
+    // initial prompt interactively and continue the session".
+    promptCommand: "{bin} -i '{prompt}'",
     executable: "agy",
     invokeMode: {
       args: ["agy", "-p", "{prompt}"],
@@ -899,6 +935,11 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     shortCode: "gm",
     processMatch: /\bgemini\b/i,
     versionCommand: "gemini --version",
+    // gemini's `-p/--prompt` is headless mode. The positional query is
+    // interactive "by default", but "-i, --prompt-interactive  Execute the
+    // provided prompt and continue in interactive mode" says so explicitly and
+    // cannot be flipped by a future default change.
+    promptCommand: "{bin} -i '{prompt}'",
     commandPatterns: [
       /(?:^|\s)(?:npx|npm\s+exec)\s+@google\/gemini-cli(?:\s|$)/i,
       /\/\.bin\/gemini(?:\s|$)/i,
@@ -1040,6 +1081,9 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // `omp -c` continues the most recent session in-pane (no session-id
     // extraction needed), same shape as `pi -c`.
     resumeCommand: "omp -c",
+    // "ARGUMENTS  MESSAGES  Messages to send (prefix files with @)";
+    // -p/--print is the non-interactive mode.
+    promptCommand: "{bin} '{prompt}'",
     // omp writes its JSONL transcript to
     // ~/.omp/agent/sessions/<encoded-cwd>/<ts>_<uuidv7>.jsonl, the same
     // filename shape as pi's, so the pattern is reused verbatim. ccmux does
@@ -1122,6 +1166,9 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // `pi -c` continues the most recent session in-pane (no session-id
     // extraction needed, like opencode --continue).
     resumeCommand: "pi -c",
+    // "pi [options] [@files...] [messages...]" — positional only; pi has NO
+    // --prompt flag at all, and --print/-p is the non-interactive mode.
+    promptCommand: "{bin} '{prompt}'",
     // pi writes its JSONL transcript to
     // ~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<uuidv7>.jsonl. ccmux does
     // not parse it in v1 (pi closes the file after each append, so the lsof
@@ -1231,6 +1278,10 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       unsafeReplyPattern: /^\s*[/!]/,
     },
     resumeCommand: "copilot --resume {id}",
+    // "-i, --interactive <prompt>  Start interactive mode and automatically
+    // execute this prompt". Copilot's `-p/--prompt` is explicitly the
+    // non-interactive scripting mode.
+    promptCommand: "{bin} -i '{prompt}'",
     // Copilot holds `session-state/<uuid>/session.db` open (lsof-discoverable),
     // so the no-hooks path can recover the native session id from it.
     sessionFilePattern: COPILOT_SESSION_FILE_PATTERN,
@@ -1310,6 +1361,7 @@ export function getAgents(preferences?: Preferences): AgentDef[] {
         `agents.${name}.errorRules`,
       ),
       resumeCommand: override.resumeCommand,
+      promptCommand: override.promptCommand,
       sessionFilePattern: override.sessionFilePattern
         ? parseRegex(
             override.sessionFilePattern,

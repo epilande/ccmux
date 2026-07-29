@@ -43,6 +43,13 @@ export interface AgentConfig {
     message?: string;
   }[];
   resumeCommand?: string;
+  /**
+   * Command template for spawning with an initial prompt (`{prompt}`
+   * placeholder, which must be single-quoted; optional `{bin}` resolves
+   * to the launcher binary). See `AgentDef.promptCommand`. Without it,
+   * `ccmux spawn --prompt` is refused for this agent.
+   */
+  promptCommand?: string;
   sessionFilePattern?: string;
   executable?: string;
   invokeMode?: InvokeModeConfig;
