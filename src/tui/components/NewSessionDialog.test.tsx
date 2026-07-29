@@ -35,6 +35,7 @@ async function renderDialog(props: {
   draft?: NewSessionDraft;
   agents?: SpawnableAgent[] | null;
   agentsError?: string | null;
+  showKeyHints?: boolean;
   width?: number;
   height?: number;
 }) {
@@ -50,6 +51,7 @@ async function renderDialog(props: {
         onPromptInput={() => {}}
         onSubmit={() => {}}
         onCancel={() => {}}
+        showKeyHints={props.showKeyHints}
       />
     ),
     { width: props.width ?? 80, height: props.height ?? 24 },
@@ -209,5 +211,27 @@ describe("NewSessionDialog", () => {
     expect(frame).toContain("spawn");
     expect(frame).toContain("esc");
     expect(frame).toContain("cancel");
+  });
+
+  it("drops its own hint row where a footer already carries one", async () => {
+    // The picker's Footer switches to a near-identical line while this
+    // dialog is open, so drawing both would print the hints twice.
+    const frame = await renderDialog({ showKeyHints: false });
+    expect(frame).not.toContain("spawn");
+    expect(frame).not.toContain("cancel");
+    // The fields themselves are untouched.
+    expect(frame).toContain("New session");
+    expect(frame).toContain("Directory");
+  });
+
+  it("shrinks by the hint row's height when it is dropped", async () => {
+    const boxRows = (frame: string) =>
+      frame.split("\n").filter((line) => line.includes("│")).length;
+    const withHints = await renderDialog({});
+    const tall = boxRows(withHints);
+    setup.renderer.destroy();
+    const withoutHints = await renderDialog({ showKeyHints: false });
+    // The row plus its blank spacer, and no stray gap left behind.
+    expect(tall - boxRows(withoutHints)).toBe(2);
   });
 });

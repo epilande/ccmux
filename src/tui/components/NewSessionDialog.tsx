@@ -18,8 +18,11 @@ const LABEL_WIDTH = 10;
 const MAX_WIDTH = 64;
 const MIN_WIDTH = 24;
 /** Rows the dialog spends on everything except the agent and placement
- *  lists: border (2), title, blank, prompt, directory, blank, key hints. */
-const CHROME_ROWS = 8;
+ *  lists and the optional key hints: border (2), title, blank, prompt,
+ *  directory. */
+const CHROME_ROWS = 6;
+/** The blank spacer plus the key-hint row, when the dialog draws its own. */
+const KEY_HINT_ROWS = 2;
 /** Content width the placement row's full labels need (number, brackets,
  *  and gaps included). Below it the row switches to the short labels and
  *  the key-hint line drops its middle segment. */
@@ -69,6 +72,14 @@ interface NewSessionDialogProps {
   onPromptInput: (prompt: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
+  /**
+   * Draw the dialog's own key-hint row. The picker's Footer switches to a
+   * near-identical line whenever this dialog is open, and showing both puts
+   * the same hints on screen twice; the footer wins there because that is
+   * where the picker's hints always live. The sidebar has no footer at all,
+   * so its dialog carries the row itself.
+   */
+  showKeyHints?: boolean;
 }
 
 export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
@@ -79,6 +90,9 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const contentWidth = () => Math.max(1, width() - LABEL_WIDTH - 4);
   const compact = () => contentWidth() < COMPACT_CONTENT_WIDTH;
   const stacked = () => contentWidth() < STACKED_CONTENT_WIDTH;
+
+  const showKeyHints = () => props.showKeyHints !== false;
+  const chromeRows = () => CHROME_ROWS + (showKeyHints() ? KEY_HINT_ROWS : 0);
 
   const agents = createMemo(() => props.agents ?? []);
   const selectedAgentIndex = createMemo(() => {
@@ -95,7 +109,10 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const visibleAgents = createMemo(() => {
     const list = agents();
     const placementRows = stacked() ? PLACEMENT_OPTIONS.length : 1;
-    const room = Math.max(1, dims().height - 2 - CHROME_ROWS - placementRows);
+    const room = Math.max(
+      1,
+      dims().height - 2 - chromeRows() - placementRows,
+    );
     const { start, end } = optionWindow(
       list.length,
       selectedAgentIndex(),
@@ -112,7 +129,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const placementRows = () => (stacked() ? PLACEMENT_OPTIONS.length : 1);
 
   const height = () =>
-    Math.min(dims().height, agentRows() + placementRows() + CHROME_ROWS);
+    Math.min(dims().height, agentRows() + placementRows() + chromeRows());
 
   const labelColor = (field: NewSessionField) =>
     props.draft.field === field ? theme.blue : theme.overlay;
@@ -290,45 +307,47 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         <text fg={theme.subtext}>{cwdLabel()}</text>
       </box>
 
-      <box height={1} />
-      <box flexDirection="row" height={1}>
-        <box
-          flexDirection="row"
-          flexShrink={0}
-          marginRight={1}
-          onMouseDown={(event) => {
-            if (event.button === MouseButton.LEFT) props.onSubmit();
-          }}
-        >
-          <text fg={theme.green}>
-            <strong>enter</strong>
-          </text>
-          <box width={1} />
-          <text fg={theme.overlay}>spawn</text>
-        </box>
-        {/* The middle hint is the one that goes when there is no room for
-            it: the two it sits between are the dialog's only exits. */}
-        <Show when={!compact()}>
-          <box flexDirection="row" marginRight={1}>
-            <text fg={theme.overlay}>· tab field · j/k or 1-9 pick</text>
+      <Show when={showKeyHints()}>
+        <box height={1} />
+        <box flexDirection="row" height={1}>
+          <box
+            flexDirection="row"
+            flexShrink={0}
+            marginRight={1}
+            onMouseDown={(event) => {
+              if (event.button === MouseButton.LEFT) props.onSubmit();
+            }}
+          >
+            <text fg={theme.green}>
+              <strong>enter</strong>
+            </text>
+            <box width={1} />
+            <text fg={theme.overlay}>spawn</text>
           </box>
-        </Show>
-        <box
-          flexDirection="row"
-          flexShrink={0}
-          onMouseDown={(event) => {
-            if (event.button === MouseButton.LEFT) props.onCancel();
-          }}
-        >
-          <text fg={theme.overlay}>·</text>
-          <box width={1} />
-          <text fg={theme.red}>
-            <strong>esc</strong>
-          </text>
-          <box width={1} />
-          <text fg={theme.overlay}>cancel</text>
+          {/* The middle hint is the one that goes when there is no room for
+              it: the two it sits between are the dialog's only exits. */}
+          <Show when={!compact()}>
+            <box flexDirection="row" marginRight={1}>
+              <text fg={theme.overlay}>· tab field · j/k or 1-9 pick</text>
+            </box>
+          </Show>
+          <box
+            flexDirection="row"
+            flexShrink={0}
+            onMouseDown={(event) => {
+              if (event.button === MouseButton.LEFT) props.onCancel();
+            }}
+          >
+            <text fg={theme.overlay}>·</text>
+            <box width={1} />
+            <text fg={theme.red}>
+              <strong>esc</strong>
+            </text>
+            <box width={1} />
+            <text fg={theme.overlay}>cancel</text>
+          </box>
         </box>
-      </box>
+      </Show>
     </box>
   );
 };

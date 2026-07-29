@@ -1850,6 +1850,7 @@ export function App(props: AppProps) {
               onPromptInput={store.actions.setNewSessionPrompt}
               onSubmit={() => void submitNewSession()}
               onCancel={store.actions.closeNewSessionDialog}
+              showKeyHints={props.sidebar === true}
             />
           )}
         </Show>
