@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { BUILTIN_AGENTS, findAgentForProcess, getAgents } from "./agents";
+import {
+  BUILTIN_AGENTS,
+  findAgentForProcess,
+  forkableAgentNames,
+  getAgents,
+} from "./agents";
 import { extractVersionFromOutput } from "../daemon/version-resolver";
 
 describe("findAgentForProcess", () => {
@@ -1003,5 +1008,79 @@ describe("normalizeInvokeMode validation", () => {
         },
       }),
     ).toThrow(/requires a \{tmpfile\} placeholder/);
+  });
+});
+
+describe("forkableAgentNames", () => {
+  it("lists only the built-ins that declare a forkCommand", () => {
+    // Claude alone in v1: every other agent's behavior when resuming a LIVE
+    // session is unverified (docs/agent-adapters.md#forking-a-session).
+    expect(forkableAgentNames()).toEqual(["claude"]);
+  });
+
+  it("includes a custom agent configured with one", () => {
+    // This is what makes the picker's Fork item appear for a custom agent,
+    // so the escape hatch is not built-ins-only.
+    const names = forkableAgentNames({
+      agents: {
+        mine: {
+          processMatch: "mine",
+          terminalRules: [],
+          forkCommand: "mine --branch {id}",
+        },
+      },
+    });
+    expect(names).toContain("mine");
+  });
+
+  it("never throws on a malformed agents config", () => {
+    // This runs on the PICKER AND SIDEBAR STARTUP PATH, which has no catch
+    // above it: Commander's async action doesn't handle rejections and
+    // src/index.ts installs no unhandledRejection hook. `getAgents` throws on
+    // a bad config, so before this guard a single typo in ccmux.json turned
+    // `ccmux picker` into a stack trace and an exit — and in the tmux popup
+    // binding, a flash-and-close with no message at all.
+    const broken = [
+      // Custom agent with no processMatch.
+      { agents: { mine: { forkCommand: "x --resume {id}" } } },
+      // Unparseable regex.
+      { agents: { mine: { processMatch: "([", terminalRules: [] } } },
+    ];
+    for (const prefs of broken) {
+      expect(() => getAgents(prefs)).toThrow();
+      expect(forkableAgentNames(prefs)).toEqual([]);
+    }
+  });
+
+  it("hides an agent whose forkCommand could never be built", () => {
+    // Truthiness was not enough: preferences are unvalidated JSON, so a
+    // number, an object, whitespace, or a template missing {id} all read as
+    // "has a forkCommand" and put an item in the menu that fails on click —
+    // the exact "reads as broken" outcome hiding it is meant to avoid.
+    const unusable: unknown[] = [
+      123,
+      {},
+      [],
+      " ",
+      "{bin} --fork-session",
+    ];
+    for (const forkCommand of unusable) {
+      const names = forkableAgentNames({
+        agents: {
+          claude: { forkCommand: forkCommand as string },
+        },
+      });
+      expect(names).not.toContain("claude");
+    }
+  });
+
+  it("drops a built-in whose forkCommand is overridden away", () => {
+    // An empty string is the config-file way to say "do not offer this",
+    // and it has to reach the picker as a hidden item rather than an item
+    // that fails on click.
+    const names = forkableAgentNames({
+      agents: { claude: { forkCommand: "" } },
+    });
+    expect(names).not.toContain("claude");
   });
 });

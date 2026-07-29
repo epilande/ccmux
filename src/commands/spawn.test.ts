@@ -10,8 +10,9 @@ mock.module("./shared", () => ({
 const { createSpawnCommand } = await import("./spawn");
 
 interface SpawnBody {
-  agent: string;
-  cwd: string;
+  agent?: string;
+  cwd?: string;
+  fork?: string;
   prompt?: string;
   split: unknown;
   target?: string;
@@ -221,5 +222,63 @@ describe("ccmux spawn --split parsing", () => {
     await expect(
       command.parseAsync(["node", "spawn", "--split", "codex"]),
     ).rejects.toThrow(/ccmux spawn codex --split/);
+  });
+});
+
+describe("ccmux spawn --fork", () => {
+  it("sends the source session id and lets the daemon supply agent and cwd", async () => {
+    // Both come off the session being forked: continuing a conversation
+    // about one repo from a shell in another must not relocate it, and the
+    // positional agent (which defaults to "claude") has no say either.
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture();
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn(["--fork", "abc-123"]);
+      expect(bodies[0]?.fork).toBe("abc-123");
+      expect(bodies[0]?.agent).toBeUndefined();
+      expect(bodies[0]?.cwd).toBeUndefined();
+    } finally {
+      restoreEnv();
+      restore();
+    }
+  });
+
+  it("still honors an explicit --cwd when forking", async () => {
+    // The escape hatch a worktree destination needs: same fork, elsewhere.
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture();
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn(["--fork", "abc-123", "--cwd", "/other/tree"]);
+      expect(bodies[0]?.cwd).toBe("/other/tree");
+      expect(bodies[0]?.fork).toBe("abc-123");
+    } finally {
+      restoreEnv();
+      restore();
+    }
+  });
+
+  it("reports the fork rather than the positional agent", async () => {
+    const lines: string[] = [];
+    console.log = (line: string) => lines.push(line);
+    const { restore } = withFetchCapture();
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn(["--fork", "abc-123"]);
+      expect(lines[0]).toContain("Forked abc-123");
+    } finally {
+      restoreEnv();
+      restore();
+    }
   });
 });

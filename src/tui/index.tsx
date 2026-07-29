@@ -39,6 +39,7 @@ interface TUIOptions {
   lastSpawnAgent?: string;
   theme?: ThemeConfig;
   reviewHandback?: Preferences["reviewHandback"];
+  forkableAgents?: string[];
 }
 
 /** Quiet-period after the last CAPABILITIES event before we restore focus.
@@ -132,6 +133,7 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
         sidebar={options.sidebar}
         lastSpawnAgent={options.lastSpawnAgent}
         reviewHandback={options.reviewHandback}
+        forkableAgents={options.forkableAgents}
       />
     ),
     rendererOrConfig,

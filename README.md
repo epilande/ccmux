@@ -268,6 +268,7 @@ ccmux spawn --target %12             # Split (or place the window next to) a spe
 ccmux spawn --detach                 # Don't switch to the new pane
 ccmux spawn --cwd ~/proj             # Set working directory
 ccmux spawn --resume <id>            # Resume an existing session
+ccmux spawn --fork <id>              # Branch an existing session into a new one
 ccmux spawn --prompt "fix the tests" # Send an initial prompt
 ```
 
@@ -288,6 +289,34 @@ It is supported for the agents whose interactive-with-prompt invocation ccmux
 has verified; for anything else (including custom agents) ccmux refuses the
 spawn rather than guessing a flag, and you can teach it the right shape with
 `promptCommand` in your agent config.
+
+### Forking Sessions
+
+Sometimes the interesting question is "what if it had gone the other way". Fork
+starts a second session that continues an existing conversation's history, in a
+pane beside the original, and leaves the original running and untouched. The
+agent is heading down path A; fork it and try path B side by side. (A source
+with no pane of its own gets a new window instead.)
+
+<kbd>F</kbd> in the picker, or **Fork** in a session's context menu, does it,
+and places the new pane beside the source's own. `ccmux spawn --fork
+<session-id>` forks the same way but places the result like every other
+`ccmux spawn`, relative to the pane you run it from. Either way the new pane
+is tracked like any other session, with its own row, state and id.
+
+The fork always starts in the source's directory. Claude looks a resumed
+session up under the project directory for the current working directory, so
+a fork somewhere else would find no conversation at all; `--cwd` pointing
+elsewhere is refused rather than silently opening an empty shell.
+
+Fork needs two things, and the picker hides the action when either is missing:
+the agent has to declare how it forks (`forkCommand`), and ccmux has to know
+which conversation the pane holds. For most agents that knowledge comes from
+hooks, so run `ccmux setup` if the action isn't offered.
+Today **Claude Code** is the only agent that ships a fork command, because it
+is the only one whose behavior when resuming a still-running session has been
+verified. Adding another is one config line once you have checked it yourself
+(see [docs/agent-adapters.md](docs/agent-adapters.md#forking-a-session)).
 
 ### Pruning Worktrees
 
@@ -362,6 +391,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Reconnect             | <kbd>R</kbd>                                                                       | Reconnect to the daemon SSE stream                                                                                     |
 | Kill session          | <kbd>x</kbd>                                                                       | Kill the selected session's process                                                                                    |
 | Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions                                                                                              |
+| Fork session          | <kbd>F</kbd>                                                                       | Branch the conversation into a pane beside it, leaving the original running                                            |
 | Prune worktrees       | <kbd>W</kbd>                                                                       | Open the prune list for finished worktrees (multi-select, confirmation)                                                |
 | Review and hand back  | <kbd>d</kbd>                                                                       | Review with [hunk](https://github.com/modem-dev/hunk), then offer to send notes to the agent (requires `hunk` on PATH) |
 | Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state                                                                                           |
@@ -711,6 +741,7 @@ You can also override built-in agent settings by using the agent's name as the k
 | `versionPatterns`     | No       | Regex patterns to extract version from output                                       |
 | `resumeCommand`       | No       | Command template for restarting (`{id}` placeholder)                                |
 | `promptCommand`       | No       | Command template for `spawn --prompt` (`{prompt}` placeholder, single-quoted)       |
+| `forkCommand`         | No       | Command template for Fork / `spawn --fork` (`{id}` placeholder, optional `{bin}`)   |
 | `sessionFilePattern`  | No       | Regex to extract session ID from log filenames                                      |
 | `executable`          | No       | Command used to launch the agent (defaults to key)                                  |
 | `hooks`               | No       | `{ type }` (built-in override only; internal)                                       |
