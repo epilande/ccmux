@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { BUILTIN_AGENTS, findAgentForProcess, getAgents } from "./agents";
+import {
+  BUILTIN_AGENTS,
+  findAgentForProcess,
+  forkableAgentNames,
+  getAgents,
+} from "./agents";
 import { extractVersionFromOutput } from "../daemon/version-resolver";
 
 describe("findAgentForProcess", () => {
@@ -1003,5 +1008,38 @@ describe("normalizeInvokeMode validation", () => {
         },
       }),
     ).toThrow(/requires a \{tmpfile\} placeholder/);
+  });
+});
+
+describe("forkableAgentNames", () => {
+  it("lists only the built-ins that declare a forkCommand", () => {
+    // Claude alone in v1: every other agent's behavior when resuming a LIVE
+    // session is unverified (docs/agent-adapters.md#forking-a-session).
+    expect(forkableAgentNames()).toEqual(["claude"]);
+  });
+
+  it("includes a custom agent configured with one", () => {
+    // This is what makes the picker's Fork item appear for a custom agent,
+    // so the escape hatch is not built-ins-only.
+    const names = forkableAgentNames({
+      agents: {
+        mine: {
+          processMatch: "mine",
+          terminalRules: [],
+          forkCommand: "mine --branch {id}",
+        },
+      },
+    });
+    expect(names).toContain("mine");
+  });
+
+  it("drops a built-in whose forkCommand is overridden away", () => {
+    // An empty string is the config-file way to say "do not offer this",
+    // and it has to reach the picker as a hidden item rather than an item
+    // that fails on click.
+    const names = forkableAgentNames({
+      agents: { claude: { forkCommand: "" } },
+    });
+    expect(names).not.toContain("claude");
   });
 });
