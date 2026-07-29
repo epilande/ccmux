@@ -56,6 +56,7 @@ import { Toast } from "./components/Toast";
 import { GroupPreview } from "./components/GroupPreview";
 import { ConfirmationDialog } from "./components/ConfirmationDialog";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
+import { PruneDialog } from "./components/PruneDialog";
 import { HelpOverlay } from "./components/HelpOverlay";
 import { theme } from "./theme";
 import type { IconStyle } from "../lib/icons";
@@ -399,6 +400,22 @@ export function App(props: AppProps) {
     }
   }
 
+  /**
+   * Open the prune surface scoped to this group's repo. The repo comes off a
+   * session in the group rather than the group key: a group key is a display
+   * label, while `mainRepoRoot` is the same value for a worktree and its main
+   * checkout, which is exactly what the scan keys off.
+   */
+  function groupContextMenuPrune() {
+    const cm = store.state.groupContextMenu;
+    if (!cm) return;
+    const repo =
+      store.selectedGroupSessions().find((s) => s.mainRepoRoot)?.mainRepoRoot ??
+      null;
+    store.actions.hideGroupContextMenu();
+    store.actions.showPrune(repo);
+  }
+
   function groupContextMenuToggleCollapse() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
@@ -520,6 +537,12 @@ export function App(props: AppProps) {
         hint: ">",
         color: theme.blue,
         action: () => groupContextMenuPin("bottom"),
+      },
+      {
+        label: "Prune Worktrees",
+        hint: "W",
+        color: theme.peach,
+        action: groupContextMenuPrune,
       },
       {
         label: "Kill Group",
@@ -931,6 +954,13 @@ export function App(props: AppProps) {
       return;
     }
 
+    // The prune overlay owns every key while it is up (it registers its own
+    // handler), so nothing here may also act on them.
+    if (store.state.prune) {
+      event.preventDefault();
+      return;
+    }
+
     if (store.state.confirmMode) {
       if (key === "y" || key === "Y" || key === "return" || key === "enter") {
         confirmDialogAction();
@@ -1127,6 +1157,19 @@ export function App(props: AppProps) {
             store.actions.showConfirmDialog(null, "kill-group", ids);
           }
         }
+        event.preventDefault();
+        break;
+
+      case "W":
+      case "w":
+        // Scoped to the selected row's repo when there is one, so `W` on a
+        // group behaves like the group menu's item; global otherwise.
+        store.actions.showPrune(
+          store.selectedSession()?.mainRepoRoot ??
+            store.selectedGroupSessions().find((s) => s.mainRepoRoot)
+              ?.mainRepoRoot ??
+            null,
+        );
         event.preventDefault();
         break;
 
@@ -1418,6 +1461,15 @@ export function App(props: AppProps) {
               store.actions.hideConfirmDialog();
             }}
           />
+        </Show>
+
+        <Show when={store.state.prune}>
+          {(prune: () => NonNullable<typeof store.state.prune>) => (
+            <PruneDialog
+              repo={prune().repo}
+              onClose={store.actions.hidePrune}
+            />
+          )}
         </Show>
 
         <Show when={store.state.contextMenu}>
