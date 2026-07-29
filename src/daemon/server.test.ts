@@ -966,6 +966,7 @@ describe("DaemonServer", () => {
       const git = stubGitSpawn({
         stdout: "main\n--show-toplevel\n--git-dir\n--git-common-dir\n",
       });
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
 
       try {
         const enriched = await internals.enrichSession(fakeSession("s1"));
@@ -976,7 +977,18 @@ describe("DaemonServer", () => {
         // Falls back to the log-derived branch rather than "main" from a
         // reply we can't trust.
         expect(enriched.gitBranch).toBeNull();
+
+        // Losing every row's branch and worktree marker silently leaves the
+        // user with no way to find out why, so it is said once...
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain("2.31");
+
+        // ...and only once, however many cwds hit the same broken git.
+        internals.gitInfoCache.clear();
+        await internals.enrichSession(fakeSession("s2"));
+        expect(warn).toHaveBeenCalledTimes(1);
       } finally {
+        warn.mockRestore();
         git.restore();
       }
     });

@@ -279,6 +279,10 @@ export class DaemonServer {
   /** Rotating start index for `sweepBranchPRs`, see its docstring. */
   private sweepOffset = 0;
   private gitInfoCache = new Map<string, GitInfoCacheEntry>();
+  /** Whether the "git echoed our flags back" warning has already been said.
+   *  Instance-scoped, which is per daemon process in production and keeps
+   *  each test's server isolated. */
+  private warnedAboutGitFlags = false;
   /** Coalesces concurrent lookups for one cwd onto a single git spawn. */
   private gitInfoInflight = new Map<string, Promise<GitInfo>>();
   private prResolver: PRResolver;
@@ -519,6 +523,19 @@ export class DaemonServer {
     if (exitCode !== 0 || lines.length !== 4) return UNKNOWN_GIT_INFO;
     const [branch, topLevel, gitDir, commonDir] = lines.map((l) => l.trim());
     if ([topLevel, gitDir, commonDir].some(isEchoedFlag)) {
+      // Refusing the reply is right, but silently: every row loses its branch
+      // and worktree marker with nothing on screen explaining why. Say it
+      // once — the cause is the git binary, so it is the same answer for
+      // every cwd on this machine and repeating it per lookup would be noise.
+      if (!this.warnedAboutGitFlags) {
+        this.warnedAboutGitFlags = true;
+        console.warn(
+          "ccmux: `git rev-parse` echoed an option back instead of answering it, " +
+            "so branch and worktree info are unavailable. This usually means git is " +
+            "older than 2.31 (no `--path-format`), or a wrapper on PATH is dropping " +
+            "unknown flags. `git --version` should be 2.31 or newer.",
+        );
+      }
       return UNKNOWN_GIT_INFO;
     }
     return {
