@@ -271,9 +271,15 @@ ccmux spawn --prompt "fix the tests" # Send an initial prompt
 ```
 
 Split directions use tmux's own vocabulary: `h` puts the new pane beside the
-old one, `v` stacks it below. Run inside tmux, `ccmux spawn` targets the pane
-you ran it from, so the new pane or window lands next to you rather than
-wherever the daemon happens to consider "current".
+old one, `v` stacks it below. Run inside tmux, `ccmux spawn` uses the pane you
+ran it from, so the new pane or window lands in your session rather than
+wherever the daemon happens to consider "current". A new window is appended at
+the end of your session, which leaves every existing window index alone; pass
+`--target <pane-id>` to insert one directly after that pane's window instead
+(tmux renumbers the windows after it), or `--target none` to let tmux place it.
+
+Targeting a pane in a _different_ tmux session creates the pane there but does
+not move you to it, so pair that with `--detach`.
 
 `--prompt` starts the agent interactively with the prompt already submitted.
 It is supported for the agents whose interactive-with-prompt invocation ccmux
