@@ -1,0 +1,297 @@
+import type { Component } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
+import { useTerminalDimensions } from "@opentui/solid";
+import { MouseButton } from "@opentui/core";
+import type { SpawnableAgent } from "../../lib/spawnable-agents";
+import type {
+  NewSessionDraft,
+  NewSessionField,
+  NewSessionPlacement,
+} from "../store";
+import { shortenCwd, truncateText } from "../utils/format";
+import { agentColorFor } from "./SessionItem";
+import { theme } from "../theme";
+
+/** Width of the label gutter ("Placement" is the longest label). */
+const LABEL_WIDTH = 10;
+const MAX_WIDTH = 58;
+const MIN_WIDTH = 24;
+/** Rows the dialog spends on everything except the agent list: border (2),
+ *  title, blank, placement, prompt, directory, blank, key hints. */
+const CHROME_ROWS = 9;
+/** Below this content width the placement labels are abbreviated. */
+const COMPACT_CONTENT_WIDTH = 40;
+
+interface PlacementOption {
+  value: NewSessionPlacement;
+  label: string;
+  compactLabel: string;
+}
+
+/** Placement choices, in the order their number keys select them. */
+export const PLACEMENT_OPTIONS: readonly PlacementOption[] = [
+  { value: "window", label: "New window", compactLabel: "Window" },
+  { value: "split-h", label: "Split right", compactLabel: "Right" },
+  { value: "split-v", label: "Split down", compactLabel: "Down" },
+];
+
+/**
+ * Slice of a longer option list to show, keeping the selection visible and
+ * centered where it can be. Exported for its own tests: an off-by-one here
+ * hides the row the user is on.
+ */
+export function optionWindow(
+  total: number,
+  selected: number,
+  size: number,
+): { start: number; end: number } {
+  if (size >= total || size <= 0) return { start: 0, end: total };
+  const half = Math.floor(size / 2);
+  const start = Math.min(Math.max(selected - half, 0), total - size);
+  return { start, end: start + size };
+}
+
+interface NewSessionDialogProps {
+  draft: NewSessionDraft;
+  /** Spawnable agents, or null while `GET /agents` is still in flight. */
+  agents: SpawnableAgent[] | null;
+  agentsError?: string | null;
+  onFocusField: (field: NewSessionField) => void;
+  onSelectAgent: (name: string) => void;
+  onSelectPlacement: (placement: NewSessionPlacement) => void;
+  onPromptInput: (prompt: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}
+
+export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
+  const dims = useTerminalDimensions();
+
+  const width = () =>
+    Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dims().width - 4));
+  const contentWidth = () => Math.max(1, width() - LABEL_WIDTH - 4);
+  const compact = () => contentWidth() < COMPACT_CONTENT_WIDTH;
+
+  const agents = createMemo(() => props.agents ?? []);
+  const selectedAgentIndex = createMemo(() => {
+    const index = agents().findIndex((a) => a.name === props.draft.agent);
+    return index >= 0 ? index : 0;
+  });
+  const selectedAgent = createMemo(
+    () => agents()[selectedAgentIndex()] ?? null,
+  );
+
+  /** The agent list is the only field that can grow past a screen; cap it at
+   *  what is left after the fixed chrome and scroll the rest. */
+  const visibleAgents = createMemo(() => {
+    const list = agents();
+    const room = Math.max(1, dims().height - 2 - CHROME_ROWS);
+    const { start, end } = optionWindow(
+      list.length,
+      selectedAgentIndex(),
+      Math.min(room, list.length),
+    );
+    return list.slice(start, end).map((agent, offset) => ({
+      agent,
+      /** Absolute position, so the number key shown is the one that picks it. */
+      index: start + offset,
+    }));
+  });
+
+  const agentRows = () => Math.max(1, visibleAgents().length);
+  const height = () => Math.min(dims().height, agentRows() + CHROME_ROWS);
+
+  const labelColor = (field: NewSessionField) =>
+    props.draft.field === field ? theme.blue : theme.overlay;
+
+  const cwdLabel = () =>
+    truncateText(shortenCwd(props.draft.cwd), contentWidth());
+
+  /** Empty until a prompt is typed; then it says whether this agent can take
+   *  one, which is per-agent and not otherwise discoverable. */
+  const promptPlaceholder = () => {
+    const agent = selectedAgent();
+    if (agent && !agent.supportsPrompt) {
+      return `${agent.displayName} can't start with a prompt`;
+    }
+    return "Optional first message...";
+  };
+
+  return (
+    <box
+      position="absolute"
+      top="50%"
+      left="50%"
+      width={width()}
+      height={height()}
+      marginTop={-Math.floor(height() / 2)}
+      marginLeft={-Math.floor(width() / 2)}
+      backgroundColor={theme.base}
+      borderStyle="single"
+      borderColor={theme.border}
+      flexDirection="column"
+      paddingLeft={1}
+      paddingRight={1}
+    >
+      <box height={1}>
+        <text fg={theme.text}>
+          <strong>New session</strong>
+        </text>
+      </box>
+      <box height={1} />
+
+      <box flexDirection="row">
+        <box width={LABEL_WIDTH}>
+          <text fg={labelColor("agent")}>Agent</text>
+        </box>
+        <box flexDirection="column" flexGrow={1}>
+          <Show
+            when={props.agents !== null}
+            fallback={<text fg={theme.overlay}>Loading agents...</text>}
+          >
+            <Show
+              when={agents().length > 0}
+              fallback={
+                <text fg={theme.red}>
+                  {props.agentsError ?? "No agents found on PATH"}
+                </text>
+              }
+            >
+              <For each={visibleAgents()}>
+                {(entry) => (
+                  <box
+                    height={1}
+                    flexDirection="row"
+                    onMouseDown={(event) => {
+                      if (event.button !== MouseButton.LEFT) return;
+                      props.onFocusField("agent");
+                      props.onSelectAgent(entry.agent.name);
+                    }}
+                  >
+                    <box width={2}>
+                      <text fg={theme.green}>
+                        {entry.agent.name === props.draft.agent ? ">" : ""}
+                      </text>
+                    </box>
+                    {/* Only the first nine get a number key. */}
+                    <box width={2}>
+                      <text fg={theme.overlay}>
+                        {entry.index < 9 ? `${entry.index + 1}` : ""}
+                      </text>
+                    </box>
+                    <text fg={agentColorFor(entry.agent.name)}>
+                      {entry.agent.displayName}
+                    </text>
+                  </box>
+                )}
+              </For>
+            </Show>
+          </Show>
+        </box>
+      </box>
+
+      <box flexDirection="row" height={1}>
+        <box width={LABEL_WIDTH}>
+          <text fg={labelColor("placement")}>Placement</text>
+        </box>
+        <box flexDirection="row" flexGrow={1}>
+          <For each={PLACEMENT_OPTIONS}>
+            {(option, index) => (
+              <box
+                flexDirection="row"
+                flexShrink={0}
+                marginRight={2}
+                onMouseDown={(event) => {
+                  if (event.button !== MouseButton.LEFT) return;
+                  props.onFocusField("placement");
+                  props.onSelectPlacement(option.value);
+                }}
+              >
+                {/* Spacing comes from box widths and margins, never from
+                    padded strings: a `<text>` is measured on its trimmed
+                    content, so trailing spaces collapse under flex. */}
+                <box width={2}>
+                  <text fg={theme.overlay}>{`${index() + 1}`}</text>
+                </box>
+                <text
+                  fg={
+                    option.value === props.draft.placement
+                      ? theme.green
+                      : theme.subtext
+                  }
+                >
+                  {compact() ? option.compactLabel : option.label}
+                </text>
+              </box>
+            )}
+          </For>
+        </box>
+      </box>
+
+      <box flexDirection="row" height={1}>
+        <box width={LABEL_WIDTH}>
+          <text fg={labelColor("prompt")}>Prompt</text>
+        </box>
+        <input
+          value={props.draft.prompt}
+          onInput={props.onPromptInput}
+          focused={props.draft.field === "prompt"}
+          placeholder={promptPlaceholder()}
+          placeholderColor={theme.overlay}
+          textColor={theme.text}
+          cursorColor={theme.blue}
+          backgroundColor="transparent"
+          focusedBackgroundColor="transparent"
+          flexGrow={1}
+        />
+      </box>
+
+      <box flexDirection="row" height={1}>
+        <box width={LABEL_WIDTH}>
+          <text fg={theme.overlay}>Directory</text>
+        </box>
+        <text fg={theme.subtext}>{cwdLabel()}</text>
+      </box>
+
+      <box height={1} />
+      <box flexDirection="row" height={1}>
+        <box
+          flexDirection="row"
+          flexShrink={0}
+          marginRight={1}
+          onMouseDown={(event) => {
+            if (event.button === MouseButton.LEFT) props.onSubmit();
+          }}
+        >
+          <text fg={theme.green}>
+            <strong>enter</strong>
+          </text>
+          <box width={1} />
+          <text fg={theme.overlay}>spawn</text>
+        </box>
+        {/* The middle hint is the one that goes when there is no room for
+            it: the two it sits between are the dialog's only exits. */}
+        <Show when={!compact()}>
+          <box flexDirection="row" marginRight={1}>
+            <text fg={theme.overlay}>· tab field · j/k or 1-9 pick</text>
+          </box>
+        </Show>
+        <box
+          flexDirection="row"
+          flexShrink={0}
+          onMouseDown={(event) => {
+            if (event.button === MouseButton.LEFT) props.onCancel();
+          }}
+        >
+          <text fg={theme.overlay}>·</text>
+          <box width={1} />
+          <text fg={theme.red}>
+            <strong>esc</strong>
+          </text>
+          <box width={1} />
+          <text fg={theme.overlay}>cancel</text>
+        </box>
+      </box>
+    </box>
+  );
+};
