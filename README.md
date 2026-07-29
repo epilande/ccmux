@@ -270,6 +270,9 @@ ccmux spawn --cwd ~/proj             # Set working directory
 ccmux spawn --resume <id>            # Resume an existing session
 ccmux spawn --fork <id>              # Branch an existing session into a new one
 ccmux spawn --prompt "fix the tests" # Send an initial prompt
+ccmux spawn --worktree               # Spawn into a git worktree (name derived from --prompt)
+ccmux spawn --worktree fix-flicker   # Spawn into a named worktree, creating it if needed
+ccmux spawn --worktree --base develop # Branch the new worktree from develop instead of the current branch
 ```
 
 Split directions use tmux's own vocabulary: `h` puts the new pane beside the
@@ -289,6 +292,16 @@ It is supported for the agents whose interactive-with-prompt invocation ccmux
 has verified; for anything else (including custom agents) ccmux refuses the
 spawn rather than guessing a flag, and you can teach it the right shape with
 `promptCommand` in your agent config.
+
+`--worktree [name]` spawns the agent into a git worktree at
+`<main>/.claude/worktrees/<name>`, creating it first if it doesn't exist yet.
+An explicit name is create-or-open: spawning into the same name again reuses
+that worktree rather than failing. Without a name, ccmux derives one from
+`--prompt`'s opening words; a derived name that collides with an existing
+worktree gets a numeric suffix (`-2`, `-3`, ...) instead of reusing it, since
+two different prompts landing in the same worktree would silently merge
+unrelated work. `--base <ref>` sets what the new branch is cut from,
+defaulting to the main checkout's current branch.
 
 ### Forking Sessions
 
@@ -333,7 +346,7 @@ Agents create git worktrees faster than anyone cleans them up, and the ones wher
 
 Removing a worktree deletes its directory, attempts to delete the local branch, closes the leftover pane once its agent has exited, prunes git's metadata, and drops the directory's entry from `~/.claude.json`. Branch deletion follows the evidence rather than the reason: a merged PR is force-deleted (`git branch -D`, since a squash merge leaves the tip unmerged by git's definition), `merged locally` and `upstream gone` use the safe `git branch -d` and report a refusal if git says the branch still holds unmerged work, and `PR closed` keeps the branch entirely.
 
-Safety rules, in short: a worktree with a **working** agent is never offered, nothing is pre-selected, dirty worktrees (uncommitted or untracked changes) need their own <kbd>D</kbd> opt-in on top of being selected and are re-checked immediately before deletion, a `worktree.symlinkDirectories` symlink does not count as dirty (it is setup, not your work), gitignored files that would be deleted are listed before you confirm, and the main checkout is never a candidate.
+Safety rules, in short: a worktree with **any** bound session, working, idle, or waiting, is never offered, a branch with no commits of its own is never classified as merged, nothing is pre-selected, dirty worktrees (uncommitted or untracked changes) need their own <kbd>D</kbd> opt-in on top of being selected and are re-checked immediately before deletion, a `worktree.symlinkDirectories` symlink does not count as dirty (it is setup, not your work), gitignored files that would be deleted are listed before you confirm, and the main checkout is never a candidate.
 
 Each directory is renamed to a `.ccmux-trash-<name>-<timestamp>` sibling before being deleted, so the path frees immediately and the contents survive for the length of the run. If ccmux is interrupted mid-run, look for that directory next to where the worktree was: `mv .ccmux-trash-<name>-<timestamp> <name>` restores it, and `git worktree repair <name>` re-links it to the repo.
 
