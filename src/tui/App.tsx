@@ -58,6 +58,7 @@ import { GroupPreview } from "./components/GroupPreview";
 import { ConfirmationDialog } from "./components/ConfirmationDialog";
 import {
   NewSessionDialog,
+  DESTINATION_OPTIONS,
   PLACEMENT_OPTIONS,
 } from "./components/NewSessionDialog";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
@@ -861,6 +862,15 @@ export function App(props: AppProps) {
             if (option) store.actions.setNewSessionPlacement(option.value);
           },
         };
+      case "destination":
+        return {
+          options: DESTINATION_OPTIONS.map((option) => option.value),
+          value: draft.destination,
+          select: (value) => {
+            const option = DESTINATION_OPTIONS.find((o) => o.value === value);
+            if (option) store.actions.setNewSessionDestination(option.value);
+          },
+        };
       default:
         return null;
     }
@@ -946,6 +956,9 @@ export function App(props: AppProps) {
           callerPane: callerPane ?? undefined,
           prompt: prompt || undefined,
           detach,
+          // The daemon derives the name from the prompt when none is given,
+          // which is the same rule the row previews, so the two cannot drift.
+          worktree: draft.destination === "worktree" ? {} : undefined,
         }),
       });
       const body = (await response.json().catch(() => null)) as {
@@ -1929,6 +1942,7 @@ export function App(props: AppProps) {
               onFocusField={store.actions.setNewSessionField}
               onSelectAgent={store.actions.setNewSessionAgent}
               onSelectPlacement={store.actions.setNewSessionPlacement}
+          onSelectDestination={store.actions.setNewSessionDestination}
               onPromptInput={store.actions.setNewSessionPrompt}
               onSubmit={() => void submitNewSession()}
               onCancel={store.actions.closeNewSessionDialog}

@@ -2950,6 +2950,9 @@ describe("store", () => {
         cwd: "/repo",
         agent: "codex",
         placement: "window",
+        // Spawning into the directory the dialog was opened over stays the
+        // default; a worktree is something you ask for.
+        destination: "here",
         prompt: "",
         field: "agent",
       });
@@ -2982,20 +2985,23 @@ describe("store", () => {
       expect(store.state.newSession?.field).toBe("placement");
       store.actions.moveNewSessionField(1);
       expect(store.state.newSession?.field).toBe("prompt");
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("destination");
       // Wraps forward past the last field...
       store.actions.moveNewSessionField(1);
       expect(store.state.newSession?.field).toBe("agent");
       // ...and backward past the first.
       store.actions.moveNewSessionField(-1);
-      expect(store.state.newSession?.field).toBe("prompt");
+      expect(store.state.newSession?.field).toBe("destination");
     });
 
-    it("updates agent, placement, prompt, and field", () => {
+    it("updates agent, placement, destination, prompt, and field", () => {
       const store = createTUIStore();
       store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
 
       store.actions.setNewSessionAgent("pi");
       store.actions.setNewSessionPlacement("split-h");
+      store.actions.setNewSessionDestination("worktree");
       store.actions.setNewSessionPrompt("fix the tests");
       store.actions.setNewSessionField("prompt");
 
@@ -3003,6 +3009,7 @@ describe("store", () => {
         cwd: "/repo",
         agent: "pi",
         placement: "split-h",
+        destination: "worktree",
         prompt: "fix the tests",
         field: "prompt",
       });
@@ -3058,9 +3065,7 @@ describe("store", () => {
       store.actions.toggleHideIdle();
       await store.actions.setLastSpawnAgent("codex");
 
-      expect(persisted).toEqual([
-        { hideIdle: true, lastSpawnAgent: "codex" },
-      ]);
+      expect(persisted).toEqual([{ hideIdle: true, lastSpawnAgent: "codex" }]);
 
       // The queue is now empty, so the cancelled timer can't fire a second,
       // stale write afterwards.

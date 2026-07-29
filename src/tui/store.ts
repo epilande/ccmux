@@ -60,7 +60,18 @@ export type ConfirmAction =
  *  `split-h`/`split-v` are tmux's own directions (`-h` is left/right). */
 export type NewSessionPlacement = "window" | "split-h" | "split-v";
 
-export type NewSessionField = "agent" | "placement" | "prompt";
+/**
+ * Where the new session's checkout comes from. `here` is the directory the
+ * dialog was opened over; `worktree` creates one under the repo's
+ * `.claude/worktrees/`, named from the prompt (issue #69).
+ */
+export type NewSessionDestination = "here" | "worktree";
+
+export type NewSessionField =
+  | "agent"
+  | "placement"
+  | "prompt"
+  | "destination";
 
 /**
  * The dialog's fields, in focus order. Focus movement, which field the
@@ -80,6 +91,11 @@ export const NEW_SESSION_FIELDS: readonly NewSessionField[] = [
   "agent",
   "placement",
   "prompt",
+  // Last, and after the prompt on purpose: the worktree name is DERIVED from
+  // the prompt, so the row can only show what you would get once there is
+  // something to derive it from. It also leaves the two-tab path to the
+  // prompt, which people already have in their fingers, where it was.
+  "destination",
 ];
 
 /**
@@ -95,6 +111,7 @@ export interface NewSessionDraft {
   cwd: string;
   agent: string;
   placement: NewSessionPlacement;
+  destination: NewSessionDestination;
   prompt: string;
   /** Which field the option/text keys currently apply to. */
   field: NewSessionField;
@@ -1238,6 +1255,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           cwd: init.cwd,
           agent: init.agent,
           placement: "window",
+          destination: "here",
           prompt: "",
           field: NEW_SESSION_FIELDS[0]!,
         });
@@ -1271,6 +1289,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     setNewSessionPlacement(placement: NewSessionPlacement) {
       if (!state.newSession) return;
       setState("newSession", "placement", placement);
+    },
+
+    setNewSessionDestination(destination: NewSessionDestination) {
+      if (!state.newSession) return;
+      setState("newSession", "destination", destination);
     },
 
     setNewSessionPrompt(prompt: string) {

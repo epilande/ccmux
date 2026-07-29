@@ -2097,6 +2097,7 @@ describe("App new session dialog", () => {
     callerPane?: string;
     prompt?: string;
     detach?: boolean;
+    worktree?: { name?: string; base?: string };
   };
 
   const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
@@ -2322,12 +2323,57 @@ describe("App new session dialog", () => {
     }
   });
 
+  /**
+   * The destination field is the picker half of issue #69. It sends the
+   * daemon an empty `worktree` object rather than a name: the daemon derives
+   * the name from the same prompt the row previewed, so the two cannot drift.
+   */
+  it("asks for a worktree when the destination is set to one", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      // agent -> destination, walking backwards to the last field.
+      setup.mockInput.pressTab({ shift: true });
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("[New worktree]");
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns[0]?.worktree).toEqual({});
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("sends no worktree field when the destination is this checkout", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns[0]?.worktree).toBeUndefined();
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
   it("shift-tab walks the fields backwards", async () => {
     const { spawns, restore } = withDaemon();
     const { restore: restoreExit } = withExitSpy();
     try {
       await openDialog();
-      // agent -> prompt -> placement, then pick the stacked split.
+      // agent -> destination -> prompt -> placement, then pick the stacked
+      // split. `destination` is last in the field order, so walking backwards
+      // from `agent` reaches it first.
+      setup.mockInput.pressTab({ shift: true });
+      await setup.renderOnce();
       setup.mockInput.pressTab({ shift: true });
       await setup.renderOnce();
       setup.mockInput.pressTab({ shift: true });
