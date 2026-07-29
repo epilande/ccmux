@@ -32,11 +32,16 @@
  *    make the absent lock safe. A worktree with a session bound to it is
  *    never offered for removal, whatever that session's status is, so a
  *    worktree spawned here is protected for as long as its agent is around.
- *    And a worktree cannot read as merged until it has commits of its own
- *    that merged, so a fresh one still sitting at its base tip is never
- *    mistaken for finished work. What a lock would add on top of that is
- *    protection for a worktree with no session and no commits, which is
- *    exactly the debris the prune exists to clear.
+ *    And a worktree still sitting on the tip it was cut from does not read as
+ *    merged, because a branch whose tip equals a base tip is excluded from
+ *    that classification, so a fresh one is not mistaken for finished work.
+ *    The limit of that is worth knowing, since it is narrower than "has no
+ *    commits of its own": a worktree cut from an OLDER ref (a `base` of
+ *    `main~1`) sits on no base tip, so it can read as merged-locally from the
+ *    moment it exists and the bound session is the only thing holding it.
+ *    What a lock would add on top of all that is protection for a worktree
+ *    with no session at all, which is exactly the debris the prune exists to
+ *    clear.
  */
 
 import {
@@ -46,7 +51,7 @@ import {
   readdirSync,
   symlinkSync,
 } from "node:fs";
-import { cp, rm } from "node:fs/promises";
+import { cp, rmdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
   normalizePath,
@@ -451,6 +456,21 @@ export async function withRepoLock<T>(
   }
 }
 
+/** Whether the repo already has a local branch of this name. */
+async function localBranchExists(
+  mainRepoRoot: string,
+  name: string,
+  git: GitRun,
+): Promise<boolean> {
+  const res = await git(mainRepoRoot, [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    `refs/heads/${name}`,
+  ]);
+  return res.exitCode === 0;
+}
+
 /**
  * The first free name in the `<slug>`, `<slug>-2`, `<slug>-3` series.
  *
@@ -480,13 +500,7 @@ async function firstFreeDerivedName(
     const path = worktreePathFor(mainRepoRoot, candidate);
     if (existsSync(path) || isSymlink(path)) continue;
     if (await isRegisteredWorktree(mainRepoRoot, path, git)) continue;
-    const branch = await git(mainRepoRoot, [
-      "rev-parse",
-      "--verify",
-      "--quiet",
-      `refs/heads/${candidate}`,
-    ]);
-    if (branch.exitCode === 0) continue;
+    if (await localBranchExists(mainRepoRoot, candidate, git)) continue;
     return { ok: true, name: candidate };
   }
   return {
@@ -578,37 +592,42 @@ export async function createWorktree(
           error: `${path} already exists and contains a .git; remove or rename it first`,
         };
       }
+      const occupied = `${path} already exists and is not empty; remove or rename it first, or pass a different worktree name`;
       if (!isEmptyDirectory(path)) {
-        return {
-          ok: false as const,
-          error: `${path} already exists and is not empty; remove or rename it first, or pass a different worktree name`,
-        };
+        return { ok: false as const, error: occupied };
       }
+      // Removed NON-recursively, which is what closes the window between the
+      // check above and this line: `rmdir` fails on a directory that gained
+      // content in between, where a recursive delete would have taken it. The
+      // check stays for the message, since it can say more than an errno can.
       try {
-        await rm(path, { recursive: true, force: true });
-      } catch (err) {
-        return {
-          ok: false as const,
-          error: `Could not clear ${path}: ${err instanceof Error ? err.message : String(err)}`,
-        };
+        await rmdir(path);
+      } catch {
+        // Content that appeared, a permission problem, a path that stopped
+        // being a directory: every one of them leaves the target occupied,
+        // which is the same answer for the caller.
+        return { ok: false as const, error: occupied };
       }
     }
 
     const based = await resolveBase(mainRepoRoot, request.base, git);
     if (!based.ok) return based;
 
-    // An existing branch of this name is reused rather than recreated: the
-    // user naming a worktree after a branch they already have means that
-    // branch, and `-b` would fail on it. Only reachable for an explicit
-    // name, since a derived one already rejected every candidate a branch
-    // was holding.
-    const branchExists = await git(mainRepoRoot, [
-      "rev-parse",
-      "--verify",
-      "--quiet",
-      `refs/heads/${name}`,
-    ]);
-    const reusingBranch = branchExists.exitCode === 0;
+    // An EXPLICIT name reuses an existing branch rather than recreating it:
+    // the user naming a worktree after a branch they already have means that
+    // branch, and `-b` would fail on it.
+    //
+    // A DERIVED name never reuses, and does not even look. The candidate
+    // search already rejected every name a branch was holding, so a branch
+    // here means one appeared since, and the lock that search ran under is
+    // process-local: another checkout of this repo, another tool or a person
+    // can all do it. Whatever that branch is, it is not this spawn's, and
+    // reusing it would start the agent on unrelated history under a name
+    // nobody chose. `-b` makes git refuse instead, which is a loud failure
+    // the user can act on rather than a silent one they discover later.
+    const reusingBranch = named.derived
+      ? false
+      : await localBranchExists(mainRepoRoot, name, git);
     const args = reusingBranch
       ? ["worktree", "add", path, name]
       : ["worktree", "add", "-b", name, path, based.base];

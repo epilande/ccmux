@@ -482,6 +482,52 @@ describe("createWorktree", () => {
     expect(out.result.branchCreated).toBe(true);
   });
 
+  // `withRepoLock` is process-local, so a branch of the derived name can
+  // appear between the candidate probe and the add: another checkout of this
+  // repo, another tool, a person at a shell. Reusing it would start the agent
+  // on unrelated history under a name nobody chose, so a derived name always
+  // passes `-b` and lets git refuse.
+  it("fails loudly when a branch takes the derived name mid-create", async () => {
+    const repo = await makeRepo();
+    // A commit off main's tip, so reuse would visibly start the agent
+    // somewhere other than where this spawn asked to start.
+    writeFileSync(join(repo, "theirs.txt"), "unrelated work\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-m", "work this spawn knows nothing about"]);
+    const interloperTip = await git(repo, ["rev-parse", "HEAD"]);
+    await git(repo, ["branch", "elsewhere"]);
+    await git(repo, ["reset", "-q", "--hard", "HEAD~1"]);
+
+    // Plants the branch in the window the real race opens: after the candidate
+    // probe reports the name free, before `git worktree add` runs.
+    let planted = false;
+    const racingGit = async (cwd: string, args: string[]) => {
+      const res = await runGit(cwd, args);
+      if (
+        !planted &&
+        args[0] === "rev-parse" &&
+        args.at(-1) === "refs/heads/fix-the-flaky"
+      ) {
+        planted = true;
+        await runGit(repo, ["branch", "fix-the-flaky", interloperTip]);
+      }
+      return res;
+    };
+
+    const out = await createWorktree(
+      repo,
+      { prompt: "fix the flaky test" },
+      { git: racingGit },
+    );
+
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toContain("worktree add -b fix-the-flaky");
+    // The interloper's branch still points where it did, and no worktree was
+    // handed the agent on top of it.
+    expect(await git(repo, ["rev-parse", "fix-the-flaky"])).toBe(interloperTip);
+    expect(existsSync(worktreePathFor(repo, "fix-the-flaky"))).toBe(false);
+  });
+
   // An explicit name is documented intent, so it keeps create-or-open: the
   // numbering exists for names the user never chose.
   it("still opens an explicitly named worktree on a collision", async () => {
