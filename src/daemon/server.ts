@@ -24,7 +24,8 @@ import {
   type SpawnPlacement,
   type SpawnSplit,
 } from "./spawn-command";
-import type { AgentDef } from "../lib/agents";
+import { getAgents, type AgentDef } from "../lib/agents";
+import { listSpawnableAgents, spawnBinaryFor } from "../lib/spawnable-agents";
 import {
   getMarkerKey,
   isBackgroundSession,
@@ -760,6 +761,10 @@ export class DaemonServer {
         },
         { headers: corsHeaders },
       );
+    }
+
+    if (path === "/agents" && req.method === "GET") {
+      return await this.handleGetSpawnableAgents(corsHeaders);
     }
 
     if (path === "/sessions" && req.method === "GET") {
@@ -1789,6 +1794,35 @@ export class DaemonServer {
   }
 
   /**
+   * The agents this machine can start, for the picker's new-session dialog.
+   * Resolved per request rather than cached: it is asked for only when that
+   * dialog opens, and a cache would hide an agent installed since boot.
+   */
+  private async handleGetSpawnableAgents(
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    try {
+      const preferences = await getPreferences();
+      return Response.json(
+        {
+          agents: listSpawnableAgents(getAgents(preferences), {
+            claudeCommand: preferences.command,
+          }),
+        },
+        { headers },
+      );
+    } catch (err: unknown) {
+      // `getAgents` throws on a malformed custom-agent block, and the
+      // message names the offending key — worth surfacing rather than
+      // leaving the dialog with an empty list and no explanation.
+      return Response.json(
+        { error: `Failed to resolve agents: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
+    }
+  }
+
+  /**
    * Spawn a new agent session in a tmux pane
    */
   private async handleSpawn(
@@ -1904,10 +1938,7 @@ export class DaemonServer {
 
     // Build agent command
     const preferences = await getPreferences();
-    const cmd =
-      agentName === "claude"
-        ? (preferences.command ?? "claude")
-        : (agent.executable ?? agentName);
+    const cmd = spawnBinaryFor(agent, preferences.command);
 
     const commandResult = buildAgentSpawnCommand({
       agent,

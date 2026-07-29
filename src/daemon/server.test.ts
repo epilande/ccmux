@@ -10,6 +10,7 @@ import { SessionManager } from "./sessions";
 import type { SessionEvent } from "./sessions";
 import type { SSEEvent, DaemonHealth } from "../types";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
+import type { SpawnableAgent } from "../lib/spawnable-agents";
 import type { Session, TmuxPane, EnrichedSession } from "../types/session";
 import { AttentionTracker } from "./attention-tracker";
 import { InvocationManager } from "./invocation-manager";
@@ -2910,6 +2911,29 @@ describe("getServerSocketPath and /server-info", () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe("GET /agents", () => {
+  it("serves spawnable agents as JSON", async () => {
+    const { internals } = createServer();
+    const res = await internals.handleRequest(
+      new Request("http://localhost/agents"),
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { agents: SpawnableAgent[] };
+    expect(Array.isArray(data.agents)).toBe(true);
+    // Which agents are installed is a property of the machine, so assert the
+    // shape and the invariant instead: every entry is a real agent name, so
+    // the dialog can hand any of them straight back to POST /spawn.
+    for (const agent of data.agents) {
+      expect(typeof agent.name).toBe("string");
+      expect(typeof agent.displayName).toBe("string");
+      expect(typeof agent.shortCode).toBe("string");
+      expect(typeof agent.supportsPrompt).toBe("boolean");
+    }
+    const names = data.agents.map((a) => a.name);
+    expect(new Set(names).size).toBe(names.length);
   });
 });
 
