@@ -9,8 +9,8 @@
  * Nothing here mutates a repo; the removal side lives in `worktree-prune.ts`.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export interface GitResult {
   exitCode: number;
@@ -135,6 +135,33 @@ export async function listWorktrees(
   return parseWorktreeList(res.stdout);
 }
 
+/**
+ * Read `worktree.symlinkDirectories` from a repo's `.claude/settings.json`.
+ *
+ * Claude Code uses this to share a directory (typically `node_modules`) into
+ * the worktrees it creates, by symlink. ccmux reads it for the opposite
+ * reason: to recognize such a link and not mistake it for the user's own
+ * uncommitted work.
+ *
+ * Absent file, unreadable file, malformed JSON and a missing key are all the
+ * same answer, an empty list. This is optional convenience config, so a parse
+ * failure must not change how a destructive feature behaves.
+ */
+export function readSymlinkDirectories(mainRepoRoot: string): string[] {
+  const settingsPath = join(mainRepoRoot, ".claude", "settings.json");
+  if (!existsSync(settingsPath)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as {
+      worktree?: { symlinkDirectories?: unknown };
+    };
+    const dirs = parsed.worktree?.symlinkDirectories;
+    if (!Array.isArray(dirs)) return [];
+    return dirs.filter((d): d is string => typeof d === "string" && d !== "");
+  } catch {
+    return [];
+  }
+}
+
 export interface DirtyState {
   dirty: boolean;
   /** Tracked files with staged or unstaged modifications. */
@@ -174,6 +201,7 @@ export interface DirtyState {
 export async function readDirtyState(
   worktreePath: string,
   git: GitRun = runGit,
+  options: { setupSymlinks?: string[] } = {},
 ): Promise<DirtyState> {
   const res = await git(worktreePath, [
     "status",
@@ -186,6 +214,10 @@ export async function readDirtyState(
     return { dirty: true, modified: 0, untracked: 0, ignoredFiles: [] };
   }
 
+  const setupSymlinks = new Set(
+    (options.setupSymlinks ?? []).map((entry) => entry.replace(/\/+$/, "")),
+  );
+
   let modified = 0;
   let untracked = 0;
   const ignoredFiles: string[] = [];
@@ -195,8 +227,12 @@ export async function readDirtyState(
       const path = line.slice(3).trim();
       // A trailing slash is git's marker for a collapsed ignored directory.
       if (path && !path.endsWith("/")) ignoredFiles.push(path);
-    } else if (line.startsWith("??")) untracked++;
-    else modified++;
+    } else if (line.startsWith("??")) {
+      if (isSetupSymlink(worktreePath, line.slice(3).trim(), setupSymlinks)) {
+        continue;
+      }
+      untracked++;
+    } else modified++;
   }
   return {
     dirty: modified + untracked > 0,
@@ -204,6 +240,35 @@ export async function readDirtyState(
     untracked,
     ignoredFiles,
   };
+}
+
+/**
+ * Whether an untracked entry is just a `worktree.symlinkDirectories` link.
+ *
+ * A `node_modules/` gitignore pattern is DIRECTORY-only, so it does not match
+ * a symlink of that name, and git reports the link as untracked. Every
+ * worktree set up by this convention therefore read as dirty — which for the
+ * prune feature meant demanding the uncommitted-work opt-in for a worktree
+ * whose only "work" is a symlink the tooling created itself. Confirmed
+ * against the real repo, where every agent-created worktree reports
+ * `?? node_modules`.
+ *
+ * Narrow on purpose: only names the repo actually configured, and only when
+ * the entry really is a symlink on disk. A real directory of that name, or a
+ * symlink the user made for their own reasons, still counts as dirt.
+ */
+function isSetupSymlink(
+  worktreePath: string,
+  entry: string,
+  setupSymlinks: Set<string>,
+): boolean {
+  const name = entry.replace(/\/+$/, "");
+  if (!setupSymlinks.has(name)) return false;
+  try {
+    return lstatSync(resolve(worktreePath, name)).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 /**

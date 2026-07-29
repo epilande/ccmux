@@ -25,11 +25,13 @@ import {
   type AgentStateFile,
   type StateCleanupResult,
 } from "./agent-state";
+
 import {
   fetchPrune,
   isMergedInto,
   listWorktrees,
   readAdminDir,
+  readSymlinkDirectories,
   readDirtyState,
   readUpstreamStates,
   resolveBaseRefs,
@@ -390,6 +392,8 @@ export async function scanRepo(
     readUpstreamStates(repoRoot, git),
   ]);
   const repoName = basename(repoRoot);
+  // Read once per repo, not per worktree: it is the same file for all of them.
+  const setupSymlinks = readSymlinkDirectories(repoRoot);
 
   // Bounded concurrency, not a serial loop: the expensive step is one
   // `gh pr list` per branch at ~0.5s of network latency each, so 15 worktrees
@@ -404,6 +408,7 @@ export async function scanRepo(
         repoName,
         baseRefs,
         upstreams,
+        setupSymlinks,
         git,
         deps,
       }),
@@ -449,6 +454,8 @@ interface ClassifyContext {
   repoName: string;
   baseRefs: string[];
   upstreams: Map<string, UpstreamState>;
+  /** `worktree.symlinkDirectories`, so a setup symlink is not read as dirt. */
+  setupSymlinks: string[];
   git: GitRun;
   deps: ScanDeps;
 }
@@ -540,7 +547,9 @@ async function classifyOne(
   const reason = reasonFor(pr, mergedLocally, upstream.gone);
   if (!reason) return {};
 
-  const dirtyState = await readDirtyState(path, git);
+  const dirtyState = await readDirtyState(path, git, {
+    setupSymlinks: ctx.setupSymlinks,
+  });
   return {
     candidate: {
       path,
@@ -905,7 +914,11 @@ export async function runPrune(
     // this worktree during that window would otherwise lose the work with no
     // opt-in. One `git status`, immediately before the directory moves.
     if (!allowDirty.has(candidate.path)) {
-      const fresh = await readDirtyState(candidate.path, git);
+      // Same setup-symlink exemption as the scan, or a worktree that passed
+      // the list would be refused here for the link the tooling itself made.
+      const fresh = await readDirtyState(candidate.path, git, {
+        setupSymlinks: readSymlinkDirectories(candidate.repoRoot),
+      });
       if (fresh.dirty) {
         outcome.error = "became dirty after it was listed; nothing was deleted";
         steps.push({

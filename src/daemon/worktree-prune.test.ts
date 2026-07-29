@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { mkdir } from "node:fs/promises";
@@ -1310,5 +1311,94 @@ describe("A1: a branch with commits made after its PR merged", () => {
       unpublished,
     ]);
     expect(stillReachable.exitCode).toBe(0);
+  });
+});
+
+/**
+ * A `worktree.symlinkDirectories` link is setup, not user work.
+ *
+ * A `node_modules/` gitignore pattern is DIRECTORY-only, so it does not match
+ * a symlink of that name and git reports `?? node_modules`. Confirmed against
+ * the real repo, where every Claude-Code-created worktree reports exactly
+ * that, which meant the prune list demanded the uncommitted-work opt-in for a
+ * worktree whose only "work" was a link the tooling made itself.
+ */
+describe("setup symlinks are not dirt", () => {
+  async function repoWithSymlinkedWorktree(name: string): Promise<{
+    repo: string;
+    wt: string;
+  }> {
+    const { repo } = await makeRepo(name);
+    mkdirSync(join(repo, ".claude"), { recursive: true });
+    writeFileSync(
+      join(repo, ".claude", "settings.json"),
+      JSON.stringify({ worktree: { symlinkDirectories: ["node_modules"] } }),
+    );
+    writeFileSync(join(repo, ".gitignore"), "node_modules/\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-qm", "config"]);
+    mkdirSync(join(repo, "node_modules"), { recursive: true });
+
+    const wt = await addWorktree(repo, "feat/linked");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/linked"]);
+    symlinkSync(join(repo, "node_modules"), join(wt, "node_modules"));
+    return { repo, wt };
+  }
+
+  it("does not report a configured symlink as dirty", async () => {
+    const { repo, wt } = await repoWithSymlinkedWorktree("setup-symlink");
+    // Without the exemption git calls this untracked, which is the bug.
+    const raw = await readDirtyState(wt);
+    expect(raw.untracked).toBe(1);
+
+    const exempt = await readDirtyState(wt, undefined, {
+      setupSymlinks: ["node_modules"],
+    });
+
+    expect(exempt.untracked).toBe(0);
+    expect(exempt.dirty).toBe(false);
+    void repo;
+  });
+
+  it("still counts a REAL directory of the same name", async () => {
+    const { repo } = await makeRepo("real-dir");
+    const wt = await addWorktree(repo, "feat/real");
+    mkdirSync(join(wt, "node_modules"), { recursive: true });
+    writeFileSync(join(wt, "node_modules", "thing.js"), "x\n");
+
+    const state = await readDirtyState(wt, undefined, {
+      setupSymlinks: ["node_modules"],
+    });
+
+    // Not a symlink, so the exemption must not apply.
+    expect(state.dirty).toBe(true);
+  });
+
+  it("still counts a symlink the repo did not configure", async () => {
+    const { repo } = await makeRepo("unconfigured");
+    const wt = await addWorktree(repo, "feat/other");
+    symlinkSync(join(repo, "README.md"), join(wt, "somewhere-else"));
+
+    const state = await readDirtyState(wt, undefined, {
+      setupSymlinks: ["node_modules"],
+    });
+
+    expect(state.dirty).toBe(true);
+  });
+
+  it("lets a symlinked worktree prune without a dirty opt-in", async () => {
+    const { repo, wt } = await repoWithSymlinkedWorktree("prune-symlinked");
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+    expect(scan.candidates[0]?.dirty).toBe(false);
+    const result = await runPrune(scan.candidates, {
+      stateFiles: [],
+      log: () => {},
+    });
+
+    expect(result.outcomes[0].removed).toBe(true);
+    expect(existsSync(wt)).toBe(false);
+    // The link was followed by nobody: the main checkout keeps its directory.
+    expect(existsSync(join(repo, "node_modules"))).toBe(true);
   });
 });
