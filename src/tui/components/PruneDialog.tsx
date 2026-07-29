@@ -31,6 +31,12 @@ type Phase = "loading" | "list" | "confirm" | "running" | "done" | "error";
 interface PruneDialogProps {
   /** Main checkout to scope the scan to; null scans every known repo. */
   repo: string | null;
+  /**
+   * Sidebar widths (~40 cols) truncate the full hint line, and what gets cut
+   * is the end — including the live "prune N" count, which is exactly the
+   * feedback that tells the user a dirty row is being held back.
+   */
+  compact?: boolean;
   onClose: () => void;
 }
 
@@ -382,7 +388,9 @@ export const PruneDialog: Component<PruneDialogProps> = (props) => {
       <box justifyContent="center" width="100%" height={1}>
         <Show when={phase() === "list"}>
           <text fg={theme.overlay}>
-            {`j/k move · space select · a all clean · D include dirty · enter prune ${effective().length} · q close`}
+            {props.compact
+              ? `space pick · D dirty · enter ${effective().length} · q`
+              : `j/k move · space select · a all clean · D include dirty · enter prune ${effective().length} · q close`}
           </text>
         </Show>
         <Show when={phase() === "confirm"}>

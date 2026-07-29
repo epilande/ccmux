@@ -1467,6 +1467,7 @@ export function App(props: AppProps) {
           {(prune: () => NonNullable<typeof store.state.prune>) => (
             <PruneDialog
               repo={prune().repo}
+              compact={props.sidebar}
               onClose={store.actions.hidePrune}
             />
           )}
