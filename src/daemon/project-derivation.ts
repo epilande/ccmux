@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from "fs";
-import { dirname, isAbsolute, join, resolve, sep } from "path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "path";
 import { homedir } from "os";
 
 /**
@@ -13,6 +13,55 @@ export interface ProjectInfo {
   isWorktree: boolean;
   /** Root of the main checkout, or null when `cwd` is not in a repo. */
   mainRepoRoot: string | null;
+  /**
+   * Root of the checkout `cwd` sits in — the worktree's own directory for a
+   * linked worktree, the same as `mainRepoRoot` for a main checkout. Null
+   * outside a repo. This, not the cwd's basename, is what names a worktree:
+   * a pane that has `cd`'d into `…/worktrees/parking/src/tui` still belongs
+   * to the worktree `parking`.
+   */
+  worktreeRoot: string | null;
+}
+
+/**
+ * Decide whether a cwd is a linked worktree, and where its main checkout
+ * lives, from one `git rev-parse`'s `--git-dir` and `--git-common-dir`.
+ *
+ * A linked worktree is exactly a cwd whose own git dir is not the repo's
+ * shared common dir; every other checkout, submodule included, has the two
+ * pointing at the same place. That is the definition git itself uses.
+ *
+ * This is git's answer to the same question {@link deriveProjectInfo}
+ * answers by walking `.git` entries — the two live side by side so the
+ * coupling is visible from either one. Prefer this when a `rev-parse` is
+ * already being paid for (the daemon's enrich path); prefer the walk when
+ * spawning git is not an option (the TUI's fabricated invoke rows). They
+ * agree on the layouts the walk covers; see {@link deriveProjectInfo} for
+ * where they don't.
+ *
+ * Both paths are still resolved against `cwd` even though the daemon asks
+ * for `--path-format=absolute`: it costs nothing, and it keeps this function
+ * correct for a caller that didn't pass that flag (git prints a repo root's
+ * git dir as a bare `.git`, and a common dir relative to the cwd).
+ *
+ * `mainRepoRoot` is the parent of the shared `.git` directory, for a main
+ * checkout and a worktree alike. Null for a bare repo, whose common dir is
+ * the repository itself and which has no checkout to point at.
+ */
+export function worktreeFacts(
+  cwd: string,
+  gitDir: string,
+  commonDir: string,
+): { isWorktree: boolean; mainRepoRoot: string | null } {
+  const resolvedGitDir = resolve(cwd, gitDir);
+  const resolvedCommonDir = resolve(cwd, commonDir);
+  return {
+    isWorktree: resolvedGitDir !== resolvedCommonDir,
+    mainRepoRoot:
+      basename(resolvedCommonDir) === ".git"
+        ? dirname(resolvedCommonDir)
+        : null,
+  };
 }
 
 /** Process-wide default cache for {@link deriveProject}. */
@@ -78,9 +127,24 @@ export function deriveProject(
  * {@link deriveProject} plus the worktree facts the walk resolves on the way
  * to the project name, for callers that have no daemon-side git spawn to
  * lean on (the fabricated `ccmux invoke` rows, which exist only on the
- * board). Agrees with the daemon's `rev-parse` detection by construction: a
- * `.git` FILE pointing into `<main>/.git/worktrees/<name>` is exactly the
- * shape that makes git report a git-dir different from the common dir.
+ * board).
+ *
+ * Scope: this recognizes the `.git`-DIRECTORY layouts only — a checkout with
+ * a real `.git` directory, and a worktree whose `.git` file points into a
+ * literal `<main>/.git/worktrees/<name>`. Those are the layouts where it
+ * agrees with {@link worktreeFacts}, git's own answer. It knowingly differs
+ * elsewhere, always by under-claiming rather than inventing a worktree:
+ *
+ * - a worktree of a BARE repo (`clone --bare` + `worktree add`) or of a
+ *   SUBMODULE (`<super>/.git/modules/<sub>/worktrees/<name>`) has no
+ *   `/.git/worktrees/` component, so this reports a plain directory where
+ *   git reports a worktree;
+ * - a worktree whose main repo was MOVED still has a `.git` file naming the
+ *   old path, so this reports a `mainRepoRoot` that no longer exists, where
+ *   git exits non-zero and the daemon reports nothing at all.
+ *
+ * Both cases end at a plain cwd-basename project, which is what this
+ * returned before any of this existed.
  */
 export function deriveProjectInfo(
   cwd: string,
@@ -98,6 +162,7 @@ export function deriveProjectInfo(
     project: cwdBasename(cwd) ?? fallback,
     isWorktree: false,
     mainRepoRoot: null,
+    worktreeRoot: null,
   };
   cache.set(cwd, info);
   return info;
@@ -156,7 +221,12 @@ function resolveGitAwareProject(
         // Main checkout: project = this dir's own basename.
         const project = cwdBasename(dir);
         return project
-          ? { project, isWorktree: false, mainRepoRoot: dir }
+          ? {
+              project,
+              isWorktree: false,
+              mainRepoRoot: dir,
+              worktreeRoot: dir,
+            }
           : null;
       }
       if (stat.isFile()) {
@@ -207,5 +277,8 @@ function resolveWorktreeProject(
 
   const mainRepoRoot = gitdir.slice(0, markerIdx);
   const project = cwdBasename(mainRepoRoot);
-  return project ? { project, isWorktree: true, mainRepoRoot } : null;
+  // The directory holding the `.git` FILE is this worktree's own root.
+  return project
+    ? { project, isWorktree: true, mainRepoRoot, worktreeRoot: gitFileDir }
+    : null;
 }

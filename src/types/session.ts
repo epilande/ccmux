@@ -289,6 +289,14 @@ export interface EnrichedSession extends Session {
    */
   mainRepoRoot: string | null;
   /**
+   * Root of the checkout this session sits in: the worktree's own directory
+   * for a worktree, the main checkout otherwise, `null` outside a repo.
+   * This is what NAMES a worktree — the cwd's basename does not, since a
+   * pane that has `cd`'d into `…/worktrees/parking/src/tui` would otherwise
+   * be labeled as a worktree called `tui`.
+   */
+  worktreeRoot: string | null;
+  /**
    * The `ccmux invoke` invocation id that spawned this session, when it
    * runs inside a `ccmux-invoke-<id>` detached tmux session (the Claude
    * invoke path). Derived at enrich time from the pane's `sessionName`,

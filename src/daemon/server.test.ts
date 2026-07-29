@@ -38,6 +38,8 @@ type ServerInternals = {
   sweepBranchPRs(): void;
   prResolver: PRResolver;
   sweepOffset: number;
+  /** Exposed so a test can expire git facts the way the TTL does. */
+  gitInfoCache: Map<string, unknown>;
   onBranchPRsChanged(cwd: string, branch: string): Promise<void>;
   visibleSessions: Set<string>;
   lastSidebarState: {
@@ -622,7 +624,9 @@ describe("DaemonServer", () => {
       // Installed before the session exists: creating one emits a `change`
       // event the server enriches on its own, which would otherwise prime the
       // cache off-camera.
-      const git = stubGitSpawn({ stdout: "feat/x\n/repo/.git\n/repo/.git\n" });
+      const git = stubGitSpawn({
+        stdout: "feat/x\n/repo\n/repo/.git\n/repo/.git\n",
+      });
 
       try {
         manager.createSession(
@@ -645,7 +649,7 @@ describe("DaemonServer", () => {
     it("keys the PR lookup off the cached branch when one is warm", async () => {
       const { manager, internals } = createServer();
       const git = stubGitSpawn({
-        stdout: "feat/live\n/repo/.git\n/repo/.git\n",
+        stdout: "feat/live\n/repo\n/repo/.git\n/repo/.git\n",
       });
 
       try {
@@ -812,7 +816,7 @@ describe("DaemonServer", () => {
     it("resolves branch, worktree and main repo root from a single git spawn", async () => {
       const { internals } = createServer();
       const git = stubGitSpawn({
-        stdout: "feat/x\n/repo/.git/worktrees/wt\n/repo/.git\n",
+        stdout: "feat/x\n/trees/wt\n/repo/.git/worktrees/wt\n/repo/.git\n",
       });
 
       try {
@@ -821,14 +825,17 @@ describe("DaemonServer", () => {
         expect(enriched.gitBranch).toBe("feat/x");
         expect(enriched.isWorktree).toBe(true);
         expect(enriched.mainRepoRoot).toBe("/repo");
+        expect(enriched.worktreeRoot).toBe("/trees/wt");
         expect(git.argv).toEqual([
           [
             "git",
             "-C",
             "/Users/test/proj",
             "rev-parse",
+            "--path-format=absolute",
             "--abbrev-ref",
             "HEAD",
+            "--show-toplevel",
             "--git-dir",
             "--git-common-dir",
           ],
@@ -843,7 +850,8 @@ describe("DaemonServer", () => {
       // which any repo living under a directory of that name tripped.
       const { internals } = createServer();
       const git = stubGitSpawn({
-        stdout: "main\n/src/worktrees/app/.git\n/src/worktrees/app/.git\n",
+        stdout:
+          "main\n/src/worktrees/app\n/src/worktrees/app/.git\n/src/worktrees/app/.git\n",
       });
 
       try {
@@ -862,7 +870,7 @@ describe("DaemonServer", () => {
       // the raw strings would report this as a worktree.
       const { internals } = createServer();
       const git = stubGitSpawn({
-        stdout: "main\n/Users/test/proj/.git\n../.git\n",
+        stdout: "main\n/Users/test/proj\n/Users/test/proj/.git\n../.git\n",
       });
       const session = fakeSession("s1");
       session.cwd = "/Users/test/proj/src";
@@ -880,7 +888,8 @@ describe("DaemonServer", () => {
     it("treats a submodule's `.git` file gitdir as its own checkout, not a worktree", async () => {
       const { internals } = createServer();
       const git = stubGitSpawn({
-        stdout: "main\n/super/.git/modules/sub\n/super/.git/modules/sub\n",
+        stdout:
+          "main\n/super/sub\n/super/.git/modules/sub\n/super/.git/modules/sub\n",
       });
 
       try {
@@ -898,7 +907,7 @@ describe("DaemonServer", () => {
       const { internals } = createServer();
       // Held in flight so all 20 callers arrive before the first resolves.
       const git = stubGitSpawn({
-        stdout: "main\n/repo/.git\n/repo/.git\n",
+        stdout: "main\n/repo\n/repo/.git\n/repo/.git\n",
         delayMs: 5,
       });
 
@@ -942,6 +951,92 @@ describe("DaemonServer", () => {
         await internals.enrichSession(fakeSession("s2"));
 
         expect(git.argv).toHaveLength(1);
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("reports nothing when git echoes a flag it doesn't understand", async () => {
+      // `rev-parse` prints an unsupported option back verbatim AND exits 0,
+      // so an older git (or a shim that drops unknown flags) would hand us
+      // `--git-common-dir` as a "path" that compares unequal to the git dir
+      // - marking every session on the machine a worktree. Weaker than the
+      // substring test this replaced, so it is gated explicitly.
+      const { internals } = createServer();
+      const git = stubGitSpawn({
+        stdout: "main\n--show-toplevel\n--git-dir\n--git-common-dir\n",
+      });
+
+      try {
+        const enriched = await internals.enrichSession(fakeSession("s1"));
+
+        expect(enriched.isWorktree).toBe(false);
+        expect(enriched.mainRepoRoot).toBeNull();
+        expect(enriched.worktreeRoot).toBeNull();
+        // Falls back to the log-derived branch rather than "main" from a
+        // reply we can't trust.
+        expect(enriched.gitBranch).toBeNull();
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("keeps project and the worktree facts from disagreeing after a topology change", async () => {
+      // The two used to come from caches with different lifetimes: git info
+      // expires after 30s, `deriveProject`'s walk cache never evicts. A cwd
+      // that BECOMES a worktree (git allows `worktree add` into an existing
+      // empty directory) then grouped under the stale name forever while its
+      // label named the new repo - a contradiction only a daemon restart
+      // could clear.
+      const paneCache = new Map<string, TmuxPane>([
+        ["%9", fakePane({ paneId: "%9", currentPath: "/src/scratch" })],
+      ]);
+      const server = createServer(undefined, paneCache).internals;
+
+      const before = stubGitSpawn({
+        stdout: "main\n/src/scratch\n/src/scratch/.git\n/src/scratch/.git\n",
+      });
+      let enriched;
+      try {
+        enriched = await server.enrichSession(fakeSession("s1", "%9"));
+      } finally {
+        before.restore();
+      }
+      expect(enriched.project).toBe("scratch");
+      expect(enriched.isWorktree).toBe(false);
+
+      // Same cwd, now a worktree of `myrepo`. Expire the git cache the way
+      // the TTL does; nothing expires a project cache, which is the point.
+      server.gitInfoCache.clear();
+      const after = stubGitSpawn({
+        stdout:
+          "feat\n/src/scratch\n/repos/myrepo/.git/worktrees/feat\n/repos/myrepo/.git\n",
+      });
+      try {
+        enriched = await server.enrichSession(fakeSession("s1", "%9"));
+      } finally {
+        after.restore();
+      }
+
+      expect(enriched.isWorktree).toBe(true);
+      expect(enriched.mainRepoRoot).toBe("/repos/myrepo");
+      // The row groups where its label says it lives.
+      expect(enriched.project).toBe("myrepo");
+    });
+
+    it("names the worktree from its root, not from a pane sitting in a subdirectory", async () => {
+      const { internals } = createServer();
+      const git = stubGitSpawn({
+        stdout:
+          "feat\n/trees/parking\n/repo/.git/worktrees/parking\n/repo/.git\n",
+      });
+      const session = fakeSession("s1");
+      session.cwd = "/trees/parking/src/tui";
+
+      try {
+        const enriched = await internals.enrichSession(session);
+
+        expect(enriched.worktreeRoot).toBe("/trees/parking");
       } finally {
         git.restore();
       }

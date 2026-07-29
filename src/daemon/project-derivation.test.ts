@@ -5,6 +5,7 @@ import { join, basename, relative } from "path";
 import {
   deriveProject,
   deriveProjectInfo,
+  worktreeFacts,
   type ProjectInfo,
 } from "./project-derivation";
 
@@ -208,6 +209,7 @@ describe("deriveProject", () => {
       project: basename(main),
       isWorktree: false,
       mainRepoRoot: main,
+      worktreeRoot: main,
     });
 
     const wtMain = tempDir("info-wt-main");
@@ -220,6 +222,8 @@ describe("deriveProject", () => {
     ).toEqual({
       project: basename(wtMain),
       isWorktree: true,
+      // The worktree's own root, which is what NAMES it - not the cwd.
+      worktreeRoot: worktree,
       mainRepoRoot: wtMain,
     });
 
@@ -236,12 +240,42 @@ describe("deriveProject", () => {
       project: basename(submodule),
       isWorktree: false,
       mainRepoRoot: null,
+      worktreeRoot: null,
     });
 
     const plain = tempDir("info-non-git");
     expect(deriveProjectInfo(plain, "fallback", { cache: new Map() })).toEqual({
       project: basename(plain),
       isWorktree: false,
+      mainRepoRoot: null,
+      worktreeRoot: null,
+    });
+  });
+
+  it("differs from git only by under-claiming, on the layouts it doesn't cover", () => {
+    // Both divergences from `worktreeFacts` come from requiring a literal
+    // `/.git/worktrees/` component. Pinned so the scope in the docstring
+    // stays honest rather than aspirational.
+    const bareRoot = tempDir("bare-host");
+    const bare = join(bareRoot, "repo.git");
+    const bareWorktreeGitdir = join(bare, "worktrees", "feat");
+    mkdirSync(bareWorktreeGitdir, { recursive: true });
+    const bareWorktree = tempDir("bare-wt");
+    writeFileSync(
+      join(bareWorktree, ".git"),
+      `gitdir: ${bareWorktreeGitdir}\n`,
+    );
+
+    const walked = deriveProjectInfo(bareWorktree, "fallback", {
+      cache: new Map(),
+    });
+    // The walk sees no `/.git/worktrees/` and falls back to the cwd name...
+    expect(walked.isWorktree).toBe(false);
+    expect(walked.project).toBe(basename(bareWorktree));
+    // ...while git, asked directly, calls it a worktree of a bare repo with
+    // no main checkout to name.
+    expect(worktreeFacts(bareWorktree, bareWorktreeGitdir, bare)).toEqual({
+      isWorktree: true,
       mainRepoRoot: null,
     });
   });

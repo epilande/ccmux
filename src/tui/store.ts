@@ -179,7 +179,8 @@ export const INVOKE_FINISHED_LINGER_MS = 6000;
 export function fabricateInvokeSession(
   event: InvocationStartedEvent,
 ): EnrichedSession {
-  const project = event.project ?? (event.cwd.split("/").pop() || event.agent);
+  // `||`, not `??`: an empty-string project would render a nameless group.
+  const project = event.project || event.cwd.split("/").pop() || event.agent;
   return {
     id: event.invocationId,
     agentType: event.agent,
@@ -210,6 +211,7 @@ export function fabricateInvokeSession(
     paneCwd: null,
     isWorktree: event.isWorktree ?? false,
     mainRepoRoot: event.mainRepoRoot ?? null,
+    worktreeRoot: event.worktreeRoot ?? null,
     originInvocationId: event.invocationId,
     originInvocationStatus: "running",
   };

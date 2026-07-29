@@ -141,6 +141,7 @@ export interface InvocationStartedEvent extends BaseSSEEvent {
   project?: string;
   isWorktree?: boolean;
   mainRepoRoot?: string | null;
+  worktreeRoot?: string | null;
 }
 
 /**

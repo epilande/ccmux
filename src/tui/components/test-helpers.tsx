@@ -29,6 +29,7 @@ export function mockEnrichedSession(
     version: null,
     isWorktree: false,
     mainRepoRoot: null,
+    worktreeRoot: null,
     originInvocationId: null,
     pid: null,
     statusChangedAt: null,

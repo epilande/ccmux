@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { basename } from "node:path";
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -31,7 +31,11 @@ import { capabilitiesFor } from "./invokers/invoker";
 import type { InvokeInput, InvokeResult } from "./invokers/types";
 import type { HookAdapter } from "./hook-adapter";
 import { PRResolver } from "./pr-resolver";
-import { deriveProject, deriveProjectInfo } from "./project-derivation";
+import {
+  deriveProject,
+  deriveProjectInfo,
+  worktreeFacts,
+} from "./project-derivation";
 import {
   searchTranscript,
   MIN_QUERY_LEN,
@@ -86,6 +90,9 @@ interface GitInfo {
   /** Root of the main checkout this cwd's repo hangs off, or null when
    *  unknown (not a repo, or a bare repo with no checkout). */
   mainRepoRoot: string | null;
+  /** Root of the checkout the cwd sits in (`--show-toplevel`): the
+   *  worktree's own directory, or the main checkout when it isn't one. */
+  worktreeRoot: string | null;
 }
 
 interface GitInfoCacheEntry {
@@ -98,43 +105,18 @@ const UNKNOWN_GIT_INFO: GitInfo = {
   branch: null,
   isWorktree: false,
   mainRepoRoot: null,
+  worktreeRoot: null,
 };
 
 /**
- * Decide whether a cwd is a linked worktree, and where its main checkout
- * lives, from one `rev-parse`'s `--git-dir` and `--git-common-dir` output.
- *
- * A linked worktree is exactly a cwd whose own git dir
- * (`<main>/.git/worktrees/<name>`) is not the repo's shared common dir
- * (`<main>/.git`); every other checkout, submodule included, has the two
- * pointing at the same place. That is the definition git itself uses, so it
- * replaces the old `/worktrees/` substring test on `--git-dir`, which
- * false-positived on any repo living under a directory named `worktrees`
- * and could not name the main checkout at all.
- *
- * Both paths are resolved against `cwd` before comparing: git prints either
- * one relative when it can (a repo root reports `.git`, and `--git-common-dir`
- * is relative to the cwd, e.g. `../.git` from a subdirectory), so comparing
- * the raw strings would report a plain checkout as a worktree.
- *
- * `mainRepoRoot` is the parent of the shared `.git` directory, for a main
- * checkout and a worktree alike. Null for a bare repo, whose common dir is
- * the repository itself and which has no checkout to point at.
+ * `git rev-parse` echoes an option it doesn't understand back as a literal
+ * output line AND exits 0, so an older git (or a shim that drops unknown
+ * flags) would otherwise hand us `--git-common-dir` as if it were a path —
+ * which compares unequal to the git dir and marks EVERY session a worktree.
+ * Any answer starting with `--` is therefore unanswerable, not a path.
  */
-export function worktreeFacts(
-  cwd: string,
-  gitDir: string,
-  commonDir: string,
-): { isWorktree: boolean; mainRepoRoot: string | null } {
-  const resolvedGitDir = resolve(cwd, gitDir);
-  const resolvedCommonDir = resolve(cwd, commonDir);
-  return {
-    isWorktree: resolvedGitDir !== resolvedCommonDir,
-    mainRepoRoot:
-      basename(resolvedCommonDir) === ".git"
-        ? dirname(resolvedCommonDir)
-        : null,
-  };
+function isEchoedFlag(line: string): boolean {
+  return line.startsWith("--");
 }
 
 const GIT_INFO_CACHE_TTL_MS = 30_000;
@@ -194,6 +176,7 @@ export function invocationEventToSSE(event: InvocationEvent): SSEEvent {
       project: info.project,
       isWorktree: info.isWorktree,
       mainRepoRoot: info.mainRepoRoot,
+      worktreeRoot: info.worktreeRoot,
     };
   }
   // `finish()` always sets a terminal status before emitting `finished`,
@@ -489,11 +472,20 @@ export class DaemonServer {
   }
 
   /**
-   * Read a cwd's branch, worktree flag and main checkout root with a single
-   * spawn: `rev-parse --abbrev-ref HEAD --git-dir --git-common-dir` prints
-   * all three, one line each, in argument order.
+   * Read a cwd's branch, checkout root, worktree flag and main checkout root
+   * with a single spawn: `rev-parse` prints one line per argument, in
+   * argument order.
    *
-   * Gated on exit 0 AND exactly three lines. The exit-code check is what
+   * `--path-format=absolute` (git >= 2.31) is what makes the two dir answers
+   * comparable. Without it git prints a repo root's git dir as a bare `.git`
+   * and the common dir relative to the cwd, and it resolves those against
+   * its own realpath'd getcwd() while ccmux would resolve them against the
+   * cwd STRING — so a plain checkout reached through a symlinked path could
+   * compare unequal and read as a worktree. An older git doesn't fail on the
+   * flag, it echoes it; the `isEchoedFlag` gate below turns that into "no
+   * git facts" rather than "everything is a worktree".
+   *
+   * Gated on exit 0 AND exactly four lines. The exit-code check is what
    * actually guards against a phantom `HEAD` branch: a bare repo with an
    * unborn HEAD still prints one stdout line per argument ("HEAD" and the
    * literal flags) while exiting 128, so a line-count-only gate would parse
@@ -509,8 +501,10 @@ export class DaemonServer {
         "-C",
         cwd,
         "rev-parse",
+        "--path-format=absolute",
         "--abbrev-ref",
         "HEAD",
+        "--show-toplevel",
         "--git-dir",
         "--git-common-dir",
       ],
@@ -522,10 +516,15 @@ export class DaemonServer {
       proc.exited,
     ]);
     const lines = stdout.trim().split("\n");
-    if (exitCode !== 0 || lines.length !== 3) return UNKNOWN_GIT_INFO;
+    if (exitCode !== 0 || lines.length !== 4) return UNKNOWN_GIT_INFO;
+    const [branch, topLevel, gitDir, commonDir] = lines.map((l) => l.trim());
+    if ([topLevel, gitDir, commonDir].some(isEchoedFlag)) {
+      return UNKNOWN_GIT_INFO;
+    }
     return {
-      branch: lines[0].trim() || null,
-      ...worktreeFacts(cwd, lines[1].trim(), lines[2].trim()),
+      branch: branch || null,
+      worktreeRoot: topLevel || null,
+      ...worktreeFacts(cwd, gitDir, commonDir),
     };
   }
 
@@ -554,16 +553,26 @@ export class DaemonServer {
       ...session,
       tmuxTarget,
       paneCwd,
-      // Re-derived here so `project` and the git facts below are keyed off
-      // the SAME cwd. The stored `project` comes from the log-derived
-      // `session.cwd`, which a pane that `cd`s elsewhere leaves behind: the
-      // row would then group under one repo while showing another's branch
-      // and worktree marker. Costs nothing on the hot path — `deriveProject`
-      // memoizes per cwd, and the daemon already called it for this session.
-      project: deriveProject(effectiveCwd, session.project),
+      // One read, one answer: when git resolved this cwd, the repo name is
+      // the main checkout's basename from that SAME read, so `project` and
+      // the worktree facts below cannot contradict each other.
+      //
+      // Deriving them separately did contradict, and permanently: git info
+      // expires after 30s while `deriveProject`'s cache never evicts, so a
+      // cwd that becomes a worktree after its first enrich (git allows
+      // `worktree add` into an existing empty directory) kept grouping under
+      // the stale name for the daemon's whole life while its label named the
+      // new repo. `deriveProject` remains the fallback for the cwds git
+      // can't answer for (not a repo, bare repo, deleted directory); its
+      // walk may be cold here, since the daemon only ever primed it with
+      // `session.cwd` and this is the pane-preferred cwd.
+      project: gitInfo.mainRepoRoot
+        ? basename(gitInfo.mainRepoRoot)
+        : deriveProject(effectiveCwd, session.project),
       gitBranch,
       isWorktree: gitInfo.isWorktree,
       mainRepoRoot: gitInfo.mainRepoRoot,
+      worktreeRoot: gitInfo.worktreeRoot,
       branchPRs,
       originInvocationId,
     };
