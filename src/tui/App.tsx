@@ -2112,7 +2112,7 @@ export function App(props: AppProps) {
               onFocusField={store.actions.setNewSessionField}
               onSelectAgent={store.actions.setNewSessionAgent}
               onSelectPlacement={store.actions.setNewSessionPlacement}
-          onSelectDestination={store.actions.setNewSessionDestination}
+              onSelectDestination={store.actions.setNewSessionDestination}
               onPromptInput={store.actions.setNewSessionPrompt}
               onSubmit={() => void submitNewSession()}
               onCancel={store.actions.closeNewSessionDialog}

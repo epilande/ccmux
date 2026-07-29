@@ -67,11 +67,7 @@ export type NewSessionPlacement = "window" | "split-h" | "split-v";
  */
 export type NewSessionDestination = "here" | "worktree";
 
-export type NewSessionField =
-  | "agent"
-  | "placement"
-  | "prompt"
-  | "destination";
+export type NewSessionField = "agent" | "placement" | "prompt" | "destination";
 
 /**
  * The dialog's fields, in focus order. Focus movement, which field the
