@@ -117,6 +117,11 @@ function sessionCwd(session: EnrichedSession): string {
   return session.paneCwd ?? session.cwd;
 }
 
+/** Shown when the daemon predates `GET /agents`. Exported for the test that
+ *  pins the wording to the restart the fix actually needs. */
+export const STALE_DAEMON_HINT =
+  "Daemon is out of date - run `ccmux daemon restart`";
+
 /** `POST /spawn`'s `split` for each placement: a new window is no split. */
 const SPAWN_SPLIT: Record<NewSessionPlacement, "h" | "v" | false> = {
   window: false,
@@ -353,12 +358,31 @@ export function App(props: AppProps) {
       });
   }
 
-  function handleRowActivate(item: FlatItem, index: number) {
-    if (
+  /**
+   * Whether an overlay currently owns the screen.
+   *
+   * The keyboard handler returns early for each of these before it reaches
+   * the main switch, so they are already modal for keys. The mouse handlers
+   * read the SAME predicate rather than repeating the list, because the
+   * repeated list is what let two overlays ship modal for the keyboard and
+   * transparent to clicks: neither this dialog nor the prune dialog was
+   * added to it. A centered dialog leaves rows visible above and below, so
+   * a click landing on one is a real click on a real row — in the one-shot
+   * picker that meant switching panes and exiting, silently discarding a
+   * half-filled dialog.
+   */
+  function modalOverlayOpen(): boolean {
+    return (
       store.state.showHelp ||
       store.state.confirmMode ||
-      store.state.previewFocused
-    ) {
+      store.state.previewFocused ||
+      store.state.newSession !== null ||
+      store.state.prune !== null
+    );
+  }
+
+  function handleRowActivate(item: FlatItem, index: number) {
+    if (modalOverlayOpen()) {
       return;
     }
     if (store.state.contextMenu || store.state.groupContextMenu) {
@@ -375,11 +399,7 @@ export function App(props: AppProps) {
     index: number,
     event: MouseEvent,
   ) {
-    if (
-      store.state.showHelp ||
-      store.state.confirmMode ||
-      store.state.previewFocused
-    ) {
+    if (modalOverlayOpen()) {
       return;
     }
     store.actions.setSelectedIndex(index);
@@ -693,6 +713,15 @@ export function App(props: AppProps) {
           error?: string;
         } | null;
         if (!response.ok) {
+          // The daemon is machine-wide and long-lived, so "new client, old
+          // daemon" is the likeliest failure right after an upgrade — and
+          // it presents as a 404, since `/agents` simply isn't routed yet.
+          // A bare "HTTP 404" in the Agent field just looks broken, so name
+          // the cause and the one-line fix (the same restart requirement
+          // docs/architecture.md states for config-added agents).
+          if (response.status === 404) {
+            throw new Error(STALE_DAEMON_HINT);
+          }
           throw new Error(body?.error ?? `HTTP ${response.status}`);
         }
         batch(() => {

@@ -130,9 +130,15 @@ mock.module("./utils/tmux-window-state", () => ({
 // state-file watcher reads it, and reading is harmless.
 const realUiState = await import("../lib/state");
 
+/** Everything the TUI tried to persist, newest last. Also the ordering
+ *  channel for the exit-vs-write test, which pushes its own marker here. */
+const uiStateWrites: unknown[] = [];
+
 mock.module("../lib/state", () => ({
   ...realUiState,
-  setUIState: async () => {},
+  setUIState: async (updates: unknown) => {
+    uiStateWrites.push(updates);
+  },
 }));
 
 mock.module("../lib/startup-timing", () => ({
@@ -142,8 +148,16 @@ mock.module("../lib/startup-timing", () => ({
   resetStartupMarks: () => {},
 }));
 
-const { App } = await import("./App");
+const { App, STALE_DAEMON_HINT } = await import("./App");
 const { setDaemonSocketPath } = await import("./utils/server-guard");
+
+// Stub process.exit so a one-shot picker's exit is observable, not fatal.
+function withExitSpy() {
+  const exitSpy = mock(() => {});
+  const originalExit = process.exit;
+  process.exit = exitSpy as never;
+  return { exitSpy, restore: () => (process.exit = originalExit) };
+}
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup;
@@ -164,6 +178,7 @@ beforeEach(() => {
   openAgentsWindowSpy.mockImplementation(async () => ({ ok: true }));
   resolveLaunchPaneSpy.mockClear();
   resolveLaunchPaneSpy.mockImplementation(async () => "%7");
+  uiStateWrites.length = 0;
   hunkAvailable = true;
   runHunkReviewSpy.mockClear();
   runHunkReviewSpy.mockImplementation(async () => ({ ok: true, notes: [] }));
@@ -1439,14 +1454,6 @@ describe("App pane-switch feedback and server scoping", () => {
     return () => (globalThis.fetch = original);
   }
 
-  // Stub process.exit so a one-shot picker's exit is observable, not fatal.
-  function withExitSpy() {
-    const exitSpy = mock(() => {});
-    const originalExit = process.exit;
-    process.exit = exitSpy as never;
-    return { exitSpy, restore: () => (process.exit = originalExit) };
-  }
-
   function withTmux(socket: string) {
     const original = process.env.TMUX;
     process.env.TMUX = socket;
@@ -2140,11 +2147,13 @@ describe("App new session dialog", () => {
     return { spawns, restore: () => (globalThis.fetch = original) };
   }
 
-  function withExit() {
-    const exitSpy = mock(() => {});
-    const originalExit = process.exit;
-    process.exit = exitSpy as never;
-    return { exitSpy, restore: () => (process.exit = originalExit) };
+  function withOurTmux(socket: string) {
+    const original = process.env.TMUX;
+    process.env.TMUX = socket;
+    return () => {
+      if (original === undefined) delete process.env.TMUX;
+      else process.env.TMUX = original;
+    };
   }
 
   const session = (overrides: Record<string, unknown> = {}) =>
@@ -2247,7 +2256,7 @@ describe("App new session dialog", () => {
 
   it("swallows keys that would otherwise act on the list", async () => {
     const { restore } = withDaemon();
-    const { exitSpy, restore: restoreExit } = withExit();
+    const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
       await openDialog();
       // `q` quits the picker outside the dialog; inside it must not.
@@ -2263,7 +2272,7 @@ describe("App new session dialog", () => {
 
   it("picks an agent by number key", async () => {
     const { spawns, restore } = withDaemon();
-    const { restore: restoreExit } = withExit();
+    const { restore: restoreExit } = withExitSpy();
     try {
       await openDialog();
       setup.mockInput.pressKey("2");
@@ -2296,7 +2305,7 @@ describe("App new session dialog", () => {
 
   it("tab moves to placement, where the number keys pick a split", async () => {
     const { spawns, restore } = withDaemon();
-    const { restore: restoreExit } = withExit();
+    const { restore: restoreExit } = withExitSpy();
     try {
       await openDialog();
       setup.mockInput.pressTab();
@@ -2315,7 +2324,7 @@ describe("App new session dialog", () => {
 
   it("shift-tab walks the fields backwards", async () => {
     const { spawns, restore } = withDaemon();
-    const { restore: restoreExit } = withExit();
+    const { restore: restoreExit } = withExitSpy();
     try {
       await openDialog();
       // agent -> prompt -> placement, then pick the stacked split.
@@ -2337,7 +2346,7 @@ describe("App new session dialog", () => {
 
   it("sends a typed prompt, and lets it contain the option keys", async () => {
     const { spawns, restore } = withDaemon();
-    const { restore: restoreExit } = withExit();
+    const { restore: restoreExit } = withExitSpy();
     try {
       await openDialog();
       setup.mockInput.pressTab();
@@ -2359,7 +2368,7 @@ describe("App new session dialog", () => {
 
   it("spawns with the derived cwd and the launch pane, then exits the picker", async () => {
     const { spawns, restore } = withDaemon();
-    const { exitSpy, restore: restoreExit } = withExit();
+    const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
       await openDialog();
       setup.mockInput.pressEnter();
@@ -2382,7 +2391,7 @@ describe("App new session dialog", () => {
 
   it("sidebar spawns detached and stays open", async () => {
     const { spawns, restore } = withDaemon();
-    const { exitSpy, restore: restoreExit } = withExit();
+    const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
       await openDialog({ sidebar: true });
       setup.mockInput.pressEnter();
@@ -2399,7 +2408,7 @@ describe("App new session dialog", () => {
 
   it("does not spawn twice when Enter is pressed twice", async () => {
     const { spawns, restore } = withDaemon();
-    const { restore: restoreExit } = withExit();
+    const { restore: restoreExit } = withExitSpy();
     try {
       await openDialog();
       setup.mockInput.pressEnter();
@@ -2437,7 +2446,7 @@ describe("App new session dialog", () => {
       spawnStatus: 400,
       spawnBody: { error: "Directory does not exist: /code/myapp" },
     });
-    const { exitSpy, restore: restoreExit } = withExit();
+    const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
       await openDialog();
       setup.mockInput.pressEnter();
@@ -2450,6 +2459,21 @@ describe("App new session dialog", () => {
       expect(exitSpy).not.toHaveBeenCalled();
     } finally {
       restoreExit();
+      restore();
+    }
+  });
+
+  it("explains a 404 as a stale daemon rather than showing HTTP 404", async () => {
+    // A daemon predating GET /agents simply doesn't route it. The daemon is
+    // machine-wide and long-lived, so this is the likeliest failure right
+    // after an upgrade, and a bare status code just reads as broken.
+    const { restore } = withDaemon({ agentsStatus: 404, agents: {} });
+    try {
+      await openDialog();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain(squish(STALE_DAEMON_HINT));
+      expect(frame).not.toContain("HTTP404");
+    } finally {
       restore();
     }
   });
@@ -2467,6 +2491,128 @@ describe("App new session dialog", () => {
     }
   });
 
+  it("refuses to spawn onto a different tmux server", async () => {
+    // withDaemon answers socketPath:null, which leaves the guard fail-open,
+    // so the refusal needs a socket that provably isn't ours.
+    const spawns: unknown[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const href = String(url);
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: "/tmp/some-other-server/default" });
+      }
+      if (href.endsWith("/agents")) return Response.json({ agents: AGENTS });
+      if (href.endsWith("/spawn")) {
+        spawns.push(init?.body);
+        return Response.json({ success: true, paneId: "%99" });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+    const restoreTmux = withOurTmux("/tmp/our-server/default");
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      expect(spawns).toHaveLength(0);
+      expect(exitSpy).not.toHaveBeenCalled();
+      // The toast wraps at this width, so compare with spacing removed.
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("Target pane is on a different tmux server"),
+      );
+    } finally {
+      restoreExit();
+      restoreTmux();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("surfaces a rejected agents fetch and retries on the next open", async () => {
+    // The daemon dying mid-session rejects rather than answering, and the
+    // dialog must not stay permanently empty once it comes back.
+    let failNext = true;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: null });
+      }
+      if (href.endsWith("/agents")) {
+        if (failNext) throw new Error("connection refused");
+        return Response.json({ agents: AGENTS });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+    try {
+      await openDialog();
+      expect(setup.captureCharFrame()).toContain("connection refused");
+
+      // Close, bring the daemon back, reopen: the list is fetched again.
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+      failNext = false;
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("1 Claude");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("surfaces a rejected spawn and keeps the dialog open", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: null });
+      }
+      if (href.endsWith("/agents")) return Response.json({ agents: AGENTS });
+      if (href.endsWith("/spawn")) throw new Error("socket hang up");
+      return Response.json({});
+    }) as unknown as typeof fetch;
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      const frame = setup.captureCharFrame();
+      expect(squish(frame)).toContain("Spawnfailed:sockethangup");
+      expect(frame).toContain("New session");
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      restoreExit();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("records the spawned agent before the picker exits", async () => {
+    // The one-shot picker calls process.exit the instant the spawn lands,
+    // so the write has to be awaited first; a queued one never reaches
+    // disk. Ordering IS the assertion, so both events share one channel.
+    const { restore } = withDaemon();
+    const originalExit = process.exit;
+    process.exit = (() => {
+      uiStateWrites.push("exit");
+    }) as never;
+    try {
+      await openDialog();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(uiStateWrites).toEqual([{ lastSpawnAgent: "codex" }, "exit"]);
+    } finally {
+      process.exit = originalExit;
+      restore();
+    }
+  });
+
   it("offers New session here on a session row's context menu", async () => {
     const { restore } = withDaemon();
     try {
@@ -2476,6 +2622,47 @@ describe("App new session dialog", () => {
       await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
       await setup.renderOnce();
       expect(setup.captureCharFrame()).toContain("New session here");
+    } finally {
+      restore();
+    }
+  });
+
+  it("ignores a row click while the dialog is open", async () => {
+    // The dialog is centered and ~10 rows tall, so rows stay visible above
+    // and below it. Before the modal guard covered this dialog, a click on
+    // one ran activateItem -> selectPane -> process.exit(0): the one-shot
+    // picker quit and threw away a half-filled dialog, prompt and all.
+    const { restore } = withDaemon();
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      await setup.mockMouse.click(5, 1);
+      await setup.renderOnce();
+
+      expect(exitSpy).not.toHaveBeenCalled();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+      // The draft survives the click.
+      expect(setup.captureCharFrame()).toContain("New session");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("ignores a row right-click while the dialog is open", async () => {
+    // A context menu opened underneath would be unreachable: the dialog's
+    // key branch runs before the context-menu branch, so nothing could
+    // dismiss the menu from the keyboard.
+    const { restore } = withDaemon();
+    try {
+      await openDialog();
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await setup.renderOnce();
+
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("New session");
+      expect(frame).not.toContain("New session here");
+      expect(frame).not.toContain("Attach");
     } finally {
       restore();
     }
