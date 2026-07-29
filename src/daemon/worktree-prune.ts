@@ -34,6 +34,7 @@ import {
   resolveBaseRefs,
   runGit,
   type GitRun,
+  type UpstreamState,
   type WorktreeEntry,
 } from "./worktree-git";
 
@@ -272,15 +273,15 @@ export async function scanRepo(
   const repoName = basename(repoRoot);
 
   for (const entry of linked) {
-    const skip = await classifyOne(entry, {
+    const { candidate, skip } = await classifyOne(entry, {
       repoRoot,
       repoName,
       baseRefs,
       upstreams,
       git,
       deps,
-      candidates,
     });
+    if (candidate) candidates.push(candidate);
     if (skip) skipped.push(skip);
   }
 
@@ -291,34 +292,52 @@ interface ClassifyContext {
   repoRoot: string;
   repoName: string;
   baseRefs: string[];
-  upstreams: Map<string, { upstream: string | null; gone: boolean }>;
+  upstreams: Map<string, UpstreamState>;
   git: GitRun;
   deps: ScanDeps;
-  candidates: PruneCandidate[];
+}
+
+/** What one worktree contributed to the scan. */
+interface Classification {
+  candidate?: PruneCandidate;
+  skip?: PruneSkip;
 }
 
 /**
- * Classify one worktree, pushing a candidate onto `ctx.candidates` or
- * returning the skip to report. Returns null for a worktree that is simply
- * still in use, which is the uninteresting majority and stays silent.
+ * The strongest applicable removal reason, in {@link PRUNE_REASONS}
+ * precedence order. Null means nothing proves this worktree is finished.
+ */
+function reasonFor(
+  pr: PRState | null,
+  mergedLocally: boolean,
+  upstreamGone: boolean,
+): PruneReason | null {
+  if (pr?.state === "MERGED") return "pr-merged";
+  if (mergedLocally) return "merged-locally";
+  if (upstreamGone) return "upstream-gone";
+  if (pr?.state === "CLOSED") return "pr-closed";
+  return null;
+}
+
+/**
+ * Classify one worktree into a candidate or a skip to report. Neither means
+ * the worktree is simply still in use, which is the uninteresting majority
+ * and stays silent.
  */
 async function classifyOne(
   entry: WorktreeEntry,
   ctx: ClassifyContext,
-): Promise<PruneSkip | null> {
+): Promise<Classification> {
   const { repoRoot, git, deps } = ctx;
   const path = entry.path;
   const branch = entry.branch;
-  const skip = (reason: string): PruneSkip => ({
-    path,
-    repoRoot,
-    branch,
-    reason,
+  const skip = (reason: string): Classification => ({
+    skip: { path, repoRoot, branch, reason },
   });
 
   // An entry git already considers stale has no working tree left to remove;
   // `git worktree prune` reclaims it, and the prune run does that anyway.
-  if (entry.prunable || !existsSync(path)) return null;
+  if (entry.prunable || !existsSync(path)) return {};
 
   // A lock on a LIVE worktree is a user decision ("don't touch this"), and
   // outranks every removal reason. Stale locks — the ones an interrupted
@@ -327,7 +346,7 @@ async function classifyOne(
   if (entry.locked) return skip("locked");
 
   // Detached HEAD: no branch means no PR, no upstream and no merge to prove.
-  if (!branch) return null;
+  if (!branch) return {};
 
   const sessions = deps.sessionsFor?.(normalizePath(path)) ?? [];
   // A live agent outranks every removal reason: pulling the directory out
@@ -341,43 +360,35 @@ async function classifyOne(
   // An open PR means the work is still in flight, whatever the local refs
   // look like. Checked against the daemon's existing cache first so the
   // common case costs nothing.
-  if (deps.hasOpenPR?.(path, branch)) return null;
+  if (deps.hasOpenPR?.(path, branch)) return {};
 
   const mergedLocally = await isMergedInto(repoRoot, branch, ctx.baseRefs, git);
   const lookupPR = deps.lookupPR ?? ghPRStateLookup;
   const pr = await lookupPR(path, branch);
-  if (pr?.state === "OPEN") return null;
+  if (pr?.state === "OPEN") return {};
 
-  const reason: PruneReason | null =
-    pr?.state === "MERGED"
-      ? "pr-merged"
-      : mergedLocally
-        ? "merged-locally"
-        : upstream.gone
-          ? "upstream-gone"
-          : pr?.state === "CLOSED"
-            ? "pr-closed"
-            : null;
-  if (!reason) return null;
+  const reason = reasonFor(pr, mergedLocally, upstream.gone);
+  if (!reason) return {};
 
   const dirtyState = await readDirtyState(path, git);
-  ctx.candidates.push({
-    path,
-    repoRoot,
-    repoName: ctx.repoName,
-    name: basename(path),
-    branch,
-    reason,
-    detail: detailFor(reason, pr, upstream.upstream, ctx.baseRefs),
-    pr,
-    dirty: dirtyState.dirty,
-    modified: dirtyState.modified,
-    untracked: dirtyState.untracked,
-    branchDeletion: branchDeletionFor(reason),
-    adminDir: readAdminDir(path),
-    sessions,
-  });
-  return null;
+  return {
+    candidate: {
+      path,
+      repoRoot,
+      repoName: ctx.repoName,
+      name: basename(path),
+      branch,
+      reason,
+      detail: detailFor(reason, pr, upstream.upstream, ctx.baseRefs),
+      pr,
+      dirty: dirtyState.dirty,
+      modified: dirtyState.modified,
+      untracked: dirtyState.untracked,
+      branchDeletion: branchDeletionFor(reason),
+      adminDir: readAdminDir(path),
+      sessions,
+    },
+  };
 }
 
 /** Scan several repos, de-duplicating repeated roots. */
@@ -505,8 +516,9 @@ async function defaultClosePane(paneId: string): Promise<PaneCloseResult> {
   return stillThere ? "failed" : "already-gone";
 }
 
-const defaultSleep = (ms: number): Promise<void> =>
-  new Promise((r) => setTimeout(r, ms));
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /**
  * Stop a worktree's agents and close their panes.
@@ -826,6 +838,12 @@ async function reclaimRepoMetadata(
   }
 }
 
+/**
+ * Drop per-directory agent state for the worktrees this run removed and,
+ * under `cleanOrphanState`, the accumulated backlog of entries whose
+ * directory no longer exists — worktrees deleted outside ccmux, which no
+ * other step would ever reach.
+ */
 function cleanState(
   removedPaths: string[],
   options: PruneOptions,
@@ -847,25 +865,4 @@ function cleanState(
     if (result.removed.length > 0 || result.error) results.push(result);
   }
   return results;
-}
-
-/**
- * The `--state`-only path: drop state entries for directories that no longer
- * exist, without touching any repo. This is the accumulated backlog from
- * worktrees deleted outside ccmux, which no other step would ever reach.
- */
-export function pruneOrphanState(
-  options: {
-    dryRun?: boolean;
-    stateFiles?: AgentStateFile[];
-    now?: () => Date;
-  } = {},
-): StateCleanupResult[] {
-  const files = options.stateFiles ?? builtinStateFiles();
-  return files.map((file) =>
-    cleanStateEntries(file, findOrphanEntries(file), {
-      dryRun: options.dryRun,
-      now: options.now,
-    }),
-  );
 }

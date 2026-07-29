@@ -12,8 +12,13 @@
  * touching any of the logic.
  */
 
-import { copyFileSync, existsSync, readFileSync, renameSync } from "node:fs";
-import { writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
 

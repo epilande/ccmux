@@ -18,7 +18,6 @@ import {
 import {
   branchDeletionFor,
   normalizePath,
-  pruneOrphanState,
   runPrune,
   scanRepo,
   trashPathFor,
@@ -630,14 +629,18 @@ describe("agent state cleanup", () => {
     expect(findOrphanEntries(state)).toEqual([join(root, "deleted-worktree")]);
   });
 
-  it("reports orphans without writing under dryRun", () => {
+  it("sweeps the orphan backlog without writing under dryRun", async () => {
     const state = fixtureState({ [join(root, "gone")]: {} });
     const before = readFileSync(state.file, "utf-8");
 
-    const results = pruneOrphanState({ dryRun: true, stateFiles: [state] });
+    const result = await runPrune([], {
+      dryRun: true,
+      cleanOrphanState: true,
+      stateFiles: [state],
+    });
 
-    expect(results[0].removed).toEqual([join(root, "gone")]);
-    expect(results[0].backupPath).toBeNull();
+    expect(result.state[0].removed).toEqual([join(root, "gone")]);
+    expect(result.state[0].backupPath).toBeNull();
     expect(readFileSync(state.file, "utf-8")).toBe(before);
   });
 
