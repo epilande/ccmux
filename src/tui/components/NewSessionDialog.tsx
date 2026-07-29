@@ -14,13 +14,16 @@ import { theme } from "../theme";
 
 /** Width of the label gutter ("Placement" is the longest label). */
 const LABEL_WIDTH = 10;
-const MAX_WIDTH = 58;
+/** Wide enough for the placement row's full labels; see COMPACT_CONTENT_WIDTH. */
+const MAX_WIDTH = 64;
 const MIN_WIDTH = 24;
 /** Rows the dialog spends on everything except the agent list: border (2),
  *  title, blank, placement, prompt, directory, blank, key hints. */
 const CHROME_ROWS = 9;
-/** Below this content width the placement labels are abbreviated. */
-const COMPACT_CONTENT_WIDTH = 40;
+/** Content width the placement row's full labels need (number, brackets,
+ *  and gaps included). Below it the row switches to the short labels and
+ *  the key-hint line drops its middle segment. */
+const COMPACT_CONTENT_WIDTH = 49;
 
 interface PlacementOption {
   value: NewSessionPlacement;
@@ -213,6 +216,15 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 <box width={2}>
                   <text fg={theme.overlay}>{`${index() + 1}`}</text>
                 </box>
+                {/* Brackets, not colour alone: the placements share one row
+                    with no selection gutter. Each bracket gets its own
+                    fixed-width box so choosing an option never reflows the
+                    row, and so the marker survives a colourless terminal. */}
+                <box width={1}>
+                  <text fg={theme.green}>
+                    {option.value === props.draft.placement ? "[" : ""}
+                  </text>
+                </box>
                 <text
                   fg={
                     option.value === props.draft.placement
@@ -222,6 +234,11 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 >
                   {compact() ? option.compactLabel : option.label}
                 </text>
+                <box width={1}>
+                  <text fg={theme.green}>
+                    {option.value === props.draft.placement ? "]" : ""}
+                  </text>
+                </box>
               </box>
             )}
           </For>

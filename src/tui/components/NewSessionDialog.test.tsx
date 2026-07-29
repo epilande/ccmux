@@ -116,18 +116,22 @@ describe("NewSessionDialog", () => {
     expect(frame).not.toContain("> 1 Claude");
   });
 
-  it("offers all three placements", async () => {
-    const frame = await renderDialog({});
-    expect(frame).toContain("1 New window");
-    expect(frame).toContain("2 Split right");
-    expect(frame).toContain("3 Split down");
+  it("offers all three placements and brackets the chosen one", async () => {
+    const frame = await renderDialog({
+      draft: draft({ placement: "split-h" }),
+    });
+    expect(frame).toContain("New window");
+    expect(frame).toContain("[Split right]");
+    expect(frame).toContain("Split down");
+    expect(frame).not.toContain("[New window]");
   });
 
   it("abbreviates the placements when the dialog is narrow", async () => {
     const frame = await renderDialog({ width: 44 });
-    expect(frame).toContain("1 Window");
-    expect(frame).toContain("2 Right");
-    expect(frame).toContain("3 Down");
+    expect(frame).toContain("[Window]");
+    expect(frame).toContain("Right");
+    expect(frame).toContain("Down");
+    expect(frame).not.toContain("Split right");
   });
 
   it("shows the typed prompt", async () => {

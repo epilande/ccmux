@@ -98,10 +98,14 @@ describe("HelpOverlay", () => {
 });
 
 describe("HelpOverlay sidebar mode", () => {
+  // The sidebar help is a stacked (key-above-description) scrollbox, so
+  // "renders all sections" only holds in a viewport tall enough for the
+  // whole list. Height is set past the content rather than to the exact
+  // fit, so adding a shortcut doesn't turn a scroll into a failure.
   async function renderSidebarHelp() {
     setup = await testRender(() => <HelpOverlay sidebar />, {
       width: 100,
-      height: 50,
+      height: 70,
     });
     await setup.renderOnce();
     return setup.captureCharFrame();
@@ -135,7 +139,7 @@ describe("HelpOverlay sidebar mode", () => {
   it("renders all sections in narrow viewport", async () => {
     setup = await testRender(() => <HelpOverlay sidebar />, {
       width: 30,
-      height: 50,
+      height: 70,
     });
     await setup.renderOnce();
     const frame = setup.captureCharFrame();

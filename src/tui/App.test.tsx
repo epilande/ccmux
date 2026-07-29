@@ -43,6 +43,9 @@ const openAgentsWindowSpy = mock(
     ok: true,
   }),
 );
+// The real one spawns `tmux list-panes` against whatever ambient TMUX the
+// runner has, which inside tmux means the developer's own server.
+const resolveLaunchPaneSpy = mock(async (): Promise<string | null> => "%7");
 
 // Spread the real module so other test files reading exports we don't override
 // (e.g. parseRestoreCandidate) still see the real implementation. mock.module
@@ -61,6 +64,7 @@ mock.module("./utils/tmux", () => ({
   notifyActivePane: () => {},
   openAgentAttachWindow: openAgentAttachWindowSpy,
   openAgentsWindow: openAgentsWindowSpy,
+  resolveLaunchPane: resolveLaunchPaneSpy,
 }));
 
 // mock.module is process-wide and keyed by resolved path, which
@@ -146,6 +150,8 @@ beforeEach(() => {
   openAgentAttachWindowSpy.mockImplementation(async () => ({ ok: true }));
   openAgentsWindowSpy.mockClear();
   openAgentsWindowSpy.mockImplementation(async () => ({ ok: true }));
+  resolveLaunchPaneSpy.mockClear();
+  resolveLaunchPaneSpy.mockImplementation(async () => "%7");
   hunkAvailable = true;
   runHunkReviewSpy.mockClear();
   runHunkReviewSpy.mockImplementation(async () => ({ ok: true, notes: [] }));
@@ -2061,5 +2067,420 @@ describe("App review (d)", () => {
     await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
     await setup.renderOnce();
     expect(setup.captureCharFrame()).not.toContain("Review diff");
+  });
+});
+
+describe("App new session dialog", () => {
+  type SpawnBody = {
+    agent?: string;
+    cwd?: string;
+    split?: unknown;
+    callerPane?: string;
+    prompt?: string;
+    detach?: boolean;
+  };
+
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  const AGENTS = [
+    { name: "claude", displayName: "Claude", shortCode: "CC", supportsPrompt: true },
+    { name: "codex", displayName: "Codex", shortCode: "CX", supportsPrompt: true },
+    { name: "pi", displayName: "Pi", shortCode: "PI", supportsPrompt: false },
+  ];
+
+  /**
+   * Route the daemon calls the dialog makes and record the spawn bodies.
+   * `/server-info` answers with a null socket so the same-server guard stays
+   * fail-open (a refusal there would mask every spawn assertion).
+   */
+  function withDaemon(
+    options: {
+      agents?: unknown;
+      agentsStatus?: number;
+      spawnStatus?: number;
+      spawnBody?: unknown;
+    } = {},
+  ) {
+    const spawns: SpawnBody[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const href = String(url);
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: null });
+      }
+      if (href.endsWith("/agents")) {
+        return Response.json(
+          options.agents === undefined
+            ? { agents: AGENTS }
+            : (options.agents as object),
+          { status: options.agentsStatus ?? 200 },
+        );
+      }
+      if (href.endsWith("/spawn")) {
+        spawns.push(JSON.parse(String(init?.body ?? "{}")) as SpawnBody);
+        return Response.json(
+          options.spawnBody ?? { success: true, paneId: "%99" },
+          { status: options.spawnStatus ?? 200 },
+        );
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+    return { spawns, restore: () => (globalThis.fetch = original) };
+  }
+
+  function withExit() {
+    const exitSpy = mock(() => {});
+    const originalExit = process.exit;
+    process.exit = exitSpy as never;
+    return { exitSpy, restore: () => (process.exit = originalExit) };
+  }
+
+  const session = (overrides: Record<string, unknown> = {}) =>
+    mockEnrichedSession({
+      id: "s1",
+      project: "myapp",
+      cwd: "/code/myapp",
+      tmuxPane: "%5",
+      ...overrides,
+    });
+
+  /** Open the dialog and let `/agents` land. */
+  async function openDialog(
+    props: Record<string, unknown> = {},
+    sessions = [session()],
+  ) {
+    await renderApp(120, 24, { groupBy: "none", ...props });
+    sseCallbacks!.onInit(sessions, null);
+    await setup.renderOnce();
+    setup.mockInput.pressKey("n");
+    await settle();
+    await setup.renderOnce();
+  }
+
+  it("opens on n with the selected row's agent and directory", async () => {
+    const { restore } = withDaemon();
+    try {
+      await openDialog({}, [session({ agentType: "codex" })]);
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("New session");
+      expect(frame).toContain("/code/myapp");
+      expect(frame).toContain("> 2 Codex");
+    } finally {
+      restore();
+    }
+  });
+
+  it("prefers the pane's cwd, which follows the agent as it cds", async () => {
+    const { restore } = withDaemon();
+    try {
+      await openDialog({}, [
+        session({ cwd: "/code/myapp", paneCwd: "/code/myapp/packages/core" }),
+      ]);
+      expect(setup.captureCharFrame()).toContain("/code/myapp/packages/core");
+    } finally {
+      restore();
+    }
+  });
+
+  it("falls back to the picker's own directory with no selection", async () => {
+    const { restore } = withDaemon();
+    const originalPwd = process.env.CCMUX_CALLER_PWD;
+    process.env.CCMUX_CALLER_PWD = "/where/the/picker/ran";
+    try {
+      await openDialog({}, []);
+      expect(setup.captureCharFrame()).toContain("/where/the/picker/ran");
+    } finally {
+      if (originalPwd === undefined) delete process.env.CCMUX_CALLER_PWD;
+      else process.env.CCMUX_CALLER_PWD = originalPwd;
+      restore();
+    }
+  });
+
+  it("defaults to the last spawned agent when the context offers none", async () => {
+    const { restore } = withDaemon();
+    try {
+      await openDialog({ lastSpawnAgent: "codex" }, []);
+      expect(setup.captureCharFrame()).toContain("> 2 Codex");
+    } finally {
+      restore();
+    }
+  });
+
+  it("snaps to a real agent when the row's agent isn't spawnable here", async () => {
+    const { restore } = withDaemon();
+    try {
+      // `gemini` was detected by pane scanning but is not on PATH.
+      await openDialog({}, [session({ agentType: "gemini" })]);
+      expect(setup.captureCharFrame()).toContain("> 1 Claude");
+    } finally {
+      restore();
+    }
+  });
+
+  it("closes on escape without spawning", async () => {
+    const { spawns, restore } = withDaemon();
+    try {
+      await openDialog();
+      setup.mockInput.pressEscape();
+      // A bare ESC byte is the prefix of every escape sequence, so the key
+      // parser holds it briefly before deciding it stands alone.
+      await settle(20);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("New session");
+      expect(spawns).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("swallows keys that would otherwise act on the list", async () => {
+    const { restore } = withDaemon();
+    const { exitSpy, restore: restoreExit } = withExit();
+    try {
+      await openDialog();
+      // `q` quits the picker outside the dialog; inside it must not.
+      setup.mockInput.pressKey("q");
+      await setup.renderOnce();
+      expect(exitSpy).not.toHaveBeenCalled();
+      expect(setup.captureCharFrame()).toContain("New session");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("picks an agent by number key", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExit();
+    try {
+      await openDialog();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("> 2 Codex");
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(spawns[0]?.agent).toBe("codex");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("moves the agent selection with j/k and clamps at the ends", async () => {
+    const { restore } = withDaemon();
+    try {
+      await openDialog();
+      setup.mockInput.pressKey("k");
+      await setup.renderOnce();
+      // Already at the top: k is a no-op rather than a wrap to the bottom.
+      expect(setup.captureCharFrame()).toContain("> 1 Claude");
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("> 2 Codex");
+    } finally {
+      restore();
+    }
+  });
+
+  it("tab moves to placement, where the number keys pick a split", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExit();
+    try {
+      await openDialog();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("[Split right]");
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(spawns[0]?.split).toBe("h");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("shift-tab walks the fields backwards", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExit();
+    try {
+      await openDialog();
+      // agent -> prompt -> placement, then pick the stacked split.
+      setup.mockInput.pressTab({ shift: true });
+      await setup.renderOnce();
+      setup.mockInput.pressTab({ shift: true });
+      await setup.renderOnce();
+      setup.mockInput.pressKey("3");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("[Split down]");
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(spawns[0]?.split).toBe("v");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("sends a typed prompt, and lets it contain the option keys", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExit();
+    try {
+      await openDialog();
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("j3k");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(spawns[0]?.prompt).toBe("j3k");
+      // The keys reached the input, not the agent/placement fields.
+      expect(spawns[0]?.agent).toBe("claude");
+      expect(spawns[0]?.split).toBe(false);
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("spawns with the derived cwd and the launch pane, then exits the picker", async () => {
+    const { spawns, restore } = withDaemon();
+    const { exitSpy, restore: restoreExit } = withExit();
+    try {
+      await openDialog();
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]).toMatchObject({
+        agent: "claude",
+        cwd: "/code/myapp",
+        split: false,
+        // callerPane, not target: an explicit target renumbers windows.
+        callerPane: "%7",
+        detach: false,
+      });
+      expect(exitSpy).toHaveBeenCalled();
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("sidebar spawns detached and stays open", async () => {
+    const { spawns, restore } = withDaemon();
+    const { exitSpy, restore: restoreExit } = withExit();
+    try {
+      await openDialog({ sidebar: true });
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(spawns[0]?.detach).toBe(true);
+      expect(exitSpy).not.toHaveBeenCalled();
+      expect(setup.captureCharFrame()).toContain("Spawned Claude");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("does not spawn twice when Enter is pressed twice", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExit();
+    try {
+      await openDialog();
+      setup.mockInput.pressEnter();
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(spawns).toHaveLength(1);
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("refuses a prompt for an agent that cannot take one", async () => {
+    const { spawns, restore } = withDaemon();
+    try {
+      await openDialog();
+      setup.mockInput.pressKey("3"); // pi: supportsPrompt false
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("hi");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(spawns).toHaveLength(0);
+      expect(setup.captureCharFrame()).toContain("can't start with a prompt");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps the dialog open and toasts when the daemon rejects the spawn", async () => {
+    const { restore } = withDaemon({
+      spawnStatus: 400,
+      spawnBody: { error: "Directory does not exist: /code/myapp" },
+    });
+    const { exitSpy, restore: restoreExit } = withExit();
+    try {
+      await openDialog();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      // The toast wraps, so compare with the box drawing and spacing gone.
+      const frame = setup.captureCharFrame();
+      expect(squish(frame)).toContain("Spawnfailed:Directorydoesnotexist");
+      expect(frame).toContain("New session");
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("reports the daemon's error when the agent list cannot be resolved", async () => {
+    const { restore } = withDaemon({
+      agentsStatus: 500,
+      agents: { error: "Failed to resolve agents: bad regex" },
+    });
+    try {
+      await openDialog();
+      expect(setup.captureCharFrame()).toContain("bad regex");
+    } finally {
+      restore();
+    }
+  });
+
+  it("offers New session here on a session row's context menu", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderApp(120, 24, { groupBy: "none" });
+      sseCallbacks!.onInit([session()], null);
+      await setup.renderOnce();
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("New session here");
+    } finally {
+      restore();
+    }
+  });
+
+  it("offers New session here on a group header's context menu", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit([session()], null);
+      await setup.renderOnce();
+      // Row 1 is the group header under the default grouping.
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("New session here");
+    } finally {
+      restore();
+    }
   });
 });

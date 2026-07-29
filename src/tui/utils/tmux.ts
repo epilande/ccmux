@@ -1,4 +1,8 @@
-import { getDaemonUrl, SIDEBAR_PANE_TITLE } from "../../lib/config";
+import {
+  getDaemonUrl,
+  isCcmuxPane,
+  SIDEBAR_PANE_TITLE,
+} from "../../lib/config";
 import { PANE_FIELD_SEP } from "../../lib/tmux-format";
 import { theme } from "../theme";
 
@@ -423,6 +427,64 @@ export async function findRestorePane(): Promise<string | null> {
     const output = await new Response(proc.stdout).text();
     if ((await proc.exited) !== 0) return null;
     return parseRestoreCandidate(output, self);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pick the pane a TUI surface was launched over, from
+ * "#{pane_id}<sep>#{pane_title}<sep>#{pane_active}" lines for its window.
+ *
+ * ccmux's own surfaces are excluded, and that is the point rather than a
+ * detail: a sidebar asked to split "the current pane" would otherwise
+ * halve the 30-column rail it lives in. `selfPane` covers the untitled
+ * cases (a picker run straight from a shell) that the title check misses.
+ * A popup picker is not a pane at all, so it contributes neither.
+ *
+ * Falls back to the first eligible pane when the active one is ccmux's,
+ * and to null when the window holds nothing else — the caller then spawns
+ * without a placement rather than guessing at a foreign window.
+ */
+export function parseLaunchPane(
+  output: string,
+  selfPane: string | null,
+): string | null {
+  let active: string | null = null;
+  let first: string | null = null;
+
+  for (const line of output.split("\n")) {
+    if (!line) continue;
+    const [paneId, title, isActive] = line.split(PANE_FIELD_SEP);
+    if (!paneId || paneId === selfPane) continue;
+    if (isCcmuxPane(title ?? null)) continue;
+    if (first === null) first = paneId;
+    if (isActive === "1") active = paneId;
+  }
+
+  return active ?? first;
+}
+
+/**
+ * Resolve the pane this TUI was launched over, for spawn placement.
+ * Resolved once at launch: by the time the user opens the new-session
+ * dialog, "the current pane" as tmux sees it may be the picker itself.
+ */
+export async function resolveLaunchPane(): Promise<string | null> {
+  if (!process.env.TMUX) return null;
+  try {
+    const proc = Bun.spawn(
+      [
+        "tmux",
+        "list-panes",
+        "-F",
+        ["#{pane_id}", "#{pane_title}", "#{pane_active}"].join(PANE_FIELD_SEP),
+      ],
+      { stdout: "pipe", stderr: "ignore" },
+    );
+    const output = await new Response(proc.stdout).text();
+    if ((await proc.exited) !== 0) return null;
+    return parseLaunchPane(output, process.env.TMUX_PANE ?? null);
   } catch {
     return null;
   }

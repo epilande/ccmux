@@ -10,6 +10,7 @@ interface FooterProps {
   previewFocused?: boolean;
   persistent?: boolean;
   groupBy?: GroupBy;
+  newSessionMode?: boolean;
   reviewable?: boolean;
 }
 
@@ -34,6 +35,11 @@ export const Footer: Component<FooterProps> = (props) => {
         <Match when={props.confirmMode}>
           <text fg={theme.overlay}>y confirm · n/Esc cancel</text>
         </Match>
+        <Match when={props.newSessionMode}>
+          <text fg={theme.overlay}>
+            enter spawn · tab next field · j/k or 1-9 pick · esc cancel
+          </text>
+        </Match>
         <Match when={props.searchMode}>
           <text fg={theme.overlay}>
             type to search · ↑/↓ or ^n/^p nav · enter{" "}
@@ -42,10 +48,10 @@ export const Footer: Component<FooterProps> = (props) => {
         </Match>
         <Match when={true}>
           <text fg={theme.overlay}>
-            j/k nav · enter {props.persistent ? "switch" : "select"} · / search
-            · b group:{props.groupBy ?? DEFAULT_GROUP_BY} · P preview · r
-            restart · x kill{props.reviewable ? " · d review" : ""} · ? help · q
-            quit
+            j/k nav · enter {props.persistent ? "switch" : "select"} · n new ·
+            / search · b group:{props.groupBy ?? DEFAULT_GROUP_BY} · P preview
+            · r restart · x kill{props.reviewable ? " · d review" : ""} · ?
+            help · q quit
           </text>
         </Match>
       </Switch>

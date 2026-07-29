@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+  parseLaunchPane,
   parseRestoreCandidate,
   parseWindowIdByName,
   agentAttachWindowName,
@@ -138,5 +139,59 @@ describe("isSafeAgentShortId", () => {
     expect(isSafeAgentShortId("abc; rm -rf ~")).toBe(false);
     expect(isSafeAgentShortId("a$(whoami)")).toBe(false);
     expect(isSafeAgentShortId("")).toBe(false);
+  });
+});
+
+describe("parseLaunchPane", () => {
+  it("returns the active sibling of a sidebar, never the sidebar itself", () => {
+    const output = [
+      row("%1", "zsh", "1"),
+      row("%2", "ccmux-sidebar", "0"),
+    ].join("\n");
+    expect(parseLaunchPane(output, "%2")).toBe("%1");
+  });
+
+  it("skips the sidebar even when the sidebar is the active pane", () => {
+    // The user is typing in the sidebar, but a spawn must still land in
+    // the main area rather than halving the rail.
+    const output = [
+      row("%1", "zsh", "0"),
+      row("%2", "ccmux-sidebar", "1"),
+    ].join("\n");
+    expect(parseLaunchPane(output, "%2")).toBe("%1");
+  });
+
+  it("returns the active pane for a popup picker, which is not a pane", () => {
+    const output = [
+      row("%1", "zsh", "0"),
+      row("%2", "nvim", "1"),
+    ].join("\n");
+    expect(parseLaunchPane(output, null)).toBe("%2");
+  });
+
+  it("skips self for an untitled picker run straight from a shell", () => {
+    const output = [
+      row("%1", "zsh", "0"),
+      row("%2", "bun", "1"),
+    ].join("\n");
+    expect(parseLaunchPane(output, "%2")).toBe("%1");
+  });
+
+  it("falls back to the first eligible pane when the active one is ccmux's", () => {
+    const output = [
+      row("%1", "ccmux-picker", "1"),
+      row("%2", "zsh", "0"),
+      row("%3", "nvim", "0"),
+    ].join("\n");
+    expect(parseLaunchPane(output, null)).toBe("%2");
+  });
+
+  it("returns null when the window holds nothing but ccmux surfaces", () => {
+    const output = row("%1", "ccmux-sidebar", "1");
+    expect(parseLaunchPane(output, "%1")).toBe(null);
+  });
+
+  it("returns null on empty output", () => {
+    expect(parseLaunchPane("", null)).toBe(null);
   });
 });
