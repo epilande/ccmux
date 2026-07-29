@@ -116,6 +116,12 @@ function formatProjectPath(
   return { prefix, dirname };
 }
 
+/** Last path segment of an absolute path; null for a null/empty path. */
+export function pathTail(path: string | null | undefined): string | null {
+  if (!path) return null;
+  return path.split("/").filter(Boolean).at(-1) ?? null;
+}
+
 /**
  * The repo a worktree row belongs to, for the `<repo>/<worktree>` label.
  * Null for anything that isn't a worktree, and for the case where the two
@@ -128,12 +134,11 @@ function formatProjectPath(
  */
 function worktreeRepoName(
   session: EnrichedSession,
-  dirname: string,
+  worktreeName: string,
 ): string | null {
   if (!session.isWorktree) return null;
-  const repo =
-    session.mainRepoRoot?.split("/").filter(Boolean).at(-1) ?? session.project;
-  if (!repo || repo === dirname) return null;
+  const repo = pathTail(session.mainRepoRoot) ?? session.project;
+  if (!repo || repo === worktreeName) return null;
   return repo;
 }
 
@@ -145,6 +150,12 @@ function worktreeRepoName(
  * worktrees of different repos rendering identically. The repo segment
  * survives compact mode (it is identity, not path context) and, via
  * `repoPrefix`, outranks the worktree name under width pressure.
+ *
+ * The worktree is named from `worktreeRoot` (git's `--show-toplevel`), NOT
+ * from the pane's cwd: a pane sitting in `…/worktrees/parking/src/tui` is
+ * still in the worktree `parking`, and labeling it `ccmux/tui` would invent
+ * a worktree that doesn't exist — with the repo prefix lending that wrong
+ * reading an air of authority the bare path never had.
  */
 function projectCellParts(
   session: EnrichedSession,
@@ -152,8 +163,13 @@ function projectCellParts(
 ): ProjectPathParts & { repoPrefix: boolean } {
   const cwd = session.paneCwd ?? session.cwd;
   const { prefix, dirname } = formatProjectPath(cwd, 2);
-  const repo = worktreeRepoName(session, dirname);
-  if (repo) return { prefix: `${repo}/`, dirname, repoPrefix: true };
+  const worktreeName = session.isWorktree
+    ? (pathTail(session.worktreeRoot) ?? dirname)
+    : dirname;
+  const repo = worktreeRepoName(session, worktreeName);
+  if (repo) {
+    return { prefix: `${repo}/`, dirname: worktreeName, repoPrefix: true };
+  }
   return { prefix: mode === "full" ? prefix : "", dirname, repoPrefix: false };
 }
 

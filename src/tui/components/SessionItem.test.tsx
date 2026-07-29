@@ -133,13 +133,46 @@ describe("SessionItem", () => {
     expect(frame).toContain("ccmux/parking");
   });
 
+  it("names the worktree from its root when the pane sits in a subdirectory", async () => {
+    // A pane that `cd`s into the worktree renders `ccmux/tui` otherwise:
+    // a worktree nobody created, asserted confidently by the repo prefix.
+    const frame = await renderItem({
+      session: mockEnrichedSession({
+        cwd: "/Users/test/Code/ccmux/.claude/worktrees/parking/src/tui",
+        worktreeRoot: "/Users/test/Code/ccmux/.claude/worktrees/parking",
+        mainRepoRoot: "/Users/test/Code/ccmux",
+        project: "ccmux",
+        isWorktree: true,
+      }),
+    });
+    expect(frame).toContain("ccmux/parking");
+    expect(frame).not.toContain("ccmux/tui");
+  });
+
+  it("renders the plain path when the worktree is named after its repo", async () => {
+    // `ccmux/ccmux` says nothing twice; the path is more informative.
+    const frame = await renderItem({
+      session: mockEnrichedSession({
+        cwd: "/Users/test/Code/trees/ccmux",
+        worktreeRoot: "/Users/test/Code/trees/ccmux",
+        mainRepoRoot: "/Users/test/Code/ccmux",
+        project: "ccmux",
+        isWorktree: true,
+      }),
+    });
+    expect(frame).not.toContain("ccmux/ccmux");
+    expect(frame).toContain("trees/ccmux");
+  });
+
   it("labels a worktree from `project` when the daemon sent no repo root", async () => {
-    // Older daemon: no `mainRepoRoot` on the wire, but `project` already
-    // resolves to the main checkout's name for a worktree.
+    // Older daemon: neither field is on the wire at all (absent, not null),
+    // but `project` already resolves to the main checkout's name for a
+    // worktree, and the cwd still ends at the worktree directory.
     const frame = await renderItem({
       session: mockEnrichedSession({
         cwd: "/Users/test/Code/ccmux/.claude/worktrees/parking",
-        mainRepoRoot: null,
+        mainRepoRoot: undefined,
+        worktreeRoot: undefined,
         project: "ccmux",
         isWorktree: true,
       }),
