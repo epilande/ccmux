@@ -406,6 +406,16 @@ export async function resolveBaseRefs(
  * the two apart, since zero commits of your own and every commit already
  * upstream are the same refs.
  *
+ * Matching ANY eligible base tip answers false for ALL of them, rather than
+ * merely dropping that one base from the loop. Per-base skipping leaks in the
+ * ordinary not-yet-pulled state, which this feature's own `fetch --prune`
+ * produces: with local `main` at B and `origin/main` already at C, a worktree
+ * cut from local `main` has tip B, so the `origin/main` iteration sees unequal
+ * tips, asks whether B is an ancestor of C, and gets yes. Since `origin/main`
+ * is resolved BEFORE `main`, the brand-new worktree classified as merged
+ * anyway. Whether the base a branch sits on happens to be behind another base
+ * says nothing about whether its work is finished.
+ *
  * This deliberately also suppresses a branch that was FAST-FORWARD merged and
  * then left where it was. Accepted: `pr-merged` and `upstream-gone` still
  * catch those, and losing a reason costs a cleanup while keeping it cost live
@@ -422,12 +432,18 @@ export async function isMergedInto(
   const branchRef = `refs/heads/${branch}`;
   const tips = await readTips(repoRoot, [branchRef, ...baseRefs], git);
   const branchTip = tips.get(branchRef);
+  // Never call a branch "merged into itself": the default branch's own
+  // worktree would otherwise classify as removable. Applied once, so the
+  // equality rule and the ancestry loop consider the same set of bases.
+  const bases = baseRefs.filter(
+    (base) => !(base === branch || base.endsWith(`/${branch}`)),
+  );
 
-  for (const base of baseRefs) {
-    // Never call a branch "merged into itself": the default branch's own
-    // worktree would otherwise classify as removable.
-    if (base === branch || base.endsWith(`/${branch}`)) continue;
-    if (branchTip && tips.get(base) === branchTip) continue;
+  if (branchTip && bases.some((base) => tips.get(base) === branchTip)) {
+    return false;
+  }
+
+  for (const base of bases) {
     const res = await git(repoRoot, [
       "merge-base",
       "--is-ancestor",

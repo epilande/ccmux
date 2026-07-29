@@ -33,11 +33,13 @@ import {
   type WorktreeSession,
 } from "./worktree-prune";
 import {
+  isMergedInto,
   normalizePath,
   parseWorktreeList,
   readAdminDir,
   readDirtyState,
   readSymlinkDirectories,
+  resolveBaseRefs,
   runGit,
 } from "./worktree-git";
 
@@ -451,6 +453,96 @@ describe("a branch sitting on the base tip is not merged", () => {
     expect(scan.candidates[0]).toMatchObject({
       path: normalizePath(wt),
       branch: "feat/really-done",
+      reason: "merged-locally",
+      branchDeletion: "safe",
+    });
+  });
+});
+
+/**
+ * The same rule with SEVERAL base refs, which is every real repo: local `main`
+ * and `origin/main` both resolve, and `resolveBaseRefs` puts the remote one
+ * first.
+ *
+ * Suppressing tip-equality per base leaks here. In the ordinary not-yet-pulled
+ * state, which this feature's own `fetch --prune` produces, local `main` sits at
+ * B while `origin/main` is already at C. A worktree cut from local `main` has
+ * tip B, so the `origin/main` iteration compares B against C, finds them
+ * unequal, asks whether B is an ancestor of C, and gets yes. The brand new
+ * worktree was classified `merged-locally` before the `main` iteration it does
+ * match was ever reached.
+ */
+describe("a branch on a base tip with several base refs", () => {
+  /**
+   * Local `main` at B with `origin/main` one commit ahead at C, the shape a
+   * fetch leaves when the remote has moved and nobody has pulled.
+   */
+  async function repoWithRemoteAhead(
+    name: string,
+  ): Promise<{ repo: string; localTip: string; remoteTip: string }> {
+    const { repo } = await makeRepo(name);
+    writeFileSync(join(repo, "b.txt"), "b\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-qm", "b"]);
+    await git(repo, ["push", "origin", "main"]);
+    const localTip = await git(repo, ["rev-parse", "HEAD"]);
+    writeFileSync(join(repo, "c.txt"), "c\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-qm", "c"]);
+    await git(repo, ["push", "origin", "main"]);
+    const remoteTip = await git(repo, ["rev-parse", "HEAD"]);
+    // Local main falls back to B; the remote-tracking ref stays at C.
+    await git(repo, ["reset", "--hard", localTip]);
+    return { repo, localTip, remoteTip };
+  }
+
+  it("is not merged when it sits on the base that is behind the remote", async () => {
+    const { repo, localTip, remoteTip } =
+      await repoWithRemoteAhead("multi-base");
+    expect(localTip).not.toBe(remoteTip);
+    expect(await git(repo, ["rev-parse", "origin/main"])).toBe(remoteTip);
+    const path = join(root, "wt", "feat-fresh-multi");
+    await git(repo, [
+      "worktree",
+      "add",
+      "-b",
+      "feat/fresh-multi",
+      path,
+      "main",
+    ]);
+
+    // The ordering is the trap, so it is asserted rather than assumed: the
+    // remote ref is tried first, and B really is an ancestor of C.
+    const baseRefs = await resolveBaseRefs(repo);
+    expect(baseRefs).toEqual(["origin/main", "main"]);
+    expect(
+      (await runGit(repo, ["merge-base", "--is-ancestor", localTip, remoteTip]))
+        .exitCode,
+    ).toBe(0);
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+    expect(scan.candidates).toEqual([]);
+    expect(existsSync(path)).toBe(true);
+    expect(await isMergedInto(repo, "feat/fresh-multi", baseRefs)).toBe(false);
+  });
+
+  // The other half again, at multiple bases: a branch with its own commit,
+  // merged so no base tip equals it, still classifies.
+  it("still classifies a genuinely merged branch in the same repo state", async () => {
+    const { repo } = await repoWithRemoteAhead("multi-base-merged");
+    const wt = await addWorktree(repo, "feat/multi-done");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/multi-done"]);
+    const branchTip = await git(repo, ["rev-parse", "feat/multi-done"]);
+    for (const base of ["main", "origin/main"]) {
+      expect(await git(repo, ["rev-parse", base])).not.toBe(branchTip);
+    }
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+
+    expect(scan.candidates).toHaveLength(1);
+    expect(scan.candidates[0]).toMatchObject({
+      path: normalizePath(wt),
+      branch: "feat/multi-done",
       reason: "merged-locally",
       branchDeletion: "safe",
     });
