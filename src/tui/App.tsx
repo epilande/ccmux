@@ -527,6 +527,52 @@ export function App(props: AppProps) {
     activateItem(item);
   }
 
+  /**
+   * Whether the row whose menu is open has uncommitted work, once the daemon
+   * has said. Null while unknown, and KEYED BY SESSION so a previous row's
+   * answer can never gate a different row's menu.
+   *
+   * Asked lazily, per menu-open, rather than enriched onto every row: this is
+   * one `git status` on an explicit, human-paced action, so it costs nothing
+   * until someone asks and can never be stale. A dirty flag on the board
+   * would mean a git spawn per session per scan, which is the cost the PR
+   * resolver's cache and sweep exist to avoid.
+   */
+  const [menuDirty, setMenuDirty] = createSignal<{
+    sessionId: string;
+    dirty: boolean;
+  } | null>(null);
+
+  /**
+   * Ask whether a row's checkout is dirty, for the menu gate.
+   *
+   * The answer arrives after the menu is already on screen, so the item it
+   * gates is APPENDED LAST (see `sessionMenuItems`). Anywhere else and a row
+   * the user is already reaching for would slide down as this lands — the
+   * same hazard that moved Fork below Restart. There is deliberately no
+   * placeholder or "checking…" row in the meantime: the item is simply
+   * absent, so the menu never shows something that isn't actionable.
+   */
+  function refreshMenuDirty(sessionId: string): void {
+    setMenuDirty(null);
+    fetch(`${getDaemonUrl()}/sessions/${sessionId}/dirty`, {
+      signal: AbortSignal.timeout(5_000),
+    })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const data = (await response.json()) as { dirty?: boolean };
+        // Only apply it if that row's menu is STILL the one open. A slow
+        // answer for a menu the user already dismissed (or reopened on
+        // another row) must not resurrect an item there.
+        if (store.state.contextMenu?.sessionId !== sessionId) return;
+        setMenuDirty({ sessionId, dirty: data.dirty === true });
+      })
+      .catch(() => {
+        // Unreachable daemon, timeout, malformed body: leave it unknown, so
+        // the item stays hidden rather than offering a move that can't run.
+      });
+  }
+
   function handleRowContextMenu(
     item: FlatItem,
     index: number,
@@ -542,6 +588,7 @@ export function App(props: AppProps) {
         event.x,
         event.y,
       );
+      refreshMenuDirty(item.filteredSession.session.id);
     } else {
       store.actions.showGroupContextMenu(item.groupKey, event.x, event.y);
     }
@@ -651,6 +698,26 @@ export function App(props: AppProps) {
     openNewSession({ cwd: sessionCwd(session), agent: session.agentType });
   }
 
+  /**
+   * "Move changes to worktree": open the new-session dialog over this row's
+   * checkout, so the move's destination and agent are already right.
+   *
+   * INCOMPLETE UNTIL #69 LANDS. The issue specifies three more prefills —
+   * destination LOCKED to a new worktree, changes-move enabled, and an
+   * "Untracked files" choice — and all three need the dialog's `destination`
+   * field, which arrives with worktree spawning. They are one call each once
+   * it exists; the gate that decides whether this item is offered at all is
+   * what lives here now.
+   */
+  function contextMenuMoveChanges() {
+    const cm = store.state.contextMenu;
+    if (!cm) return;
+    const session = store.state.sessions.find((s) => s.id === cm.sessionId);
+    store.actions.hideContextMenu();
+    if (!session) return;
+    openNewSession({ cwd: sessionCwd(session), agent: session.agentType });
+  }
+
   function groupContextMenuNewSession() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
@@ -716,6 +783,27 @@ export function App(props: AppProps) {
         ...reviewItem,
       ];
     }
+    // Only once the daemon has confirmed this row has uncommitted work.
+    // Absent while unknown, and absent when clean: an item that offers to
+    // move nothing, or that refuses on click, is the "reads as broken"
+    // outcome hide-don't-disable exists to avoid.
+    const dirty = menuDirty();
+    const moveChangesItem: ContextMenuItem[] =
+      session && dirty?.sessionId === session.id && dirty.dirty
+        ? [
+            {
+              // Must fit ContextMenu's fixed 22-col box on ONE line: the
+              // component computes its height as `items.length + 2`, so a
+              // label that wraps renders two rows and silently breaks the
+              // height (and therefore the clamping) for the whole menu. The
+              // full phrase lives in the dialog this opens.
+              label: "Move changes",
+              hint: "",
+              color: theme.peach,
+              action: contextMenuMoveChanges,
+            },
+          ]
+        : [];
     // Hidden rather than disabled when the agent or the row can't be forked:
     // an item that is only ever there for Claude rows with hooks installed
     // would otherwise read as broken on every other row.
@@ -755,6 +843,12 @@ export function App(props: AppProps) {
       // already hovering the old position.
       ...forkItem,
       ...reviewItem,
+      // ABSOLUTE LAST, and that position is the whole design. Unlike every
+      // item above it, this one arrives ASYNCHRONOUSLY: the menu is already
+      // on screen when the dirty answer lands, so anywhere else it would
+      // shove the items below it down under a cursor that is already moving.
+      // Last means the only thing that can change is empty space.
+      ...moveChangesItem,
     ];
   }
 

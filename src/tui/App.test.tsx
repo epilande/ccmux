@@ -3136,3 +3136,230 @@ describe("App new session dialog", () => {
     }
   });
 });
+
+describe("App move-changes menu gate", () => {
+  /**
+   * The gate is lazy: the dirty answer arrives AFTER the menu is on screen.
+   * These pin the two properties that makes that safe — the item is absent
+   * until the answer lands, and nothing above it moves when it does.
+   */
+  function captureDirty(
+    answer: { dirty: boolean } | "never" | "error" = { dirty: true },
+  ) {
+    const asked: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/dirty")) {
+        asked.push(href);
+        if (answer === "never") return new Promise(() => {}) as Promise<Response>;
+        if (answer === "error") return { ok: false, status: 500 } as Response;
+        return { ok: true, json: async () => answer } as Response;
+      }
+      if (href.includes("/server-info")) {
+        return { ok: true, json: async () => ({ socketPath: null }) } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch;
+    return { asked, restore: () => (globalThis.fetch = original) };
+  }
+
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  async function openMenuOnRow() {
+    await renderApp(120, 24, { groupBy: "none", persistent: true });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "s1",
+          project: "myapp",
+          cwd: "/code/myapp",
+          tmuxPane: "%1",
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+    await setup.renderOnce();
+  }
+
+  /** Rows of the open menu, by the labels visible in the frame. */
+  function menuRows(): { label: string; row: number }[] {
+    // "Review diff" matters most: it is the only row BELOW where an
+    // out-of-place item would be inserted, so leaving it out would make the
+    // no-shift assertion blind to the exact regression it guards.
+    const labels = [
+      "Attach",
+      "New session",
+      "Kill",
+      "Restart",
+      "Review diff",
+      "Move changes",
+    ];
+    return setup
+      .captureCharFrame()
+      .split("\n")
+      .flatMap((line, row) => {
+        const label = labels.find((l) => line.includes(l));
+        return label ? [{ label, row }] : [];
+      });
+  }
+
+  it("asks the daemon only when the menu opens", async () => {
+    const { asked, restore } = captureDirty();
+    try {
+      await openMenuOnRow();
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain("/sessions/s1/dirty");
+    } finally {
+      restore();
+    }
+  });
+
+  it("shows the item once the answer says dirty", async () => {
+    const { restore } = captureDirty({ dirty: true });
+    try {
+      await openMenuOnRow();
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Move changes");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps the item hidden for a clean checkout", async () => {
+    const { restore } = captureDirty({ dirty: false });
+    try {
+      await openMenuOnRow();
+      await settle();
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      // Anchored, so this can't pass by the menu never opening.
+      expect(frame).toContain("Attach");
+      expect(frame).not.toContain("Move changes");
+    } finally {
+      restore();
+    }
+  });
+
+  it("shows no placeholder while the answer is outstanding", async () => {
+    // Deliberately no "checking…" row: the menu never displays something
+    // that isn't actionable.
+    const { restore } = captureDirty("never");
+    try {
+      await openMenuOnRow();
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Attach");
+      expect(frame).not.toContain("Move changes");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps the item hidden when the daemon errors", async () => {
+    const { restore } = captureDirty("error");
+    try {
+      await openMenuOnRow();
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Move changes");
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not move any row already on screen when the item lands", async () => {
+    // THE invariant, and the reason the item is appended last. The answer
+    // arrives after the menu is drawn, so an item inserted anywhere else
+    // would shove the rows below it down under a cursor mid-travel. Asserts
+    // POSITIONS rather than timing, so it outlives whatever the latency is.
+    //
+    // The answer is held open deliberately: a mock that resolves immediately
+    // settles during the render await, so the "before" frame would already
+    // contain the item and the test would prove nothing.
+    let release!: (r: Response) => void;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      if (String(url).includes("/dirty")) {
+        return new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch;
+
+    try {
+      await openMenuOnRow();
+      const before = menuRows();
+      expect(before.length).toBeGreaterThan(2);
+      expect(before.some((r) => r.label === "Move changes")).toBe(false);
+
+      release({ ok: true, json: async () => ({ dirty: true }) } as Response);
+      await settle();
+      await setup.renderOnce();
+      const after = menuRows();
+      expect(after.some((r) => r.label === "Move changes")).toBe(true);
+
+      // Every row that existed before is still at exactly the same y.
+      for (const row of before) {
+        const moved = after.find((r) => r.label === row.label);
+        expect(`${row.label}@${moved?.row}`).toBe(`${row.label}@${row.row}`);
+      }
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("never gates one row's menu with another row's answer", async () => {
+    // A slow answer for a dismissed menu must not resurrect the item
+    // somewhere else.
+    let resolveFirst!: (r: Response) => void;
+    const original = globalThis.fetch;
+    const asked: string[] = [];
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/dirty")) {
+        asked.push(href);
+        if (asked.length === 1) {
+          return new Promise<Response>((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return { ok: true, json: async () => ({ dirty: false }) } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch;
+
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({ id: "s1", project: "a", cwd: "/a", tmuxPane: "%1" }),
+          mockEnrichedSession({ id: "s2", project: "b", cwd: "/b", tmuxPane: "%2" }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      // Open on the first row, then dismiss and open on the second.
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("escape");
+      await setup.renderOnce();
+      await setup.mockMouse.click(5, 2, MouseButtons.RIGHT);
+      await setup.renderOnce();
+
+      // The first row's answer arrives late, and says dirty.
+      resolveFirst({
+        ok: true,
+        json: async () => ({ dirty: true }),
+      } as Response);
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Move changes");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
