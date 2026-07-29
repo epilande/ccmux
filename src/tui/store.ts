@@ -179,7 +179,7 @@ export const INVOKE_FINISHED_LINGER_MS = 6000;
 export function fabricateInvokeSession(
   event: InvocationStartedEvent,
 ): EnrichedSession {
-  const project = event.cwd.split("/").pop() || event.agent;
+  const project = event.project ?? (event.cwd.split("/").pop() || event.agent);
   return {
     id: event.invocationId,
     agentType: event.agent,
@@ -208,8 +208,8 @@ export function fabricateInvokeSession(
     prompts: [],
     tmuxTarget: null,
     paneCwd: null,
-    isWorktree: false,
-    mainRepoRoot: null,
+    isWorktree: event.isWorktree ?? false,
+    mainRepoRoot: event.mainRepoRoot ?? null,
     originInvocationId: event.invocationId,
     originInvocationStatus: "running",
   };

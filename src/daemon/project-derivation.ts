@@ -2,8 +2,21 @@ import { existsSync, readFileSync, statSync } from "fs";
 import { dirname, isAbsolute, join, resolve, sep } from "path";
 import { homedir } from "os";
 
+/**
+ * What the `.git` walk learned about a cwd: its display project name, plus
+ * the worktree facts the same walk already had to resolve to get there.
+ */
+export interface ProjectInfo {
+  /** Display "project" name — see {@link deriveProject}. */
+  project: string;
+  /** Whether `cwd` is inside a linked git worktree. */
+  isWorktree: boolean;
+  /** Root of the main checkout, or null when `cwd` is not in a repo. */
+  mainRepoRoot: string | null;
+}
+
 /** Process-wide default cache for {@link deriveProject}. */
-export const projectCache: Map<string, string> = new Map();
+export const projectCache: Map<string, ProjectInfo> = new Map();
 
 export interface DeriveProjectOptions {
   /**
@@ -12,7 +25,7 @@ export interface DeriveProjectOptions {
    * Callers pass their own `Map` in tests to observe cache population
    * without touching daemon-wide state.
    */
-  cache?: Map<string, string>;
+  cache?: Map<string, ProjectInfo>;
   /**
    * Home directory to stop the upward walk at (never scan above it).
    * Defaults to `os.homedir()`. Overridable for tests, since Bun's
@@ -58,16 +71,36 @@ export function deriveProject(
   fallback: string,
   options: DeriveProjectOptions = {},
 ): string {
+  return deriveProjectInfo(cwd, fallback, options).project;
+}
+
+/**
+ * {@link deriveProject} plus the worktree facts the walk resolves on the way
+ * to the project name, for callers that have no daemon-side git spawn to
+ * lean on (the fabricated `ccmux invoke` rows, which exist only on the
+ * board). Agrees with the daemon's `rev-parse` detection by construction: a
+ * `.git` FILE pointing into `<main>/.git/worktrees/<name>` is exactly the
+ * shape that makes git report a git-dir different from the common dir.
+ */
+export function deriveProjectInfo(
+  cwd: string,
+  fallback: string,
+  options: DeriveProjectOptions = {},
+): ProjectInfo {
   const cache = options.cache ?? projectCache;
 
   const cached = cache.get(cwd);
   if (cached !== undefined) return cached;
 
   const homeDir = options.homeDir ?? homedir();
-  const project =
-    resolveGitAwareProject(cwd, homeDir) ?? cwdBasename(cwd) ?? fallback;
-  cache.set(cwd, project);
-  return project;
+  const resolved = resolveGitAwareProject(cwd, homeDir);
+  const info: ProjectInfo = resolved ?? {
+    project: cwdBasename(cwd) ?? fallback,
+    isWorktree: false,
+    mainRepoRoot: null,
+  };
+  cache.set(cwd, info);
+  return info;
 }
 
 /**
@@ -94,7 +127,10 @@ function cwdBasename(cwd: string): string | null {
  * A session launched AT `$HOME` (cwd === homeDir) still resolves through
  * the probe below, so `$HOME`-is-itself-a-repo keeps its own basename.
  */
-function resolveGitAwareProject(cwd: string, homeDir: string): string | null {
+function resolveGitAwareProject(
+  cwd: string,
+  homeDir: string,
+): ProjectInfo | null {
   if (!isAbsolute(cwd)) return null;
 
   let dir = cwd;
@@ -118,7 +154,10 @@ function resolveGitAwareProject(cwd: string, homeDir: string): string | null {
       }
       if (stat.isDirectory()) {
         // Main checkout: project = this dir's own basename.
-        return cwdBasename(dir);
+        const project = cwdBasename(dir);
+        return project
+          ? { project, isWorktree: false, mainRepoRoot: dir }
+          : null;
       }
       if (stat.isFile()) {
         return resolveWorktreeProject(gitPath, dir);
@@ -146,7 +185,7 @@ function resolveGitAwareProject(cwd: string, homeDir: string): string | null {
 function resolveWorktreeProject(
   gitFilePath: string,
   gitFileDir: string,
-): string | null {
+): ProjectInfo | null {
   let content: string;
   try {
     content = readFileSync(gitFilePath, "utf-8");
@@ -166,6 +205,7 @@ function resolveWorktreeProject(
   const markerIdx = gitdir.lastIndexOf(marker);
   if (markerIdx === -1) return null;
 
-  const mainRoot = gitdir.slice(0, markerIdx);
-  return cwdBasename(mainRoot);
+  const mainRepoRoot = gitdir.slice(0, markerIdx);
+  const project = cwdBasename(mainRepoRoot);
+  return project ? { project, isWorktree: true, mainRepoRoot } : null;
 }

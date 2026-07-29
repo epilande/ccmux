@@ -31,7 +31,7 @@ import { capabilitiesFor } from "./invokers/invoker";
 import type { InvokeInput, InvokeResult } from "./invokers/types";
 import type { HookAdapter } from "./hook-adapter";
 import { PRResolver } from "./pr-resolver";
-import { deriveProject } from "./project-derivation";
+import { deriveProject, deriveProjectInfo } from "./project-derivation";
 import {
   searchTranscript,
   MIN_QUERY_LEN,
@@ -177,6 +177,13 @@ export function invocationEventToSSE(event: InvocationEvent): SSEEvent {
   const { record } = event;
   const timestamp = new Date().toISOString();
   if (event.type === "started") {
+    // Resolved here rather than on the board: a subprocess invoke never
+    // becomes a daemon session, so this event is the only chance to give its
+    // row the same git-aware project the repo's real sessions group under.
+    // Synchronous (a memoized `.git` walk, no spawn) to keep the invocation
+    // stream in strict order with `init` and `session_created`, which the
+    // board's reconcile and Claude-invoke de-dup both depend on.
+    const info = deriveProjectInfo(record.cwd, record.agent);
     return {
       type: "invocation_started",
       timestamp,
@@ -184,6 +191,9 @@ export function invocationEventToSSE(event: InvocationEvent): SSEEvent {
       agent: record.agent,
       cwd: record.cwd,
       startedAt: new Date(record.startedAt).toISOString(),
+      project: info.project,
+      isWorktree: info.isWorktree,
+      mainRepoRoot: info.mainRepoRoot,
     };
   }
   // `finish()` always sets a terminal status before emitting `finished`,

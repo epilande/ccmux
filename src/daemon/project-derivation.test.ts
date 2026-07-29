@@ -2,7 +2,11 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, unlinkSync } from "fs";
 import { tmpdir } from "os";
 import { join, basename, relative } from "path";
-import { deriveProject } from "./project-derivation";
+import {
+  deriveProject,
+  deriveProjectInfo,
+  type ProjectInfo,
+} from "./project-derivation";
 
 const cleanupDirs: string[] = [];
 
@@ -180,10 +184,10 @@ describe("deriveProject", () => {
     const gitFile = join(worktree, ".git");
     writeFileSync(gitFile, `gitdir: ${worktreesDir}\n`);
 
-    const cache = new Map<string, string>();
+    const cache = new Map<string, ProjectInfo>();
     const first = deriveProject(worktree, "fallback", { cache });
     expect(first).toBe(basename(main));
-    expect(cache.get(worktree)).toBe(basename(main));
+    expect(cache.get(worktree)?.project).toBe(basename(main));
 
     // Remove the .git file so a fresh (uncached) walk would find nothing
     // and fall back to the worktree's own basename instead.
@@ -194,13 +198,61 @@ describe("deriveProject", () => {
     expect(second).not.toBe(basename(worktree));
   });
 
+  it("carries the worktree facts the walk already resolved", () => {
+    // The invoke path reads these instead of spawning git, so they have to
+    // agree with the daemon's git-dir vs common-dir answer for each shape.
+    const main = tempDir("info-main");
+    mkdirSync(join(main, ".git"));
+    const mainInfo = deriveProjectInfo(main, "fallback", { cache: new Map() });
+    expect(mainInfo).toEqual({
+      project: basename(main),
+      isWorktree: false,
+      mainRepoRoot: main,
+    });
+
+    const wtMain = tempDir("info-wt-main");
+    const worktreesDir = join(wtMain, ".git", "worktrees", "feature-z");
+    mkdirSync(worktreesDir, { recursive: true });
+    const worktree = tempDir("info-wt");
+    writeFileSync(join(worktree, ".git"), `gitdir: ${worktreesDir}\n`);
+    expect(
+      deriveProjectInfo(worktree, "fallback", { cache: new Map() }),
+    ).toEqual({
+      project: basename(wtMain),
+      isWorktree: true,
+      mainRepoRoot: wtMain,
+    });
+
+    // A submodule's `.git` FILE is not a worktree, and its gitdir names no
+    // checkout root.
+    const superRepo = tempDir("info-super");
+    const moduleGitdir = join(superRepo, ".git", "modules", "sub");
+    mkdirSync(moduleGitdir, { recursive: true });
+    const submodule = tempDir("info-sub");
+    writeFileSync(join(submodule, ".git"), `gitdir: ${moduleGitdir}\n`);
+    expect(
+      deriveProjectInfo(submodule, "fallback", { cache: new Map() }),
+    ).toEqual({
+      project: basename(submodule),
+      isWorktree: false,
+      mainRepoRoot: null,
+    });
+
+    const plain = tempDir("info-non-git");
+    expect(deriveProjectInfo(plain, "fallback", { cache: new Map() })).toEqual({
+      project: basename(plain),
+      isWorktree: false,
+      mainRepoRoot: null,
+    });
+  });
+
   it("uses a separate result per cwd within the same cache", () => {
     const a = tempDir("cache-a");
     mkdirSync(join(a, ".git"));
     const b = tempDir("cache-b");
     mkdirSync(join(b, ".git"));
 
-    const cache = new Map<string, string>();
+    const cache = new Map<string, ProjectInfo>();
     expect(deriveProject(a, "fallback", { cache })).toBe(basename(a));
     expect(deriveProject(b, "fallback", { cache })).toBe(basename(b));
     expect(cache.size).toBe(2);

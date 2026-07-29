@@ -2481,6 +2481,37 @@ describe("invocationEventToSSE", () => {
     expect(typeof event.timestamp).toBe("string");
   });
 
+  it("carries the git-aware project so an invoke row groups with the repo's sessions", () => {
+    // The board fabricates this row and can't walk the filesystem itself, so
+    // an invoke launched from a worktree only groups under the repo (rather
+    // than the worktree's directory name) if the daemon resolves it here.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-invoke-wt-")));
+    try {
+      const main = join(root, "myrepo");
+      const worktree = join(root, "trees", "parking");
+      mkdirSync(join(main, ".git", "worktrees", "parking"), {
+        recursive: true,
+      });
+      mkdirSync(worktree, { recursive: true });
+      writeFileSync(
+        join(worktree, ".git"),
+        `gitdir: ${join(main, ".git", "worktrees", "parking")}\n`,
+      );
+
+      const event = invocationEventToSSE({
+        type: "started",
+        record: { ...runningRecord, cwd: worktree },
+      });
+      if (event.type !== "invocation_started") throw new Error("wrong type");
+
+      expect(event.project).toBe("myrepo");
+      expect(event.isWorktree).toBe(true);
+      expect(event.mainRepoRoot).toBe(main);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("maps a succeeded finish to invocation_finished with durationMs", () => {
     const event = invocationEventToSSE({
       type: "finished",

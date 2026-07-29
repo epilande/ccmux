@@ -129,6 +129,18 @@ export interface InvocationStartedEvent extends BaseSSEEvent {
   cwd: string;
   /** ISO timestamp of admission; the source for the live board age. */
   startedAt: string;
+  /**
+   * The cwd's git-aware project name, worktree flag, and main checkout root,
+   * resolved daemon-side (`deriveProjectInfo`) because the fabricated board
+   * row for a subprocess invoke has no daemon session to be enriched from,
+   * and the resolution walks the filesystem, which must stay out of the TUI
+   * process. Optional only so a board talking to an older daemon still
+   * renders (it falls back to the cwd basename); the daemon always sends
+   * them.
+   */
+  project?: string;
+  isWorktree?: boolean;
+  mainRepoRoot?: string | null;
 }
 
 /**
