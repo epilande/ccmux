@@ -19,6 +19,7 @@ import { createSpawnCommand } from "./commands/spawn";
 import { createInvokeCommand } from "./commands/invoke";
 import { createSidebarCommand } from "./commands/sidebar";
 import { createNotifyCommand } from "./commands/notify";
+import { createWorktreeCommand } from "./commands/worktree";
 
 const program = new Command();
 
@@ -48,5 +49,6 @@ program.addCommand(createSpawnCommand());
 program.addCommand(createInvokeCommand());
 program.addCommand(createSidebarCommand());
 program.addCommand(createNotifyCommand());
+program.addCommand(createWorktreeCommand());
 
 program.parse();
