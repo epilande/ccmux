@@ -1,4 +1,7 @@
 import { describe, it, expect } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
 import { getBuiltinAgent } from "../lib/agents-test-helpers";
 import {
@@ -216,6 +219,109 @@ describe("buildAgentSpawnCommand", () => {
     const run = Bun.spawnSync(["sh", "-c", result.value]);
     expect(run.exitCode).toBe(0);
     expect(run.stdout.toString()).toBe(`[${prompt}]`);
+  });
+
+  it("treats $ replacement patterns in the prompt as literal text", () => {
+    // `String.replace` with a STRING replacement expands `$&`, "$`", "$'",
+    // and `$$` inside the replacement, so a prompt containing them used to
+    // splice parts of the template back into the command. "$`" is the
+    // dangerous one: it inserts everything before the match, which reopens
+    // the quoted word and turns the rest of the prompt into shell syntax.
+    // The payload targets a scratch path and the test asserts it was
+    // never created, so the proof is "no command ran", not just "stdout
+    // looked right". Kept out of the repo so a regression cannot litter
+    // the working tree.
+    const canary = join(mkdtempSync(join(tmpdir(), "spawn-inj-")), "PWNED");
+    try {
+      for (const prompt of [
+        `$\`; touch ${canary}; #`,
+        "$& $& $&",
+        "$'; id; #",
+        "$$",
+        "$`$&$'$$",
+      ]) {
+        const result = buildAgentSpawnCommand({
+          agent: agentWith({ promptCommand: "printf '[%s]' '{prompt}'" }),
+          binary: "printf",
+          prompt,
+        });
+        expect(result.ok).toBe(true);
+        if (!result.ok) continue;
+        // The shell is the real oracle: the agent must receive the prompt
+        // byte for byte, and nothing else may run.
+        const run = Bun.spawnSync(["sh", "-c", result.value]);
+        expect(run.exitCode).toBe(0);
+        expect(run.stdout.toString()).toBe(`[${prompt}]`);
+        expect(existsSync(canary)).toBe(false);
+      }
+    } finally {
+      rmSync(dirname(canary), { recursive: true, force: true });
+    }
+  });
+
+  it("treats $ replacement patterns in the binary and session id as literal", () => {
+    // Same bug class on the other two placeholders. Neither is remote
+    // input, but both come from a config file rather than from ccmux.
+    expect(
+      buildAgentSpawnCommand({
+        agent: agentWith({ promptCommand: "{bin} '{prompt}'" }),
+        binary: "$&bin",
+        prompt: "hi",
+      }),
+    ).toEqual({ ok: true, value: "$&bin 'hi'" });
+
+    expect(
+      buildAgentSpawnCommand({
+        agent: agentWith({ resumeCommand: "codex resume {id}" }),
+        binary: "codex",
+        resume: "$`x",
+      }),
+    ).toEqual({ ok: true, value: "codex resume $`x" });
+  });
+
+  it("refuses a template whose single quotes are nested in double quotes", () => {
+    // The placeholder is immediately wrapped in single quotes, but the
+    // whole word is double-quoted, where `'` is an ordinary character.
+    // Single-quote escaping does nothing there, and `$(...)`/backticks in
+    // the prompt would be expanded by the shell.
+    for (const template of [
+      `sh -c "{bin} '{prompt}'"`,
+      `{bin} --wrap "outer '{prompt}' outer"`,
+    ]) {
+      const result = buildAgentSpawnCommand({
+        agent: agentWith({ promptCommand: template }),
+        binary: "printf",
+        prompt: "$(touch ./should-never-run)",
+      });
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it("refuses a template with unbalanced quotes", () => {
+    // Would leave the pane's shell waiting for a closing quote.
+    for (const template of ["{bin} '{prompt}", `{bin} "x '{prompt}'`]) {
+      expect(
+        buildAgentSpawnCommand({
+          agent: agentWith({ promptCommand: template }),
+          binary: "x",
+          prompt: "hi",
+        }).ok,
+      ).toBe(false);
+    }
+  });
+
+  it("substitutes every occurrence of a placeholder", () => {
+    // A half-substituted template would reach the shell with a literal
+    // `{prompt}` in it.
+    expect(
+      buildAgentSpawnCommand({
+        agent: agentWith({
+          promptCommand: "{bin} --a '{prompt}' --b '{prompt}'",
+        }),
+        binary: "x",
+        prompt: "p",
+      }),
+    ).toEqual({ ok: true, value: "x --a 'p' --b 'p'" });
   });
 
   it("refuses a prompt spawn for an agent with no promptCommand", () => {

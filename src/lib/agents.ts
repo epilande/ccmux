@@ -72,11 +72,12 @@ export interface AgentDef {
   /**
    * Shell command template that starts an INTERACTIVE session with an
    * initial prompt already submitted, used by `POST /spawn`. `{prompt}`
-   * is the prompt text and must be wrapped in single quotes (the spawn
-   * builder escapes for exactly that quoting and refuses a template that
-   * gets it wrong); `{bin}` is the resolved launcher binary, so a
-   * `command` preference or an `executable` override survives the
-   * template.
+   * is the prompt text and must sit in a genuine single-quoted context:
+   * the spawn builder parses the template's quoting the way `sh` does and
+   * refuses anything it cannot prove safe, including single quotes nested
+   * inside double quotes, where the escaping would be inert. `{bin}` is
+   * the resolved launcher binary, so a `command` preference or an
+   * `executable` override survives the template.
    *
    * Undefined means "this agent has no verified interactive-with-prompt
    * invocation", and prompt spawns are refused for it. There is no safe

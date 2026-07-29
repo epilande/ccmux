@@ -39,7 +39,12 @@ So `<binary> --prompt '<text>'`, which ccmux emitted for every agent before this
 
 OpenCode is the one row the help text alone does not settle: its `--prompt` is listed under the default TUI command's options with no explicit "interactive" wording, so it was confirmed by spawning it — the TUI came up, the prompt was submitted and answered, and the session stayed interactive afterwards. Claude (positional) and Gemini (`-i`) were spawned the same way, which live-covers both template shapes.
 
-Only `{prompt}` (mandatory, and it must stay inside single quotes) and `{bin}` (optional, the resolved launcher) are substituted. Agents with no `promptCommand` — including every custom agent that has not declared one — refuse prompt spawns with a 400 rather than guessing.
+Only `{prompt}` (mandatory) and `{bin}` (optional, the resolved launcher) are substituted, and every occurrence of each is replaced. Agents with no `promptCommand` — including every custom agent that has not declared one — refuse prompt spawns with a 400 rather than guessing.
+
+Two quoting rules are enforced in `spawn-command.ts`, both because prompt text is attacker-shaped input that ends up in a shell command typed into a pane:
+
+- Substitution never goes through `String.replace` with a string replacement, which expands `$&`, `` $` ``, `$'`, and `$$` **in the replacement**. A prompt of ``$`; touch ./PWNED; #`` would otherwise splice the preceding template text back in, reopen the quoted word, and execute. Substitution is split/join instead.
+- The template's quoting is parsed the way `sh` reads it, and every `{prompt}` must land in a real single-quoted context with the template balanced. Checking only the adjacent characters is not enough: in `sh -c "{bin} '{prompt}'"` the placeholder looks single-quoted but the enclosing word is double-quoted, where `'` is ordinary, `"` closes the word, and `$(...)` is expanded.
 
 ## Claude-specific caveats
 

@@ -630,9 +630,14 @@ The built-in agents are the happy path: they ship with hook integration for auth
 `promptCommand` is what `ccmux spawn --prompt` types into the new pane. It
 must start an **interactive** session with the prompt submitted, not a
 one-shot/print run. `{prompt}` is the prompt text and has to stay wrapped in
-single quotes (that is the quoting ccmux escapes for; a double-quoted or
-unquoted placeholder is refused). The optional `{bin}` resolves to the
-agent's launcher, so a wrapper binary or `executable` override survives.
+single quotes, because that is the quoting ccmux escapes for. ccmux reads the
+template the way `sh` does and refuses it unless every `{prompt}` lands in a
+real single-quoted context with the template's quotes balanced, so an unquoted
+or double-quoted placeholder is rejected, and so is one whose single quotes sit
+inside double quotes (`sh -c "agent '{prompt}'"`), where `'` is just an
+ordinary character and the escaping would do nothing. The optional `{bin}`
+resolves to the agent's launcher, so a wrapper binary or `executable` override
+survives.
 
 You can also override built-in agent settings by using the agent's name as the key (e.g., `"claude"`, `"codex"`). An override of `notificationActions` (the notification button/reply keystroke map) **replaces the whole map**, it is not merged key by key; it also controls the reply surfaces (`replyOnQuestion`, `replyOnFinished`, `permissionReplyPrelude`, the `plan*` keys, and the `unsafeReplyPattern` reply guard, written as a regex string like `readyPattern`), so any key you leave out is dropped rather than inherited from the built-in default. Copy across every key you still want when you override it. The one exception is `unsafeReplyPattern`: it is carried forward from the built-in as a safety default even when your override omits it, so a partial override can't accidentally re-enable unapproved shell execution through a reply. To disable it on purpose, set an explicit never-match pattern (e.g. `"/(?!x)x/"`).
 

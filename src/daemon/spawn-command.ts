@@ -66,19 +66,89 @@ export function escapeSingleQuoted(value: string): string {
 }
 
 /**
- * A `promptCommand` template is only safe if its `{prompt}` placeholder
- * sits inside single quotes: that is the quoting `escapeSingleQuoted`
- * assumes. A bare or double-quoted placeholder would let prompt text
- * reach the shell as syntax, so a template that gets it wrong is
- * refused rather than silently executed. Kept module-private so the check
- * cannot be used apart from the escaping it presupposes.
+ * Substitute EVERY occurrence of a placeholder with a literal value.
+ *
+ * Deliberately not `String.replace`: with a string replacement, `$&`,
+ * "$`", "$'", and `$$` in the REPLACEMENT are expansion patterns, so a
+ * prompt containing "$`" would splice the text before the match back
+ * into the command — closing the quoted word and handing the rest of the
+ * prompt to the shell as syntax. `join` performs no such expansion.
+ * Replacing every occurrence (rather than the first) also keeps a
+ * literal `{prompt}` out of a template that uses the placeholder twice.
+ */
+export function substituteAll(
+  template: string,
+  placeholder: string,
+  value: string,
+): string {
+  return template.split(placeholder).join(value);
+}
+
+type QuoteState = "none" | "single" | "double";
+
+/**
+ * Walk a template the way `sh` reads it, recording the quoting state at
+ * each `{prompt}` and whether the template ends with every quote closed.
+ * Placeholders are skipped over as inert text, which is exactly what the
+ * substituted values are: the prompt is single-quote escaped, and `{bin}`
+ * is substituted before this runs so the string scanned here is the one
+ * the shell will actually see.
+ */
+function scanPromptPlaceholders(template: string): {
+  balanced: boolean;
+  states: QuoteState[];
+} {
+  const PLACEHOLDER = "{prompt}";
+  let state: QuoteState = "none";
+  const states: QuoteState[] = [];
+
+  for (let i = 0; i < template.length; ) {
+    if (template.startsWith(PLACEHOLDER, i)) {
+      states.push(state);
+      i += PLACEHOLDER.length;
+      continue;
+    }
+    const char = template[i];
+    if (state === "single") {
+      // Single quotes are literal all the way to the closing quote;
+      // backslash has no special meaning inside them.
+      if (char === "'") state = "none";
+      i += 1;
+      continue;
+    }
+    if (char === "\\") {
+      i += 2;
+      continue;
+    }
+    if (state === "none") {
+      if (char === "'") state = "single";
+      else if (char === '"') state = "double";
+    } else if (char === '"') {
+      state = "none";
+    }
+    i += 1;
+  }
+
+  return { balanced: state === "none", states };
+}
+
+/**
+ * A `promptCommand` template is only safe if every `{prompt}` sits in a
+ * genuine single-quoted context, because that is the quoting
+ * `escapeSingleQuoted` produces. Checking only the adjacent characters is
+ * not enough: in `sh -c "{bin} '{prompt}'"` the placeholder is flanked by
+ * single quotes, but the enclosing word is double-quoted, where `'` is an
+ * ordinary character and the escaping is inert — `"` closes the word and
+ * `$(...)` is expanded. Templates come from the user's config file, which
+ * is trusted to name a command but must not be able to turn prompt text
+ * into shell syntax, so anything this cannot prove safe is refused.
+ * Module-private: the check presupposes the escaping it guards.
  */
 function promptPlaceholderIsQuoted(template: string): boolean {
-  const idx = template.indexOf("{prompt}");
-  if (idx < 0) return false;
-  const before = template[idx - 1];
-  const after = template[idx + "{prompt}".length];
-  return before === "'" && after === "'";
+  const { balanced, states } = scanPromptPlaceholders(template);
+  return (
+    balanced && states.length > 0 && states.every((state) => state === "single")
+  );
 }
 
 export interface AgentCommandInput {
@@ -112,7 +182,7 @@ export function buildAgentSpawnCommand(
     return {
       ok: true,
       value: agent.resumeCommand
-        ? agent.resumeCommand.replace("{id}", resume)
+        ? substituteAll(agent.resumeCommand, "{id}", resume)
         : `${binary} --resume ${resume}`,
     };
   }
@@ -127,19 +197,21 @@ export function buildAgentSpawnCommand(
           `Set 'agents.${agent.name}.promptCommand' in ccmux.json (e.g. "{bin} '{prompt}'").`,
       };
     }
-    if (!promptPlaceholderIsQuoted(template)) {
+    // `{bin}` first, so the quoting check runs over the string the shell
+    // will actually see rather than over the un-substituted template.
+    const withBinary = substituteAll(template, "{bin}", binary);
+    if (!promptPlaceholderIsQuoted(withBinary)) {
       return {
         ok: false,
         error:
-          `Invalid promptCommand for agent '${agent.name}': the {prompt} placeholder ` +
-          `must be wrapped in single quotes (e.g. "{bin} '{prompt}'").`,
+          `Invalid promptCommand for agent '${agent.name}': every {prompt} placeholder ` +
+          `must sit inside single quotes that are not themselves nested in double ` +
+          `quotes, and the template's quotes must be balanced (e.g. "{bin} '{prompt}'").`,
       };
     }
     return {
       ok: true,
-      value: template
-        .replace("{bin}", binary)
-        .replace("{prompt}", escapeSingleQuoted(prompt)),
+      value: substituteAll(withBinary, "{prompt}", escapeSingleQuoted(prompt)),
     };
   }
 

@@ -18,6 +18,7 @@ import {
   buildTmuxSpawnArgv,
   normalizeSplit,
   normalizeTarget,
+  substituteAll,
   type SpawnSplit,
 } from "./spawn-command";
 import type { AgentDef } from "../lib/agents";
@@ -1313,7 +1314,7 @@ export class DaemonServer {
         );
       }
       const resumeId = getMarkerKey(session);
-      restartCommand = agent.resumeCommand.replace("{id}", resumeId);
+      restartCommand = substituteAll(agent.resumeCommand, "{id}", resumeId);
     } else {
       const { command = "claude" } = await getPreferences();
       restartCommand = session.nativeSessionId
