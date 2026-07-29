@@ -50,10 +50,41 @@ describe("store invoke synthesis", () => {
     expect(row.originInvocationId).toBe("inv_abcd");
     expect(row.originInvocationStatus).toBe("running");
     expect(row.status).toBe("working");
-    // project mirrors the daemon's basename derivation (createPaneTrackedSession)
+    // Falls back to the cwd basename when the event carries no project
+    // (a daemon older than those fields).
     expect(row.project).toBe("myapp");
     // lastActivityAt is the start time so the age column counts up live
     expect(row.lastActivityAt).toBe("2024-01-15T12:00:00Z");
+  });
+
+  it("groups a worktree invoke with the repo's real sessions", () => {
+    // The daemon resolves the project through the same `deriveProject` real
+    // sessions go through; without it the row would strand itself under the
+    // worktree's directory name for its whole lifetime.
+    const store = createTUIStore({ groupBy: "project" });
+    store.actions.setSessions([
+      mockEnrichedSession({
+        id: "real",
+        project: "myapp",
+        cwd: "/Users/test/Code/myapp",
+      }),
+    ]);
+    store.actions.startInvocation(
+      startEvent({
+        cwd: "/Users/test/Code/trees/parking",
+        project: "myapp",
+        isWorktree: true,
+        mainRepoRoot: "/Users/test/Code/myapp",
+      }),
+    );
+
+    const row = store.state.sessions.find((s) => s.id === "inv_abcd")!;
+    expect(row.project).toBe("myapp");
+    expect(row.isWorktree).toBe(true);
+    expect(row.mainRepoRoot).toBe("/Users/test/Code/myapp");
+    expect(getGroupKey(row, "project")).toBe(
+      getGroupKey(store.state.sessions[0], "project"),
+    );
   });
 
   it("skips synthesizing a row for a claude invoke (skip-and-wait de-dup)", () => {

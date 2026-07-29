@@ -1,4 +1,5 @@
 import { statSync } from "node:fs";
+import { basename } from "node:path";
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -46,6 +47,11 @@ import type { InvokeInput, InvokeResult } from "./invokers/types";
 import type { HookAdapter } from "./hook-adapter";
 import { PRResolver } from "./pr-resolver";
 import {
+  deriveProject,
+  deriveProjectInfo,
+  worktreeFacts,
+} from "./project-derivation";
+import {
   searchTranscript,
   MIN_QUERY_LEN,
   SEARCH_CONCURRENCY,
@@ -92,10 +98,16 @@ type NotificationActionRunner = (
  *  focuses a pane whose session had pending attention. Fail-open. */
 type NotificationRetractFn = (sessionId: string) => Promise<void>;
 
-/** A cwd's git facts, both derived from one `git rev-parse` call. */
+/** A cwd's git facts, all derived from one `git rev-parse` call. */
 interface GitInfo {
   branch: string | null;
   isWorktree: boolean;
+  /** Root of the main checkout this cwd's repo hangs off, or null when
+   *  unknown (not a repo, or a bare repo with no checkout). */
+  mainRepoRoot: string | null;
+  /** Root of the checkout the cwd sits in (`--show-toplevel`): the
+   *  worktree's own directory, or the main checkout when it isn't one. */
+  worktreeRoot: string | null;
 }
 
 interface GitInfoCacheEntry {
@@ -104,7 +116,23 @@ interface GitInfoCacheEntry {
 }
 
 /** A cwd git can't answer for: not a repo, unborn HEAD, deleted dir. */
-const UNKNOWN_GIT_INFO: GitInfo = { branch: null, isWorktree: false };
+const UNKNOWN_GIT_INFO: GitInfo = {
+  branch: null,
+  isWorktree: false,
+  mainRepoRoot: null,
+  worktreeRoot: null,
+};
+
+/**
+ * `git rev-parse` echoes an option it doesn't understand back as a literal
+ * output line AND exits 0, so an older git (or a shim that drops unknown
+ * flags) would otherwise hand us `--git-common-dir` as if it were a path —
+ * which compares unequal to the git dir and marks EVERY session a worktree.
+ * Any answer starting with `--` is therefore unanswerable, not a path.
+ */
+function isEchoedFlag(line: string): boolean {
+  return line.startsWith("--");
+}
 
 const GIT_INFO_CACHE_TTL_MS = 30_000;
 /** How often to sweep visible sessions' (cwd, branch) keys through the
@@ -146,6 +174,13 @@ export function invocationEventToSSE(event: InvocationEvent): SSEEvent {
   const { record } = event;
   const timestamp = new Date().toISOString();
   if (event.type === "started") {
+    // Resolved here rather than on the board: a subprocess invoke never
+    // becomes a daemon session, so this event is the only chance to give its
+    // row the same git-aware project the repo's real sessions group under.
+    // Synchronous (a memoized `.git` walk, no spawn) to keep the invocation
+    // stream in strict order with `init` and `session_created`, which the
+    // board's reconcile and Claude-invoke de-dup both depend on.
+    const info = deriveProjectInfo(record.cwd, record.agent);
     return {
       type: "invocation_started",
       timestamp,
@@ -153,6 +188,10 @@ export function invocationEventToSSE(event: InvocationEvent): SSEEvent {
       agent: record.agent,
       cwd: record.cwd,
       startedAt: new Date(record.startedAt).toISOString(),
+      project: info.project,
+      isWorktree: info.isWorktree,
+      mainRepoRoot: info.mainRepoRoot,
+      worktreeRoot: info.worktreeRoot,
     };
   }
   // `finish()` always sets a terminal status before emitting `finished`,
@@ -255,6 +294,10 @@ export class DaemonServer {
   /** Rotating start index for `sweepBranchPRs`, see its docstring. */
   private sweepOffset = 0;
   private gitInfoCache = new Map<string, GitInfoCacheEntry>();
+  /** Whether the "git echoed our flags back" warning has already been said.
+   *  Instance-scoped, which is per daemon process in production and keeps
+   *  each test's server isolated. */
+  private warnedAboutGitFlags = false;
   /** Coalesces concurrent lookups for one cwd onto a single git spawn. */
   private gitInfoInflight = new Map<string, Promise<GitInfo>>();
   private prResolver: PRResolver;
@@ -448,23 +491,42 @@ export class DaemonServer {
   }
 
   /**
-   * Read a cwd's branch and worktree flag with a single spawn:
-   * `rev-parse --abbrev-ref HEAD --git-dir` prints both, one line each, in
+   * Read a cwd's branch, checkout root, worktree flag and main checkout root
+   * with a single spawn: `rev-parse` prints one line per argument, in
    * argument order.
    *
-   * Gated on exit 0 AND exactly two lines. The exit-code check is what
+   * `--path-format=absolute` (git >= 2.31) is what makes the two dir answers
+   * comparable. Without it git prints a repo root's git dir as a bare `.git`
+   * and the common dir relative to the cwd, and it resolves those against
+   * its own realpath'd getcwd() while ccmux would resolve them against the
+   * cwd STRING — so a plain checkout reached through a symlinked path could
+   * compare unequal and read as a worktree. An older git doesn't fail on the
+   * flag, it echoes it; the `isEchoedFlag` gate below turns that into "no
+   * git facts" rather than "everything is a worktree".
+   *
+   * Gated on exit 0 AND exactly four lines. The exit-code check is what
    * actually guards against a phantom `HEAD` branch: a bare repo with an
-   * unborn HEAD still prints two stdout lines ("HEAD" and a literal
-   * "--git-dir") while exiting 128, so a line-count-only gate would parse
-   * that as a real two-line answer and misreport the branch. The two-line
-   * gate stays as defense-in-depth on top of the exit-code check, not as a
+   * unborn HEAD still prints one stdout line per argument ("HEAD" and the
+   * literal flags) while exiting 128, so a line-count-only gate would parse
+   * that as a real answer and misreport the branch. The line-count gate
+   * stays as defense-in-depth on top of the exit-code check, not as a
    * substitute for it. A detached HEAD in a real repo still reports the
-   * literal `HEAD` (exit 0, two lines), which is pre-existing behavior and
-   * unchanged.
+   * literal `HEAD` (exit 0), which is pre-existing behavior and unchanged.
    */
   private async readGitInfo(cwd: string): Promise<GitInfo> {
     const proc = Bun.spawn(
-      ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD", "--git-dir"],
+      [
+        "git",
+        "-C",
+        cwd,
+        "rev-parse",
+        "--path-format=absolute",
+        "--abbrev-ref",
+        "HEAD",
+        "--show-toplevel",
+        "--git-dir",
+        "--git-common-dir",
+      ],
       // stderr is never read, so don't pay for a pipe on this path.
       { stdout: "pipe", stderr: "ignore" },
     );
@@ -473,10 +535,28 @@ export class DaemonServer {
       proc.exited,
     ]);
     const lines = stdout.trim().split("\n");
-    if (exitCode !== 0 || lines.length !== 2) return UNKNOWN_GIT_INFO;
+    if (exitCode !== 0 || lines.length !== 4) return UNKNOWN_GIT_INFO;
+    const [branch, topLevel, gitDir, commonDir] = lines.map((l) => l.trim());
+    if ([topLevel, gitDir, commonDir].some(isEchoedFlag)) {
+      // Refusing the reply is right, but silently: every row loses its branch
+      // and worktree marker with nothing on screen explaining why. Say it
+      // once — the cause is the git binary, so it is the same answer for
+      // every cwd on this machine and repeating it per lookup would be noise.
+      if (!this.warnedAboutGitFlags) {
+        this.warnedAboutGitFlags = true;
+        console.warn(
+          "ccmux: `git rev-parse` echoed an option back instead of answering it, " +
+            "so branch and worktree info are unavailable. This usually means git is " +
+            "older than 2.31 (no `--path-format`), or a wrapper on PATH is dropping " +
+            "unknown flags. `git --version` should be 2.31 or newer.",
+        );
+      }
+      return UNKNOWN_GIT_INFO;
+    }
     return {
-      branch: lines[0].trim() || null,
-      isWorktree: lines[1].includes("/worktrees/"),
+      branch: branch || null,
+      worktreeRoot: topLevel || null,
+      ...worktreeFacts(cwd, gitDir, commonDir),
     };
   }
 
@@ -505,8 +585,26 @@ export class DaemonServer {
       ...session,
       tmuxTarget,
       paneCwd,
+      // One read, one answer: when git resolved this cwd, the repo name is
+      // the main checkout's basename from that SAME read, so `project` and
+      // the worktree facts below cannot contradict each other.
+      //
+      // Deriving them separately did contradict, and permanently: git info
+      // expires after 30s while `deriveProject`'s cache never evicts, so a
+      // cwd that becomes a worktree after its first enrich (git allows
+      // `worktree add` into an existing empty directory) kept grouping under
+      // the stale name for the daemon's whole life while its label named the
+      // new repo. `deriveProject` remains the fallback for the cwds git
+      // can't answer for (not a repo, bare repo, deleted directory); its
+      // walk may be cold here, since the daemon only ever primed it with
+      // `session.cwd` and this is the pane-preferred cwd.
+      project: gitInfo.mainRepoRoot
+        ? basename(gitInfo.mainRepoRoot)
+        : deriveProject(effectiveCwd, session.project),
       gitBranch,
       isWorktree: gitInfo.isWorktree,
+      mainRepoRoot: gitInfo.mainRepoRoot,
+      worktreeRoot: gitInfo.worktreeRoot,
       branchPRs,
       originInvocationId,
     };

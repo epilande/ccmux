@@ -17,7 +17,13 @@ import { InvocationRegistry } from "./invokers/registry";
 import { stubInvoker } from "./invokers/test-helpers";
 import type { HookAdapter } from "./hook-adapter";
 import { PRResolver } from "./pr-resolver";
-import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  writeFileSync,
+  rmSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import type { sendLiteralToPane, sendPromptToPane } from "./pane-io";
@@ -32,6 +38,8 @@ type ServerInternals = {
   sweepBranchPRs(): void;
   prResolver: PRResolver;
   sweepOffset: number;
+  /** Exposed so a test can expire git facts the way the TTL does. */
+  gitInfoCache: Map<string, unknown>;
   onBranchPRsChanged(cwd: string, branch: string): Promise<void>;
   visibleSessions: Set<string>;
   lastSidebarState: {
@@ -149,6 +157,50 @@ function createServer(
     tracker: attn,
     internals: server as unknown as ServerInternals,
   };
+}
+
+/**
+ * Environment for the real-git fixtures below, hermetic in both directions.
+ *
+ * Identity is supplied explicitly because a CI runner has none in any config
+ * scope and refuses git's implicit fallback ("no email was given and
+ * auto-detection is disabled"), while a developer machine infers one and
+ * commits happily. A fixture that inherits the ambient identity therefore
+ * passes locally and fails on CI, and it fails *late*: the empty commit
+ * leaves HEAD unborn, `worktree add` builds an unborn worktree, and
+ * `readGitInfo`'s exit-code guard correctly reports no git facts — so the
+ * breakage surfaces as a null `mainRepoRoot` several steps from its cause.
+ *
+ * Both config scopes are neutered in the other direction, so a developer's
+ * own settings (`commit.gpgsign`, hooks, templates) can't reach in either.
+ */
+const GIT_FIXTURE_ENV: Record<string, string> = {
+  ...(process.env as Record<string, string>),
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_AUTHOR_NAME: "ccmux test",
+  GIT_AUTHOR_EMAIL: "test@ccmux.invalid",
+  GIT_COMMITTER_NAME: "ccmux test",
+  GIT_COMMITTER_EMAIL: "test@ccmux.invalid",
+};
+
+/**
+ * Run one git setup command for a real-git fixture, throwing on a non-zero
+ * exit. Every fixture command goes through this so a broken setup fails at
+ * the step that broke, naming git's own error, instead of surviving to a
+ * later assertion that reports a misleading value.
+ */
+function runFixtureGit(cwd: string, ...args: string[]): void {
+  const proc = Bun.spawnSync(["git", "-C", cwd, ...args], {
+    env: GIT_FIXTURE_ENV,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (proc.exitCode !== 0) {
+    throw new Error(
+      `fixture setup failed: git ${args.join(" ")} exited ${proc.exitCode}: ${proc.stderr.toString().trim()}`,
+    );
+  }
 }
 
 function fakePane(overrides: Partial<TmuxPane> = {}): TmuxPane {
@@ -572,7 +624,9 @@ describe("DaemonServer", () => {
       // Installed before the session exists: creating one emits a `change`
       // event the server enriches on its own, which would otherwise prime the
       // cache off-camera.
-      const git = stubGitSpawn({ stdout: "feat/x\n/repo/.git\n" });
+      const git = stubGitSpawn({
+        stdout: "feat/x\n/repo\n/repo/.git\n/repo/.git\n",
+      });
 
       try {
         manager.createSession(
@@ -594,7 +648,9 @@ describe("DaemonServer", () => {
 
     it("keys the PR lookup off the cached branch when one is warm", async () => {
       const { manager, internals } = createServer();
-      const git = stubGitSpawn({ stdout: "feat/live\n/repo/.git\n" });
+      const git = stubGitSpawn({
+        stdout: "feat/live\n/repo\n/repo/.git\n/repo/.git\n",
+      });
 
       try {
         manager.createSession(
@@ -757,10 +813,10 @@ describe("DaemonServer", () => {
       expect(enriched.gitBranch).toBeNull();
     });
 
-    it("resolves branch and worktree from a single git spawn", async () => {
+    it("resolves branch, worktree and main repo root from a single git spawn", async () => {
       const { internals } = createServer();
       const git = stubGitSpawn({
-        stdout: "feat/x\n/repo/.git/worktrees/wt\n",
+        stdout: "feat/x\n/trees/wt\n/repo/.git/worktrees/wt\n/repo/.git\n",
       });
 
       try {
@@ -768,17 +824,80 @@ describe("DaemonServer", () => {
 
         expect(enriched.gitBranch).toBe("feat/x");
         expect(enriched.isWorktree).toBe(true);
+        expect(enriched.mainRepoRoot).toBe("/repo");
+        expect(enriched.worktreeRoot).toBe("/trees/wt");
         expect(git.argv).toEqual([
           [
             "git",
             "-C",
             "/Users/test/proj",
             "rev-parse",
+            "--path-format=absolute",
             "--abbrev-ref",
             "HEAD",
+            "--show-toplevel",
             "--git-dir",
+            "--git-common-dir",
           ],
         ]);
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("does not call a repo under a `worktrees/` directory a worktree", async () => {
+      // The old detection was a `/worktrees/` substring test on --git-dir,
+      // which any repo living under a directory of that name tripped.
+      const { internals } = createServer();
+      const git = stubGitSpawn({
+        stdout:
+          "main\n/src/worktrees/app\n/src/worktrees/app/.git\n/src/worktrees/app/.git\n",
+      });
+
+      try {
+        const enriched = await internals.enrichSession(fakeSession("s1"));
+
+        expect(enriched.isWorktree).toBe(false);
+        expect(enriched.mainRepoRoot).toBe("/src/worktrees/app");
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("resolves relative git dirs against the cwd before comparing them", async () => {
+      // Real fixture from a plain checkout's subdirectory: git prints an
+      // absolute --git-dir but a cwd-relative --git-common-dir, so comparing
+      // the raw strings would report this as a worktree.
+      const { internals } = createServer();
+      const git = stubGitSpawn({
+        stdout: "main\n/Users/test/proj\n/Users/test/proj/.git\n../.git\n",
+      });
+      const session = fakeSession("s1");
+      session.cwd = "/Users/test/proj/src";
+
+      try {
+        const enriched = await internals.enrichSession(session);
+
+        expect(enriched.isWorktree).toBe(false);
+        expect(enriched.mainRepoRoot).toBe("/Users/test/proj");
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("treats a submodule's `.git` file gitdir as its own checkout, not a worktree", async () => {
+      const { internals } = createServer();
+      const git = stubGitSpawn({
+        stdout:
+          "main\n/super/sub\n/super/.git/modules/sub\n/super/.git/modules/sub\n",
+      });
+
+      try {
+        const enriched = await internals.enrichSession(fakeSession("s1"));
+
+        expect(enriched.isWorktree).toBe(false);
+        // The common dir is the module dir, not a checkout's `.git`.
+        expect(enriched.mainRepoRoot).toBeNull();
       } finally {
         git.restore();
       }
@@ -787,7 +906,10 @@ describe("DaemonServer", () => {
     it("coalesces concurrent lookups for one cwd onto a single git spawn", async () => {
       const { internals } = createServer();
       // Held in flight so all 20 callers arrive before the first resolves.
-      const git = stubGitSpawn({ stdout: "main\n/repo/.git\n", delayMs: 5 });
+      const git = stubGitSpawn({
+        stdout: "main\n/repo\n/repo/.git\n/repo/.git\n",
+        delayMs: 5,
+      });
 
       try {
         const enriched = await Promise.all(
@@ -834,12 +956,170 @@ describe("DaemonServer", () => {
       }
     });
 
+    it("reports nothing when git echoes a flag it doesn't understand", async () => {
+      // `rev-parse` prints an unsupported option back verbatim AND exits 0,
+      // so an older git (or a shim that drops unknown flags) would hand us
+      // `--git-common-dir` as a "path" that compares unequal to the git dir
+      // - marking every session on the machine a worktree. Weaker than the
+      // substring test this replaced, so it is gated explicitly.
+      const { internals } = createServer();
+      const git = stubGitSpawn({
+        stdout: "main\n--show-toplevel\n--git-dir\n--git-common-dir\n",
+      });
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
+
+      try {
+        const enriched = await internals.enrichSession(fakeSession("s1"));
+
+        expect(enriched.isWorktree).toBe(false);
+        expect(enriched.mainRepoRoot).toBeNull();
+        expect(enriched.worktreeRoot).toBeNull();
+        // Falls back to the log-derived branch rather than "main" from a
+        // reply we can't trust.
+        expect(enriched.gitBranch).toBeNull();
+
+        // Losing every row's branch and worktree marker silently leaves the
+        // user with no way to find out why, so it is said once...
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain("2.31");
+
+        // ...and only once, however many cwds hit the same broken git.
+        internals.gitInfoCache.clear();
+        await internals.enrichSession(fakeSession("s2"));
+        expect(warn).toHaveBeenCalledTimes(1);
+      } finally {
+        warn.mockRestore();
+        git.restore();
+      }
+    });
+
+    it("keeps project and the worktree facts from disagreeing after a topology change", async () => {
+      // The two used to come from caches with different lifetimes: git info
+      // expires after 30s, `deriveProject`'s walk cache never evicts. A cwd
+      // that BECOMES a worktree (git allows `worktree add` into an existing
+      // empty directory) then grouped under the stale name forever while its
+      // label named the new repo - a contradiction only a daemon restart
+      // could clear.
+      const paneCache = new Map<string, TmuxPane>([
+        ["%9", fakePane({ paneId: "%9", currentPath: "/src/scratch" })],
+      ]);
+      const server = createServer(undefined, paneCache).internals;
+
+      const before = stubGitSpawn({
+        stdout: "main\n/src/scratch\n/src/scratch/.git\n/src/scratch/.git\n",
+      });
+      let enriched;
+      try {
+        enriched = await server.enrichSession(fakeSession("s1", "%9"));
+      } finally {
+        before.restore();
+      }
+      expect(enriched.project).toBe("scratch");
+      expect(enriched.isWorktree).toBe(false);
+
+      // Same cwd, now a worktree of `myrepo`. Expire the git cache the way
+      // the TTL does; nothing expires a project cache, which is the point.
+      server.gitInfoCache.clear();
+      const after = stubGitSpawn({
+        stdout:
+          "feat\n/src/scratch\n/repos/myrepo/.git/worktrees/feat\n/repos/myrepo/.git\n",
+      });
+      try {
+        enriched = await server.enrichSession(fakeSession("s1", "%9"));
+      } finally {
+        after.restore();
+      }
+
+      expect(enriched.isWorktree).toBe(true);
+      expect(enriched.mainRepoRoot).toBe("/repos/myrepo");
+      // The row groups where its label says it lives.
+      expect(enriched.project).toBe("myrepo");
+    });
+
+    it("names the worktree from its root, not from a pane sitting in a subdirectory", async () => {
+      const { internals } = createServer();
+      const git = stubGitSpawn({
+        stdout:
+          "feat\n/trees/parking\n/repo/.git/worktrees/parking\n/repo/.git\n",
+      });
+      const session = fakeSession("s1");
+      session.cwd = "/trees/parking/src/tui";
+
+      try {
+        const enriched = await internals.enrichSession(session);
+
+        expect(enriched.worktreeRoot).toBe("/trees/parking");
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("derives project from the same cwd the git facts come from", async () => {
+      // A pane that `cd`s out of the directory the log recorded used to move
+      // the branch and worktree marker (pane cwd) while leaving `project`
+      // (log cwd) behind, so the row grouped under one repo and showed
+      // another's branch.
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-cwd-")));
+      try {
+        const repo = join(root, "other-repo");
+        mkdirSync(join(repo, ".git"), { recursive: true });
+        const paneCache = new Map<string, TmuxPane>([
+          ["%9", fakePane({ paneId: "%9", currentPath: repo })],
+        ]);
+        const { internals } = createServer(undefined, paneCache);
+        const session = fakeSession("s1", "%9");
+
+        const enriched = await internals.enrichSession(session);
+
+        expect(session.project).toBe("proj"); // log-derived, left alone
+        expect(enriched.project).toBe("other-repo");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("tells a real worktree from its main checkout (real git)", async () => {
+      // The stubbed cases above pin the parsing; this one pins the premise —
+      // that `--git-dir` and `--git-common-dir` really do diverge for a
+      // linked worktree and agree for the checkout it was added from.
+      // realpath'd: git records the worktree's gitdir by real path, and on
+      // macOS `/tmp` is a symlink, so the raw mkdtemp path would not match.
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-wt-")));
+      const main = join(root, "repo");
+      const worktree = join(root, "trees", "feature");
+      try {
+        mkdirSync(main);
+        runFixtureGit(main, "init", "-q", "-b", "main");
+        runFixtureGit(main, "commit", "-q", "--allow-empty", "-m", "init");
+        runFixtureGit(main, "worktree", "add", "-q", "-b", "feature", worktree);
+
+        const { internals } = createServer();
+        const mainSession = fakeSession("s1");
+        mainSession.cwd = main;
+        const worktreeSession = fakeSession("s2");
+        worktreeSession.cwd = worktree;
+
+        const enrichedMain = await internals.enrichSession(mainSession);
+        const enrichedWorktree = await internals.enrichSession(worktreeSession);
+
+        expect(enrichedMain.isWorktree).toBe(false);
+        expect(enrichedMain.mainRepoRoot).toBe(main);
+        expect(enrichedWorktree.isWorktree).toBe(true);
+        expect(enrichedWorktree.gitBranch).toBe("feature");
+        // Both checkouts point at the same main root, which is what
+        // worktree management keys off.
+        expect(enrichedWorktree.mainRepoRoot).toBe(main);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it("treats an unborn HEAD (fresh git init) as no branch, not a phantom one", async () => {
       // Real fixture: `git init` exits 128 on `rev-parse` but still prints a
       // lone `HEAD` line, which an ungated parse would show as a branch.
       const dir = mkdtempSync(join(tmpdir(), "ccmux-unborn-"));
       try {
-        Bun.spawnSync(["git", "init", "-q", dir]);
+        runFixtureGit(dir, "init", "-q");
         const { internals } = createServer();
         const session = fakeSession("s1");
         session.cwd = dir;
@@ -2346,6 +2626,37 @@ describe("invocationEventToSSE", () => {
     // epoch-ms startedAt becomes an ISO string on the wire
     expect(event.startedAt).toBe(new Date(1700000000000).toISOString());
     expect(typeof event.timestamp).toBe("string");
+  });
+
+  it("carries the git-aware project so an invoke row groups with the repo's sessions", () => {
+    // The board fabricates this row and can't walk the filesystem itself, so
+    // an invoke launched from a worktree only groups under the repo (rather
+    // than the worktree's directory name) if the daemon resolves it here.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-invoke-wt-")));
+    try {
+      const main = join(root, "myrepo");
+      const worktree = join(root, "trees", "parking");
+      mkdirSync(join(main, ".git", "worktrees", "parking"), {
+        recursive: true,
+      });
+      mkdirSync(worktree, { recursive: true });
+      writeFileSync(
+        join(worktree, ".git"),
+        `gitdir: ${join(main, ".git", "worktrees", "parking")}\n`,
+      );
+
+      const event = invocationEventToSSE({
+        type: "started",
+        record: { ...runningRecord, cwd: worktree },
+      });
+      if (event.type !== "invocation_started") throw new Error("wrong type");
+
+      expect(event.project).toBe("myrepo");
+      expect(event.isWorktree).toBe(true);
+      expect(event.mainRepoRoot).toBe(main);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("maps a succeeded finish to invocation_finished with durationMs", () => {

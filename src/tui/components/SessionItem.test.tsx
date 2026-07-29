@@ -105,6 +105,93 @@ describe("SessionItem", () => {
     expect(frame).not.toContain(":feat+");
   });
 
+  it("labels a worktree row with its repo, not its parent directory", async () => {
+    const frame = await renderItem({
+      session: mockEnrichedSession({
+        cwd: "/Users/test/Code/ccmux/.claude/worktrees/parking",
+        mainRepoRoot: "/Users/test/Code/ccmux",
+        project: "ccmux",
+        isWorktree: true,
+      }),
+    });
+    expect(frame).toContain("ccmux/parking");
+    expect(frame).not.toContain("worktrees/parking");
+  });
+
+  it("keeps the repo on a worktree row in compact (dirname) mode", async () => {
+    // Compact mode drops path context, but the repo is identity: without it
+    // two same-named worktrees of different repos render identically.
+    const frame = await renderItem({
+      session: mockEnrichedSession({
+        cwd: "/Users/test/Code/ccmux/.claude/worktrees/parking",
+        mainRepoRoot: "/Users/test/Code/ccmux",
+        project: "ccmux",
+        isWorktree: true,
+      }),
+      columns: { row1: { left: [{ field: "project", mode: "dirname" }] } },
+    });
+    expect(frame).toContain("ccmux/parking");
+  });
+
+  it("names the worktree from its root when the pane sits in a subdirectory", async () => {
+    // A pane that `cd`s into the worktree renders `ccmux/tui` otherwise:
+    // a worktree nobody created, asserted confidently by the repo prefix.
+    const frame = await renderItem({
+      session: mockEnrichedSession({
+        cwd: "/Users/test/Code/ccmux/.claude/worktrees/parking/src/tui",
+        worktreeRoot: "/Users/test/Code/ccmux/.claude/worktrees/parking",
+        mainRepoRoot: "/Users/test/Code/ccmux",
+        project: "ccmux",
+        isWorktree: true,
+      }),
+    });
+    expect(frame).toContain("ccmux/parking");
+    expect(frame).not.toContain("ccmux/tui");
+  });
+
+  it("renders the plain path when the worktree is named after its repo", async () => {
+    // `ccmux/ccmux` says nothing twice; the path is more informative.
+    const frame = await renderItem({
+      session: mockEnrichedSession({
+        cwd: "/Users/test/Code/trees/ccmux",
+        worktreeRoot: "/Users/test/Code/trees/ccmux",
+        mainRepoRoot: "/Users/test/Code/ccmux",
+        project: "ccmux",
+        isWorktree: true,
+      }),
+    });
+    expect(frame).not.toContain("ccmux/ccmux");
+    expect(frame).toContain("trees/ccmux");
+  });
+
+  it("labels a worktree from `project` when the daemon sent no repo root", async () => {
+    // Older daemon: neither field is on the wire at all (absent, not null),
+    // but `project` already resolves to the main checkout's name for a
+    // worktree, and the cwd still ends at the worktree directory.
+    const frame = await renderItem({
+      session: mockEnrichedSession({
+        cwd: "/Users/test/Code/ccmux/.claude/worktrees/parking",
+        mainRepoRoot: undefined,
+        worktreeRoot: undefined,
+        project: "ccmux",
+        isWorktree: true,
+      }),
+    });
+    expect(frame).toContain("ccmux/parking");
+  });
+
+  it("falls back to the plain path for a non-worktree row", async () => {
+    const frame = await renderItem({
+      session: mockEnrichedSession({
+        cwd: "/Users/test/Code/ccmux",
+        mainRepoRoot: "/Users/test/Code/ccmux",
+        project: "ccmux",
+        isWorktree: false,
+      }),
+    });
+    expect(frame).toContain("Code/ccmux");
+  });
+
   it("renders idle status", async () => {
     const frame = await renderItem({
       session: mockEnrichedSession({ status: "idle" }),
@@ -643,6 +730,27 @@ describe("SessionItem row 2 (subtitle)", () => {
       promptDisplay: "row2",
     });
     expect(frame).toContain("feature/xyz");
+  });
+
+  it("marks a worktree on the standalone branch column too", async () => {
+    // The default project cell appends `+`; moving branch to its own column
+    // used to drop the indicator silently.
+    const frame = await renderItem({
+      session: mockEnrichedSession({ gitBranch: "feature/xyz" }),
+      columns: { row2: { left: ["branch"] } },
+      promptDisplay: "row2",
+    });
+    expect(frame).not.toContain("feature/xyz+");
+
+    const worktreeFrame = await renderItem({
+      session: mockEnrichedSession({
+        gitBranch: "feature/xyz",
+        isWorktree: true,
+      }),
+      columns: { row2: { left: ["branch"] } },
+      promptDisplay: "row2",
+    });
+    expect(worktreeFrame).toContain("feature/xyz+");
   });
 
   it("collapses row 2 when configured subtitle has no data", async () => {

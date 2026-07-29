@@ -410,19 +410,21 @@ ccmux config set columns.row2.right "branch"
 
 Pass an empty string to clear a side: `ccmux config set columns.row2.left ""`.
 
-| Field     | Modes                 | Default mode | Description                              |
-| :-------- | :-------------------- | :----------- | :--------------------------------------- |
-| `index`   | —                     | —            | Row number (1–9)                         |
-| `status`  | `icon`/`short`/`full` | `icon`       | Status badge style                       |
-| `project` | `dirname`/`full`      | `dirname`    | Project path (basename or full)          |
-| `agent`   | `short`/`full`        | `full`       | Agent name (2-char code or full label)   |
-| `version` | —                     | —            | Agent version                            |
-| `pane`    | —                     | —            | Tmux pane target (session:window.pane)   |
-| `time`    | —                     | —            | Relative time since last input           |
-| `prompt`  | —                     | —            | Last user prompt (truncated)             |
-| `cwd`     | —                     | —            | Working directory                        |
-| `branch`  | —                     | —            | Git branch                               |
-| `pr`      | `short`/`full`        | `full`       | Open PRs for the branch (`#25`/`PR #25`) |
+| Field     | Modes                 | Default mode | Description                                                                              |
+| :-------- | :-------------------- | :----------- | :--------------------------------------------------------------------------------------- |
+| `index`   | —                     | —            | Row number (1–9)                                                                         |
+| `status`  | `icon`/`short`/`full` | `icon`       | Status badge style                                                                       |
+| `project` | `dirname`/`full`      | `dirname`    | Project path (basename or full); a worktree renders as `<repo>/<worktree>` in both modes |
+| `agent`   | `short`/`full`        | `full`       | Agent name (2-char code or full label)                                                   |
+| `version` | —                     | —            | Agent version                                                                            |
+| `pane`    | —                     | —            | Tmux pane target (session:window.pane)                                                   |
+| `time`    | —                     | —            | Relative time since last input                                                           |
+| `prompt`  | —                     | —            | Last user prompt (truncated)                                                             |
+| `cwd`     | —                     | —            | Working directory                                                                        |
+| `branch`  | —                     | —            | Git branch, suffixed `+` in a worktree                                                   |
+| `pr`      | `short`/`full`        | `full`       | Open PRs for the branch (`#25`/`PR #25`)                                                 |
+
+The `project` cell reads `path:branch`, and a session running in a git worktree marks it twice: the branch gains a trailing `+` (also on the standalone `branch` column), and the path is replaced by `<repo>/<worktree>` — `ccmux/parking` rather than the `worktrees/parking` the directory happens to spell, so worktrees of different repos stay distinguishable. Both survive the `dirname` mode, since they are identity rather than path context; when the cell is too narrow for both, the repo yields before the worktree's own name does.
 
 Defaults: `row1.left` is `index, status, project` (status badge widens icon→short→full as the terminal grows). `row1.right` cascades by breakpoint: just `pane` below `xs`, then `agent:short, pane` at `xs`, `agent:short, pane, time` at `sm`, and `agent:full, version, pane, time` at `md`+. The `prompt` and `pr` cells are configured on `row2`, but `promptDisplay` (default `inline`, cycled live by <kbd>p</kbd>) controls how they render: `inline` flattens them onto `row1` so each session stays a single line, `row2` gives the prompt its own line with `pr` at the right edge, and `off` hides both. Sessions with no prompt stay single-line in `inline` mode; in `row2` mode the second line still appears when another row-2 field (such as an open PR) has data.
 
