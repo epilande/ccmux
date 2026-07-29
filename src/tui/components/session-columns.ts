@@ -549,6 +549,12 @@ export interface ProjectCellInput {
   dirname: string;
   branch: string | null;
   isWorktree: boolean;
+  /**
+   * The prefix carries repo identity rather than path context (a worktree
+   * row's `<repo>/<worktree>`), so it outranks the dirname when the cell has
+   * to shrink. Path prefixes keep the default order (prefix first).
+   */
+  repoPrefix?: boolean;
 }
 
 /** Display strings for the project cell after fitting to a width budget. */
@@ -588,19 +594,36 @@ function shortenBranchLabel(
   return ":" + branch.slice(0, bodyLen) + "~" + wt;
 }
 
+/** Fit the prefix into `avail` chars; dropped entirely under 2 usable ones. */
+function fitPrefix(prefix: string, avail: number): string {
+  if (avail < 2) return "";
+  return prefix.length > avail ? truncateText(prefix, avail) : prefix;
+}
+
+/** Fit the dirname into `avail` chars, never below a floor that keeps it
+ *  identifiable (the caller absorbs the overflow elsewhere). */
+function fitDirname(dirname: string, avail: number): string {
+  const DIRNAME_FLOOR = 5;
+  if (dirname.length <= avail) return dirname;
+  return truncateText(dirname, Math.max(DIRNAME_FLOOR, avail));
+}
+
 /**
  * Fit the project (path:branch) cell into `budget` chars, never silently
  * clipping: any shortening shows `…` (or the existing `~` for the branch).
  * Shrink order matches the design: prefix first (drop it under 2 usable
  * chars), then the dirname (kept to a small floor), then the branch as a last
- * resort. When everything already fits, the rendering is unchanged.
+ * resort. A `repoPrefix` swaps the first two — the repo a worktree belongs to
+ * is worth more than the tail of its own directory name — and is the only
+ * case where a prefix survives a squeeze the dirname doesn't. When everything
+ * already fits, the rendering is unchanged.
  */
 export function fitProjectCell(
   input: ProjectCellInput,
   budget: number,
   maxBranchLen: number,
 ): ProjectCellDisplay {
-  const { prefix, dirname, branch, isWorktree } = input;
+  const { prefix, dirname, branch, isWorktree, repoPrefix } = input;
   let branchLabel = branch
     ? branchLabelFor(branch, isWorktree, maxBranchLen)
     : "";
@@ -610,28 +633,28 @@ export function fitProjectCell(
     return { prefix, dirname, branchLabel };
   }
 
-  // 1. Shrink the prefix first: give it whatever is left after dirname+branch.
-  const availForPrefix = budget - dirname.length - branchWidth;
-  let outPrefix: string;
-  if (availForPrefix < 2) {
-    outPrefix = "";
-  } else if (prefix.length > availForPrefix) {
-    outPrefix = truncateText(prefix, availForPrefix);
-  } else {
-    outPrefix = prefix;
-  }
-  if (outPrefix.length + dirname.length + branchWidth <= budget) {
-    return { prefix: outPrefix, dirname, branchLabel };
-  }
+  let outPrefix = prefix;
+  let outDirname = dirname;
 
-  // 2. Prefix minimal but dirname+branch still overflow: truncate the dirname,
-  //    keeping a small floor so it stays identifiable.
-  const DIRNAME_FLOOR = 5;
-  const availForDirname = budget - outPrefix.length - branchWidth;
-  const outDirname =
-    dirname.length <= availForDirname
-      ? dirname
-      : truncateText(dirname, Math.max(DIRNAME_FLOOR, availForDirname));
+  if (repoPrefix) {
+    // 1. Shrink the worktree name first, keeping the repo whole.
+    outDirname = fitDirname(dirname, budget - prefix.length - branchWidth);
+    if (prefix.length + outDirname.length + branchWidth <= budget) {
+      return { prefix, dirname: outDirname, branchLabel };
+    }
+    // 2. Dirname at its floor and still overflowing: give the repo whatever
+    //    is left.
+    outPrefix = fitPrefix(prefix, budget - outDirname.length - branchWidth);
+  } else {
+    // 1. Shrink the prefix first: give it what's left after dirname+branch.
+    outPrefix = fitPrefix(prefix, budget - dirname.length - branchWidth);
+    if (outPrefix.length + dirname.length + branchWidth <= budget) {
+      return { prefix: outPrefix, dirname, branchLabel };
+    }
+    // 2. Prefix minimal but dirname+branch still overflow: truncate the
+    //    dirname, keeping a small floor so it stays identifiable.
+    outDirname = fitDirname(dirname, budget - outPrefix.length - branchWidth);
+  }
   if (outPrefix.length + outDirname.length + branchWidth <= budget) {
     return { prefix: outPrefix, dirname: outDirname, branchLabel };
   }

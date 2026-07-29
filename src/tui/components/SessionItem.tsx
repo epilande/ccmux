@@ -117,8 +117,51 @@ function formatProjectPath(
 }
 
 /**
- * The project cell's path parts fit to a width budget. The compact/dirname
- * mode drops the prefix, so pass "" for it. Computed off the same
+ * The repo a worktree row belongs to, for the `<repo>/<worktree>` label.
+ * Null for anything that isn't a worktree, and for the case where the two
+ * segments would read the same (a worktree directory named after its repo),
+ * where the plain path parts say more.
+ *
+ * Prefers `mainRepoRoot` (git's own answer, via the daemon) and falls back
+ * to `project`, which resolves to the main checkout's basename for a
+ * worktree and is what the row already groups under.
+ */
+function worktreeRepoName(
+  session: EnrichedSession,
+  dirname: string,
+): string | null {
+  if (!session.isWorktree) return null;
+  const root = session.mainRepoRoot;
+  const name = (root ? root.split("/").filter(Boolean).at(-1) : null) ?? null;
+  const repo = name ?? session.project;
+  if (!repo || repo === dirname) return null;
+  return repo;
+}
+
+/**
+ * The project cell's path parts for a session. A worktree is labeled by
+ * repo identity — `ccmux/parking`, not the `worktrees/parking` its path
+ * happens to spell — because the parent segment of a worktree is usually a
+ * shared container directory that names no repo, leaving two same-named
+ * worktrees of different repos rendering identically. The repo segment
+ * survives compact mode (it is identity, not path context) and, via
+ * `repoPrefix`, outranks the worktree name under width pressure.
+ */
+function projectCellParts(
+  session: EnrichedSession,
+  mode: string | undefined,
+): ProjectPathParts & { repoPrefix: boolean } {
+  const cwd = session.paneCwd ?? session.cwd;
+  const { prefix, dirname } = formatProjectPath(cwd, 2);
+  const repo = worktreeRepoName(session, dirname);
+  if (repo) return { prefix: `${repo}/`, dirname, repoPrefix: true };
+  return { prefix: mode === "full" ? prefix : "", dirname, repoPrefix: false };
+}
+
+/**
+ * The project cell's path parts fit to a width budget. `projectCellParts`
+ * has already applied the compact/dirname mode's prefix drop, so whatever
+ * prefix comes back is meant to render. Computed off the same
  * `fitProjectCell` the FieldCell renders from, so the render and the width
  * budget can never diverge.
  */
@@ -128,14 +171,12 @@ function fittedProjectCell(
   budget: number,
   maxBranchLen: number,
 ) {
-  const { prefix, dirname } = formatProjectPath(
-    session.paneCwd ?? session.cwd,
-    2,
-  );
+  const { prefix, dirname, repoPrefix } = projectCellParts(session, mode);
   return fitProjectCell(
     {
-      prefix: mode === "full" ? prefix : "",
+      prefix,
       dirname,
+      repoPrefix,
       branch: session.gitBranch,
       isWorktree: session.isWorktree,
     },
@@ -326,7 +367,6 @@ const FieldCell: Component<{
       );
     }
     case "project": {
-      const compact = entry.mode !== "full";
       // A createMemo, not a plain const: this component body runs once per
       // mount and rows stay mounted across SSE deltas, so a const would freeze
       // the cell on its mount-time value. The memo instead recomputes reactively
@@ -378,7 +418,7 @@ const FieldCell: Component<{
               />
             }
           >
-            <Show when={!compact && fitted().prefix}>
+            <Show when={fitted().prefix}>
               <text fg={dimColor(ctx, theme.subtext)}>{fitted().prefix}</text>
             </Show>
             <text fg={dirnameColor()}>
@@ -568,12 +608,14 @@ const FieldCell: Component<{
           {shortenCwd(ctx.session.paneCwd ?? ctx.session.cwd)}
         </text>
       );
-    case "branch":
-      return (
-        <text fg={dimColor(ctx, theme.blue)}>
-          {ctx.session.gitBranch ?? ""}
-        </text>
-      );
+    case "branch": {
+      // Same `+` worktree marker the default project cell appends
+      // (`branchLabelFor`), so moving `branch` into its own column doesn't
+      // silently drop the indicator.
+      const branch = ctx.session.gitBranch;
+      const label = branch ? branch + (ctx.session.isWorktree ? "+" : "") : "";
+      return <text fg={dimColor(ctx, theme.blue)}>{label}</text>;
+    }
     case "pr": {
       const label = () => prLabel(ctx.session, entry.mode);
       // Color by PR state (red blocked / green approved / yellow open);

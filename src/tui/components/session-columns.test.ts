@@ -1014,6 +1014,47 @@ describe("fitProjectCell", () => {
     expect(out.prefix).toBe("");
   });
 
+  it("spends width on the repo before the worktree name when the prefix is repo identity", () => {
+    // `ccmux/` is which repo the worktree belongs to; the worktree's own name
+    // is the part that can afford to lose characters. The default order
+    // (asserted above) would have dropped the repo first.
+    const out = fitProjectCell(
+      {
+        prefix: "ccmux/",
+        dirname: "worktree-detection",
+        branch: "main",
+        isWorktree: true,
+        repoPrefix: true,
+      },
+      20,
+      24,
+    );
+    expect(out.prefix).toBe("ccmux/");
+    expect(out.dirname.endsWith("…")).toBe(true);
+    expect(out.branchLabel).toBe(":main+");
+    expect(
+      out.prefix.length + out.dirname.length + out.branchLabel.length,
+    ).toBeLessThanOrEqual(20);
+  });
+
+  it("gives up the repo prefix only once the worktree name is at its floor", () => {
+    const out = fitProjectCell(
+      {
+        prefix: "some-long-repo/",
+        dirname: "worktree-detection",
+        branch: null,
+        isWorktree: true,
+        repoPrefix: true,
+      },
+      10,
+      24,
+    );
+    expect(out.dirname.length).toBeGreaterThanOrEqual(5);
+    expect(out.dirname.endsWith("…")).toBe(true);
+    expect(out.prefix.length).toBeLessThan("some-long-repo/".length);
+    expect(out.prefix.length + out.dirname.length).toBeLessThanOrEqual(10);
+  });
+
   it("leaves a branch-less cell without a stray colon", () => {
     const out = fitProjectCell(
       { prefix: "", dirname: "app", branch: null, isWorktree: false },
