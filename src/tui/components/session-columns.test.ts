@@ -1088,6 +1088,144 @@ describe("fitProjectCell", () => {
     );
   });
 
+  it("never renders a truncated repo, which would name no repo and eat the `/`", () => {
+    // The 80-column repro from the review: sizing a truncated prefix against
+    // a floored worktree name and then re-floating that name made the two
+    // steps disagree, so the cell rendered `claude-t…work…` - 14 chars in a
+    // 13-char budget, no separator, overflowing the neighbouring column.
+    const out = fitProjectCell(
+      {
+        prefix: "claude-toolkit/",
+        dirname: "worktree-detection",
+        branch: null,
+        isWorktree: true,
+        repoPrefix: true,
+      },
+      13,
+      24,
+    );
+    expect(out).toEqual({
+      prefix: "",
+      dirname: "worktree-det…",
+      branchLabel: "",
+    });
+  });
+
+  it("keeps the `/` separator whenever both segments render", () => {
+    // A rendered repo is always the whole prefix, so the separator it ends
+    // with can never be the character truncation ate.
+    for (let budget = 4; budget <= 60; budget++) {
+      const out = fitProjectCell(
+        {
+          prefix: "claude-toolkit/",
+          dirname: "worktree-detection",
+          branch: "fix/worktree-detection",
+          isWorktree: true,
+          repoPrefix: true,
+        },
+        budget,
+        24,
+      );
+      if (out.prefix) {
+        expect(out.prefix).toBe("claude-toolkit/");
+      }
+    }
+  });
+
+  it("stays within budget at every width, for repo names long and short", () => {
+    const shapes = [
+      { prefix: "claude-toolkit/", dirname: "worktree-detection" },
+      { prefix: "some-really-long-repo-name/", dirname: "wt" },
+      { prefix: "ccmux/", dirname: "parking" },
+    ];
+    for (const shape of shapes) {
+      for (const branch of [null, "main", "fix/worktree-detection"]) {
+        // Below the dirname floor no rendering can fit by construction (a
+        // pre-existing, documented trade: the last identifiable segment
+        // survives a budget that can't hold it), so the sweep starts there.
+        for (let budget = 5; budget <= 60; budget++) {
+          const out = fitProjectCell(
+            { ...shape, branch, isWorktree: true, repoPrefix: true },
+            budget,
+            24,
+          );
+          const width =
+            out.prefix.length + out.dirname.length + out.branchLabel.length;
+          expect(width).toBeLessThanOrEqual(budget);
+        }
+      }
+    }
+  });
+
+  it("never renders less as the cell grows", () => {
+    // The regressed shapes rendered *fewer* characters at a wider budget,
+    // which is how the mismatch surfaced as flicker across breakpoints.
+    const shapes = [
+      { prefix: "claude-toolkit/", dirname: "worktree-detection" },
+      { prefix: "some-really-long-repo-name/", dirname: "wt" },
+    ];
+    for (const shape of shapes) {
+      for (const branch of [null, "fix/worktree-detection"]) {
+        let previous = 0;
+        for (let budget = 5; budget <= 60; budget++) {
+          const out = fitProjectCell(
+            { ...shape, branch, isWorktree: true, repoPrefix: true },
+            budget,
+            24,
+          );
+          const width =
+            out.prefix.length + out.dirname.length + out.branchLabel.length;
+          expect(width).toBeGreaterThanOrEqual(previous);
+          previous = width;
+        }
+      }
+    }
+  });
+
+  it("never buys the repo by making the branch disappear", () => {
+    // The repo starts fitting as the cell grows. If it could pay for itself
+    // with the whole branch label, the branch would blink out exactly as the
+    // terminal WIDENS into that band - which is what the reviewer saw at 80
+    // columns (repo back, branch gone) versus 70 (branch back, repo gone).
+    for (let budget = 5; budget <= 60; budget++) {
+      const out = fitProjectCell(
+        {
+          prefix: "claude-toolkit/",
+          dirname: "worktree-detection",
+          branch: "fix/worktree-detection",
+          isWorktree: true,
+          repoPrefix: true,
+        },
+        budget,
+        24,
+      );
+      if (out.prefix) expect(out.branchLabel).not.toBe("");
+    }
+  });
+
+  it("makes the branch yield before the worktree row loses its identity", () => {
+    // A long branch used to spell itself out to `maxBranchLen` while the repo
+    // dropped and the worktree name fell to a stub, which is backwards for a
+    // row whose job is saying which tree it is.
+    const out = fitProjectCell(
+      {
+        prefix: "ccmux/",
+        dirname: "parking",
+        branch: "feat/sidebar-parking",
+        isWorktree: true,
+        repoPrefix: true,
+      },
+      25,
+      24,
+    );
+    expect(out.prefix).toBe("ccmux/");
+    expect(out.dirname.startsWith("p")).toBe(true);
+    expect(out.branchLabel.endsWith("~+")).toBe(true);
+    expect(
+      out.prefix.length + out.dirname.length + out.branchLabel.length,
+    ).toBeLessThanOrEqual(25);
+  });
+
   it("leaves a branch-less cell without a stray colon", () => {
     const out = fitProjectCell(
       { prefix: "", dirname: "app", branch: null, isWorktree: false },
