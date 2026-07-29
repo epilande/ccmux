@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
 import { getBuiltinAgent } from "../lib/agents-test-helpers";
 import {
+  buildAgentForkCommand,
   buildAgentSpawnCommand,
   buildTmuxSpawnArgv,
   escapeSingleQuoted,
@@ -561,6 +562,136 @@ describe("buildAgentSpawnCommand", () => {
       });
       expect(result.ok).toBe(false);
     }
+  });
+});
+
+describe("buildAgentForkCommand", () => {
+  function agentWith(overrides: Partial<AgentDef>): AgentDef {
+    return { ...claudeAgent, ...overrides };
+  }
+
+  it("substitutes the source id and the launcher in one pass", () => {
+    expect(
+      buildAgentForkCommand({
+        agent: agentWith({ forkCommand: "{bin} --resume {id} --fork-session" }),
+        binary: "/my/wrapper",
+        sessionId: "abc-123",
+      }),
+    ).toEqual({
+      ok: true,
+      value: "/my/wrapper --resume abc-123 --fork-session",
+    });
+  });
+
+  it("never revisits substituted text", () => {
+    // The single-pass guarantee, phrased as the failure it prevents: a
+    // wrapper binary that happens to contain `{id}` must stay a binary
+    // name, not become a second copy of the session id.
+    expect(
+      buildAgentForkCommand({
+        agent: agentWith({ forkCommand: "{bin} --resume {id}" }),
+        binary: "wrap{id}",
+        sessionId: "abc",
+      }),
+    ).toEqual({ ok: true, value: "wrap{id} --resume abc" });
+  });
+
+  it("refuses an agent that has not declared how it forks", () => {
+    const result = buildAgentForkCommand({
+      agent: agentWith({ name: "codex", forkCommand: undefined }),
+      binary: "codex",
+      sessionId: "abc",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("forkCommand");
+  });
+
+  it("treats an empty template as 'not supported', not as malformed", () => {
+    // An empty string is the documented config-file way to turn fork off for
+    // an agent, and `forkableAgentNames` reads it that way, so the picker
+    // simply hides the item. `ccmux spawn --fork` bypasses that gate and must
+    // land on the SAME answer rather than complaining about a missing {id}
+    // in a template the user never wrote.
+    const result = buildAgentForkCommand({
+      agent: agentWith({ name: "codex", forkCommand: "" }),
+      binary: "codex",
+      sessionId: "abc",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("does not support forking");
+      expect(result.error).not.toContain("{id} placeholder");
+    }
+  });
+
+  it("refuses a template with no {id}", () => {
+    // Without it the fork silently starts a FRESH session: a pane appears,
+    // the agent runs, and the history the user asked to branch is gone.
+    const result = buildAgentForkCommand({
+      agent: agentWith({ forkCommand: "{bin} --fork-session" }),
+      binary: "claude",
+      sessionId: "abc",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("{id}");
+  });
+
+  it("refuses a non-string template from config", () => {
+    const result = buildAgentForkCommand({
+      agent: agentWith({ forkCommand: 123 as unknown as string }),
+      binary: "claude",
+      sessionId: "abc",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("forkCommand");
+  });
+
+  it("refuses a session id that is not inert to the shell", () => {
+    // The id lands in a command typed into a pane's shell. The route
+    // constrains it too; this is the guard that travels with the builder,
+    // so a future caller cannot lose it.
+    for (const id of [
+      "a b",
+      "abc;rm -rf /",
+      "$(id)",
+      "'x'",
+      "",
+      "a".repeat(129),
+    ]) {
+      const result = buildAgentForkCommand({
+        agent: agentWith({ forkCommand: "{bin} --resume {id}" }),
+        binary: "claude",
+        sessionId: id,
+      });
+      expect(result.ok).toBe(false);
+    }
+  });
+});
+
+describe("built-in fork invocations", () => {
+  it("forks Claude into a new session id, leaving the source alone", () => {
+    // `--fork-session` (not a bare `--resume`, which would APPEND to the
+    // source's transcript and fight the live original for it).
+    expect(
+      buildAgentForkCommand({
+        agent: getBuiltinAgent("claude"),
+        binary: "claude",
+        sessionId: "abc-123",
+      }),
+    ).toEqual({
+      ok: true,
+      value: "claude --resume abc-123 --fork-session",
+    });
+  });
+
+  it("is the only built-in that claims to fork", () => {
+    // Every other agent's resume semantics against a LIVE original are
+    // unverified, and a wrong guess corrupts the session being forked.
+    // Adding a name here means someone checked it (see
+    // docs/agent-adapters.md#forking-a-session).
+    expect(
+      BUILTIN_AGENTS.filter((a) => a.forkCommand).map((a) => a.name),
+    ).toEqual(["claude"]);
   });
 });
 

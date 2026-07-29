@@ -50,6 +50,15 @@ export interface AgentConfig {
    * `ccmux spawn --prompt` is refused for this agent.
    */
   promptCommand?: string;
+  /**
+   * Command template for forking a session: continue its history in a new
+   * session without touching the original (`{id}` is the source session's
+   * native id, optional `{bin}` resolves to the launcher binary). See
+   * `AgentDef.forkCommand`. Without it, fork is refused for this agent and
+   * the picker's Fork menu item stays hidden. Only set this once you have
+   * checked that resuming a LIVE session does not disturb it.
+   */
+  forkCommand?: string;
   sessionFilePattern?: string;
   executable?: string;
   invokeMode?: InvokeModeConfig;

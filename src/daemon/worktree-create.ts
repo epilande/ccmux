@@ -32,16 +32,15 @@
  *    rather than needing an unlock first.
  */
 
-import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  symlinkSync,
-} from "node:fs";
+import { existsSync, lstatSync, mkdirSync, symlinkSync } from "node:fs";
 import { cp, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { normalizePath, runGit, type GitRun } from "./worktree-git";
+import {
+  normalizePath,
+  readSymlinkDirectories,
+  runGit,
+  type GitRun,
+} from "./worktree-git";
 
 /** Where worktrees live, relative to the main checkout. */
 export const WORKTREE_DIR = join(".claude", "worktrees");
@@ -186,29 +185,6 @@ export interface CreateWorktreeOptions {
     mainRepoRoot: string,
     worktreePath: string,
   ) => Promise<{ symlinked: string[]; included: string[] }>;
-}
-
-/**
- * Read `worktree.symlinkDirectories` from the repo's `.claude/settings.json`.
- *
- * Absent file, unreadable file, malformed JSON and a missing key are all the
- * same answer: nothing to symlink. This is optional convenience config, so
- * refusing to create a worktree because it could not be parsed would trade a
- * working feature for a cosmetic one.
- */
-export function readSymlinkDirectories(mainRepoRoot: string): string[] {
-  const settingsPath = join(mainRepoRoot, ".claude", "settings.json");
-  if (!existsSync(settingsPath)) return [];
-  try {
-    const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as {
-      worktree?: { symlinkDirectories?: unknown };
-    };
-    const dirs = parsed.worktree?.symlinkDirectories;
-    if (!Array.isArray(dirs)) return [];
-    return dirs.filter((d): d is string => typeof d === "string" && d !== "");
-  } catch {
-    return [];
-  }
 }
 
 /**

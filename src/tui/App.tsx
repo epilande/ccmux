@@ -102,6 +102,11 @@ interface AppProps {
   sidebar?: boolean;
   lastSpawnAgent?: string;
   reviewHandback?: Preferences["reviewHandback"];
+  /**
+   * Agents that declare a `forkCommand` (see `forkableAgentNames`). Gates the
+   * Fork action, which is otherwise hidden rather than offered-then-refused.
+   */
+  forkableAgents?: string[];
 }
 
 /** Message text for a rejected fetch/parse, for a toast. */
@@ -365,6 +370,129 @@ export function App(props: AppProps) {
   }
 
   /**
+   * Whether this row can be forked.
+   *
+   * Two conditions are about knowing WHAT to continue: the agent has to
+   * declare how it forks, and ccmux has to know which conversation the pane
+   * holds — a pane-tracked row with no hooks installed has an agent but no
+   * session id.
+   *
+   * Background rows are excluded even though they satisfy both. They are
+   * created with `agentType: "claude"` and a `nativeSessionId` (see
+   * `createBackgroundSession` and the background source), so without this
+   * they would qualify — but they are PANELESS, which makes "fork into a
+   * pane beside the original" meaningless: the fork would land in an
+   * unrelated new window. `sessionMenuItems` already returns early for them,
+   * so the key would otherwise do something the menu deliberately refuses.
+   */
+  function canForkSession(
+    session:
+      | {
+          agentType: string;
+          nativeSessionId?: string;
+          trackingMode?: string;
+        }
+      | undefined,
+  ): boolean {
+    if (!session?.nativeSessionId) return false;
+    if (session.trackingMode === "background") return false;
+    return (props.forkableAgents ?? []).includes(session.agentType);
+  }
+
+  /**
+   * Why this row can't be forked, for the key path. The menu hides the item
+   * instead, but a keybinding has no way to hide itself and the help overlay
+   * advertises `F` on every row, so silence reads as a broken key.
+   */
+  function forkRefusalReason(session: {
+    agentType: string;
+    nativeSessionId?: string;
+    trackingMode?: string;
+  }): string {
+    if (session.trackingMode === "background") {
+      return "Fork: background agents have no pane to fork beside";
+    }
+    if (!session.nativeSessionId) {
+      // Same reason the daemon gives, which the client gate would otherwise
+      // never let the user see.
+      return `Fork: ccmux doesn't know which conversation this pane holds. Install hooks with 'ccmux setup'.`;
+    }
+    return `Fork: ${session.agentType} has no verified fork command`;
+  }
+
+  /** Drops re-activations while a fork is pending, so a double press can't
+   * open two panes off one conversation. */
+  let forkInFlight = false;
+
+  /** Ceiling on a fork request. Without one, a daemon that accepts the
+   * connection and never answers latches `forkInFlight` for the rest of the
+   * picker's life, and `F` silently stops working. */
+  const FORK_TIMEOUT_MS = 15_000;
+
+  /**
+   * Fork a session into a pane beside its own: same agent, same directory,
+   * conversation continued from the source's history, original untouched.
+   *
+   * The picker only chooses the DESTINATION here (`split` + `target` /
+   * `callerPane`); how to continue the conversation is the daemon's
+   * `forkCommand` template. Note the cwd is NOT ours to choose: Claude
+   * resolves a resumed session against the project directory for its cwd, so
+   * the daemon refuses a fork into a different one.
+   */
+  async function forkSession(session: EnrichedSession) {
+    if (!canForkSession(session)) return;
+    if (forkInFlight) {
+      // Say so rather than dropping it silently, which is indistinguishable
+      // from a dead key.
+      store.actions.showToast("Fork already in progress");
+      return;
+    }
+    forkInFlight = true;
+    try {
+      // Beside the source when it has a pane to sit beside. Otherwise a new
+      // window in the CALLER's session: sending no placement at all leaves
+      // the daemon running a bare `new-window`, and since the daemon has no
+      // client, tmux picks its own MRU session — so the window lands
+      // somewhere unrelated and the jump below then drags the user there.
+      const target = session.tmuxPane ?? undefined;
+      const callerPane = target ? undefined : await resolveSpawnPane();
+      const response = await fetch(`${getDaemonUrl()}/spawn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fork: session.id,
+          split: target ? "h" : false,
+          target,
+          callerPane: callerPane ?? undefined,
+          // The jump below is this component's own exit path (it flashes the
+          // pane and closes a one-shot picker); letting the daemon switch too
+          // would race it.
+          detach: true,
+        }),
+        signal: AbortSignal.timeout(FORK_TIMEOUT_MS),
+      });
+      const data = (await response.json().catch(() => null)) as {
+        paneId?: string;
+        error?: string;
+      } | null;
+      if (!response.ok || !data?.paneId) {
+        store.actions.showToast(
+          `Fork failed: ${data?.error ?? response.statusText}`,
+        );
+        return;
+      }
+      selectPane(data.paneId);
+    } catch (err: unknown) {
+      store.actions.showToast(`Fork failed: ${errText(err)}`);
+    } finally {
+      // In `finally`, not on each exit path: a throw between the guard and
+      // the response (an aborted fetch, a rejected json parse) used to leave
+      // the latch set forever.
+      forkInFlight = false;
+    }
+  }
+
+  /**
    * Whether an overlay currently owns the screen.
    *
    * The keyboard handler returns early for each of these before it reaches
@@ -505,6 +633,14 @@ export function App(props: AppProps) {
     }
   }
 
+  function contextMenuFork() {
+    const cm = store.state.contextMenu;
+    if (!cm) return;
+    const session = store.state.sessions.find((s) => s.id === cm.sessionId);
+    store.actions.hideContextMenu();
+    if (session) void forkSession(session);
+  }
+
   function contextMenuNewSession() {
     const cm = store.state.contextMenu;
     if (!cm) return;
@@ -581,6 +717,19 @@ export function App(props: AppProps) {
         ...reviewItem,
       ];
     }
+    // Hidden rather than disabled when the agent or the row can't be forked:
+    // an item that is only ever there for Claude rows with hooks installed
+    // would otherwise read as broken on every other row.
+    const forkItem: ContextMenuItem[] = canForkSession(session)
+      ? [
+          {
+            label: "Fork",
+            hint: "F",
+            color: theme.blue,
+            action: contextMenuFork,
+          },
+        ]
+      : [];
     return [
       {
         label: "Attach",
@@ -601,6 +750,11 @@ export function App(props: AppProps) {
         color: theme.peach,
         action: () => contextMenuConfirm("restart"),
       },
+      // Last of the always-present actions on purpose. This item appears and
+      // disappears reactively (an SSE update that drops `nativeSessionId`
+      // removes it), and anything above Kill would slide Kill under a cursor
+      // already hovering the old position.
+      ...forkItem,
       ...reviewItem,
     ];
   }
@@ -1675,8 +1829,24 @@ export function App(props: AppProps) {
         }
         break;
 
+      case "F":
       case "f":
-        store.actions.toggleHideIdle();
+        // Shift+F forks, bare `f` filters. Both spellings of the capital are
+        // matched because terminals deliver it as name `"f"` with `shift`
+        // set rather than as `"F"`; without the lowercase case the binding
+        // would be unreachable.
+        if (key === "F" || event.shift) {
+          const sessionToFork = store.selectedSession();
+          // Silent on a group header, like `r` and `x`; but on a real row
+          // that can't be forked, say why. The help overlay lists `F`
+          // unconditionally, so silence there reads as a broken key.
+          if (sessionToFork) {
+            if (canForkSession(sessionToFork)) void forkSession(sessionToFork);
+            else store.actions.showToast(forkRefusalReason(sessionToFork));
+          }
+        } else {
+          store.actions.toggleHideIdle();
+        }
         event.preventDefault();
         break;
 

@@ -87,6 +87,11 @@ export function createSpawnCommand(): Command {
     )
     .option("--cwd <dir>", "Working directory")
     .option("--resume <session-id>", "Resume an existing session")
+    .option(
+      "--fork <session-id>",
+      "Continue an existing session's history in a new one, leaving the original untouched " +
+        "(the agent and, unless --cwd says otherwise, the directory come from that session)",
+    )
     .option("--prompt <text>", "Initial prompt to send")
     .option(
       "--split [direction]",
@@ -112,6 +117,7 @@ export function createSpawnCommand(): Command {
         options: {
           cwd?: string;
           resume?: string;
+          fork?: string;
           prompt?: string;
           split?: SpawnSplit;
           target?: string;
@@ -159,9 +165,17 @@ export function createSpawnCommand(): Command {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              agent,
-              cwd: resolveSpawnCwd(options.cwd),
+              // Both are the source session's on a fork: the daemon reads
+              // them off the session it resolves, so sending the positional
+              // agent (which defaults to "claude") would only look like it
+              // had a say. An explicit `--cwd` still wins.
+              agent: options.fork ? undefined : agent,
+              cwd:
+                options.fork && !options.cwd
+                  ? undefined
+                  : resolveSpawnCwd(options.cwd),
               resume: options.resume,
+              fork: options.fork,
               prompt: options.prompt,
               split: options.split ?? false,
               target: explicitTarget,
@@ -191,7 +205,9 @@ export function createSpawnCommand(): Command {
             );
           }
           console.log(
-            `Spawned ${agent} in pane ${data.paneId}: ${data.command}`,
+            options.fork
+              ? `Forked ${options.fork} into pane ${data.paneId}: ${data.command}`
+              : `Spawned ${agent} in pane ${data.paneId}: ${data.command}`,
           );
         } catch (error) {
           console.error("Failed to spawn session:", error);

@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { mkdir } from "node:fs/promises";
@@ -36,6 +37,7 @@ import {
   parseWorktreeList,
   readAdminDir,
   readDirtyState,
+  readSymlinkDirectories,
   runGit,
 } from "./worktree-git";
 
@@ -1310,5 +1312,195 @@ describe("A1: a branch with commits made after its PR merged", () => {
       unpublished,
     ]);
     expect(stillReachable.exitCode).toBe(0);
+  });
+});
+
+/**
+ * A `worktree.symlinkDirectories` link is setup, not user work.
+ *
+ * A `node_modules/` gitignore pattern is DIRECTORY-only, so it does not match
+ * a symlink of that name and git reports `?? node_modules`. Confirmed against
+ * the real repo, where every Claude-Code-created worktree reports exactly
+ * that, which meant the prune list demanded the uncommitted-work opt-in for a
+ * worktree whose only "work" was a link the tooling made itself.
+ */
+describe("setup symlinks are not dirt", () => {
+  async function repoWithSymlinkedWorktree(name: string): Promise<{
+    repo: string;
+    wt: string;
+  }> {
+    const { repo } = await makeRepo(name);
+    mkdirSync(join(repo, ".claude"), { recursive: true });
+    writeFileSync(
+      join(repo, ".claude", "settings.json"),
+      JSON.stringify({ worktree: { symlinkDirectories: ["node_modules"] } }),
+    );
+    writeFileSync(join(repo, ".gitignore"), "node_modules/\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-qm", "config"]);
+    mkdirSync(join(repo, "node_modules"), { recursive: true });
+
+    const wt = await addWorktree(repo, "feat/linked");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/linked"]);
+    symlinkSync(join(repo, "node_modules"), join(wt, "node_modules"));
+    return { repo, wt };
+  }
+
+  it("does not report a configured symlink as dirty", async () => {
+    const { repo, wt } = await repoWithSymlinkedWorktree("setup-symlink");
+    // Without the exemption git calls this untracked, which is the bug.
+    const raw = await readDirtyState(wt);
+    expect(raw.untracked).toBe(1);
+
+    const exempt = await readDirtyState(wt, undefined, {
+      setupSymlinks: ["node_modules"],
+    });
+
+    expect(exempt.untracked).toBe(0);
+    expect(exempt.dirty).toBe(false);
+    void repo;
+  });
+
+  it("still counts a REAL directory of the same name", async () => {
+    const { repo } = await makeRepo("real-dir");
+    const wt = await addWorktree(repo, "feat/real");
+    mkdirSync(join(wt, "node_modules"), { recursive: true });
+    writeFileSync(join(wt, "node_modules", "thing.js"), "x\n");
+
+    const state = await readDirtyState(wt, undefined, {
+      setupSymlinks: ["node_modules"],
+    });
+
+    // Not a symlink, so the exemption must not apply.
+    expect(state.dirty).toBe(true);
+  });
+
+  it("still counts a symlink the repo did not configure", async () => {
+    const { repo } = await makeRepo("unconfigured");
+    const wt = await addWorktree(repo, "feat/other");
+    symlinkSync(join(repo, "README.md"), join(wt, "somewhere-else"));
+
+    const state = await readDirtyState(wt, undefined, {
+      setupSymlinks: ["node_modules"],
+    });
+
+    expect(state.dirty).toBe(true);
+  });
+
+  it("lets a symlinked worktree prune without a dirty opt-in", async () => {
+    const { repo, wt } = await repoWithSymlinkedWorktree("prune-symlinked");
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+    expect(scan.candidates[0]?.dirty).toBe(false);
+    const result = await runPrune(scan.candidates, {
+      stateFiles: [],
+      log: () => {},
+    });
+
+    expect(result.outcomes[0].removed).toBe(true);
+    expect(existsSync(wt)).toBe(false);
+    // The link was followed by nobody: the main checkout keeps its directory.
+    expect(existsSync(join(repo, "node_modules"))).toBe(true);
+  });
+
+  // A plain FILE of the configured name is not a symlink, so the exemption
+  // must not apply. Correct already; pinned so it stays that way.
+  it("still counts a plain FILE of the configured name", async () => {
+    const { repo } = await makeRepo("plain-file");
+    const wt = await addWorktree(repo, "feat/file");
+    writeFileSync(join(wt, "node_modules"), "not a directory\n");
+
+    const state = await readDirtyState(wt, undefined, {
+      setupSymlinks: ["node_modules"],
+    });
+
+    expect(state.dirty).toBe(true);
+  });
+});
+
+/**
+ * Claude Code resolves `worktree.symlinkDirectories` from MERGED settings, so
+ * reading only the project file would miss the user-scope case — which is the
+ * natural place to put a machine-wide "share node_modules" preference, and
+ * therefore exactly the user who would keep the bug with no signal why.
+ */
+describe("readSymlinkDirectories scopes", () => {
+  function writeSettings(dir: string, dirs: string[] | null): void {
+    mkdirSync(join(dir, ".claude"), { recursive: true });
+    writeFileSync(
+      join(dir, ".claude", "settings.json"),
+      JSON.stringify(
+        dirs === null ? {} : { worktree: { symlinkDirectories: dirs } },
+      ),
+    );
+  }
+
+  it("reads user scope when the project says nothing", () => {
+    const repo = join(root, "repo-user");
+    const home = join(root, "home-user");
+    mkdirSync(repo, { recursive: true });
+    writeSettings(home, ["node_modules"]);
+
+    expect(readSymlinkDirectories(repo, home)).toEqual(["node_modules"]);
+  });
+
+  it("lets project scope replace user scope", () => {
+    const repo = join(root, "repo-proj");
+    const home = join(root, "home-proj");
+    writeSettings(repo, ["vendor"]);
+    writeSettings(home, ["node_modules"]);
+
+    expect(readSymlinkDirectories(repo, home)).toEqual(["vendor"]);
+  });
+
+  it("lets settings.local.json win over both", () => {
+    const repo = join(root, "repo-local");
+    const home = join(root, "home-local");
+    writeSettings(repo, ["vendor"]);
+    writeSettings(home, ["node_modules"]);
+    writeFileSync(
+      join(repo, ".claude", "settings.local.json"),
+      JSON.stringify({ worktree: { symlinkDirectories: ["local-only"] } }),
+    );
+
+    expect(readSymlinkDirectories(repo, home)).toEqual(["local-only"]);
+  });
+
+  // A scope that merely EXISTS without the key must not shadow the one below.
+  it("falls through a scope that does not define the key", () => {
+    const repo = join(root, "repo-empty");
+    const home = join(root, "home-empty");
+    writeSettings(repo, null);
+    writeSettings(home, ["node_modules"]);
+
+    expect(readSymlinkDirectories(repo, home)).toEqual(["node_modules"]);
+  });
+
+  it("returns nothing when no scope defines it", () => {
+    const repo = join(root, "repo-none");
+    const home = join(root, "home-none");
+    mkdirSync(repo, { recursive: true });
+    mkdirSync(home, { recursive: true });
+
+    expect(readSymlinkDirectories(repo, home)).toEqual([]);
+  });
+
+  // A half-written settings file must not shadow the scope below it, and a
+  // list holding something that is not a directory name must not produce a
+  // symlink target of `undefined`.
+  it("falls through malformed JSON and drops non-string entries", () => {
+    const repo = join(root, "repo-malformed");
+    const home = join(root, "home-malformed");
+    mkdirSync(join(repo, ".claude"), { recursive: true });
+    writeFileSync(join(repo, ".claude", "settings.json"), "{not json");
+    writeSettings(home, ["node_modules"]);
+
+    expect(readSymlinkDirectories(repo, home)).toEqual(["node_modules"]);
+
+    writeFileSync(
+      join(repo, ".claude", "settings.json"),
+      JSON.stringify({ worktree: { symlinkDirectories: ["vendor", 7, ""] } }),
+    );
+    expect(readSymlinkDirectories(repo, home)).toEqual(["vendor"]);
   });
 });

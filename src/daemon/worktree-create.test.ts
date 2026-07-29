@@ -14,7 +14,6 @@ import { join } from "node:path";
 import {
   applyWorktreeFileSetup,
   createWorktree,
-  readSymlinkDirectories,
   resolveWorktreeIncludes,
   resolveBase,
   resolveWorktreeName,
@@ -165,21 +164,6 @@ describe("resolveBase", () => {
 });
 
 describe("file setup", () => {
-  it("reads symlinkDirectories, tolerating absent and malformed settings", () => {
-    const repo = join(root, "cfg");
-    mkdirSync(join(repo, ".claude"), { recursive: true });
-    expect(readSymlinkDirectories(repo)).toEqual([]);
-
-    writeFileSync(join(repo, ".claude", "settings.json"), "{not json");
-    expect(readSymlinkDirectories(repo)).toEqual([]);
-
-    writeFileSync(
-      join(repo, ".claude", "settings.json"),
-      JSON.stringify({ worktree: { symlinkDirectories: ["node_modules", 7] } }),
-    );
-    expect(readSymlinkDirectories(repo)).toEqual(["node_modules"]);
-  });
-
   /**
    * `.worktreeinclude` is GITIGNORE SYNTAX under a dual filter: a path is
    * included only if it matches a pattern AND is gitignored. Both halves are

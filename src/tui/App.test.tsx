@@ -2089,6 +2089,343 @@ describe("App review (d)", () => {
   });
 });
 
+describe("App fork (F / context menu)", () => {
+  /** Capture spawn POSTs; `/server-info` is answered so the same-server
+   *  guard behind the post-fork jump resolves deterministically. */
+  function captureSpawn(
+    response: { ok: boolean; status?: number; body?: unknown } = { ok: true },
+  ) {
+    const bodies: Record<string, unknown>[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const href = String(url);
+      if (href.includes("/server-info")) {
+        return {
+          ok: true,
+          json: async () => ({ socketPath: null }),
+        } as Response;
+      }
+      if (href.includes("/spawn")) {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return {
+          ok: response.ok,
+          status: response.status ?? (response.ok ? 200 : 400),
+          statusText: "Bad Request",
+          json: async () => response.body ?? { success: true, paneId: "%99" },
+        } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch;
+    return { bodies, restore: () => (globalThis.fetch = original) };
+  }
+
+  /** Stub process.exit: the one-shot picker exits after jumping to the fork. */
+  function withExitSpy() {
+    const exitSpy = mock(() => {});
+    const originalExit = process.exit;
+    process.exit = exitSpy as never;
+    return { exitSpy, restore: () => (process.exit = originalExit) };
+  }
+
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  async function renderWithSession(
+    props: Record<string, unknown> = {},
+    sessionOverrides: Record<string, unknown> = {},
+  ) {
+    await renderApp(120, 20, {
+      groupBy: "none",
+      forkableAgents: ["claude"],
+      persistent: true,
+      ...props,
+    });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "s1",
+          project: "myapp",
+          cwd: "/code/myapp",
+          agentType: "claude",
+          nativeSessionId: "native-1",
+          tmuxPane: "%5",
+          ...sessionOverrides,
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+  }
+
+  it("forks the selected session beside its own pane", async () => {
+    const { bodies, restore } = captureSpawn();
+    try {
+      await renderWithSession();
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]).toMatchObject({
+        fork: "s1",
+        split: "h",
+        target: "%5",
+        // The picker owns the jump; a daemon-side switch would race it.
+        detach: true,
+      });
+      // No agent or cwd: the daemon reads both off the session being forked.
+      expect(bodies[0]?.agent).toBeUndefined();
+      expect(bodies[0]?.cwd).toBeUndefined();
+    } finally {
+      restore();
+    }
+  });
+
+  it("also fires for the name-\"F\" spelling some terminals send", async () => {
+    // Terminals disagree: most send a capital as name `"f"` with `shift` set
+    // (what `pressKey("F")` above produces — it emits the same byte 0x46, so
+    // driving this case through `pressKey("f", {shift:true})` would just
+    // re-run the previous test), while modifyOtherKeys sends a CSI sequence
+    // that parses to name `"F"`. Both arms of the binding are live, and this
+    // one drives the raw bytes so the `key === "F"` arm is genuinely covered
+    // rather than covered by comment.
+    const { bodies, restore } = captureSpawn();
+    try {
+      await renderWithSession();
+      // CSI 27 ; 2 ; 70 ~  =  modifyOtherKeys form of shift+F.
+      setup.renderer.stdin.emit("data", Buffer.from("\x1b[27;2;70~"));
+      await settle();
+      await setup.renderOnce();
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]?.fork).toBe("s1");
+    } finally {
+      restore();
+    }
+  });
+
+  it("leaves bare f as the hide-idle filter", async () => {
+    // Asserting only "no fork was sent" would pass just as happily if `f`
+    // became a no-op, which is the regression this test exists to catch. The
+    // row is idle, so the filter's effect is visible: it disappears, and
+    // comes back on a second press.
+    const { bodies, restore } = captureSpawn();
+    try {
+      await renderWithSession();
+      expect(setup.captureCharFrame()).toContain("myapp");
+
+      setup.mockInput.pressKey("f");
+      await settle();
+      await setup.renderOnce();
+      expect(bodies).toHaveLength(0);
+      expect(setup.captureCharFrame()).not.toContain("myapp");
+
+      setup.mockInput.pressKey("f");
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("myapp");
+      expect(bodies).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("jumps to the forked pane and exits a one-shot picker", async () => {
+    const { restore } = captureSpawn();
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    try {
+      await renderWithSession({ persistent: false });
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+      expect(switchToPaneSpy).toHaveBeenCalledWith("%99");
+      expect(exitSpy).toHaveBeenCalled();
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("drops a second press while a fork is in flight", async () => {
+    // One conversation, one fork: a double press must not open two panes.
+    const bodies: Record<string, unknown>[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      if (String(url).includes("/spawn")) {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Promise(() => {}) as Promise<Response>; // never settles
+      }
+      return { ok: true, json: async () => ({ socketPath: null }) } as Response;
+    }) as unknown as typeof fetch;
+    try {
+      await renderWithSession();
+      setup.mockInput.pressKey("F");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("F");
+      await setup.renderOnce();
+      expect(bodies).toHaveLength(1);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("surfaces a refused fork as a toast", async () => {
+    const { restore } = captureSpawn({
+      ok: false,
+      status: 400,
+      body: { error: "Agent 'codex' does not support forking a session." },
+    });
+    try {
+      await renderWithSession();
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain(squish("Fork failed:"));
+      expect(frame).toContain(squish("does not support forking"));
+    } finally {
+      restore();
+    }
+  });
+
+  it("does nothing for an agent that declares no fork command", async () => {
+    const { bodies, restore } = captureSpawn();
+    try {
+      await renderWithSession({ forkableAgents: [] });
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+      expect(bodies).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("does nothing for a row with no native session id", async () => {
+    // Pane-tracked without hooks: ccmux cannot name the conversation.
+    const { bodies, restore } = captureSpawn();
+    try {
+      await renderWithSession({}, { nativeSessionId: undefined });
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+      expect(bodies).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("refuses a paneless background row, which the menu already hides", async () => {
+    // These rows DO satisfy the other two conditions: they are created with
+    // agentType "claude" and a nativeSessionId, so without an explicit gate
+    // `F` would fork one into an unrelated new window (no pane to sit beside)
+    // while sessionMenuItems refuses to offer it. Key and menu have to agree.
+    const { bodies, restore } = captureSpawn();
+    try {
+      await renderWithSession(
+        {},
+        {
+          trackingMode: "background",
+          tmuxPane: null,
+          nativeSessionId: "bg-native-id",
+        },
+      );
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+      expect(bodies).toHaveLength(0);
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("no pane to fork beside"),
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("says why instead of doing nothing on an unforkable row", async () => {
+    // A menu item can hide itself; a keybinding cannot, and the help overlay
+    // advertises `F` on every row.
+    const { restore } = captureSpawn();
+    try {
+      await renderWithSession({}, { nativeSessionId: undefined });
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain(squish("ccmux setup"));
+    } finally {
+      restore();
+    }
+  });
+
+  it("names the agent when it has no verified fork command", async () => {
+    const { restore } = captureSpawn();
+    try {
+      await renderWithSession({ forkableAgents: [] });
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("no verified fork command"),
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("shows Fork in the context menu only for a forkable row", async () => {
+    const { restore } = captureSpawn();
+    try {
+      await renderWithSession();
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Fork");
+    } finally {
+      restore();
+    }
+  });
+
+  it("hides Fork for a row ccmux cannot fork", async () => {
+    // Hidden, not disabled: an item that never works on this row would read
+    // as broken rather than as inapplicable.
+    const { restore } = captureSpawn();
+    try {
+      await renderWithSession({}, { nativeSessionId: undefined });
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      // Anchored on an item that is always present, so this cannot pass by
+      // the menu simply never having opened.
+      expect(frame).toContain("Attach");
+      expect(frame).not.toContain("Fork");
+    } finally {
+      restore();
+    }
+  });
+
+  it("forks from the context menu item", async () => {
+    const { bodies, restore } = captureSpawn();
+    try {
+      await renderWithSession();
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      // Located by its label rather than a fixed row. Fork's position in the
+      // menu is deliberately not stable (it moved once already, and it is
+      // conditional), and a hardcoded row silently starts clicking whatever
+      // slid into it — which is how this test would "pass" by firing Kill.
+      const menuRow = setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes("Fork"));
+      expect(menuRow).toBeGreaterThan(0);
+      await setup.mockMouse.click(7, menuRow, MouseButtons.LEFT);
+      await settle();
+      await setup.renderOnce();
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]?.fork).toBe("s1");
+    } finally {
+      restore();
+    }
+  });
+});
+
 describe("App new session dialog", () => {
   type SpawnBody = {
     agent?: string;
