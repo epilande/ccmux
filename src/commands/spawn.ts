@@ -10,6 +10,13 @@ interface SpawnResponse {
   success: boolean;
   paneId: string;
   command: string;
+  /** Present only when `--worktree` asked for one. */
+  worktree?: {
+    name: string;
+    path: string;
+    branch: string;
+    created: boolean;
+  };
 }
 
 /**
@@ -91,6 +98,14 @@ export function createSpawnCommand(): Command {
       "tmux pane to split or place next to ('none' to ignore the current pane)",
     )
     .option("--detach", "Don't switch to the new pane after spawning")
+    .option(
+      "--worktree [name]",
+      "Spawn into a git worktree at <repo>/.claude/worktrees/<name>, creating it if needed (name derived from --prompt when omitted)",
+    )
+    .option(
+      "--base <ref>",
+      "Branch the new worktree from this ref (default: the repository's current branch)",
+    )
     .action(
       async (
         agent: string,
@@ -101,6 +116,8 @@ export function createSpawnCommand(): Command {
           split?: SpawnSplit;
           target?: string;
           detach?: boolean;
+          worktree?: string | boolean;
+          base?: string;
         },
       ) => {
         await ensureDaemon();
@@ -112,6 +129,21 @@ export function createSpawnCommand(): Command {
             ? undefined
             : options.target;
         const optedOut = options.target !== undefined && !explicitTarget;
+
+        // `--worktree` bare is `true` from commander, `--worktree x` is the
+        // string. Both become an object, since the daemon accepts one shape;
+        // `--base` without `--worktree` is a no-op flag rather than an error,
+        // matching how the other placement options behave in isolation.
+        const worktree =
+          options.worktree === undefined
+            ? undefined
+            : {
+                name:
+                  typeof options.worktree === "string"
+                    ? options.worktree
+                    : undefined,
+                base: options.base,
+              };
 
         try {
           const response = await fetch(`${getDaemonUrl()}/spawn`, {
@@ -128,6 +160,7 @@ export function createSpawnCommand(): Command {
                 ? undefined
                 : callerPane(await daemonTmuxSocket()),
               detach: options.detach ?? false,
+              worktree,
             }),
           });
 
@@ -142,6 +175,12 @@ export function createSpawnCommand(): Command {
           }
 
           const data = (await response.json()) as SpawnResponse;
+          if (data.worktree) {
+            const { name, path, branch, created } = data.worktree;
+            console.log(
+              `${created ? "Created" : "Reusing"} worktree ${name} on branch ${branch}: ${path}`,
+            );
+          }
           console.log(
             `Spawned ${agent} in pane ${data.paneId}: ${data.command}`,
           );
