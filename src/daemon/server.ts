@@ -66,6 +66,7 @@ import {
   type WorktreeSession,
 } from "./worktree-prune";
 import { fetchPrune } from "./worktree-git";
+import { readUncommitted } from "./worktree-move-changes";
 import type {
   NotificationActionInput,
   NotificationActionResult,
@@ -813,6 +814,19 @@ export class DaemonServer {
       return await this.handleScreenSession(sessionId, url, corsHeaders);
     }
 
+    // BEFORE the catch-all GET below, which slices everything after
+    // `/sessions/` as the id and would read this path's id as
+    // `<id>/dirty`. Any future `GET /sessions/:id/<verb>` needs the same
+    // placement.
+    if (
+      path.startsWith("/sessions/") &&
+      path.endsWith("/dirty") &&
+      req.method === "GET"
+    ) {
+      const sessionId = path.slice("/sessions/".length, -"/dirty".length);
+      return await this.handleSessionDirty(sessionId, corsHeaders);
+    }
+
     if (path.startsWith("/sessions/") && req.method === "GET") {
       const sessionId = path.slice("/sessions/".length);
       return await this.handleGetSession(sessionId, corsHeaders);
@@ -1278,6 +1292,63 @@ export class DaemonServer {
     this.attentionTracker.markSeen(sessionId);
     this.sessionManager.markSeen(sessionId);
     return Response.json({ success: true }, { headers });
+  }
+
+  /**
+   * Uncommitted work in a session's checkout, for the picker's "Move changes
+   * to worktree" gate.
+   *
+   * Lazy and per-session on purpose. This is one `git status` on an explicit
+   * user action (opening a context menu), so it costs nothing until someone
+   * asks and can never be stale. The alternative, a dirty flag enriched onto
+   * every row, would mean a git spawn per session per scan — exactly the cost
+   * the PR resolver's cache and sweep exist to avoid.
+   *
+   * It deliberately reuses `readUncommitted`, the same reader the move itself
+   * uses, rather than `readDirtyState`. The two disagree in ways that matter
+   * here: `readDirtyState` reports an unreadable checkout as DIRTY (the safe
+   * direction for prune, which is destructive) and counts ignored files
+   * separately. A gate that said "dirty" where the move would answer
+   * "nothing to move" would offer an action that then refuses.
+   */
+  private async handleSessionDirty(
+    sessionId: string,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    const session = this.sessionManager.getSession(sessionId);
+    if (!session) {
+      return Response.json(
+        { error: "Session not found" },
+        { status: 404, headers },
+      );
+    }
+    if (!session.cwd) {
+      return Response.json(
+        { error: "Session has no working directory" },
+        { status: 400, headers },
+      );
+    }
+
+    const state = await readUncommitted(session.cwd);
+    // Null means the cwd is not a readable git checkout. Reported as
+    // `repo: false` rather than as an error: "this row has nothing to move"
+    // is a perfectly ordinary answer to the question the menu is asking.
+    if (!state) {
+      return Response.json(
+        { repo: false, dirty: false, modified: 0, untracked: 0 },
+        { headers },
+      );
+    }
+
+    return Response.json(
+      {
+        repo: true,
+        dirty: state.modified + state.untrackedPaths.length > 0,
+        modified: state.modified,
+        untracked: state.untrackedPaths.length,
+      },
+      { headers },
+    );
   }
 
   private handleDeleteSession(

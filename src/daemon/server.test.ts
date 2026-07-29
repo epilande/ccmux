@@ -5,6 +5,7 @@ import {
   spyOn,
   afterAll,
   afterEach,
+  beforeEach,
   mock,
 } from "bun:test";
 import {
@@ -3859,5 +3860,150 @@ describe("worktree prune endpoints", () => {
     const body = (await res.json()) as { outcomes: unknown[] };
 
     expect(body.outcomes).toHaveLength(1);
+  });
+});
+
+/**
+ * `GET /sessions/:id/dirty` — the lazy gate behind the picker's "Move changes
+ * to worktree" item. Driven against a REAL fixture repo, because the property
+ * that matters is that it agrees with what the move itself would do.
+ */
+describe("GET /sessions/:id/dirty", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-dirty-")));
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  async function git(cwd: string, args: string[]): Promise<void> {
+    const proc = Bun.spawn(["git", "-C", cwd, ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const code = await proc.exited;
+    if (code !== 0) {
+      throw new Error(
+        `git ${args.join(" ")} failed: ${await new Response(proc.stderr).text()}`,
+      );
+    }
+  }
+
+  async function makeRepo(name: string): Promise<string> {
+    const repo = join(root, name);
+    mkdirSync(repo, { recursive: true });
+    await git(root, ["init", "--initial-branch=main", repo]);
+    await git(repo, ["config", "user.email", "test@example.com"]);
+    await git(repo, ["config", "user.name", "Test"]);
+    writeFileSync(join(repo, "tracked.txt"), "original\n");
+    await git(repo, ["add", "tracked.txt"]);
+    await git(repo, ["commit", "-m", "init"]);
+    return repo;
+  }
+
+  /** A session whose checkout is `cwd`. */
+  function sessionIn(manager: SessionManager, cwd: string): string {
+    const session = manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd,
+      pid: 999,
+    });
+    return session.id;
+  }
+
+  async function dirtyOf(
+    internals: ServerInternals,
+    id: string,
+  ): Promise<Record<string, unknown>> {
+    const res = await internals.handleRequest(
+      new Request(`http://localhost/sessions/${id}/dirty`),
+    );
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  it("reports a clean checkout as not dirty", async () => {
+    const { manager, internals } = createServer();
+    const repo = await makeRepo("clean");
+    const id = sessionIn(manager, repo);
+
+    expect(await dirtyOf(internals, id)).toEqual({
+      repo: true,
+      dirty: false,
+      modified: 0,
+      untracked: 0,
+    });
+  });
+
+  it("counts tracked edits and untracked files separately", async () => {
+    const { manager, internals } = createServer();
+    const repo = await makeRepo("messy");
+    writeFileSync(join(repo, "tracked.txt"), "edited\n");
+    writeFileSync(join(repo, "new.txt"), "new\n");
+    const id = sessionIn(manager, repo);
+
+    expect(await dirtyOf(internals, id)).toEqual({
+      repo: true,
+      dirty: true,
+      modified: 1,
+      untracked: 1,
+    });
+  });
+
+  it("counts untracked-only work as dirty", async () => {
+    // The move can relocate it, so the menu has to offer the action.
+    const { manager, internals } = createServer();
+    const repo = await makeRepo("untracked-only");
+    writeFileSync(join(repo, "new.txt"), "new\n");
+    const id = sessionIn(manager, repo);
+
+    const body = await dirtyOf(internals, id);
+    expect(body.dirty).toBe(true);
+    expect(body.modified).toBe(0);
+    expect(body.untracked).toBe(1);
+  });
+
+  it("answers 'not a repo' plainly rather than erroring", async () => {
+    // An ordinary answer to what the menu is asking, not a failure. Note this
+    // deliberately differs from readDirtyState, which calls an unreadable
+    // checkout DIRTY because its caller (prune) is destructive.
+    const { manager, internals } = createServer();
+    const plain = join(root, "plain");
+    mkdirSync(plain, { recursive: true });
+    const id = sessionIn(manager, plain);
+
+    expect(await dirtyOf(internals, id)).toEqual({
+      repo: false,
+      dirty: false,
+      modified: 0,
+      untracked: 0,
+    });
+  });
+
+  it("404s an unknown session", async () => {
+    const { internals } = createServer();
+    const res = await internals.handleRequest(
+      new Request("http://localhost/sessions/nope/dirty"),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("ignores gitignored files, which the move never relocates", async () => {
+    // The engine's own file setup covers ignored content, so counting it here
+    // would offer a move for a checkout that has nothing to move.
+    const { manager, internals } = createServer();
+    const repo = await makeRepo("ignored");
+    writeFileSync(join(repo, ".gitignore"), "secret.env\n");
+    await git(repo, ["add", ".gitignore"]);
+    await git(repo, ["commit", "-m", "ignore"]);
+    writeFileSync(join(repo, "secret.env"), "TOKEN=1\n");
+    const id = sessionIn(manager, repo);
+
+    const body = await dirtyOf(internals, id);
+    expect(body.dirty).toBe(false);
+    expect(body.untracked).toBe(0);
   });
 });
