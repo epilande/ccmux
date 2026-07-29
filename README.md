@@ -295,7 +295,8 @@ spawn rather than guessing a flag, and you can teach it the right shape with
 Sometimes the interesting question is "what if it had gone the other way". Fork
 starts a second session that continues an existing conversation's history, in a
 pane beside the original, and leaves the original running and untouched. The
-agent is heading down path A; fork it and try path B side by side.
+agent is heading down path A; fork it and try path B side by side. (A source
+with no pane of its own gets a new window instead.)
 
 <kbd>F</kbd> in the picker (or **Fork** in a session's context menu, or
 `ccmux spawn --fork <session-id>`) does it. The new pane is tracked like any
@@ -303,7 +304,8 @@ other session, so it gets its own row, its own state, and its own id.
 
 Fork needs two things, and the picker hides the action when either is missing:
 the agent has to declare how it forks (`forkCommand`), and ccmux has to know
-which conversation the pane holds, which comes from hooks (`ccmux setup`).
+which conversation the pane holds. For most agents that knowledge comes from
+hooks, so run `ccmux setup` if the action isn't offered.
 Today **Claude Code** is the only agent that ships a fork command, because it
 is the only one whose behavior when resuming a still-running session has been
 verified. Adding another is one config line once you have checked it yourself

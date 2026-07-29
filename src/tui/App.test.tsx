@@ -2075,7 +2075,10 @@ describe("App fork (F / context menu)", () => {
     globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
       const href = String(url);
       if (href.includes("/server-info")) {
-        return { ok: true, json: async () => ({ socketPath: null }) } as Response;
+        return {
+          ok: true,
+          json: async () => ({ socketPath: null }),
+        } as Response;
       }
       if (href.includes("/spawn")) {
         bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -2169,12 +2172,25 @@ describe("App fork (F / context menu)", () => {
   });
 
   it("leaves bare f as the hide-idle filter", async () => {
+    // Asserting only "no fork was sent" would pass just as happily if `f`
+    // became a no-op, which is the regression this test exists to catch. The
+    // row is idle, so the filter's effect is visible: it disappears, and
+    // comes back on a second press.
     const { bodies, restore } = captureSpawn();
     try {
       await renderWithSession();
+      expect(setup.captureCharFrame()).toContain("myapp");
+
       setup.mockInput.pressKey("f");
       await settle();
       await setup.renderOnce();
+      expect(bodies).toHaveLength(0);
+      expect(setup.captureCharFrame()).not.toContain("myapp");
+
+      setup.mockInput.pressKey("f");
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("myapp");
       expect(bodies).toHaveLength(0);
     } finally {
       restore();
@@ -2266,6 +2282,64 @@ describe("App fork (F / context menu)", () => {
     }
   });
 
+  it("refuses a paneless background row, which the menu already hides", async () => {
+    // These rows DO satisfy the other two conditions: they are created with
+    // agentType "claude" and a nativeSessionId, so without an explicit gate
+    // `F` would fork one into an unrelated new window (no pane to sit beside)
+    // while sessionMenuItems refuses to offer it. Key and menu have to agree.
+    const { bodies, restore } = captureSpawn();
+    try {
+      await renderWithSession(
+        {},
+        {
+          trackingMode: "background",
+          tmuxPane: null,
+          nativeSessionId: "bg-native-id",
+        },
+      );
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+      expect(bodies).toHaveLength(0);
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("no pane to fork beside"),
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("says why instead of doing nothing on an unforkable row", async () => {
+    // A menu item can hide itself; a keybinding cannot, and the help overlay
+    // advertises `F` on every row.
+    const { restore } = captureSpawn();
+    try {
+      await renderWithSession({}, { nativeSessionId: undefined });
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain(squish("ccmux setup"));
+    } finally {
+      restore();
+    }
+  });
+
+  it("names the agent when it has no verified fork command", async () => {
+    const { restore } = captureSpawn();
+    try {
+      await renderWithSession({ forkableAgents: [] });
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("no verified fork command"),
+      );
+    } finally {
+      restore();
+    }
+  });
+
   it("shows Fork in the context menu only for a forkable row", async () => {
     const { restore } = captureSpawn();
     try {
@@ -2286,7 +2360,11 @@ describe("App fork (F / context menu)", () => {
       await renderWithSession({}, { nativeSessionId: undefined });
       await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).not.toContain("Fork");
+      const frame = setup.captureCharFrame();
+      // Anchored on an item that is always present, so this cannot pass by
+      // the menu simply never having opened.
+      expect(frame).toContain("Attach");
+      expect(frame).not.toContain("Fork");
     } finally {
       restore();
     }

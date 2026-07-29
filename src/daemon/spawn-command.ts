@@ -364,7 +364,12 @@ export function buildAgentForkCommand(
   const { agent, binary, sessionId } = input;
   const template = agent.forkCommand;
 
-  if (template === undefined) {
+  // Empty string shares this branch, not the placeholder check below. It is
+  // the config-file way to say "do not offer this" (the picker's gate reads
+  // it as unforkable), so `ccmux spawn --fork`, which bypasses that gate,
+  // has to give the same answer rather than complaining about a malformed
+  // template the user never wrote.
+  if (!template) {
     return {
       ok: false,
       error:

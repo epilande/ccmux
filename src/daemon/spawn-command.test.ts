@@ -605,6 +605,24 @@ describe("buildAgentForkCommand", () => {
     if (!result.ok) expect(result.error).toContain("forkCommand");
   });
 
+  it("treats an empty template as 'not supported', not as malformed", () => {
+    // An empty string is the documented config-file way to turn fork off for
+    // an agent, and `forkableAgentNames` reads it that way, so the picker
+    // simply hides the item. `ccmux spawn --fork` bypasses that gate and must
+    // land on the SAME answer rather than complaining about a missing {id}
+    // in a template the user never wrote.
+    const result = buildAgentForkCommand({
+      agent: agentWith({ name: "codex", forkCommand: "" }),
+      binary: "codex",
+      sessionId: "abc",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("does not support forking");
+      expect(result.error).not.toContain("{id} placeholder");
+    }
+  });
+
   it("refuses a template with no {id}", () => {
     // Without it the fork silently starts a FRESH session: a pane appears,
     // the agent runs, and the history the user asked to branch is gone.

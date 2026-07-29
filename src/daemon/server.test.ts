@@ -3856,19 +3856,34 @@ describe("POST /spawn", () => {
       const source = trackedSession(manager, "forky");
       const { argv, restore } = withTmuxRecorder();
       try {
-        for (const body of [
-          { fork: "nope" },
+        // The expected message is pinned per case. Asserting only the status
+        // would let the security case pass while 400ing for some unrelated
+        // reason, which is the one rejection here that must not drift.
+        const cases: { body: Record<string, unknown>; expect: string }[] = [
+          { body: { fork: "nope" }, expect: "Unknown session to fork" },
           // Anything the shell could act on is rejected before it is ever
           // interpolated into a command.
-          { fork: "src-sid; rm -rf /" },
-          { fork: 42 },
+          {
+            body: { fork: "src-sid; rm -rf /" },
+            expect: "Invalid 'fork' field",
+          },
+          { body: { fork: 42 }, expect: "Invalid 'fork' field" },
           // Each of these builds its own command; honoring one and dropping
           // the other silently would be worse than refusing.
-          { fork: source.id, resume: "other-sid" },
-          { fork: source.id, prompt: "hi" },
-        ]) {
+          {
+            body: { fork: source.id, resume: "other-sid" },
+            expect: "Cannot combine 'fork'",
+          },
+          {
+            body: { fork: source.id, prompt: "hi" },
+            expect: "Cannot combine 'fork'",
+          },
+        ];
+        for (const { body, expect: expected } of cases) {
           const res = await internals.handleRequest(spawnRequest(body));
           expect(res.status).toBe(400);
+          const { error } = (await res.json()) as { error: string };
+          expect(`${JSON.stringify(body)} -> ${error}`).toContain(expected);
         }
         expect(argv).toHaveLength(0);
       } finally {

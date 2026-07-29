@@ -337,17 +337,54 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Whether this row can be forked. Two conditions, and both are about
-   * knowing WHAT to continue: the agent has to declare how it forks, and
-   * ccmux has to know which conversation the pane holds — a pane-tracked row
-   * (no hooks installed) has an agent but no session id, and a paneless
-   * background row has neither.
+   * Whether this row can be forked.
+   *
+   * Two conditions are about knowing WHAT to continue: the agent has to
+   * declare how it forks, and ccmux has to know which conversation the pane
+   * holds — a pane-tracked row with no hooks installed has an agent but no
+   * session id.
+   *
+   * Background rows are excluded even though they satisfy both. They are
+   * created with `agentType: "claude"` and a `nativeSessionId` (see
+   * `createBackgroundSession` and the background source), so without this
+   * they would qualify — but they are PANELESS, which makes "fork into a
+   * pane beside the original" meaningless: the fork would land in an
+   * unrelated new window. `sessionMenuItems` already returns early for them,
+   * so the key would otherwise do something the menu deliberately refuses.
    */
   function canForkSession(
-    session: { agentType: string; nativeSessionId?: string } | undefined,
+    session:
+      | {
+          agentType: string;
+          nativeSessionId?: string;
+          trackingMode?: string;
+        }
+      | undefined,
   ): boolean {
     if (!session?.nativeSessionId) return false;
+    if (session.trackingMode === "background") return false;
     return (props.forkableAgents ?? []).includes(session.agentType);
+  }
+
+  /**
+   * Why this row can't be forked, for the key path. The menu hides the item
+   * instead, but a keybinding has no way to hide itself and the help overlay
+   * advertises `F` on every row, so silence reads as a broken key.
+   */
+  function forkRefusalReason(session: {
+    agentType: string;
+    nativeSessionId?: string;
+    trackingMode?: string;
+  }): string {
+    if (session.trackingMode === "background") {
+      return "Fork: background agents have no pane to fork beside";
+    }
+    if (!session.nativeSessionId) {
+      // Same reason the daemon gives, which the client gate would otherwise
+      // never let the user see.
+      return `Fork: ccmux doesn't know which conversation this pane holds. Install hooks with 'ccmux setup'.`;
+    }
+    return `Fork: ${session.agentType} has no verified fork command`;
   }
 
   /** Drops re-activations while a fork is pending, so a double press can't
@@ -1318,7 +1355,13 @@ export function App(props: AppProps) {
         // would be unreachable.
         if (key === "F" || event.shift) {
           const sessionToFork = store.selectedSession();
-          if (sessionToFork) forkSession(sessionToFork);
+          // Silent on a group header, like `r` and `x`; but on a real row
+          // that can't be forked, say why. The help overlay lists `F`
+          // unconditionally, so silence there reads as a broken key.
+          if (sessionToFork) {
+            if (canForkSession(sessionToFork)) forkSession(sessionToFork);
+            else store.actions.showToast(forkRefusalReason(sessionToFork));
+          }
         } else {
           store.actions.toggleHideIdle();
         }
