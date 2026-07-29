@@ -423,53 +423,72 @@ export function App(props: AppProps) {
    * open two panes off one conversation. */
   let forkInFlight = false;
 
+  /** Ceiling on a fork request. Without one, a daemon that accepts the
+   * connection and never answers latches `forkInFlight` for the rest of the
+   * picker's life, and `F` silently stops working. */
+  const FORK_TIMEOUT_MS = 15_000;
+
   /**
    * Fork a session into a pane beside its own: same agent, same directory,
    * conversation continued from the source's history, original untouched.
    *
-   * The picker only chooses the DESTINATION here (`split` + `target`); how to
-   * continue the conversation is the daemon's `forkCommand` template. That
-   * split is what lets a worktree destination reuse the fork command as-is
-   * and change only these fields.
+   * The picker only chooses the DESTINATION here (`split` + `target` /
+   * `callerPane`); how to continue the conversation is the daemon's
+   * `forkCommand` template. Note the cwd is NOT ours to choose: Claude
+   * resolves a resumed session against the project directory for its cwd, so
+   * the daemon refuses a fork into a different one.
    */
-  function forkSession(session: EnrichedSession) {
-    if (forkInFlight || !canForkSession(session)) return;
+  async function forkSession(session: EnrichedSession) {
+    if (!canForkSession(session)) return;
+    if (forkInFlight) {
+      // Say so rather than dropping it silently, which is indistinguishable
+      // from a dead key.
+      store.actions.showToast("Fork already in progress");
+      return;
+    }
     forkInFlight = true;
-    // Beside the source when it has a pane to sit beside; a new window
-    // otherwise, rather than splitting whichever pane the daemon considers
-    // current, which would be somewhere unrelated.
-    const target = session.tmuxPane ?? undefined;
-    fetch(`${getDaemonUrl()}/spawn`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        fork: session.id,
-        split: target ? "h" : false,
-        target,
-        // The jump below is this component's own exit path (it flashes the
-        // pane and closes a one-shot picker); letting the daemon switch too
-        // would race it.
-        detach: true,
-      }),
-    })
-      .then(async (response) => {
-        forkInFlight = false;
-        const data = (await response.json().catch(() => null)) as {
-          paneId?: string;
-          error?: string;
-        } | null;
-        if (!response.ok || !data?.paneId) {
-          store.actions.showToast(
-            `Fork failed: ${data?.error ?? response.statusText}`,
-          );
-          return;
-        }
-        selectPane(data.paneId);
-      })
-      .catch((err: unknown) => {
-        forkInFlight = false;
-        store.actions.showToast(`Fork failed: ${errText(err)}`);
+    try {
+      // Beside the source when it has a pane to sit beside. Otherwise a new
+      // window in the CALLER's session: sending no placement at all leaves
+      // the daemon running a bare `new-window`, and since the daemon has no
+      // client, tmux picks its own MRU session — so the window lands
+      // somewhere unrelated and the jump below then drags the user there.
+      const target = session.tmuxPane ?? undefined;
+      const callerPane = target ? undefined : await resolveSpawnPane();
+      const response = await fetch(`${getDaemonUrl()}/spawn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fork: session.id,
+          split: target ? "h" : false,
+          target,
+          callerPane: callerPane ?? undefined,
+          // The jump below is this component's own exit path (it flashes the
+          // pane and closes a one-shot picker); letting the daemon switch too
+          // would race it.
+          detach: true,
+        }),
+        signal: AbortSignal.timeout(FORK_TIMEOUT_MS),
       });
+      const data = (await response.json().catch(() => null)) as {
+        paneId?: string;
+        error?: string;
+      } | null;
+      if (!response.ok || !data?.paneId) {
+        store.actions.showToast(
+          `Fork failed: ${data?.error ?? response.statusText}`,
+        );
+        return;
+      }
+      selectPane(data.paneId);
+    } catch (err: unknown) {
+      store.actions.showToast(`Fork failed: ${errText(err)}`);
+    } finally {
+      // In `finally`, not on each exit path: a throw between the guard and
+      // the response (an aborted fetch, a rejected json parse) used to leave
+      // the latch set forever.
+      forkInFlight = false;
+    }
   }
 
   /**
@@ -618,7 +637,7 @@ export function App(props: AppProps) {
     if (!cm) return;
     const session = store.state.sessions.find((s) => s.id === cm.sessionId);
     store.actions.hideContextMenu();
-    if (session) forkSession(session);
+    if (session) void forkSession(session);
   }
 
   function contextMenuNewSession() {
@@ -1809,7 +1828,7 @@ export function App(props: AppProps) {
           // that can't be forked, say why. The help overlay lists `F`
           // unconditionally, so silence there reads as a broken key.
           if (sessionToFork) {
-            if (canForkSession(sessionToFork)) forkSession(sessionToFork);
+            if (canForkSession(sessionToFork)) void forkSession(sessionToFork);
             else store.actions.showToast(forkRefusalReason(sessionToFork));
           }
         } else {

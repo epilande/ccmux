@@ -61,7 +61,11 @@ So an agent earns a `forkCommand` only after someone has checked, against a **li
 
 Two structural notes for anyone extending this:
 
-- Command construction (`buildAgentForkCommand`) is kept separate from pane placement (`buildTmuxSpawnArgv` and the route's placement resolution). `POST /spawn`'s fork path adds no targeting of its own: the caller passes `split`/`target` exactly as for any other spawn, and an explicit `cwd` overrides the source's. That is what lets a fork-into-a-worktree destination reuse the command half unchanged.
+- Command construction (`buildAgentForkCommand`) is kept separate from pane placement (`buildTmuxSpawnArgv` and the route's placement resolution). `POST /spawn`'s fork path adds no targeting of its own: the caller passes `split`/`target` exactly as for any other spawn. The command half is genuinely reusable.
+
+- **THE CWD IS NOT FREE, and a fork into a different directory is refused.** Claude resolves `--resume <id>` against the project directory derived from the CURRENT working directory (`~/.claude/projects/<encoded-cwd>/`), so a fork started anywhere other than the source's cwd cannot find the conversation. Verified live on Claude Code 2.1.220: `POST /spawn {"fork": "<id>", "cwd": "<other dir>"}` returned 200 with a pane id, and the pane printed `No conversation found with session ID: <id>` and dropped to a bare shell. Nothing in ccmux could see that this had failed, which is why the route now refuses the combination outright rather than handing back a dead pane.
+
+  This matters most for the planned fork-into-a-worktree work: a worktree is a different directory, so it is NOT simply "the same command with a different cwd". Reusing the command half is correct, but something has to put the transcript where the destination will look for it (copying it into the destination's encoded project directory before spawning is the obvious candidate) before a fork can run there at all.
 - Forking mid-turn is safe for Claude and is deliberately not gated on the source being idle. Verified against a source in the middle of a long answer: the source finished its turn normally and stayed `idle`-after-`working` as usual, and the fork came up with the history as of fork time, which includes the in-flight turn's user message but not the answer that had not been written yet. The fork does not auto-run that pending turn; it sits at an empty composer. The two processes only ever share a file one of them reads.
 
 ## Claude-specific caveats

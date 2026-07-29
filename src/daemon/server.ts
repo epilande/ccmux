@@ -2057,18 +2057,35 @@ export class DaemonServer {
     fork?: unknown;
     resume?: string;
     prompt?: unknown;
+    cwd?: string;
   }): BuildResult<ForkSource | undefined> {
-    const { fork } = body;
+    const { fork, cwd } = body;
     if (fork === undefined || fork === null)
       return { ok: true, value: undefined };
 
-    if (typeof fork !== "string" || !NATIVE_SESSION_ID_PATTERN.test(fork)) {
+    // A LOOKUP KEY, not a value that reaches a shell: it is compared against
+    // ids ccmux itself minted and never interpolated into a command (what
+    // gets interpolated is the resolved `nativeSessionId`, which the builder
+    // pattern-checks itself). So this is a sanity bound, not the injection
+    // guard. The strict pattern used to live here and locked out legitimate
+    // pane-tracked ids: a custom agent named `my.agent` yields
+    // `my.agent_pane3`, which it rejected, making those rows unforkable.
+    if (
+      typeof fork !== "string" ||
+      fork.length === 0 ||
+      fork.length > 256 ||
+      // eslint-disable-next-line no-control-regex
+      /[\x00-\x1f\x7f]/.test(fork)
+    ) {
       return { ok: false, error: "Invalid 'fork' field" };
     }
     // Fork is a way to START a session, not a modifier on one: each of these
     // builds its own command, so accepting the combination would mean
     // silently honoring one and dropping the other.
-    if (body.resume !== undefined || body.prompt !== undefined) {
+    // `!= null`, matching `normalizePrompt`'s treatment of null as absent. A
+    // client that serializes omitted fields as null could otherwise never
+    // fork at all.
+    if (body.resume != null || body.prompt != null) {
       return {
         ok: false,
         error: "Cannot combine 'fork' with 'resume' or 'prompt'",
@@ -2089,6 +2106,39 @@ export class DaemonServer {
         error:
           `Session ${fork} has no native session id to fork from. ` +
           `Install hooks with 'ccmux setup' so ccmux can track which conversation a pane holds.`,
+      };
+    }
+    // Paneless background rows carry BOTH an agent type and a native session
+    // id, so they reach here looking forkable. The picker hides the action
+    // for them, but that is a display gate: this is where it has to be true.
+    // "Fork into a pane beside the original" is meaningless without a pane,
+    // and `claude --bg` is precisely the two-live-processes-on-one-session
+    // case docs/agent-adapters.md says must be verified before an agent earns
+    // a fork, which nobody has done for background workers.
+    if (isBackgroundSession(session)) {
+      return {
+        ok: false,
+        error:
+          `Session ${fork} is a background agent, which has no pane to fork beside. ` +
+          `Forking a background worker is not supported.`,
+      };
+    }
+    // Claude resolves `--resume <id>` against the project directory derived
+    // from the CURRENT cwd (`~/.claude/projects/<encoded-cwd>/`), so a fork
+    // started anywhere else cannot find the conversation: the pane opens,
+    // send-keys succeeds, the route answers 200, and the user gets "No
+    // conversation found with session ID" and a bare shell. Verified live on
+    // Claude Code 2.1.220. Refusing is the honest answer until something
+    // moves the transcript into the destination's project directory (see
+    // docs/agent-adapters.md#forking-a-session).
+    if (cwd !== undefined && cwd !== session.cwd) {
+      return {
+        ok: false,
+        error:
+          `Cannot fork ${fork} into a different directory. ` +
+          `${session.agentType} resolves a resumed session against the project directory for its cwd, ` +
+          `so the fork would start in ${cwd} and find no conversation. ` +
+          `Omit 'cwd' to fork in ${session.cwd}.`,
       };
     }
 
@@ -2236,7 +2286,10 @@ export class DaemonServer {
 
     // `resume` is interpolated into a shell command typed into the pane, so an
     // unconstrained value is command injection. Constrain it like `/invoke`.
-    if (resume !== undefined) {
+    // `!= null` so an explicitly-null field means absent, as it does for
+    // `prompt` (see `normalizePrompt`); a client that serializes omitted
+    // fields as null was otherwise rejected outright.
+    if (resume != null) {
       if (
         typeof resume !== "string" ||
         !NATIVE_SESSION_ID_PATTERN.test(resume)

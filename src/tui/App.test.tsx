@@ -2179,14 +2179,19 @@ describe("App fork (F / context menu)", () => {
     }
   });
 
-  it("also fires for the lowercase-plus-shift spelling of F", async () => {
-    // Terminals deliver a capital as name `"f"` with `shift` set rather than
-    // as `"F"`. Dropping either case makes the binding unreachable on some
-    // terminals while looking correct in the other's test.
+  it("also fires for the name-\"F\" spelling some terminals send", async () => {
+    // Terminals disagree: most send a capital as name `"f"` with `shift` set
+    // (what `pressKey("F")` above produces — it emits the same byte 0x46, so
+    // driving this case through `pressKey("f", {shift:true})` would just
+    // re-run the previous test), while modifyOtherKeys sends a CSI sequence
+    // that parses to name `"F"`. Both arms of the binding are live, and this
+    // one drives the raw bytes so the `key === "F"` arm is genuinely covered
+    // rather than covered by comment.
     const { bodies, restore } = captureSpawn();
     try {
       await renderWithSession();
-      setup.mockInput.pressKey("f", { shift: true });
+      // CSI 27 ; 2 ; 70 ~  =  modifyOtherKeys form of shift+F.
+      setup.renderer.stdin.emit("data", Buffer.from("\x1b[27;2;70~"));
       await settle();
       await setup.renderOnce();
       expect(bodies).toHaveLength(1);

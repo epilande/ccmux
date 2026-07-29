@@ -375,7 +375,11 @@ export function buildAgentForkCommand(
       error:
         `Agent '${agent.name}' does not support forking a session. ` +
         `Set 'agents.${agent.name}.forkCommand' in ccmux.json (e.g. "{bin} --resume {id} --fork-session") ` +
-        `once you have verified that resuming a live session leaves it undisturbed.`,
+        `once you have verified that resuming a live session leaves it undisturbed. ` +
+        // The daemon resolves its agent list once at boot while the picker
+        // reads ccmux.json live, so a just-added forkCommand shows the menu
+        // item and still lands here.
+        `If you just added it, restart the daemon.`,
     };
   }
   // A config file can hold any JSON, and this runs outside the route's try

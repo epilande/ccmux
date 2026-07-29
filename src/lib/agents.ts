@@ -1419,6 +1419,20 @@ export function getAgents(preferences?: Preferences): AgentDef[] {
 }
 
 /**
+ * Whether a `forkCommand` is one the builder will actually accept.
+ *
+ * Shared with `buildAgentForkCommand` so the picker's gate and the route's
+ * refusal cannot drift: a truthiness check offered Fork for a template that
+ * was a number, an object, whitespace, or simply missing `{id}`, and the
+ * action then failed on click — the exact "reads as broken" outcome the
+ * hide-don't-disable choice exists to avoid. Preferences are unvalidated
+ * JSON, so every one of those is reachable from ccmux.json.
+ */
+export function isUsableForkCommand(template: unknown): template is string {
+  return typeof template === "string" && template.includes("{id}");
+}
+
+/**
  * Names of the agents that declare how to fork a session — the built-ins
  * that ship a `forkCommand` plus any custom agent configured with one.
  *
@@ -1426,11 +1440,26 @@ export function getAgents(preferences?: Preferences): AgentDef[] {
  * is a display gate only: the daemon re-derives the same fact from its own
  * agent registry when the request arrives, so a picker running against a
  * daemon with different config gets a clear refusal rather than a wrong pane.
+ *
+ * NEVER THROWS, and that is load-bearing rather than defensive. `getAgents`
+ * throws on a malformed `agents` block (a missing `processMatch`, an
+ * unparseable regex), and this is called on the PICKER AND SIDEBAR STARTUP
+ * PATH, which nothing above catches: Commander's async action has no handler
+ * and there is no `unhandledRejection` hook. A single typo in ccmux.json
+ * would otherwise take the picker from "renders, with the daemon logging the
+ * config error" to a stack trace and exit — and in the tmux popup binding
+ * that is a flash-and-close with no message at all, plus every sidebar in
+ * the fleet dying on next launch. Fork not being offered is a far better
+ * failure than no picker.
  */
 export function forkableAgentNames(preferences?: Preferences): string[] {
-  return getAgents(preferences)
-    .filter((agent) => agent.forkCommand)
-    .map((agent) => agent.name);
+  try {
+    return getAgents(preferences)
+      .filter((agent) => isUsableForkCommand(agent.forkCommand))
+      .map((agent) => agent.name);
+  } catch {
+    return [];
+  }
 }
 
 /** Map of agent name → short code for compact display */

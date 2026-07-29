@@ -298,9 +298,16 @@ pane beside the original, and leaves the original running and untouched. The
 agent is heading down path A; fork it and try path B side by side. (A source
 with no pane of its own gets a new window instead.)
 
-<kbd>F</kbd> in the picker (or **Fork** in a session's context menu, or
-`ccmux spawn --fork <session-id>`) does it. The new pane is tracked like any
-other session, so it gets its own row, its own state, and its own id.
+<kbd>F</kbd> in the picker, or **Fork** in a session's context menu, does it,
+and places the new pane beside the source's own. `ccmux spawn --fork
+<session-id>` forks the same way but places the result like every other
+`ccmux spawn`, relative to the pane you run it from. Either way the new pane
+is tracked like any other session, with its own row, state and id.
+
+The fork always starts in the source's directory. Claude looks a resumed
+session up under the project directory for the current working directory, so
+a fork somewhere else would find no conversation at all; `--cwd` pointing
+elsewhere is refused rather than silently opening an empty shell.
 
 Fork needs two things, and the picker hides the action when either is missing:
 the agent has to declare how it forks (`forkCommand`), and ccmux has to know

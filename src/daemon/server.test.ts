@@ -3819,12 +3819,9 @@ describe("POST /spawn", () => {
       }
     });
 
-    it("takes the agent and cwd from the source, and an explicit cwd wins", async () => {
-      // The cwd override is the seam the worktree destination uses: same
-      // fork command, different directory.
+    it("takes the agent from the source, ignoring the caller's", async () => {
       const { manager, internals } = serverForAgents([forkAgent, noForkAgent]);
       const source = trackedSession(manager, "forky");
-      const elsewhere = realpathSync(tmpdir());
       const { argv, restore } = withTmuxRecorder();
       try {
         // `agent` names a DIFFERENT agent and is ignored: the conversation
@@ -3833,12 +3830,16 @@ describe("POST /spawn", () => {
           spawnRequest({
             fork: source.id,
             agent: "unforkable",
-            cwd: elsewhere,
             detach: true,
           }),
         );
         expect(res.status).toBe(200);
-        expect(argv[0]).toContain(elsewhere);
+        // And it starts in the SOURCE's directory. This used to assert that
+        // an explicit cwd wins, which live testing disproved: Claude looks a
+        // resumed session up under the project dir for the current cwd, so a
+        // fork elsewhere finds no conversation. That combination is now
+        // refused outright (see the test below).
+        expect(argv[0]).toContain(source.cwd);
         expect(argv[1]?.[4]).toContain("forky --resume src-sid");
       } finally {
         restore();
@@ -3927,6 +3928,136 @@ describe("POST /spawn", () => {
       }
     });
 
+    it("refuses a fork into a DIFFERENT directory", async () => {
+      // Verified live on Claude Code 2.1.220: the pane opens, send-keys
+      // succeeds, the route answers 200, and the agent prints "No
+      // conversation found with session ID" before dropping to a bare shell,
+      // because Claude looks a resumed session up under the project dir for
+      // the CURRENT cwd. A clear 400 beats a dead pane nothing can detect.
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const source = trackedSession(manager, "forky");
+      const elsewhere = realpathSync(
+        mkdtempSync(join(tmpdir(), "ccmux-fork-")),
+      );
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id, cwd: elsewhere, detach: true }),
+        );
+        expect(res.status).toBe(400);
+        const { error } = (await res.json()) as { error: string };
+        expect(error).toContain("different directory");
+        expect(error).toContain(source.cwd);
+        // Nothing was created, so there is no dead pane to clean up.
+        expect(argv).toHaveLength(0);
+      } finally {
+        restore();
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
+    });
+
+    it("allows an explicit cwd that MATCHES the source", async () => {
+      // The refusal is about a DIFFERENT directory, not about the field
+      // being present: a caller echoing the session's own cwd is fine.
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const source = trackedSession(manager, "forky");
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id, cwd: source.cwd, detach: true }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[1]?.[4]).toContain("forky --resume src-sid");
+      } finally {
+        restore();
+      }
+    });
+
+    it("refuses a paneless background row daemon-side too", async () => {
+      // The picker hides Fork for these, but that is a DISPLAY gate. Verified
+      // by review that a hand-rolled request reached tmux and spawned a
+      // window, so the refusal has to be here as well.
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const bg = manager.createBackgroundSession({
+        daemonShort: "bgabc123",
+        pid: 4242,
+        cwd,
+        nativeSessionId: "bgnative-1",
+        logPath: null,
+        version: null,
+        status: "idle",
+        attentionType: null,
+        pendingTool: null,
+        lastPrompt: null,
+        lastActivityAt: null,
+      });
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: bg.id, detach: true }),
+        );
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as { error: string }).error).toContain(
+          "background agent",
+        );
+        expect(argv).toHaveLength(0);
+      } finally {
+        restore();
+      }
+    });
+
+    it("accepts a pane-tracked id the strict pattern would have rejected", async () => {
+      // `body.fork` is a LOOKUP KEY, not a value reaching a shell. A custom
+      // agent named `my.agent` yields the id `my.agent_pane3`, which the old
+      // NATIVE_SESSION_ID_PATTERN check refused — making every row of that
+      // agent unforkable no matter how it was configured.
+      const dotted: AgentDef = {
+        ...forkAgent,
+        name: "my.agent",
+        executable: "my-agent",
+      };
+      const { manager, internals } = serverForAgents([dotted]);
+      const source = manager.createPaneTrackedSession({
+        agentType: "my.agent",
+        paneId: "%3",
+        cwd,
+        pid: 4242,
+        nativeSessionId: "src-sid",
+      });
+      expect(source.id).toContain(".");
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id, detach: true }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[1]?.[4]).toBe("my-agent --resume src-sid --fork-session");
+      } finally {
+        restore();
+      }
+    });
+
+    it("treats an explicitly null resume/prompt as absent", async () => {
+      // A client that serializes omitted fields as null could otherwise never
+      // fork; null means absent everywhere else in this route.
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const source = trackedSession(manager, "forky");
+      const { restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({
+            fork: source.id,
+            resume: null,
+            prompt: null,
+            detach: true,
+          }),
+        );
+        expect(res.status).toBe(200);
+      } finally {
+        restore();
+      }
+    });
+
     it("refuses an unknown session, a malformed id, and combinations", async () => {
       const { manager, internals } = serverForAgents([forkAgent]);
       const source = trackedSession(manager, "forky");
@@ -3939,11 +4070,18 @@ describe("POST /spawn", () => {
           { body: { fork: "nope" }, expect: "Unknown session to fork" },
           // Anything the shell could act on is rejected before it is ever
           // interpolated into a command.
+          // A shell-shaped id is no longer rejected on SHAPE: `fork` is a
+          // lookup key, compared against ids ccmux itself minted and never
+          // interpolated into a command, so it simply matches nothing. What
+          // reaches the shell is the resolved `nativeSessionId`, which the
+          // builder pattern-checks (see spawn-command.test.ts).
           {
             body: { fork: "src-sid; rm -rf /" },
-            expect: "Invalid 'fork' field",
+            expect: "Unknown session to fork",
           },
           { body: { fork: 42 }, expect: "Invalid 'fork' field" },
+          { body: { fork: "" }, expect: "Invalid 'fork' field" },
+          { body: { fork: "a b" }, expect: "Invalid 'fork' field" },
           // Each of these builds its own command; honoring one and dropping
           // the other silently would be worse than refusing.
           {
