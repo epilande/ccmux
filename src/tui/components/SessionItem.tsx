@@ -131,9 +131,8 @@ function worktreeRepoName(
   dirname: string,
 ): string | null {
   if (!session.isWorktree) return null;
-  const root = session.mainRepoRoot;
-  const name = (root ? root.split("/").filter(Boolean).at(-1) : null) ?? null;
-  const repo = name ?? session.project;
+  const repo =
+    session.mainRepoRoot?.split("/").filter(Boolean).at(-1) ?? session.project;
   if (!repo || repo === dirname) return null;
   return repo;
 }
@@ -613,7 +612,8 @@ const FieldCell: Component<{
       // (`branchLabelFor`), so moving `branch` into its own column doesn't
       // silently drop the indicator.
       const branch = ctx.session.gitBranch;
-      const label = branch ? branch + (ctx.session.isWorktree ? "+" : "") : "";
+      const marker = ctx.session.isWorktree ? "+" : "";
+      const label = branch ? branch + marker : "";
       return <text fg={dimColor(ctx, theme.blue)}>{label}</text>;
     }
     case "pr": {

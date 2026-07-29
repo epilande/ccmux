@@ -645,9 +645,10 @@ export function fitProjectCell(
   let branchLabel = branch
     ? branchLabelFor(branch, isWorktree, maxBranchLen)
     : "";
-  const branchWidth = branchLabel.length;
+  // What the path parts get to share once the branch label has its width.
+  const pathBudget = budget - branchLabel.length;
 
-  if (prefix.length + dirname.length + branchWidth <= budget) {
+  if (prefix.length + dirname.length <= pathBudget) {
     return { prefix, dirname, branchLabel };
   }
 
@@ -658,33 +659,27 @@ export function fitProjectCell(
     // 1. Shrink the worktree name first, keeping the repo whole.
     outDirname = fitDirname(
       dirname,
-      budget - prefix.length - branchWidth,
+      pathBudget - prefix.length,
       WORKTREE_NAME_FLOOR,
     );
-    if (prefix.length + outDirname.length + branchWidth <= budget) {
-      return { prefix, dirname: outDirname, branchLabel };
+    if (prefix.length + outDirname.length > pathBudget) {
+      // 2. Worktree name at its floor and still overflowing: the cell is too
+      //    small to carry both, so the repo takes what's left or gives up,
+      //    and the freed chars go back to the worktree name.
+      outPrefix = fitPrefix(
+        prefix,
+        pathBudget - outDirname.length,
+        REPO_PREFIX_MIN,
+      );
+      outDirname = fitDirname(dirname, pathBudget - outPrefix.length);
     }
-    // 2. Worktree name at its floor and still overflowing: the cell is too
-    //    small to carry both, so the repo takes what's left or gives up.
-    outPrefix = fitPrefix(
-      prefix,
-      budget - outDirname.length - branchWidth,
-      REPO_PREFIX_MIN,
-    );
-    // The worktree name went below the normal floor to make room for a repo
-    // that then shrank or vanished; hand the freed chars back to it.
-    outDirname = fitDirname(dirname, budget - outPrefix.length - branchWidth);
   } else {
     // 1. Shrink the prefix first: give it what's left after dirname+branch.
-    outPrefix = fitPrefix(prefix, budget - dirname.length - branchWidth);
-    if (outPrefix.length + dirname.length + branchWidth <= budget) {
-      return { prefix: outPrefix, dirname, branchLabel };
-    }
-    // 2. Prefix minimal but dirname+branch still overflow: truncate the
-    //    dirname, keeping a small floor so it stays identifiable.
-    outDirname = fitDirname(dirname, budget - outPrefix.length - branchWidth);
+    outPrefix = fitPrefix(prefix, pathBudget - dirname.length);
+    // 2. Then the dirname, kept to a small floor so it stays identifiable.
+    outDirname = fitDirname(dirname, pathBudget - outPrefix.length);
   }
-  if (outPrefix.length + outDirname.length + branchWidth <= budget) {
+  if (outPrefix.length + outDirname.length <= pathBudget) {
     return { prefix: outPrefix, dirname: outDirname, branchLabel };
   }
 
