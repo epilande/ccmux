@@ -12,6 +12,24 @@
  * from the first words of the prompt. No model is consulted, deliberately —
  * a branch name that varies run to run is not something a user can predict,
  * script, or find again.
+ *
+ * TWO DELIBERATE DIVERGENCES from what Claude Code does with its own
+ * worktrees, both chosen rather than overlooked:
+ *
+ * 1. The branch is the BARE slug. Claude Code prefixes its own with
+ *    `worktree-`. Matching it was considered and rejected: "behave
+ *    identically" is worth paying for in FILE SETUP, where a difference
+ *    produces a worktree that misbehaves, but a branch name is user-facing
+ *    intent rather than a compatibility surface. Someone typing
+ *    `--worktree fix-thing` expects a branch called `fix-thing`, and a forced
+ *    prefix would clutter every branch listing to no benefit.
+ * 2. No lock is taken. Claude Code holds a session lock for the life of its
+ *    session, which is why `git worktree list` shows its worktrees as
+ *    `locked` with a reason naming the session and pid. Not copying it is the
+ *    behavior we want on both sides: ccmux's prune skips locked worktrees, so
+ *    a live Claude session is already protected by its own lock, while a
+ *    ccmux-created worktree becomes prunable the moment its agent exits
+ *    rather than needing an unlock first.
  */
 
 import {
