@@ -1,10 +1,16 @@
 import { describe, it, expect, mock, afterEach } from "bun:test";
 
 // Neutralize ensureDaemon so the action never spawns/probes a real daemon.
+// Counted as well as neutralized: argument validation that runs BEFORE it is
+// the difference between rejecting a typo and leaving a daemon behind on the
+// shared port.
+let ensureDaemonCalls = 0;
 const realShared = await import("./shared");
 mock.module("./shared", () => ({
   ...realShared,
-  ensureDaemon: async () => {},
+  ensureDaemon: async () => {
+    ensureDaemonCalls++;
+  },
 }));
 
 const { createSpawnCommand } = await import("./spawn");
@@ -62,9 +68,35 @@ async function runSpawn(argv: string[]): Promise<void> {
 }
 
 const originalLog = console.log;
+const originalError = console.error;
 afterEach(() => {
   console.log = originalLog;
+  console.error = originalError;
 });
+
+/**
+ * Run the action with `process.exit` turned into a throw, so a validation
+ * failure can be asserted on in-process instead of taking the test runner
+ * down with it.
+ */
+async function runSpawnExpectingExit(argv: string[]): Promise<number> {
+  const realExit = process.exit;
+  process.exit = ((code?: number) => {
+    throw new Error(`process.exit:${code ?? 0}`);
+  }) as typeof process.exit;
+  try {
+    await runSpawn(argv);
+  } catch (err) {
+    const match = /^process\.exit:(\d+)$/.exec(
+      err instanceof Error ? err.message : "",
+    );
+    if (!match) throw err;
+    return Number(match[1]);
+  } finally {
+    process.exit = realExit;
+  }
+  throw new Error("expected the command to exit");
+}
 
 describe("ccmux spawn cwd resolution", () => {
   // bin/ccmux cds into the package root for module resolution, so
@@ -229,14 +261,107 @@ describe("--base requires --worktree", () => {
   // `--base` alone is inert. Silently ignoring a flag someone typed costs a
   // confused debugging session, and unlike `--split` without a target there
   // is no sensible thing the command can do with it.
-  it("exits with a clear error", async () => {
-    const proc = Bun.spawnSync(
-      ["bun", "run", "src/index.ts", "spawn", "claude", "--base", "main"],
-      { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" },
-    );
+  //
+  // The `ensureDaemonCalls` assertion is the point of running this in-process:
+  // the check used to sit below `ensureDaemon()`, so rejecting the typo booted
+  // a daemon on the shared port first, and this test left one running on
+  // whoever's machine ran the suite.
+  it("exits with a clear error without starting a daemon", async () => {
+    const errors: string[] = [];
+    console.error = (line: string) => errors.push(line);
+    ensureDaemonCalls = 0;
 
-    expect(proc.exitCode).toBe(1);
-    expect(proc.stderr.toString()).toContain("--base requires --worktree");
+    const code = await runSpawnExpectingExit(["claude", "--base", "main"]);
+
+    expect(code).toBe(1);
+    expect(errors.join("\n")).toContain("--base requires --worktree");
+    expect(ensureDaemonCalls).toBe(0);
+  });
+});
+
+describe("ccmux spawn --worktree reporting", () => {
+  /** Answer `/spawn` with a worktree result of the given shape. */
+  function withWorktreeResponse(worktree: Record<string, unknown>) {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = typeof url === "string" ? url : url.toString();
+      if (href.endsWith("/server-info")) {
+        return new Response(JSON.stringify({ socketPath: null }), {
+          status: 200,
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          success: true,
+          paneId: "%9",
+          command: "claude",
+          worktree,
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    return () => (globalThis.fetch = original);
+  }
+
+  async function reportFor(worktree: Record<string, unknown>): Promise<string> {
+    const lines: string[] = [];
+    console.log = (line: string) => lines.push(line);
+    const restore = withWorktreeResponse(worktree);
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn(["--worktree", "wt"]);
+      return lines.join("\n");
+    } finally {
+      restoreEnv();
+      restore();
+    }
+  }
+
+  // The default base is the MAIN checkout's current branch, not the caller's,
+  // so which ref the branch was cut from is not something the user can infer.
+  it("names the base a new branch was cut from", async () => {
+    const out = await reportFor({
+      name: "wt",
+      path: "/repo/.claude/worktrees/wt",
+      branch: "wt",
+      created: true,
+      branchCreated: true,
+      base: "release/2.0",
+    });
+
+    expect(out).toContain("Created worktree wt on new branch wt");
+    expect(out).toContain("from release/2.0");
+  });
+
+  // Branch reuse is intentional, but the reused branch can already carry
+  // twenty commits: reporting it as created would misdescribe the starting
+  // point of everything the agent is about to do.
+  it("does not call a reused branch new", async () => {
+    const out = await reportFor({
+      name: "wt",
+      path: "/repo/.claude/worktrees/wt",
+      branch: "wt",
+      created: true,
+      branchCreated: false,
+    });
+
+    expect(out).toContain("Created worktree wt on existing branch wt");
+    expect(out).not.toContain("new branch");
+  });
+
+  it("reports an opened worktree as reused", async () => {
+    const out = await reportFor({
+      name: "wt",
+      path: "/repo/.claude/worktrees/wt",
+      branch: "wt",
+      created: false,
+      branchCreated: false,
+    });
+
+    expect(out).toContain("Reusing worktree wt on branch wt");
   });
 });
 

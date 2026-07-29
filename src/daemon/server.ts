@@ -2527,8 +2527,9 @@ export class DaemonServer {
       }
 
       // `worktree` is echoed back because the caller asked for a destination
-      // it did not name: the path and branch are decided here, and `created`
-      // distinguishes a fresh worktree from one that was opened.
+      // it did not name: the path, branch and base ref are decided here, and
+      // `created` / `branchCreated` say which of the two the request made
+      // rather than found, so a caller can report it without overclaiming.
       return Response.json(
         { success: true, paneId, command, worktree: worktreeInfo },
         { headers },

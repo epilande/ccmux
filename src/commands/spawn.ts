@@ -16,6 +16,9 @@ interface SpawnResponse {
     path: string;
     branch: string;
     created: boolean;
+    branchCreated: boolean;
+    /** Absent when no branch was cut, so there is nothing to report it from. */
+    base?: string;
   };
 }
 
@@ -126,6 +129,20 @@ export function createSpawnCommand(): Command {
           base?: string;
         },
       ) => {
+        // `--base` alone is inert, and silently ignoring a flag someone typed
+        // costs a confused debugging session. Unlike `--split` without a
+        // target, which still does something sensible, this expresses an
+        // intent the command cannot honor at all.
+        //
+        // Checked before `ensureDaemon`, because pure argument validation
+        // must not start a background process: rejecting a typo used to leave
+        // a daemon behind on the shared port, which the CLI's own test then
+        // did to whoever ran it.
+        if (options.base !== undefined && options.worktree === undefined) {
+          console.error("--base requires --worktree");
+          process.exit(1);
+        }
+
         await ensureDaemon();
 
         // `--target none` (or an empty value) opts out of placement
@@ -138,16 +155,6 @@ export function createSpawnCommand(): Command {
 
         // `--worktree` bare is `true` from commander, `--worktree x` is the
         // string. Both become an object, since the daemon accepts one shape.
-        //
-        // `--base` alone is inert, and silently ignoring a flag someone typed
-        // costs a confused debugging session. Unlike `--split` without a
-        // target, which still does something sensible, this expresses an
-        // intent the command cannot honor at all.
-        if (options.base !== undefined && options.worktree === undefined) {
-          console.error("--base requires --worktree");
-          process.exit(1);
-        }
-
         const worktree =
           options.worktree === undefined
             ? undefined
@@ -198,10 +205,18 @@ export function createSpawnCommand(): Command {
 
           const data = (await response.json()) as SpawnResponse;
           if (data.worktree) {
-            const { name, path, branch, created } = data.worktree;
-            console.log(
-              `${created ? "Created" : "Reusing"} worktree ${name} on branch ${branch}: ${path}`,
-            );
+            const { name, path, branch, created, branchCreated, base } =
+              data.worktree;
+            // Three honest lines rather than one hedged one. A reused branch
+            // can already carry twenty commits, so calling it new would
+            // misdescribe where the agent is starting from, and the base is
+            // only worth naming when a branch was actually cut from it.
+            const what = !created
+              ? `Reusing worktree ${name} on branch ${branch}`
+              : branchCreated
+                ? `Created worktree ${name} on new branch ${branch}${base ? ` from ${base}` : ""}`
+                : `Created worktree ${name} on existing branch ${branch}`;
+            console.log(`${what}: ${path}`);
           }
           console.log(
             options.fork
