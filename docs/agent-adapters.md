@@ -23,19 +23,21 @@ The startup-race closer for markers written before the first scan created the pa
 
 `POST /spawn` / `ccmux spawn --prompt` must start an **interactive** session with the prompt submitted. There is no shared flag for that, and the wrong choice fails silently: a print/one-shot flag still runs, it just exits after one turn instead of leaving a session behind. Each agent's shape is declared in `AgentDef.promptCommand` (`src/lib/agents.ts`) and pinned by a table test in `src/daemon/spawn-command.test.ts`. Verified by reading each CLI's own `--help` on a machine with all nine installed:
 
-| Agent       | Interactive-with-prompt        | What the help says                                                                                                                               |
-| :---------- | :----------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------- |
-| Claude      | `claude '<prompt>'`            | `claude [options] [command] [prompt]`; "starts an interactive session by default, use -p/--print" for one-shot                                   |
-| Codex       | `codex '<prompt>'`             | `codex [OPTIONS] [PROMPT]`; "[PROMPT] Optional user prompt to start the session"; `codex exec` is one-shot                                       |
-| Cursor      | `cursor-agent '<prompt>'`      | `agent [options] [command] [prompt...]`; "prompt Initial prompt for the agent"; `-p/--print` is one-shot                                         |
-| OpenCode    | `opencode --prompt '<prompt>'` | default TUI command's "--prompt prompt to use"; the positional is a PROJECT PATH; `opencode run` is one-shot                                     |
-| Pi          | `pi '<prompt>'`                | `pi [options] [@files...] [messages...]`; no `--prompt` flag exists; `--print/-p` is one-shot                                                    |
-| omp         | `omp '<prompt>'`               | "ARGUMENTS MESSAGES Messages to send"; `-p/--print` is one-shot                                                                                  |
-| Antigravity | `agy -i '<prompt>'`            | **`--prompt` is documented as "Alias for --print"**; `-i/--prompt-interactive` is "Run an initial prompt interactively and continue the session" |
-| Copilot     | `copilot -i '<prompt>'`        | `-i, --interactive <prompt>` "Start interactive mode and automatically execute this prompt"; `-p/--prompt` is "non-interactive"                  |
-| Gemini      | `gemini -i '<prompt>'`         | `-p/--prompt` is "non-interactive (headless) mode"; `-i/--prompt-interactive` is "Execute the provided prompt and continue in interactive mode"  |
+| Agent       | Interactive-with-prompt        | What the help says                                                                                                                                                                                     |
+| :---------- | :----------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude      | `claude '<prompt>'`            | `claude [options] [command] [prompt]`; "starts an interactive session by default, use -p/--print" for one-shot                                                                                         |
+| Codex       | `codex '<prompt>'`             | `codex [OPTIONS] [PROMPT]`; "[PROMPT] Optional user prompt to start the session"; `codex exec` is one-shot                                                                                             |
+| Cursor      | `cursor-agent '<prompt>'`      | `agent [options] [command] [prompt...]`; "prompt Initial prompt for the agent"; `-p/--print` is one-shot                                                                                               |
+| OpenCode    | `opencode --prompt '<prompt>'` | default TUI command's "--prompt prompt to use"; the positional is a PROJECT PATH; `opencode run` is one-shot                                                                                           |
+| Pi          | `pi '<prompt>'`                | EXAMPLES section spells it out: "# Interactive mode with initial prompt / `pi "List all .ts files in src/"`" vs "# Non-interactive mode (process and exit) / `pi -p "..."`"; no `--prompt` flag exists |
+| omp         | `omp '<prompt>'`               | EXAMPLES section, same two entries as pi (`omp "..."` interactive, `omp -p "..."` one-shot)                                                                                                            |
+| Antigravity | `agy -i '<prompt>'`            | **`--prompt` is documented as "Alias for --print"**; `-i/--prompt-interactive` is "Run an initial prompt interactively and continue the session"                                                       |
+| Copilot     | `copilot -i '<prompt>'`        | `-i, --interactive <prompt>` "Start interactive mode and automatically execute this prompt"; `-p/--prompt` is "non-interactive"                                                                        |
+| Gemini      | `gemini -i '<prompt>'`         | `-p/--prompt` is "non-interactive (headless) mode"; `-i/--prompt-interactive` is "Execute the provided prompt and continue in interactive mode"                                                        |
 
 So `<binary> --prompt '<text>'`, which ccmux emitted for every agent before this table existed, was correct for exactly one of the nine (OpenCode). For Antigravity, Copilot, and Gemini it silently selected one-shot print mode; for the other five `--prompt` is not a flag at all.
+
+OpenCode is the one row the help text alone does not settle: its `--prompt` is listed under the default TUI command's options with no explicit "interactive" wording, so it was confirmed by spawning it — the TUI came up, the prompt was submitted and answered, and the session stayed interactive afterwards. Claude (positional) and Gemini (`-i`) were spawned the same way, which live-covers both template shapes.
 
 Only `{prompt}` (mandatory, and it must stay inside single quotes) and `{bin}` (optional, the resolved launcher) are substituted. Agents with no `promptCommand` — including every custom agent that has not declared one — refuse prompt spawns with a 400 rather than guessing.
 

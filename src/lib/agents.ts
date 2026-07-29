@@ -1081,8 +1081,9 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // `omp -c` continues the most recent session in-pane (no session-id
     // extraction needed), same shape as `pi -c`.
     resumeCommand: "omp -c",
-    // "ARGUMENTS  MESSAGES  Messages to send (prefix files with @)";
-    // -p/--print is the non-interactive mode.
+    // `omp --help` EXAMPLES spells both out: "# Interactive mode with initial
+    // prompt / omp \"List all .ts files in src/\"" vs "# Non-interactive mode
+    // (process and exit) / omp -p \"...\"".
     promptCommand: "{bin} '{prompt}'",
     // omp writes its JSONL transcript to
     // ~/.omp/agent/sessions/<encoded-cwd>/<ts>_<uuidv7>.jsonl, the same
@@ -1166,8 +1167,9 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // `pi -c` continues the most recent session in-pane (no session-id
     // extraction needed, like opencode --continue).
     resumeCommand: "pi -c",
-    // "pi [options] [@files...] [messages...]" — positional only; pi has NO
-    // --prompt flag at all, and --print/-p is the non-interactive mode.
+    // `pi --help` EXAMPLES spells both out: "# Interactive mode with initial
+    // prompt / pi \"List all .ts files in src/\"" vs "# Non-interactive mode
+    // (process and exit) / pi -p \"...\"". pi has NO --prompt flag at all.
     promptCommand: "{bin} '{prompt}'",
     // pi writes its JSONL transcript to
     // ~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<uuidv7>.jsonl. ccmux does
