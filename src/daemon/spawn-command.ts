@@ -353,18 +353,28 @@ export interface TmuxSpawnArgvInput {
   split: ResolvedSplit;
   cwd: string;
   placement?: SpawnPlacement;
+  /**
+   * Leave the caller's view where it is. Passed to tmux as `-d`, which is
+   * the only thing that actually prevents the switch: BOTH `new-window`
+   * and `split-window` make what they create current by default, so
+   * merely skipping the follow-up `select-window` left `--detach` still
+   * yanking the caller to the new window.
+   */
+  detach?: boolean;
 }
 
 /** argv for the tmux command that creates the pane, minus the binary. */
 export function buildTmuxSpawnArgv(input: TmuxSpawnArgvInput): string[] {
-  const { split, cwd, placement } = input;
+  const { split, cwd, placement, detach = false } = input;
   const argv: string[] = [];
 
   if (split) {
     argv.push("split-window", `-${split}`);
+    if (detach) argv.push("-d");
     if (placement?.kind === "pane") argv.push("-t", placement.id);
   } else {
     argv.push("new-window");
+    if (detach) argv.push("-d");
     if (placement?.kind === "window") argv.push("-a", "-t", placement.id);
     else if (placement?.kind === "session") argv.push("-t", `${placement.id}:`);
   }

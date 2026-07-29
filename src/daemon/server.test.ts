@@ -3039,6 +3039,7 @@ describe("POST /spawn", () => {
       expect(argv[0]).toEqual([
         "tmux",
         "new-window",
+        "-d",
         "-c",
         cwd,
         "-P",
@@ -3071,6 +3072,7 @@ describe("POST /spawn", () => {
         "tmux",
         "split-window",
         "-h",
+        "-d",
         "-t",
         "%5",
         "-c",
@@ -3112,6 +3114,7 @@ describe("POST /spawn", () => {
       expect(argv[1]).toEqual([
         "tmux",
         "new-window",
+        "-d",
         "-a",
         "-t",
         "@9",
@@ -3141,6 +3144,7 @@ describe("POST /spawn", () => {
       expect(argv[1]).toEqual([
         "tmux",
         "new-window",
+        "-d",
         "-t",
         "$3:",
         "-c",
@@ -3171,6 +3175,7 @@ describe("POST /spawn", () => {
       expect(argv[1]?.slice(1)).toEqual([
         "split-window",
         "-v",
+        "-d",
         "-t",
         "%5",
         "-c",
@@ -3239,6 +3244,40 @@ describe("POST /spawn", () => {
         expect(res.status).toBe(400);
       }
       expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("detaching passes -d and skips select-window", async () => {
+    // Both halves are needed. `-d` stops tmux making the new window
+    // current (which it does by default), and skipping select-window
+    // stops us switching back to it afterwards. Either one alone leaves
+    // `--detach` yanking the caller's view.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, detach: true }),
+      );
+      expect(argv[0]).toContain("-d");
+      expect(argv.map((a) => a[1])).not.toContain("select-window");
+    } finally {
+      restore();
+    }
+  });
+
+  it("not detaching omits -d and still selects the new window", async () => {
+    // The default. A regression here would stop every plain spawn from
+    // focusing what it just created.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, detach: false }),
+      );
+      expect(argv[0]).not.toContain("-d");
+      expect(argv.map((a) => a[1])).toContain("select-window");
     } finally {
       restore();
     }

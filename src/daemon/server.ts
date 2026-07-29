@@ -1854,7 +1854,7 @@ export class DaemonServer {
     }
 
     // Create tmux pane
-    const tmuxArgv = buildTmuxSpawnArgv({ split, cwd, placement });
+    const tmuxArgv = buildTmuxSpawnArgv({ split, cwd, placement, detach });
     const tmuxCmd = tmuxArgv[0];
     try {
       const proc = Bun.spawn(["tmux", ...tmuxArgv], {

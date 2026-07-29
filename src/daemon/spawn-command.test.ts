@@ -145,6 +145,69 @@ describe("buildTmuxSpawnArgv", () => {
     ]);
   });
 
+  it("passes -d on both paths only when detaching", () => {
+    // `-d` is the ONLY thing that keeps the caller's view put: both
+    // new-window and split-window make what they create current by
+    // default, so skipping the follow-up select-window was not enough
+    // and `--detach` still yanked the caller to the new window.
+    expect(
+      buildTmuxSpawnArgv({ split: false, cwd: "/w", detach: true }),
+    ).toContain("-d");
+    expect(
+      buildTmuxSpawnArgv({ split: "h", cwd: "/w", detach: true }),
+    ).toContain("-d");
+  });
+
+  it("omits -d without detach, so the new pane still takes focus", () => {
+    // The default users rely on. A stray `-d` here would silently stop
+    // every plain spawn from focusing what it just created.
+    expect(buildTmuxSpawnArgv({ split: false, cwd: "/w" })).not.toContain("-d");
+    expect(buildTmuxSpawnArgv({ split: "h", cwd: "/w" })).not.toContain("-d");
+    expect(
+      buildTmuxSpawnArgv({ split: false, cwd: "/w", detach: false }),
+    ).not.toContain("-d");
+  });
+
+  it("keeps -d compatible with placement on both paths", () => {
+    expect(
+      buildTmuxSpawnArgv({
+        split: false,
+        cwd: "/w",
+        detach: true,
+        placement: { kind: "session", id: "$3" },
+      }),
+    ).toEqual([
+      "new-window",
+      "-d",
+      "-t",
+      "$3:",
+      "-c",
+      "/w",
+      "-P",
+      "-F",
+      "#{pane_id}",
+    ]);
+    expect(
+      buildTmuxSpawnArgv({
+        split: "v",
+        cwd: "/w",
+        detach: true,
+        placement: { kind: "pane", id: "%12" },
+      }),
+    ).toEqual([
+      "split-window",
+      "-v",
+      "-d",
+      "-t",
+      "%12",
+      "-c",
+      "/w",
+      "-P",
+      "-F",
+      "#{pane_id}",
+    ]);
+  });
+
   it("ignores a non-pane placement on the split path", () => {
     // A split can only target a pane; a session/window placement must not
     // leak through as a `-t` tmux would resolve to something else.
