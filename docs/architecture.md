@@ -184,7 +184,7 @@ The lookup also fetches `reviewDecision` and `statusCheckRollup`, folding the ro
 
 ## Worktree pruning
 
-`worktree-prune.ts` answers "which of this repo's worktrees are finished" and, separately, performs the removal. The split is load-bearing: `scanRepos` only reads, and its output is the **only** input `runPrune` accepts. `POST /worktrees/prune` therefore takes paths, re-scans in-process, and rejects (409) any path the fresh scan does not currently classify as removable — a stale client list, a replayed request, or a hand-written POST cannot delete a directory that has since become active.
+`worktree-prune.ts` answers "which of this repo's worktrees are finished" and, separately, performs the removal. The split is load-bearing: `scanRepos` only reads, and its output is the **only** input `runPrune` accepts. Note where the guarantee actually lives — `runPrune` trusts the candidate objects it is handed, so the re-scan is enforced by `handlePruneWorktrees` in `server.ts`, not by the prune module. A second caller that skipped the endpoint would lose it. `POST /worktrees/prune` therefore takes paths, re-scans in-process, and rejects (409) any path the fresh scan does not currently classify as removable — a stale client list, a replayed request, or a hand-written POST cannot delete a directory that has since become active.
 
 **Repo inventory.** Sessions are the only repo list the daemon has, and the right one: the scan collects every `mainRepoRoot` across live sessions, so a repo ccmux has never seen an agent in is never offered. One session anywhere in a repo (its main checkout included) brings that repo's whole worktree list into scope, so an abandoned worktree with no session of its own is still found.
 

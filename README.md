@@ -282,18 +282,22 @@ Agents create git worktrees faster than anyone cleans them up, and the ones wher
 | `upstream gone`  | The branch had an upstream and it's gone after a `fetch --prune`       |
 | `PR closed`      | The PR was closed without merging; the branch is kept                  |
 
-Removing a worktree deletes its directory, deletes the local branch (only for the merged reasons, forced only where the merge is proven), closes the leftover pane once its agent has exited, prunes git's metadata, and drops the directory's entry from `~/.claude.json`.
+Removing a worktree deletes its directory, attempts to delete the local branch, closes the leftover pane once its agent has exited, prunes git's metadata, and drops the directory's entry from `~/.claude.json`. Branch deletion follows the evidence rather than the reason: a merged PR is force-deleted (`git branch -D`, since a squash merge leaves the tip unmerged by git's definition), `merged locally` and `upstream gone` use the safe `git branch -d` and report a refusal if git says the branch still holds unmerged work, and `PR closed` keeps the branch entirely.
 
-Safety rules, in short: a worktree with a **working** agent is never offered, nothing is pre-selected, dirty worktrees (uncommitted or untracked changes) need their own <kbd>D</kbd> opt-in on top of being selected, the main checkout is never a candidate, and every removal is a rename-to-trash before a delete, so the path frees immediately and the contents survive for the length of the run.
+Safety rules, in short: a worktree with a **working** agent is never offered, nothing is pre-selected, dirty worktrees (uncommitted or untracked changes) need their own <kbd>D</kbd> opt-in on top of being selected and are re-checked immediately before deletion, gitignored files that would be deleted are listed before you confirm, and the main checkout is never a candidate.
+
+Each directory is renamed to a `.ccmux-trash-<name>-<timestamp>` sibling before being deleted, so the path frees immediately and the contents survive for the length of the run. If ccmux is interrupted mid-run, look for that directory next to where the worktree was: `mv .ccmux-trash-<name>-<timestamp> <name>` restores it, and `git worktree repair <name>` re-links it to the repo.
 
 ```bash
 ccmux worktree prune             # Interactive confirm list
 ccmux worktree prune --dry-run   # Show what would go, change nothing
-ccmux worktree prune --state     # Also drop state entries for directories deleted outside ccmux
+ccmux worktree prune --state     # Also drop agent state entries (see below)
 ccmux worktree prune --repo ~/p  # Limit to one repository
 ```
 
-There is no `--yes` and no automatic mode; removals are always confirmed interactively.
+`--state` removes `~/.claude.json` entries for **any** recorded directory that does not exist right now, not only former worktrees, so an ordinary repo you have not checked out will be dropped too. Entries whose parent directory is also missing are skipped, which keeps an unmounted external drive or a disconnected network share from taking every project on it with them. The removed paths are printed, and the file is copied to `~/.claude.json.ccmux-backup-<timestamp>-<pid>` first (the newest three are kept).
+
+There is no `--yes` and no automatic mode; removals are always confirmed interactively. `--dry-run` changes nothing on disk, though it still runs `git fetch --prune` per repo, which is what makes the `upstream gone` signal visible and does update remote-tracking refs.
 
 ### Programmatic Invocation
 
