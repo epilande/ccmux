@@ -10,6 +10,7 @@ import { getUIState, resolvePromptDisplay } from "../lib/state";
 import { markStartup } from "../lib/startup-timing";
 import { SIDEBAR_PANE_TITLE, parseCcmuxPort } from "../lib/config";
 import { PANE_FIELD_SEP } from "../lib/tmux-format";
+import { forkableAgentNames } from "../lib/agents";
 
 type SidebarPosition = "left" | "right";
 
@@ -173,7 +174,9 @@ export function createSidebarCommand(): Command {
           hideIdle: uiState.hideIdle,
           promptDisplay: resolvePromptDisplay(uiState, prefs.promptDisplay),
           sidebar: true,
+          lastSpawnAgent: uiState.lastSpawnAgent,
           reviewHandback: prefs.reviewHandback,
+          forkableAgents: forkableAgentNames(prefs),
           theme: prefs.theme,
         });
       },

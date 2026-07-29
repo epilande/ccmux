@@ -103,6 +103,8 @@ Full daemon internals — the binder's D1/D2/D3 guards, the recursive log-tree w
 
 Built with @opentui/solid. Entry point: `src/tui/App.tsx` with reactive store in `src/tui/store.ts`. Components live in `src/tui/components/`.
 
+The new-session dialog (`n`, or the right-click menus) is driven by `NEW_SESSION_FIELDS` in `store.ts` plus a matching `NewSessionDraft` key per field. Focus movement, the option keys, the rendered rows, and the dialog's own height all read that list, so adding a field is additive rather than a rework of the key handling — but it is not a one-liner: expect to touch the field list and draft key, the store action and the dialog's open-time default, the `focusedOptions` / `focusedOptionValue` / `applyFocusedOption` trio in `App.tsx`, the component's props and its render branch, and `fieldRows` in `NewSessionDialog.tsx`. TypeScript names every one of those, `fieldRows` included — it is a `Record<NewSessionField, …>` precisely because the height used to be a hand-summed constant that compiled fine and clipped the bottom row. Its wire behavior (`GET /agents`, and why placement travels as `callerPane` rather than `target`) is in [`docs/architecture.md`](docs/architecture.md).
+
 ### Data Flow
 
 ```
@@ -118,9 +120,11 @@ Agent processes/logs --> Watcher --> Parser --> Status Machine --> Session Manag
 
 ### Agent Definitions
 
-Built-in agents: `src/lib/agents.ts`. Each `AgentDef` includes: `processMatch`, `commandPatterns`, `terminalRules`, `errorRules`, `executable`, `resumeCommand`, `promptCommand`, `sessionFilePattern`, `versionCommand`, `hooks`, `invokeMode`, `readyPattern`.
+Built-in agents: `src/lib/agents.ts`. Each `AgentDef` includes: `processMatch`, `commandPatterns`, `terminalRules`, `errorRules`, `executable`, `resumeCommand`, `promptCommand`, `forkCommand`, `sessionFilePattern`, `versionCommand`, `hooks`, `invokeMode`, `readyPattern`.
 
 `promptCommand` (the interactive-with-initial-prompt shape used by `ccmux spawn --prompt`) is per-agent and non-obvious — `--prompt` means one-shot print mode for three of the built-ins. See [`docs/agent-adapters.md#spawning-with-an-initial-prompt`](docs/agent-adapters.md#spawning-with-an-initial-prompt) before adding or changing one.
+
+`forkCommand` (branch a conversation into a new session, leaving the original alone) is Claude-only: for every other built-in, what a resume does to a still-running original is unverified, and a wrong guess damages the session the user asked to preserve. Do not add one without checking it live. See [`docs/agent-adapters.md#forking-a-session`](docs/agent-adapters.md#forking-a-session).
 
 Custom agents via `agents` key in `~/.config/ccmux/ccmux.json` (types in `src/lib/preferences.ts` -> `AgentConfig`).
 

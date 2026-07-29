@@ -87,6 +87,22 @@ export interface AgentDef {
    */
   promptCommand?: string;
   /**
+   * Shell command template that starts a session whose conversation
+   * CONTINUES the given session's history while leaving that session
+   * untouched, used by `POST /spawn`'s fork path. `{id}` is the source
+   * session's native id and `{bin}` the resolved launcher binary, both
+   * substituted in one pass (see `substitutePlaceholders`).
+   *
+   * Undefined means "forking this agent has not been verified", and fork is
+   * refused for it — both at the route and in the picker's menu. There is no
+   * safe default: resuming a session that is still live can contend over the
+   * agent's own rollout/session state, so an agent earns this field only once
+   * someone has checked its resume semantics against a LIVE original. Claude
+   * Code's `--fork-session` writes a new transcript under a new id, which is
+   * why it is the only built-in that defines one.
+   */
+  forkCommand?: string;
+  /**
    * argv to stop a paneless background session (`trackingMode: "background"`)
    * given its daemon-short id. Only meaningful for agents with a background
    * mode whose worker pid is owned by a supervisor process, not by ccmux —
@@ -334,6 +350,9 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
   if (override.promptCommand !== undefined) {
     merged.promptCommand = override.promptCommand;
   }
+  if (override.forkCommand !== undefined) {
+    merged.forkCommand = override.forkCommand;
+  }
   if (override.sessionFilePattern !== undefined) {
     merged.sessionFilePattern = parseRegex(
       override.sessionFilePattern,
@@ -479,6 +498,12 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // "claude [options] [command] [prompt]" — "starts an interactive session
     // by default, use -p/--print for non-interactive output" (claude --help).
     promptCommand: "{bin} '{prompt}'",
+    // `--fork-session` resumes the transcript into a NEW session id rather
+    // than appending to the source, so the original keeps its history and can
+    // carry on being used. Verified against a live original, including one
+    // mid-turn: the source writes to its own transcript and the fork only
+    // reads it (`docs/agent-adapters.md#forking-a-session`).
+    forkCommand: "{bin} --resume {id} --fork-session",
     sessionFilePattern:
       /\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i,
     terminalRules: [
@@ -1365,6 +1390,7 @@ export function getAgents(preferences?: Preferences): AgentDef[] {
       ),
       resumeCommand: override.resumeCommand,
       promptCommand: override.promptCommand,
+      forkCommand: override.forkCommand,
       sessionFilePattern: override.sessionFilePattern
         ? parseRegex(
             override.sessionFilePattern,
@@ -1390,6 +1416,50 @@ export function getAgents(preferences?: Preferences): AgentDef[] {
   }
 
   return Array.from(byName.values());
+}
+
+/**
+ * Whether a `forkCommand` is one the builder will actually accept.
+ *
+ * Shared with `buildAgentForkCommand` so the picker's gate and the route's
+ * refusal cannot drift: a truthiness check offered Fork for a template that
+ * was a number, an object, whitespace, or simply missing `{id}`, and the
+ * action then failed on click — the exact "reads as broken" outcome the
+ * hide-don't-disable choice exists to avoid. Preferences are unvalidated
+ * JSON, so every one of those is reachable from ccmux.json.
+ */
+export function isUsableForkCommand(template: unknown): template is string {
+  return typeof template === "string" && template.includes("{id}");
+}
+
+/**
+ * Names of the agents that declare how to fork a session — the built-ins
+ * that ship a `forkCommand` plus any custom agent configured with one.
+ *
+ * The TUI takes this as a prop to decide whether to offer Fork on a row. It
+ * is a display gate only: the daemon re-derives the same fact from its own
+ * agent registry when the request arrives, so a picker running against a
+ * daemon with different config gets a clear refusal rather than a wrong pane.
+ *
+ * NEVER THROWS, and that is load-bearing rather than defensive. `getAgents`
+ * throws on a malformed `agents` block (a missing `processMatch`, an
+ * unparseable regex), and this is called on the PICKER AND SIDEBAR STARTUP
+ * PATH, which nothing above catches: Commander's async action has no handler
+ * and there is no `unhandledRejection` hook. A single typo in ccmux.json
+ * would otherwise take the picker from "renders, with the daemon logging the
+ * config error" to a stack trace and exit — and in the tmux popup binding
+ * that is a flash-and-close with no message at all, plus every sidebar in
+ * the fleet dying on next launch. Fork not being offered is a far better
+ * failure than no picker.
+ */
+export function forkableAgentNames(preferences?: Preferences): string[] {
+  try {
+    return getAgents(preferences)
+      .filter((agent) => isUsableForkCommand(agent.forkCommand))
+      .map((agent) => agent.name);
+  } catch {
+    return [];
+  }
 }
 
 /** Map of agent name → short code for compact display */

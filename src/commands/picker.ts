@@ -10,6 +10,7 @@ import {
 } from "../lib/icons";
 import { markStartup } from "../lib/startup-timing";
 import { PICKER_PANE_TITLE } from "../lib/config";
+import { forkableAgentNames } from "../lib/agents";
 
 /**
  * Resolves the effective `persistent` setting from CLI flag and config,
@@ -100,7 +101,9 @@ export function createPickerCommand(): Command {
           hideIdle: uiState.hideIdle,
           promptDisplay: resolvePromptDisplay(uiState, prefs.promptDisplay),
           persistent,
+          lastSpawnAgent: uiState.lastSpawnAgent,
           reviewHandback: prefs.reviewHandback,
+          forkableAgents: forkableAgentNames(prefs),
           theme: prefs.theme,
         });
       },
