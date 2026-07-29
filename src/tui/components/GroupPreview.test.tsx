@@ -90,6 +90,49 @@ describe("GroupPreview", () => {
     expect(frame).toContain("3 idle");
   });
 
+  it("lists the group's worktree sessions with branch and status", async () => {
+    // A repo's sessions group together regardless of which checkout they run
+    // in, so the preview otherwise never says they sit in different trees.
+    const sessions = [
+      mockEnrichedSession({
+        id: "s1",
+        tmuxTarget: "dev:1",
+        cwd: "/Users/test/Code/ccmux",
+      }),
+      mockEnrichedSession({
+        id: "s2",
+        tmuxTarget: "dev:2",
+        cwd: "/Users/test/Code/ccmux/.claude/worktrees/parking",
+        gitBranch: "feat/parking",
+        isWorktree: true,
+        status: "working",
+      }),
+    ];
+    const frame = await renderGroupPreview(
+      {
+        label: "ccmux",
+        count: 2,
+        statusSummary: { ...emptySummary(), idle: 1, working: 1 },
+      },
+      sessions,
+    );
+    expect(frame).toContain("Worktrees");
+    expect(frame).toContain("parking");
+    expect(frame).toContain("feat/parking");
+  });
+
+  it("omits the worktree list when the group has no worktree sessions", async () => {
+    const frame = await renderGroupPreview(
+      {
+        label: "ccmux",
+        count: 1,
+        statusSummary: { ...emptySummary(), idle: 1 },
+      },
+      [mockEnrichedSession({ id: "s1", tmuxTarget: "dev:1" })],
+    );
+    expect(frame).not.toContain("Worktrees");
+  });
+
   it("renders session rows with tmux targets", async () => {
     const sessions = [
       mockEnrichedSession({

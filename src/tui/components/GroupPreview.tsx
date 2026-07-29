@@ -109,6 +109,46 @@ const SessionRow: Component<{
   );
 };
 
+/** The worktree directory's own name, which is what distinguishes one
+ *  worktree of a repo from another (the repo name is the group's label). */
+function worktreeName(session: EnrichedSession): string {
+  const cwd = session.paneCwd ?? session.cwd;
+  return cwd.split("/").filter(Boolean).at(-1) ?? cwd;
+}
+
+/**
+ * One line per worktree session in the group: which worktree, what branch,
+ * what state. A repo's sessions group together regardless of which checkout
+ * they run in, so without this the preview says how many sessions the repo
+ * has but not that they sit in different working trees. Sessions only — the
+ * on-disk worktree list (including ones with nothing running) belongs with
+ * worktree management, which is what can act on them.
+ */
+const WorktreeRow: Component<{
+  session: EnrichedSession;
+  iconStyle?: IconStyle;
+}> = (props) => {
+  const effective = createMemo(() => getEffectiveStatus(props.session));
+  const icon = useStatusIcon(
+    () => effective().status,
+    () => effective().attentionType,
+    () => props.iconStyle,
+    () => props.session.attentionState,
+  );
+
+  return (
+    <box flexDirection="row" height={1} gap={1}>
+      <text fg={getStatusColor(effective().status, effective().attentionType)}>
+        {icon()}
+      </text>
+      <text fg={theme.text}>{worktreeName(props.session)}</text>
+      <Show when={props.session.gitBranch}>
+        {(branch: () => string) => <text fg={theme.blue}>{branch()}</text>}
+      </Show>
+    </box>
+  );
+};
+
 export const GroupPreview: Component<GroupPreviewProps> = (props) => {
   const dims = useTerminalDimensions();
   const separatorWidth = createMemo(() =>
@@ -126,6 +166,10 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
   );
 
   const summaryParts = () => staticSummaryParts(summary(), props.iconStyle);
+
+  const worktreeSessions = createMemo(() =>
+    props.sessions.filter((s) => s.isWorktree),
+  );
 
   return (
     <box
@@ -163,6 +207,18 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
         ref={(r: ScrollBoxRenderable) => props.onScrollboxRef?.(r)}
       >
         <box flexDirection="column" paddingTop={1}>
+          <Show when={worktreeSessions().length > 0}>
+            <box flexDirection="column" paddingBottom={1}>
+              <text fg={theme.subtext}>
+                <b>Worktrees</b>
+              </text>
+              <For each={worktreeSessions()}>
+                {(session) => (
+                  <WorktreeRow session={session} iconStyle={props.iconStyle} />
+                )}
+              </For>
+            </box>
+          </Show>
           <For each={props.sessions}>
             {(session) => (
               <SessionRow session={session} iconStyle={props.iconStyle} />
