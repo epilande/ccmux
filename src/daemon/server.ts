@@ -144,6 +144,11 @@ const PR_SWEEP_INTERVAL_MS = 2 * 60_000;
  */
 const WORKTREE_FETCH_TTL_MS = 60_000;
 
+/** Upper bound on worktrees one prune request may name. Far above any real
+ *  repo's worktree count; exists so a malformed body can't ask the daemon to
+ *  normalize an unbounded list. */
+const MAX_PRUNE_PATHS = 500;
+
 const NATIVE_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_INVOKE_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -984,10 +989,10 @@ export class DaemonServer {
    * into scope, so an abandoned worktree with no session of its own is still
    * found.
    */
-  private async pruneRepoRoots(filter: string | null): Promise<string[]> {
-    const sessions = await this.enrichSessions(
-      this.sessionManager.getSessions(),
-    );
+  private pruneRepoRoots(
+    sessions: EnrichedSession[],
+    filter: string | null,
+  ): string[] {
     const roots = new Set<string>();
     for (const session of sessions) {
       if (session.mainRepoRoot) roots.add(session.mainRepoRoot);
@@ -1006,10 +1011,13 @@ export class DaemonServer {
    * should not pay for the network twice.
    */
   private async scanPruneCandidates(filter: string | null): Promise<PruneScan> {
-    const repoRoots = await this.pruneRepoRoots(filter);
+    // Enriched ONCE and shared. Enrichment spawns git per distinct cwd, so
+    // doing it separately for the repo list and the session map paid for the
+    // whole thing twice on every scan.
     const sessions = await this.enrichSessions(
       this.sessionManager.getSessions(),
     );
+    const repoRoots = this.pruneRepoRoots(sessions, filter);
 
     const byWorktree = new Map<string, WorktreeSession[]>();
     for (const session of sessions) {
@@ -1024,17 +1032,26 @@ export class DaemonServer {
         tmuxPane: session.tmuxPane,
         tmuxTarget: session.tmuxTarget,
         pid: session.pid ?? null,
+        // Carried, not filtered out: a background agent still has to GATE the
+        // removal when it is working. What it must never get is the SIGTERM —
+        // its pid belongs to Claude's supervisor, not to ccmux, exactly as
+        // `handleKillSession` says.
+        background: isBackgroundSession(session),
       });
       byWorktree.set(key, list);
     }
 
+    // Fetches run together: they are independent network calls against
+    // different repos, and serializing them made the scan's fixed cost the
+    // SUM of every repo's round-trip.
     const now = Date.now();
-    for (const root of repoRoots) {
+    const toFetch = repoRoots.filter((root) => {
       const last = this.worktreeFetchedAt.get(root) ?? 0;
-      if (now - last < WORKTREE_FETCH_TTL_MS) continue;
+      if (now - last < WORKTREE_FETCH_TTL_MS) return false;
       this.worktreeFetchedAt.set(root, now);
-      await fetchPrune(root);
-    }
+      return true;
+    });
+    await Promise.all(toFetch.map((root) => fetchPrune(root)));
 
     return scanRepos(repoRoots, {
       skipFetch: true,
@@ -1087,10 +1104,22 @@ export class DaemonServer {
       return Response.json({ error: "Invalid JSON" }, { status: 400, headers });
     }
 
-    const asPaths = (value: unknown): string[] =>
-      Array.isArray(value)
-        ? value.filter((v): v is string => typeof v === "string")
-        : [];
+    // De-duplicated after normalization, and capped. Two spellings of one
+    // worktree (`/tmp` and `/private/tmp`, or a trailing slash) otherwise
+    // produce several outcomes for the same directory, and since branch
+    // deletion resolves an outcome by path it always found the FIRST one —
+    // so the later "already gone" failures overwrote a successful run's
+    // result and rendered it as a wall of errors.
+    const asPaths = (value: unknown): string[] => {
+      if (!Array.isArray(value)) return [];
+      const seen = new Set<string>();
+      for (const v of value) {
+        if (typeof v !== "string") continue;
+        if (seen.size >= MAX_PRUNE_PATHS) break;
+        seen.add(normalizePath(v));
+      }
+      return [...seen];
+    };
     const paths = asPaths(body.paths);
     const allowDirty = asPaths(body.allowDirty);
     const cleanState = body.cleanState === true;

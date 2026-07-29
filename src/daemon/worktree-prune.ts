@@ -14,8 +14,9 @@
  * of that.
  */
 
-import { existsSync, realpathSync, renameSync, rmSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { existsSync, realpathSync, renameSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { basename, dirname, join, sep } from "node:path";
 import type { SessionStatus } from "../types/session";
 import {
   builtinStateFiles,
@@ -83,6 +84,13 @@ export interface WorktreeSession {
   tmuxPane: string | null;
   tmuxTarget: string | null;
   pid: number | null;
+  /**
+   * A paneless Claude background-agent row. Its pid belongs to Claude's own
+   * supervisor rather than to ccmux, so it must never be signalled directly
+   * (the same rule `handleKillSession` follows). It still counts for the
+   * working-session gate.
+   */
+  background?: boolean;
 }
 
 export interface PruneCandidate {
@@ -224,10 +232,13 @@ export const ghPRStateLookup: PRStateLookup = async (cwd, branch) => {
     if (exitCode !== 0) return null;
     const rows = (await new Response(proc.stdout).json()) as GhPRRow[];
     if (!Array.isArray(rows) || rows.length === 0) return null;
+    // `refs/heads/` qualified for the same reason as `isMergedInto`: a tag
+    // sharing the branch name outranks the branch in git's disambiguation,
+    // and this SHA is what proves the PR belongs to this branch.
     const tip = await runGit(cwd, [
       "rev-parse",
       "--verify",
-      `${branch}^{commit}`,
+      `refs/heads/${branch}^{commit}`,
     ]);
     const localTip = tip.exitCode === 0 ? tip.stdout.trim() : null;
     return selectPRForBranch(rows, localTip);
@@ -323,9 +334,16 @@ export function branchDeletionFor(reason: PruneReason): BranchDeletion {
 /**
  * Classify every linked worktree of one repo.
  *
- * Ordering matters for cost as much as for safety: the session gate and the
- * cheap local checks run before any network call, so a repo full of active
- * worktrees costs no gh round-trips.
+ * Ordering matters for safety: the session gate and the lock check run before
+ * anything else, so a live worktree is never classified at all.
+ *
+ * It buys less than it looks like on cost. An ordinary active worktree — a
+ * branch pushed with a PR still open — reaches the `gh` call, because
+ * "is there an open PR" is exactly what the network is being asked. Measured:
+ * 15 active worktrees still made 15 gh calls. What genuinely avoids the call
+ * is a branch with no upstream, a branch already merged locally, or a hit in
+ * the daemon's open-PR cache (`hasOpenPR`); everything else pays for it, which
+ * is why the calls run concurrently rather than one at a time.
  */
 export async function scanRepo(
   repoRoot: string,
@@ -349,20 +367,57 @@ export async function scanRepo(
   ]);
   const repoName = basename(repoRoot);
 
-  for (const entry of linked) {
-    const { candidate, skip } = await classifyOne(entry, {
-      repoRoot,
-      repoName,
-      baseRefs,
-      upstreams,
-      git,
-      deps,
-    });
+  // Bounded concurrency, not a serial loop: the expensive step is one
+  // `gh pr list` per branch at ~0.5s of network latency each, so 15 worktrees
+  // took 8.3s serially against 1.6s at this width. The cap keeps a repo with
+  // dozens of worktrees from opening dozens of simultaneous gh processes.
+  const results = await mapWithConcurrency(
+    linked,
+    CLASSIFY_CONCURRENCY,
+    (entry) =>
+      classifyOne(entry, {
+        repoRoot,
+        repoName,
+        baseRefs,
+        upstreams,
+        git,
+        deps,
+      }),
+  );
+  for (const { candidate, skip } of results) {
     if (candidate) candidates.push(candidate);
     if (skip) skipped.push(skip);
   }
 
   return { candidates, skipped };
+}
+
+/** Concurrent `gh pr list` calls per repo during classification. */
+const CLASSIFY_CONCURRENCY = 6;
+
+/**
+ * `Promise.all` with a ceiling on how many run at once, preserving input
+ * order in the result.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (true) {
+        const i = next++;
+        if (i >= items.length) return;
+        results[i] = await fn(items[i]);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
 }
 
 interface ClassifyContext {
@@ -440,6 +495,20 @@ async function classifyOne(
   if (deps.hasOpenPR?.(path, branch)) return {};
 
   const mergedLocally = await isMergedInto(repoRoot, branch, ctx.baseRefs, git);
+
+  // The gh call is NOT skipped for a locally-merged branch, and NOT skipped
+  // for a branch with no configured upstream, even though both look like free
+  // wins. Tests pinned both as regressions:
+  //
+  // - Skipping when `mergedLocally` loses the OPEN suppression. The lookup
+  //   does not only decide between `-d` and `-D`; it is also how an open PR
+  //   is discovered, and a branch merged into a local integration branch
+  //   while its PR is still open would then be offered for deletion.
+  // - Skipping when no upstream is configured assumes "never pushed", but
+  //   `git push origin HEAD` (without `-u`) sets no upstream at all, so a
+  //   perfectly ordinary merged PR would go unseen.
+  //
+  // Concurrency across worktrees is where the time comes back instead.
   const lookupPR = deps.lookupPR ?? ghPRStateLookup;
   const pr = await lookupPR(path, branch);
   if (pr?.state === "OPEN") return {};
@@ -600,6 +669,18 @@ async function paneExists(paneId: string): Promise<boolean> {
   }
 }
 
+/**
+ * Whether a parsed admin dir really is one of this repo's worktree admin
+ * entries. `readAdminDir` reads it out of a `.git` file inside the worktree,
+ * which is content ccmux does not own, and the value is used to unlink a
+ * file — so it is confirmed to sit under `<repoRoot>/.git/worktrees/` before
+ * anything is removed.
+ */
+export function isRepoAdminDir(adminDir: string, repoRoot: string): boolean {
+  const expected = join(normalizePath(repoRoot), ".git", "worktrees") + sep;
+  return normalizePath(adminDir).startsWith(expected);
+}
+
 /** Membership test over `tmux list-panes -F '#{pane_id}'` output. */
 export function paneListIncludes(output: string, paneId: string): boolean {
   return output.split("\n").some((line) => line.trim() === paneId);
@@ -641,6 +722,16 @@ async function stopSessions(
   const closed: string[] = [];
 
   for (const session of candidate.sessions) {
+    if (session.background) {
+      // Read-only here by design. Its worker is supervisor-owned, and it has
+      // no pane to close, so there is nothing this run may safely do to it.
+      steps.push({
+        step: "skip background agent",
+        ok: true,
+        detail: `${session.agentType} ${session.id} is supervisor-owned; not signalled`,
+      });
+      continue;
+    }
     if (session.pid) {
       let alive = true;
       try {
@@ -737,7 +828,7 @@ export async function runPrune(
       steps.push({
         step: "refused",
         ok: false,
-        detail: `${candidate.modified} modified, ${candidate.untracked} untracked — needs an explicit dirty opt-in`,
+        detail: `${candidate.modified} modified, ${candidate.untracked} untracked; needs an explicit dirty opt-in`,
       });
       continue;
     }
@@ -753,7 +844,7 @@ export async function runPrune(
         detail:
           `${candidate.path} (${candidate.detail})` +
           (candidate.dirty
-            ? ` — DIRTY: ${candidate.modified} modified, ${candidate.untracked} untracked`
+            ? ` (DIRTY: ${candidate.modified} modified, ${candidate.untracked} untracked)`
             : ""),
       });
       if (candidate.ignoredFiles.length > 0) {
@@ -784,6 +875,24 @@ export async function runPrune(
       });
     }
 
+    // Re-check at the point of no return. The scan-time answer can be tens of
+    // seconds old by now — a `gh pr list` per worktree, plus up to 3s per
+    // session waiting for an agent to exit — and someone editing in a shell in
+    // this worktree during that window would otherwise lose the work with no
+    // opt-in. One `git status`, immediately before the directory moves.
+    if (!allowDirty.has(candidate.path)) {
+      const fresh = await readDirtyState(candidate.path, git);
+      if (fresh.dirty) {
+        outcome.error = "became dirty after it was listed; nothing was deleted";
+        steps.push({
+          step: "refused",
+          ok: false,
+          detail: `${fresh.modified} modified, ${fresh.untracked} untracked appeared since the scan`,
+        });
+        continue;
+      }
+    }
+
     outcome.panesClosed = await stopSessions(candidate, options, steps);
 
     const trash = trashPathFor(candidate.path, now());
@@ -792,15 +901,39 @@ export async function runPrune(
       outcome.trashPath = trash;
       outcome.removed = true;
       trashToDelete.push(trash);
-      steps.push({ step: "move aside", ok: true, detail: trash });
+      // Says "and deleted" because by the time anyone reads this the trash is
+      // gone: it is removed at the end of the same run. A bare path invited
+      // users to go looking for a directory that no longer exists. If the
+      // delete DOES fail, a later "delete trash" step reports the survivor.
+      steps.push({
+        step: "move aside",
+        ok: true,
+        detail: `${trash} (deleted at the end of the run)`,
+      });
     } catch (err) {
       // The rename is a convenience (it frees the path instantly and gives an
       // undo window), not the goal. If it fails, delete in place rather than
       // abandoning a removal the user explicitly confirmed.
       const message = err instanceof Error ? err.message : String(err);
       steps.push({ step: "move aside", ok: false, detail: message });
+      // A rename that failed on PERMISSIONS will not be rescued by deleting in
+      // place — `rm -r` walks into the tree, destroys what it can reach, and
+      // only then fails on the entry it could not unlink. That reported
+      // "removal failed" while the working tree had already been emptied,
+      // which points the user away from the truth. Refuse instead.
+      if (isPermissionError(err)) {
+        outcome.error = `${message} (nothing was deleted)`;
+        steps.push({
+          step: "refused",
+          ok: false,
+          detail:
+            "the directory could not be moved aside for permission reasons; " +
+            "deleting in place would destroy part of the tree before failing",
+        });
+        continue;
+      }
       try {
-        rmSync(candidate.path, { recursive: true, force: true });
+        await rm(candidate.path, { recursive: true, force: true });
         outcome.removed = true;
         steps.push({
           step: "remove in place",
@@ -808,7 +941,15 @@ export async function runPrune(
           detail: candidate.path,
         });
       } catch (rmErr) {
-        outcome.error = rmErr instanceof Error ? rmErr.message : String(rmErr);
+        const rmMessage =
+          rmErr instanceof Error ? rmErr.message : String(rmErr);
+        // Report what is actually on disk. A partial delete leaves a
+        // half-emptied working tree, and saying only "failed" invites the
+        // reader to assume their files are intact.
+        const partial = existsSync(candidate.path)
+          ? " (the directory still exists but its contents may be partially deleted)"
+          : " (the directory is gone despite the error)";
+        outcome.error = rmMessage + partial;
         steps.push({
           step: "remove in place",
           ok: false,
@@ -819,7 +960,8 @@ export async function runPrune(
     }
 
     log(
-      `ccmux: pruned worktree ${candidate.path} (${candidate.detail})` +
+      `ccmux: [${options.source ?? "api"}] pruned worktree ${candidate.path} ` +
+        `(${candidate.detail})` +
         (outcome.trashPath
           ? ` -> ${outcome.trashPath}`
           : " (deleted in place)"),
@@ -838,17 +980,43 @@ export async function runPrune(
   const state = cleanState(removedPaths, options, dryRun);
 
   // Deleted last, so the contents survive for the whole run.
+  //
+  // Asynchronously, because this is the daemon's thread: a synchronous
+  // recursive delete of a worktree carrying a `node_modules` (20k files here)
+  // stalls the scan loop, SSE and every queued request for most of a second,
+  // and a multi-worktree run turns that into one continuous freeze for every
+  // unrelated session. The rename already freed the path, so nothing waits on
+  // this finishing quickly.
   for (const trash of trashToDelete) {
+    const outcome = outcomes.find((o) => o.trashPath === trash);
     try {
-      rmSync(trash, { recursive: true, force: true });
+      await rm(trash, { recursive: true, force: true });
     } catch (err) {
-      log(
-        `ccmux: failed to delete ${trash}: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      // Surfaced, not just logged. A user who opted in to losing uncommitted
+      // work was told it was deleted; if the copy actually survives in a
+      // hidden sibling directory, that promise was false and they need the
+      // path to finish the job by hand.
+      const message = err instanceof Error ? err.message : String(err);
+      log(`ccmux: failed to delete ${trash}: ${message}`);
+      outcome?.steps.push({
+        step: "delete trash",
+        ok: false,
+        detail: `${trash} still exists: ${message}`,
+      });
     }
   }
 
   return { outcomes, state, dryRun };
+}
+
+/** EACCES/EPERM/EROFS — the errors where deleting in place would destroy
+ *  part of the tree before failing, rather than failing cleanly. */
+function isPermissionError(err: unknown): boolean {
+  const code =
+    err instanceof Error && "code" in err ? String(err.code) : String(err);
+  return (
+    code.includes("EACCES") || code.includes("EPERM") || code.includes("EROFS")
+  );
 }
 
 /**
@@ -911,23 +1079,39 @@ async function reclaimRepoMetadata(
   git: GitRun,
   outcomes: PruneOutcome[],
 ): Promise<void> {
+  // Keyed off outcomes that actually REMOVED something. A run where every
+  // candidate was refused (all dirty, no opt-in) has reclaimed nothing, so it
+  // must not go on to unlock and prune the repo anyway.
   const byRepo = new Map<string, PruneOutcome[]>();
   for (const outcome of outcomes) {
+    if (!outcome.removed) continue;
     const list = byRepo.get(outcome.repoRoot) ?? [];
     list.push(outcome);
     byRepo.set(outcome.repoRoot, list);
   }
 
   for (const [repoRoot, repoOutcomes] of byRepo) {
+    const removedHere = new Set(repoOutcomes.map((o) => o.path));
     const entries = await listWorktrees(repoRoot, git);
     for (const entry of entries) {
       if (!entry.locked || existsSync(entry.path)) continue;
-      const adminDir =
-        candidates.find((c) => c.path === entry.path)?.adminDir ?? null;
+      // ONLY worktrees this run removed. A lock on any other entry is the
+      // user's own `git worktree lock`, and git's documented reason for it is
+      // a path that is legitimately absent right now — an external drive or a
+      // network share. Unlocking and pruning those destroyed a registration
+      // the user never selected.
+      if (!removedHere.has(entry.path)) continue;
+      const candidate = candidates.find((c) => c.path === entry.path);
+      if (!candidate) continue;
+
       let cleared = false;
-      if (adminDir) {
+      const adminDir = candidate.adminDir;
+      // The admin dir is parsed out of the worktree's own `.git` file, so it
+      // is only trusted once it is confirmed to live under this repo's
+      // `.git/worktrees/`; otherwise fall through to git's own unlock.
+      if (adminDir && isRepoAdminDir(adminDir, repoRoot)) {
         try {
-          rmSync(join(adminDir, "locked"), { force: true });
+          await rm(join(adminDir, "locked"), { force: true });
           cleared = true;
         } catch {
           cleared = false;

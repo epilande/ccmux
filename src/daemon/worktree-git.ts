@@ -269,7 +269,12 @@ export async function isMergedInto(
     const res = await git(repoRoot, [
       "merge-base",
       "--is-ancestor",
-      branch,
+      // Fully qualified, NOT the short name: git's disambiguation ranks
+      // `refs/tags/<name>` ABOVE `refs/heads/<name>`, so a tag sharing the
+      // branch's name silently answered this question about the tag. An
+      // unmerged branch then classified `merged-locally` and lost its
+      // directory on a false reason.
+      `refs/heads/${branch}`,
       base,
     ]);
     if (res.exitCode === 0) return true;
