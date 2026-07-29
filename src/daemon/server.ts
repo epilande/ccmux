@@ -42,6 +42,15 @@ import {
   SEARCH_CONCURRENCY,
   type SessionMatches,
 } from "./transcript-search";
+import {
+  normalizePath,
+  runPrune,
+  scanRepos,
+  type PruneCandidate,
+  type PruneScan,
+  type WorktreeSession,
+} from "./worktree-prune";
+import { fetchPrune } from "./worktree-git";
 import type {
   NotificationActionInput,
   NotificationActionResult,
@@ -125,6 +134,15 @@ const GIT_INFO_CACHE_TTL_MS = 30_000;
  *  expired PR keys spawn gh), and worst-case PR staleness = resolver TTL +
  *  this interval. */
 const PR_SWEEP_INTERVAL_MS = 2 * 60_000;
+
+/**
+ * How long a repo's `git fetch --prune` counts as fresh for worktree
+ * classification. The fetch is the one network call in a prune scan; opening
+ * the prune surface, backing out and opening it again is common enough that
+ * paying for it every time is worth avoiding, while a branch deleted on the
+ * remote in the last minute is not a case the list needs to catch instantly.
+ */
+const WORKTREE_FETCH_TTL_MS = 60_000;
 
 const NATIVE_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_INVOKE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -306,6 +324,8 @@ export class DaemonServer {
   /** Reads the daemon's live scan-health snapshot. Follows the getPaneCache /
    *  getAgentByType accessor pattern so the server never imports daemon state. */
   private getScanHealth: () => DaemonHealth;
+  /** When each repo last had `git fetch --prune` run for a prune scan. */
+  private worktreeFetchedAt = new Map<string, number>();
 
   constructor(
     sessionManager: SessionManager,
@@ -755,6 +775,14 @@ export class DaemonServer {
       return await this.handleSearch(url, corsHeaders);
     }
 
+    if (path === "/worktrees/prune-candidates" && req.method === "GET") {
+      return await this.handlePruneCandidates(url, corsHeaders);
+    }
+
+    if (path === "/worktrees/prune" && req.method === "POST") {
+      return await this.handlePruneWorktrees(req, corsHeaders);
+    }
+
     // Suffixed GET routes must come before the generic GET /sessions/{id} catch-all
     if (
       path.startsWith("/sessions/") &&
@@ -943,6 +971,190 @@ export class DaemonServer {
       { sessions: await this.enrichSessions(sessions) },
       { headers },
     );
+  }
+
+  /**
+   * Repos to scan for prunable worktrees: every main checkout the live
+   * sessions point at.
+   *
+   * Sessions are the only repo inventory the daemon has, and it is the right
+   * one — a repo ccmux has never seen an agent in is not a repo whose
+   * worktrees ccmux should be offering to delete. One session anywhere in a
+   * repo (including its main checkout) brings that repo's whole worktree list
+   * into scope, so an abandoned worktree with no session of its own is still
+   * found.
+   */
+  private async pruneRepoRoots(filter: string | null): Promise<string[]> {
+    const sessions = await this.enrichSessions(
+      this.sessionManager.getSessions(),
+    );
+    const roots = new Set<string>();
+    for (const session of sessions) {
+      if (session.mainRepoRoot) roots.add(session.mainRepoRoot);
+    }
+    if (!filter) return [...roots];
+    const wanted = normalizePath(filter);
+    return [...roots].filter((root) => normalizePath(root) === wanted);
+  }
+
+  /**
+   * Classify prunable worktrees across the sessions' repos.
+   *
+   * The per-repo `git fetch --prune` (what turns a branch deleted on GitHub
+   * into a locally visible `[gone]`) is run here rather than inside the scan
+   * so it can be rate-limited: opening the prune surface twice in a row
+   * should not pay for the network twice.
+   */
+  private async scanPruneCandidates(filter: string | null): Promise<PruneScan> {
+    const repoRoots = await this.pruneRepoRoots(filter);
+    const sessions = await this.enrichSessions(
+      this.sessionManager.getSessions(),
+    );
+
+    const byWorktree = new Map<string, WorktreeSession[]>();
+    for (const session of sessions) {
+      const root = session.worktreeRoot;
+      if (!root) continue;
+      const key = normalizePath(root);
+      const list = byWorktree.get(key) ?? [];
+      list.push({
+        id: session.id,
+        agentType: session.agentType,
+        status: session.status,
+        tmuxPane: session.tmuxPane,
+        tmuxTarget: session.tmuxTarget,
+        pid: session.pid ?? null,
+      });
+      byWorktree.set(key, list);
+    }
+
+    const now = Date.now();
+    for (const root of repoRoots) {
+      const last = this.worktreeFetchedAt.get(root) ?? 0;
+      if (now - last < WORKTREE_FETCH_TTL_MS) continue;
+      this.worktreeFetchedAt.set(root, now);
+      await fetchPrune(root);
+    }
+
+    return scanRepos(repoRoots, {
+      skipFetch: true,
+      sessionsFor: (path) => byWorktree.get(path) ?? [],
+      hasOpenPR: (cwd, branch) =>
+        (this.prResolver.get(cwd, branch)?.length ?? 0) > 0,
+    });
+  }
+
+  private async handlePruneCandidates(
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    try {
+      const scan = await this.scanPruneCandidates(url.searchParams.get("repo"));
+      return Response.json(scan, { headers });
+    } catch (err) {
+      return Response.json(
+        { error: `Failed to scan worktrees: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
+    }
+  }
+
+  /**
+   * Execute a prune run.
+   *
+   * The request names paths, never candidates: everything that decides what
+   * removal does (the reason, whether the branch may be deleted, whether the
+   * tree is dirty) is re-derived from a fresh scan in this process. A path the
+   * scan does not currently classify as removable is rejected rather than
+   * removed, so a stale client list, a repeated request, or a hand-written
+   * POST cannot delete a directory that has since become active.
+   */
+  private async handlePruneWorktrees(
+    req: Request,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    let body: {
+      paths?: unknown;
+      allowDirty?: unknown;
+      dryRun?: unknown;
+      cleanState?: unknown;
+      repo?: unknown;
+      source?: unknown;
+    };
+    try {
+      body = (await req.json()) as typeof body;
+    } catch {
+      return Response.json({ error: "Invalid JSON" }, { status: 400, headers });
+    }
+
+    const asPaths = (value: unknown): string[] =>
+      Array.isArray(value)
+        ? value.filter((v): v is string => typeof v === "string")
+        : [];
+    const paths = asPaths(body.paths);
+    const allowDirty = asPaths(body.allowDirty);
+    const cleanState = body.cleanState === true;
+
+    if (paths.length === 0 && !cleanState) {
+      return Response.json(
+        { error: "No worktrees selected" },
+        { status: 400, headers },
+      );
+    }
+
+    try {
+      const scan = await this.scanPruneCandidates(
+        typeof body.repo === "string" ? body.repo : null,
+      );
+      const byPath = new Map<string, PruneCandidate>();
+      for (const candidate of scan.candidates) {
+        byPath.set(normalizePath(candidate.path), candidate);
+      }
+
+      const selected: PruneCandidate[] = [];
+      const unknown: string[] = [];
+      for (const path of paths) {
+        const candidate = byPath.get(normalizePath(path));
+        if (candidate) selected.push(candidate);
+        else unknown.push(path);
+      }
+      if (unknown.length > 0) {
+        return Response.json(
+          {
+            error:
+              "Not currently removable (re-open the prune list): " +
+              unknown.join(", "),
+          },
+          { status: 409, headers },
+        );
+      }
+
+      const result = await runPrune(selected, {
+        dryRun: body.dryRun === true,
+        cleanOrphanState: cleanState,
+        // Normalized on both sides: a candidate's path comes from git already
+        // resolved through symlinks, so an opt-in echoed back through a client
+        // still matches the candidate it was granted for.
+        allowDirtyPaths: allowDirty.map(normalizePath),
+        source: typeof body.source === "string" ? body.source : "api",
+      });
+      // A removed worktree invalidates the cwd-keyed git cache for every path
+      // under it; leaving it would keep answering for a directory that is gone.
+      for (const outcome of result.outcomes) {
+        if (!outcome.removed) continue;
+        for (const cwd of this.gitInfoCache.keys()) {
+          if (cwd === outcome.path || cwd.startsWith(`${outcome.path}/`)) {
+            this.gitInfoCache.delete(cwd);
+          }
+        }
+      }
+      return Response.json(result, { headers });
+    } catch (err) {
+      return Response.json(
+        { error: `Prune failed: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
+    }
   }
 
   /**
