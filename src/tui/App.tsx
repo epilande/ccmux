@@ -77,6 +77,13 @@ import { createIdleGcScheduler } from "./utils/idle-gc";
 import { setSpinnerPaused } from "./utils/useStatusIcon";
 import { markStartup, reportStartup } from "../lib/startup-timing";
 
+/** Readable text for a rejected fetch, for the toast that reports it. */
+function errorMessage(err: unknown): string {
+  return err && typeof err === "object" && "message" in err
+    ? String((err as { message: unknown }).message)
+    : String(err);
+}
+
 interface AppProps {
   initialPreview?: boolean;
   iconStyle?: IconStyle;
@@ -94,6 +101,11 @@ interface AppProps {
   persistent?: boolean;
   sidebar?: boolean;
   reviewHandback?: Preferences["reviewHandback"];
+  /**
+   * Agents that declare a `forkCommand` (see `forkableAgentNames`). Gates the
+   * Fork action, which is otherwise hidden rather than offered-then-refused.
+   */
+  forkableAgents?: string[];
 }
 
 export function App(props: AppProps) {
@@ -324,6 +336,73 @@ export function App(props: AppProps) {
       });
   }
 
+  /**
+   * Whether this row can be forked. Two conditions, and both are about
+   * knowing WHAT to continue: the agent has to declare how it forks, and
+   * ccmux has to know which conversation the pane holds — a pane-tracked row
+   * (no hooks installed) has an agent but no session id, and a paneless
+   * background row has neither.
+   */
+  function canForkSession(
+    session: { agentType: string; nativeSessionId?: string } | undefined,
+  ): boolean {
+    if (!session?.nativeSessionId) return false;
+    return (props.forkableAgents ?? []).includes(session.agentType);
+  }
+
+  /** Drops re-activations while a fork is pending, so a double press can't
+   * open two panes off one conversation. */
+  let forkInFlight = false;
+
+  /**
+   * Fork a session into a pane beside its own: same agent, same directory,
+   * conversation continued from the source's history, original untouched.
+   *
+   * The picker only chooses the DESTINATION here (`split` + `target`); how to
+   * continue the conversation is the daemon's `forkCommand` template. That
+   * split is what lets a worktree destination reuse the fork command as-is
+   * and change only these fields.
+   */
+  function forkSession(session: EnrichedSession) {
+    if (forkInFlight || !canForkSession(session)) return;
+    forkInFlight = true;
+    // Beside the source when it has a pane to sit beside; a new window
+    // otherwise, rather than splitting whichever pane the daemon considers
+    // current, which would be somewhere unrelated.
+    const target = session.tmuxPane ?? undefined;
+    fetch(`${getDaemonUrl()}/spawn`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fork: session.id,
+        split: target ? "h" : false,
+        target,
+        // The jump below is this component's own exit path (it flashes the
+        // pane and closes a one-shot picker); letting the daemon switch too
+        // would race it.
+        detach: true,
+      }),
+    })
+      .then(async (response) => {
+        forkInFlight = false;
+        const data = (await response.json().catch(() => null)) as {
+          paneId?: string;
+          error?: string;
+        } | null;
+        if (!response.ok || !data?.paneId) {
+          store.actions.showToast(
+            `Fork failed: ${data?.error ?? response.statusText}`,
+          );
+          return;
+        }
+        selectPane(data.paneId);
+      })
+      .catch((err: unknown) => {
+        forkInFlight = false;
+        store.actions.showToast(`Fork failed: ${errorMessage(err)}`);
+      });
+  }
+
   function handleRowActivate(item: FlatItem, index: number) {
     if (
       store.state.showHelp ||
@@ -450,6 +529,14 @@ export function App(props: AppProps) {
     }
   }
 
+  function contextMenuFork() {
+    const cm = store.state.contextMenu;
+    if (!cm) return;
+    const session = store.state.sessions.find((s) => s.id === cm.sessionId);
+    store.actions.hideContextMenu();
+    if (session) forkSession(session);
+  }
+
   function contextMenuReview() {
     const cm = store.state.contextMenu;
     if (!cm) return;
@@ -500,6 +587,19 @@ export function App(props: AppProps) {
         ...reviewItem,
       ];
     }
+    // Hidden rather than disabled when the agent or the row can't be forked:
+    // an item that is only ever there for Claude rows with hooks installed
+    // would otherwise read as broken on every other row.
+    const forkItem: ContextMenuItem[] = canForkSession(session)
+      ? [
+          {
+            label: "Fork",
+            hint: "F",
+            color: theme.blue,
+            action: contextMenuFork,
+          },
+        ]
+      : [];
     return [
       {
         label: "Attach",
@@ -507,6 +607,7 @@ export function App(props: AppProps) {
         color: theme.green,
         action: contextMenuAttach,
       },
+      ...forkItem,
       {
         label: "Kill",
         hint: "x",
@@ -588,11 +689,7 @@ export function App(props: AppProps) {
         );
       })
       .catch((err: unknown) => {
-        const message =
-          err && typeof err === "object" && "message" in err
-            ? String((err as { message: unknown }).message)
-            : String(err);
-        store.actions.showToast(`Kill failed: ${message}`);
+        store.actions.showToast(`Kill failed: ${errorMessage(err)}`);
       });
   }
 
@@ -1213,8 +1310,18 @@ export function App(props: AppProps) {
         }
         break;
 
+      case "F":
       case "f":
-        store.actions.toggleHideIdle();
+        // Shift+F forks, bare `f` filters. Both spellings of the capital are
+        // matched because terminals deliver it as name `"f"` with `shift`
+        // set rather than as `"F"`; without the lowercase case the binding
+        // would be unreachable.
+        if (key === "F" || event.shift) {
+          const sessionToFork = store.selectedSession();
+          if (sessionToFork) forkSession(sessionToFork);
+        } else {
+          store.actions.toggleHideIdle();
+        }
         event.preventDefault();
         break;
 

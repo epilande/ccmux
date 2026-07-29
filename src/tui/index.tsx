@@ -38,6 +38,7 @@ interface TUIOptions {
   sidebar?: boolean;
   theme?: ThemeConfig;
   reviewHandback?: Preferences["reviewHandback"];
+  forkableAgents?: string[];
 }
 
 /** Quiet-period after the last CAPABILITIES event before we restore focus.
@@ -130,6 +131,7 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
         persistent={options.persistent}
         sidebar={options.sidebar}
         reviewHandback={options.reviewHandback}
+        forkableAgents={options.forkableAgents}
       />
     ),
     rendererOrConfig,

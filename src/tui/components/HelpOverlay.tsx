@@ -24,6 +24,7 @@ const leftGroups = (sidebar?: boolean, reviewable?: boolean): Group[] => [
       { key: "Enter", desc: "Switch to session" },
       { key: "/", desc: "Search" },
       { key: "f", desc: "Toggle hide idle" },
+      { key: "F", desc: "Fork session" },
       { key: "p", desc: "Cycle prompt (inline/row/off)" },
       { key: "b", desc: "Cycle group-by mode" },
       { key: "r", desc: "Restart session" },
