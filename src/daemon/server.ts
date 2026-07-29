@@ -15,12 +15,14 @@ import {
   sendPromptToPane,
 } from "./pane-io";
 import {
+  buildAgentForkCommand,
   buildAgentSpawnCommand,
   buildTmuxSpawnArgv,
   normalizePrompt,
   normalizeSplit,
   normalizeTarget,
   substitutePlaceholders,
+  NATIVE_SESSION_ID_PATTERN,
   type SpawnPlacement,
   type SpawnSplit,
 } from "./spawn-command";
@@ -164,7 +166,6 @@ const WORKTREE_FETCH_TTL_MS = 60_000;
  *  normalize an unbounded list. */
 const MAX_PRUNE_PATHS = 500;
 
-const NATIVE_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_INVOKE_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** Prefix `ClaudeInvoker` uses for its detached tmux session name. */
@@ -2030,6 +2031,64 @@ export class DaemonServer {
   }
 
   /**
+   * Resolve `POST /spawn`'s `fork` field to the session whose conversation
+   * the new pane should continue, or `undefined` when this is an ordinary
+   * spawn.
+   *
+   * The id may be either the tracked ccmux id (what the picker holds) or the
+   * agent's own native id (what a human reads off `ccmux show` or the
+   * agent's UI); for a native-tracked session the two are the same string.
+   */
+  private resolveForkSource(body: {
+    fork?: unknown;
+    resume?: string;
+    prompt?: unknown;
+  }):
+    | {
+        ok: true;
+        value?: { session: Readonly<Session>; nativeSessionId: string };
+      }
+    | { ok: false; error: string } {
+    const { fork } = body;
+    if (fork === undefined || fork === null) return { ok: true };
+
+    if (typeof fork !== "string" || !NATIVE_SESSION_ID_PATTERN.test(fork)) {
+      return { ok: false, error: "Invalid 'fork' field" };
+    }
+    // Fork is a way to START a session, not a modifier on one: each of these
+    // builds its own command, so accepting the combination would mean
+    // silently honoring one and dropping the other.
+    if (body.resume !== undefined || body.prompt !== undefined) {
+      return {
+        ok: false,
+        error: "Cannot combine 'fork' with 'resume' or 'prompt'",
+      };
+    }
+
+    const session =
+      this.sessionManager.getSession(fork) ??
+      this.sessionManager.getSessionByNativeSessionId(fork);
+    if (!session) {
+      return { ok: false, error: `Unknown session to fork: ${fork}` };
+    }
+    // Pane-tracked-only rows: ccmux knows a pane runs an agent but not which
+    // conversation it holds, and there is nothing to continue from.
+    if (!session.nativeSessionId) {
+      return {
+        ok: false,
+        error:
+          `Session ${fork} has no native session id to fork from. ` +
+          `Install hooks with 'ccmux setup' so ccmux can track which conversation a pane holds.`,
+      };
+    }
+
+    return {
+      ok: true,
+      value: { session, nativeSessionId: session.nativeSessionId },
+    };
+  }
+
+  /**
    * Spawn a new agent session in a tmux pane
    */
   private async handleSpawn(
@@ -2040,6 +2099,7 @@ export class DaemonServer {
       agent?: string;
       cwd?: string;
       resume?: string;
+      fork?: unknown;
       prompt?: unknown;
       split?: SpawnSplit;
       target?: string;
@@ -2055,7 +2115,25 @@ export class DaemonServer {
       );
     }
 
-    const { agent: agentName = "claude", cwd, resume, detach = false } = body;
+    const { resume, detach = false } = body;
+
+    // Forking is resolved first because the SOURCE session supplies both the
+    // agent and the default cwd, so the usual "is cwd present" check below
+    // can only run once we know whether a source will fill it in.
+    const forkResult = this.resolveForkSource(body);
+    if (!forkResult.ok) {
+      return Response.json(
+        { error: forkResult.error },
+        { status: 400, headers },
+      );
+    }
+    const forkSource = forkResult.value;
+
+    // The picker sends no cwd when forking: a fork belongs in the source's
+    // directory by default. Forking somewhere else is still expressible (an
+    // explicit cwd wins), which is the seam the worktree destination uses.
+    const cwd = body.cwd ?? forkSource?.session.cwd;
+    const agentName = forkSource?.session.agentType ?? body.agent ?? "claude";
 
     if (!cwd || typeof cwd !== "string") {
       return Response.json(
@@ -2150,12 +2228,21 @@ export class DaemonServer {
         ? (preferences.command ?? "claude")
         : (agent.executable ?? agentName);
 
-    const commandResult = buildAgentSpawnCommand({
-      agent,
-      binary: cmd,
-      resume,
-      prompt,
-    });
+    // The two builders are deliberately separate functions: forking is a
+    // different command shape, and keeping its construction out of the
+    // placement logic below is what lets a worktree destination reuse it.
+    const commandResult = forkSource
+      ? buildAgentForkCommand({
+          agent,
+          binary: cmd,
+          sessionId: forkSource.nativeSessionId,
+        })
+      : buildAgentSpawnCommand({
+          agent,
+          binary: cmd,
+          resume,
+          prompt,
+        });
     if (!commandResult.ok) {
       return Response.json(
         { error: commandResult.error },

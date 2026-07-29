@@ -3688,6 +3688,194 @@ describe("POST /spawn", () => {
       restore();
     }
   });
+
+  describe("forking a session", () => {
+    const forkAgent: AgentDef = {
+      ...promptAgent,
+      name: "forky",
+      executable: "forky",
+      forkCommand: "{bin} --resume {id} --fork-session",
+    };
+    const noForkAgent: AgentDef = {
+      ...forkAgent,
+      name: "unforkable",
+      executable: "unforkable",
+      forkCommand: undefined,
+    };
+
+    /** A row of `agentType` sitting in a pane in a real cwd. `null` for the
+     *  native id is the no-hooks case: an agent ccmux can see but whose
+     *  conversation it cannot name. */
+    function trackedSession(
+      manager: SessionManager,
+      agentType: string,
+      nativeSessionId: string | null = "src-sid",
+    ) {
+      return manager.createPaneTrackedSession({
+        agentType,
+        paneId: "%3",
+        cwd,
+        pid: 4242,
+        nativeSessionId: nativeSessionId ?? undefined,
+      });
+    }
+
+    it("builds the fork command from the source session's native id", async () => {
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const source = trackedSession(manager, "forky");
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id, detach: true }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[0]?.[1]).toBe("new-window");
+        expect(argv[1]).toEqual([
+          "tmux",
+          "send-keys",
+          "-t",
+          "%99",
+          "forky --resume src-sid --fork-session",
+          "Enter",
+        ]);
+      } finally {
+        restore();
+      }
+    });
+
+    it("takes the agent and cwd from the source, and an explicit cwd wins", async () => {
+      // The cwd override is the seam the worktree destination uses: same
+      // fork command, different directory.
+      const { manager, internals } = serverForAgents([forkAgent, noForkAgent]);
+      const source = trackedSession(manager, "forky");
+      const elsewhere = realpathSync(tmpdir());
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        // `agent` names a DIFFERENT agent and is ignored: the conversation
+        // being continued decides what runs, not the caller.
+        const res = await internals.handleRequest(
+          spawnRequest({
+            fork: source.id,
+            agent: "unforkable",
+            cwd: elsewhere,
+            detach: true,
+          }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[0]).toContain(elsewhere);
+        expect(argv[1]?.[4]).toContain("forky --resume src-sid");
+      } finally {
+        restore();
+      }
+    });
+
+    it("resolves the source by native id as well as by tracked id", async () => {
+      const { manager, internals } = serverForAgents([forkAgent]);
+      trackedSession(manager, "forky", "native-abc");
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: "native-abc", detach: true }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[1]?.[4]).toBe("forky --resume native-abc --fork-session");
+      } finally {
+        restore();
+      }
+    });
+
+    it("places the fork where the caller asks, beside the source pane", async () => {
+      // Placement stays entirely the caller's: the fork path adds no
+      // targeting of its own, which is what keeps command construction and
+      // pane placement independent.
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const source = trackedSession(manager, "forky");
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({
+            fork: source.id,
+            split: "h",
+            target: "%3",
+            detach: true,
+          }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[1]?.slice(1, 6)).toEqual([
+          "split-window",
+          "-h",
+          "-d",
+          "-t",
+          "%3",
+        ]);
+      } finally {
+        restore();
+      }
+    });
+
+    it("refuses an agent with no forkCommand", async () => {
+      const { manager, internals } = serverForAgents([noForkAgent]);
+      const source = trackedSession(manager, "unforkable");
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id }),
+        );
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as { error: string }).error).toContain(
+          "forkCommand",
+        );
+        expect(argv).toHaveLength(0);
+      } finally {
+        restore();
+      }
+    });
+
+    it("refuses a row with no native session id", async () => {
+      // Pane-tracked without hooks: ccmux knows an agent is running there
+      // but not which conversation, so there is nothing to continue.
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const source = trackedSession(manager, "forky", null);
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id }),
+        );
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as { error: string }).error).toContain(
+          "no native session id",
+        );
+        expect(argv).toHaveLength(0);
+      } finally {
+        restore();
+      }
+    });
+
+    it("refuses an unknown session, a malformed id, and combinations", async () => {
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const source = trackedSession(manager, "forky");
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        for (const body of [
+          { fork: "nope" },
+          // Anything the shell could act on is rejected before it is ever
+          // interpolated into a command.
+          { fork: "src-sid; rm -rf /" },
+          { fork: 42 },
+          // Each of these builds its own command; honoring one and dropping
+          // the other silently would be worse than refusing.
+          { fork: source.id, resume: "other-sid" },
+          { fork: source.id, prompt: "hi" },
+        ]) {
+          const res = await internals.handleRequest(spawnRequest(body));
+          expect(res.status).toBe(400);
+        }
+        expect(argv).toHaveLength(0);
+      } finally {
+        restore();
+      }
+    });
+  });
 });
 
 /**
