@@ -41,7 +41,9 @@ const BUILTIN_NAMES = new Set(BUILTIN_AGENTS.map((agent) => agent.name));
  * agents from `ccmux.json` are listed unconditionally: the user declared
  * one by hand, and its `executable` is as likely to be a shell function or
  * a wrapper `Bun.which` cannot see as it is to be missing — so the honest
- * answer comes from the spawn attempt, not from hiding it.
+ * answer comes from the spawn attempt, not from hiding it. A `command`
+ * preference makes Claude hand-declared in exactly the same way, so it is
+ * listed unconditionally too.
  */
 export function listSpawnableAgents(
   agents: AgentDef[],
@@ -53,7 +55,16 @@ export function listSpawnableAgents(
   const which = options.which ?? Bun.which;
   const spawnable: SpawnableAgent[] = [];
   for (const agent of agents) {
-    if (BUILTIN_NAMES.has(agent.name)) {
+    // A `command` preference is as hand-declared as a custom agent's
+    // `executable`, and the same argument applies: it is documented as
+    // possibly being a bare alias (`c`), a `~`-relative path, or
+    // `$HOME/.local/bin/claude` (see `buildAgentSpawnCommand`), and
+    // `Bun.which` resolves none of those. The command is typed into an
+    // interactive shell, where it does resolve — so gating on `which` here
+    // hides an agent that would spawn perfectly well.
+    const declaredClaudeCommand =
+      agent.name === "claude" && options.claudeCommand !== undefined;
+    if (BUILTIN_NAMES.has(agent.name) && !declaredClaudeCommand) {
       const binary = spawnBinaryFor(agent, options.claudeCommand);
       if (which(binary) === null) continue;
     }

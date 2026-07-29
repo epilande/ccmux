@@ -58,6 +58,25 @@ describe("listSpawnableAgents", () => {
     expect(result.map((a) => a.name)).toEqual(["claude"]);
   });
 
+  test("a declared claude command is listed even when which cannot resolve it", () => {
+    // `command` is documented as possibly being an alias, a `~` path, or
+    // `$HOME/...`. Bun.which resolves none of those, but the command is
+    // typed into an interactive shell, where it does resolve.
+    for (const command of ["c", "~/.local/bin/claude", "$HOME/bin/claude"]) {
+      const result = listSpawnableAgents(BUILTIN_AGENTS, {
+        claudeCommand: command,
+        which: whichNone,
+      });
+      expect(result.map((a) => a.name)).toEqual(["claude"]);
+    }
+  });
+
+  test("claude stays PATH-gated when no command is declared", () => {
+    expect(
+      listSpawnableAgents(BUILTIN_AGENTS, { which: whichNone }),
+    ).toEqual([]);
+  });
+
   test("reports display name, short code, and prompt support", () => {
     const result = listSpawnableAgents(BUILTIN_AGENTS, { which: whichAll });
     const claude = result.find((a) => a.name === "claude")!;
