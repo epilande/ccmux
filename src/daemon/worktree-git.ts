@@ -9,8 +9,22 @@
  * Nothing here mutates a repo; the removal side lives in `worktree-prune.ts`.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
+
+/**
+ * Resolve a path through symlinks so git's recorded worktree path and a
+ * caller's computed one compare equal. Git stores the realpath, so on macOS
+ * a `/tmp` path recorded as `/private/tmp` otherwise never matches. Falls
+ * back to the input for a path that does not exist yet.
+ */
+export function normalizePath(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
+}
 
 export interface GitResult {
   exitCode: number;

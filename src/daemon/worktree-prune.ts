@@ -14,7 +14,7 @@
  * of that.
  */
 
-import { existsSync, realpathSync, renameSync } from "node:fs";
+import { existsSync, renameSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import type { SessionStatus } from "../types/session";
@@ -29,6 +29,7 @@ import {
   fetchPrune,
   isMergedInto,
   listWorktrees,
+  normalizePath,
   readAdminDir,
   readDirtyState,
   readUpstreamStates,
@@ -38,6 +39,11 @@ import {
   type UpstreamState,
   type WorktreeEntry,
 } from "./worktree-git";
+
+// Re-exported so the endpoint and tests that already import it from here keep
+// working; it lives in `worktree-git.ts` now because worktree CREATION needs
+// the same realpath comparison against git's recorded paths.
+export { normalizePath };
 
 /**
  * Why a worktree is removable, strongest evidence first — this is also the
@@ -273,20 +279,6 @@ export interface ScanDeps {
   hasOpenPR?: (cwd: string, branch: string) => boolean;
   /** Skip the per-repo `git fetch --prune` (tests, offline runs). */
   skipFetch?: boolean;
-}
-
-/**
- * Resolve a path through symlinks so git's recorded worktree path and the
- * daemon's `--show-toplevel` answer compare equal (on macOS, `/tmp` and
- * `/private/tmp` otherwise make every match fail). Falls back to the input
- * for a path that no longer exists.
- */
-export function normalizePath(path: string): string {
-  try {
-    return realpathSync.native(path);
-  } catch {
-    return path;
-  }
 }
 
 /**
