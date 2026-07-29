@@ -99,9 +99,11 @@ describe("HelpOverlay", () => {
 
 describe("HelpOverlay sidebar mode", () => {
   // The sidebar help is a stacked (key-above-description) scrollbox, so
-  // "renders all sections" only holds in a viewport tall enough for the
-  // whole list. Height is set past the content rather than to the exact
-  // fit, so adding a shortcut doesn't turn a scroll into a failure.
+  // "renders all sections" only holds in a viewport tall enough for the whole
+  // list: it needs roughly twice the entry count in rows. Height is set well
+  // past the content rather than to the exact fit — at the exact fit, adding
+  // any shortcut fails an unrelated section's assertion instead, which is how
+  // both `n` and `W` independently ended up raising this number.
   async function renderSidebarHelp() {
     setup = await testRender(() => <HelpOverlay sidebar />, {
       width: 100,
