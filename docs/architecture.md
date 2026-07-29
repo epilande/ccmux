@@ -195,11 +195,18 @@ The lookup also fetches `reviewDecision` and `statusCheckRollup`, folding the ro
 3. `upstream-gone` — `%(upstream:track)` reports `[gone]` after the per-repo `git fetch --prune`. The shape auto-delete-on-merge leaves, but **not** proof of a merge, so it also uses the safe `-d` and reports a refusal rather than forcing.
 4. `pr-closed` — closed without merging. The worktree is finished; the branch is kept.
 
+**Proving a PR is about this branch (`selectPRForBranch`).** `gh pr list --head <branch>` matches the branch NAME across the whole network — it has no syntax for qualifying an owner, so `"<owner>:<branch>"` is explicitly unsupported — and the reply mixes in every fork's PR and every earlier reuse of that name. On `cli/cli`, `--head patch-1` returns 25 PRs from 25 different forks, three of them MERGED. Two asymmetric rules, because the directions have opposite costs:
+
+- **OPEN wins over everything, from any repo, with no identity check.** An open PR is the state that makes a worktree NOT removable, so a false positive only skips a cleanup while a false negative deletes live work. This is also why it is resolved before merged and closed: a branch carrying both a merged PR and a live one is being worked on.
+- **MERGED and CLOSED justify removal, so they must be proven**: same repository (never a fork), and a head SHA equal to the local branch tip. The SHA is what defeats name reuse — a new `feat/x` sharing a name with a long-merged `feat/x` has a different tip. An unresolvable tip fails closed.
+
 An **open** PR (checked against the existing `PRResolver` cache first, so the common case costs no `gh` call), a **working** session, a user **lock**, a detached HEAD, and the main checkout all mean "not a candidate". Dirty (uncommitted or untracked) worktrees are candidates but are flagged, never pre-selected, and refused by `runPrune` unless their path appears in `allowDirtyPaths` — the gate is enforced in the destructive core so both surfaces inherit it.
+
+**Ignored files are shown, not gated.** Plain `git status --porcelain` hides them, so a worktree whose only uncommitted content is a gitignored `.env` reported perfectly clean and could be swept up by "select all" — and since the trash is deleted at the end of the same run, an unbackupable file would go with no recovery window. `readDirtyState` uses `--ignored=matching` and keeps the individual ignored FILES; ignored DIRECTORIES collapse to one entry and are dropped as regenerable build output. They are surfaced on the row, at both confirmation steps, and in the run log before the directory moves, but they do NOT join the dirty gate: a stray `.DS_Store` is an ignored file, and a gate that fires on every worktree trains people to clear it reflexively, which is worse than no gate for the case it exists to catch.
 
 **Run phases**, in this order for a reason:
 
-1. Stop each session's agent, then close its pane (a `kill-pane` that finds nothing is success: stopping the agent usually takes its pane with it).
+1. Stop each session's agent, then close its pane (a `kill-pane` that finds nothing is success: stopping the agent usually takes its pane with it). Liveness is membership in `list-panes`, never the exit code of `display-message -t <id>`, which is ZERO with empty output for a pane that no longer exists.
 2. Rename the directory to a dot-prefixed trash sibling in the same parent — atomic, cross-device-proof, frees the path even while a shell holds it as cwd.
 3. Clear stale `locked` markers (an interrupted `worktree add` leaves entries `git worktree prune` refuses to touch) and run `git worktree prune`.
 4. Delete branches. **After** the prune, not before: until the admin entry is gone git still considers the branch checked out in a worktree and refuses to delete it with or without `-D`.
