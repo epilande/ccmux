@@ -42,11 +42,6 @@ import {
   type WorktreeEntry,
 } from "./worktree-git";
 
-// Re-exported so the endpoint and tests that already import it from here keep
-// working; it lives in `worktree-git.ts` now because worktree CREATION needs
-// the same realpath comparison against git's recorded paths.
-export { normalizePath };
-
 /**
  * Why a worktree is removable, strongest evidence first — this is also the
  * precedence order when several apply:

@@ -22,7 +22,6 @@ import {
   describeIgnoredFiles,
   ghPRStateLookup,
   isRepoAdminDir,
-  normalizePath,
   paneListIncludes,
   runPrune,
   scanRepo,
@@ -34,6 +33,7 @@ import {
   type WorktreeSession,
 } from "./worktree-prune";
 import {
+  normalizePath,
   parseWorktreeList,
   readAdminDir,
   readDirtyState,

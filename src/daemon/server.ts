@@ -64,14 +64,13 @@ import {
   type SessionMatches,
 } from "./transcript-search";
 import {
-  normalizePath,
   runPrune,
   scanRepos,
   type PruneCandidate,
   type PruneScan,
   type WorktreeSession,
 } from "./worktree-prune";
-import { fetchPrune } from "./worktree-git";
+import { fetchPrune, normalizePath } from "./worktree-git";
 import type {
   NotificationActionInput,
   NotificationActionResult,
