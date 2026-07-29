@@ -57,6 +57,45 @@ export async function getPaneCurrentCommand(
 }
 
 /**
+ * Resolve the window (`@7`) and session (`$3`) containing a pane, and
+ * thereby whether the pane exists at all. Needed by `POST /spawn`, which
+ * gets a pane id from the caller but cannot hand one to `new-window`
+ * ("can't specify pane here"). Ids rather than names: both are stable and
+ * immune to a session name containing a space or colon.
+ *
+ * tmux exits 0 with EMPTY output for a pane that no longer exists, so an
+ * empty result is folded into null alongside real failures — otherwise a
+ * closed pane would silently become "no target" and land the spawn in an
+ * arbitrary session.
+ */
+export async function resolvePaneLocation(
+  paneId: string,
+): Promise<{ windowId: string; sessionId: string } | null> {
+  try {
+    const proc = Bun.spawn(
+      [
+        "tmux",
+        "display-message",
+        "-p",
+        "-t",
+        paneId,
+        "-F",
+        "#{window_id} #{session_id}",
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const output = (await new Response(proc.stdout).text()).trim();
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) return null;
+    const [windowId, sessionId] = output.split(" ");
+    if (!windowId || !sessionId) return null;
+    return { windowId, sessionId };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Send literal text to a pane, then optionally press Enter.
  * Mirrors the pattern in server.ts handleSendToSession: uses 'send-keys -l --'
  * so strings like 'Enter', 'C-c', 'Space' inside the text are NOT interpreted
