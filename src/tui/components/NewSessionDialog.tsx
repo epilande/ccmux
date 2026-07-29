@@ -125,14 +125,14 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    *  the full sentence would run past the border. */
   const promptPlaceholder = () => {
     const agent = selectedAgent();
-    const text =
-      agent && !agent.supportsPrompt
-        ? stacked()
-          ? "no prompt support"
-          : `${agent.displayName} can't start with a prompt`
-        : stacked()
-          ? "Optional prompt..."
-          : "Optional first message...";
+    let text: string;
+    if (agent && !agent.supportsPrompt) {
+      text = stacked()
+        ? "no prompt support"
+        : `${agent.displayName} can't start with a prompt`;
+    } else {
+      text = stacked() ? "Optional prompt..." : "Optional first message...";
+    }
     // The input draws its placeholder in full, past its own box, so the
     // fit has to be enforced here rather than left to the layout.
     return truncateText(text, contentWidth());
@@ -221,51 +221,46 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           onMouseDown={() => props.onFocusField("placement")}
         >
           <For each={PLACEMENT_OPTIONS}>
-            {(option, index) => (
-              <box
-                height={1}
-                flexDirection="row"
-                flexShrink={0}
-                marginRight={stacked() ? 0 : 2}
-                onMouseDown={(event) => {
-                  if (event.button !== MouseButton.LEFT) return;
-                  props.onFocusField("placement");
-                  props.onSelectPlacement(option.value);
-                }}
-              >
-                {/* Spacing comes from box widths and margins, never from
-                    padded strings: a `<text>` is measured on its trimmed
-                    content, so trailing spaces collapse under flex. */}
-                <box width={2}>
-                  <text fg={theme.overlay}>{`${index() + 1}`}</text>
-                </box>
-                {/* Brackets, not colour alone: the placements have no
-                    selection gutter of their own. Each bracket gets a
-                    fixed-width box so choosing an option never reflows the
-                    row, and so the marker survives a colourless terminal. */}
-                <box width={1}>
-                  <text fg={theme.green}>
-                    {option.value === props.draft.placement ? "[" : ""}
-                  </text>
-                </box>
-                <text
-                  fg={
-                    option.value === props.draft.placement
-                      ? theme.green
-                      : theme.subtext
-                  }
+            {(option, index) => {
+              const selected = () => option.value === props.draft.placement;
+              return (
+                <box
+                  height={1}
+                  flexDirection="row"
+                  flexShrink={0}
+                  marginRight={stacked() ? 0 : 2}
+                  onMouseDown={(event) => {
+                    if (event.button !== MouseButton.LEFT) return;
+                    props.onFocusField("placement");
+                    props.onSelectPlacement(option.value);
+                  }}
                 >
-                  {/* Stacked has a row to itself, so it can afford the full
-                      label even though it is the narrowest surface. */}
-                  {compact() && !stacked() ? option.compactLabel : option.label}
-                </text>
-                <box width={1}>
-                  <text fg={theme.green}>
-                    {option.value === props.draft.placement ? "]" : ""}
+                  {/* Spacing comes from box widths and margins, never from
+                      padded strings: a `<text>` is measured on its trimmed
+                      content, so trailing spaces collapse under flex. */}
+                  <box width={2}>
+                    <text fg={theme.overlay}>{`${index() + 1}`}</text>
+                  </box>
+                  {/* Brackets, not colour alone: the placements have no
+                      selection gutter of their own. Each bracket gets a
+                      fixed-width box so choosing an option never reflows the
+                      row, and so the marker survives a colourless terminal. */}
+                  <box width={1}>
+                    <text fg={theme.green}>{selected() ? "[" : ""}</text>
+                  </box>
+                  <text fg={selected() ? theme.green : theme.subtext}>
+                    {/* Stacked has a row to itself, so it can afford the full
+                        label even though it is the narrowest surface. */}
+                    {compact() && !stacked()
+                      ? option.compactLabel
+                      : option.label}
                   </text>
+                  <box width={1}>
+                    <text fg={theme.green}>{selected() ? "]" : ""}</text>
+                  </box>
                 </box>
-              </box>
-            )}
+              );
+            }}
           </For>
         </box>
       </box>
