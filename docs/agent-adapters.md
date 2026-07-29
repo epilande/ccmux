@@ -50,7 +50,7 @@ Two quoting rules are enforced in `spawn-command.ts`, both because prompt text i
 
 Fork (`F` in the picker, the context menu's **Fork**, `ccmux spawn --fork <id>`) starts a new session whose conversation continues an existing one's history while leaving that session untouched. It is declared per agent in `AgentDef.forkCommand` (`{id}` = the source's native session id, optional `{bin}` = the resolved launcher), built by `buildAgentForkCommand` in `src/daemon/spawn-command.ts`.
 
-**Claude Code is the only built-in that declares one**, `claude --resume {id} --fork-session`. Its `--help` is explicit: "--fork-session: When resuming, create a new session ID instead of reusing the original". Verified live against a running original: the fork gets its own session id and its own transcript file, replays the history, and the source session keeps its id, its transcript, and its ability to continue.
+**Claude Code is the only built-in that declares one**, `claude --resume {id} --fork-session`. Its `--help` is explicit: "--fork-session: When resuming, create a new session ID instead of reusing the original" (Claude Code 2.1.220). Verified live against a running original: the fork came up with the replayed history under a NEW session id and a new transcript file, and the two then diverged cleanly, with each side's next answer landing only in its own transcript and neither seeing the other's. The forked pane is tracked like any other spawn (its own marker, its own row) once it takes its first turn.
 
 Fork is deliberately not enabled for the rest, and adding one is not a matter of pattern-matching the resume flag:
 
@@ -62,7 +62,7 @@ So an agent earns a `forkCommand` only after someone has checked, against a **li
 Two structural notes for anyone extending this:
 
 - Command construction (`buildAgentForkCommand`) is kept separate from pane placement (`buildTmuxSpawnArgv` and the route's placement resolution). `POST /spawn`'s fork path adds no targeting of its own: the caller passes `split`/`target` exactly as for any other spawn, and an explicit `cwd` overrides the source's. That is what lets a fork-into-a-worktree destination reuse the command half unchanged.
-- Forking mid-turn is safe for Claude and is not gated. The source writes only to its own transcript and the fork only reads it, so a fork taken while the original is working replays the history up to that point (the in-flight turn's not-yet-written output is simply absent from the copy).
+- Forking mid-turn is safe for Claude and is deliberately not gated on the source being idle. Verified against a source in the middle of a long answer: the source finished its turn normally and stayed `idle`-after-`working` as usual, and the fork came up with the history as of fork time, which includes the in-flight turn's user message but not the answer that had not been written yet. The fork does not auto-run that pending turn; it sits at an empty composer. The two processes only ever share a file one of them reads.
 
 ## Claude-specific caveats
 
