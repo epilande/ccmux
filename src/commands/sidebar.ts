@@ -173,6 +173,7 @@ export function createSidebarCommand(): Command {
           hideIdle: uiState.hideIdle,
           promptDisplay: resolvePromptDisplay(uiState, prefs.promptDisplay),
           sidebar: true,
+          lastSpawnAgent: uiState.lastSpawnAgent,
           reviewHandback: prefs.reviewHandback,
           theme: prefs.theme,
         });
