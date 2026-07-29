@@ -17,7 +17,13 @@ import { InvocationRegistry } from "./invokers/registry";
 import { stubInvoker } from "./invokers/test-helpers";
 import type { HookAdapter } from "./hook-adapter";
 import { PRResolver } from "./pr-resolver";
-import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  writeFileSync,
+  rmSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import type { sendLiteralToPane, sendPromptToPane } from "./pane-io";
@@ -572,7 +578,7 @@ describe("DaemonServer", () => {
       // Installed before the session exists: creating one emits a `change`
       // event the server enriches on its own, which would otherwise prime the
       // cache off-camera.
-      const git = stubGitSpawn({ stdout: "feat/x\n/repo/.git\n" });
+      const git = stubGitSpawn({ stdout: "feat/x\n/repo/.git\n/repo/.git\n" });
 
       try {
         manager.createSession(
@@ -594,7 +600,9 @@ describe("DaemonServer", () => {
 
     it("keys the PR lookup off the cached branch when one is warm", async () => {
       const { manager, internals } = createServer();
-      const git = stubGitSpawn({ stdout: "feat/live\n/repo/.git\n" });
+      const git = stubGitSpawn({
+        stdout: "feat/live\n/repo/.git\n/repo/.git\n",
+      });
 
       try {
         manager.createSession(
@@ -757,10 +765,10 @@ describe("DaemonServer", () => {
       expect(enriched.gitBranch).toBeNull();
     });
 
-    it("resolves branch and worktree from a single git spawn", async () => {
+    it("resolves branch, worktree and main repo root from a single git spawn", async () => {
       const { internals } = createServer();
       const git = stubGitSpawn({
-        stdout: "feat/x\n/repo/.git/worktrees/wt\n",
+        stdout: "feat/x\n/repo/.git/worktrees/wt\n/repo/.git\n",
       });
 
       try {
@@ -768,6 +776,7 @@ describe("DaemonServer", () => {
 
         expect(enriched.gitBranch).toBe("feat/x");
         expect(enriched.isWorktree).toBe(true);
+        expect(enriched.mainRepoRoot).toBe("/repo");
         expect(git.argv).toEqual([
           [
             "git",
@@ -777,8 +786,65 @@ describe("DaemonServer", () => {
             "--abbrev-ref",
             "HEAD",
             "--git-dir",
+            "--git-common-dir",
           ],
         ]);
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("does not call a repo under a `worktrees/` directory a worktree", async () => {
+      // The old detection was a `/worktrees/` substring test on --git-dir,
+      // which any repo living under a directory of that name tripped.
+      const { internals } = createServer();
+      const git = stubGitSpawn({
+        stdout: "main\n/src/worktrees/app/.git\n/src/worktrees/app/.git\n",
+      });
+
+      try {
+        const enriched = await internals.enrichSession(fakeSession("s1"));
+
+        expect(enriched.isWorktree).toBe(false);
+        expect(enriched.mainRepoRoot).toBe("/src/worktrees/app");
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("resolves relative git dirs against the cwd before comparing them", async () => {
+      // Real fixture from a plain checkout's subdirectory: git prints an
+      // absolute --git-dir but a cwd-relative --git-common-dir, so comparing
+      // the raw strings would report this as a worktree.
+      const { internals } = createServer();
+      const git = stubGitSpawn({
+        stdout: "main\n/Users/test/proj/.git\n../.git\n",
+      });
+      const session = fakeSession("s1");
+      session.cwd = "/Users/test/proj/src";
+
+      try {
+        const enriched = await internals.enrichSession(session);
+
+        expect(enriched.isWorktree).toBe(false);
+        expect(enriched.mainRepoRoot).toBe("/Users/test/proj");
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("treats a submodule's `.git` file gitdir as its own checkout, not a worktree", async () => {
+      const { internals } = createServer();
+      const git = stubGitSpawn({
+        stdout: "main\n/super/.git/modules/sub\n/super/.git/modules/sub\n",
+      });
+
+      try {
+        const enriched = await internals.enrichSession(fakeSession("s1"));
+
+        expect(enriched.isWorktree).toBe(false);
+        // The common dir is the module dir, not a checkout's `.git`.
+        expect(enriched.mainRepoRoot).toBeNull();
       } finally {
         git.restore();
       }
@@ -787,7 +853,10 @@ describe("DaemonServer", () => {
     it("coalesces concurrent lookups for one cwd onto a single git spawn", async () => {
       const { internals } = createServer();
       // Held in flight so all 20 callers arrive before the first resolves.
-      const git = stubGitSpawn({ stdout: "main\n/repo/.git\n", delayMs: 5 });
+      const git = stubGitSpawn({
+        stdout: "main\n/repo/.git\n/repo/.git\n",
+        delayMs: 5,
+      });
 
       try {
         const enriched = await Promise.all(
@@ -831,6 +900,70 @@ describe("DaemonServer", () => {
         expect(git.argv).toHaveLength(1);
       } finally {
         git.restore();
+      }
+    });
+
+    it("derives project from the same cwd the git facts come from", async () => {
+      // A pane that `cd`s out of the directory the log recorded used to move
+      // the branch and worktree marker (pane cwd) while leaving `project`
+      // (log cwd) behind, so the row grouped under one repo and showed
+      // another's branch.
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-cwd-")));
+      try {
+        const repo = join(root, "other-repo");
+        mkdirSync(join(repo, ".git"), { recursive: true });
+        const paneCache = new Map<string, TmuxPane>([
+          ["%9", fakePane({ paneId: "%9", currentPath: repo })],
+        ]);
+        const { internals } = createServer(undefined, paneCache);
+        const session = fakeSession("s1", "%9");
+
+        const enriched = await internals.enrichSession(session);
+
+        expect(session.project).toBe("proj"); // log-derived, left alone
+        expect(enriched.project).toBe("other-repo");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("tells a real worktree from its main checkout (real git)", async () => {
+      // The stubbed cases above pin the parsing; this one pins the premise —
+      // that `--git-dir` and `--git-common-dir` really do diverge for a
+      // linked worktree and agree for the checkout it was added from.
+      // realpath'd: git records the worktree's gitdir by real path, and on
+      // macOS `/tmp` is a symlink, so the raw mkdtemp path would not match.
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-wt-")));
+      const main = join(root, "repo");
+      const worktree = join(root, "trees", "feature");
+      try {
+        mkdirSync(main);
+        const git = (...args: string[]) =>
+          Bun.spawnSync(["git", "-C", main, ...args], {
+            env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" },
+          });
+        Bun.spawnSync(["git", "init", "-q", "-b", "main", main]);
+        git("commit", "-q", "--allow-empty", "-m", "init");
+        git("worktree", "add", "-q", "-b", "feature", worktree);
+
+        const { internals } = createServer();
+        const mainSession = fakeSession("s1");
+        mainSession.cwd = main;
+        const worktreeSession = fakeSession("s2");
+        worktreeSession.cwd = worktree;
+
+        const enrichedMain = await internals.enrichSession(mainSession);
+        const enrichedWorktree = await internals.enrichSession(worktreeSession);
+
+        expect(enrichedMain.isWorktree).toBe(false);
+        expect(enrichedMain.mainRepoRoot).toBe(main);
+        expect(enrichedWorktree.isWorktree).toBe(true);
+        expect(enrichedWorktree.gitBranch).toBe("feature");
+        // Both checkouts point at the same main root, which is what
+        // worktree management keys off.
+        expect(enrichedWorktree.mainRepoRoot).toBe(main);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
       }
     });
 

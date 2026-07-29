@@ -28,6 +28,7 @@ export function mockEnrichedSession(
     gitBranch: null,
     version: null,
     isWorktree: false,
+    mainRepoRoot: null,
     originInvocationId: null,
     pid: null,
     statusChangedAt: null,

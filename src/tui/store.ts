@@ -163,19 +163,18 @@ export const INVOKE_FINISHED_LINGER_MS = 6000;
  * invoke worker (codex/cursor/opencode/gemini), which creates no tmux
  * session and would otherwise be invisible. Keyed by `invocationId`.
  *
- * `project` uses the plain `cwd.split("/").pop()` basename, NOT the
- * daemon's git-aware `deriveProject` (`src/daemon/project-derivation.ts`),
- * because that resolution walks the filesystem and must stay out of the
- * TUI process. This divergence is permanent for the row's lifetime, not a
- * brief placeholder: subprocess invoke rows live ONLY in the TUI (no
- * daemon session is ever created for them, which is why the `setSessions`
- * merge preserves them), so nothing ever updates `project` to the
- * git-aware value. An invoke launched from a git worktree therefore groups
- * under the worktree's directory name for its whole lifetime (the
- * invocation duration plus the finished linger), while real sessions in
- * that same worktree group under the main repo name. `lastActivityAt` is
- * the start time so the existing `useTick` age column counts up live (a
- * stuck worker reads as stale).
+ * `project` and the worktree fields come off the event, where the daemon
+ * resolved them with the same git-aware `deriveProject`
+ * (`src/daemon/project-derivation.ts`) every real session goes through, so
+ * an invoke launched from a worktree groups with that repo's other sessions
+ * instead of stranding itself under the worktree's directory name. That
+ * matters for the row's whole lifetime, not just briefly: subprocess invoke
+ * rows live ONLY in the TUI (no daemon session is ever created for them,
+ * which is why the `setSessions` merge preserves them), so nothing later
+ * corrects the value. The plain-basename fallback covers a board connected
+ * to a daemon predating those fields. `lastActivityAt` is the start time so
+ * the existing `useTick` age column counts up live (a stuck worker reads as
+ * stale).
  */
 export function fabricateInvokeSession(
   event: InvocationStartedEvent,
@@ -210,6 +209,7 @@ export function fabricateInvokeSession(
     tmuxTarget: null,
     paneCwd: null,
     isWorktree: false,
+    mainRepoRoot: null,
     originInvocationId: event.invocationId,
     originInvocationStatus: "running",
   };

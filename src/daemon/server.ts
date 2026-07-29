@@ -1,4 +1,5 @@
 import { statSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -30,6 +31,7 @@ import { capabilitiesFor } from "./invokers/invoker";
 import type { InvokeInput, InvokeResult } from "./invokers/types";
 import type { HookAdapter } from "./hook-adapter";
 import { PRResolver } from "./pr-resolver";
+import { deriveProject } from "./project-derivation";
 import {
   searchTranscript,
   MIN_QUERY_LEN,
@@ -77,10 +79,13 @@ type NotificationActionRunner = (
  *  focuses a pane whose session had pending attention. Fail-open. */
 type NotificationRetractFn = (sessionId: string) => Promise<void>;
 
-/** A cwd's git facts, both derived from one `git rev-parse` call. */
+/** A cwd's git facts, all derived from one `git rev-parse` call. */
 interface GitInfo {
   branch: string | null;
   isWorktree: boolean;
+  /** Root of the main checkout this cwd's repo hangs off, or null when
+   *  unknown (not a repo, or a bare repo with no checkout). */
+  mainRepoRoot: string | null;
 }
 
 interface GitInfoCacheEntry {
@@ -89,7 +94,48 @@ interface GitInfoCacheEntry {
 }
 
 /** A cwd git can't answer for: not a repo, unborn HEAD, deleted dir. */
-const UNKNOWN_GIT_INFO: GitInfo = { branch: null, isWorktree: false };
+const UNKNOWN_GIT_INFO: GitInfo = {
+  branch: null,
+  isWorktree: false,
+  mainRepoRoot: null,
+};
+
+/**
+ * Decide whether a cwd is a linked worktree, and where its main checkout
+ * lives, from one `rev-parse`'s `--git-dir` and `--git-common-dir` output.
+ *
+ * A linked worktree is exactly a cwd whose own git dir
+ * (`<main>/.git/worktrees/<name>`) is not the repo's shared common dir
+ * (`<main>/.git`); every other checkout, submodule included, has the two
+ * pointing at the same place. That is the definition git itself uses, so it
+ * replaces the old `/worktrees/` substring test on `--git-dir`, which
+ * false-positived on any repo living under a directory named `worktrees`
+ * and could not name the main checkout at all.
+ *
+ * Both paths are resolved against `cwd` before comparing: git prints either
+ * one relative when it can (a repo root reports `.git`, and `--git-common-dir`
+ * is relative to the cwd, e.g. `../.git` from a subdirectory), so comparing
+ * the raw strings would report a plain checkout as a worktree.
+ *
+ * `mainRepoRoot` is the parent of the shared `.git` directory, for a main
+ * checkout and a worktree alike. Null for a bare repo, whose common dir is
+ * the repository itself and which has no checkout to point at.
+ */
+export function worktreeFacts(
+  cwd: string,
+  gitDir: string,
+  commonDir: string,
+): { isWorktree: boolean; mainRepoRoot: string | null } {
+  const resolvedGitDir = resolve(cwd, gitDir);
+  const resolvedCommonDir = resolve(cwd, commonDir);
+  return {
+    isWorktree: resolvedGitDir !== resolvedCommonDir,
+    mainRepoRoot:
+      basename(resolvedCommonDir) === ".git"
+        ? dirname(resolvedCommonDir)
+        : null,
+  };
+}
 
 const GIT_INFO_CACHE_TTL_MS = 30_000;
 /** How often to sweep visible sessions' (cwd, branch) keys through the
@@ -433,23 +479,31 @@ export class DaemonServer {
   }
 
   /**
-   * Read a cwd's branch and worktree flag with a single spawn:
-   * `rev-parse --abbrev-ref HEAD --git-dir` prints both, one line each, in
-   * argument order.
+   * Read a cwd's branch, worktree flag and main checkout root with a single
+   * spawn: `rev-parse --abbrev-ref HEAD --git-dir --git-common-dir` prints
+   * all three, one line each, in argument order.
    *
-   * Gated on exit 0 AND exactly two lines. The exit-code check is what
+   * Gated on exit 0 AND exactly three lines. The exit-code check is what
    * actually guards against a phantom `HEAD` branch: a bare repo with an
-   * unborn HEAD still prints two stdout lines ("HEAD" and a literal
-   * "--git-dir") while exiting 128, so a line-count-only gate would parse
-   * that as a real two-line answer and misreport the branch. The two-line
-   * gate stays as defense-in-depth on top of the exit-code check, not as a
+   * unborn HEAD still prints one stdout line per argument ("HEAD" and the
+   * literal flags) while exiting 128, so a line-count-only gate would parse
+   * that as a real answer and misreport the branch. The line-count gate
+   * stays as defense-in-depth on top of the exit-code check, not as a
    * substitute for it. A detached HEAD in a real repo still reports the
-   * literal `HEAD` (exit 0, two lines), which is pre-existing behavior and
-   * unchanged.
+   * literal `HEAD` (exit 0), which is pre-existing behavior and unchanged.
    */
   private async readGitInfo(cwd: string): Promise<GitInfo> {
     const proc = Bun.spawn(
-      ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD", "--git-dir"],
+      [
+        "git",
+        "-C",
+        cwd,
+        "rev-parse",
+        "--abbrev-ref",
+        "HEAD",
+        "--git-dir",
+        "--git-common-dir",
+      ],
       // stderr is never read, so don't pay for a pipe on this path.
       { stdout: "pipe", stderr: "ignore" },
     );
@@ -458,10 +512,10 @@ export class DaemonServer {
       proc.exited,
     ]);
     const lines = stdout.trim().split("\n");
-    if (exitCode !== 0 || lines.length !== 2) return UNKNOWN_GIT_INFO;
+    if (exitCode !== 0 || lines.length !== 3) return UNKNOWN_GIT_INFO;
     return {
       branch: lines[0].trim() || null,
-      isWorktree: lines[1].includes("/worktrees/"),
+      ...worktreeFacts(cwd, lines[1].trim(), lines[2].trim()),
     };
   }
 
@@ -490,8 +544,16 @@ export class DaemonServer {
       ...session,
       tmuxTarget,
       paneCwd,
+      // Re-derived here so `project` and the git facts below are keyed off
+      // the SAME cwd. The stored `project` comes from the log-derived
+      // `session.cwd`, which a pane that `cd`s elsewhere leaves behind: the
+      // row would then group under one repo while showing another's branch
+      // and worktree marker. Costs nothing on the hot path — `deriveProject`
+      // memoizes per cwd, and the daemon already called it for this session.
+      project: deriveProject(effectiveCwd, session.project),
       gitBranch,
       isWorktree: gitInfo.isWorktree,
+      mainRepoRoot: gitInfo.mainRepoRoot,
       branchPRs,
       originInvocationId,
     };
