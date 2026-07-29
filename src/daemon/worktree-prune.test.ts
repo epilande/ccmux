@@ -705,6 +705,8 @@ describe("selectPRForBranch", () => {
     });
   });
 
+  // Modelled on the real `cli/cli --head patch-1` reply. What rejects these
+  // is the SHA, not the fork flag: none of them is at this branch's tip.
   it("ignores merged PRs from forks that share the branch name", () => {
     const forks = [
       row({ number: 13296, isCrossRepository: true, headRefOid: "e40c592e" }),
@@ -718,6 +720,38 @@ describe("selectPRForBranch", () => {
     ];
 
     expect(selectPRForBranch(forks, "tip")).toBeNull();
+  });
+
+  /**
+   * The fork-to-upstream workflow: your own PR is cross-repository, and its
+   * head IS your local commit. Requiring same-repo would break this for no
+   * gain, since a matching SHA is already proof of identity — a commit hash
+   * equal to the local tip cannot belong to a different branch.
+   */
+  it("accepts a fork PR whose head is exactly this branch's tip", () => {
+    const forkPR = row({
+      number: 4242,
+      isCrossRepository: true,
+      headRefOid: "tip",
+    });
+
+    expect(selectPRForBranch([forkPR], "tip")).toMatchObject({
+      number: 4242,
+      state: "MERGED",
+    });
+  });
+
+  it("accepts a closed fork PR at this branch's tip", () => {
+    const forkPR = row({
+      number: 4243,
+      isCrossRepository: true,
+      headRefOid: "tip",
+      state: "CLOSED",
+    });
+
+    expect(selectPRForBranch([forkPR], "tip")).toMatchObject({
+      state: "CLOSED",
+    });
   });
 
   // A branch name reused after the original was merged and deleted: same

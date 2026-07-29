@@ -140,7 +140,12 @@ export interface GhPRRow {
   number: number;
   url: string;
   state: string;
-  /** PR head lives in a fork, not in this repo. */
+  /**
+   * PR head lives in a fork. Informational only: this is deliberately NOT
+   * part of the identity rule, because a fork-to-upstream PR is an ordinary
+   * workflow and `headRefOid` already proves identity on its own. Do not
+   * "restore" it as a filter.
+   */
   isCrossRepository?: boolean;
   /** SHA of the PR's head commit — the only reliable branch identity. */
   headRefOid?: string;
@@ -165,10 +170,17 @@ export interface GhPRRow {
  *   work. This is also why it is checked before merged and closed: a branch
  *   with both a merged PR and a currently open one is being worked on.
  * - MERGED and CLOSED justify removal, so they must be PROVEN to be about
- *   this branch: same repository (never a fork), and a head SHA equal to the
- *   local branch tip. The SHA is what defeats name reuse — a new `feat/x`
- *   sharing a name with a long-merged `feat/x` has a different tip, so the
- *   old PR no longer speaks for it.
+ *   this branch, and the proof is one thing: a head SHA equal to the local
+ *   branch tip. That defeats name reuse (a new `feat/x` sharing a name with a
+ *   long-merged `feat/x` has a different tip) and it defeats the fork noise
+ *   above (25 unrelated `patch-1` PRs, none of them at this tip).
+ *
+ * Note what is deliberately NOT required: that the PR live in this
+ * repository. A `headRefOid` equal to the local tip IS the identity — that
+ * exact commit is the PR's head, whichever repository the PR was opened
+ * from — so a same-repo check adds nothing on top of it while breaking the
+ * entirely ordinary fork-to-upstream workflow, where every one of your own
+ * PRs is cross-repository.
  *
  * `localTip` null (git could not resolve the branch) fails closed: no PR can
  * be proven to match, so nothing merged or closed is reported.
@@ -187,9 +199,7 @@ export function selectPRForBranch(
   if (open) return asState(open);
 
   if (!localTip) return null;
-  const mine = rows.filter(
-    (r) => r.isCrossRepository !== true && r.headRefOid === localTip,
-  );
+  const mine = rows.filter((r) => r.headRefOid === localTip);
   const merged = mine.find((r) => r.state === "MERGED");
   if (merged) return asState(merged);
   const closed = mine.find((r) => r.state === "CLOSED");
