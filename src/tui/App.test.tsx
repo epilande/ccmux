@@ -2613,6 +2613,122 @@ describe("App new session dialog", () => {
     }
   });
 
+  it("still spawns when remembering the agent fails", async () => {
+    // The pane already exists by then. Reporting a state-write failure as
+    // "Spawn failed" makes the user press Enter again and get a SECOND
+    // pane, which is strictly worse than forgetting the agent.
+    const { spawns, restore } = withDaemon();
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    const originalSet = uiStateWrites.push;
+    uiStateWrites.push = () => {
+      throw new Error("EACCES: permission denied, open 'state.json'");
+    };
+    try {
+      await openDialog();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      expect(spawns).toHaveLength(1);
+      expect(exitSpy).toHaveBeenCalled();
+      expect(setup.captureCharFrame()).not.toContain("Spawn failed");
+    } finally {
+      uiStateWrites.push = originalSet;
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("resolves the launch pane per spawn, not once at mount", async () => {
+    // A cached pane goes stale: a sidebar records its neighbour at startup,
+    // the neighbour is closed later, and every spawn then 400s forever.
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    resolveLaunchPaneSpy.mockClear();
+    try {
+      await openDialog();
+      expect(resolveLaunchPaneSpy).not.toHaveBeenCalled();
+
+      resolveLaunchPaneSpy.mockImplementation(async () => "%42");
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(resolveLaunchPaneSpy).toHaveBeenCalled();
+      expect(spawns[0]?.callerPane).toBe("%42");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("refuses to open over a session with no working directory", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderApp(120, 24, { groupBy: "none" });
+      sseCallbacks!.onInit([session({ cwd: "", paneCwd: null })], null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("New session");
+      expect(squish(frame)).toContain(squish("no working directory"));
+    } finally {
+      restore();
+    }
+  });
+
+  it("leaves Shift+N unclaimed", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderApp(120, 24, { groupBy: "none" });
+      sseCallbacks!.onInit([session()], null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n", { shift: true });
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("New session");
+    } finally {
+      restore();
+    }
+  });
+
+  it("refetches the agent list on every open", async () => {
+    // A long-lived sidebar must notice an agent installed since it started.
+    let calls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: null });
+      }
+      if (href.endsWith("/agents")) {
+        calls += 1;
+        return Response.json({
+          agents: calls === 1 ? [AGENTS[0]] : AGENTS,
+        });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+    try {
+      await openDialog();
+      expect(calls).toBe(1);
+      expect(setup.captureCharFrame()).not.toContain("Codex");
+
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+
+      expect(calls).toBe(2);
+      expect(setup.captureCharFrame()).toContain("Codex");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("offers New session here on a session row's context menu", async () => {
     const { restore } = withDaemon();
     try {

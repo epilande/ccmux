@@ -122,6 +122,11 @@ function sessionCwd(session: EnrichedSession): string {
 export const STALE_DAEMON_HINT =
   "Daemon is out of date - run `ccmux daemon restart`";
 
+/** Groupings whose header stands for one directory, so a new session opened
+ *  over it can inherit that directory. `session` and `window` group by tmux
+ *  location, which says nothing about where their members live. */
+const GROUPINGS_BY_DIRECTORY = new Set<GroupBy>(["project", "cwd"]);
+
 /** `POST /spawn`'s `split` for each placement: a new window is no split. */
 const SPAWN_SPLIT: Record<NewSessionPlacement, "h" | "v" | false> = {
   window: false,
@@ -681,16 +686,25 @@ export function App(props: AppProps) {
     SpawnableAgent[] | null
   >(null);
   const [agentsError, setAgentsError] = createSignal<string | null>(null);
-  let agentsRequested = false;
-  /**
-   * The pane this TUI was launched over, resolved once at mount. Deliberately
-   * not re-derived at spawn time: by then "the current pane" as tmux sees it
-   * can be the picker's own popup or the sidebar rail.
-   */
-  let launchPane: string | null = null;
+  /** In-flight `/agents` fetch, so opening the dialog twice in quick
+   *  succession doesn't issue two. Cleared when it settles, so each open
+   *  refreshes — a days-old sidebar would otherwise never notice an agent
+   *  installed since it started. */
+  let agentsInFlight: Promise<void> | null = null;
   /** Drops a second Enter while a spawn is in flight, which would otherwise
    *  open two panes for one intent. */
   let spawnInFlight = false;
+
+  /**
+   * The pane to place the new session against. The sidebar must never target
+   * its own rail (it persists, and splitting it halves the strip); an inline
+   * picker must target exactly its own pane, because it vacates it on spawn
+   * and anything else halves a bystander's pane instead.
+   */
+  const resolveSpawnPane = (): Promise<string | null> =>
+    resolveLaunchPane({ excludeSelf: props.sidebar === true }).catch(
+      () => null,
+    );
 
   /**
    * Where the picker itself was launched from. `bin/ccmux` cds into the
@@ -701,12 +715,23 @@ export function App(props: AppProps) {
    */
   const pickerCwd = (): string => process.env.CCMUX_CALLER_PWD ?? process.cwd();
 
-  /** Fetch the agent list on first need. Kept off the launch path: the picker
-   *  is startup-sensitive and most launches never open the dialog. */
+  /**
+   * Refresh the agent list. Called on every dialog open, and kept off the
+   * launch path: the picker is startup-sensitive and most launches never
+   * open the dialog. Re-fetching per open is what lets a long-lived sidebar
+   * pick up an agent installed since it started.
+   */
   function ensureSpawnableAgents(): void {
-    if (agentsRequested) return;
-    agentsRequested = true;
-    fetch(`${getDaemonUrl()}/agents`)
+    if (agentsInFlight) return;
+    // Back to "loading" rather than leaving the previous error on screen: a
+    // retry that still shows the old red line reads as not having retried.
+    if (agentsError() !== null) {
+      batch(() => {
+        setAgentsError(null);
+        setSpawnableAgents(null);
+      });
+    }
+    agentsInFlight = fetch(`${getDaemonUrl()}/agents`)
       .then(async (response) => {
         const body = (await response.json().catch(() => null)) as {
           agents?: SpawnableAgent[];
@@ -730,13 +755,15 @@ export function App(props: AppProps) {
         });
       })
       .catch((err: unknown) => {
-        // Allow a retry on the next open: a daemon restarted mid-session
-        // shouldn't leave the dialog permanently empty.
-        agentsRequested = false;
+        // A daemon restarted mid-session must not leave the dialog
+        // permanently empty, and the next open retries.
         batch(() => {
           setAgentsError(errText(err));
           setSpawnableAgents([]);
         });
+      })
+      .finally(() => {
+        agentsInFlight = null;
       });
   }
 
@@ -746,6 +773,11 @@ export function App(props: AppProps) {
    * cwd is derived, never asked: a session row means that session's
    * directory, a group header means the directory the group stands for, and
    * no selection at all falls back to where the picker was launched.
+   *
+   * A header only stands for a directory under a directory-shaped grouping.
+   * Grouped by tmux session or window, its members can span unrelated
+   * repositories, so the first member's cwd would be an arbitrary pick —
+   * the picker's own directory is at least a defensible default.
    */
   function newSessionContext(item: FlatItem | null): {
     cwd: string;
@@ -755,7 +787,10 @@ export function App(props: AppProps) {
       const session = item.filteredSession.session;
       return { cwd: sessionCwd(session), agent: session.agentType };
     }
-    if (item?.type === "header") {
+    if (
+      item?.type === "header" &&
+      GROUPINGS_BY_DIRECTORY.has(store.state.groupBy)
+    ) {
       const first = item.members[0]?.session;
       if (first) return { cwd: sessionCwd(first) };
     }
@@ -763,6 +798,13 @@ export function App(props: AppProps) {
   }
 
   function openNewSession(context: { cwd: string; agent?: string }): void {
+    // Mirrors `reviewSession`: refuse at the point of intent rather than
+    // opening a dialog with a blank Directory row whose Enter round-trips
+    // to a 400 from the daemon.
+    if (!context.cwd) {
+      store.actions.showToast("Can't start here: no working directory");
+      return;
+    }
     ensureSpawnableAgents();
     store.actions.openNewSessionDialog({
       cwd: context.cwd,
@@ -878,20 +920,30 @@ export function App(props: AppProps) {
     // is to put you in the new pane, so it jumps and gets out of the way.
     const detach = props.sidebar === true;
     spawnInFlight = true;
+    let spawned: { paneId?: string } | null = null;
     try {
+      const callerPane = await resolveSpawnPane();
+      // A sidebar alone in its window has nothing to split but itself, and
+      // the daemon's placement-less `split-window` would halve the rail.
+      // Degrade to a new window and say so, rather than mangling the board.
+      let split = SPAWN_SPLIT[draft.placement];
+      if (split !== false && callerPane === null && props.sidebar) {
+        split = false;
+        store.actions.showToast("No pane to split here; opened a window");
+      }
       const response = await fetch(`${getDaemonUrl()}/spawn`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           agent: agent.name,
           cwd: draft.cwd,
-          split: SPAWN_SPLIT[draft.placement],
+          split,
           // `callerPane`, not `target`: the daemon reads an explicit target
           // as "insert a window right here", which renumbers every later
           // window in the session and breaks `select-window -t N` muscle
           // memory. The picker only means "my session/pane" — which for a
           // split is still exactly this pane.
-          callerPane: launchPane ?? undefined,
+          callerPane: callerPane ?? undefined,
           prompt: prompt || undefined,
           detach,
         }),
@@ -900,32 +952,37 @@ export function App(props: AppProps) {
         paneId?: string;
         error?: string;
       } | null;
-      if (!response.ok) {
+      if (response.ok) {
+        spawned = body ?? {};
+      } else {
         // Leave the dialog open: every 400 here (agent can't take a prompt,
         // cwd is gone) is something the user can fix in place.
         store.actions.showToast(
           `Spawn failed: ${body?.error ?? response.statusText}`,
           4000,
         );
-        return;
       }
-      // Awaited, not fired and forgotten: the one-shot picker exits a few
-      // lines below and would otherwise cut the write off mid-flight.
-      await store.actions.setLastSpawnAgent(agent.name);
-      store.actions.closeNewSessionDialog();
-      if (detach) {
-        store.actions.showToast(`Spawned ${agent.displayName}`);
-        return;
-      }
-      // The daemon already selected the new pane's window; tell the other
-      // boards so their active-row highlight doesn't lag a scan behind.
-      if (body?.paneId) notifyActivePane(body.paneId);
-      if (!props.persistent) process.exit(0);
     } catch (err: unknown) {
       store.actions.showToast(`Spawn failed: ${errText(err)}`, 4000);
     } finally {
       spawnInFlight = false;
     }
+    if (!spawned) return;
+
+    // The pane EXISTS from here on, so nothing below may report a spawn
+    // failure. Remembering the agent is best-effort for exactly that reason:
+    // an unwritable ~/.config would otherwise surface as "Spawn failed", and
+    // the user — reasonably — would press Enter again and get a second pane.
+    await store.actions.setLastSpawnAgent(agent.name).catch(() => {});
+    store.actions.closeNewSessionDialog();
+    if (detach) {
+      store.actions.showToast(`Spawned ${agent.displayName}`);
+      return;
+    }
+    // The daemon already selected the new pane's window; tell the other
+    // boards so their active-row highlight doesn't lag a scan behind.
+    if (spawned.paneId) notifyActivePane(spawned.paneId);
+    if (!props.persistent) process.exit(0);
   }
 
   function handleNewSessionKey(event: KeyEvent): void {
@@ -1113,13 +1170,6 @@ export function App(props: AppProps) {
 
     // Learn the daemon's tmux server up front (also refreshed on SSE reconnect).
     refreshServerInfo();
-
-    // Resolve the pane we were launched over, for spawn placement. Fire and
-    // forget: nothing renders it, and a spawn before it lands simply places
-    // where tmux would have anyway.
-    void resolveLaunchPane().then((pane) => {
-      launchPane = pane;
-    });
 
     // Hydrate sidebar selection from daemon so new instances sync with existing ones.
     // Skip if the daemon has nothing to share so we don't clobber the active-pane default.
@@ -1507,9 +1557,12 @@ export function App(props: AppProps) {
       case "n":
         if (event.ctrl) {
           store.actions.moveSelection(1);
-        } else {
+        } else if (!event.shift) {
           openNewSession(newSessionContext(store.selectedFlatItem()));
         }
+        // Shift+N falls through deliberately: every other capital in this
+        // switch is its own action, so silently treating `N` as `n` would
+        // claim a key some later feature wants.
         event.preventDefault();
         break;
 
