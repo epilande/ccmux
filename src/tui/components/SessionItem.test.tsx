@@ -133,6 +133,20 @@ describe("SessionItem", () => {
     expect(frame).toContain("ccmux/parking");
   });
 
+  it("labels a worktree from `project` when the daemon sent no repo root", async () => {
+    // Older daemon: no `mainRepoRoot` on the wire, but `project` already
+    // resolves to the main checkout's name for a worktree.
+    const frame = await renderItem({
+      session: mockEnrichedSession({
+        cwd: "/Users/test/Code/ccmux/.claude/worktrees/parking",
+        mainRepoRoot: null,
+        project: "ccmux",
+        isWorktree: true,
+      }),
+    });
+    expect(frame).toContain("ccmux/parking");
+  });
+
   it("falls back to the plain path for a non-worktree row", async () => {
     const frame = await renderItem({
       session: mockEnrichedSession({

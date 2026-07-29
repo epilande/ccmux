@@ -1037,7 +1037,31 @@ describe("fitProjectCell", () => {
     ).toBeLessThanOrEqual(20);
   });
 
-  it("gives up the repo prefix only once the worktree name is at its floor", () => {
+  it("takes the worktree name below the normal dirname floor to keep the repo", () => {
+    // A plain path cell floors the dirname at 5 and would rather drop the
+    // prefix; with repo identity in the prefix that trade is backwards.
+    const out = fitProjectCell(
+      {
+        prefix: "ccmux/",
+        dirname: "parking",
+        branch: "feat/sidebar",
+        isWorktree: true,
+        repoPrefix: true,
+      },
+      19,
+      8,
+    );
+    expect(out.prefix).toBe("ccmux/");
+    expect(out.dirname.length).toBeLessThan(5);
+    expect(out.dirname.endsWith("…")).toBe(true);
+    expect(
+      out.prefix.length + out.dirname.length + out.branchLabel.length,
+    ).toBeLessThanOrEqual(19);
+  });
+
+  it("drops a repo prefix that no longer names the repo, giving the space back", () => {
+    // Squeezed to `s…`, the prefix names nothing; the worktree name is the
+    // only identity left, so it gets the chars and its normal floor back.
     const out = fitProjectCell(
       {
         prefix: "some-long-repo/",
@@ -1046,13 +1070,22 @@ describe("fitProjectCell", () => {
         isWorktree: true,
         repoPrefix: true,
       },
-      10,
+      6,
       24,
     );
-    expect(out.dirname.length).toBeGreaterThanOrEqual(5);
-    expect(out.dirname.endsWith("…")).toBe(true);
-    expect(out.prefix.length).toBeLessThan("some-long-repo/".length);
-    expect(out.prefix.length + out.dirname.length).toBeLessThanOrEqual(10);
+    expect(out.prefix).toBe("");
+    expect(out.dirname).toBe(
+      fitProjectCell(
+        {
+          prefix: "",
+          dirname: "worktree-detection",
+          branch: null,
+          isWorktree: true,
+        },
+        6,
+        24,
+      ).dirname,
+    );
   });
 
   it("leaves a branch-less cell without a stray colon", () => {
