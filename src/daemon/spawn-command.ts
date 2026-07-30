@@ -96,14 +96,30 @@ export function normalizeBoolean(
 const FORBIDDEN_PROMPT_CONTROL_CHARS = /[\x00-\x08\x0b\x0c\x0e-\x1f]/;
 
 /**
- * Upper bound on a spawn `prompt`'s byte size, mirroring `/invoke`'s
- * `MAX_INVOKE_PROMPT_BYTES` in `server.ts`. Below this, `Bun.spawn` throws
- * `E2BIG` on macOS at roughly 1 MB of combined argv, and on Linux a single
- * argument over 128 KiB fails outright; either throw lands in the spawn
- * handler's outer catch AFTER the pane already exists. Capping here turns
- * that into a clean 400 before any pane or worktree is created.
+ * Budget for the BUILT spawn command, which reaches tmux as one argv element
+ * (`send-keys -t <pane> <command> Enter`). Linux rejects an `execve` whose
+ * single argument exceeds `MAX_ARG_STRLEN` (128 KiB on 4 KiB pages) however
+ * small the rest of the argv is, so that per-argument limit, not the ~1 MB of
+ * total argv macOS enforces, is what decides whether `Bun.spawn` throws. Set
+ * conservatively below it by design, matching `MAX_ARGV_PROMPT_BYTES` in
+ * `invokers/constants.ts`, which caps the same OS limit for the same reason.
+ *
+ * Deliberately NOT the 256 KiB `/invoke` allows: an invoked prompt is written
+ * to stdin or chunked into a pane rather than travelling as one argument, so
+ * it has no per-argument ceiling to respect. The two numbers diverge because
+ * the transports do.
  */
-export const MAX_SPAWN_PROMPT_BYTES = 256 * 1024;
+export const MAX_SPAWN_COMMAND_BYTES = 120 * 1024;
+
+/**
+ * Upper bound on a spawn `prompt`'s byte size: the command budget less
+ * headroom for the template that wraps it. This is the friendlier of the two
+ * checks (it names the field the caller actually sent) but it cannot be the
+ * guarantee on its own, because the command is longer than the prompt: the
+ * template adds bytes, and `escapeSingleQuoted` turns every `'` into four.
+ * {@link spawnCommandTooLarge} is what makes the promise true.
+ */
+export const MAX_SPAWN_PROMPT_BYTES = MAX_SPAWN_COMMAND_BYTES - 2 * 1024;
 
 /**
  * Validate the wire `prompt` field. Absent stays absent; anything present
@@ -139,6 +155,24 @@ export function normalizePrompt(
     };
   }
   return { ok: true, value };
+}
+
+/**
+ * Why the built command cannot be handed to tmux, or undefined when it fits.
+ *
+ * Asked of the string a builder produced, since that is the argv element the
+ * OS measures. Everything the builders do is pure string work, so the caller
+ * can ask before it creates a pane or a worktree and turn what used to be a
+ * throw-then-500 into a 400 with nothing behind it.
+ */
+export function spawnCommandTooLarge(command: string): string | undefined {
+  const byteLength = Buffer.byteLength(command, "utf8");
+  if (byteLength <= MAX_SPAWN_COMMAND_BYTES) return undefined;
+  return (
+    `The command this spawn would run is ${byteLength} bytes, over the ` +
+    `${MAX_SPAWN_COMMAND_BYTES}-byte limit for a single command argument. ` +
+    `Shorten the prompt (quoting it grows it: every single quote becomes four bytes).`
+  );
 }
 
 /**

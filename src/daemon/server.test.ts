@@ -3770,6 +3770,54 @@ describe("POST /spawn", () => {
     }
   });
 
+  it("rejects a prompt Linux could not pass as one argument", async () => {
+    // 200 KiB passed the old 256 KiB cap and then threw at spawn time on
+    // Linux, where a SINGLE argument over 128 KiB (MAX_ARG_STRLEN) is rejected
+    // no matter how small the rest of the argv is. That throw surfaced as a
+    // 500 after the pane existed, which is exactly what the cap exists to
+    // prevent, so the cap has to sit below the per-argument limit.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({
+          agent: "prompty",
+          cwd,
+          prompt: "a".repeat(200 * 1024),
+        }),
+      );
+      expect(res.status).toBe(400);
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects a prompt whose ESCAPED form outgrows the argument limit", async () => {
+    // A raw-prompt cap cannot make the promise on its own: every single quote
+    // becomes four bytes ('\''), so a prompt well inside the cap can build a
+    // command that no longer fits. Measured on the built string instead, and
+    // still before any pane exists.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const prompt = "'".repeat(64 * 1024);
+      expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(
+        MAX_SPAWN_PROMPT_BYTES,
+      );
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, prompt }),
+      );
+
+      expect(res.status).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error).toContain("single command argument");
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
   it("accepts a prompt exactly at the byte cap", async () => {
     const { internals } = serverForAgents([promptAgent]);
     const { argv, restore } = withTmuxRecorder();

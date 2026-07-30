@@ -9,6 +9,7 @@ import {
   buildAgentSpawnCommand,
   buildTmuxSpawnArgv,
   escapeSingleQuoted,
+  MAX_SPAWN_COMMAND_BYTES,
   MAX_SPAWN_PROMPT_BYTES,
   normalizeBoolean,
   normalizePrompt,
@@ -16,6 +17,7 @@ import {
   normalizeTarget,
   normalizeWorktreeRequest,
   quotedTemplateProblem,
+  spawnCommandTooLarge,
   substituteQuotedTemplate,
 } from "./spawn-command";
 
@@ -126,6 +128,52 @@ describe("normalizePrompt", () => {
     expect(prompt.length).toBeLessThan(MAX_SPAWN_PROMPT_BYTES);
     const result = normalizePrompt(prompt);
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("spawnCommandTooLarge", () => {
+  // The prompt cap alone cannot decide this: what the OS measures is the
+  // built command, and it is always longer than the prompt inside it.
+
+  it("accepts a command exactly at the argument budget", () => {
+    expect(spawnCommandTooLarge("a".repeat(MAX_SPAWN_COMMAND_BYTES))).toBe(
+      undefined,
+    );
+  });
+
+  it("refuses one byte over, naming the size and the budget", () => {
+    const problem = spawnCommandTooLarge("a".repeat(MAX_SPAWN_COMMAND_BYTES + 1));
+    expect(problem).toContain(String(MAX_SPAWN_COMMAND_BYTES + 1));
+    expect(problem).toContain(String(MAX_SPAWN_COMMAND_BYTES));
+  });
+
+  it("catches an escaped prompt that grew past the budget", () => {
+    // A quote-only prompt inside the raw cap quadruples when escaped, so the
+    // command it builds is over budget while the prompt never was.
+    const prompt = "'".repeat(64 * 1024);
+    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(
+      MAX_SPAWN_PROMPT_BYTES,
+    );
+    const built = buildAgentSpawnCommand({
+      agent: { ...claudeAgent, promptCommand: "{bin} '{prompt}'" },
+      binary: "claude",
+      prompt,
+    });
+    expect(built.ok).toBe(true);
+    expect(built.ok && spawnCommandTooLarge(built.value)).toContain(
+      "single command argument",
+    );
+  });
+
+  it("stays under budget for a prompt at the raw cap", () => {
+    // The headroom between the two constants is what keeps an ordinary
+    // at-the-cap prompt from being refused by the second check instead.
+    const built = buildAgentSpawnCommand({
+      agent: { ...claudeAgent, promptCommand: "{bin} '{prompt}'" },
+      binary: "claude",
+      prompt: "a".repeat(MAX_SPAWN_PROMPT_BYTES),
+    });
+    expect(built.ok && spawnCommandTooLarge(built.value)).toBe(undefined);
   });
 });
 

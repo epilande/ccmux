@@ -25,6 +25,7 @@ import {
   normalizeSplit,
   normalizeTarget,
   normalizeWorktreeRequest,
+  spawnCommandTooLarge,
   substitutePlaceholders,
   NATIVE_SESSION_ID_PATTERN,
   type BuildResult,
@@ -2527,6 +2528,20 @@ export class DaemonServer {
       );
     }
     const command = commandResult.value;
+
+    // Measured on the BUILT command, because that is the argv element tmux
+    // gets: the raw-prompt cap cannot promise it fits (the template adds bytes
+    // and escaping a quote-heavy prompt multiplies them), and an oversized
+    // single argument makes `Bun.spawn` THROW on Linux rather than exit
+    // non-zero. Still ahead of the worktree and the pane, so this stays a 400
+    // with nothing created.
+    const oversizedCommand = spawnCommandTooLarge(command);
+    if (oversizedCommand) {
+      return Response.json(
+        { error: oversizedCommand },
+        { status: 400, headers },
+      );
+    }
 
     // Resolve placement. The pane is probed even on the split path, where
     // tmux would report its own failure, so that a stale pane is one
