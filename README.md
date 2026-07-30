@@ -742,7 +742,9 @@ template the way `sh` does and refuses it unless every `{prompt}` lands in a
 real single-quoted context with the template's quotes balanced, so an unquoted
 or double-quoted placeholder is rejected, and so is one whose single quotes sit
 inside double quotes (`sh -c "agent '{prompt}'"`), where `'` is just an
-ordinary character and the escaping would do nothing. The optional `{bin}`
+ordinary character and the escaping would do nothing. Backticks, `$(`,
+backslashes, and bash/zsh `$'...'` quoting are rejected too, and the error
+names whichever one it found. The optional `{bin}`
 resolves to the agent's launcher, so a wrapper binary or `executable` override
 survives.
 

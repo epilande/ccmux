@@ -509,6 +509,62 @@ describe("buildAgentSpawnCommand", () => {
     }
   });
 
+  it("refuses a template containing a backslash", () => {
+    // A backslash desynchronizes any quote scan from the shell. The scan
+    // used to consume the escaped character too, which swallowed the `{`
+    // of a following `{prompt}`: the occurrence was never seen, but
+    // `substitutePlaceholders` still replaced it, so the template below
+    // passed and emitted a SECOND, unquoted copy of the prompt. With
+    // prompt `x;touch <canary>;:` the emitted line was
+    // `printf '...' \x;touch <canary>;:`, which created the canary in
+    // /bin/sh, /bin/bash and /bin/zsh alike.
+    for (const template of [
+      "{bin} '{prompt}' \\{prompt}",
+      "{bin} \\'{prompt}\\'",
+      "{bin} '{prompt}' \\;",
+    ]) {
+      const result = buildAgentSpawnCommand({
+        agent: agentWith({ promptCommand: template }),
+        binary: "printf",
+        prompt: "hi",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("backslash");
+    }
+  });
+
+  it("refuses a template using $'...' ANSI-C quoting", () => {
+    // The scan read the `'` after `$` as an ordinary opening single quote,
+    // but bash and zsh INTERPRET backslashes inside `$'...'`, so
+    // `escapeSingleQuoted`'s `'\''` idiom is inert there. With prompt
+    // `a\';touch <canary>;#` the emitted `printf $'a\'\'';touch
+    // <canary>;#'` terminated the ANSI-C string early and ran the touch in
+    // /bin/sh, /bin/bash and /bin/zsh.
+    for (const template of ["{bin} $'{prompt}'", "{bin} -m $'x' '{prompt}'"]) {
+      const result = buildAgentSpawnCommand({
+        agent: agentWith({ promptCommand: template }),
+        binary: "printf",
+        prompt: "hi",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("ANSI-C");
+    }
+  });
+
+  it("still accepts every built-in promptCommand", () => {
+    // The two refusals above widened the guard; a built-in template caught
+    // by them would break prompt spawns for that agent outright.
+    for (const agent of BUILTIN_AGENTS) {
+      expect(
+        buildAgentSpawnCommand({
+          agent,
+          binary: agent.executable ?? agent.name,
+          prompt: "hi",
+        }).ok,
+      ).toBe(true);
+    }
+  });
+
   it("refuses a template with unbalanced quotes", () => {
     // Would leave the pane's shell waiting for a closing quote.
     for (const template of ["{bin} '{prompt}", "{bin} x '{prompt}''"]) {
@@ -760,9 +816,9 @@ describe("normalizeWorktreeRequest", () => {
   });
 
   it("carries name and base through", () => {
-    expect(normalizeWorktreeRequest({ name: "fix-thing", base: "main" })).toEqual(
-      { ok: true, value: { name: "fix-thing", base: "main" } },
-    );
+    expect(
+      normalizeWorktreeRequest({ name: "fix-thing", base: "main" }),
+    ).toEqual({ ok: true, value: { name: "fix-thing", base: "main" } });
   });
 
   it("drops empty members rather than passing blanks downstream", () => {

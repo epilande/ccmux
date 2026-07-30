@@ -150,6 +150,12 @@ type QuoteState = "none" | "single" | "double";
  * substituted values are: the prompt is single-quote escaped, and the
  * binary is separately required to be quote-neutral (see
  * `binaryIsQuoteNeutral`) precisely so that skipping it here is sound.
+ *
+ * There is no backslash handling because a backslash anywhere in the
+ * template is refused before this runs (see `UNSAFE_TEMPLATE_CONSTRUCTS`).
+ * Modelling it here is what caused the original bypass: consuming two
+ * characters at once swallowed the `{` of a following `{prompt}`, so the
+ * scan missed an occurrence that `substitutePlaceholders` still replaced.
  */
 function scanPromptPlaceholders(template: string): {
   balanced: boolean;
@@ -178,10 +184,6 @@ function scanPromptPlaceholders(template: string): {
       i += 1;
       continue;
     }
-    if (char === "\\") {
-      i += 2;
-      continue;
-    }
     if (state === "none") {
       if (char === "'") state = "single";
       else if (char === '"') state = "double";
@@ -195,16 +197,33 @@ function scanPromptPlaceholders(template: string): {
 }
 
 /**
- * Constructs that make a template impossible to reason about safely. A
- * double quote means the single quotes around `{prompt}` may be inert
+ * Constructs that make a template impossible to reason about safely, each
+ * paired with the wording used to refuse it so someone hand-writing a
+ * template is told WHICH construct was rejected.
+ *
+ * A double quote means the single quotes around `{prompt}` may be inert
  * (`{bin} "pre'{prompt}'post"` expands `$(...)` straight out of prompt
  * text); backticks and `$(` mean part of the command is the OUTPUT of
  * another command, so even a correctly quoted prompt is re-split by the
- * shell after substitution. None of them are needed to name a launcher,
- * and false assurance is worse than no check, so they are refused
- * outright rather than modelled.
+ * shell after substitution. A backslash desynchronizes any quote scan from
+ * what the shell does (`{bin} '{prompt}' \{prompt}` emitted a second,
+ * unquoted copy of the prompt), which is also why `binaryIsQuoteNeutral`
+ * already refuses one in the launcher. `$'` opens bash and zsh ANSI-C
+ * quoting, where backslashes ARE interpreted, so `escapeSingleQuoted`'s
+ * `'\''` idiom is inert and prompt text breaks straight out; refusing it
+ * costs nothing, since the escaper only ever produces plain single-quoted
+ * output.
+ *
+ * None of them are needed to name a launcher, and false assurance is worse
+ * than no check, so they are refused outright rather than modelled.
  */
-const UNSAFE_TEMPLATE_CONSTRUCT = /["`]|\$\(/;
+const UNSAFE_TEMPLATE_CONSTRUCTS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/"/, "a double quote"],
+  [/`/, "a backtick"],
+  [/\$\(/, "a '$(' command substitution"],
+  [/\\/, "a backslash"],
+  [/\$'/, 'a "$\'" ANSI-C quote'],
+];
 
 /**
  * A `promptCommand` template is only safe if every `{prompt}` sits in a
@@ -215,15 +234,22 @@ const UNSAFE_TEMPLATE_CONSTRUCT = /["`]|\$\(/;
  * ordinary character and the escaping is inert. Templates come from the
  * user's config file, which is trusted to name a command but must not be
  * able to turn prompt text into shell syntax, so anything this cannot
- * prove safe is refused. Module-private: the check presupposes the
- * escaping it guards.
+ * prove safe is refused.
+ *
+ * Returns the reason it could not be proven safe, or `undefined` when it
+ * is. Module-private: the check presupposes the escaping it guards.
  */
-function promptPlaceholderIsQuoted(template: string): boolean {
-  if (UNSAFE_TEMPLATE_CONSTRUCT.test(template)) return false;
+function promptTemplateProblem(template: string): string | undefined {
+  for (const [pattern, name] of UNSAFE_TEMPLATE_CONSTRUCTS) {
+    if (pattern.test(template)) return `it contains ${name}`;
+  }
   const { balanced, states } = scanPromptPlaceholders(template);
-  return (
-    balanced && states.length > 0 && states.every((state) => state === "single")
-  );
+  if (!balanced) return "its quotes are not balanced";
+  if (states.length === 0) return "it has no {prompt} placeholder";
+  if (states.some((state) => state !== "single")) {
+    return "a {prompt} placeholder is not inside single quotes";
+  }
+  return undefined;
 }
 
 /**
@@ -314,13 +340,15 @@ export function buildAgentSpawnCommand(
           `around the prompt.`,
       };
     }
-    if (!promptPlaceholderIsQuoted(template)) {
+    const problem = promptTemplateProblem(template);
+    if (problem !== undefined) {
       return {
         ok: false,
         error:
-          `Invalid 'agents.${agent.name}.promptCommand': every {prompt} placeholder must sit ` +
-          `inside balanced single quotes, and the template may not contain double quotes, ` +
-          `backticks, or '$(' (e.g. "{bin} '{prompt}'").`,
+          `Invalid 'agents.${agent.name}.promptCommand': ${problem}. Every {prompt} ` +
+          `placeholder must sit inside balanced single quotes, and the template may not ` +
+          `contain double quotes, backticks, backslashes, '$(' or "$'" ` +
+          `(e.g. "{bin} '{prompt}'").`,
       };
     }
     return {
