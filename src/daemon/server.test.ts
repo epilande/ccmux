@@ -62,11 +62,13 @@ import {
   mkdirSync,
   mkdtempSync,
   realpathSync,
+  symlinkSync,
   writeFileSync,
   rmSync,
 } from "fs";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import { join } from "path";
+import { resolvedHomeDir } from "../lib/config";
 import type { sendLiteralToPane, sendPromptToPane } from "./pane-io";
 import { MAX_SPAWN_PROMPT_BYTES } from "./spawn-command";
 
@@ -973,6 +975,49 @@ describe("DaemonServer", () => {
       } finally {
         git.restore();
       }
+    });
+
+    it("still guards when $HOME is a symlink, which git's answer never is (S4)", async () => {
+      // `mainRepoRoot` comes from `git rev-parse --path-format=absolute`, which
+      // resolves symlinks. An unresolved home therefore never compares equal to
+      // it, and on a machine with a relocated home the guard silently stopped
+      // firing: `resolvedHomeDir` is what keeps the two comparable.
+      const fixture = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-s4-")));
+      const realHome = join(fixture, "real-home");
+      const linkedHome = join(fixture, "linked-home");
+      mkdirSync(join(realHome, "notes"), { recursive: true });
+      symlinkSync(realHome, linkedHome);
+      const gitAnswer = `main\n${realHome}\n${realHome}/.git\n${realHome}/.git\n`;
+
+      const unresolved = createServer();
+      unresolved.internals.homeDir = linkedHome;
+      const resolved = createServer();
+      resolved.internals.homeDir = resolvedHomeDir(linkedHome);
+      const git = stubGitSpawn({ stdout: gitAnswer });
+      try {
+        const inHome = (server: typeof unresolved) => {
+          const session = fakeSession("s1");
+          session.cwd = join(realHome, "notes");
+          session.project = "notes";
+          return server.internals.enrichSession(session);
+        };
+
+        // The bug: git says $HOME, the guard compares against a link and lets
+        // the home directory's own name through.
+        expect((await inHome(unresolved)).project).toBe("real-home");
+        expect((await inHome(resolved)).project).toBe("notes");
+      } finally {
+        git.restore();
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    });
+
+    it("initializes the $HOME boundary from the resolved home directory (S4)", async () => {
+      // The field the guard reads must come through the resolver, not a raw
+      // `homedir()`; on a machine whose home is a link this is the difference
+      // between the guard working and doing nothing.
+      const { internals } = createServer();
+      expect(internals.homeDir).toBe(realpathSync(homedir()));
     });
 
     it("does not suppress git's project name when mainRepoRoot is merely under home, not $HOME itself (S4)", async () => {

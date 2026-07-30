@@ -1,5 +1,4 @@
-import { realpathSync, watch } from "fs";
-import { homedir } from "node:os";
+import { watch } from "fs";
 import {
   batch,
   on,
@@ -40,7 +39,7 @@ import {
   type OpenAgentsResult,
 } from "./utils/tmux";
 import { isSameServerCached, setDaemonSocketPath } from "./utils/server-guard";
-import { getDaemonUrl, STATE_FILE } from "../lib/config";
+import { getDaemonUrl, resolvedHomeDir, STATE_FILE } from "../lib/config";
 import { getUIState } from "../lib/state";
 import {
   PERF_ENABLED,
@@ -134,22 +133,6 @@ export const STALE_DAEMON_HINT =
  *  over it can inherit that directory. `session` and `window` group by tmux
  *  location, which says nothing about where their members live. */
 const GROUPINGS_BY_DIRECTORY = new Set<GroupBy>(["project", "cwd"]);
-
-/**
- * The home directory with symlinks resolved, for comparing against a
- * `mainRepoRoot`, which the daemon reads from
- * `git rev-parse --path-format=absolute` and is therefore already realpath'd.
- * Read per call rather than hoisted: it is one syscall on a keypress, and a
- * cached value could not follow a home directory that moved under the process.
- */
-function resolvedHomeDir(): string {
-  const home = homedir();
-  try {
-    return realpathSync(home);
-  } catch {
-    return home;
-  }
-}
 
 /** `POST /spawn`'s `split` for each placement: a new window is no split. */
 const SPAWN_SPLIT: Record<NewSessionPlacement, "h" | "v" | false> = {

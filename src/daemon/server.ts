@@ -1,12 +1,12 @@
 import { statSync } from "node:fs";
 import { basename, relative, isAbsolute, resolve } from "node:path";
-import { homedir } from "node:os";
 import {
   DAEMON_PORT,
   DAEMON_HOST,
   HEARTBEAT_INTERVAL_MS,
   MAX_SEND_TEXT_CHARS,
   isCcmuxPane,
+  resolvedHomeDir,
 } from "../lib/config";
 import { getPreferences } from "../lib/preferences";
 import {
@@ -369,8 +369,13 @@ export class DaemonServer {
    * matches `DeriveProjectOptions.homeDir` in project-derivation.ts, which
    * exists for the identical reason: Bun's `os.homedir()` doesn't track a
    * test-time `process.env.HOME` override.
+   *
+   * Realpath'd once here, because what it is compared against (`mainRepoRoot`,
+   * read from `git rev-parse --path-format=absolute`) already is: with a
+   * symlinked home the equality and the descendant test below both miss and
+   * the guard silently no-ops. @see resolvedHomeDir
    */
-  private homeDir: string = homedir();
+  private homeDir: string = resolvedHomeDir();
 
   constructor(
     sessionManager: SessionManager,
