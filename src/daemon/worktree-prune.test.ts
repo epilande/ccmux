@@ -782,6 +782,41 @@ describe("runPrune", () => {
     },
   );
 
+  /**
+   * The portable half of S10: `normalizePath` resolves symlinks as well as
+   * case, so a candidate path that reaches the compare through a symlinked
+   * parent pins the same normalize-before-compare property on filesystems
+   * where a case mismatch cannot arise.
+   */
+  it("honors a dirty opt-in when the candidate path arrives through a symlink", async () => {
+    const { wt, candidate } = await candidateFor("run-dirty-link", "feat/link");
+    writeFileSync(join(wt, "scratch.txt"), "work\n");
+    const linkParent = mkdtempSync(join(tmpdir(), "prune-link-"));
+    try {
+      const link = join(linkParent, "via-link");
+      symlinkSync(dirname(wt), link);
+      const viaLink = join(link, basename(wt));
+      expect(normalizePath(viaLink)).toBe(normalizePath(wt));
+      const dirty: PruneCandidate = {
+        ...candidate,
+        path: viaLink,
+        dirty: true,
+        untracked: 1,
+      };
+
+      const result = await runPrune([dirty], {
+        stateFiles: [],
+        log: () => {},
+        allowDirtyPaths: [normalizePath(wt)],
+      });
+
+      expect(result.outcomes[0].removed).toBe(true);
+      expect(existsSync(wt)).toBe(false);
+    } finally {
+      rmSync(linkParent, { recursive: true, force: true });
+    }
+  });
+
   it("changes nothing under dryRun", async () => {
     const { repo, wt, candidate } = await candidateFor("run-dry", "feat/dry");
 
