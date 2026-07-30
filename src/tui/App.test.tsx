@@ -134,10 +134,17 @@ const realUiState = await import("../lib/state");
  *  channel for the exit-vs-write test, which pushes its own marker here. */
 const uiStateWrites: unknown[] = [];
 
+/** When set, `setUIState` parks on it instead of resolving immediately, so a
+ *  test can hold open the window the real one has: the pane already exists,
+ *  the state write is mid-flight (read, write, rename), and the dialog is
+ *  still on screen. */
+let uiStateGate: Promise<void> | null = null;
+
 mock.module("../lib/state", () => ({
   ...realUiState,
   setUIState: async (updates: unknown) => {
     uiStateWrites.push(updates);
+    if (uiStateGate) await uiStateGate;
   },
 }));
 
@@ -179,6 +186,7 @@ beforeEach(() => {
   resolveLaunchPaneSpy.mockClear();
   resolveLaunchPaneSpy.mockImplementation(async () => "%7");
   uiStateWrites.length = 0;
+  uiStateGate = null;
   hunkAvailable = true;
   runHunkReviewSpy.mockClear();
   runHunkReviewSpy.mockImplementation(async () => ({ ok: true, notes: [] }));
@@ -2877,6 +2885,45 @@ describe("App new session dialog", () => {
       await settle();
       expect(spawns).toHaveLength(1);
     } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("does not spawn twice when Enter lands while the agent is being remembered", async () => {
+    // The spawn is no longer in flight here but the pane already exists, and
+    // remembering the agent is a real file read, write and rename. The dialog
+    // stays on screen for all of it, so an Enter delivered in that window
+    // used to pass both guards and open a second pane. Durable on the sidebar
+    // and the persistent picker, where nothing exits to end the race.
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    let release: () => void = () => {};
+    uiStateGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await openDialog({ sidebar: true });
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      // Parked mid-write: one pane exists, the dialog is still up.
+      expect(spawns).toHaveLength(1);
+      expect(uiStateWrites).toContainEqual({ lastSpawnAgent: "claude" });
+      expect(setup.captureCharFrame()).toContain("New session");
+
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(spawns).toHaveLength(1);
+
+      release();
+      await settle();
+      await setup.renderOnce();
+      expect(spawns).toHaveLength(1);
+      expect(setup.captureCharFrame()).not.toContain("New session");
+    } finally {
+      release();
       restoreExit();
       restore();
     }

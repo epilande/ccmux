@@ -1144,7 +1144,11 @@ export function App(props: AppProps) {
     } catch (err: unknown) {
       store.actions.showToast(`Spawn failed: ${errText(err)}`, 4000);
     } finally {
-      spawnInFlight = false;
+      // Released only on the paths that leave the dialog open. A landed spawn
+      // holds the guard until the draft is gone: the state write below is a
+      // real file read, write and rename, and an Enter delivered during it
+      // would otherwise pass BOTH guards and open a second pane.
+      if (!spawned) spawnInFlight = false;
     }
     if (!spawned) return;
 
@@ -1152,8 +1156,12 @@ export function App(props: AppProps) {
     // failure. Remembering the agent is best-effort for exactly that reason:
     // an unwritable ~/.config would otherwise surface as "Spawn failed", and
     // the user — reasonably — would press Enter again and get a second pane.
-    await store.actions.setLastSpawnAgent(agent.name).catch(() => {});
-    store.actions.closeNewSessionDialog();
+    try {
+      await store.actions.setLastSpawnAgent(agent.name).catch(() => {});
+    } finally {
+      store.actions.closeNewSessionDialog();
+      spawnInFlight = false;
+    }
     if (detach) {
       store.actions.showToast(`Spawned ${agent.displayName}`);
       return;
