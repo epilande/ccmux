@@ -90,8 +90,17 @@ describe("normalizeBoolean", () => {
     });
   });
 
+  it("treats an explicit null as absent too", () => {
+    // Matches `normalizePrompt`, `resume` and `fork`: a client that serializes
+    // omitted fields as null must not be refused for saying nothing.
+    expect(normalizeBoolean(null, "detach")).toEqual({
+      ok: true,
+      value: undefined,
+    });
+  });
+
   it("rejects a truthy non-boolean, naming the field", () => {
-    for (const bad of ["false", "true", 0, 1, null, {}, []]) {
+    for (const bad of ["false", "true", 0, 1, {}, []]) {
       const result = normalizeBoolean(bad, "detach");
       expect(result.ok).toBe(false);
       expect(result.ok || result.error).toContain("detach");

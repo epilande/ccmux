@@ -3909,6 +3909,25 @@ describe("POST /spawn", () => {
     }
   });
 
+  it("treats an explicitly null detach as absent", async () => {
+    // The rest of the spawn body (prompt, resume, fork) deliberately reads an
+    // explicit null as "field omitted", for clients that serialize it that
+    // way; detach 400ing on it was the odd one out.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, detach: null }),
+      );
+
+      expect(res.status).toBe(200);
+      expect(argv[0]).not.toContain("-d");
+      expect(argv.map((a) => a[1])).toContain("select-window");
+    } finally {
+      restore();
+    }
+  });
+
   it("rejects a truthy non-boolean detach instead of treating it as true", async () => {
     // Before the fix, `body` was an unchecked cast: the string "false" is
     // truthy, so it passed tmux `-d` and suppressed `select-window` — the

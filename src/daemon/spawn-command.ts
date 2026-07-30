@@ -70,14 +70,20 @@ export function normalizeTarget(
  * Validate a wire boolean field (`detach`). Every other spawn field goes
  * through a normalizer that rejects anything not in its accepted shape; this
  * one used to be an unchecked cast, so a truthy non-boolean like the string
- * `"false"` silently reached tmux as `true`. `undefined` is left for the
- * caller to default.
+ * `"false"` silently reached tmux as `true`.
+ *
+ * Absent stays absent for the caller to default, and an explicit `null` counts
+ * as absent, the way `prompt`, `resume` and `fork` all treat it: a client that
+ * serializes omitted fields as null is saying nothing, not sending a bad value.
+ * Strings and numbers are still refused, since each of those is a caller who
+ * meant something specific and would otherwise get the opposite.
  */
 export function normalizeBoolean(
   value: unknown,
   field: string,
 ): BuildResult<boolean | undefined> {
-  if (value === undefined) return { ok: true, value: undefined };
+  if (value === undefined || value === null)
+    return { ok: true, value: undefined };
   if (typeof value === "boolean") return { ok: true, value };
   return {
     ok: false,
