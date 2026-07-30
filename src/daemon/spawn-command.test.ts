@@ -12,6 +12,8 @@ import {
   normalizeSplit,
   normalizeTarget,
   normalizeWorktreeRequest,
+  quotedTemplateProblem,
+  substituteQuotedTemplate,
 } from "./spawn-command";
 
 const claudeAgent: AgentDef = getBuiltinAgent("claude");
@@ -798,6 +800,152 @@ describe("escapeSingleQuoted", () => {
 
   it("leaves shell metacharacters alone (the quotes contain them)", () => {
     expect(escapeSingleQuoted("$(id); `id` && x")).toBe("$(id); `id` && x");
+  });
+});
+
+describe("substituteQuotedTemplate", () => {
+  // `{path}` carries a filesystem path, which may legally contain quotes,
+  // spaces, newlines and every shell metacharacter. It gets the same
+  // single-quoted placement and escaping as `{prompt}`, through the same
+  // one-pass substitution.
+
+  it("escapes a path for the single-quoted word it lands in", () => {
+    // Byte-exact: this string is typed into a shell, so "looks fine" is
+    // not the contract.
+    expect(
+      substituteQuotedTemplate("{bin} --resume '{path}'", {
+        bin: "claude",
+        path: "/tmp/it's here/a b",
+      }),
+    ).toBe("claude --resume '/tmp/it'\\''s here/a b'");
+  });
+
+  it("leaves values that are inert by construction alone", () => {
+    // `bin` and `id` are validated rather than escaped, so escaping them
+    // would corrupt a legitimate `$HOME/bin/claude`.
+    expect(
+      substituteQuotedTemplate("{bin} --resume {id} --fork-session", {
+        bin: "$HOME/bin/claude",
+        id: "abc-123",
+      }),
+    ).toBe("$HOME/bin/claude --resume abc-123 --fork-session");
+  });
+
+  it("hands a real shell every hostile path as exactly one argument", () => {
+    // The shell is the oracle. `printf` stands in for the agent binary, and
+    // the canary proves nothing else ran, rather than just that stdout
+    // looked right.
+    const canary = join(mkdtempSync(join(tmpdir(), "spawn-path-")), "PWNED");
+    try {
+      for (const path of [
+        "/tmp/it's here",
+        '/tmp/say "hi"',
+        "/tmp/a b\tc",
+        "/tmp/$(touch " + canary + ")",
+        "/tmp/`touch " + canary + "`",
+        "/tmp/a;touch " + canary + ";:",
+        "/tmp/line\nbreak",
+        "/tmp/$HOME/${x}/$&/$`/$'",
+        "/tmp/'; touch " + canary + "; #",
+      ]) {
+        const command = substituteQuotedTemplate("printf '[%s]' '{path}'", {
+          bin: "printf",
+          path,
+        });
+        for (const shell of ["/bin/sh", "/bin/bash", "/bin/zsh"]) {
+          const run = Bun.spawnSync([shell, "-c", command]);
+          expect(run.exitCode).toBe(0);
+          expect(run.stdout.toString()).toBe(`[${path}]`);
+          expect(existsSync(canary)).toBe(false);
+        }
+      }
+    } finally {
+      rmSync(dirname(canary), { recursive: true, force: true });
+    }
+  });
+
+  it("is not a raw substitution, which the same payload would execute", () => {
+    // The red half of the test above: the naive `.replace` into the same
+    // single-quoted slot closes the quote and runs the payload, and this
+    // asserts it really does before asserting that ours does not.
+    const canary = join(
+      mkdtempSync(join(tmpdir(), "spawn-path-raw-")),
+      "PWNED",
+    );
+    const template = "printf '[%s]' '{path}'";
+    const path = `/tmp/x';touch ${canary};#`;
+    try {
+      const naive = template.replace("{path}", path);
+      Bun.spawnSync(["/bin/sh", "-c", naive], { stderr: "ignore" });
+      expect(existsSync(canary)).toBe(true);
+
+      rmSync(canary, { force: true });
+      const safe = substituteQuotedTemplate(template, {
+        bin: "printf",
+        path,
+      });
+      expect(safe).not.toBe(naive);
+      const run = Bun.spawnSync(["/bin/sh", "-c", safe]);
+      expect(run.stdout.toString()).toBe(`[${path}]`);
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      rmSync(dirname(canary), { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a path containing {prompt} from relocating the prompt", () => {
+    // The one-pass property, on the new placeholder: a path substituted
+    // first must not be able to carry a later placeholder to a slot the
+    // guard never checked.
+    expect(
+      substituteQuotedTemplate("{bin} '{path}' '{prompt}'", {
+        bin: "x",
+        path: "/tmp/{prompt}",
+        prompt: "P",
+      }),
+    ).toBe("x '/tmp/{prompt}' 'P'");
+  });
+});
+
+describe("quotedTemplateProblem", () => {
+  it("accepts a single-quoted {path}", () => {
+    expect(
+      quotedTemplateProblem("{bin} --resume '{path}' --fork-session"),
+    ).toBeUndefined();
+  });
+
+  it("refuses a {path} that is not in a genuine single-quoted context", () => {
+    // Identical treatment to `{prompt}`: the escaping only holds inside
+    // real single quotes, so anything else is refused rather than modelled.
+    for (const template of [
+      "{bin} {path}",
+      `{bin} "{path}"`,
+      `{bin} sh -c "{bin} '{path}'"`,
+      "{bin} $'{path}'",
+      "{bin} \\{path}",
+      "{bin} '{path}",
+      "{bin} $(echo '{path}')",
+      "{bin} `echo '{path}'`",
+    ]) {
+      expect(quotedTemplateProblem(template)).toBeDefined();
+    }
+  });
+
+  it("names the placeholder it could not prove safe", () => {
+    // A hand-written template with several placeholders is unactionable
+    // otherwise.
+    expect(quotedTemplateProblem("{bin} '{prompt}' {path}")).toContain(
+      "{path}",
+    );
+    expect(quotedTemplateProblem("{bin} {prompt} '{path}'")).toContain(
+      "{prompt}",
+    );
+  });
+
+  it("says nothing about which placeholders a template needs", () => {
+    // Whether `{prompt}` or `{path}` is mandatory is the caller's contract
+    // with its own config field, checked next to that field's error text.
+    expect(quotedTemplateProblem("{bin} --continue")).toBeUndefined();
   });
 });
 

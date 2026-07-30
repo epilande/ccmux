@@ -140,16 +140,58 @@ export function substitutePlaceholders(
   return template.replace(pattern, (_match, name: string) => values[name]!);
 }
 
+/**
+ * Placeholders whose value is free-form text made safe by
+ * `escapeSingleQuoted`, so each occurrence has to land in a genuine
+ * single-quoted context. `path` is here for the same reason `prompt` is: a
+ * filesystem path can hold quotes, spaces and shell metacharacters.
+ *
+ * Everything else a template can carry (`bin`, `id`) is inert by
+ * construction and validated separately.
+ */
+const QUOTED_PLACEHOLDERS = ["prompt", "path"] as const;
+
+/** A placeholder whose substituted value is single-quote escaped. */
+export type QuotedPlaceholder = (typeof QUOTED_PLACEHOLDERS)[number];
+
+const QUOTED_PLACEHOLDER_NAMES: ReadonlySet<string> = new Set(
+  QUOTED_PLACEHOLDERS,
+);
+const QUOTED_TOKENS = QUOTED_PLACEHOLDERS.map((name) => `{${name}}`);
+
+/**
+ * Escape the free-form values and substitute the whole template in ONE
+ * pass. `prompt` and `path` are escaped for a single-quoted word; every
+ * other value (`bin`, `id`) goes in verbatim, because it is inert by
+ * construction rather than by escaping.
+ *
+ * Callers must have cleared `quotedTemplateProblem` first: the escaping
+ * only holds inside the quoting that check proves is there.
+ */
+export function substituteQuotedTemplate(
+  template: string,
+  values: Record<string, string>,
+): string {
+  const substitutions: Record<string, string> = {};
+  for (const [name, value] of Object.entries(values)) {
+    substitutions[name] = QUOTED_PLACEHOLDER_NAMES.has(name)
+      ? escapeSingleQuoted(value)
+      : value;
+  }
+  return substitutePlaceholders(template, substitutions);
+}
+
 type QuoteState = "none" | "single" | "double";
 
 /**
  * Walk a template the way `sh` reads it, recording the quoting state at
- * each `{prompt}` and whether the template ends with every quote closed.
+ * each `{prompt}` / `{path}` and whether the template ends with every quote
+ * closed.
  *
- * Both placeholders are skipped as inert text, which is what their
- * substituted values are: the prompt is single-quote escaped, and the
- * binary is separately required to be quote-neutral (see
- * `binaryIsQuoteNeutral`) precisely so that skipping it here is sound.
+ * Every placeholder is skipped as inert text, which is what its substituted
+ * value is: `{prompt}` and `{path}` are single-quote escaped, and the binary
+ * is separately required to be quote-neutral (see `binaryIsQuoteNeutral`)
+ * precisely so that skipping it here is sound.
  *
  * There is no backslash handling because a backslash anywhere in the
  * template is refused before this runs (see `UNSAFE_TEMPLATE_CONSTRUCTS`).
@@ -157,19 +199,21 @@ type QuoteState = "none" | "single" | "double";
  * characters at once swallowed the `{` of a following `{prompt}`, so the
  * scan missed an occurrence that `substitutePlaceholders` still replaced.
  */
-function scanPromptPlaceholders(template: string): {
+function scanQuotedPlaceholders(template: string): {
   balanced: boolean;
-  states: QuoteState[];
+  placeholders: { token: string; state: QuoteState }[];
 } {
-  const PROMPT = "{prompt}";
   const BIN = "{bin}";
   let state: QuoteState = "none";
-  const states: QuoteState[] = [];
+  const placeholders: { token: string; state: QuoteState }[] = [];
 
   for (let i = 0; i < template.length; ) {
-    if (template.startsWith(PROMPT, i)) {
-      states.push(state);
-      i += PROMPT.length;
+    const token = QUOTED_TOKENS.find((candidate) =>
+      template.startsWith(candidate, i),
+    );
+    if (token !== undefined) {
+      placeholders.push({ token, state });
+      i += token.length;
       continue;
     }
     if (template.startsWith(BIN, i)) {
@@ -193,7 +237,7 @@ function scanPromptPlaceholders(template: string): {
     i += 1;
   }
 
-  return { balanced: state === "none", states };
+  return { balanced: state === "none", placeholders };
 }
 
 /**
@@ -226,28 +270,31 @@ const UNSAFE_TEMPLATE_CONSTRUCTS: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 
 /**
- * A `promptCommand` template is only safe if every `{prompt}` sits in a
- * genuine single-quoted context, because that is the quoting
- * `escapeSingleQuoted` produces. Checking only the adjacent characters is
- * not enough: in `sh -c "{bin} '{prompt}'"` the placeholder is flanked by
- * single quotes, but the enclosing word is double-quoted, where `'` is an
- * ordinary character and the escaping is inert. Templates come from the
- * user's config file, which is trusted to name a command but must not be
- * able to turn prompt text into shell syntax, so anything this cannot
- * prove safe is refused.
+ * A template is only safe if every `{prompt}` and `{path}` sits in a genuine
+ * single-quoted context, because that is the quoting `escapeSingleQuoted`
+ * produces. Checking only the adjacent characters is not enough: in
+ * `sh -c "{bin} '{prompt}'"` the placeholder is flanked by single quotes,
+ * but the enclosing word is double-quoted, where `'` is an ordinary
+ * character and the escaping is inert. Templates come from the user's config
+ * file, which is trusted to name a command but must not be able to turn
+ * prompt text or a path into shell syntax, so anything this cannot prove
+ * safe is refused.
  *
- * Returns the reason it could not be proven safe, or `undefined` when it
- * is. Module-private: the check presupposes the escaping it guards.
+ * Returns the reason it could not be proven safe, or `undefined` when it is.
+ * Presupposes the escaping it guards, so it belongs with
+ * `substituteQuotedTemplate` and callers must run the two as a pair. Says
+ * nothing about WHICH placeholders a template needs; that is the caller's
+ * contract with its own config field.
  */
-function promptTemplateProblem(template: string): string | undefined {
+export function quotedTemplateProblem(template: string): string | undefined {
   for (const [pattern, name] of UNSAFE_TEMPLATE_CONSTRUCTS) {
     if (pattern.test(template)) return `it contains ${name}`;
   }
-  const { balanced, states } = scanPromptPlaceholders(template);
+  const { balanced, placeholders } = scanQuotedPlaceholders(template);
   if (!balanced) return "its quotes are not balanced";
-  if (states.length === 0) return "it has no {prompt} placeholder";
-  if (states.some((state) => state !== "single")) {
-    return "a {prompt} placeholder is not inside single quotes";
+  const unquoted = placeholders.find((entry) => entry.state !== "single");
+  if (unquoted !== undefined) {
+    return `${unquoted.token} is not inside single quotes`;
   }
   return undefined;
 }
@@ -340,7 +387,17 @@ export function buildAgentSpawnCommand(
           `around the prompt.`,
       };
     }
-    const problem = promptTemplateProblem(template);
+    // Without `{prompt}` the prompt is silently dropped and the agent comes
+    // up with nothing to answer, which looks like the spawn half-worked.
+    if (!template.includes("{prompt}")) {
+      return {
+        ok: false,
+        error:
+          `Invalid 'agents.${agent.name}.promptCommand': must contain the {prompt} ` +
+          `placeholder, otherwise the prompt would be dropped (e.g. "{bin} '{prompt}'").`,
+      };
+    }
+    const problem = quotedTemplateProblem(template);
     if (problem !== undefined) {
       return {
         ok: false,
@@ -353,10 +410,7 @@ export function buildAgentSpawnCommand(
     }
     return {
       ok: true,
-      value: substitutePlaceholders(template, {
-        bin: binary,
-        prompt: escapeSingleQuoted(prompt),
-      }),
+      value: substituteQuotedTemplate(template, { bin: binary, prompt }),
     };
   }
 
