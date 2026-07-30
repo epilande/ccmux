@@ -68,6 +68,7 @@ import {
 import { tmpdir } from "os";
 import { join } from "path";
 import type { sendLiteralToPane, sendPromptToPane } from "./pane-io";
+import { MAX_SPAWN_PROMPT_BYTES } from "./spawn-command";
 
 /**
  * Access private methods/fields on DaemonServer for unit testing.
@@ -3363,16 +3364,22 @@ describe("POST /spawn", () => {
   // with Enter. Both are pinned end to end through the route.
 
   /**
+   * A stubbed subcommand either exits with a code and output, or throws
+   * synchronously the way `Bun.spawn` really does for an oversized argv
+   * (E2BIG on macOS, a single over-128KiB argument on Linux) rather than
+   * exiting non-zero.
+   */
+  type TmuxOutcome = { code: number; out: string } | { throws: true };
+
+  /**
    * Stub `Bun.spawn`, recording every argv. Outcomes are matched by tmux
    * subcommand so a test only has to describe the calls it cares about;
    * anything unlisted succeeds with empty output.
    */
-  function withTmuxRecorder(
-    outcomes: Record<string, { code: number; out: string }> = {},
-  ) {
+  function withTmuxRecorder(outcomes: Record<string, TmuxOutcome> = {}) {
     const original = Bun.spawn;
     const argv: string[][] = [];
-    const defaults: Record<string, { code: number; out: string }> = {
+    const defaults: Record<string, TmuxOutcome> = {
       // Pane probe: `#{window_id} #{session_id}` for a live pane.
       "display-message": { code: 0, out: "@9 $3\n" },
     };
@@ -3380,6 +3387,9 @@ describe("POST /spawn", () => {
       argv.push(spawned);
       const key = spawned[1] ?? "";
       const next = outcomes[key] ?? defaults[key] ?? { code: 0, out: "%99\n" };
+      if ("throws" in next) {
+        throw new Error("posix_spawn failed: E2BIG (Argument list too long)");
+      }
       return {
         exited: Promise.resolve(next.code),
         stdout: new Blob([next.out]).stream(),
@@ -3645,6 +3655,75 @@ describe("POST /spawn", () => {
     }
   });
 
+  it("rejects an over-cap prompt before any pane exists", async () => {
+    // `/spawn` has no config gate on prompt size, unlike `/invoke`'s
+    // `MAX_INVOKE_PROMPT_BYTES`. Below this cap `Bun.spawn` throws E2BIG
+    // rather than exiting non-zero, well after the pane exists; the cap
+    // turns that into a clean 400 with nothing created.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({
+          agent: "prompty",
+          cwd,
+          prompt: "a".repeat(MAX_SPAWN_PROMPT_BYTES + 1),
+        }),
+      );
+      expect(res.status).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error).toContain(String(MAX_SPAWN_PROMPT_BYTES));
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("accepts a prompt exactly at the byte cap", async () => {
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({
+          agent: "prompty",
+          cwd,
+          prompt: "a".repeat(MAX_SPAWN_PROMPT_BYTES),
+          detach: true,
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(argv.length).toBeGreaterThan(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("kills the pane when a post-creation tmux spawn throws instead of exiting non-zero", async () => {
+    // `Bun.spawn` throws synchronously for an oversized argv rather than
+    // exiting non-zero (confirmed: E2BIG at ~1MB on macOS, a single
+    // over-128KiB argument on Linux). Before this fix, that throw skipped
+    // straight to the outer catch, which had no pane id in scope and left
+    // the orphan behind.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder({
+      "send-keys": { throws: true },
+    });
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, detach: true }),
+      );
+      expect(res.status).toBeGreaterThanOrEqual(500);
+      expect(argv.map((a) => a[1])).toEqual([
+        "new-window",
+        "send-keys",
+        "kill-pane",
+      ]);
+      expect(argv[2]).toEqual(["tmux", "kill-pane", "-t", "%99"]);
+    } finally {
+      restore();
+    }
+  });
+
   it("detaching passes -d and skips select-window", async () => {
     // Both halves are needed. `-d` stops tmux making the new window
     // current (which it does by default), and skipping select-window
@@ -3674,6 +3753,26 @@ describe("POST /spawn", () => {
       );
       expect(argv[0]).not.toContain("-d");
       expect(argv.map((a) => a[1])).toContain("select-window");
+    } finally {
+      restore();
+    }
+  });
+
+  it("succeeds without killing the pane when select-window itself throws", async () => {
+    // The agent is already running by the time select-window runs
+    // (send-keys succeeded), so a focus-switch failure here must not be
+    // reported as a failed spawn or tear down a session the caller can
+    // already see.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder({
+      "select-window": { throws: true },
+    });
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, detach: false }),
+      );
+      expect(res.status).toBe(200);
+      expect(argv.map((a) => a[1])).not.toContain("kill-pane");
     } finally {
       restore();
     }

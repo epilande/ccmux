@@ -77,11 +77,21 @@ export function normalizeTarget(
 const FORBIDDEN_PROMPT_CONTROL_CHARS = /[\x00-\x08\x0b\x0c\x0e-\x1f]/;
 
 /**
+ * Upper bound on a spawn `prompt`'s byte size, mirroring `/invoke`'s
+ * `MAX_INVOKE_PROMPT_BYTES` in `server.ts`. Below this, `Bun.spawn` throws
+ * `E2BIG` on macOS at roughly 1 MB of combined argv, and on Linux a single
+ * argument over 128 KiB fails outright; either throw lands in the spawn
+ * handler's outer catch AFTER the pane already exists. Capping here turns
+ * that into a clean 400 before any pane or worktree is created.
+ */
+export const MAX_SPAWN_PROMPT_BYTES = 256 * 1024;
+
+/**
  * Validate the wire `prompt` field. Absent stays absent; anything present
- * must be a non-blank string free of control characters. Empty is
- * rejected rather than ignored: `--prompt ""` silently spawning a bare
- * agent (and slipping past the refusal an agent without `promptCommand`
- * would otherwise get) is worse than a clear error.
+ * must be a non-blank string free of control characters, within the byte
+ * cap. Empty is rejected rather than ignored: `--prompt ""` silently
+ * spawning a bare agent (and slipping past the refusal an agent without
+ * `promptCommand` would otherwise get) is worse than a clear error.
  */
 export function normalizePrompt(
   value: unknown,
@@ -98,6 +108,15 @@ export function normalizePrompt(
     return {
       ok: false,
       error: `Invalid 'prompt' field: must not contain control characters`,
+    };
+  }
+  const byteLength = Buffer.byteLength(value, "utf8");
+  if (byteLength > MAX_SPAWN_PROMPT_BYTES) {
+    return {
+      ok: false,
+      error:
+        `Invalid 'prompt' field: exceeds maximum size of ` +
+        `${MAX_SPAWN_PROMPT_BYTES} bytes (got ${byteLength})`,
     };
   }
   return { ok: true, value };

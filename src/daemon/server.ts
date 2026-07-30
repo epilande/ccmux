@@ -2469,6 +2469,28 @@ export class DaemonServer {
       detach,
     });
     const tmuxCmd = tmuxArgv[0];
+    // Hoisted so the outer catch (below) can kill a pane that was created
+    // before a later step throws, not just before one that exits non-zero.
+    // `Bun.spawn` throws rather than exiting non-zero for an oversized argv
+    // (E2BIG on macOS, a single over-128KiB argument on Linux), and that
+    // throw happens on the send-keys spawn, well after the pane exists.
+    let paneId: string | undefined;
+    // Past this point a throw can happen with a pane already created, so
+    // every failure has to take it back down. Leaving it would strand an
+    // empty shell the caller never asked for, and a caller retrying a
+    // failing spawn would pile them up. No-ops if the pane was never
+    // created (paneId still unset).
+    const killPane = async (): Promise<void> => {
+      if (!paneId) return;
+      try {
+        await Bun.spawn(["tmux", "kill-pane", "-t", paneId], {
+          stdout: "pipe",
+          stderr: "pipe",
+        }).exited;
+      } catch {
+        // Best effort: the original failure is what we report.
+      }
+    };
     try {
       const proc = Bun.spawn(["tmux", ...tmuxArgv], {
         stdout: "pipe",
@@ -2485,21 +2507,7 @@ export class DaemonServer {
         );
       }
 
-      const paneId = (await new Response(proc.stdout).text()).trim();
-
-      // Past this point the pane exists, so every failure has to take it
-      // back down. Leaving it would strand an empty shell the caller never
-      // asked for, and a caller retrying a failing spawn would pile them up.
-      const killPane = async (): Promise<void> => {
-        try {
-          await Bun.spawn(["tmux", "kill-pane", "-t", paneId], {
-            stdout: "pipe",
-            stderr: "pipe",
-          }).exited;
-        } catch {
-          // Best effort: the original failure is what we report.
-        }
-      };
+      paneId = (await new Response(proc.stdout).text()).trim();
 
       // Send the agent command into the new pane.
       //
@@ -2527,13 +2535,25 @@ export class DaemonServer {
         );
       }
 
-      // Switch to the new pane unless detached
+      // Switch to the new pane unless detached. The session is already
+      // running by this point (send-keys succeeded), so a failure here is
+      // only a lost focus switch, not a failed spawn: it must not kill the
+      // pane or turn the response into an error, or a working session the
+      // caller can already see in `tmux list-panes` would be reported as
+      // failed and torn down out from under them. Best effort, log and
+      // continue.
       if (!detach) {
-        const selectProc = Bun.spawn(["tmux", "select-window", "-t", paneId], {
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        await selectProc.exited;
+        try {
+          const selectProc = Bun.spawn(
+            ["tmux", "select-window", "-t", paneId],
+            { stdout: "pipe", stderr: "pipe" },
+          );
+          await selectProc.exited;
+        } catch (err: unknown) {
+          console.error(
+            `Failed to select window for pane ${paneId}: ${errorMessage(err)}`,
+          );
+        }
       }
 
       // `worktree` is echoed back because the caller asked for a destination
@@ -2545,6 +2565,10 @@ export class DaemonServer {
         { headers },
       );
     } catch (err: unknown) {
+      // Covers a throwing spawn anywhere in the block above (e.g. an
+      // oversized send-keys argv), not just a non-zero exit: `paneId` may
+      // already be set, and `killPane` no-ops otherwise.
+      await killPane();
       return Response.json(
         {
           error: withWorktreeNote(

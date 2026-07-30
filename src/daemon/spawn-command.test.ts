@@ -9,6 +9,8 @@ import {
   buildAgentSpawnCommand,
   buildTmuxSpawnArgv,
   escapeSingleQuoted,
+  MAX_SPAWN_PROMPT_BYTES,
+  normalizePrompt,
   normalizeSplit,
   normalizeTarget,
   normalizeWorktreeRequest,
@@ -63,6 +65,38 @@ describe("normalizeTarget", () => {
     for (const bad of ["@3", "mysession:1.0", "0", "%", "%1a", 12]) {
       expect(normalizeTarget(bad).ok).toBe(false);
     }
+  });
+});
+
+describe("normalizePrompt", () => {
+  // Below this cap, `Bun.spawn` throws rather than exiting non-zero for an
+  // oversized argv (E2BIG on macOS around 1MB, a single over-128KiB
+  // argument on Linux), and that throw lands well after the pane already
+  // exists. The cap turns it into a clean 400 before anything is created.
+
+  it("accepts a prompt exactly at the byte cap", () => {
+    const prompt = "a".repeat(MAX_SPAWN_PROMPT_BYTES);
+    expect(normalizePrompt(prompt)).toEqual({ ok: true, value: prompt });
+  });
+
+  it("rejects a prompt one byte over the cap, naming the cap and the size", () => {
+    const prompt = "a".repeat(MAX_SPAWN_PROMPT_BYTES + 1);
+    const result = normalizePrompt(prompt);
+    expect(result.ok).toBe(false);
+    expect(result.ok || result.error).toContain(String(MAX_SPAWN_PROMPT_BYTES));
+    expect(result.ok || result.error).toContain(
+      String(MAX_SPAWN_PROMPT_BYTES + 1),
+    );
+  });
+
+  it("measures bytes, not characters, for multi-byte prompts", () => {
+    // Each of these is a 3-byte UTF-8 codepoint, so this string is over the
+    // cap in bytes while under it in character count.
+    const charCount = Math.floor(MAX_SPAWN_PROMPT_BYTES / 3) + 1;
+    const prompt = "☃".repeat(charCount);
+    expect(prompt.length).toBeLessThan(MAX_SPAWN_PROMPT_BYTES);
+    const result = normalizePrompt(prompt);
+    expect(result.ok).toBe(false);
   });
 });
 
