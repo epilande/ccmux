@@ -282,10 +282,12 @@ export interface EnrichedSession extends Session {
   isWorktree: boolean;
   /**
    * Root of the main checkout the session's repo hangs off — the same path
-   * for a worktree and for the main checkout itself. `null` when the cwd is
-   * not in a repo (or is a bare repo, which has no checkout). Gives a
-   * worktree row its repo identity, and is the key worktree management keys
-   * off.
+   * for a worktree and for the main checkout itself, and also correct for a
+   * submodule checkout and a `--separate-git-dir` repo (both resolve via
+   * `--show-toplevel`). `null` when the cwd is not in a repo, or is a
+   * worktree of a bare repo, which has no main checkout to point at. Gives
+   * a worktree row its repo identity, and is the key worktree management
+   * keys off.
    */
   mainRepoRoot: string | null;
   /**

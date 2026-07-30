@@ -938,8 +938,10 @@ describe("DaemonServer", () => {
         const enriched = await internals.enrichSession(fakeSession("s1"));
 
         expect(enriched.isWorktree).toBe(false);
-        // The common dir is the module dir, not a checkout's `.git`.
-        expect(enriched.mainRepoRoot).toBeNull();
+        // The common dir is the module dir, not a checkout's `.git`, but
+        // this is not a worktree, so mainRepoRoot falls back to
+        // --show-toplevel (S5), which is the submodule's own checkout root.
+        expect(enriched.mainRepoRoot).toBe("/super/sub");
       } finally {
         git.restore();
       }

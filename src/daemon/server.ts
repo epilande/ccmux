@@ -593,7 +593,7 @@ export class DaemonServer {
     return {
       branch: branch || null,
       worktreeRoot: topLevel || null,
-      ...worktreeFacts(cwd, gitDir, commonDir),
+      ...worktreeFacts(cwd, gitDir, commonDir, topLevel),
     };
   }
 
