@@ -1,5 +1,6 @@
 import { statSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, relative, isAbsolute } from "node:path";
+import { homedir } from "node:os";
 import {
   DAEMON_PORT,
   DAEMON_HOST,
@@ -358,6 +359,15 @@ export class DaemonServer {
   private getScanHealth: () => DaemonHealth;
   /** When each repo last had `git fetch --prune` run for a prune scan. */
   private worktreeFetchedAt = new Map<string, number>();
+  /**
+   * Home directory, for the `project` $HOME-boundary guard (S4). A plain
+   * field rather than a constructor param, so a test can stub it directly
+   * the same way it reaches other private state through `ServerInternals` -
+   * matches `DeriveProjectOptions.homeDir` in project-derivation.ts, which
+   * exists for the identical reason: Bun's `os.homedir()` doesn't track a
+   * test-time `process.env.HOME` override.
+   */
+  private homeDir: string = homedir();
 
   constructor(
     sessionManager: SessionManager,
@@ -597,6 +607,42 @@ export class DaemonServer {
     };
   }
 
+  /**
+   * The project name git's answer would give, or null to fall through to
+   * `deriveProject`'s $HOME-bounded walk (S4).
+   *
+   * `git rev-parse` has no notion of `$HOME` as a ceiling, so a literal
+   * `~/.git` (someone ran `git init` directly in their home directory for
+   * dotfiles) resolves `mainRepoRoot` to `$HOME` for every directory
+   * beneath it. Trusting that here would collapse every non-repo directory
+   * under home into one group named after the home directory - exactly the
+   * regression `deriveProject`'s own stop-at-`$HOME` guard
+   * (project-derivation.ts) was written to prevent, just reached through
+   * the git-info path instead of the filesystem walk.
+   *
+   * Only a strict descendant of `$HOME` triggers the bypass: a session
+   * whose effective cwd IS `$HOME` still gets git's answer (matching
+   * `deriveProject`'s own cwd === homeDir carve-out), and the common
+   * bare-repo dotfiles pattern (`~/.cfg --bare` with a worktree at `$HOME`)
+   * has `mainRepoRoot` at the bare repo's own path, never literally
+   * `$HOME`, so it is unaffected.
+   */
+  private gitProjectName(
+    mainRepoRoot: string | null,
+    cwd: string,
+  ): string | null {
+    if (!mainRepoRoot) return null;
+    if (mainRepoRoot === this.homeDir && this.isStrictDescendantOfHome(cwd)) {
+      return null;
+    }
+    return basename(mainRepoRoot);
+  }
+
+  private isStrictDescendantOfHome(cwd: string): boolean {
+    const rel = relative(this.homeDir, cwd);
+    return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+  }
+
   private async enrichSession(session: Session): Promise<EnrichedSession> {
     const paneCache = this.getPaneCache();
     const paneInfo = session.tmuxPane ? paneCache.get(session.tmuxPane) : null;
@@ -632,12 +678,15 @@ export class DaemonServer {
       // `worktree add` into an existing empty directory) kept grouping under
       // the stale name for the daemon's whole life while its label named the
       // new repo. `deriveProject` remains the fallback for the cwds git
-      // can't answer for (not a repo, bare repo, deleted directory); its
-      // walk may be cold here, since the daemon only ever primed it with
-      // `session.cwd` and this is the pane-preferred cwd.
-      project: gitInfo.mainRepoRoot
-        ? basename(gitInfo.mainRepoRoot)
-        : deriveProject(effectiveCwd, session.project),
+      // can't answer for (not a repo, bare repo, deleted directory) AND for
+      // the cwds `gitProjectName` refuses to bless (a literal `~/.git`
+      // repo, S4); its walk may be cold here, since the daemon only ever
+      // primed it with `session.cwd` and this is the pane-preferred cwd.
+      project:
+        this.gitProjectName(gitInfo.mainRepoRoot, effectiveCwd) ??
+        deriveProject(effectiveCwd, session.project, {
+          homeDir: this.homeDir,
+        }),
       gitBranch,
       isWorktree: gitInfo.isWorktree,
       mainRepoRoot: gitInfo.mainRepoRoot,

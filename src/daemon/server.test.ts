@@ -149,6 +149,9 @@ type ServerInternals = {
     string,
     { id: string; controller: { enqueue(data: string): void } }
   >;
+  /** Stubbable for S4's $HOME-boundary tests; see project-derivation.ts's
+   *  identical `DeriveProjectOptions.homeDir` for why a plain field. */
+  homeDir: string;
 };
 
 function createServer(
@@ -942,6 +945,55 @@ describe("DaemonServer", () => {
         // this is not a worktree, so mainRepoRoot falls back to
         // --show-toplevel (S5), which is the submodule's own checkout root.
         expect(enriched.mainRepoRoot).toBe("/super/sub");
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("does not let a literal ~/.git collapse every home subdirectory into one project (S4)", async () => {
+      const { internals } = createServer();
+      internals.homeDir = "/Users/homie";
+      const git = stubGitSpawn({
+        stdout: "main\n/Users/homie\n/Users/homie/.git\n/Users/homie/.git\n",
+      });
+      const session = fakeSession("s1");
+      session.cwd = "/Users/homie/notes";
+      session.project = "notes";
+
+      try {
+        const enriched = await internals.enrichSession(session);
+
+        // Git resolved mainRepoRoot to $HOME itself. Trusting that would
+        // name every non-repo directory under home after the home
+        // directory, so this must fall through to deriveProject's
+        // $HOME-bounded walk instead, landing on the cwd's own basename.
+        expect(enriched.mainRepoRoot).toBe("/Users/homie");
+        expect(enriched.project).toBe("notes");
+        expect(enriched.project).not.toBe("homie");
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("does not suppress git's project name when mainRepoRoot is merely under home, not $HOME itself (S4)", async () => {
+      // A real repo checked out under home (e.g. ~/dotfiles) is not the
+      // pattern the guard targets: only mainRepoRoot === $HOME exactly
+      // triggers it, so an ordinary repo elsewhere under home keeps
+      // grouping by its own name.
+      const { internals } = createServer();
+      internals.homeDir = "/Users/homie";
+      const git = stubGitSpawn({
+        stdout:
+          "main\n/Users/homie/dotfiles\n/Users/homie/dotfiles/.git\n/Users/homie/dotfiles/.git\n",
+      });
+      const session = fakeSession("s1");
+      session.cwd = "/Users/homie/dotfiles";
+
+      try {
+        const enriched = await internals.enrichSession(session);
+
+        expect(enriched.mainRepoRoot).toBe("/Users/homie/dotfiles");
+        expect(enriched.project).toBe("dotfiles");
       } finally {
         git.restore();
       }
