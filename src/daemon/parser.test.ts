@@ -11,6 +11,7 @@ import {
   readLogIncremental,
   readLogTail,
   readFirstEntryTimestamp,
+  readTranscriptCwd,
 } from "./parser";
 
 describe("parser", () => {
@@ -114,6 +115,66 @@ invalid json
       await Bun.write(empty, "");
       expect(readFirstEntryTimestamp(empty)).toBeNull();
       expect(readFirstEntryTimestamp(join(testDir, "nope.jsonl"))).toBeNull();
+    });
+  });
+
+  describe("readTranscriptCwd", () => {
+    it("resolves cwd from a normal small transcript", async () => {
+      const path = join(testDir, "small.jsonl");
+      const lines = [
+        JSON.stringify({ type: "summary" }),
+        JSON.stringify({ type: "user", cwd: "/Users/dev/project" }),
+      ];
+      await Bun.write(path, lines.join("\n") + "\n");
+      expect(readTranscriptCwd(path)).toBe("/Users/dev/project");
+    });
+
+    it("resolves cwd when the cwd-bearing line itself is larger than the initial read window", async () => {
+      // Reproduces a real corpus shape: a giant pasted entry (one huge
+      // field) lands on the SAME line that carries `cwd`, and that line's
+      // own length pushes its terminating newline past the initial read
+      // boundary. What matters is where the LINE ENDS, not where the
+      // `cwd` substring first appears within it, so `cwd` is placed before
+      // the padding to prove that isn't what saves the read.
+      const path = join(testDir, "big-cwd-line.jsonl");
+      const padding = "x".repeat(400 * 1024); // 400 KB, over the 256 KB default
+      const lines = [
+        JSON.stringify({ type: "summary" }),
+        JSON.stringify({
+          type: "user",
+          cwd: "/Users/dev/big-project",
+          pastedContent: padding,
+        }),
+      ];
+      const content = lines.join("\n") + "\n";
+      // Sanity: the cwd-bearing line's end must land past the default
+      // 256 KiB initial window, or this test isn't exercising the bug.
+      const secondLineEnd = lines[0].length + 1 + lines[1].length;
+      expect(secondLineEnd).toBeGreaterThan(256 * 1024);
+      await Bun.write(path, content);
+      expect(readTranscriptCwd(path)).toBe("/Users/dev/big-project");
+    });
+
+    it("returns null when no cwd appears in the first 50 lines", async () => {
+      const path = join(testDir, "no-early-cwd.jsonl");
+      const lines: string[] = [];
+      for (let i = 0; i < 60; i++) {
+        // Only line 55 (index 54) carries a cwd -- past the 50-line cap.
+        lines.push(
+          i === 54
+            ? JSON.stringify({ type: "user", cwd: "/should/not/be/found" })
+            : JSON.stringify({ type: "progress", uuid: `u${i}` }),
+        );
+      }
+      await Bun.write(path, lines.join("\n") + "\n");
+      expect(readTranscriptCwd(path)).toBeNull();
+    });
+
+    it("returns null for an empty or missing file", async () => {
+      const empty = join(testDir, "empty-cwd.jsonl");
+      await Bun.write(empty, "");
+      expect(readTranscriptCwd(empty)).toBeNull();
+      expect(readTranscriptCwd(join(testDir, "nope-cwd.jsonl"))).toBeNull();
     });
   });
 
