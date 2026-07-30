@@ -46,6 +46,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 ### Prerequisites
 
 - [tmux](https://github.com/tmux/tmux) with active sessions running AI coding agents
+- git 2.31 or newer (for branch and worktree detection; ccmux still works without it, just without that info)
 
 ### Homebrew
 

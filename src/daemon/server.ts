@@ -548,17 +548,21 @@ export class DaemonServer {
    * its own realpath'd getcwd() while ccmux would resolve them against the
    * cwd STRING — so a plain checkout reached through a symlinked path could
    * compare unequal and read as a worktree. An older git doesn't fail on the
-   * flag, it echoes it; the `isEchoedFlag` gate below turns that into "no
-   * git facts" rather than "everything is a worktree".
+   * flag, it echoes it as an EXTRA stdout line (still answering the rest),
+   * so the affected band emits 5 lines, not 4; the `isEchoedFlag` check
+   * below runs BEFORE the line-count gate for exactly that reason and turns
+   * it into "no git facts" rather than "everything is a worktree" (or, if
+   * it ran after, an unreachable warning masked by the length gate).
    *
-   * Gated on exit 0 AND exactly four lines. The exit-code check is what
-   * actually guards against a phantom `HEAD` branch: a bare repo with an
-   * unborn HEAD still prints one stdout line per argument ("HEAD" and the
-   * literal flags) while exiting 128, so a line-count-only gate would parse
-   * that as a real answer and misreport the branch. The line-count gate
-   * stays as defense-in-depth on top of the exit-code check, not as a
-   * substitute for it. A detached HEAD in a real repo still reports the
-   * literal `HEAD` (exit 0), which is pre-existing behavior and unchanged.
+   * Past the echoed-flag check, gated on exit 0 AND exactly four lines. The
+   * exit-code check is what actually guards against a phantom `HEAD`
+   * branch: a bare repo with an unborn HEAD still prints one stdout line
+   * per argument ("HEAD" and the literal flags) while exiting 128, so a
+   * line-count-only gate would parse that as a real answer and misreport
+   * the branch. The line-count gate stays as defense-in-depth on top of the
+   * exit-code check, not as a substitute for it. A detached HEAD in a real
+   * repo still reports the literal `HEAD` (exit 0), which is pre-existing
+   * behavior and unchanged.
    */
   private async readGitInfo(cwd: string): Promise<GitInfo> {
     const proc = Bun.spawn(
@@ -581,10 +585,18 @@ export class DaemonServer {
       new Response(proc.stdout).text(),
       proc.exited,
     ]);
-    const lines = stdout.trim().split("\n");
-    if (exitCode !== 0 || lines.length !== 4) return UNKNOWN_GIT_INFO;
-    const [branch, topLevel, gitDir, commonDir] = lines.map((l) => l.trim());
-    if ([topLevel, gitDir, commonDir].some(isEchoedFlag)) {
+    const lines = stdout
+      .trim()
+      .split("\n")
+      .map((l) => l.trim());
+    // Checked before, and independent of, the line-count gate below: real
+    // old git doesn't just fail to answer `--path-format` — it echoes the
+    // unrecognized flag back as an EXTRA stdout line and still answers the
+    // rest, so the affected band emits 5 lines, not 4. Gating on exit 0 and
+    // exactly 4 lines first meant that shape hit the length check and
+    // returned before this code ever ran, so the warning below could never
+    // fire for the real-world case it exists to explain.
+    if (exitCode === 0 && lines.some(isEchoedFlag)) {
       // Refusing the reply is right, but silently: every row loses its branch
       // and worktree marker with nothing on screen explaining why. Say it
       // once — the cause is the git binary, so it is the same answer for
@@ -600,6 +612,8 @@ export class DaemonServer {
       }
       return UNKNOWN_GIT_INFO;
     }
+    if (exitCode !== 0 || lines.length !== 4) return UNKNOWN_GIT_INFO;
+    const [branch, topLevel, gitDir, commonDir] = lines;
     return {
       branch: branch || null,
       worktreeRoot: topLevel || null,

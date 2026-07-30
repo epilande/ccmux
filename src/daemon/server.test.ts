@@ -999,6 +999,43 @@ describe("DaemonServer", () => {
       }
     });
 
+    it("warns once when git echoes an unrecognized flag back, the real old-git shape (O3)", async () => {
+      // Real git on a version without `--path-format` doesn't just fail to
+      // answer it - it echoes the flag back as an EXTRA stdout line and
+      // still answers the rest of the argv, so the actual shape is 5
+      // lines, not 4: the echoed flag, then branch/topLevel/gitDir/
+      // commonDir in argument order. A 4-line mock of this case is a shape
+      // real git cannot produce, and it hid that the length gate used to
+      // return UNKNOWN_GIT_INFO before the warning check ever ran.
+      const { internals } = createServer();
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
+      const git = stubGitSpawn({
+        stdout:
+          "--path-format=absolute\nmain\n/Users/test/proj\n/Users/test/proj/.git\n/Users/test/proj/.git\n",
+      });
+
+      try {
+        const enriched = await internals.enrichSession(fakeSession("s1"));
+
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]?.[0]).toContain("older than 2.31");
+        expect(enriched.gitBranch).toBeNull();
+        expect(enriched.isWorktree).toBe(false);
+        expect(enriched.mainRepoRoot).toBeNull();
+        expect(enriched.worktreeRoot).toBeNull();
+
+        // Said once, not per lookup: a second session on a different cwd
+        // hits the same unanswerable git, but the warning doesn't repeat.
+        const secondSession = fakeSession("s2");
+        secondSession.cwd = "/Users/test/other";
+        await internals.enrichSession(secondSession);
+        expect(warn).toHaveBeenCalledTimes(1);
+      } finally {
+        git.restore();
+        warn.mockRestore();
+      }
+    });
+
     it("coalesces concurrent lookups for one cwd onto a single git spawn", async () => {
       const { internals } = createServer();
       // Held in flight so all 20 callers arrive before the first resolves.
