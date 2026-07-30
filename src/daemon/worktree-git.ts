@@ -563,19 +563,24 @@ export async function classifyRemoteHosting(
   cwd: string,
   git: GitRun = runGit,
 ): Promise<RemoteHosting> {
-  // `--local` scopes the question to this repo's own config, which is where
-  // remotes live, and (the reason it matters here) makes a path that is not a
-  // repo fail with exit 128 instead of quietly falling through to global config
-  // and reporting the same "no key matched" a genuinely remote-less repo does.
-  const res = await git(cwd, [
-    "config",
-    "--local",
-    "--get-regexp",
-    "^remote\\..*\\.url",
-  ]);
+  // Two probes, because one cannot answer both halves. This one establishes
+  // repo-ness: outside a repo there is no config to read and nothing to
+  // conclude, which is the only thing scoping the config read to `--local`
+  // was ever buying.
+  const repo = await git(cwd, ["rev-parse", "--git-dir"]);
+  if (repo.exitCode !== 0) return "unknown";
+
+  // Remotes are then read at FULL config scope, NOT `--local`. A remote can
+  // live in global or system config (dotfiles that `include.path` a shared
+  // file, an `includeIf` per-directory block, `GIT_CONFIG_GLOBAL`), where
+  // `git remote -v` and `gh` both still see it. `--local` reported those repos
+  // as having no remote at all, which is the one permissive answer: a broken
+  // `gh` then read as "no PR can exist here" and a locally merged worktree was
+  // offered for force-deletion with its PR still open.
+  const res = await git(cwd, ["config", "--get-regexp", "^remote\\..*\\.url"]);
   // Exit 1 is git's documented "no key matched": no remote URLs at all.
   if (res.exitCode === 1) return "none";
-  // Anything else (not a repo, git missing) tells us nothing about the
+  // Anything else (git missing, config unreadable) tells us nothing about the
   // remotes, so claim the strict path rather than the convenient one.
   if (res.exitCode !== 0) return "unknown";
 

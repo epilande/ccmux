@@ -39,6 +39,7 @@ import {
   resolveBaseRefs,
   runGit,
   type GitRun,
+  type RemoteHosting,
   type UpstreamState,
   type WorktreeEntry,
 } from "./worktree-git";
@@ -89,10 +90,25 @@ export type PRLookupResult =
   | { ok: true; pr: PRState | null }
   | { ok: false; error: string };
 
-/** Resolves the PR (if any) for a branch, including merged/closed ones. */
+/**
+ * What the REPO's remotes say about whether a PR could exist, resolved at most
+ * once for the whole scan. Remotes are repo-level config that every linked
+ * worktree shares, and the answer is only read on the lookup FAILURE path, so
+ * probing git per worktree would repeat an identical pair of calls for every
+ * worktree of a repo on exactly the machine where `gh` is already broken.
+ */
+export type RemoteHostingLookup = () => Promise<RemoteHosting>;
+
+/**
+ * Resolves the PR (if any) for a branch, including merged/closed ones.
+ *
+ * `hosting` is the scan's shared remote classification. It is optional so a
+ * one-off call (`ghPRStateLookup(cwd, branch)`) still classifies for itself.
+ */
 export type PRStateLookup = (
   cwd: string,
   branch: string,
+  hosting?: RemoteHostingLookup,
 ) => Promise<PRLookupResult>;
 
 /** A session living in a worktree, as the prune surfaces need to see it. */
@@ -244,7 +260,11 @@ export function selectPRForBranch(
  * remotes at all ({@link classifyRemoteHosting}), where a refusal IS the
  * answer.
  */
-export const ghPRStateLookup: PRStateLookup = async (cwd, branch) => {
+export const ghPRStateLookup: PRStateLookup = async (
+  cwd,
+  branch,
+  hostingLookup,
+) => {
   /**
    * A gh failure in a repo with NO remotes is not a missing answer: a PR has
    * nowhere to live there, so the worktree stays classifiable. Every other
@@ -252,7 +272,9 @@ export const ghPRStateLookup: PRStateLookup = async (cwd, branch) => {
    * github.com, reports the failure as-is.
    */
   const failed = async (error: string): Promise<PRLookupResult> => {
-    const hosting = await classifyRemoteHosting(cwd);
+    const hosting = await (hostingLookup
+      ? hostingLookup()
+      : classifyRemoteHosting(cwd));
     if (hosting === "none") return { ok: true, pr: null };
     return {
       ok: false,
@@ -447,6 +469,10 @@ export async function scanRepo(
   const repoName = basename(repoRoot);
   // Read once per repo, not per worktree: it is the same file for all of them.
   const setupSymlinks = readSymlinkDirectories(repoRoot);
+  // Same reasoning, one step lazier: the remote classification is repo-level
+  // too, but only the PR-lookup failure path reads it, so it is resolved on
+  // first use and then shared instead of being probed per worktree.
+  const hosting = onceAsync(() => classifyRemoteHosting(repoRoot, git));
 
   // Bounded concurrency, not a serial loop: the expensive step is one
   // `gh pr list` per branch at ~0.5s of network latency each, so 15 worktrees
@@ -462,6 +488,7 @@ export async function scanRepo(
         baseRefs,
         upstreams,
         setupSymlinks,
+        hosting,
         git,
         deps,
       }),
@@ -476,6 +503,17 @@ export async function scanRepo(
 
 /** Concurrent `gh pr list` calls per repo during classification. */
 const CLASSIFY_CONCURRENCY = 6;
+
+/**
+ * Run an async producer at most once, sharing the SAME promise with every
+ * later caller. Sharing the promise (rather than the resolved value) is what
+ * makes it safe under `mapWithConcurrency`, where several worktrees can ask
+ * before the first answer has landed.
+ */
+function onceAsync<T>(produce: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | undefined;
+  return () => (pending ??= produce());
+}
 
 /**
  * `Promise.all` with a ceiling on how many run at once, preserving input
@@ -509,6 +547,8 @@ interface ClassifyContext {
   upstreams: Map<string, UpstreamState>;
   /** `worktree.symlinkDirectories`, so a setup symlink is not read as dirt. */
   setupSymlinks: string[];
+  /** The repo's shared remote classification. @see RemoteHostingLookup */
+  hosting: RemoteHostingLookup;
   git: GitRun;
   deps: ScanDeps;
 }
@@ -619,7 +659,7 @@ async function classifyOne(
   // either was never a candidate, gh or no gh, so it stays silent rather than
   // turning every in-flight worktree into a skip line on a broken machine.
   const lookupPR = deps.lookupPR ?? ghPRStateLookup;
-  const lookup = await lookupPR(path, branch);
+  const lookup = await lookupPR(path, branch, ctx.hosting);
   if (!lookup.ok) {
     if (mergedLocally || upstream.gone) {
       return skip(`PR state could not be determined: ${lookup.error}`);

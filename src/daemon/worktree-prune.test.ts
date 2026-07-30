@@ -43,6 +43,7 @@ import {
   readSymlinkDirectories,
   resolveBaseRefs,
   runGit,
+  type GitRun,
 } from "./worktree-git";
 
 /**
@@ -1332,6 +1333,53 @@ describe("classifyRemoteHosting", () => {
     expect(await classifyRemoteHosting(notARepo)).toBe("unknown");
   });
 
+  /**
+   * A repo's remotes need not live in its own config. An `include.path`
+   * dotfiles setup puts them in a shared file that `git remote -v` and `gh`
+   * both read, while the repo-local config holds no remote at all, so a
+   * repo-scoped probe reports the one classification that is permissive.
+   */
+  it("reports github for a remote reachable only through an include", async () => {
+    const { repo } = await makeRepo("host-include");
+    const shared = join(root, "shared-config");
+    writeFileSync(
+      shared,
+      '[remote "shared"]\n\turl = git@github.com:o/r.git\n',
+    );
+    await git(repo, ["remote", "remove", "origin"]);
+    await git(repo, ["config", "include.path", shared]);
+
+    expect(await classifyRemoteHosting(repo)).toBe("github");
+  });
+
+  it("reports github for a remote defined only in global config", async () => {
+    const { repo } = await makeRepo("host-global");
+    const globalConfig = join(root, "global-config");
+    writeFileSync(
+      globalConfig,
+      '[remote "global"]\n\turl = https://github.com/o/r.git\n',
+    );
+    await git(repo, ["remote", "remove", "origin"]);
+    // `Bun.spawn` snapshots the environment it is handed rather than reading
+    // `process.env` live, so `GIT_CONFIG_GLOBAL` has to travel through the
+    // runner instead of being set on the test process.
+    const withGlobalConfig: GitRun = async (cwd, args) => {
+      const proc = Bun.spawn(["git", "-C", cwd, ...args], {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, GIT_CONFIG_GLOBAL: globalConfig },
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      return { exitCode, stdout, stderr };
+    };
+
+    expect(await classifyRemoteHosting(repo, withGlobalConfig)).toBe("github");
+  });
+
   // A second remote is enough: gh answers for whichever one is a GitHub one.
   it("reports github when only a non-origin remote is on github.com", async () => {
     const { repo } = await makeRepo("host-second");
@@ -1597,6 +1645,55 @@ describe("a PR lookup that could not answer", () => {
       expect(scan.skipped[0]).toMatchObject({ path: normalizePath(wt) });
       expect(scan.skipped[0].reason).toContain("PR state");
       expect(existsSync(wt)).toBe(true);
+    });
+
+    /**
+     * The remaining way the hatch failed open: a repo whose remotes live
+     * outside its own config (dotfiles that `include.path` a shared file, or
+     * a `GIT_CONFIG_GLOBAL` remote). `gh` and `git remote -v` both see the
+     * github.com remote there, so a broken `gh` is hiding a PR that can
+     * exist, and the scan must withhold rather than offer the worktree.
+     */
+    it("withholds a locally merged worktree whose remote lives in a shared config", async () => {
+      const { repo } = await makeRepo("gh-broken-included-remote");
+      const wt = await addWorktree(repo, "feat/included");
+      await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/included"]);
+      const shared = join(root, "shared-config");
+      writeFileSync(
+        shared,
+        '[remote "shared"]\n\turl = git@github.com:o/r.git\n',
+      );
+      await git(repo, ["remote", "remove", "origin"]);
+      await git(repo, ["config", "include.path", shared]);
+
+      const scan = await scanRepo(repo, { skipFetch: true });
+
+      expect(scan.candidates).toEqual([]);
+      expect(scan.skipped).toHaveLength(1);
+      expect(scan.skipped[0]).toMatchObject({ path: normalizePath(wt) });
+      expect(scan.skipped[0].reason).toContain("PR state");
+      expect(existsSync(wt)).toBe(true);
+    });
+
+    // The remotes are the same config for every worktree of the repo, so a
+    // machine with a broken `gh` must not pay the probe per worktree.
+    it("classifies the repo's remotes once, not once per worktree", async () => {
+      const { repo } = await makeRepo("gh-broken-shared-probe");
+      for (const branch of ["feat/one", "feat/two", "feat/three"]) {
+        await addWorktree(repo, branch);
+        await git(repo, ["merge", "--no-ff", "-m", "merge", branch]);
+      }
+      let probes = 0;
+      const counting: GitRun = async (cwd, args) => {
+        if (args[0] === "config" && args.join(" ").includes("^remote"))
+          probes++;
+        return runGit(cwd, args);
+      };
+
+      const scan = await scanRepo(repo, { skipFetch: true, git: counting });
+
+      expect(scan.skipped).toHaveLength(3);
+      expect(probes).toBe(1);
     });
   });
 });
