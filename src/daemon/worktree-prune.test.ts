@@ -28,7 +28,7 @@ import {
   selectPRForBranch,
   trashPathFor,
   type GhPRRow,
-  type PRState,
+  type PRLookupResult,
   type PruneCandidate,
   type WorktreeSession,
 } from "./worktree-prune";
@@ -105,7 +105,7 @@ function session(overrides: Partial<WorktreeSession> = {}): WorktreeSession {
   };
 }
 
-const noPR = async (): Promise<PRState | null> => null;
+const noPR = async (): Promise<PRLookupResult> => ({ ok: true, pr: null });
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "ccmux-prune-test-"));
@@ -205,9 +205,12 @@ describe("scanRepo classification", () => {
     const scan = await scanRepo(repo, {
       skipFetch: true,
       lookupPR: async () => ({
-        number: 68,
-        url: "https://github.com/o/r/pull/68",
-        state: "MERGED",
+        ok: true,
+        pr: {
+          number: 68,
+          url: "https://github.com/o/r/pull/68",
+          state: "MERGED",
+        },
       }),
     });
 
@@ -227,9 +230,12 @@ describe("scanRepo classification", () => {
     const scan = await scanRepo(repo, {
       skipFetch: true,
       lookupPR: async () => ({
-        number: 12,
-        url: "https://github.com/o/r/pull/12",
-        state: "CLOSED",
+        ok: true,
+        pr: {
+          number: 12,
+          url: "https://github.com/o/r/pull/12",
+          state: "CLOSED",
+        },
       }),
     });
 
@@ -247,9 +253,12 @@ describe("scanRepo classification", () => {
     const scan = await scanRepo(repo, {
       skipFetch: true,
       lookupPR: async () => ({
-        number: 7,
-        url: "https://github.com/o/r/pull/7",
-        state: "MERGED",
+        ok: true,
+        pr: {
+          number: 7,
+          url: "https://github.com/o/r/pull/7",
+          state: "MERGED",
+        },
       }),
     });
 
@@ -274,9 +283,12 @@ describe("scanRepo classification", () => {
     const scan = await scanRepo(repo, {
       skipFetch: true,
       lookupPR: async () => ({
-        number: 3,
-        url: "https://github.com/o/r/pull/3",
-        state: "OPEN",
+        ok: true,
+        pr: {
+          number: 3,
+          url: "https://github.com/o/r/pull/3",
+          state: "OPEN",
+        },
       }),
     });
 
@@ -294,7 +306,7 @@ describe("scanRepo classification", () => {
       hasOpenPR: () => true,
       lookupPR: async () => {
         lookups++;
-        return null;
+        return { ok: true, pr: null };
       },
     });
 
@@ -1080,7 +1092,7 @@ describe("ghPRStateLookup", () => {
     repo: string,
     branch: string,
     reply: unknown,
-  ): Promise<PRState | null> {
+  ): Promise<PRLookupResult> {
     writeFileSync(
       join(binDir, "gh"),
       `#!/bin/bash\ncat <<'JSON'\n${JSON.stringify(reply)}\nJSON\n`,
@@ -1114,7 +1126,11 @@ describe("ghPRStateLookup", () => {
         headRefOid: tip,
       },
     ]);
-    expect(matched).toMatchObject({ number: 42, state: "MERGED" });
+    expect(matched.ok).toBe(true);
+    expect(matched.ok && matched.pr).toMatchObject({
+      number: 42,
+      state: "MERGED",
+    });
 
     const namesake = await withFakeGh(wt, "feat/looked-up", [
       {
@@ -1125,21 +1141,130 @@ describe("ghPRStateLookup", () => {
         headRefOid: "0000000000000000000000000000000000000000",
       },
     ]);
-    expect(namesake).toBeNull();
+    expect(namesake).toEqual({ ok: true, pr: null });
   });
 
-  it("returns null when gh fails", async () => {
+  it("reports an error, not an empty result, when gh fails", async () => {
     const { repo } = await makeRepo("gh-fails");
+    await git(repo, ["remote", "set-url", "origin", "git@github.com:o/r.git"]);
     writeFileSync(join(binDir, "gh"), "#!/bin/bash\nexit 1\n", { mode: 0o755 });
-    expect(await ghPRStateLookup(repo, "feat/x")).toBeNull();
+
+    const result = await ghPRStateLookup(repo, "feat/x");
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toContain("exited 1");
   });
 
-  it("returns null for malformed output instead of throwing", async () => {
+  it("reports an error for malformed output instead of throwing", async () => {
     const { repo } = await makeRepo("gh-garbage");
+    await git(repo, ["remote", "set-url", "origin", "git@github.com:o/r.git"]);
     writeFileSync(join(binDir, "gh"), "#!/bin/bash\necho 'not json'\n", {
       mode: 0o755,
     });
-    expect(await ghPRStateLookup(repo, "feat/x")).toBeNull();
+
+    const result = await ghPRStateLookup(repo, "feat/x");
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toContain("JSON");
+  });
+
+  it("reports an error when gh is not installed at all", async () => {
+    const { repo } = await makeRepo("gh-absent");
+    await git(repo, ["remote", "set-url", "origin", "git@github.com:o/r.git"]);
+    // git stays reachable (the lookup needs it), gh does not exist anywhere.
+    symlinkSync(Bun.which("git")!, join(binDir, "git"));
+    process.env.PATH = binDir;
+
+    const result = await ghPRStateLookup(repo, "feat/x");
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("treats a gh failure in a repo with no GitHub remote as no PR", async () => {
+    // The fixture's `origin` is a local bare path, so gh could never answer
+    // for it and there is nowhere for a PR to live. Fixed rather than unknown.
+    const { repo } = await makeRepo("gh-not-github");
+    writeFileSync(join(binDir, "gh"), "#!/bin/bash\nexit 1\n", { mode: 0o755 });
+
+    expect(await ghPRStateLookup(repo, "feat/x")).toEqual({
+      ok: true,
+      pr: null,
+    });
+  });
+
+  it("reports no PR for an empty reply", async () => {
+    const { repo } = await makeRepo("gh-empty");
+    expect(await withFakeGh(repo, "feat/x", [])).toEqual({
+      ok: true,
+      pr: null,
+    });
+  });
+});
+
+/**
+ * S7: an undeterminable PR state must not read as "no PR".
+ *
+ * `gh` missing, unauthenticated, rate-limited or offline used to return the
+ * same `null` as a repo with no PR, which reproduces exactly the skip the
+ * module argues against: an open PR going undetected on a branch that looks
+ * merged locally, and with it a worktree offered for deletion while its review
+ * is still in flight.
+ */
+describe("a PR lookup that could not answer", () => {
+  const failedLookup = async (): Promise<PRLookupResult> => ({
+    ok: false,
+    error: "gh: authentication required",
+  });
+
+  it("withholds a locally merged worktree and says why", async () => {
+    const { repo } = await makeRepo("lookup-failed");
+    const wt = await addWorktree(repo, "feat/unknown");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/unknown"]);
+
+    const scan = await scanRepo(repo, {
+      skipFetch: true,
+      lookupPR: failedLookup,
+    });
+
+    expect(scan.candidates).toEqual([]);
+    expect(scan.skipped).toHaveLength(1);
+    expect(scan.skipped[0]).toMatchObject({
+      path: normalizePath(wt),
+      branch: "feat/unknown",
+    });
+    expect(scan.skipped[0].reason).toContain("PR state");
+    expect(scan.skipped[0].reason).toContain("authentication required");
+  });
+
+  // The force-delete path is the one that must be unreachable: nothing may be
+  // classified `pr-merged` on a lookup that failed.
+  it("never reaches pr-merged when the branch was squash-merged", async () => {
+    const { repo, remote } = await makeRepo("lookup-failed-squash");
+    const wt = await addWorktree(repo, "feat/squash", { push: true });
+    await git(repo, ["merge", "--squash", "feat/squash"]);
+    await git(repo, ["commit", "-m", "squash"]);
+    await git(remote, ["update-ref", "-d", "refs/heads/feat/squash"]);
+
+    const scan = await scanRepo(repo, { lookupPR: failedLookup });
+
+    expect(scan.candidates).toEqual([]);
+    expect(existsSync(wt)).toBe(true);
+  });
+
+  // A worktree nothing local proves finished was never going to be offered, so
+  // it stays silent: a machine without gh must not turn every in-flight
+  // worktree into a skip line.
+  it("stays silent for a worktree with no local removal evidence", async () => {
+    const { repo } = await makeRepo("lookup-failed-active");
+    await addWorktree(repo, "feat/in-flight");
+
+    const scan = await scanRepo(repo, {
+      skipFetch: true,
+      lookupPR: failedLookup,
+    });
+
+    expect(scan.candidates).toEqual([]);
+    expect(scan.skipped).toEqual([]);
   });
 });
 

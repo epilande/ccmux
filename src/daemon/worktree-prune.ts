@@ -28,6 +28,7 @@ import {
 
 import {
   fetchPrune,
+  hasGitHubRemote,
   isMergedInto,
   listWorktrees,
   normalizePath,
@@ -75,11 +76,24 @@ export interface PRState {
   state: "OPEN" | "MERGED" | "CLOSED";
 }
 
+/**
+ * Outcome of one PR lookup, discriminated on purpose.
+ *
+ * "This branch has no PR" and "the PR state could not be established" are
+ * opposite facts for a feature that deletes directories, and they used to be
+ * the same `null`: gh missing, unauthenticated, rate-limited, offline or
+ * returning garbage all read as "no PR", which is precisely how an OPEN PR
+ * goes undetected. See {@link classifyOne} for what a failure does instead.
+ */
+export type PRLookupResult =
+  | { ok: true; pr: PRState | null }
+  | { ok: false; error: string };
+
 /** Resolves the PR (if any) for a branch, including merged/closed ones. */
 export type PRStateLookup = (
   cwd: string,
   branch: string,
-) => Promise<PRState | null>;
+) => Promise<PRLookupResult>;
 
 /** A session living in a worktree, as the prune surfaces need to see it. */
 export interface WorktreeSession {
@@ -222,8 +236,28 @@ export function selectPRForBranch(
  * resolver filters out, and precisely the state that makes a worktree
  * removable. See {@link selectPRForBranch} for how one of the returned PRs is
  * proven to be about this branch rather than a namesake.
+ *
+ * Every way this can fail to reach an answer — gh absent, unauthenticated,
+ * rate-limited, offline, or replying with something that is not the requested
+ * JSON — reports `ok: false` rather than "no PR", because the caller deletes
+ * directories on the difference. The one exception is a repo gh could never
+ * have answered for ({@link hasGitHubRemote}), where a refusal IS the answer.
  */
 export const ghPRStateLookup: PRStateLookup = async (cwd, branch) => {
+  /**
+   * A gh failure in a repo with no GitHub remote is not a missing answer: no
+   * PR can exist there, so the worktree stays classifiable.
+   */
+  const failed = async (error: string): Promise<PRLookupResult> =>
+    (await hasGitHubRemote(cwd))
+      ? { ok: false, error }
+      : { ok: true, pr: null };
+
+  // A single try/catch around the whole spawn-through-parse sequence: a
+  // missing `gh` binary throws from `Bun.spawn` itself (ENOENT) rather than
+  // producing a process to await, so there is no exit code to branch on for
+  // that case. JSON parsing gets its own inner catch so its message can say
+  // "JSON" specifically rather than being folded into the generic one below.
   try {
     const proc = Bun.spawn(
       [
@@ -249,9 +283,20 @@ export const ghPRStateLookup: PRStateLookup = async (cwd, branch) => {
       { cwd, stdout: "pipe", stderr: "ignore", env: { ...process.env } },
     );
     const exitCode = await proc.exited;
-    if (exitCode !== 0) return null;
-    const rows = (await new Response(proc.stdout).json()) as GhPRRow[];
-    if (!Array.isArray(rows) || rows.length === 0) return null;
+    if (exitCode !== 0) return failed(`gh pr list exited ${exitCode}`);
+
+    let rows: GhPRRow[];
+    try {
+      rows = (await new Response(proc.stdout).json()) as GhPRRow[];
+    } catch (err) {
+      return failed(
+        `gh pr list did not return valid JSON: ${errorMessage(err)}`,
+      );
+    }
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return { ok: true, pr: null };
+    }
+
     // `refs/heads/` qualified for the same reason as `isMergedInto`: a tag
     // sharing the branch name outranks the branch in git's disambiguation,
     // and this SHA is what proves the PR belongs to this branch.
@@ -261,11 +306,15 @@ export const ghPRStateLookup: PRStateLookup = async (cwd, branch) => {
       `refs/heads/${branch}^{commit}`,
     ]);
     const localTip = tip.exitCode === 0 ? tip.stdout.trim() : null;
-    return selectPRForBranch(rows, localTip);
-  } catch {
-    return null;
+    return { ok: true, pr: selectPRForBranch(rows, localTip) };
+  } catch (err) {
+    return failed(`gh could not be run: ${errorMessage(err)}`);
   }
 };
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 export interface ScanDeps {
   git?: GitRun;
@@ -548,8 +597,26 @@ async function classifyOne(
   //   perfectly ordinary merged PR would go unseen.
   //
   // Concurrency across worktrees is where the time comes back instead.
+  //
+  // S7: a failed lookup is NOT treated as "no PR". `gh` missing,
+  // unauthenticated, rate-limited, offline, or replying with garbage used to
+  // collapse to the same `null` as a branch with no PR, which reproduces
+  // exactly the skip two paragraphs up warns against: an open PR going
+  // undetected. It only matters when local evidence would otherwise offer
+  // this worktree (`mergedLocally` or `upstream.gone`) — a failure can only
+  // ever WITHHOLD a worktree, never manufacture a reason, so `reasonFor` is
+  // never reached with a guessed PR state. A worktree with no local evidence
+  // either was never a candidate, gh or no gh, so it stays silent rather than
+  // turning every in-flight worktree into a skip line on a broken machine.
   const lookupPR = deps.lookupPR ?? ghPRStateLookup;
-  const pr = await lookupPR(path, branch);
+  const lookup = await lookupPR(path, branch);
+  if (!lookup.ok) {
+    if (mergedLocally || upstream.gone) {
+      return skip(`PR state could not be determined: ${lookup.error}`);
+    }
+    return {};
+  }
+  const pr = lookup.pr;
   if (pr?.state === "OPEN") return {};
 
   const reason = reasonFor(pr, mergedLocally, upstream.gone);

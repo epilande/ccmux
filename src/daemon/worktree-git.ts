@@ -527,6 +527,35 @@ export async function readUpstreamStates(
 }
 
 /**
+ * Whether any of this repo's remotes points at github.com.
+ *
+ * Used on the PR-lookup FAILURE path only (see `ghPRStateLookup`), to separate
+ * "gh could not answer" from "there was nothing for gh to answer about". A
+ * repo whose remotes are a local path, a GitLab host or nothing at all has
+ * nowhere for a pull request to live, so gh refusing to run there is a
+ * complete answer rather than a missing one, and a locally merged worktree in
+ * such a repo stays prunable.
+ *
+ * A GitHub Enterprise remote on a custom domain is deliberately NOT recognized
+ * (it is not derivable from the URL), so it reads as unknowable — the safe
+ * direction, and only reachable when gh is already broken.
+ */
+export async function hasGitHubRemote(
+  cwd: string,
+  git: GitRun = runGit,
+): Promise<boolean> {
+  const res = await git(cwd, ["config", "--get-regexp", "^remote\\..*\\.url"]);
+  // Exit 1 is git's documented "no key matched": no remote URLs at all.
+  if (res.exitCode === 1) return false;
+  // Anything else (not a repo, git missing) tells us nothing, so claim the
+  // strict path rather than the convenient one.
+  if (res.exitCode !== 0) return true;
+  return res.stdout
+    .split("\n")
+    .some((line) => /(^|[@/.])github\.com([/:]|$)/i.test(line.trim()));
+}
+
+/**
  * `git fetch --prune`, the call that turns a branch deleted on GitHub into a
  * locally visible `[gone]`. Slow (network) and therefore run once per repo
  * per prune surface, never per worktree. Failure is not fatal: without it the
