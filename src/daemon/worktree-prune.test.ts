@@ -776,6 +776,94 @@ describe("runPrune", () => {
     expect(result.outcomes[0].panesClosed).toEqual(["%9"]);
   });
 
+  /**
+   * S9. Previously: one SIGTERM, a 3s poll, then `ok: false` with "closing
+   * its pane anyway", and the caller renamed and deleted the directory
+   * unconditionally. A wedged agent kept writing into the trash directory
+   * right up until it was deleted.
+   *
+   * A REAL process, not the injected `killProcess`/`sleep` seam: the point is
+   * to prove the escalation against actual OS signal semantics. A shell that
+   * traps and ignores SIGTERM still cannot ignore SIGKILL, so this proves
+   * the "gets SIGKILLed" half of the fix.
+   */
+  it("SIGKILLs an agent that ignores SIGTERM, then proceeds with removal", async () => {
+    const { wt, candidate } = await candidateFor("run-sigkill", "feat/sigkill");
+    // A readiness file, touched only AFTER `trap` installs, and polled for
+    // below: without this handshake, SIGTERM can arrive before the shell has
+    // finished installing the trap, killing it by the ordinary default
+    // disposition and making the test pass for the wrong reason.
+    const ready = join(root, "sigkill-ready");
+    const proc = Bun.spawn(
+      ["sh", "-c", `trap "" TERM; touch '${ready}'; sleep 30`],
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    const pid = proc.pid;
+    const deadline = Date.now() + 5000;
+    while (!existsSync(ready) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(existsSync(ready)).toBe(true);
+    const withSession: PruneCandidate = {
+      ...candidate,
+      sessions: [session({ pid, tmuxPane: null })],
+    };
+
+    try {
+      const result = await runPrune([withSession], {
+        stateFiles: [],
+        log: () => {},
+      });
+
+      const stopStep = result.outcomes[0].steps.find(
+        (s) => s.step === "stop agent",
+      );
+      expect(stopStep?.ok).toBe(true);
+      expect(stopStep?.detail).toContain("SIGKILLed");
+      expect(result.outcomes[0].removed).toBe(true);
+      expect(existsSync(wt)).toBe(false);
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already dead, which is the point of the test.
+      }
+    }
+  }, 10000);
+
+  /**
+   * S9's other half: the design decision is "SIGKILL escalation, and refuse
+   * the candidate if even that does not confirm death" rather than deleting
+   * unconditionally. SIGKILL itself cannot be blocked by a real process, so
+   * this drives the refusal through the injectable `killProcess` seam — the
+   * same seam a real "permission denied to signal" failure would surface
+   * through.
+   */
+  it("refuses a candidate whose agent still answers after SIGKILL", async () => {
+    const { wt, candidate } = await candidateFor(
+      "run-unkillable",
+      "feat/unkillable",
+    );
+    const withSession: PruneCandidate = {
+      ...candidate,
+      sessions: [session({ pid: 999999, tmuxPane: "%9" })],
+    };
+
+    const result = await runPrune([withSession], {
+      stateFiles: [],
+      log: () => {},
+      // Never throws for any pid or signal: every liveness probe reports
+      // the process alive, exactly like an agent that resists both
+      // SIGTERM and SIGKILL.
+      killProcess: () => {},
+    });
+
+    expect(result.outcomes[0].removed).toBe(false);
+    expect(result.outcomes[0].error).toContain("SIGKILL");
+    expect(existsSync(wt)).toBe(true);
+  }, 10000);
+
   // Stopping the agent frequently closes its own pane, so a `kill-pane` that
   // finds nothing is the success path — reporting it as a failure made a
   // clean run read as broken.

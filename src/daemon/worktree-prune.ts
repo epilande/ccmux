@@ -734,6 +734,13 @@ export interface PruneOptions extends PruneDeps {
 }
 
 const PROCESS_EXIT_TIMEOUT_MS = 3000;
+/**
+ * How long to wait for a SIGKILL to take effect after SIGTERM went
+ * unanswered (S9). SIGKILL cannot be trapped or ignored, so this only needs
+ * to cover the OS's own reap latency, not any agent shutdown work — kept
+ * short deliberately.
+ */
+const SIGKILL_VERIFY_TIMEOUT_MS = 1000;
 
 function defaultKill(pid: number, signal: NodeJS.Signals | 0): void {
   process.kill(pid, signal);
@@ -812,22 +819,58 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 /**
+ * Poll `kill(pid, 0)` until it throws (process gone) or `timeoutMs` elapses.
+ * Shared by the SIGTERM wait and the SIGKILL verify (S9): both are "did the
+ * signal already land" checks that differ only in the timeout and which
+ * signal preceded them.
+ */
+async function waitForExit(
+  pid: number,
+  kill: (pid: number, signal: NodeJS.Signals | 0) => void,
+  sleep: (ms: number) => Promise<void>,
+  timeoutMs: number,
+): Promise<boolean> {
+  let alive = true;
+  const deadline = Date.now() + timeoutMs;
+  while (alive && Date.now() < deadline) {
+    try {
+      kill(pid, 0);
+      await sleep(50);
+    } catch {
+      alive = false;
+    }
+  }
+  return !alive; // true == confirmed dead within the window
+}
+
+/**
  * Stop a worktree's agents and close their panes.
  *
- * The pane is closed only after the process is confirmed gone (or the wait
- * times out and is reported): closing first would leave the agent orphaned
- * mid-write against a directory that is about to be renamed out from under
- * it, which is exactly the shutdown this is trying to avoid.
+ * The pane is closed only after the process is confirmed gone (or SIGKILL was
+ * tried and its own wait ran out): closing first would leave the agent
+ * orphaned mid-write against a directory that is about to be renamed out from
+ * under it, which is exactly the shutdown this is trying to avoid.
+ *
+ * S9: a SIGTERM that goes unanswered for `PROCESS_EXIT_TIMEOUT_MS` escalates
+ * to SIGKILL, verified the same way. `allExited` in the returned summary is
+ * false only when a process still answers `kill(pid, 0)` after that
+ * escalation — at that point ccmux has done everything short of a bug in the
+ * OS to end it, and {@link runPrune} refuses to rename or delete that
+ * candidate's directory rather than delete out from under a process that may
+ * still be writing to it. The pane is still closed either way: closing it is
+ * a UI courtesy, not a data-safety measure, so it is not worth withholding
+ * over a process ccmux could not kill.
  */
 async function stopSessions(
   candidate: PruneCandidate,
   deps: PruneDeps,
   steps: PruneStep[],
-): Promise<string[]> {
+): Promise<{ closedPanes: string[]; allExited: boolean }> {
   const kill = deps.killProcess ?? defaultKill;
   const closePane = deps.closePane ?? defaultClosePane;
   const sleep = deps.sleep ?? defaultSleep;
   const closed: string[] = [];
+  let allExited = true;
 
   for (const session of candidate.sessions) {
     if (session.background) {
@@ -847,21 +890,40 @@ async function stopSessions(
       } catch {
         alive = false; // already gone
       }
-      const deadline = Date.now() + PROCESS_EXIT_TIMEOUT_MS;
-      while (alive && Date.now() < deadline) {
+      if (alive) {
+        alive = !(await waitForExit(
+          session.pid,
+          kill,
+          sleep,
+          PROCESS_EXIT_TIMEOUT_MS,
+        ));
+      }
+      let escalated = false;
+      if (alive) {
+        escalated = true;
         try {
-          kill(session.pid, 0);
-          await sleep(50);
+          kill(session.pid, "SIGKILL");
         } catch {
-          alive = false;
+          alive = false; // died between the check and the signal
+        }
+        if (alive) {
+          alive = !(await waitForExit(
+            session.pid,
+            kill,
+            sleep,
+            SIGKILL_VERIFY_TIMEOUT_MS,
+          ));
         }
       }
+      if (alive) allExited = false;
       steps.push({
         step: "stop agent",
         ok: !alive,
         detail: alive
-          ? `${session.agentType} pid ${session.pid} did not exit in ${PROCESS_EXIT_TIMEOUT_MS}ms; closing its pane anyway`
-          : `${session.agentType} pid ${session.pid} exited`,
+          ? `${session.agentType} pid ${session.pid} did not exit after SIGTERM or SIGKILL; this worktree will be refused`
+          : escalated
+            ? `${session.agentType} pid ${session.pid} did not exit in ${PROCESS_EXIT_TIMEOUT_MS}ms; SIGKILLed`
+            : `${session.agentType} pid ${session.pid} exited`,
       });
     }
 
@@ -877,7 +939,7 @@ async function stopSessions(
       });
     }
   }
-  return closed;
+  return { closedPanes: closed, allExited };
 }
 
 /**
@@ -995,7 +1057,26 @@ export async function runPrune(
     // — the previous order — left that whole window unguarded: an agent
     // flushing state during its own shutdown, or a user editing in a shell,
     // could dirty the directory in the gap between the check and the rename.
-    outcome.panesClosed = await stopSessions(candidate, options, steps);
+    //
+    // S9: `stopSessions` escalates an unanswered SIGTERM to SIGKILL and
+    // reports whether every session's process is confirmed gone. A candidate
+    // whose agent survives even SIGKILL is refused here rather than deleted:
+    // the previous behavior renamed and deleted the directory unconditionally
+    // after the wait, so a wedged agent kept writing into the trash directory
+    // right up until it was removed.
+    const shutdown = await stopSessions(candidate, options, steps);
+    outcome.panesClosed = shutdown.closedPanes;
+    if (!shutdown.allExited) {
+      outcome.error =
+        "its agent could not be stopped even after SIGKILL; nothing was deleted";
+      steps.push({
+        step: "refused",
+        ok: false,
+        detail:
+          "a live process may still be writing to this worktree; it was left in place",
+      });
+      continue;
+    }
 
     // Re-check at the point of no return, AFTER the shutdown wait above, not
     // before it (S8). The scan-time answer can be tens of seconds old by
