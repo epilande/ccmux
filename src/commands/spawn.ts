@@ -10,6 +10,16 @@ interface SpawnResponse {
   success: boolean;
   paneId: string;
   command: string;
+  /** Present only when `--worktree` asked for one. */
+  worktree?: {
+    name: string;
+    path: string;
+    branch: string;
+    created: boolean;
+    branchCreated: boolean;
+    /** Absent when no branch was cut, so there is nothing to report it from. */
+    base?: string;
+  };
 }
 
 /**
@@ -96,6 +106,14 @@ export function createSpawnCommand(): Command {
       "tmux pane to split or place next to ('none' to ignore the current pane)",
     )
     .option("--detach", "Don't switch to the new pane after spawning")
+    .option(
+      "--worktree [name]",
+      "Spawn into a git worktree at <repo>/.claude/worktrees/<name>, creating it if needed (name derived from --prompt when omitted)",
+    )
+    .option(
+      "--base <ref>",
+      "Branch the new worktree from this ref (default: the repository's current branch)",
+    )
     .action(
       async (
         agent: string,
@@ -107,8 +125,24 @@ export function createSpawnCommand(): Command {
           split?: SpawnSplit;
           target?: string;
           detach?: boolean;
+          worktree?: string | boolean;
+          base?: string;
         },
       ) => {
+        // `--base` alone is inert, and silently ignoring a flag someone typed
+        // costs a confused debugging session. Unlike `--split` without a
+        // target, which still does something sensible, this expresses an
+        // intent the command cannot honor at all.
+        //
+        // Checked before `ensureDaemon`, because pure argument validation
+        // must not start a background process: rejecting a typo used to leave
+        // a daemon behind on the shared port, which the CLI's own test then
+        // did to whoever ran it.
+        if (options.base !== undefined && options.worktree === undefined) {
+          console.error("--base requires --worktree");
+          process.exit(1);
+        }
+
         await ensureDaemon();
 
         // `--target none` (or an empty value) opts out of placement
@@ -118,6 +152,19 @@ export function createSpawnCommand(): Command {
             ? undefined
             : options.target;
         const optedOut = options.target !== undefined && !explicitTarget;
+
+        // `--worktree` bare is `true` from commander, `--worktree x` is the
+        // string. Both become an object, since the daemon accepts one shape.
+        const worktree =
+          options.worktree === undefined
+            ? undefined
+            : {
+                name:
+                  typeof options.worktree === "string"
+                    ? options.worktree
+                    : undefined,
+                base: options.base,
+              };
 
         try {
           const response = await fetch(`${getDaemonUrl()}/spawn`, {
@@ -142,6 +189,7 @@ export function createSpawnCommand(): Command {
                 ? undefined
                 : callerPane(await daemonTmuxSocket()),
               detach: options.detach ?? false,
+              worktree,
             }),
           });
 
@@ -156,6 +204,27 @@ export function createSpawnCommand(): Command {
           }
 
           const data = (await response.json()) as SpawnResponse;
+          if (data.worktree) {
+            const { name, path, branch, created, branchCreated, base } =
+              data.worktree;
+            // Three honest lines rather than one hedged one. A reused branch
+            // can already carry twenty commits, so calling it new would
+            // misdescribe where the agent is starting from, and the base is
+            // only worth naming when a branch was actually cut from it.
+            // A reused worktree already sits on its branch, so there was
+            // nothing for `--base` to cut. Saying so beats a line that reads
+            // as if the flag had been honored.
+            const staleBase =
+              !created && options.base
+                ? " (--base ignored: the worktree already existed)"
+                : "";
+            const what = !created
+              ? `Reusing worktree ${name} on branch ${branch}${staleBase}`
+              : branchCreated
+                ? `Created worktree ${name} on new branch ${branch}${base ? ` from ${base}` : ""}`
+                : `Created worktree ${name} on existing branch ${branch}`;
+            console.log(`${what}: ${path}`);
+          }
           console.log(
             options.fork
               ? `Forked ${options.fork} into pane ${data.paneId}: ${data.command}`

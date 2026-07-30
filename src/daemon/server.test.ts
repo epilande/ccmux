@@ -3973,6 +3973,62 @@ describe("POST /spawn", () => {
       }
     });
 
+    it("refuses a fork into a new worktree, creating nothing", async () => {
+      // Same wall as the explicit-cwd refusal above, reached a different way:
+      // a fork into a worktree sends no `cwd` at all, so that check passes and
+      // the relocation only appears once the worktree resolves. The source cwd
+      // is a REAL repo here, so the worktree would genuinely have been created
+      // had the refusal come later — which is what the directory assertion
+      // pins down.
+      //
+      // The name is load-bearing. A fork carries no prompt, so a BARE
+      // `worktree: {}` is already refused with "a worktree needs a name" and
+      // would make this test pass against no guard at all. Measured with the
+      // guard disabled: named, the same request answers 200 and creates the
+      // worktree.
+      const repo = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-fw-")));
+      Bun.spawnSync(["git", "init", "-q", repo]);
+      Bun.spawnSync(
+        ["git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "x"],
+        {
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "t",
+            GIT_AUTHOR_EMAIL: "t@t",
+            GIT_COMMITTER_NAME: "t",
+            GIT_COMMITTER_EMAIL: "t@t",
+          },
+        },
+      );
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const source = manager.createPaneTrackedSession({
+        agentType: "forky",
+        paneId: "%3",
+        cwd: repo,
+        pid: 4242,
+        nativeSessionId: "src-sid",
+      });
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({
+            fork: source.id,
+            worktree: { name: "forked" },
+            detach: true,
+          }),
+        );
+        expect(res.status).toBe(400);
+        const { error } = (await res.json()) as { error: string };
+        expect(error).toContain("into a new worktree");
+        expect(error).toContain(repo);
+        expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
+        expect(argv).toHaveLength(0);
+      } finally {
+        restore();
+        rmSync(repo, { recursive: true, force: true });
+      }
+    });
+
     it("refuses a paneless background row daemon-side too", async () => {
       // The picker hides Fork for these, but that is a DISPLAY gate. Verified
       // by review that a hand-rolled request reached tmux and spawned a
@@ -4276,5 +4332,309 @@ describe("worktree prune endpoints", () => {
     const body = (await res.json()) as { outcomes: unknown[] };
 
     expect(body.outcomes).toHaveLength(1);
+  });
+});
+
+/**
+ * `POST /spawn` with a worktree destination.
+ *
+ * tmux is stubbed but git is NOT: the whole point of the endpoint half is
+ * that a real worktree exists at a real path before the pane is created, and
+ * a stubbed git would assert nothing about that. Non-tmux commands therefore
+ * pass through to the real `Bun.spawn`.
+ */
+describe("POST /spawn with a worktree", () => {
+  let root: string;
+
+  /**
+   * `failWith` makes every tmux call exit non-zero with that stderr, which is
+   * the only failure the handler can still hit AFTER the worktree exists: the
+   * agent, the command and the placement are all resolved before it now, so
+   * nothing cheaper than tmux reaches the note.
+   */
+  function withTmuxOnlyStub(options: { failWith?: string } = {}) {
+    const original = Bun.spawn;
+    const argv: string[][] = [];
+    Bun.spawn = ((spawned: string[], opts?: unknown) => {
+      if (spawned[0] !== "tmux") {
+        return (original as (a: string[], b?: unknown) => unknown)(
+          spawned,
+          opts,
+        );
+      }
+      argv.push(spawned);
+      return {
+        exited: Promise.resolve(options.failWith === undefined ? 0 : 1),
+        stdout: new Blob(["%99\n"]).stream(),
+        stderr: new Blob([options.failWith ?? ""]).stream(),
+      };
+    }) as unknown as typeof Bun.spawn;
+    return { argv, restore: () => (Bun.spawn = original) };
+  }
+
+  /** Local branch names in a fixture repo, for leak assertions. */
+  function localBranches(repo: string): string {
+    const proc = Bun.spawnSync(
+      ["git", "-C", repo, "branch", "--list", "--format=%(refname:short)"],
+      { env: GIT_FIXTURE_ENV, stdout: "pipe", stderr: "pipe" },
+    );
+    if (proc.exitCode !== 0) {
+      throw new Error(`git branch --list failed: ${proc.stderr.toString()}`);
+    }
+    return proc.stdout.toString();
+  }
+
+  function makeRepo(): string {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-spawn-wt-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    return repo;
+  }
+
+  async function spawnInto(
+    internals: ServerInternals,
+    body: Record<string, unknown>,
+  ): Promise<Response> {
+    return internals.handleRequest(
+      new Request("http://127.0.0.1:2269/spawn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("creates the worktree and spawns the pane in it", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "fix-thing" },
+      });
+      const body = (await res.json()) as {
+        worktree?: {
+          path: string;
+          name: string;
+          branch: string;
+          created: boolean;
+        };
+      };
+
+      expect(res.status).toBe(200);
+      expect(body.worktree?.name).toBe("fix-thing");
+      expect(body.worktree?.created).toBe(true);
+      expect(existsSync(body.worktree!.path)).toBe(true);
+      // The contract that matters: the pane was opened in the worktree, not
+      // in the cwd the request named.
+      const paneArgv = tmux.argv.find((a) => a.includes("-c"));
+      expect(paneArgv?.[paneArgv.indexOf("-c") + 1]).toBe(body.worktree!.path);
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("derives the name from the prompt when none is given", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        prompt: "fix sidebar flicker on resize",
+        worktree: {},
+      });
+      const body = (await res.json()) as { worktree?: { name: string } };
+
+      expect(body.worktree?.name).toBe("fix-sidebar-flicker");
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("rejects a worktree request with neither a name nor a prompt", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: {},
+      });
+      const body = (await res.json()) as { error: string };
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("needs a name");
+      // And no pane was opened for a request that could not be satisfied.
+      expect(tmux.argv).toEqual([]);
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("rejects a worktree request outside a git repository", async () => {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-spawn-nogit-"));
+    const plain = join(root, "plain");
+    mkdirSync(plain, { recursive: true });
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: plain,
+        worktree: { name: "nope" },
+      });
+      const body = (await res.json()) as { error: string };
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("Not inside a git repository");
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  /**
+   * The worktree is deliberately NOT rolled back when a later step fails, so
+   * the error has to say it is there. Otherwise the user is left wondering
+   * whether to clean it up by hand.
+   */
+  it("says the worktree survives when a later step fails", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub({ failWith: "no space left for a window" });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "left-behind" },
+      });
+      const body = (await res.json()) as { error: string };
+
+      expect(res.status).toBe(500);
+      expect(body.error).toContain("no space left for a window");
+      expect(body.error).toContain("left-behind");
+      expect(body.error).toContain("will reuse it");
+      // And it really is on disk, as the message claims.
+      expect(
+        existsSync(join(repo, ".claude", "worktrees", "left-behind")),
+      ).toBe(true);
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  /**
+   * A derived name is not stable: `createWorktree` suffixes a taken one, so
+   * telling the user a re-run reuses this worktree would be a lie that leaves
+   * them with `<slug>-2`. The note has to name the flag that actually reuses it.
+   */
+  it("tells a derived name to pass the flag rather than re-run", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub({ failWith: "tmux is unhappy" });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        prompt: "fix sidebar flicker on resize",
+        worktree: {},
+      });
+      const body = (await res.json()) as { error: string };
+
+      expect(res.status).toBe(500);
+      expect(body.error).toContain("numbered sibling");
+      expect(body.error).toContain("--worktree 'fix-sidebar-flicker'");
+      expect(body.error).not.toContain("will reuse it");
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("does not mention a worktree when one was merely opened", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const ok = withTmuxOnlyStub();
+    try {
+      await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "reused" },
+      });
+    } finally {
+      ok.restore();
+    }
+    const tmux = withTmuxOnlyStub({ failWith: "tmux is unhappy" });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "reused" },
+      });
+      const body = (await res.json()) as { error: string };
+
+      expect(body.error).toContain("tmux is unhappy");
+      expect(body.error).not.toContain("was created");
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  /**
+   * The validation the request fails on has to run BEFORE the worktree is
+   * created, not after: a typo'd agent name that still costs the user a
+   * checkout and a branch to clean up is the whole reason the ordering is
+   * load-bearing rather than incidental.
+   */
+  it("creates nothing when the agent name is unknown", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "no-such-agent",
+        cwd: repo,
+        worktree: { name: "never-made" },
+      });
+      const body = (await res.json()) as { error: string };
+
+      expect(res.status).toBe(400);
+      expect(body.error).toBe("Unknown agent: no-such-agent");
+      expect(existsSync(join(repo, ".claude", "worktrees", "never-made"))).toBe(
+        false,
+      );
+      expect(localBranches(repo)).not.toContain("never-made");
+      expect(tmux.argv).toEqual([]);
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("spawns into the ordinary cwd when no worktree is requested", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, { agent: "claude", cwd: repo });
+      const body = (await res.json()) as { worktree?: unknown };
+
+      expect(res.status).toBe(200);
+      expect(body.worktree).toBeUndefined();
+      const paneArgv = tmux.argv.find((a) => a.includes("-c"));
+      expect(paneArgv?.[paneArgv.indexOf("-c") + 1]).toBe(repo);
+    } finally {
+      tmux.restore();
+    }
   });
 });

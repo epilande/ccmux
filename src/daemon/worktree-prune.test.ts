@@ -22,7 +22,6 @@ import {
   describeIgnoredFiles,
   ghPRStateLookup,
   isRepoAdminDir,
-  normalizePath,
   paneListIncludes,
   runPrune,
   scanRepo,
@@ -34,10 +33,13 @@ import {
   type WorktreeSession,
 } from "./worktree-prune";
 import {
+  isMergedInto,
+  normalizePath,
   parseWorktreeList,
   readAdminDir,
   readDirtyState,
   readSymlinkDirectories,
+  resolveBaseRefs,
   runGit,
 } from "./worktree-git";
 
@@ -345,30 +347,6 @@ describe("scanRepo classification", () => {
     });
   });
 
-  it("lists idle and waiting sessions on the candidate instead of excluding it", async () => {
-    const { repo } = await makeRepo("idle");
-    const wt = await addWorktree(repo, "feat/idle");
-    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/idle"]);
-
-    const scan = await scanRepo(repo, {
-      skipFetch: true,
-      lookupPR: noPR,
-      sessionsFor: (path) =>
-        path === normalizePath(wt)
-          ? [
-              session({ status: "idle" }),
-              session({ id: "s2", status: "waiting" }),
-            ]
-          : [],
-    });
-
-    expect(scan.candidates).toHaveLength(1);
-    expect(scan.candidates[0].sessions.map((s) => s.status)).toEqual([
-      "idle",
-      "waiting",
-    ]);
-  });
-
   it("respects a user lock on a live worktree", async () => {
     const { repo } = await makeRepo("locked");
     const wt = await addWorktree(repo, "feat/locked");
@@ -389,6 +367,256 @@ describe("scanRepo classification", () => {
     const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
 
     expect(scan.candidates).toEqual([]);
+  });
+});
+
+/**
+ * A worktree that was JUST created is not finished work.
+ *
+ * `git worktree add -b feat/x <path> main`, what `spawn --worktree` runs, gives
+ * the new branch the base's own tip, and a commit is an ancestor of
+ * itself, so the ancestry check answered "merged into main" for a directory
+ * created seconds earlier. Nothing else dissented: the setup files are
+ * gitignored or symlinks, so it read perfectly clean, and the session gate only
+ * looked at `working`. Confirming that list SIGTERMed a live agent, deleted the
+ * directory, and deleted the branch.
+ */
+describe("a branch sitting on the base tip is not merged", () => {
+  /** Exactly what `spawn --worktree` leaves behind: a branch, zero commits. */
+  async function addFreshWorktree(
+    repo: string,
+    branch: string,
+  ): Promise<string> {
+    const path = join(root, "wt", branch.replace(/\//g, "-"));
+    await git(repo, ["worktree", "add", "-b", branch, path, "main"]);
+    return path;
+  }
+
+  // `waiting` is called out separately because it is the state that reads as
+  // safest and is not: the agent is mid-turn, blocked on a permission answer.
+  const bound = [null, "idle", "waiting"] as const;
+  for (const status of bound) {
+    it(`is not a candidate with ${status ?? "no"} session bound`, async () => {
+      const { repo } = await makeRepo(`fresh-${status ?? "none"}`);
+      const wt = await addFreshWorktree(repo, "feat/fresh");
+      expect(await git(repo, ["rev-parse", "feat/fresh"])).toBe(
+        await git(repo, ["rev-parse", "main"]),
+      );
+
+      const scan = await scanRepo(repo, {
+        skipFetch: true,
+        lookupPR: noPR,
+        sessionsFor: (path) =>
+          status && path === normalizePath(wt) ? [session({ status })] : [],
+      });
+
+      expect(scan.candidates).toEqual([]);
+      expect(existsSync(wt)).toBe(true);
+    });
+  }
+
+  // The shipping shape, since it is what made the row invisible: the setup
+  // symlink is exempt from `dirty`, so nothing at all flagged the worktree.
+  it("is not a candidate when its only content is a setup symlink", async () => {
+    const { repo } = await makeRepo("fresh-symlinked");
+    mkdirSync(join(repo, ".claude"), { recursive: true });
+    writeFileSync(
+      join(repo, ".claude", "settings.json"),
+      JSON.stringify({ worktree: { symlinkDirectories: ["node_modules"] } }),
+    );
+    writeFileSync(join(repo, ".gitignore"), "node_modules/\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-qm", "config"]);
+    mkdirSync(join(repo, "node_modules"), { recursive: true });
+    const wt = await addFreshWorktree(repo, "feat/fresh-linked");
+    symlinkSync(join(repo, "node_modules"), join(wt, "node_modules"));
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+
+    expect(scan.candidates).toEqual([]);
+  });
+
+  // The other half of the rule: suppressing tip-equality must not cost the
+  // reason itself. A real merge advances the base PAST the branch, so the two
+  // tips differ and the ancestry check still answers yes.
+  it("still classifies a branch the base has moved past as merged-locally", async () => {
+    const { repo } = await makeRepo("still-merged");
+    const wt = await addWorktree(repo, "feat/really-done");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/really-done"]);
+    expect(await git(repo, ["rev-parse", "main"])).not.toBe(
+      await git(repo, ["rev-parse", "feat/really-done"]),
+    );
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+
+    expect(scan.candidates).toHaveLength(1);
+    expect(scan.candidates[0]).toMatchObject({
+      path: normalizePath(wt),
+      branch: "feat/really-done",
+      reason: "merged-locally",
+      branchDeletion: "safe",
+    });
+  });
+});
+
+/**
+ * The same rule with SEVERAL base refs, which is every real repo: local `main`
+ * and `origin/main` both resolve, and `resolveBaseRefs` puts the remote one
+ * first.
+ *
+ * Suppressing tip-equality per base leaks here. In the ordinary not-yet-pulled
+ * state, which this feature's own `fetch --prune` produces, local `main` sits at
+ * B while `origin/main` is already at C. A worktree cut from local `main` has
+ * tip B, so the `origin/main` iteration compares B against C, finds them
+ * unequal, asks whether B is an ancestor of C, and gets yes. The brand new
+ * worktree was classified `merged-locally` before the `main` iteration it does
+ * match was ever reached.
+ */
+describe("a branch on a base tip with several base refs", () => {
+  /**
+   * Local `main` at B with `origin/main` one commit ahead at C, the shape a
+   * fetch leaves when the remote has moved and nobody has pulled.
+   */
+  async function repoWithRemoteAhead(
+    name: string,
+  ): Promise<{ repo: string; localTip: string; remoteTip: string }> {
+    const { repo } = await makeRepo(name);
+    writeFileSync(join(repo, "b.txt"), "b\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-qm", "b"]);
+    await git(repo, ["push", "origin", "main"]);
+    const localTip = await git(repo, ["rev-parse", "HEAD"]);
+    writeFileSync(join(repo, "c.txt"), "c\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-qm", "c"]);
+    await git(repo, ["push", "origin", "main"]);
+    const remoteTip = await git(repo, ["rev-parse", "HEAD"]);
+    // Local main falls back to B; the remote-tracking ref stays at C.
+    await git(repo, ["reset", "--hard", localTip]);
+    return { repo, localTip, remoteTip };
+  }
+
+  it("is not merged when it sits on the base that is behind the remote", async () => {
+    const { repo, localTip, remoteTip } =
+      await repoWithRemoteAhead("multi-base");
+    expect(localTip).not.toBe(remoteTip);
+    expect(await git(repo, ["rev-parse", "origin/main"])).toBe(remoteTip);
+    const path = join(root, "wt", "feat-fresh-multi");
+    await git(repo, [
+      "worktree",
+      "add",
+      "-b",
+      "feat/fresh-multi",
+      path,
+      "main",
+    ]);
+
+    // The ordering is the trap, so it is asserted rather than assumed: the
+    // remote ref is tried first, and B really is an ancestor of C.
+    const baseRefs = await resolveBaseRefs(repo);
+    expect(baseRefs).toEqual(["origin/main", "main"]);
+    expect(
+      (await runGit(repo, ["merge-base", "--is-ancestor", localTip, remoteTip]))
+        .exitCode,
+    ).toBe(0);
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+    expect(scan.candidates).toEqual([]);
+    expect(existsSync(path)).toBe(true);
+    expect(await isMergedInto(repo, "feat/fresh-multi", baseRefs)).toBe(false);
+  });
+
+  // The other half again, at multiple bases: a branch with its own commit,
+  // merged so no base tip equals it, still classifies.
+  it("still classifies a genuinely merged branch in the same repo state", async () => {
+    const { repo } = await repoWithRemoteAhead("multi-base-merged");
+    const wt = await addWorktree(repo, "feat/multi-done");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/multi-done"]);
+    const branchTip = await git(repo, ["rev-parse", "feat/multi-done"]);
+    for (const base of ["main", "origin/main"]) {
+      expect(await git(repo, ["rev-parse", base])).not.toBe(branchTip);
+    }
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+
+    expect(scan.candidates).toHaveLength(1);
+    expect(scan.candidates[0]).toMatchObject({
+      path: normalizePath(wt),
+      branch: "feat/multi-done",
+      reason: "merged-locally",
+      branchDeletion: "safe",
+    });
+  });
+});
+
+/**
+ * The session gate, widened from `working` to any bound session. An agent at
+ * its prompt (`idle`) or blocked on a permission question (`waiting`) is a
+ * session the user is still in the middle of, and it holds the worktree as its
+ * cwd, so removal SIGTERMs it and deletes the directory under it.
+ */
+describe("session gate", () => {
+  async function mergedWorktree(
+    name: string,
+  ): Promise<{ repo: string; wt: string }> {
+    const { repo } = await makeRepo(name);
+    const wt = await addWorktree(repo, "feat/held");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/held"]);
+    return { repo, wt };
+  }
+
+  for (const status of ["working", "idle", "waiting"] as const) {
+    it(`skips a removable worktree while an agent is ${status} in it`, async () => {
+      const { repo, wt } = await mergedWorktree(`gate-${status}`);
+
+      const scan = await scanRepo(repo, {
+        skipFetch: true,
+        lookupPR: noPR,
+        sessionsFor: (path) =>
+          path === normalizePath(wt) ? [session({ status })] : [],
+      });
+
+      expect(scan.candidates).toEqual([]);
+      expect(scan.skipped).toHaveLength(1);
+      expect(scan.skipped[0]).toMatchObject({
+        path: normalizePath(wt),
+        branch: "feat/held",
+        reason: `an agent is ${status} here`,
+      });
+    });
+  }
+
+  // With several sessions the message names the one that matters most, so the
+  // skip line does not read as "idle" while an agent is mid-write.
+  it("reports the working session when the worktree holds several", async () => {
+    const { repo, wt } = await mergedWorktree("gate-mixed");
+
+    const scan = await scanRepo(repo, {
+      skipFetch: true,
+      lookupPR: noPR,
+      sessionsFor: (path) =>
+        path === normalizePath(wt)
+          ? [
+              session({ status: "idle" }),
+              session({ id: "s2", status: "working" }),
+            ]
+          : [],
+    });
+
+    expect(scan.skipped[0].reason).toBe("an agent is working here");
+  });
+
+  it("still classifies a worktree with no session at all", async () => {
+    const { repo } = await mergedWorktree("gate-none");
+
+    const scan = await scanRepo(repo, {
+      skipFetch: true,
+      lookupPR: noPR,
+      sessionsFor: () => [],
+    });
+
+    expect(scan.candidates).toHaveLength(1);
+    expect(scan.skipped).toEqual([]);
   });
 });
 
@@ -1119,28 +1347,30 @@ describe("isRepoAdminDir", () => {
 });
 
 describe("background sessions", () => {
-  it("is never signalled, but still counts for the working gate", async () => {
+  it("is never signalled", async () => {
     const { repo } = await makeRepo("bg");
-    const wt = await addWorktree(repo, "feat/bg");
+    await addWorktree(repo, "feat/bg");
     await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/bg"]);
-    const scan = await scanRepo(repo, {
-      skipFetch: true,
-      lookupPR: noPR,
-      sessionsFor: (path) =>
-        path === normalizePath(wt)
-          ? [
-              session({
-                status: "idle",
-                pid: 4242,
-                tmuxPane: null,
-                background: true,
-              }),
-            ]
-          : [],
-    });
+    // Attached by hand: the session gate now withholds every worktree that has
+    // one, so a scan can no longer produce a candidate carrying a session, and
+    // this is about what `runPrune` does with the candidate it is handed.
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+    const candidates: PruneCandidate[] = [
+      {
+        ...scan.candidates[0],
+        sessions: [
+          session({
+            status: "idle",
+            pid: 4242,
+            tmuxPane: null,
+            background: true,
+          }),
+        ],
+      },
+    ];
     const killed: number[] = [];
 
-    const result = await runPrune(scan.candidates, {
+    const result = await runPrune(candidates, {
       stateFiles: [],
       log: () => {},
       killProcess: (pid) => {
@@ -1483,5 +1713,24 @@ describe("readSymlinkDirectories scopes", () => {
     mkdirSync(home, { recursive: true });
 
     expect(readSymlinkDirectories(repo, home)).toEqual([]);
+  });
+
+  // A half-written settings file must not shadow the scope below it, and a
+  // list holding something that is not a directory name must not produce a
+  // symlink target of `undefined`.
+  it("falls through malformed JSON and drops non-string entries", () => {
+    const repo = join(root, "repo-malformed");
+    const home = join(root, "home-malformed");
+    mkdirSync(join(repo, ".claude"), { recursive: true });
+    writeFileSync(join(repo, ".claude", "settings.json"), "{not json");
+    writeSettings(home, ["node_modules"]);
+
+    expect(readSymlinkDirectories(repo, home)).toEqual(["node_modules"]);
+
+    writeFileSync(
+      join(repo, ".claude", "settings.json"),
+      JSON.stringify({ worktree: { symlinkDirectories: ["vendor", 7, ""] } }),
+    );
+    expect(readSymlinkDirectories(repo, home)).toEqual(["vendor"]);
   });
 });

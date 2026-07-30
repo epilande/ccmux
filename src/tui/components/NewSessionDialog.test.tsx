@@ -26,6 +26,7 @@ const draft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft => ({
   cwd: "/Users/dev/code/ccmux",
   agent: "claude",
   placement: "window",
+  destination: "here",
   prompt: "",
   field: "agent",
   ...overrides,
@@ -48,6 +49,7 @@ async function renderDialog(props: {
         onFocusField={() => {}}
         onSelectAgent={() => {}}
         onSelectPlacement={() => {}}
+        onSelectDestination={() => {}}
         onPromptInput={() => {}}
         onSubmit={() => {}}
         onCancel={() => {}}
@@ -268,5 +270,123 @@ describe("NewSessionDialog", () => {
     const withoutHints = await renderDialog({ showKeyHints: false });
     // The row plus its blank spacer, and no stray gap left behind.
     expect(tall - boxRows(withoutHints)).toBe(2);
+  });
+});
+
+/**
+ * The worktree destination (issue #69). The row shows the name it WOULD
+ * create, derived from the prompt, so the choice is concrete rather than a
+ * promise and the branch name never arrives as a surprise.
+ */
+describe("NewSessionDialog destination", () => {
+  it("offers both destinations, with this checkout selected by default", async () => {
+    await renderDialog({});
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Where");
+    expect(frame).toContain("[This checkout]");
+    expect(frame).toContain("New worktree");
+  });
+
+  it("previews the derived worktree name from the prompt", async () => {
+    await renderDialog({
+      // A short prompt so the whole derived name fits: the dialog is capped
+      // at MAX_WIDTH regardless of terminal size, so a long one is always
+      // truncated (covered by the next test).
+      draft: draft({ destination: "worktree", prompt: "fix bug" }),
+    });
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("[New worktree: fix-bug]");
+  });
+
+  /**
+   * The derived name is budgeted against the row, not appended blindly. A
+   * long slug pushed the dialog's own right border off screen, which reads
+   * as a broken dialog rather than a long name.
+   */
+  it("truncates the name rather than overflowing the border", async () => {
+    await renderDialog({
+      draft: draft({
+        destination: "worktree",
+        prompt: "fix sidebar flicker on resize",
+      }),
+    });
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("New worktree: fix-sidebar-");
+    // Every row of the box still ends with its border.
+    const boxRows = frame
+      .split("\n")
+      .filter((row) => row.includes("│"))
+      .map((row) => row.trimEnd());
+    expect(boxRows.length).toBeGreaterThan(0);
+    for (const row of boxRows) {
+      expect(row.endsWith("│")).toBe(true);
+    }
+  });
+
+  /**
+   * With no derivable name the option cannot spawn at all, so the row says
+   * what is missing instead of showing a name it does not have.
+   */
+  it("asks for a prompt until there is something to derive a name from", async () => {
+    await renderDialog({ draft: draft({ destination: "worktree" }) });
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("[New worktree (add a prompt)]");
+    expect(frame).not.toContain("New worktree:");
+    // The hint is budgeted like the name is; the border still closes.
+    for (const row of frame
+      .split("\n")
+      .filter((row) => row.includes("│"))
+      .map((row) => row.trimEnd())) {
+      expect(row.endsWith("│")).toBe(true);
+    }
+  });
+
+  it("keeps the hint off the unselected row, where it is only noise", async () => {
+    const frame = await renderDialog({ draft: draft({ destination: "here" }) });
+
+    expect(frame).toContain("[This checkout]");
+    expect(frame).not.toContain("add a prompt");
+  });
+
+  /** A CJK-only prompt derives nothing, exactly like an empty one. */
+  it("asks for a prompt when the prompt derives no slug at all", async () => {
+    const frame = await renderDialog({
+      draft: draft({ destination: "worktree", prompt: "修复侧边栏" }),
+    });
+
+    expect(frame).toContain("[New worktree (add a prompt)]");
+  });
+
+  /**
+   * The destination shares its label rule with Placement, so a sidebar-width
+   * surface has to keep BOTH choices readable and on their own rows — the
+   * same failure the placements had, where two options rendered identically.
+   */
+  it("stacks and abbreviates the destinations on a sidebar-width surface", async () => {
+    const frame = await renderDialog({ width: 34, height: 30 });
+
+    // The capitalized short labels, which only the abbreviated forms carry
+    // (`This checkout` / `New worktree` spell theirs differently), on rows of
+    // their own rather than sharing one.
+    const lines = frame.split("\n");
+    const hereRow = lines.findIndex((line) => line.includes("Here"));
+    const worktreeRow = lines.findIndex((line) => line.includes("Worktree"));
+    expect(hereRow).toBeGreaterThanOrEqual(0);
+    expect(worktreeRow).toBeGreaterThanOrEqual(0);
+    expect(worktreeRow).not.toBe(hereRow);
+    const widest = Math.max(...lines.map((line) => line.trimEnd().length));
+    expect(widest).toBeLessThanOrEqual(34);
+  });
+
+  // The dialog grows a row per field; the height is derived from the field
+  // list so a new one cannot silently clip the row below it.
+  it("keeps the directory row visible with the destination row present", async () => {
+    await renderDialog({ draft: draft({ destination: "worktree" }) });
+
+    expect(setup.captureCharFrame()).toContain("Directory");
   });
 });

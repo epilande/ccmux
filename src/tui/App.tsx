@@ -58,8 +58,10 @@ import { GroupPreview } from "./components/GroupPreview";
 import { ConfirmationDialog } from "./components/ConfirmationDialog";
 import {
   NewSessionDialog,
+  DESTINATION_OPTIONS,
   PLACEMENT_OPTIONS,
 } from "./components/NewSessionDialog";
+import { slugFromPrompt } from "../daemon/worktree-create";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { PruneDialog } from "./components/PruneDialog";
 import { HelpOverlay } from "./components/HelpOverlay";
@@ -1015,6 +1017,15 @@ export function App(props: AppProps) {
             if (option) store.actions.setNewSessionPlacement(option.value);
           },
         };
+      case "destination":
+        return {
+          options: DESTINATION_OPTIONS.map((option) => option.value),
+          value: draft.destination,
+          select: (value) => {
+            const option = DESTINATION_OPTIONS.find((o) => o.value === value);
+            if (option) store.actions.setNewSessionDestination(option.value);
+          },
+        };
       default:
         return null;
     }
@@ -1065,6 +1076,17 @@ export function App(props: AppProps) {
       );
       return;
     }
+    // The dialog has no name field, so the prompt is the only name it can
+    // offer. Refuse here rather than posting: the daemon's own refusal reads
+    // "pass one explicitly", which is advice for the CLI and not something
+    // this dialog can act on.
+    if (draft.destination === "worktree" && !slugFromPrompt(prompt)) {
+      store.actions.showToast(
+        "Type a prompt to name the worktree, or use ccmux spawn --worktree <name>",
+        4000,
+      );
+      return;
+    }
     // Placement carries a `%N` from OUR tmux server; against a daemon
     // watching a different one it would resolve to an unrelated pane, and
     // the agent would start where nobody is looking.
@@ -1100,6 +1122,9 @@ export function App(props: AppProps) {
           callerPane: callerPane ?? undefined,
           prompt: prompt || undefined,
           detach,
+          // The daemon derives the name from the prompt when none is given,
+          // which is the same rule the row previews, so the two cannot drift.
+          worktree: draft.destination === "worktree" ? {} : undefined,
         }),
       });
       const body = (await response.json().catch(() => null)) as {
@@ -2099,6 +2124,7 @@ export function App(props: AppProps) {
               onFocusField={store.actions.setNewSessionField}
               onSelectAgent={store.actions.setNewSessionAgent}
               onSelectPlacement={store.actions.setNewSessionPlacement}
+              onSelectDestination={store.actions.setNewSessionDestination}
               onPromptInput={store.actions.setNewSessionPrompt}
               onSubmit={() => void submitNewSession()}
               onCancel={store.actions.closeNewSessionDialog}

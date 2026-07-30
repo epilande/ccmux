@@ -5,10 +5,12 @@ import { MouseButton } from "@opentui/core";
 import type { SpawnableAgent } from "../../lib/spawnable-agents";
 import {
   NEW_SESSION_FIELDS,
+  type NewSessionDestination,
   type NewSessionDraft,
   type NewSessionField,
   type NewSessionPlacement,
 } from "../store";
+import { slugFromPrompt } from "../../daemon/worktree-create";
 import { shortenCwd, truncateText } from "../utils/format";
 import { agentColorFor } from "./SessionItem";
 import { theme } from "../theme";
@@ -47,6 +49,18 @@ export const PLACEMENT_OPTIONS: readonly PlacementOption[] = [
   { value: "split-v", label: "Split down", compactLabel: "Down" },
 ];
 
+interface DestinationOption {
+  value: NewSessionDestination;
+  label: string;
+  compactLabel: string;
+}
+
+/** Destination choices, in the order their number keys select them. */
+export const DESTINATION_OPTIONS: readonly DestinationOption[] = [
+  { value: "here", label: "This checkout", compactLabel: "Here" },
+  { value: "worktree", label: "New worktree", compactLabel: "Worktree" },
+];
+
 /**
  * Slice of a longer option list to show, keeping the selection visible and
  * centered where it can be. Exported for its own tests: an off-by-one here
@@ -71,6 +85,7 @@ interface NewSessionDialogProps {
   onFocusField: (field: NewSessionField) => void;
   onSelectAgent: (name: string) => void;
   onSelectPlacement: (placement: NewSessionPlacement) => void;
+  onSelectDestination: (destination: NewSessionDestination) => void;
   onPromptInput: (prompt: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
@@ -94,16 +109,20 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const stacked = () => contentWidth() < STACKED_CONTENT_WIDTH;
 
   /**
-   * The label to draw for a placement option.
+   * The label to draw for a numbered option, shared by Placement and Where.
    *
    * Stacking gives each option its own row, but a row is not unlimited: at
    * the sidebar's real 30-column rail the dialog is 26 wide and the label
    * column is 8, which renders `New window` / `Split right` / `Split down`
-   * as `New` / `Split` / `Split` — two of the three indistinguishable. The
-   * full label is therefore used only when it actually fits, and the short
-   * label (which exists for exactly this) is the fallback in both layouts.
+   * as `New` / `Split` / `Split` — two of the three indistinguishable, and
+   * `This checkout` / `New worktree` the same way. The full label is
+   * therefore used only when it actually fits, and the short label (which
+   * exists for exactly this) is the fallback in both layouts.
    */
-  const placementLabel = (option: PlacementOption): string => {
+  const optionLabel = (option: {
+    label: string;
+    compactLabel: string;
+  }): string => {
     // The row also spends a 2-wide number cell and two 1-wide bracket cells.
     const room = contentWidth() - 4;
     if (!stacked()) return compact() ? option.compactLabel : option.label;
@@ -124,10 +143,9 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
 
   /**
    * How many rows each field occupies. Exhaustive over `NewSessionField` by
-   * type, which is the point: a field added to `NEW_SESSION_FIELDS` (issue
-   * #69's worktree destination is next) fails to compile until its height
-   * is declared here. The previous hand-summed constant type-checked fine
-   * and silently clipped the bottom row instead.
+   * type, which is the point: a field added to `NEW_SESSION_FIELDS` fails to
+   * compile until its height is declared here. The previous hand-summed
+   * constant type-checked fine and silently clipped the bottom row instead.
    */
   const fieldRows: Record<NewSessionField, () => number> = {
     // Declared before `visibleAgents` but never CALLED before it exists:
@@ -136,6 +154,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     // is load-bearing, not stylistic.
     agent: () => Math.max(1, visibleAgents().length),
     placement: () => (stacked() ? PLACEMENT_OPTIONS.length : 1),
+    destination: () => (stacked() ? DESTINATION_OPTIONS.length : 1),
     prompt: () => 1,
   };
 
@@ -356,7 +375,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                     <text fg={theme.green}>{selected() ? "[" : ""}</text>
                   </box>
                   <text fg={selected() ? theme.green : theme.subtext}>
-                    {placementLabel(option)}
+                    {optionLabel(option)}
                   </text>
                   <box width={1}>
                     <text fg={theme.green}>{selected() ? "]" : ""}</text>
@@ -382,6 +401,80 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           focusedBackgroundColor="transparent"
           flexGrow={1}
         />
+      </box>
+
+      <box flexDirection="row">
+        <FieldLabel field="destination" text="Where" />
+        <box
+          flexDirection={stacked() ? "column" : "row"}
+          flexGrow={1}
+          onMouseDown={() => props.onFocusField("destination")}
+        >
+          <For each={DESTINATION_OPTIONS}>
+            {(option, index) => {
+              const selected = () => option.value === props.draft.destination;
+              /* The worktree option carries the name it would create, so the
+                 choice is concrete rather than a promise. It tracks the
+                 prompt as it is typed, which is also the answer to "where
+                 did that branch name come from". */
+              const label = () => {
+                const base = optionLabel(option);
+                if (option.value !== "worktree") return base;
+                // Budgeted, not appended blindly: a long prompt yields a long
+                // slug, and on one row that pushed the dialog's own right
+                // border off screen. Each option spends a 2-wide number cell
+                // and two 1-wide brackets, and when side by side the first
+                // option also spends its label and a 2-wide margin.
+                const spent = stacked()
+                  ? 4
+                  : 8 + optionLabel(DESTINATION_OPTIONS[0]!).length + 2;
+                const room = contentWidth() - spent;
+                const slug = slugFromPrompt(props.draft.prompt);
+                if (!slug) {
+                  // A worktree is named by the prompt and nothing else, so
+                  // with no derivable name this option cannot spawn. Say so
+                  // while the choice is being made rather than on Enter, and
+                  // only while it is the choice: on the unselected row the
+                  // hint is noise. Appended only when it fits whole, since a
+                  // truncated `Worktree (a...` explains nothing.
+                  if (!selected()) return base;
+                  const hinted = `${base} (add a prompt)`;
+                  return hinted.length <= room ? hinted : base;
+                }
+                return truncateText(
+                  `${base}: ${slug}`,
+                  Math.max(base.length, room),
+                );
+              };
+              return (
+                <box
+                  height={1}
+                  flexDirection="row"
+                  flexShrink={0}
+                  marginRight={stacked() ? 0 : 2}
+                  onMouseDown={(event) => {
+                    if (event.button !== MouseButton.LEFT) return;
+                    props.onFocusField("destination");
+                    props.onSelectDestination(option.value);
+                  }}
+                >
+                  <box width={2}>
+                    <text fg={theme.overlay}>{`${index() + 1}`}</text>
+                  </box>
+                  <box width={1}>
+                    <text fg={theme.green}>{selected() ? "[" : ""}</text>
+                  </box>
+                  <text fg={selected() ? theme.green : theme.subtext}>
+                    {label()}
+                  </text>
+                  <box width={1}>
+                    <text fg={theme.green}>{selected() ? "]" : ""}</text>
+                  </box>
+                </box>
+              );
+            }}
+          </For>
+        </box>
       </box>
 
       <box flexDirection="row" height={1}>

@@ -15,9 +15,23 @@
  * Nothing here mutates a repo; the removal side lives in `worktree-prune.ts`.
  */
 
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+
+/**
+ * Resolve a path through symlinks so git's recorded worktree path and a
+ * caller's computed one compare equal. Git stores the realpath, so on macOS
+ * a `/tmp` path recorded as `/private/tmp` otherwise never matches. Falls
+ * back to the input for a path that does not exist yet.
+ */
+export function normalizePath(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
+}
 
 export interface GitResult {
   exitCode: number;
@@ -382,6 +396,32 @@ export async function resolveBaseRefs(
  * A squash or rebase merge does NOT satisfy this (the tip commit never
  * appears on the base), which is why the PR-derived reasons exist alongside
  * it rather than on top of it.
+ *
+ * A branch sitting exactly ON a base tip is NOT merged, even though ancestry
+ * says yes (a commit is an ancestor of itself). That shape is a brand new
+ * worktree: `git worktree add -b feat/x <path> main` gives the branch the
+ * base's tip and nothing else, so treating it as merged offered a worktree
+ * created seconds ago, still holding a live agent, for removal under "merged
+ * into main", branch deletion included. There is nothing else locally to tell
+ * the two apart, since zero commits of your own and every commit already
+ * upstream are the same refs.
+ *
+ * Matching ANY eligible base tip answers false for ALL of them, rather than
+ * merely dropping that one base from the loop. Per-base skipping leaks in the
+ * ordinary not-yet-pulled state, which this feature's own `fetch --prune`
+ * produces: with local `main` at B and `origin/main` already at C, a worktree
+ * cut from local `main` has tip B, so the `origin/main` iteration sees unequal
+ * tips, asks whether B is an ancestor of C, and gets yes. Since `origin/main`
+ * is resolved BEFORE `main`, the brand-new worktree classified as merged
+ * anyway. Whether the base a branch sits on happens to be behind another base
+ * says nothing about whether its work is finished.
+ *
+ * This deliberately also suppresses a branch that was FAST-FORWARD merged and
+ * then left where it was. Accepted: `pr-merged` and `upstream-gone` still
+ * catch those, and losing a reason costs a cleanup while keeping it cost live
+ * work. Do not "fix" it with `git rev-list --count <base>..<branch> == 0`
+ * either. That count is also 0 for a genuinely merged branch, so it suppresses
+ * the reason entirely rather than just this shape.
  */
 export async function isMergedInto(
   repoRoot: string,
@@ -389,10 +429,21 @@ export async function isMergedInto(
   baseRefs: string[],
   git: GitRun = runGit,
 ): Promise<boolean> {
-  for (const base of baseRefs) {
-    // Never call a branch "merged into itself": the default branch's own
-    // worktree would otherwise classify as removable.
-    if (base === branch || base.endsWith(`/${branch}`)) continue;
+  const branchRef = `refs/heads/${branch}`;
+  const tips = await readTips(repoRoot, [branchRef, ...baseRefs], git);
+  const branchTip = tips.get(branchRef);
+  // Never call a branch "merged into itself": the default branch's own
+  // worktree would otherwise classify as removable. Applied once, so the
+  // equality rule and the ancestry loop consider the same set of bases.
+  const bases = baseRefs.filter(
+    (base) => !(base === branch || base.endsWith(`/${branch}`)),
+  );
+
+  if (branchTip && bases.some((base) => tips.get(base) === branchTip)) {
+    return false;
+  }
+
+  for (const base of bases) {
     const res = await git(repoRoot, [
       "merge-base",
       "--is-ancestor",
@@ -401,12 +452,38 @@ export async function isMergedInto(
       // branch's name silently answered this question about the tag. An
       // unmerged branch then classified `merged-locally` and lost its
       // directory on a false reason.
-      `refs/heads/${branch}`,
+      branchRef,
       base,
     ]);
     if (res.exitCode === 0) return true;
   }
   return false;
+}
+
+/**
+ * Commit SHA per ref, resolved in one `rev-parse`.
+ *
+ * All or nothing: git interleaves its "unknown revision" complaint with the
+ * SHAs it did resolve, so a short reply cannot be mapped back to the refs that
+ * produced it. An empty map means "no equality knowledge", which leaves
+ * {@link isMergedInto} on the ancestry answer alone.
+ */
+async function readTips(
+  repoRoot: string,
+  refs: string[],
+  git: GitRun,
+): Promise<Map<string, string>> {
+  const res = await git(
+    repoRoot,
+    ["rev-parse"].concat(refs.map((ref) => `${ref}^{commit}`)),
+  );
+  if (res.exitCode !== 0) return new Map();
+  const lines = res.stdout
+    .trim()
+    .split("\n")
+    .map((line) => line.trim());
+  if (lines.length !== refs.length) return new Map();
+  return new Map(refs.map((ref, i) => [ref, lines[i]]));
 }
 
 export interface UpstreamState {

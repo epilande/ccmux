@@ -466,3 +466,50 @@ export function buildTmuxSpawnArgv(input: TmuxSpawnArgvInput): string[] {
   argv.push("-c", cwd, "-P", "-F", "#{pane_id}");
   return argv;
 }
+
+/** A request to spawn into a worktree rather than the given cwd. */
+export interface WorktreeRequest {
+  name?: string;
+  base?: string;
+}
+
+/**
+ * Validate and normalize the wire `worktree` field.
+ *
+ * Absent (or `null`/`false`) means the ordinary spawn into `cwd`. An object
+ * opts in, with both members optional: no `name` derives one from the prompt,
+ * no `base` branches from the main checkout's current branch.
+ *
+ * Deliberately one shape rather than also accepting `true`. The CLI's bare
+ * `--worktree` sends `{}`, which says the same thing, and every extra
+ * accepted spelling is another path that has to stay correct.
+ */
+export function normalizeWorktreeRequest(
+  value: unknown,
+): BuildResult<WorktreeRequest | undefined> {
+  if (value === undefined || value === null || value === false) {
+    return { ok: true, value: undefined };
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return {
+      ok: false,
+      error:
+        "Invalid 'worktree' field: expected an object such as { name, base }",
+    };
+  }
+
+  const raw = value as { name?: unknown; base?: unknown };
+  const request: WorktreeRequest = {};
+  for (const key of ["name", "base"] as const) {
+    const member = raw[key];
+    if (member === undefined || member === null || member === "") continue;
+    if (typeof member !== "string") {
+      return {
+        ok: false,
+        error: `Invalid 'worktree.${key}' field: expected a string`,
+      };
+    }
+    request[key] = member;
+  }
+  return { ok: true, value: request };
+}

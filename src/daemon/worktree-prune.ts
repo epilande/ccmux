@@ -14,7 +14,7 @@
  * of that.
  */
 
-import { existsSync, realpathSync, renameSync } from "node:fs";
+import { existsSync, renameSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import type { SessionStatus } from "../types/session";
@@ -30,6 +30,7 @@ import {
   fetchPrune,
   isMergedInto,
   listWorktrees,
+  normalizePath,
   readAdminDir,
   readSymlinkDirectories,
   readDirtyState,
@@ -47,7 +48,9 @@ import {
  *
  * - `pr-merged`: GitHub says the branch's PR was merged. Survives squash and
  *   rebase merges, which no local check can see.
- * - `merged-locally`: the branch tip is an ancestor of the default branch.
+ * - `merged-locally`: the branch tip is an ancestor of the default branch, and
+ *   is not the default branch's own tip (see {@link isMergedInto} for why that
+ *   exclusion is what keeps a just-created worktree out of this list).
  *   Locally provable, so it is the one reason that never needs a force.
  * - `upstream-gone`: the branch had an upstream and it is gone after a
  *   `fetch --prune` — the shape a merge with auto-delete leaves behind, but
@@ -90,7 +93,7 @@ export interface WorktreeSession {
    * A paneless Claude background-agent row. Its pid belongs to Claude's own
    * supervisor rather than to ccmux, so it must never be signalled directly
    * (the same rule `handleKillSession` follows). It still counts for the
-   * working-session gate.
+   * session gate.
    */
   background?: boolean;
 }
@@ -120,7 +123,12 @@ export interface PruneCandidate {
   branchDeletion: BranchDeletion;
   /** `.git/worktrees/<name>`, captured while the worktree still exists. */
   adminDir: string | null;
-  /** Idle/finished sessions in this worktree; removal takes them down. */
+  /**
+   * Sessions in this worktree; removal takes them down. Always empty on a
+   * candidate {@link scanRepo} produced, since a bound session in any state
+   * now skips the worktree instead. Still honored by {@link runPrune} because
+   * its contract is the candidate it is handed, not the scan's behavior.
+   */
   sessions: WorktreeSession[];
 }
 
@@ -275,20 +283,6 @@ export interface ScanDeps {
   hasOpenPR?: (cwd: string, branch: string) => boolean;
   /** Skip the per-repo `git fetch --prune` (tests, offline runs). */
   skipFetch?: boolean;
-}
-
-/**
- * Resolve a path through symlinks so git's recorded worktree path and the
- * daemon's `--show-toplevel` answer compare equal (on macOS, `/tmp` and
- * `/private/tmp` otherwise make every match fail). Falls back to the input
- * for a path that no longer exists.
- */
-export function normalizePath(path: string): string {
-  try {
-    return realpathSync.native(path);
-  } catch {
-    return path;
-  }
 }
 
 /**
@@ -512,10 +506,24 @@ async function classifyOne(
   if (!branch) return {};
 
   const sessions = deps.sessionsFor?.(normalizePath(path)) ?? [];
-  // A live agent outranks every removal reason: pulling the directory out
-  // from under a working agent loses whatever it has not written yet.
-  if (sessions.some((s) => s.status === "working")) {
-    return skip("an agent is working here");
+  // ANY session bound to this worktree outranks every removal reason, not just
+  // a working one. `working` is the obvious case (pulling the directory out
+  // from under it loses whatever it has not written yet), but an agent sitting
+  // at its prompt or blocked on a permission question is equally in use, and
+  // for `waiting` the agent is by definition mid-turn.
+  //
+  // The gate has to be this wide because the classification cannot always tell
+  // fresh from finished: a worktree branched from base has the base's tip as
+  // its own, which every local check reads as "already merged" (see
+  // `isMergedInto`). A live session is the signal that survives that.
+  const live =
+    sessions.find((s) => s.status === "working") ?? sessions.at(0) ?? null;
+  if (live) {
+    return skip(
+      live.status === "working"
+        ? "an agent is working here"
+        : `an agent is ${live.status} here`,
+    );
   }
 
   const upstream = ctx.upstreams.get(branch) ?? { upstream: null, gone: false };

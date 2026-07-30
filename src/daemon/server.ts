@@ -21,12 +21,14 @@ import {
   normalizePrompt,
   normalizeSplit,
   normalizeTarget,
+  normalizeWorktreeRequest,
   substitutePlaceholders,
   NATIVE_SESSION_ID_PATTERN,
   type BuildResult,
   type SpawnPlacement,
   type SpawnSplit,
 } from "./spawn-command";
+import { createWorktree, type WorktreeCreation } from "./worktree-create";
 import { getAgents, type AgentDef } from "../lib/agents";
 import { listSpawnableAgents, spawnBinaryFor } from "../lib/spawnable-agents";
 import {
@@ -62,14 +64,13 @@ import {
   type SessionMatches,
 } from "./transcript-search";
 import {
-  normalizePath,
   runPrune,
   scanRepos,
   type PruneCandidate,
   type PruneScan,
   type WorktreeSession,
 } from "./worktree-prune";
-import { fetchPrune } from "./worktree-git";
+import { fetchPrune, normalizePath } from "./worktree-git";
 import type {
   NotificationActionInput,
   NotificationActionResult,
@@ -2207,6 +2208,7 @@ export class DaemonServer {
       target?: string;
       callerPane?: string;
       detach?: boolean;
+      worktree?: unknown;
     };
     try {
       body = (await req.json()) as typeof body;
@@ -2317,6 +2319,37 @@ export class DaemonServer {
       );
     }
 
+    // A worktree destination replaces the cwd for everything downstream, so it
+    // is resolved here: past this point the handler is the ordinary spawn
+    // path, and placement, split direction and per-agent prompt handling apply
+    // to the new checkout without knowing it is one.
+    const worktreeRequest = normalizeWorktreeRequest(body.worktree);
+    if (!worktreeRequest.ok) {
+      return Response.json(
+        { error: worktreeRequest.error },
+        { status: 400, headers },
+      );
+    }
+    // A worktree destination is a different directory, so it runs into exactly
+    // the wall `resolveForkSource` refuses an explicit `cwd` for: the fork
+    // would start in the new checkout and find no conversation there. That
+    // check cannot catch this one, because a fork into a worktree sends no
+    // `cwd` at all and only becomes a relocation once the worktree resolves.
+    // Refused BEFORE the worktree is created, so a rejected request leaves no
+    // directory and no branch behind.
+    if (forkSource && worktreeRequest.value) {
+      return Response.json(
+        {
+          error:
+            `Cannot fork ${forkSource.session.agentType} into a new worktree. ` +
+            `A resumed session is resolved against the project directory for its cwd, ` +
+            `so the fork would start in the worktree and find no conversation. ` +
+            `Spawn a fresh session into the worktree, or fork in ${forkSource.session.cwd}.`,
+        },
+        { status: 400, headers },
+      );
+    }
+
     // Resolve agent definition (custom agents from config are also valid)
     const agent = this.getAgentByType(agentName);
     if (!agent) {
@@ -2381,8 +2414,65 @@ export class DaemonServer {
       }
     }
 
+    // Creating the worktree is the handler's first side effect, so it comes
+    // last among the things that can still refuse the request. Everything
+    // above resolves the agent, the command and the placement from the
+    // request alone and never reads the destination directory, so a bad
+    // agent name or a stale target pane now 400s without leaving a checkout
+    // and a branch behind for the user to clean up.
+    let spawnCwd = cwd;
+    let worktreeInfo: WorktreeCreation | undefined;
+    if (worktreeRequest.value) {
+      const gitInfo = await this.getGitInfo(cwd);
+      if (!gitInfo.mainRepoRoot) {
+        return Response.json(
+          { error: `Not inside a git repository: ${cwd}` },
+          { status: 400, headers },
+        );
+      }
+      const created = await createWorktree(gitInfo.mainRepoRoot, {
+        ...worktreeRequest.value,
+        prompt: prompt ?? undefined,
+      });
+      if (!created.ok) {
+        return Response.json(
+          { error: created.error },
+          { status: 400, headers },
+        );
+      }
+      worktreeInfo = created.result;
+      spawnCwd = created.result.path;
+    }
+
+    /**
+     * Decorate a failure that happens AFTER the worktree was created.
+     *
+     * The worktree is deliberately not rolled back: create-or-open makes a
+     * retry correct, and unwinding would risk deleting a worktree that
+     * already existed. But that only helps if the user is told, otherwise
+     * they are left wondering whether to clean it up by hand.
+     *
+     * The retry advice splits by mode because only an explicit name is
+     * stable: a derived name that is already taken gets a numeric suffix, so
+     * re-running the same command would build a sibling rather than reuse
+     * what is already there.
+     */
+    const withWorktreeNote = (error: string): string => {
+      if (!worktreeInfo?.created) return error;
+      const retry =
+        worktreeRequest.value?.name === undefined
+          ? `re-running will create a numbered sibling, pass --worktree '${worktreeInfo.name}' to reuse this one`
+          : "re-running the same command will reuse it";
+      return `${error} (the worktree '${worktreeInfo.name}' was created at ${worktreeInfo.path} and left in place; ${retry})`;
+    };
+
     // Create tmux pane
-    const tmuxArgv = buildTmuxSpawnArgv({ split, cwd, placement, detach });
+    const tmuxArgv = buildTmuxSpawnArgv({
+      split,
+      cwd: spawnCwd,
+      placement,
+      detach,
+    });
     const tmuxCmd = tmuxArgv[0];
     try {
       const proc = Bun.spawn(["tmux", ...tmuxArgv], {
@@ -2393,7 +2483,9 @@ export class DaemonServer {
       if (exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();
         return Response.json(
-          { error: `tmux ${tmuxCmd} failed: ${stderr.trim()}` },
+          {
+            error: withWorktreeNote(`tmux ${tmuxCmd} failed: ${stderr.trim()}`),
+          },
           { status: 500, headers },
         );
       }
@@ -2431,7 +2523,11 @@ export class DaemonServer {
         const stderr = await new Response(sendProc.stderr).text();
         await killPane();
         return Response.json(
-          { error: `Failed to send command to pane: ${stderr.trim()}` },
+          {
+            error: withWorktreeNote(
+              `Failed to send command to pane: ${stderr.trim()}`,
+            ),
+          },
           { status: 500, headers },
         );
       }
@@ -2445,10 +2541,21 @@ export class DaemonServer {
         await selectProc.exited;
       }
 
-      return Response.json({ success: true, paneId, command }, { headers });
+      // `worktree` is echoed back because the caller asked for a destination
+      // it did not name: the path, branch and base ref are decided here, and
+      // `created` / `branchCreated` say which of the two the request made
+      // rather than found, so a caller can report it without overclaiming.
+      return Response.json(
+        { success: true, paneId, command, worktree: worktreeInfo },
+        { headers },
+      );
     } catch (err: unknown) {
       return Response.json(
-        { error: `Failed to spawn session: ${errorMessage(err)}` },
+        {
+          error: withWorktreeNote(
+            `Failed to spawn session: ${errorMessage(err)}`,
+          ),
+        },
         { status: 500, headers },
       );
     }
