@@ -164,20 +164,30 @@ describe("SessionItem", () => {
     expect(frame).toContain("trees/ccmux");
   });
 
-  it("labels a worktree from `project` when the daemon sent no repo root", async () => {
-    // Older daemon: neither field is on the wire at all (absent, not null),
-    // but `project` already resolves to the main checkout's name for a
-    // worktree, and the cwd still ends at the worktree directory.
+  it("does not fabricate a repo prefix when mainRepoRoot is null (O1)", async () => {
+    // A worktree of a bare repo (or a `--separate-git-dir` layout) has no
+    // main checkout, so mainRepoRoot is genuinely null (S5). `project` in
+    // that case is just the pane cwd's basename, not a repo name - a stale
+    // `?? session.project` fallback here would fabricate a `<repo>/<worktree>`
+    // label out of it. Pane cwd basename ("featx") deliberately differs from
+    // the worktree root's tail ("wt") so the `repo === worktreeName` guard
+    // can't accidentally suppress the fabrication and mask the bug.
+    //
+    // Dirname (compact) mode: a real repoPrefix survives width pressure and
+    // compact mode (see the earlier "keeps the repo... in compact mode"
+    // test), so this is where a fabricated one would be most visible.
     const frame = await renderItem({
       session: mockEnrichedSession({
-        cwd: "/Users/test/Code/ccmux/.claude/worktrees/parking",
-        mainRepoRoot: undefined,
-        worktreeRoot: undefined,
-        project: "ccmux",
+        cwd: "/Users/test/Code/host/wt/src/featx",
+        worktreeRoot: "/Users/test/Code/host/wt",
+        mainRepoRoot: null,
+        project: "featx",
         isWorktree: true,
       }),
+      columns: { row1: { left: [{ field: "project", mode: "dirname" }] } },
     });
-    expect(frame).toContain("ccmux/parking");
+    expect(frame).not.toContain("featx/wt");
+    expect(frame).not.toContain("wt");
   });
 
   it("falls back to the plain path for a non-worktree row", async () => {

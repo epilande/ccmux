@@ -124,20 +124,22 @@ export function pathTail(path: string | null | undefined): string | null {
 
 /**
  * The repo a worktree row belongs to, for the `<repo>/<worktree>` label.
- * Null for anything that isn't a worktree, and for the case where the two
+ * Null for anything that isn't a worktree, for the case where the two
  * segments would read the same (a worktree directory named after its repo),
- * where the plain path parts say more.
+ * where the plain path parts say more, and for a worktree whose
+ * `mainRepoRoot` the daemon couldn't resolve (a worktree of a bare repo).
  *
- * Prefers `mainRepoRoot` (git's own answer, via the daemon) and falls back
- * to `project`, which resolves to the main checkout's basename for a
- * worktree and is what the row already groups under.
+ * Sourced from `mainRepoRoot` only (git's own answer, via the daemon), with
+ * no `project` fallback: `project` is a cwd basename in exactly the cases
+ * where `mainRepoRoot` is null, so falling back to it would fabricate a
+ * `<repo>/<worktree>` label out of a directory name that isn't a repo.
  */
 function worktreeRepoName(
   session: EnrichedSession,
   worktreeName: string,
 ): string | null {
   if (!session.isWorktree) return null;
-  const repo = pathTail(session.mainRepoRoot) ?? session.project;
+  const repo = pathTail(session.mainRepoRoot);
   if (!repo || repo === worktreeName) return null;
   return repo;
 }
