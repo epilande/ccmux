@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { AgentStateFile } from "./agent-state";
 import {
   cleanStateEntries,
@@ -723,6 +723,38 @@ describe("runPrune", () => {
       stateFiles: [],
       log: () => {},
       allowDirtyPaths: [dirty.path],
+    });
+
+    expect(result.outcomes[0].removed).toBe(true);
+    expect(existsSync(wt)).toBe(false);
+  });
+
+  /**
+   * S10. `server.ts` normalizes `allowDirty` before sending it, but
+   * `candidate.path` is git's own raw recorded path. On a case-insensitive
+   * filesystem those can differ by case alone, and comparing them
+   * un-normalized refused an opt-in the user genuinely granted.
+   */
+  it("honors a dirty opt-in whose case differs from git's raw recorded path", async () => {
+    const { wt, candidate } = await candidateFor("run-dirty-case", "feat/case");
+    writeFileSync(join(wt, "scratch.txt"), "work\n");
+    const mismatchedCase = join(dirname(wt), basename(wt).toUpperCase());
+    // Sanity: still the very same file on this filesystem, or the rest of
+    // the test would not be exercising the case-mismatch this guards.
+    expect(normalizePath(mismatchedCase)).toBe(normalizePath(wt));
+    const dirty: PruneCandidate = {
+      ...candidate,
+      path: mismatchedCase,
+      dirty: true,
+      untracked: 1,
+    };
+
+    const result = await runPrune([dirty], {
+      stateFiles: [],
+      log: () => {},
+      // As server.ts sends it: normalized, not echoing the candidate's raw
+      // case back.
+      allowDirtyPaths: [normalizePath(wt)],
     });
 
     expect(result.outcomes[0].removed).toBe(true);

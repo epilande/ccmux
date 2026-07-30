@@ -729,6 +729,13 @@ export interface PruneOptions extends PruneDeps {
    * the one outcome no amount of "I confirmed the list" should authorize by
    * itself. Enforced here, in the destructive core, so every surface inherits
    * it rather than each one re-implementing the gate.
+   *
+   * Compared against `normalizePath(candidate.path)`, not the raw path (S10):
+   * a caller (`server.ts`) normalizes this list before sending it, and
+   * `candidate.path` is git's own raw recorded path, which can differ from
+   * the normalized form by case (case-insensitive filesystem) or a resolved
+   * symlink. Comparing them un-normalized still fails closed, but dead-ends
+   * an opted-in removal on a spurious "was not opted in".
    */
   allowDirtyPaths?: string[];
 }
@@ -998,7 +1005,14 @@ export async function runPrune(
     };
     outcomes.push(outcome);
 
-    if (candidate.dirty && !allowDirty.has(candidate.path)) {
+    // S10: compared against the normalized path on both sides. `allowDirty`
+    // arrives normalized (the server normalizes the opt-in list it was
+    // sent), but `candidate.path` is git's own raw recorded path, which can
+    // differ by case on a case-insensitive filesystem or by a symlink git
+    // resolved and the caller's echo did not. Comparing raw-to-normalized
+    // fails closed (nothing is destroyed) but dead-ends the user on a
+    // refusal for a worktree they did opt into.
+    if (candidate.dirty && !allowDirty.has(normalizePath(candidate.path))) {
       outcome.error =
         "has uncommitted or untracked changes and was not opted in";
       steps.push({
@@ -1084,7 +1098,7 @@ export async function runPrune(
     // `stopSessions` just ran — and someone editing in this worktree during
     // that window would otherwise lose the work with no opt-in. One
     // `git status`, immediately before the directory moves.
-    if (!allowDirty.has(candidate.path)) {
+    if (!allowDirty.has(normalizePath(candidate.path))) {
       // Same setup-symlink exemption as the scan, or a worktree that passed
       // the list would be refused here for the link the tooling itself made.
       //
