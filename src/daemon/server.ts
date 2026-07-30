@@ -19,6 +19,7 @@ import {
   buildAgentForkCommand,
   buildAgentSpawnCommand,
   buildTmuxSpawnArgv,
+  normalizeBoolean,
   normalizePrompt,
   normalizeSplit,
   normalizeTarget,
@@ -2283,7 +2284,7 @@ export class DaemonServer {
       split?: SpawnSplit;
       target?: string;
       callerPane?: string;
-      detach?: boolean;
+      detach?: unknown;
       worktree?: unknown;
     };
     try {
@@ -2295,7 +2296,7 @@ export class DaemonServer {
       );
     }
 
-    const { resume, detach = false } = body;
+    const { resume } = body;
 
     // Forking is resolved first because the SOURCE session supplies both the
     // agent and the default cwd, so the usual "is cwd present" check below
@@ -2361,6 +2362,19 @@ export class DaemonServer {
       );
     }
     const prompt = promptResult.value;
+
+    // Every other spawn field goes through a normalizer; `detach` used to be
+    // an unchecked cast, so `{"detach":"false"}` (a truthy string) reached
+    // tmux as `true`, passing `-d` and suppressing `select-window` — the
+    // opposite of what the caller wrote.
+    const detachResult = normalizeBoolean(body.detach, "detach");
+    if (!detachResult.ok) {
+      return Response.json(
+        { error: detachResult.error },
+        { status: 400, headers },
+      );
+    }
+    const detach = detachResult.value ?? false;
 
     // `resume` is interpolated into a shell command typed into the pane, so an
     // unconstrained value is command injection. Constrain it like `/invoke`.

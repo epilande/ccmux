@@ -3849,6 +3849,38 @@ describe("POST /spawn", () => {
     }
   });
 
+  it("omitted detach behaves like false", async () => {
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      await internals.handleRequest(spawnRequest({ agent: "prompty", cwd }));
+      expect(argv[0]).not.toContain("-d");
+      expect(argv.map((a) => a[1])).toContain("select-window");
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects a truthy non-boolean detach instead of treating it as true", async () => {
+    // Before the fix, `body` was an unchecked cast: the string "false" is
+    // truthy, so it passed tmux `-d` and suppressed `select-window` — the
+    // opposite of what the caller wrote.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, detach: "false" }),
+      );
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain(
+        "detach",
+      );
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
   it("succeeds without killing the pane when select-window itself throws", async () => {
     // The agent is already running by the time select-window runs
     // (send-keys succeeded), so a focus-switch failure here must not be

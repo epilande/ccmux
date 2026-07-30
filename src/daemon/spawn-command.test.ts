@@ -10,6 +10,7 @@ import {
   buildTmuxSpawnArgv,
   escapeSingleQuoted,
   MAX_SPAWN_PROMPT_BYTES,
+  normalizeBoolean,
   normalizePrompt,
   normalizeSplit,
   normalizeTarget,
@@ -64,6 +65,34 @@ describe("normalizeTarget", () => {
   it("rejects window ids, session names, and other target forms", () => {
     for (const bad of ["@3", "mysession:1.0", "0", "%", "%1a", 12]) {
       expect(normalizeTarget(bad).ok).toBe(false);
+    }
+  });
+});
+
+describe("normalizeBoolean", () => {
+  // `detach` used to be an unchecked cast, so a truthy non-boolean like the
+  // string "false" silently reached tmux as `true`.
+
+  it("treats absent as absent, leaving the caller's default", () => {
+    expect(normalizeBoolean(undefined, "detach")).toEqual({
+      ok: true,
+      value: undefined,
+    });
+  });
+
+  it("passes real booleans through", () => {
+    expect(normalizeBoolean(true, "detach")).toEqual({ ok: true, value: true });
+    expect(normalizeBoolean(false, "detach")).toEqual({
+      ok: true,
+      value: false,
+    });
+  });
+
+  it("rejects a truthy non-boolean, naming the field", () => {
+    for (const bad of ["false", "true", 0, 1, null, {}, []]) {
+      const result = normalizeBoolean(bad, "detach");
+      expect(result.ok).toBe(false);
+      expect(result.ok || result.error).toContain("detach");
     }
   });
 });

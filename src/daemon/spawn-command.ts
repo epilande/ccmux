@@ -67,6 +67,25 @@ export function normalizeTarget(
 }
 
 /**
+ * Validate a wire boolean field (`detach`). Every other spawn field goes
+ * through a normalizer that rejects anything not in its accepted shape; this
+ * one used to be an unchecked cast, so a truthy non-boolean like the string
+ * `"false"` silently reached tmux as `true`. `undefined` is left for the
+ * caller to default.
+ */
+export function normalizeBoolean(
+  value: unknown,
+  field: string,
+): BuildResult<boolean | undefined> {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (typeof value === "boolean") return { ok: true, value };
+  return {
+    ok: false,
+    error: `Invalid '${field}' field: expected true or false`,
+  };
+}
+
+/**
  * Control characters the prompt may not contain. A NUL in particular
  * survives shell escaping but makes `Bun.spawn` reject the argv — and it
  * would do so AFTER the pane exists, leaving an orphan behind and
