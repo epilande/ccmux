@@ -326,6 +326,68 @@ describe("file setup", () => {
     expect(out.symlinked).toEqual([]);
     expect(out.included).toEqual([]);
   });
+
+  // The escape guard cannot see this one: the entry itself stays inside the
+  // worktree, and the way out is the LINK TEXT of a path git checked out
+  // there. `existsSync` follows symlinks, so a dangling one reads as absent
+  // and a copy writes THROUGH it to whatever it names.
+  it("refuses to copy over a dangling symlink in the worktree", async () => {
+    const repo = await makeRepo("through-link");
+    const leaked = join(root, "leaked.txt");
+    // Four levels up from `<repo>/.claude/worktrees/wt` is `root`, so the
+    // committed link names a path outside the repo entirely.
+    symlinkSync(
+      join("..", "..", "..", "..", "leaked.txt"),
+      join(repo, "env.local"),
+    );
+    writeFileSync(join(repo, ".gitignore"), "env.local\n");
+    writeFileSync(join(repo, ".worktreeinclude"), "env.local\n");
+    await git(repo, [
+      "add",
+      "-f",
+      ".gitignore",
+      ".worktreeinclude",
+      "env.local",
+    ]);
+    await git(repo, ["commit", "-m", "link"]);
+    await git(repo, ["branch", "old"]);
+    // The main checkout's own copy is a real, untracked, ignored file: the one
+    // the include pass then tries to copy in on top of the checked-out link.
+    await git(repo, ["rm", "--cached", "-q", "env.local"]);
+    rmSync(join(repo, "env.local"));
+    writeFileSync(join(repo, "env.local"), "SECRET=1\n");
+    await git(repo, ["commit", "-m", "untrack"]);
+
+    const out = await createWorktree(repo, { name: "wt", base: "old" });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    // The filesystem first: what a regression costs is a secret written to a
+    // path outside the repo.
+    expect(existsSync(leaked)).toBe(false);
+    expect(lstatIsSymlink(join(out.result.path, "env.local"))).toBe(true);
+    expect(out.result.included).not.toContain("env.local");
+  });
+
+  // `git ls-files` C-quotes a non-ASCII path by default, handing back the
+  // literal `"caf\303\251.local"`, which names nothing on disk and got
+  // silently skipped. Both calls run NUL-terminated so an entry arrives as
+  // its real bytes.
+  it("includes a non-ASCII path", async () => {
+    const repo = await makeRepo("non-ascii");
+    writeFileSync(join(repo, ".gitignore"), "*.local\n");
+    writeFileSync(join(repo, ".worktreeinclude"), "*.local\n");
+    await git(repo, ["add", "-f", ".gitignore", ".worktreeinclude"]);
+    await git(repo, ["commit", "-m", "config"]);
+    writeFileSync(join(repo, "café.local"), "SECRET=1\n");
+    const wt = join(root, "target-non-ascii");
+    mkdirSync(wt, { recursive: true });
+
+    const out = await applyWorktreeFileSetup(repo, wt);
+
+    expect(out.included).toEqual(["café.local"]);
+    expect(readFileSync(join(wt, "café.local"), "utf-8")).toBe("SECRET=1\n");
+  });
 });
 
 describe("createWorktree", () => {

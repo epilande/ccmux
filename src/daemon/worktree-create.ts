@@ -275,12 +275,14 @@ export async function resolveWorktreeIncludes(
   const [matching, ignored] = await Promise.all([
     git(mainRepoRoot, [
       "ls-files",
+      "-z",
       "--others",
       "--ignored",
       `--exclude-from=${includePath}`,
     ]),
     git(mainRepoRoot, [
       "ls-files",
+      "-z",
       "--others",
       "--ignored",
       "--exclude-standard",
@@ -288,13 +290,14 @@ export async function resolveWorktreeIncludes(
   ]);
   if (matching.exitCode !== 0 || ignored.exitCode !== 0) return [];
 
-  const lines = (out: string): string[] =>
-    out
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l !== "");
-  const ignoredSet = new Set(lines(ignored.stdout));
-  return lines(matching.stdout).filter((path) => ignoredSet.has(path));
+  // `-z` is not just a separator choice: without it git C-QUOTES any path with
+  // a non-ASCII or special byte, so `café.local` comes back as the literal
+  // `"caf\303\251.local"` and every filesystem call on it misses. NUL
+  // termination disables the quoting, so an entry is kept byte for byte.
+  const entries = (out: string): string[] =>
+    out.split("\0").filter((l) => l !== "");
+  const ignoredSet = new Set(entries(ignored.stdout));
+  return entries(matching.stdout).filter((path) => ignoredSet.has(path));
 }
 
 /**
@@ -402,7 +405,12 @@ export async function applyWorktreeFileSetup(
     const target = join(worktreePath, entry);
     if (!isInside(worktreePath, target)) continue;
     if (!existsSync(source)) continue;
-    if (existsSync(target)) continue;
+    // Same guard as the symlink loop, and the symlink half matters as much
+    // here: a DANGLING symlink checked out at the target reads as absent to
+    // `existsSync`, and a copy would then write THROUGH it to wherever it
+    // points, which the escape guard above cannot see because the escape is
+    // in the link's text rather than in the entry's.
+    if (existsSync(target) || isSymlink(target)) continue;
     try {
       mkdirSync(dirname(target), { recursive: true });
       await cp(source, target, { recursive: true });
