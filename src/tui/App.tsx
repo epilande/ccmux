@@ -656,9 +656,16 @@ export function App(props: AppProps) {
   function groupContextMenuNewSession() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
-    const first = store.selectedGroupSessions()[0];
+    // Through `newSessionContext`, the same resolver the `n` key uses: this
+    // path used to take the first member's cwd unconditionally, so a header
+    // grouped by tmux session or window answered one way to the keyboard and
+    // another to the mouse. Located by the menu's own group key rather than
+    // the selection, which SSE re-sorts underneath an open menu.
+    const header = store
+      .flatItems()
+      .find((item) => item.type === "header" && item.groupKey === cm.groupKey);
     store.actions.hideGroupContextMenu();
-    openNewSession({ cwd: first ? sessionCwd(first) : pickerCwd() });
+    openNewSession(newSessionContext(header ?? null));
   }
 
   function contextMenuReview() {
@@ -934,6 +941,9 @@ export function App(props: AppProps) {
    * Grouped by tmux session or window, its members can span unrelated
    * repositories, so the first member's cwd would be an arbitrary pick —
    * the picker's own directory is at least a defensible default.
+   *
+   * Every entry point (the `n` key, both context menus) routes through here,
+   * so key and mouse cannot answer the same question differently.
    */
   function newSessionContext(item: FlatItem | null): {
     cwd: string;
@@ -947,7 +957,18 @@ export function App(props: AppProps) {
       item?.type === "header" &&
       GROUPINGS_BY_DIRECTORY.has(store.state.groupBy)
     ) {
-      const first = item.members[0]?.session;
+      const members = item.members.map((member) => member.session);
+      // A project group is repo-level: it holds the main checkout AND every
+      // worktree hanging off it, and members are sorted by status then
+      // activity. `members[0]` is therefore an arbitrary sibling worktree
+      // that can change between two opens; `mainRepoRoot` is the one
+      // directory every member of the group agrees on. `cwd` grouping keys
+      // off the directory itself, so it keeps taking the member's.
+      if (store.state.groupBy === "project") {
+        const repoRoot = members.find((s) => s.mainRepoRoot)?.mainRepoRoot;
+        if (repoRoot) return { cwd: repoRoot };
+      }
+      const first = members[0];
       if (first) return { cwd: sessionCwd(first) };
     }
     return { cwd: pickerCwd() };

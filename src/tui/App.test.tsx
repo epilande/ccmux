@@ -3292,6 +3292,103 @@ describe("App new session dialog", () => {
     }
   });
 
+  /** Right-click the group header on row 1 and click its "New session here"
+   *  item, located by label so a menu reshuffle can't fire a different
+   *  action. Returns the frame with the dialog open. */
+  async function openGroupMenuNewSession(): Promise<string> {
+    await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+    await setup.renderOnce();
+    const menuRow = setup
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes("New session here"));
+    expect(menuRow).toBeGreaterThan(0);
+    await setup.mockMouse.click(7, menuRow, MouseButtons.LEFT);
+    await settle();
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  }
+
+  it("gives the same directory for a group whether opened by key or by mouse", async () => {
+    // Grouped by tmux session, a header's members can span unrelated repos,
+    // so the first member's cwd is an arbitrary pick and the picker's own
+    // directory is the defensible answer. The key path already gated on that;
+    // the menu path took the first member unconditionally, so the same header
+    // answered differently depending on how it was opened.
+    const { restore } = withDaemon();
+    const originalPwd = process.env.CCMUX_CALLER_PWD;
+    process.env.CCMUX_CALLER_PWD = "/where/the/picker/ran";
+    const grouped = [
+      session({ id: "s1", cwd: "/code/other-repo", tmuxTarget: "dev:1.0" }),
+      session({ id: "s2", cwd: "/code/myapp", tmuxTarget: "dev:2.0" }),
+    ];
+    try {
+      await renderApp(120, 24, { groupBy: "session" });
+      sseCallbacks!.onInit(grouped, null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+      const byKey = setup.captureCharFrame();
+      expect(byKey).toContain("/where/the/picker/ran");
+
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+
+      const byMouse = await openGroupMenuNewSession();
+      expect(byMouse).toContain("New session");
+      expect(byMouse).toContain("/where/the/picker/ran");
+      expect(byMouse).not.toContain("/code/other-repo");
+    } finally {
+      if (originalPwd === undefined) delete process.env.CCMUX_CALLER_PWD;
+      else process.env.CCMUX_CALLER_PWD = originalPwd;
+      restore();
+    }
+  });
+
+  it("uses the repo root for a project group, not a member's worktree", async () => {
+    // A project group is repo-level: it holds the main checkout AND every
+    // worktree of it, and members are sorted by status then activity. Taking
+    // members[0] made the directory a sibling worktree that changes between
+    // two opens; the repo root is the one directory the whole group agrees on.
+    const { restore } = withDaemon();
+    const worktree = session({
+      id: "s1",
+      cwd: "/code/myapp/.claude/worktrees/feature",
+      project: "myapp",
+      isWorktree: true,
+      mainRepoRoot: "/code/myapp",
+    });
+    const checkout = session({
+      id: "s2",
+      cwd: "/code/myapp",
+      project: "myapp",
+      mainRepoRoot: "/code/myapp",
+    });
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit([worktree, checkout], null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+      const byKey = setup.captureCharFrame();
+      expect(byKey).toContain("/code/myapp");
+      expect(byKey).not.toContain("worktrees/feature");
+
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+
+      const byMouse = await openGroupMenuNewSession();
+      expect(byMouse).toContain("/code/myapp");
+      expect(byMouse).not.toContain("worktrees/feature");
+    } finally {
+      restore();
+    }
+  });
+
   it("offers New session here on a group header's context menu", async () => {
     const { restore } = withDaemon();
     try {
