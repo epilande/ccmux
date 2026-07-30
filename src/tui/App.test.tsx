@@ -2179,7 +2179,7 @@ describe("App fork (F / context menu)", () => {
     }
   });
 
-  it("also fires for the name-\"F\" spelling some terminals send", async () => {
+  it('also fires for the name-"F" spelling some terminals send', async () => {
     // Terminals disagree: most send a capital as name `"f"` with `shift` set
     // (what `pressKey("F")` above produces — it emits the same byte 0x46, so
     // driving this case through `pressKey("f", {shift:true})` would just
@@ -2440,8 +2440,18 @@ describe("App new session dialog", () => {
   const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
   const AGENTS = [
-    { name: "claude", displayName: "Claude", shortCode: "CC", supportsPrompt: true },
-    { name: "codex", displayName: "Codex", shortCode: "CX", supportsPrompt: true },
+    {
+      name: "claude",
+      displayName: "Claude",
+      shortCode: "CC",
+      supportsPrompt: true,
+    },
+    {
+      name: "codex",
+      displayName: "Codex",
+      shortCode: "CX",
+      supportsPrompt: true,
+    },
     { name: "pi", displayName: "Pi", shortCode: "PI", supportsPrompt: false },
   ];
 
@@ -2670,16 +2680,84 @@ describe("App new session dialog", () => {
     const { restore: restoreExit } = withExitSpy();
     try {
       await openDialog();
+      // agent -> placement -> prompt. The prompt is the only name this dialog
+      // can offer, so a worktree submit carries one.
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("fix bug");
+      await setup.renderOnce();
+      // prompt -> destination.
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("[New worktree: fix-bug]");
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns[0]?.worktree).toEqual({});
+      expect(spawns[0]?.prompt).toBe("fix bug");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  /**
+   * The dialog has no name field, so a prompt that derives nothing leaves the
+   * worktree destination unspawnable. It refuses locally rather than posting:
+   * the daemon's own refusal advises passing a name explicitly, which is CLI
+   * advice this dialog has no field for.
+   */
+  it("refuses a worktree with no derivable name instead of posting", async () => {
+    const { spawns, restore } = withDaemon();
+    // Spied even though this path must not spawn: a regression here would
+    // otherwise exit the runner on success and read as a silent pass.
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
       // agent -> destination, walking backwards to the last field.
       setup.mockInput.pressTab({ shift: true });
       await setup.renderOnce();
       setup.mockInput.pressKey("2");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("[New worktree]");
       setup.mockInput.pressEnter();
       await settle();
+      await setup.renderOnce();
 
-      expect(spawns[0]?.worktree).toEqual({});
+      expect(spawns).toHaveLength(0);
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Type a prompt to name the");
+      // Fixable in place, so the dialog stays up with the draft intact.
+      expect(frame).toContain("New session");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("refuses a worktree when a non-Latin prompt derives no name", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      // Every character is stripped by the slug rules, so this is as nameless
+      // as an empty prompt while looking nothing like one.
+      await setup.mockInput.typeText("修复侧边栏");
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      expect(spawns).toHaveLength(0);
+      expect(setup.captureCharFrame()).toContain("Type a prompt to name the");
     } finally {
       restoreExit();
       restore();

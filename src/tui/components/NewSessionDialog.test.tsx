@@ -326,12 +326,39 @@ describe("NewSessionDialog destination", () => {
     }
   });
 
-  it("shows no name until the prompt has something to derive one from", async () => {
+  /**
+   * With no derivable name the option cannot spawn at all, so the row says
+   * what is missing instead of showing a name it does not have.
+   */
+  it("asks for a prompt until there is something to derive a name from", async () => {
     await renderDialog({ draft: draft({ destination: "worktree" }) });
 
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("[New worktree]");
+    expect(frame).toContain("[New worktree (add a prompt)]");
     expect(frame).not.toContain("New worktree:");
+    // The hint is budgeted like the name is; the border still closes.
+    for (const row of frame
+      .split("\n")
+      .filter((row) => row.includes("│"))
+      .map((row) => row.trimEnd())) {
+      expect(row.endsWith("│")).toBe(true);
+    }
+  });
+
+  it("keeps the hint off the unselected row, where it is only noise", async () => {
+    const frame = await renderDialog({ draft: draft({ destination: "here" }) });
+
+    expect(frame).toContain("[This checkout]");
+    expect(frame).not.toContain("add a prompt");
+  });
+
+  /** A CJK-only prompt derives nothing, exactly like an empty one. */
+  it("asks for a prompt when the prompt derives no slug at all", async () => {
+    const frame = await renderDialog({
+      draft: draft({ destination: "worktree", prompt: "修复侧边栏" }),
+    });
+
+    expect(frame).toContain("[New worktree (add a prompt)]");
   });
 
   /**

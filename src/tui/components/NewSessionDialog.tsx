@@ -420,8 +420,6 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               const label = () => {
                 const base = optionLabel(option);
                 if (option.value !== "worktree") return base;
-                const slug = slugFromPrompt(props.draft.prompt);
-                if (!slug) return base;
                 // Budgeted, not appended blindly: a long prompt yields a long
                 // slug, and on one row that pushed the dialog's own right
                 // border off screen. Each option spends a 2-wide number cell
@@ -431,6 +429,18 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                   ? 4
                   : 8 + optionLabel(DESTINATION_OPTIONS[0]!).length + 2;
                 const room = contentWidth() - spent;
+                const slug = slugFromPrompt(props.draft.prompt);
+                if (!slug) {
+                  // A worktree is named by the prompt and nothing else, so
+                  // with no derivable name this option cannot spawn. Say so
+                  // while the choice is being made rather than on Enter, and
+                  // only while it is the choice: on the unselected row the
+                  // hint is noise. Appended only when it fits whole, since a
+                  // truncated `Worktree (a...` explains nothing.
+                  if (!selected()) return base;
+                  const hinted = `${base} (add a prompt)`;
+                  return hinted.length <= room ? hinted : base;
+                }
                 return truncateText(
                   `${base}: ${slug}`,
                   Math.max(base.length, room),

@@ -61,6 +61,7 @@ import {
   DESTINATION_OPTIONS,
   PLACEMENT_OPTIONS,
 } from "./components/NewSessionDialog";
+import { slugFromPrompt } from "../daemon/worktree-create";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { PruneDialog } from "./components/PruneDialog";
 import { HelpOverlay } from "./components/HelpOverlay";
@@ -1072,6 +1073,17 @@ export function App(props: AppProps) {
       store.actions.showToast(
         `${agent.displayName} can't start with a prompt`,
         3000,
+      );
+      return;
+    }
+    // The dialog has no name field, so the prompt is the only name it can
+    // offer. Refuse here rather than posting: the daemon's own refusal reads
+    // "pass one explicitly", which is advice for the CLI and not something
+    // this dialog can act on.
+    if (draft.destination === "worktree" && !slugFromPrompt(prompt)) {
+      store.actions.showToast(
+        "Type a prompt to name the worktree, or use ccmux spawn --worktree <name>",
+        4000,
       );
       return;
     }
