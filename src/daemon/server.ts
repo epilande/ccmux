@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import { basename, relative, isAbsolute } from "node:path";
+import { basename, relative, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
 import {
   DAEMON_PORT,
@@ -19,6 +19,7 @@ import {
   buildAgentForkCommand,
   buildAgentSpawnCommand,
   buildTmuxSpawnArgv,
+  forkResumesByIdAlone,
   normalizeBoolean,
   normalizePrompt,
   normalizeSplit,
@@ -2210,20 +2211,52 @@ export class DaemonServer {
           `Forking a background worker is not supported.`,
       };
     }
-    // No destination-cwd check. There used to be a `cwd !== session.cwd`
-    // refusal here, on the belief that a resume is resolved against the
-    // project directory for the current cwd. That is not how it works:
-    // `claude --resume <id>` also tries every checkout `git worktree list`
-    // reports, so it is repo-scoped and the equality test refused valid
-    // destinations. The built-in template now resumes by transcript PATH,
-    // which skips directory resolution altogether (see
-    // `buildAgentForkCommand` and docs/agent-adapters.md#forking-a-session),
-    // so any destination the ordinary spawn path accepts is fine. What the
-    // template needs, the builder validates.
+    // The destination check is NOT here, because it depends on the agent's
+    // fork template and this runs before the agent is resolved. A `{path}`
+    // fork accepts any destination the ordinary spawn path does (resuming by
+    // transcript path skips directory resolution altogether), while an
+    // id-form one is repo-scoped: see `forkDestinationProblem`, which the
+    // route calls before its first side effect.
     return {
       ok: true,
       value: { session, nativeSessionId: session.nativeSessionId },
     };
+  }
+
+  /**
+   * Why `cwd` cannot host a fork of `session`, or null when it can.
+   *
+   * Only asked of an id-form template (see `forkResumesByIdAlone`), which
+   * resolves the conversation against the SOURCE's repository. Same repo, not
+   * same directory: every checkout git reports is a directory the id resolves
+   * from, so a sibling worktree is a legal destination and the plain equality
+   * test this replaces refused ones that work. A destination git cannot place
+   * (neither side is a repo) is held to equality, since a project directory
+   * derived from a cwd is all the agent has left to look in.
+   */
+  private async forkDestinationProblem(
+    session: Session,
+    cwd: string,
+  ): Promise<string | null> {
+    if (resolve(cwd) === resolve(session.cwd)) return null;
+    const [destination, source] = await Promise.all([
+      this.getGitInfo(cwd),
+      this.getGitInfo(session.cwd),
+    ]);
+    if (
+      destination.mainRepoRoot !== null &&
+      destination.mainRepoRoot === source.mainRepoRoot
+    ) {
+      return null;
+    }
+    return (
+      `Cannot fork ${session.agentType} into ${cwd}: ` +
+      `'agents.${session.agentType}.forkCommand' resumes by session id, which the agent ` +
+      `resolves against the source session's repository (${session.cwd}), so the fork would ` +
+      `come up in a pane with no conversation. Fork into a directory in that repository, or ` +
+      `set that template to the transcript-path form ("{bin} --resume '{path}' --fork-session"), ` +
+      `which resumes from anywhere.`
+    );
   }
 
   /**
@@ -2447,6 +2480,20 @@ export class DaemonServer {
         { error: `Unknown agent: ${agentName}` },
         { status: 400, headers },
       );
+    }
+
+    // A fork by session id only resolves inside the source's repository, so
+    // its destination is checked here: before the worktree and the pane, and
+    // after the agent whose template decides whether the question applies at
+    // all. A `{path}` fork is destination-independent and skips this.
+    if (forkSource && forkResumesByIdAlone(agent)) {
+      const problem = await this.forkDestinationProblem(
+        forkSource.session,
+        cwd,
+      );
+      if (problem) {
+        return Response.json({ error: problem }, { status: 400, headers });
+      }
     }
 
     // Build agent command

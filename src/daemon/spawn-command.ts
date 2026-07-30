@@ -514,6 +514,25 @@ function templateUsesTranscriptPath(template: string): boolean {
 }
 
 /**
+ * Whether this agent's fork template resumes by `{id}` alone, which makes the
+ * fork REPO-SCOPED and its destination not free.
+ *
+ * `claude --resume <id>` resolves the id against project directories derived
+ * from the launch cwd, falling back to every checkout `git worktree list`
+ * reports: it finds the conversation from anywhere inside the source's repo
+ * and nowhere outside it, where it prints "No conversation found" and drops to
+ * a shell (a live pane no ccmux surface can tell from a working fork).
+ * `{path}` skips that resolution entirely, so only the id form constrains
+ * where a fork may land. The route asks before it creates anything; see
+ * `buildAgentForkCommand` for the two forms.
+ */
+export function forkResumesByIdAlone(agent: AgentDef): boolean {
+  const template = agent.forkCommand;
+  if (typeof template !== "string" || template === "") return false;
+  return !templateUsesTranscriptPath(template) && template.includes("{id}");
+}
+
+/**
  * Build the shell command that continues `sessionId`'s conversation in a
  * new session, leaving the source untouched.
  *

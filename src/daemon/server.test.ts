@@ -4322,6 +4322,129 @@ describe("POST /spawn", () => {
       }
     });
 
+    /**
+     * The id-form template is repo-scoped, so its destination is not free the
+     * way a `{path}` fork's is. These two drive real git (the guard resolves
+     * both directories' main checkout), so tmux is stubbed on its own.
+     */
+    describe("an id-form template's destination", () => {
+      function withTmuxOnly() {
+        const original = Bun.spawn;
+        const argv: string[][] = [];
+        Bun.spawn = ((spawned: string[], opts?: unknown) => {
+          if (spawned[0] !== "tmux") {
+            return (original as (a: string[], b?: unknown) => unknown)(
+              spawned,
+              opts,
+            );
+          }
+          argv.push(spawned);
+          const out = spawned[1] === "display-message" ? "@9 $3\n" : "%99\n";
+          return {
+            exited: Promise.resolve(0),
+            stdout: new Blob([out]).stream(),
+            stderr: new Blob([""]).stream(),
+          };
+        }) as unknown as typeof Bun.spawn;
+        return { argv, restore: () => (Bun.spawn = original) };
+      }
+
+      const fixtureEnv = {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@t",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@t",
+      };
+      function fixtureGit(cwd: string, ...args: string[]): void {
+        const proc = Bun.spawnSync(["git", "-C", cwd, ...args], {
+          env: fixtureEnv,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        if (proc.exitCode !== 0) {
+          throw new Error(
+            `git ${args.join(" ")} failed: ${proc.stderr.toString()}`,
+          );
+        }
+      }
+      /** A one-commit repo, realpath'd so it compares equal to git's answer. */
+      function fixtureRepo(): string {
+        const repo = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-forkid-")));
+        Bun.spawnSync(["git", "init", "-q", repo], { env: fixtureEnv });
+        fixtureGit(repo, "commit", "-q", "--allow-empty", "-m", "x");
+        return repo;
+      }
+
+      it("is refused outside the source's repository, creating no pane", async () => {
+        // `claude --resume <id>` derives the project directory from the launch
+        // cwd and falls back to every checkout `git worktree list` reports, so
+        // from outside the repo it finds no conversation, prints "No
+        // conversation found" and drops to a shell: a live pane ccmux cannot
+        // tell from a working fork. Refused before tmux is touched.
+        const repo = fixtureRepo();
+        const elsewhere = realpathSync(
+          mkdtempSync(join(tmpdir(), "ccmux-forkid-out-")),
+        );
+        const { manager, internals } = serverForAgents([forkAgent]);
+        const source = manager.createPaneTrackedSession({
+          agentType: "forky",
+          paneId: "%3",
+          cwd: repo,
+          pid: 4242,
+          nativeSessionId: "src-sid",
+        });
+        const { argv, restore } = withTmuxOnly();
+        try {
+          const res = await internals.handleRequest(
+            spawnRequest({ fork: source.id, cwd: elsewhere, detach: true }),
+          );
+
+          expect(res.status).toBe(400);
+          const { error } = (await res.json()) as { error: string };
+          // Names the cause and the way out, since the id form is itself the
+          // escape hatch someone chose in ccmux.json.
+          expect(error).toContain("forkCommand");
+          expect(error).toContain("{path}");
+          expect(argv).toHaveLength(0);
+        } finally {
+          restore();
+          rmSync(repo, { recursive: true, force: true });
+          rmSync(elsewhere, { recursive: true, force: true });
+        }
+      });
+
+      it("accepts a sibling worktree of the same repository", async () => {
+        // The guard is repo-scoped, not the plain cwd equality it replaces:
+        // every checkout of the repo is a directory the id resolves from, and
+        // forking into one is the whole point of the worktree destination.
+        const repo = fixtureRepo();
+        const sibling = join(repo, "trees", "feature");
+        fixtureGit(repo, "worktree", "add", "-q", "-b", "feature", sibling);
+        const { manager, internals } = serverForAgents([forkAgent]);
+        const source = manager.createPaneTrackedSession({
+          agentType: "forky",
+          paneId: "%3",
+          cwd: repo,
+          pid: 4242,
+          nativeSessionId: "src-sid",
+        });
+        const { argv, restore } = withTmuxOnly();
+        try {
+          const res = await internals.handleRequest(
+            spawnRequest({ fork: source.id, cwd: sibling, detach: true }),
+          );
+
+          expect(res.status).toBe(200);
+          expect(argv[0]).toContain(sibling);
+          expect(argv[1]?.[4]).toBe("forky --resume src-sid --fork-session");
+        } finally {
+          restore();
+          rmSync(repo, { recursive: true, force: true });
+        }
+      });
+    });
+
     it("refuses a fork into a new worktree, creating nothing", async () => {
       // Not a resume-scoping wall any more (a fork into an existing directory
       // is accepted above): this request CREATES its destination, and the
