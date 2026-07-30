@@ -191,9 +191,6 @@ export function substitutePlaceholders(
  */
 const QUOTED_PLACEHOLDERS = ["prompt", "path"] as const;
 
-/** A placeholder whose substituted value is single-quote escaped. */
-export type QuotedPlaceholder = (typeof QUOTED_PLACEHOLDERS)[number];
-
 const QUOTED_PLACEHOLDER_NAMES: ReadonlySet<string> = new Set(
   QUOTED_PLACEHOLDERS,
 );
