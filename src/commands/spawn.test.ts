@@ -24,6 +24,7 @@ interface SpawnBody {
   target?: string;
   callerPane?: string;
   detach: boolean;
+  worktree?: { name?: string; base?: string };
 }
 
 /**
@@ -279,6 +280,47 @@ describe("--base requires --worktree", () => {
   });
 });
 
+describe("ccmux spawn --worktree wire shape", () => {
+  // The daemon accepts one shape for `worktree`: an object. Sending the raw
+  // flag value (`true` for a bare `--worktree`) is rejected there, so the
+  // conversion the CLI does is worth pinning from the wire side.
+  it("always sends an object, with unset keys absent after the round-trip", async () => {
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture();
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn(["--worktree"]);
+      await runSpawn(["--worktree", "x", "--base", "y"]);
+
+      expect(bodies[0]?.worktree).toStrictEqual({});
+      expect(Object.keys(bodies[0]?.worktree ?? { name: "" })).toEqual([]);
+      expect(bodies[1]?.worktree).toStrictEqual({ name: "x", base: "y" });
+    } finally {
+      restoreEnv();
+      restore();
+    }
+  });
+
+  it("omits worktree entirely without the flag", async () => {
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture();
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn([]);
+      expect(bodies[0]?.worktree).toBeUndefined();
+    } finally {
+      restoreEnv();
+      restore();
+    }
+  });
+});
+
 describe("ccmux spawn --worktree reporting", () => {
   /** Answer `/spawn` with a worktree result of the given shape. */
   function withWorktreeResponse(worktree: Record<string, unknown>) {
@@ -303,7 +345,10 @@ describe("ccmux spawn --worktree reporting", () => {
     return () => (globalThis.fetch = original);
   }
 
-  async function reportFor(worktree: Record<string, unknown>): Promise<string> {
+  async function reportFor(
+    worktree: Record<string, unknown>,
+    argv: string[] = ["--worktree", "wt"],
+  ): Promise<string> {
     const lines: string[] = [];
     console.log = (line: string) => lines.push(line);
     const restore = withWorktreeResponse(worktree);
@@ -312,7 +357,7 @@ describe("ccmux spawn --worktree reporting", () => {
       CCMUX_CALLER_PWD: "/caller/dir",
     });
     try {
-      await runSpawn(["--worktree", "wt"]);
+      await runSpawn(argv);
       return lines.join("\n");
     } finally {
       restoreEnv();
@@ -362,6 +407,25 @@ describe("ccmux spawn --worktree reporting", () => {
     });
 
     expect(out).toContain("Reusing worktree wt on branch wt");
+  });
+
+  // An existing worktree is already on its branch, so `--base` had nothing to
+  // cut. Reporting the reuse without a word about it leaves the user believing
+  // their agent started from the ref they named.
+  it("says --base was ignored when the worktree was reused", async () => {
+    const out = await reportFor(
+      {
+        name: "wt",
+        path: "/repo/.claude/worktrees/wt",
+        branch: "wt",
+        created: false,
+        branchCreated: false,
+      },
+      ["--worktree", "wt", "--base", "develop"],
+    );
+
+    expect(out).toContain("Reusing worktree wt on branch wt");
+    expect(out).toContain("--base ignored");
   });
 });
 

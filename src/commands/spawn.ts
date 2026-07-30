@@ -211,8 +211,15 @@ export function createSpawnCommand(): Command {
             // can already carry twenty commits, so calling it new would
             // misdescribe where the agent is starting from, and the base is
             // only worth naming when a branch was actually cut from it.
+            // A reused worktree already sits on its branch, so there was
+            // nothing for `--base` to cut. Saying so beats a line that reads
+            // as if the flag had been honored.
+            const staleBase =
+              !created && options.base
+                ? " (--base ignored: the worktree already existed)"
+                : "";
             const what = !created
-              ? `Reusing worktree ${name} on branch ${branch}`
+              ? `Reusing worktree ${name} on branch ${branch}${staleBase}`
               : branchCreated
                 ? `Created worktree ${name} on new branch ${branch}${base ? ` from ${base}` : ""}`
                 : `Created worktree ${name} on existing branch ${branch}`;
