@@ -629,10 +629,18 @@ const FieldCell: Component<{
       // Same `+` worktree marker the default project cell appends
       // (`branchLabelFor`), so moving `branch` into its own column doesn't
       // silently drop the indicator.
-      const branch = ctx.session.gitBranch;
-      const marker = ctx.session.isWorktree ? "+" : "";
-      const label = branch ? branch + marker : "";
-      return <text fg={dimColor(ctx, theme.blue)}>{label}</text>;
+      //
+      // Thunk, not a plain const: this component body runs once per mount
+      // and rows stay mounted across SSE deltas (see :385-387 and
+      // :910-912), so a const would freeze the cell at its mount-time
+      // branch and read stale after a `git checkout`. Matches the `pr`
+      // case's `label` thunk just below.
+      const label = () => {
+        const branch = ctx.session.gitBranch;
+        const marker = ctx.session.isWorktree ? "+" : "";
+        return branch ? branch + marker : "";
+      };
+      return <text fg={dimColor(ctx, theme.blue)}>{label()}</text>;
     }
     case "pr": {
       const label = () => prLabel(ctx.session, entry.mode);
