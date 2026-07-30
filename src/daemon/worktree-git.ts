@@ -527,32 +527,69 @@ export async function readUpstreamStates(
 }
 
 /**
- * Whether any of this repo's remotes points at github.com.
+ * What this repo's remotes say about whether a pull request could exist.
  *
- * Used on the PR-lookup FAILURE path only (see `ghPRStateLookup`), to separate
- * "gh could not answer" from "there was nothing for gh to answer about". A
- * repo whose remotes are a local path, a GitLab host or nothing at all has
- * nowhere for a pull request to live, so gh refusing to run there is a
- * complete answer rather than a missing one, and a locally merged worktree in
- * such a repo stays prunable.
+ * Read on the PR-lookup FAILURE path only (see `ghPRStateLookup`), to separate
+ * "gh could not answer" from "there was nothing for gh to answer about".
  *
- * A GitHub Enterprise remote on a custom domain is deliberately NOT recognized
- * (it is not derivable from the URL), so it reads as unknowable — the safe
- * direction, and only reachable when gh is already broken.
+ * - `none`: the repo has no remote URLs at all. A pull request has nowhere to
+ *   live, so gh refusing to run here IS the answer, and a locally merged
+ *   worktree stays prunable. This is the only case the permissive branch gets,
+ *   because it is the only one absence is provable in.
+ * - `github`: some remote URL is recognizably github.com, so a PR could exist
+ *   and a gh failure is hiding it.
+ * - `unknown`: remotes exist but none is recognizably github.com. A GitHub
+ *   Enterprise custom domain, an ssh config alias (`git@gh-personal:o/r.git`)
+ *   and an `insteadOf` shorthand (`gh:o/r`) all land here, and none of them is
+ *   derivable from the URL. It is handled exactly like `github`: an
+ *   unrecognized host is not proof that no PR exists, and the branch that
+ *   deletes directories does not get to guess.
  */
-export async function hasGitHubRemote(
+export type RemoteHosting = "github" | "none" | "unknown";
+
+/**
+ * Whether a single remote URL is recognizably github.com.
+ *
+ * Bounded on both sides so a lookalike host cannot pass: `evil-github.com`
+ * fails the left boundary (`-` is not a host separator) and
+ * `github.com.evil.io` fails the right one (the host does not end there).
+ */
+export function isGitHubRemoteUrl(url: string): boolean {
+  return /(^|[@/.])github\.com([/:]|$)/i.test(url.trim());
+}
+
+/** @see RemoteHosting */
+export async function classifyRemoteHosting(
   cwd: string,
   git: GitRun = runGit,
-): Promise<boolean> {
-  const res = await git(cwd, ["config", "--get-regexp", "^remote\\..*\\.url"]);
+): Promise<RemoteHosting> {
+  // `--local` scopes the question to this repo's own config, which is where
+  // remotes live, and (the reason it matters here) makes a path that is not a
+  // repo fail with exit 128 instead of quietly falling through to global config
+  // and reporting the same "no key matched" a genuinely remote-less repo does.
+  const res = await git(cwd, [
+    "config",
+    "--local",
+    "--get-regexp",
+    "^remote\\..*\\.url",
+  ]);
   // Exit 1 is git's documented "no key matched": no remote URLs at all.
-  if (res.exitCode === 1) return false;
-  // Anything else (not a repo, git missing) tells us nothing, so claim the
-  // strict path rather than the convenient one.
-  if (res.exitCode !== 0) return true;
-  return res.stdout
+  if (res.exitCode === 1) return "none";
+  // Anything else (not a repo, git missing) tells us nothing about the
+  // remotes, so claim the strict path rather than the convenient one.
+  if (res.exitCode !== 0) return "unknown";
+
+  // `--get-regexp` prints `<key> <value>`; the value is everything after the
+  // first space, since a remote URL may itself be a path containing spaces.
+  const urls = res.stdout
     .split("\n")
-    .some((line) => /(^|[@/.])github\.com([/:]|$)/i.test(line.trim()));
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+    .map((line) => line.slice(line.indexOf(" ") + 1));
+  // Exit 0 with nothing to read is a shape git is not supposed to produce, so
+  // it goes to the strict side rather than being read as "no remotes".
+  if (urls.length === 0) return "unknown";
+  return urls.some(isGitHubRemoteUrl) ? "github" : "unknown";
 }
 
 /**

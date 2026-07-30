@@ -33,6 +33,8 @@ import {
   type WorktreeSession,
 } from "./worktree-prune";
 import {
+  classifyRemoteHosting,
+  isGitHubRemoteUrl,
   isMergedInto,
   normalizePath,
   parseWorktreeList,
@@ -826,8 +828,12 @@ describe("runPrune", () => {
     // finished installing the trap, killing it by the ordinary default
     // disposition and making the test pass for the wrong reason.
     const ready = join(root, "sigkill-ready");
+    // `exec sleep` rather than a plain one: without it the shell stays as a
+    // parent and the SIGKILL below reaps only the shell, leaking a `sleep 30`
+    // grandchild per run. Replacing the shell keeps the trapped-TERM property
+    // (the trap is inherited as ignored) with a single pid to kill.
     const proc = Bun.spawn(
-      ["sh", "-c", `trap "" TERM; touch '${ready}'; sleep 30`],
+      ["sh", "-c", `trap "" TERM; touch '${ready}'; exec sleep 30`],
       { stdout: "ignore", stderr: "ignore" },
     );
     const pid = proc.pid;
@@ -1200,6 +1206,92 @@ describe("selectPRForBranch", () => {
 });
 
 /**
+ * S7's escape hatch, the one branch that may still answer "no PR" without gh.
+ *
+ * It used to be a boolean: "recognizably github.com" took the strict path and
+ * EVERYTHING else took the permissive one, which is backwards for every remote
+ * shape github.com is not spelled in: a GitHub Enterprise domain, an ssh
+ * config alias, an `insteadOf` shorthand. Those all host real pull requests
+ * and all read as "no PR possible", so a broken gh offered a worktree with an
+ * open PR for deletion. Only a repo with NO remotes proves absence.
+ */
+describe("isGitHubRemoteUrl", () => {
+  it("recognizes the https and ssh spellings of github.com", () => {
+    expect(isGitHubRemoteUrl("https://github.com/o/r.git")).toBe(true);
+    expect(isGitHubRemoteUrl("git@github.com:o/r.git")).toBe(true);
+    expect(isGitHubRemoteUrl("ssh://git@github.com/o/r.git")).toBe(true);
+    expect(isGitHubRemoteUrl("https://user@github.com/o/r")).toBe(true);
+  });
+
+  // Both halves of the boundary, because a lookalike host that passed would
+  // send a real gh failure down the permissive branch.
+  it("rejects lookalike hosts on either side of the label", () => {
+    expect(isGitHubRemoteUrl("https://evil-github.com/o/r.git")).toBe(false);
+    expect(isGitHubRemoteUrl("https://github.com.evil.io/o/r.git")).toBe(false);
+    expect(isGitHubRemoteUrl("git@evil-github.com:o/r.git")).toBe(false);
+  });
+
+  it("does not recognize hosts github.com is merely absent from", () => {
+    expect(isGitHubRemoteUrl("https://github.mycorp.example/o/r.git")).toBe(
+      false,
+    );
+    expect(isGitHubRemoteUrl("git@gh-personal:o/r.git")).toBe(false);
+    expect(isGitHubRemoteUrl("gh:o/r")).toBe(false);
+    expect(isGitHubRemoteUrl("/srv/git/local.git")).toBe(false);
+  });
+});
+
+describe("classifyRemoteHosting", () => {
+  /** Point the fixture's `origin` at `url` without touching anything else. */
+  async function repoWithRemote(name: string, url: string): Promise<string> {
+    const { repo } = await makeRepo(name);
+    await git(repo, ["remote", "set-url", "origin", url]);
+    return repo;
+  }
+
+  it("reports github for a recognizable github.com remote", async () => {
+    const repo = await repoWithRemote("host-gh", "git@github.com:o/r.git");
+    expect(await classifyRemoteHosting(repo)).toBe("github");
+  });
+
+  it("reports none only when the repo has no remote at all", async () => {
+    const { repo } = await makeRepo("host-none");
+    await git(repo, ["remote", "remove", "origin"]);
+    expect(await classifyRemoteHosting(repo)).toBe("none");
+  });
+
+  // The finding itself: each of these hosts pull requests, and each used to
+  // read as "no PR can exist here".
+  it.each([
+    ["a GitHub Enterprise domain", "https://github.mycorp.example/o/r.git"],
+    ["an ssh config alias", "git@gh-personal:o/r.git"],
+    ["an insteadOf shorthand", "gh:o/r"],
+    ["a local path remote", "/srv/git/local.git"],
+  ])("reports unknown for %s", async (_label, url) => {
+    const repo = await repoWithRemote(`host-${url.replace(/\W/g, "-")}`, url);
+    expect(await classifyRemoteHosting(repo)).toBe("unknown");
+  });
+
+  it("reports unknown when git itself cannot answer", async () => {
+    const notARepo = join(root, "not-a-repo");
+    mkdirSync(notARepo, { recursive: true });
+    expect(await classifyRemoteHosting(notARepo)).toBe("unknown");
+  });
+
+  // A second remote is enough: gh answers for whichever one is a GitHub one.
+  it("reports github when only a non-origin remote is on github.com", async () => {
+    const { repo } = await makeRepo("host-second");
+    await git(repo, [
+      "remote",
+      "add",
+      "upstream",
+      "https://github.com/o/r.git",
+    ]);
+    expect(await classifyRemoteHosting(repo)).toBe("github");
+  });
+});
+
+/**
  * Drives the real `ghPRStateLookup` (spawn, JSON parse, tip resolution) with
  * a fake `gh` on PATH, against a real fixture repo. Previously uncovered:
  * every classification test injects `lookupPR` instead.
@@ -1300,16 +1392,36 @@ describe("ghPRStateLookup", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("treats a gh failure in a repo with no GitHub remote as no PR", async () => {
-    // The fixture's `origin` is a local bare path, so gh could never answer
-    // for it and there is nowhere for a PR to live. Fixed rather than unknown.
-    const { repo } = await makeRepo("gh-not-github");
+  it("treats a gh failure in a repo with no remotes at all as no PR", async () => {
+    // The only provable absence: with no remote there is nowhere for a pull
+    // request to live, so gh refusing to run is a complete answer.
+    const { repo } = await makeRepo("gh-no-remote");
+    await git(repo, ["remote", "remove", "origin"]);
     writeFileSync(join(binDir, "gh"), "#!/bin/bash\nexit 1\n", { mode: 0o755 });
 
     expect(await ghPRStateLookup(repo, "feat/x")).toEqual({
       ok: true,
       pr: null,
     });
+  });
+
+  // S7: a remote whose host ccmux cannot place is NOT evidence that no PR
+  // exists. Each of these can host one, and a gh failure hides it.
+  it.each([
+    ["a GitHub Enterprise domain", "https://github.mycorp.example/o/r.git"],
+    ["an ssh config alias", "git@gh-personal:o/r.git"],
+    ["an insteadOf shorthand", "gh:o/r"],
+    ["a local path remote", "/srv/git/local.git"],
+  ])("reports unknowable, not no-PR, for %s", async (_label, url) => {
+    const { repo } = await makeRepo(`gh-unknown-${url.replace(/\W/g, "-")}`);
+    await git(repo, ["remote", "set-url", "origin", url]);
+    writeFileSync(join(binDir, "gh"), "#!/bin/bash\nexit 1\n", { mode: 0o755 });
+
+    const result = await ghPRStateLookup(repo, "feat/x");
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toContain("exited 1");
+    expect(result.ok === false && result.error).toContain("github.com");
   });
 
   it("reports no PR for an empty reply", async () => {
@@ -1385,6 +1497,53 @@ describe("a PR lookup that could not answer", () => {
 
     expect(scan.candidates).toEqual([]);
     expect(scan.skipped).toEqual([]);
+  });
+
+  /**
+   * The whole chain, with no `lookupPR` stub, because the defect lived in the
+   * default lookup's own escape hatch rather than in classification: a repo on
+   * a GitHub Enterprise domain plus a failing `gh` used to reach
+   * `merged-locally` and offer the worktree, since "not recognizably
+   * github.com" was read as "no PR can exist". The github.com spelling of the
+   * same repo skipped correctly, which is what made it a hatch and not a bug
+   * in the S7 rule.
+   */
+  describe("through the real gh path, per remote spelling", () => {
+    let binDir: string;
+    let originalPath: string | undefined;
+
+    beforeEach(() => {
+      binDir = join(root, "fakebin");
+      mkdirSync(binDir, { recursive: true });
+      originalPath = process.env.PATH;
+      process.env.PATH = `${binDir}:${originalPath}`;
+      writeFileSync(join(binDir, "gh"), "#!/bin/bash\nexit 1\n", {
+        mode: 0o755,
+      });
+    });
+
+    afterEach(() => {
+      process.env.PATH = originalPath;
+    });
+
+    it.each([
+      ["github.com", "git@github.com:o/r.git"],
+      ["a GitHub Enterprise domain", "https://github.mycorp.example/o/r.git"],
+      ["an ssh config alias", "git@gh-personal:o/r.git"],
+    ])("withholds a locally merged worktree on %s", async (_label, url) => {
+      const { repo } = await makeRepo(`gh-broken-${url.replace(/\W/g, "-")}`);
+      const wt = await addWorktree(repo, "feat/hatch");
+      await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/hatch"]);
+      await git(repo, ["remote", "set-url", "origin", url]);
+
+      const scan = await scanRepo(repo, { skipFetch: true });
+
+      expect(scan.candidates).toEqual([]);
+      expect(scan.skipped).toHaveLength(1);
+      expect(scan.skipped[0]).toMatchObject({ path: normalizePath(wt) });
+      expect(scan.skipped[0].reason).toContain("PR state");
+      expect(existsSync(wt)).toBe(true);
+    });
   });
 });
 

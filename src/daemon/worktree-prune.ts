@@ -27,8 +27,8 @@ import {
 } from "./agent-state";
 
 import {
+  classifyRemoteHosting,
   fetchPrune,
-  hasGitHubRemote,
   isMergedInto,
   listWorktrees,
   normalizePath,
@@ -240,18 +240,28 @@ export function selectPRForBranch(
  * Every way this can fail to reach an answer — gh absent, unauthenticated,
  * rate-limited, offline, or replying with something that is not the requested
  * JSON — reports `ok: false` rather than "no PR", because the caller deletes
- * directories on the difference. The one exception is a repo gh could never
- * have answered for ({@link hasGitHubRemote}), where a refusal IS the answer.
+ * directories on the difference. The one exception is a repo that has no
+ * remotes at all ({@link classifyRemoteHosting}), where a refusal IS the
+ * answer.
  */
 export const ghPRStateLookup: PRStateLookup = async (cwd, branch) => {
   /**
-   * A gh failure in a repo with no GitHub remote is not a missing answer: no
-   * PR can exist there, so the worktree stays classifiable.
+   * A gh failure in a repo with NO remotes is not a missing answer: a PR has
+   * nowhere to live there, so the worktree stays classifiable. Every other
+   * repo, including one whose remotes are simply not recognizable as
+   * github.com, reports the failure as-is.
    */
-  const failed = async (error: string): Promise<PRLookupResult> =>
-    (await hasGitHubRemote(cwd))
-      ? { ok: false, error }
-      : { ok: true, pr: null };
+  const failed = async (error: string): Promise<PRLookupResult> => {
+    const hosting = await classifyRemoteHosting(cwd);
+    if (hosting === "none") return { ok: true, pr: null };
+    return {
+      ok: false,
+      error:
+        hosting === "unknown"
+          ? `${error} (no remote recognizable as github.com, so a PR cannot be ruled out)`
+          : error,
+    };
+  };
 
   // A single try/catch around the whole spawn-through-parse sequence: a
   // missing `gh` binary throws from `Bun.spawn` itself (ENOENT) rather than
@@ -826,12 +836,13 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 /**
- * Poll `kill(pid, 0)` until it throws (process gone) or `timeoutMs` elapses.
+ * Poll `kill(pid, 0)` until it throws (process gone) or `timeoutMs` elapses,
+ * reporting whether the process is STILL alive at the end of that window.
  * Shared by the SIGTERM wait and the SIGKILL verify (S9): both are "did the
  * signal already land" checks that differ only in the timeout and which
  * signal preceded them.
  */
-async function waitForExit(
+async function stillAliveAfter(
   pid: number,
   kill: (pid: number, signal: NodeJS.Signals | 0) => void,
   sleep: (ms: number) => Promise<void>,
@@ -847,7 +858,7 @@ async function waitForExit(
       alive = false;
     }
   }
-  return !alive; // true == confirmed dead within the window
+  return alive; // true == still answering when the window ran out
 }
 
 /**
@@ -898,12 +909,12 @@ async function stopSessions(
         alive = false; // already gone
       }
       if (alive) {
-        alive = !(await waitForExit(
+        alive = await stillAliveAfter(
           session.pid,
           kill,
           sleep,
           PROCESS_EXIT_TIMEOUT_MS,
-        ));
+        );
       }
       let escalated = false;
       if (alive) {
@@ -914,12 +925,12 @@ async function stopSessions(
           alive = false; // died between the check and the signal
         }
         if (alive) {
-          alive = !(await waitForExit(
+          alive = await stillAliveAfter(
             session.pid,
             kill,
             sleep,
             SIGKILL_VERIFY_TIMEOUT_MS,
-          ));
+          );
         }
       }
       if (alive) allExited = false;
