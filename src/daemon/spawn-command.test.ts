@@ -1064,7 +1064,10 @@ describe("substituteQuotedTemplate", () => {
           bin: "printf",
           path,
         });
-        for (const shell of ["/bin/sh", "/bin/bash", "/bin/zsh"]) {
+        // zsh ships on macOS but not on Linux CI runners.
+        for (const shell of ["/bin/sh", "/bin/bash", "/bin/zsh"].filter(
+          existsSync,
+        )) {
           const run = Bun.spawnSync([shell, "-c", command]);
           expect(run.exitCode).toBe(0);
           expect(run.stdout.toString()).toBe(`[${path}]`);
