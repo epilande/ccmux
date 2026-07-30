@@ -3,6 +3,9 @@ import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import type { SSECallbacks } from "./utils/sse";
 import { mockEnrichedSession, squish } from "./components/test-helpers";
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // Capture SSE callbacks so tests can fire events
 let sseCallbacks: SSECallbacks | null = null;
@@ -3384,6 +3387,70 @@ describe("App new session dialog", () => {
       const byMouse = await openGroupMenuNewSession();
       expect(byMouse).toContain("/code/myapp");
       expect(byMouse).not.toContain("worktrees/feature");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps a member's directory when the group's members disagree on the repo", async () => {
+    // The project group key is a repo NAME, not a path, so ~/work/api and
+    // ~/oss/api land in ONE group. Taking whichever member happened to carry a
+    // mainRepoRoot answered with one of two unrelated repositories depending on
+    // the status sort, so a disagreement falls back to the member's own cwd.
+    const { restore } = withDaemon();
+    const first = session({
+      id: "s1",
+      cwd: "/code/work/api/src",
+      project: "api",
+      mainRepoRoot: "/code/work/api",
+    });
+    const second = session({
+      id: "s2",
+      cwd: "/code/oss/api/src",
+      project: "api",
+      mainRepoRoot: "/code/oss/api",
+    });
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit([first, second], null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+
+      // The member's own cwd, not either repo root. Spelled out with the
+      // field label so a row behind the dialog cannot satisfy it.
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Directory /code/work/api/src");
+      expect(frame).not.toContain("Directory /code/oss/api");
+    } finally {
+      restore();
+    }
+  });
+
+  it("never answers with the home directory for a project group", async () => {
+    // A literal ~/.git dotfiles repo resolves every member's mainRepoRoot to
+    // $HOME while the group stands for one subdirectory of it, so agreeing on
+    // $HOME is agreement on the wrong directory: a new session would start at
+    // the top of the user's home.
+    const { restore } = withDaemon();
+    const home = realpathSync(homedir());
+    const inHome = session({
+      id: "s1",
+      cwd: join(home, "dotfiles-notes"),
+      project: "dotfiles-notes",
+      mainRepoRoot: home,
+    });
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit([inHome], null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+
+      // Labelled, so the session row behind the dialog cannot satisfy it.
+      expect(setup.captureCharFrame()).toContain("Directory ~/dotfiles-notes");
     } finally {
       restore();
     }

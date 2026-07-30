@@ -1,4 +1,5 @@
-import { watch } from "fs";
+import { realpathSync, watch } from "fs";
+import { homedir } from "node:os";
 import {
   batch,
   on,
@@ -133,6 +134,22 @@ export const STALE_DAEMON_HINT =
  *  over it can inherit that directory. `session` and `window` group by tmux
  *  location, which says nothing about where their members live. */
 const GROUPINGS_BY_DIRECTORY = new Set<GroupBy>(["project", "cwd"]);
+
+/**
+ * The home directory with symlinks resolved, for comparing against a
+ * `mainRepoRoot`, which the daemon reads from
+ * `git rev-parse --path-format=absolute` and is therefore already realpath'd.
+ * Read per call rather than hoisted: it is one syscall on a keypress, and a
+ * cached value could not follow a home directory that moved under the process.
+ */
+function resolvedHomeDir(): string {
+  const home = homedir();
+  try {
+    return realpathSync(home);
+  } catch {
+    return home;
+  }
+}
 
 /** `POST /spawn`'s `split` for each placement: a new window is no split. */
 const SPAWN_SPLIT: Record<NewSessionPlacement, "h" | "v" | false> = {
@@ -960,13 +977,33 @@ export function App(props: AppProps) {
       const members = item.members.map((member) => member.session);
       // A project group is repo-level: it holds the main checkout AND every
       // worktree hanging off it, and members are sorted by status then
-      // activity. `members[0]` is therefore an arbitrary sibling worktree
-      // that can change between two opens; `mainRepoRoot` is the one
-      // directory every member of the group agrees on. `cwd` grouping keys
-      // off the directory itself, so it keeps taking the member's.
+      // activity, so `members[0]` is an arbitrary sibling worktree that can
+      // change between two opens. The repo root is the directory the group
+      // stands for, but only when the group PROVES it, which takes two
+      // conditions:
+      //
+      // - Unanimous. The group key is a repo NAME (a basename), so ~/work/api
+      //   and ~/oss/api share one group; picking whichever member carried a
+      //   root would answer with one of two unrelated repositories depending
+      //   on the sort.
+      // - Not the home directory. A literal ~/.git (dotfiles initialized in
+      //   $HOME) resolves every member's `mainRepoRoot` to $HOME while the
+      //   group is labelled after a subdirectory, so "agreement" there means
+      //   opening at the top of the user's home.
+      //
+      // Anything else falls back to a member's own cwd, which is at least a
+      // directory one of the sessions is really in. `cwd` grouping keys off
+      // the directory itself, so it always takes the member's.
       if (store.state.groupBy === "project") {
-        const repoRoot = members.find((s) => s.mainRepoRoot)?.mainRepoRoot;
-        if (repoRoot) return { cwd: repoRoot };
+        const roots = new Set(
+          members
+            .map((member) => member.mainRepoRoot)
+            .filter((root): root is string => Boolean(root)),
+        );
+        const [repoRoot] = roots;
+        if (roots.size === 1 && repoRoot && repoRoot !== resolvedHomeDir()) {
+          return { cwd: repoRoot };
+        }
       }
       const first = members[0];
       if (first) return { cwd: sessionCwd(first) };
