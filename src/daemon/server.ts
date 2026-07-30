@@ -1198,22 +1198,45 @@ export class DaemonServer {
       return Response.json({ error: "Invalid JSON" }, { status: 400, headers });
     }
 
-    // De-duplicated after normalization, and capped. Two spellings of one
-    // worktree (`/tmp` and `/private/tmp`, or a trailing slash) otherwise
-    // produce several outcomes for the same directory, and since branch
-    // deletion resolves an outcome by path it always found the FIRST one —
-    // so the later "already gone" failures overwrote a successful run's
-    // result and rendered it as a wall of errors.
+    // De-duplicated after normalization. Two spellings of one worktree
+    // (`/tmp` and `/private/tmp`, or a trailing slash) otherwise produce
+    // several outcomes for the same directory, and since branch deletion
+    // resolves an outcome by path it always found the FIRST one — so the
+    // later "already gone" failures overwrote a successful run's result and
+    // rendered it as a wall of errors.
     const asPaths = (value: unknown): string[] => {
       if (!Array.isArray(value)) return [];
       const seen = new Set<string>();
       for (const v of value) {
         if (typeof v !== "string") continue;
-        if (seen.size >= MAX_PRUNE_PATHS) break;
         seen.add(normalizePath(v));
       }
       return [...seen];
     };
+    // O7: reject an over-cap list outright rather than silently truncating.
+    // Checked on the RAW array length, before `asPaths` dedupes or
+    // normalizes anything — for both fields, since a silently dropped
+    // `allowDirty` opt-in fails closed (a real refusal) but is exactly as
+    // silent as a dropped path. Checking the raw length, rather than
+    // `asPaths(value).length`, also keeps `MAX_PRUNE_PATHS`'s original point
+    // intact: a malformed body with an absurd array cannot make the daemon
+    // run `normalizePath` (a `realpath` syscall per entry) over all of it
+    // just to find out it should have been rejected.
+    const overCap = (value: unknown, field: string): Response | null => {
+      if (!Array.isArray(value)) return null;
+      if (value.length <= MAX_PRUNE_PATHS) return null;
+      return Response.json(
+        {
+          error: `Too many ${field} (${value.length}); the limit is ${MAX_PRUNE_PATHS} per request`,
+        },
+        { status: 400, headers },
+      );
+    };
+    const pathsCapError = overCap(body.paths, "paths");
+    if (pathsCapError) return pathsCapError;
+    const allowDirtyCapError = overCap(body.allowDirty, "allowDirty entries");
+    if (allowDirtyCapError) return allowDirtyCapError;
+
     const paths = asPaths(body.paths);
     const allowDirty = asPaths(body.allowDirty);
     const cleanState = body.cleanState === true;

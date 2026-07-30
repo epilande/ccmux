@@ -4649,6 +4649,56 @@ describe("worktree prune endpoints", () => {
 
     expect(body.outcomes).toHaveLength(1);
   });
+
+  /**
+   * O7: `MAX_PRUNE_PATHS` (500 in server.ts) used to silently `break` once
+   * the de-duplicated set hit the cap, dropping the remainder with no error
+   * and no field saying anything was dropped. It now rejects the request
+   * outright, for both `paths` and `allowDirty` (a silently dropped opt-in
+   * fails closed but is exactly as silent as a dropped path).
+   */
+  it("rejects a path list over the cap and names the cap", async () => {
+    const { repo } = makePruneFixture();
+    const { internals } = serverFor(repo);
+    const over = Array.from({ length: 501 }, (_, i) => join(root, `p${i}`));
+
+    const res = await post(internals, { paths: over });
+    const body = (await res.json()) as { error: string };
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("501");
+    expect(body.error).toContain("500");
+  });
+
+  it("rejects an over-cap allowDirty list too, not just paths", async () => {
+    const { repo, worktree } = makePruneFixture();
+    const { internals } = serverFor(repo);
+    const over = Array.from({ length: 501 }, (_, i) => join(root, `p${i}`));
+
+    const res = await post(internals, {
+      paths: [worktree],
+      allowDirty: over,
+    });
+    const body = (await res.json()) as { error: string };
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("501");
+    expect(existsSync(worktree)).toBe(true);
+  });
+
+  it("accepts a path list exactly at the cap", async () => {
+    const { repo } = makePruneFixture();
+    const { internals } = serverFor(repo);
+    const atCap = Array.from({ length: 500 }, (_, i) => join(root, `p${i}`));
+
+    const res = await post(internals, { paths: atCap });
+    const body = (await res.json()) as { error?: string };
+
+    // Not the cap rejection; it proceeds to the normal "not currently
+    // removable" refusal for these made-up paths instead.
+    expect(res.status).not.toBe(400);
+    expect(body.error ?? "").not.toContain("the limit is");
+  });
 });
 
 /**
