@@ -260,19 +260,19 @@ Three toggles control what gets scanned: `searchPaneContent`, `searchPaneLines`,
 Launch new agent sessions directly from the CLI:
 
 ```bash
-ccmux spawn                          # Spawn claude (default) in a new tmux window
-ccmux spawn codex                    # Spawn a specific agent
-ccmux spawn --split                  # Split current pane instead of new window
-ccmux spawn --split h                # Split left/right ('v' is the stacked default)
-ccmux spawn --target %12             # Split (or place the window next to) a specific pane
-ccmux spawn --detach                 # Don't switch to the new pane
-ccmux spawn --cwd ~/proj             # Set working directory
-ccmux spawn --resume <id>            # Resume an existing session
-ccmux spawn --fork <id>              # Branch an existing session into a new one
-ccmux spawn --prompt "fix the tests" # Send an initial prompt
-ccmux spawn --worktree               # Spawn into a git worktree (name derived from --prompt)
-ccmux spawn --worktree fix-flicker   # Spawn into a named worktree, creating it if needed
-ccmux spawn --worktree --base develop # Branch the new worktree from develop instead of the current branch
+ccmux spawn                                                  # Spawn claude (default) in a new tmux window
+ccmux spawn codex                                            # Spawn a specific agent
+ccmux spawn --split                                          # Split current pane instead of new window
+ccmux spawn --split h                                        # Split left/right ('v' is the stacked default)
+ccmux spawn --target %12                                     # Split (or place the window next to) a specific pane
+ccmux spawn --detach                                         # Don't switch to the new pane
+ccmux spawn --cwd ~/proj                                     # Set working directory
+ccmux spawn --resume <id>                                    # Resume an existing session
+ccmux spawn --fork <id>                                      # Branch an existing session into a new one
+ccmux spawn --prompt "fix the tests"                         # Send an initial prompt
+ccmux spawn --worktree --prompt "fix flicker"                # Spawn into a git worktree (name derived from the prompt)
+ccmux spawn --worktree fix-flicker                           # Spawn into a named worktree, creating it if needed
+ccmux spawn --worktree --base develop --prompt "fix flicker" # Branch the new worktree from develop
 ```
 
 Split directions use tmux's own vocabulary: `h` puts the new pane beside the
@@ -394,7 +394,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Jump to first/last    | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd>                                            | Go to top / bottom                                                                                                     |
 | Jump to session       | <kbd>1</kbd>–<kbd>9</kbd>                                                          | Switch directly to session N                                                                                           |
 | Switch to session     | <kbd>Enter</kbd>                                                                   | Switch tmux to the selected pane                                                                                       |
-| New session           | <kbd>n</kbd>                                                                       | Open the new-session dialog (agent, placement, prompt; directory derived from the selected row)                        |
+| New session           | <kbd>n</kbd>                                                                       | Open the new-session dialog (agent, placement, prompt, worktree; directory derived from the selected row)              |
 | Search                | <kbd>/</kbd>                                                                       | Enter fuzzy search mode                                                                                                |
 | Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel                                                                                            |
 | Scroll preview        | <kbd>Ctrl+D</kbd> / <kbd>Ctrl+U</kbd>                                              | Half-page scroll in preview                                                                                            |
@@ -427,10 +427,13 @@ Opened with <kbd>n</kbd>, or from the right-click menu on a session row or a gro
 | Next / prev field   | <kbd>Tab</kbd> / <kbd>Shift+Tab</kbd>                      |
 | Move within a field | <kbd>j</kbd> / <kbd>k</kbd> or <kbd>↑</kbd> / <kbd>↓</kbd> |
 | Pick by number      | <kbd>1</kbd>–<kbd>9</kbd>                                  |
+| Where it runs       | <kbd>1</kbd> This checkout / <kbd>2</kbd> New worktree     |
 | Spawn               | <kbd>Enter</kbd>                                           |
 | Cancel              | <kbd>Esc</kbd>                                             |
 
 Movement and number keys apply to the focused field, so <kbd>2</kbd> picks the second agent on the Agent field and the second placement on the Placement field. In the Prompt field every key is text, so <kbd>↑</kbd> / <kbd>↓</kbd> (or <kbd>Ctrl</kbd>+<kbd>P</kbd> / <kbd>Ctrl</kbd>+<kbd>N</kbd>) move between fields there instead.
+
+**Where** picks between this checkout and a new git worktree. The worktree option carries the name it would create, derived from the prompt and updated as you type, and its branch is cut from the main checkout's current branch. Choosing a different base ref is CLI-only (`ccmux spawn --worktree --base <ref>`).
 
 The working directory is derived, not typed: a session row uses that session's directory, a group header uses the group's, and no selection falls back to where the picker was launched. The picker jumps to the new pane, and a one-shot picker then closes while a `--persistent` board stays open; the sidebar spawns into the window's main area without stealing focus.
 
