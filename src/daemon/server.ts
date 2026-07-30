@@ -2058,9 +2058,8 @@ export class DaemonServer {
     fork?: unknown;
     resume?: string;
     prompt?: unknown;
-    cwd?: string;
   }): BuildResult<ForkSource | undefined> {
-    const { fork, cwd } = body;
+    const { fork } = body;
     if (fork === undefined || fork === null)
       return { ok: true, value: undefined };
 
@@ -2124,25 +2123,16 @@ export class DaemonServer {
           `Forking a background worker is not supported.`,
       };
     }
-    // Claude resolves `--resume <id>` against the project directory derived
-    // from the CURRENT cwd (`~/.claude/projects/<encoded-cwd>/`), so a fork
-    // started anywhere else cannot find the conversation: the pane opens,
-    // send-keys succeeds, the route answers 200, and the user gets "No
-    // conversation found with session ID" and a bare shell. Verified live on
-    // Claude Code 2.1.220. Refusing is the honest answer until something
-    // moves the transcript into the destination's project directory (see
-    // docs/agent-adapters.md#forking-a-session).
-    if (cwd !== undefined && cwd !== session.cwd) {
-      return {
-        ok: false,
-        error:
-          `Cannot fork ${fork} into a different directory. ` +
-          `${session.agentType} resolves a resumed session against the project directory for its cwd, ` +
-          `so the fork would start in ${cwd} and find no conversation. ` +
-          `Omit 'cwd' to fork in ${session.cwd}.`,
-      };
-    }
-
+    // No destination-cwd check. There used to be a `cwd !== session.cwd`
+    // refusal here, on the belief that a resume is resolved against the
+    // project directory for the current cwd. That is not how it works:
+    // `claude --resume <id>` also tries every checkout `git worktree list`
+    // reports, so it is repo-scoped and the equality test refused valid
+    // destinations. The built-in template now resumes by transcript PATH,
+    // which skips directory resolution altogether (see
+    // `buildAgentForkCommand` and docs/agent-adapters.md#forking-a-session),
+    // so any destination the ordinary spawn path accepts is fine. What the
+    // template needs, the builder validates.
     return {
       ok: true,
       value: { session, nativeSessionId: session.nativeSessionId },
@@ -2330,21 +2320,21 @@ export class DaemonServer {
         { status: 400, headers },
       );
     }
-    // A worktree destination is a different directory, so it runs into exactly
-    // the wall `resolveForkSource` refuses an explicit `cwd` for: the fork
-    // would start in the new checkout and find no conversation there. That
-    // check cannot catch this one, because a fork into a worktree sends no
-    // `cwd` at all and only becomes a relocation once the worktree resolves.
-    // Refused BEFORE the worktree is created, so a rejected request leaves no
-    // directory and no branch behind.
+    // Fork-into-a-new-worktree is a destination CREATION, not just a
+    // different cwd, and nobody has run the combination against a live agent
+    // yet. Resuming by transcript path removed the resume-scoping wall this
+    // refusal used to cite, so what is left is an unshipped feature rather
+    // than a technical impossibility: it is tracked separately, with its own
+    // surface and its own live check. Refused BEFORE the worktree is created,
+    // so a rejected request leaves no directory and no branch behind.
     if (forkSource && worktreeRequest.value) {
       return Response.json(
         {
           error:
-            `Cannot fork ${forkSource.session.agentType} into a new worktree. ` +
-            `A resumed session is resolved against the project directory for its cwd, ` +
-            `so the fork would start in the worktree and find no conversation. ` +
-            `Spawn a fresh session into the worktree, or fork in ${forkSource.session.cwd}.`,
+            `Cannot fork ${forkSource.session.agentType} into a new worktree yet: ` +
+            `that combination has not been verified against a live agent. ` +
+            `Spawn a fresh session into the worktree, or fork into an existing ` +
+            `directory with 'cwd'.`,
         },
         { status: 400, headers },
       );
@@ -2371,6 +2361,11 @@ export class DaemonServer {
           agent,
           binary: cmd,
           sessionId: forkSource.nativeSessionId,
+          // The builder decides whether it needs this and refuses when a
+          // `{path}` template cannot get a readable transcript out of it.
+          // Everything here runs before the first side effect, so that
+          // refusal is a 400 with no pane and no worktree behind it.
+          logPath: forkSource.session.logPath,
         })
       : buildAgentSpawnCommand({
           agent,

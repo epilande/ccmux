@@ -3778,6 +3778,30 @@ describe("POST /spawn", () => {
       executable: "unforkable",
       forkCommand: undefined,
     };
+    /** The shape Claude ships: resume by transcript PATH, so the fork is not
+     *  tied to the directory the source happens to be sitting in. */
+    const pathForkAgent: AgentDef = {
+      ...forkAgent,
+      name: "pathy",
+      executable: "pathy",
+      forkCommand: "{bin} --resume '{path}' --fork-session",
+    };
+
+    /** A readable transcript on disk, since a `{path}` fork stats the file. */
+    function transcriptFor(
+      manager: SessionManager,
+      sessionId: string,
+      name = "src-sid.jsonl",
+    ): { path: string; cleanup: () => void } {
+      const dir = mkdtempSync(join(tmpdir(), "ccmux-forkpath-"));
+      const path = join(dir, name);
+      writeFileSync(path, "{}\n");
+      manager.setLogPath(sessionId, path);
+      return {
+        path,
+        cleanup: () => rmSync(dir, { recursive: true, force: true }),
+      };
+    }
 
     /** A row of `agentType` sitting in a pane in a real cwd. `null` for the
      *  native id is the no-hooks case: an agent ccmux can see but whose
@@ -3834,11 +3858,7 @@ describe("POST /spawn", () => {
           }),
         );
         expect(res.status).toBe(200);
-        // And it starts in the SOURCE's directory. This used to assert that
-        // an explicit cwd wins, which live testing disproved: Claude looks a
-        // resumed session up under the project dir for the current cwd, so a
-        // fork elsewhere finds no conversation. That combination is now
-        // refused outright (see the test below).
+        // And with no cwd sent it starts in the SOURCE's directory.
         expect(argv[0]).toContain(source.cwd);
         expect(argv[1]?.[4]).toContain("forky --resume src-sid");
       } finally {
@@ -3928,14 +3948,15 @@ describe("POST /spawn", () => {
       }
     });
 
-    it("refuses a fork into a DIFFERENT directory", async () => {
-      // Verified live on Claude Code 2.1.220: the pane opens, send-keys
-      // succeeds, the route answers 200, and the agent prints "No
-      // conversation found with session ID" before dropping to a bare shell,
-      // because Claude looks a resumed session up under the project dir for
-      // the CURRENT cwd. A clear 400 beats a dead pane nothing can detect.
-      const { manager, internals } = serverForAgents([forkAgent]);
-      const source = trackedSession(manager, "forky");
+    it("forks into a DIFFERENT directory", async () => {
+      // This used to be a 400. The model behind it was wrong: `--resume <id>`
+      // is repo-scoped (it also tries every checkout `git worktree list`
+      // reports), and the built-in template now resumes by transcript path,
+      // which is directory-independent outright. The equality test refused
+      // destinations that work, and never fired on the path the picker uses.
+      const { manager, internals } = serverForAgents([pathForkAgent]);
+      const source = trackedSession(manager, "pathy");
+      const { path, cleanup } = transcriptFor(manager, source.id);
       const elsewhere = realpathSync(
         mkdtempSync(join(tmpdir(), "ccmux-fork-")),
       );
@@ -3944,21 +3965,127 @@ describe("POST /spawn", () => {
         const res = await internals.handleRequest(
           spawnRequest({ fork: source.id, cwd: elsewhere, detach: true }),
         );
-        expect(res.status).toBe(400);
-        const { error } = (await res.json()) as { error: string };
-        expect(error).toContain("different directory");
-        expect(error).toContain(source.cwd);
-        // Nothing was created, so there is no dead pane to clean up.
-        expect(argv).toHaveLength(0);
+        expect(res.status).toBe(200);
+        // The pane really is created in the requested directory, and the
+        // command it runs points at the source's own transcript.
+        expect(argv[0]).toContain(elsewhere);
+        expect(argv[1]?.[4]).toBe(`pathy --resume '${path}' --fork-session`);
       } finally {
         restore();
+        cleanup();
         rmSync(elsewhere, { recursive: true, force: true });
       }
     });
 
+    it("defaults to the source's directory when no cwd is sent", async () => {
+      // What the picker does, and the reason it is a default rather than a
+      // constraint: a fork belongs beside its original.
+      const { manager, internals } = serverForAgents([pathForkAgent]);
+      const source = trackedSession(manager, "pathy");
+      const { cleanup } = transcriptFor(manager, source.id);
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id, detach: true }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[0]).toContain(source.cwd);
+      } finally {
+        restore();
+        cleanup();
+      }
+    });
+
+    it("quotes a transcript path containing a space and a quote", async () => {
+      // Byte-exact, because this string is typed into a pane's shell and a
+      // project directory can legally hold either character.
+      const { manager, internals } = serverForAgents([pathForkAgent]);
+      const source = trackedSession(manager, "pathy");
+      const { path, cleanup } = transcriptFor(
+        manager,
+        source.id,
+        "it's a.jsonl",
+      );
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id, detach: true }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[1]?.[4]).toBe(
+          `pathy --resume '${path.replace(/'/g, "'\\''")}' --fork-session`,
+        );
+        // Spelled out once, so a change to the escaping cannot pass by
+        // rewriting the expression above.
+        expect(argv[1]?.[4]).toContain("/it'\\''s a.jsonl'");
+      } finally {
+        restore();
+        cleanup();
+      }
+    });
+
+    it("refuses a {path} fork with no usable transcript, creating no pane", async () => {
+      // The path form's whole value is that the agent opens the file instead
+      // of deriving a directory. A path that resolves to nothing reproduces
+      // the failure it prevents: a live pane that found no conversation,
+      // which ccmux cannot detect. So this has to 400 BEFORE tmux is touched.
+      const dir = mkdtempSync(join(tmpdir(), "ccmux-forkpath-"));
+      const unusable = [
+        // Never recorded (no hooks yet, or a row that has not taken a turn).
+        null,
+        // Relative, so it would resolve against the destination's cwd.
+        "relative/src-sid.jsonl",
+        // Absolute and named right, but not on disk.
+        join(dir, "gone.jsonl"),
+      ];
+      try {
+        for (const logPath of unusable) {
+          const { manager, internals } = serverForAgents([pathForkAgent]);
+          const source = trackedSession(manager, "pathy");
+          if (logPath !== null) manager.setLogPath(source.id, logPath);
+          const { argv, restore } = withTmuxRecorder();
+          try {
+            const res = await internals.handleRequest(
+              spawnRequest({ fork: source.id, detach: true }),
+            );
+            expect(res.status).toBe(400);
+            const { error } = (await res.json()) as { error: string };
+            expect(error).toContain("Cannot fork session src-sid");
+            // Actionable: names both ways out.
+            expect(error).toContain("ccmux setup");
+            expect(error).toContain("--resume {id}");
+            expect(argv).toHaveLength(0);
+          } finally {
+            restore();
+          }
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("still forks an id-based template with no transcript at all", async () => {
+      // The compatibility fallback. `--resume <absolute path>` is
+      // undocumented (verified on Claude Code 2.1.218 through 2.1.220), so
+      // reverting `agents.<name>.forkCommand` to the id form in ccmux.json
+      // has to keep working, transcript or no transcript.
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const source = trackedSession(manager, "forky");
+      expect(source.logPath).toBeNull();
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id, detach: true }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[1]?.[4]).toBe("forky --resume src-sid --fork-session");
+      } finally {
+        restore();
+      }
+    });
+
     it("allows an explicit cwd that MATCHES the source", async () => {
-      // The refusal is about a DIFFERENT directory, not about the field
-      // being present: a caller echoing the session's own cwd is fine.
+      // Echoing the session's own cwd is as accepted as omitting it.
       const { manager, internals } = serverForAgents([forkAgent]);
       const source = trackedSession(manager, "forky");
       const { argv, restore } = withTmuxRecorder();
@@ -3974,12 +4101,12 @@ describe("POST /spawn", () => {
     });
 
     it("refuses a fork into a new worktree, creating nothing", async () => {
-      // Same wall as the explicit-cwd refusal above, reached a different way:
-      // a fork into a worktree sends no `cwd` at all, so that check passes and
-      // the relocation only appears once the worktree resolves. The source cwd
-      // is a REAL repo here, so the worktree would genuinely have been created
-      // had the refusal come later — which is what the directory assertion
-      // pins down.
+      // Not a resume-scoping wall any more (a fork into an existing directory
+      // is accepted above): this request CREATES its destination, and the
+      // combination is unverified against a live agent, so it stays refused
+      // until it ships as its own feature. The source cwd is a REAL repo
+      // here, so the worktree would genuinely have been created had the
+      // refusal come later — which is what the directory assertion pins down.
       //
       // The name is load-bearing. A fork carries no prompt, so a BARE
       // `worktree: {}` is already refused with "a worktree needs a name" and
@@ -4020,7 +4147,6 @@ describe("POST /spawn", () => {
         expect(res.status).toBe(400);
         const { error } = (await res.json()) as { error: string };
         expect(error).toContain("into a new worktree");
-        expect(error).toContain(repo);
         expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
         expect(argv).toHaveLength(0);
       } finally {

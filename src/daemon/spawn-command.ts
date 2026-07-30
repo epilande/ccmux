@@ -1,3 +1,5 @@
+import { accessSync, constants, statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import type { AgentDef } from "../lib/agents";
 
 /**
@@ -423,6 +425,57 @@ export interface AgentForkCommandInput {
   binary: string;
   /** The SOURCE session's native id, substituted for `{id}`. */
   sessionId: string;
+  /**
+   * The SOURCE session's transcript file, substituted for `{path}`. Only
+   * templates that use `{path}` need it, and it is validated here rather
+   * than by the caller (see `resolveForkTranscript`), so no route can lose
+   * the check.
+   */
+  logPath?: string | null;
+}
+
+/**
+ * The transcript file a `{path}` fork will resume, or why `logPath` cannot
+ * be handed to a resume flag.
+ *
+ * The point of resuming by path is that the agent opens the file instead of
+ * deriving a directory, so a path that does not resolve to a readable
+ * transcript produces the exact failure the path form exists to avoid: a
+ * live pane that found no conversation, which nothing downstream can see.
+ * Better to refuse before the pane exists.
+ *
+ * The `.jsonl` requirement is a shape guard, not a filesystem one:
+ * `Session.logPath` is whatever the source recorded (for a background row it
+ * is `state.json`'s scan path verbatim), so "a readable file" alone would
+ * happily pass a value that is not a transcript at all.
+ */
+function resolveForkTranscript(
+  logPath: string | null | undefined,
+): BuildResult<string> {
+  const refuse = (error: string): BuildResult<string> => ({ ok: false, error });
+  if (!logPath) return refuse("ccmux has recorded no transcript path for it");
+  if (!isAbsolute(logPath)) {
+    return refuse(`its recorded transcript path is not absolute (${logPath})`);
+  }
+  if (!logPath.endsWith(".jsonl")) {
+    return refuse(
+      `its recorded transcript path is not a .jsonl transcript (${logPath})`,
+    );
+  }
+  try {
+    if (!statSync(logPath).isFile()) {
+      return refuse(`its transcript path is not a file (${logPath})`);
+    }
+    accessSync(logPath, constants.R_OK);
+  } catch {
+    return refuse(`its transcript is missing or unreadable (${logPath})`);
+  }
+  return { ok: true, value: logPath };
+}
+
+/** Whether a fork template resumes by transcript path (see the builder). */
+function templateUsesTranscriptPath(template: string): boolean {
+  return template.includes("{path}");
 }
 
 /**
@@ -435,15 +488,30 @@ export interface AgentForkCommandInput {
  * different `cwd` and destination, so that feature reuses this function
  * unchanged and only swaps the placement half.
  *
- * There is no quoting scan like `promptCommand`'s, because nothing
- * free-form is interpolated: `{id}` is constrained to
- * `NATIVE_SESSION_ID_PATTERN` right here, and `{bin}` is the same value
- * the bare-spawn path already sends to the shell verbatim.
+ * A template resumes by `{path}` (the source's transcript file) or by
+ * `{id}` (the source's native session id), and the difference is not
+ * cosmetic. `claude --resume <id>` resolves the id against project
+ * directories derived from the launch cwd, falling back to every checkout
+ * `git worktree list` reports, so it is REPO-scoped: it finds the
+ * conversation from anywhere inside the repo and nowhere outside it.
+ * `claude --resume <absolute path>` skips that resolution entirely and works
+ * from any directory, which is why the built-in template uses it and why the
+ * route no longer has to constrain the destination cwd.
+ *
+ * `{path}` is undocumented (absent from `claude --help`), verified on Claude
+ * Code 2.1.218 through 2.1.220 in print and interactive mode, and not
+ * publicly guaranteed. `{id}` therefore stays a first-class placeholder: if
+ * a release breaks the path form, `agents.claude.forkCommand` can be set
+ * back to the id form in ccmux.json without a ccmux change.
+ *
+ * `{id}` needs no quoting scan (`NATIVE_SESSION_ID_PATTERN` makes it inert
+ * to the shell). `{path}` does, and gets exactly `{prompt}`'s treatment:
+ * `quotedTemplateProblem` plus `substituteQuotedTemplate`.
  */
 export function buildAgentForkCommand(
   input: AgentForkCommandInput,
 ): BuildResult<string> {
-  const { agent, binary, sessionId } = input;
+  const { agent, binary, sessionId, logPath } = input;
   const template = agent.forkCommand;
 
   // Empty string shares this branch, not the placeholder check below. It is
@@ -472,24 +540,72 @@ export function buildAgentForkCommand(
       error: `Invalid 'agents.${agent.name}.forkCommand': expected a string.`,
     };
   }
-  // Without `{id}` the command starts a FRESH session: the pane appears, the
-  // agent runs, and the history the user asked to branch is silently absent.
-  // A refusal is far easier to act on than that.
-  if (!template.includes("{id}")) {
+  // Naming neither the transcript nor the id starts a FRESH session: the pane
+  // appears, the agent runs, and the history the user asked to branch is
+  // silently absent. A refusal is far easier to act on than that.
+  if (!templateUsesTranscriptPath(template) && !template.includes("{id}")) {
     return {
       ok: false,
       error:
-        `Invalid 'agents.${agent.name}.forkCommand': must contain the {id} placeholder, ` +
-        `otherwise the fork would start a fresh session instead of continuing this one.`,
+        `Invalid 'agents.${agent.name}.forkCommand': must contain the {path} placeholder ` +
+        `(the source's transcript file) or {id} (its native session id), otherwise the ` +
+        `fork would start a fresh session instead of continuing this one.`,
     };
   }
+  // Checked whether or not `{id}` is used: the id is what identifies the
+  // source everywhere else, so a value this loose is a bug worth surfacing
+  // even when it never reaches the shell.
   if (!NATIVE_SESSION_ID_PATTERN.test(sessionId)) {
     return { ok: false, error: `Invalid session id: ${sessionId}` };
   }
 
+  if (!templateUsesTranscriptPath(template)) {
+    return {
+      ok: true,
+      value: substitutePlaceholders(template, { id: sessionId, bin: binary }),
+    };
+  }
+
+  const transcript = resolveForkTranscript(logPath);
+  if (!transcript.ok) {
+    return {
+      ok: false,
+      error:
+        `Cannot fork session ${sessionId}: ${transcript.error}. ` +
+        `'agents.${agent.name}.forkCommand' resumes by transcript path, so the fork ` +
+        `cannot be built without one. Install hooks with 'ccmux setup' so ccmux records ` +
+        `the transcript, take a turn in the session, or set that template to the id form ` +
+        `("{bin} --resume {id} --fork-session") to resume by session id instead.`,
+    };
+  }
+  if (!binaryIsQuoteNeutral(binary)) {
+    return {
+      ok: false,
+      error:
+        `Cannot fork '${agent.name}': its launcher (${binary}) contains a quote, a ` +
+        `backslash, or a command substitution, which would break the quoting around the ` +
+        `transcript path.`,
+    };
+  }
+  const problem = quotedTemplateProblem(template);
+  if (problem !== undefined) {
+    return {
+      ok: false,
+      error:
+        `Invalid 'agents.${agent.name}.forkCommand': ${problem}. Every {path} ` +
+        `placeholder must sit inside balanced single quotes, and the template may not ` +
+        `contain double quotes, backticks, backslashes, '$(' or "$'" ` +
+        `(e.g. "{bin} --resume '{path}' --fork-session").`,
+    };
+  }
+
   return {
     ok: true,
-    value: substitutePlaceholders(template, { id: sessionId, bin: binary }),
+    value: substituteQuotedTemplate(template, {
+      id: sessionId,
+      bin: binary,
+      path: transcript.value,
+    }),
   };
 }
 

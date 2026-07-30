@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
@@ -628,6 +628,20 @@ describe("buildAgentForkCommand", () => {
     return { ...claudeAgent, ...overrides };
   }
 
+  /** A real readable transcript, since the `{path}` form stats the file. */
+  function transcript(name = "abc.jsonl"): {
+    path: string;
+    cleanup: () => void;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "ccmux-fork-"));
+    const path = join(dir, name);
+    writeFileSync(path, "{}\n");
+    return {
+      path,
+      cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    };
+  }
+
   it("substitutes the source id and the launcher in one pass", () => {
     expect(
       buildAgentForkCommand({
@@ -682,16 +696,20 @@ describe("buildAgentForkCommand", () => {
     }
   });
 
-  it("refuses a template with no {id}", () => {
-    // Without it the fork silently starts a FRESH session: a pane appears,
-    // the agent runs, and the history the user asked to branch is gone.
+  it("refuses a template that names neither the transcript nor the id", () => {
+    // Without one of them the fork silently starts a FRESH session: a pane
+    // appears, the agent runs, and the history the user asked to branch is
+    // gone.
     const result = buildAgentForkCommand({
       agent: agentWith({ forkCommand: "{bin} --fork-session" }),
       binary: "claude",
       sessionId: "abc",
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("{id}");
+    if (!result.ok) {
+      expect(result.error).toContain("{path}");
+      expect(result.error).toContain("{id}");
+    }
   });
 
   it("refuses a non-string template from config", () => {
@@ -724,22 +742,153 @@ describe("buildAgentForkCommand", () => {
       expect(result.ok).toBe(false);
     }
   });
+
+  describe("resuming by transcript path", () => {
+    const PATH_TEMPLATE = "{bin} --resume '{path}' --fork-session";
+
+    it("single-quote escapes the path, exactly as it does a prompt", () => {
+      // A directory name can hold a space and a quote, and this is a shell
+      // command typed into a pane: byte-exact, not "looks right".
+      const { path, cleanup } = transcript("it's a.jsonl");
+      try {
+        const result = buildAgentForkCommand({
+          agent: agentWith({ forkCommand: PATH_TEMPLATE }),
+          binary: "claude",
+          sessionId: "abc-123",
+          logPath: path,
+        });
+        expect(result).toEqual({
+          ok: true,
+          value: `claude --resume '${dirname(path)}/it'\\''s a.jsonl' --fork-session`,
+        });
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("refuses a missing, relative, or unreadable transcript", () => {
+      // The whole point of the path form is that the agent opens the file
+      // instead of deriving a directory, so a path that resolves to nothing
+      // reproduces the failure it exists to prevent: a live pane that found
+      // no conversation, which nothing downstream can detect.
+      const { path, cleanup } = transcript();
+      try {
+        const bad: (string | null | undefined)[] = [
+          undefined,
+          null,
+          "",
+          "relative/abc.jsonl",
+          // Absolute, but not a transcript at all: `Session.logPath` is
+          // whatever the source recorded, and a background row records a
+          // `state.json` scan path.
+          join(dirname(path), "state.json"),
+          // Absolute and .jsonl, but gone.
+          join(dirname(path), "missing.jsonl"),
+          // A directory, not a file.
+          dirname(path),
+        ];
+        for (const logPath of bad) {
+          const result = buildAgentForkCommand({
+            agent: agentWith({ forkCommand: PATH_TEMPLATE }),
+            binary: "claude",
+            sessionId: "abc-123",
+            logPath,
+          });
+          expect(result.ok).toBe(false);
+          if (!result.ok) {
+            // Actionable: names the escape hatch rather than just failing.
+            expect(result.error).toContain("ccmux setup");
+            expect(result.error).toContain("--resume {id}");
+          }
+        }
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("still builds an id-only template with no transcript at all", () => {
+      // The compatibility fallback: the path interface is undocumented, so
+      // reverting `forkCommand` to the id form in ccmux.json has to keep
+      // working for a row ccmux never recorded a transcript for.
+      expect(
+        buildAgentForkCommand({
+          agent: agentWith({
+            forkCommand: "{bin} --resume {id} --fork-session",
+          }),
+          binary: "claude",
+          sessionId: "abc-123",
+          logPath: null,
+        }),
+      ).toEqual({ ok: true, value: "claude --resume abc-123 --fork-session" });
+    });
+
+    it("refuses a {path} that is not in a real single-quoted context", () => {
+      // Same reasoning as `promptCommand`: the escaping is single-quote
+      // escaping, and it is inert anywhere else.
+      const { path, cleanup } = transcript();
+      try {
+        for (const template of [
+          "{bin} --resume {path}",
+          '{bin} --resume "{path}"',
+          `sh -c "{bin} --resume '{path}'"`,
+        ]) {
+          const result = buildAgentForkCommand({
+            agent: agentWith({ forkCommand: template }),
+            binary: "claude",
+            sessionId: "abc-123",
+            logPath: path,
+          });
+          expect(result.ok).toBe(false);
+        }
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("refuses a launcher that would break the quoting around the path", () => {
+      // `{bin}` is skipped as inert by the template scan, which is only
+      // sound while the binary itself is quote-neutral.
+      const { path, cleanup } = transcript();
+      try {
+        const result = buildAgentForkCommand({
+          agent: agentWith({ forkCommand: PATH_TEMPLATE }),
+          binary: "/opt/it's/claude",
+          sessionId: "abc-123",
+          logPath: path,
+        });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error).toContain("launcher");
+      } finally {
+        cleanup();
+      }
+    });
+  });
 });
 
 describe("built-in fork invocations", () => {
-  it("forks Claude into a new session id, leaving the source alone", () => {
+  it("forks Claude by transcript path, leaving the source alone", () => {
     // `--fork-session` (not a bare `--resume`, which would APPEND to the
-    // source's transcript and fight the live original for it).
-    expect(
-      buildAgentForkCommand({
-        agent: getBuiltinAgent("claude"),
-        binary: "claude",
-        sessionId: "abc-123",
-      }),
-    ).toEqual({
-      ok: true,
-      value: "claude --resume abc-123 --fork-session",
-    });
+    // source's transcript and fight the live original for it), and by PATH
+    // rather than id, which is what lets the fork start in any directory
+    // (docs/agent-adapters.md#forking-a-session).
+    const dir = mkdtempSync(join(tmpdir(), "ccmux-fork-"));
+    const path = join(dir, "abc-123.jsonl");
+    writeFileSync(path, "{}\n");
+    try {
+      expect(
+        buildAgentForkCommand({
+          agent: getBuiltinAgent("claude"),
+          binary: "claude",
+          sessionId: "abc-123",
+          logPath: path,
+        }),
+      ).toEqual({
+        ok: true,
+        value: `claude --resume '${path}' --fork-session`,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("is the only built-in that claims to fork", () => {

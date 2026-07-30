@@ -317,10 +317,10 @@ and places the new pane beside the source's own. `ccmux spawn --fork
 `ccmux spawn`, relative to the pane you run it from. Either way the new pane
 is tracked like any other session, with its own row, state and id.
 
-The fork always starts in the source's directory. Claude looks a resumed
-session up under the project directory for the current working directory, so
-a fork somewhere else would find no conversation at all; `--cwd` pointing
-elsewhere is refused rather than silently opening an empty shell.
+The fork starts in the source's directory by default, because that is where a
+side-by-side fork belongs. It is a default, not a limit: `--cwd` elsewhere is
+honored, since the fork resumes the source's transcript by path rather than by
+looking a session id up under the current directory.
 
 Fork needs two things, and the picker hides the action when either is missing:
 the agent has to declare how it forks (`forkCommand`), and ccmux has to know
@@ -759,7 +759,7 @@ You can also override built-in agent settings by using the agent's name as the k
 | `versionPatterns`     | No       | Regex patterns to extract version from output                                       |
 | `resumeCommand`       | No       | Command template for restarting (`{id}` placeholder)                                |
 | `promptCommand`       | No       | Command template for `spawn --prompt` (`{prompt}` placeholder, single-quoted)       |
-| `forkCommand`         | No       | Command template for Fork / `spawn --fork` (`{id}` placeholder, optional `{bin}`)   |
+| `forkCommand`         | No       | Command template for Fork / `spawn --fork` (`{path}` single-quoted, or `{id}`)      |
 | `sessionFilePattern`  | No       | Regex to extract session ID from log filenames                                      |
 | `executable`          | No       | Command used to launch the agent (defaults to key)                                  |
 | `hooks`               | No       | `{ type }` (built-in override only; internal)                                       |

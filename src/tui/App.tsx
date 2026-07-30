@@ -436,9 +436,9 @@ export function App(props: AppProps) {
    *
    * The picker only chooses the DESTINATION here (`split` + `target` /
    * `callerPane`); how to continue the conversation is the daemon's
-   * `forkCommand` template. Note the cwd is NOT ours to choose: Claude
-   * resolves a resumed session against the project directory for its cwd, so
-   * the daemon refuses a fork into a different one.
+   * `forkCommand` template. No cwd is sent, which the daemon reads as "the
+   * source's directory" — a product choice (a fork sits beside its original),
+   * not a constraint: the daemon accepts an explicit cwd for a fork.
    */
   async function forkSession(session: EnrichedSession) {
     if (!canForkSession(session)) return;
