@@ -2350,6 +2350,76 @@ export class DaemonServer {
       );
     }
 
+    // Resolve agent definition (custom agents from config are also valid)
+    const agent = this.getAgentByType(agentName);
+    if (!agent) {
+      return Response.json(
+        { error: `Unknown agent: ${agentName}` },
+        { status: 400, headers },
+      );
+    }
+
+    // Build agent command
+    const preferences = await getPreferences();
+    const cmd = spawnBinaryFor(agent, preferences.command);
+
+    // The two builders are deliberately separate functions: forking is a
+    // different command shape, and keeping its construction out of the
+    // placement logic below is what lets a worktree destination reuse it.
+    const commandResult = forkSource
+      ? buildAgentForkCommand({
+          agent,
+          binary: cmd,
+          sessionId: forkSource.nativeSessionId,
+        })
+      : buildAgentSpawnCommand({
+          agent,
+          binary: cmd,
+          resume,
+          prompt,
+        });
+    if (!commandResult.ok) {
+      return Response.json(
+        { error: commandResult.error },
+        { status: 400, headers },
+      );
+    }
+    const command = commandResult.value;
+
+    // Resolve placement. The pane is probed even on the split path, where
+    // tmux would report its own failure, so that a stale pane is one
+    // consistent 400 rather than a 400 on one branch and a raw-stderr 500
+    // on the other.
+    const placementPane = target ?? callerPane;
+    let placement: SpawnPlacement | undefined;
+    if (placementPane) {
+      const location = await resolvePaneLocation(placementPane);
+      if (!location) {
+        return Response.json(
+          { error: `Unknown target pane: ${placementPane}` },
+          { status: 400, headers },
+        );
+      }
+      if (split) {
+        placement = { kind: "pane", id: placementPane };
+      } else if (target) {
+        // Explicitly named: put the window right after that one, even
+        // though tmux renumbers the windows after it.
+        placement = { kind: "window", id: location.windowId };
+      } else {
+        // Implicit: the caller only means "my session", so append at the
+        // end. Inserting here would shift every later window's index and
+        // break `select-window -t N` muscle memory and bindings.
+        placement = { kind: "session", id: location.sessionId };
+      }
+    }
+
+    // Creating the worktree is the handler's first side effect, so it comes
+    // last among the things that can still refuse the request. Everything
+    // above resolves the agent, the command and the placement from the
+    // request alone and never reads the destination directory, so a bad
+    // agent name or a stale target pane now 400s without leaving a checkout
+    // and a branch behind for the user to clean up.
     let spawnCwd = cwd;
     let worktreeInfo: WorktreeCreation | undefined;
     if (worktreeRequest.value) {
@@ -2381,75 +2451,20 @@ export class DaemonServer {
      * retry correct, and unwinding would risk deleting a worktree that
      * already existed. But that only helps if the user is told, otherwise
      * they are left wondering whether to clean it up by hand.
+     *
+     * The retry advice splits by mode because only an explicit name is
+     * stable: a derived name that is already taken gets a numeric suffix, so
+     * re-running the same command would build a sibling rather than reuse
+     * what is already there.
      */
-    const withWorktreeNote = (error: string): string =>
-      worktreeInfo?.created
-        ? `${error} (the worktree '${worktreeInfo.name}' was created at ${worktreeInfo.path} and left in place; re-running the same command will reuse it)`
-        : error;
-
-    // Resolve agent definition (custom agents from config are also valid)
-    const agent = this.getAgentByType(agentName);
-    if (!agent) {
-      return Response.json(
-        { error: withWorktreeNote(`Unknown agent: ${agentName}`) },
-        { status: 400, headers },
-      );
-    }
-
-    // Build agent command
-    const preferences = await getPreferences();
-    const cmd = spawnBinaryFor(agent, preferences.command);
-
-    // The two builders are deliberately separate functions: forking is a
-    // different command shape, and keeping its construction out of the
-    // placement logic below is what lets a worktree destination reuse it.
-    const commandResult = forkSource
-      ? buildAgentForkCommand({
-          agent,
-          binary: cmd,
-          sessionId: forkSource.nativeSessionId,
-        })
-      : buildAgentSpawnCommand({
-          agent,
-          binary: cmd,
-          resume,
-          prompt,
-        });
-    if (!commandResult.ok) {
-      return Response.json(
-        { error: withWorktreeNote(commandResult.error) },
-        { status: 400, headers },
-      );
-    }
-    const command = commandResult.value;
-
-    // Resolve placement. The pane is probed even on the split path, where
-    // tmux would report its own failure, so that a stale pane is one
-    // consistent 400 rather than a 400 on one branch and a raw-stderr 500
-    // on the other.
-    const placementPane = target ?? callerPane;
-    let placement: SpawnPlacement | undefined;
-    if (placementPane) {
-      const location = await resolvePaneLocation(placementPane);
-      if (!location) {
-        return Response.json(
-          { error: withWorktreeNote(`Unknown target pane: ${placementPane}`) },
-          { status: 400, headers },
-        );
-      }
-      if (split) {
-        placement = { kind: "pane", id: placementPane };
-      } else if (target) {
-        // Explicitly named: put the window right after that one, even
-        // though tmux renumbers the windows after it.
-        placement = { kind: "window", id: location.windowId };
-      } else {
-        // Implicit: the caller only means "my session", so append at the
-        // end. Inserting here would shift every later window's index and
-        // break `select-window -t N` muscle memory and bindings.
-        placement = { kind: "session", id: location.sessionId };
-      }
-    }
+    const withWorktreeNote = (error: string): string => {
+      if (!worktreeInfo?.created) return error;
+      const retry =
+        worktreeRequest.value?.name === undefined
+          ? `re-running will create a numbered sibling, pass --worktree '${worktreeInfo.name}' to reuse this one`
+          : "re-running the same command will reuse it";
+      return `${error} (the worktree '${worktreeInfo.name}' was created at ${worktreeInfo.path} and left in place; ${retry})`;
+    };
 
     // Create tmux pane
     const tmuxArgv = buildTmuxSpawnArgv({
