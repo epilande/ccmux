@@ -387,6 +387,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     }
     const merged = { ...pendingUpdates, ...updates };
     pendingUpdates = {};
+    // A flush with nothing to say still cancels the timer above, but it must
+    // not turn into a disk write: callers flush unconditionally so the queue
+    // always drains, and `setUIState` is a real read-modify-write.
+    if (Object.keys(merged).length === 0) return Promise.resolve();
     return Promise.resolve(persistStateFn(merged));
   }
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1310,7 +1314,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
      * bypassing) takes any pending `f`/`p`/`b` toggle to disk with it.
      */
     setLastSpawnAgent(agent: string): Promise<void> {
-      if (state.lastSpawnAgent === agent) return Promise.resolve();
+      // Re-spawning the same agent is not a state change, but it still owes
+      // the flush: same-agent is the DEFAULT branch (the value is seeded from
+      // disk and the dialog opens on it), and this is the only path that
+      // drains the debounce queue before the exit that follows a spawn. An
+      // empty flush is a no-op write, so this costs nothing when there is
+      // nothing pending.
+      if (state.lastSpawnAgent === agent) return flushUIState({});
       setState("lastSpawnAgent", agent);
       return flushUIState({ lastSpawnAgent: agent });
     },
