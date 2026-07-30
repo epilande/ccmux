@@ -1552,6 +1552,57 @@ describe("dirty re-check before removal", () => {
     expect(result.outcomes[0].error).toContain("became dirty");
     expect(existsSync(wt)).toBe(true);
   });
+
+  /**
+   * S8: the comment used to claim the re-check ran "immediately before the
+   * directory moves" and cited the agent-exit wait as the staleness it
+   * covers, but the check actually ran BEFORE `stopSessions`, leaving that
+   * whole wait unguarded. This drives the dirtying through `closePane`, the
+   * one existing injectable seam that fires from inside `stopSessions`
+   * itself, so it lands exactly in the window the old order left open.
+   */
+  it("catches a worktree dirtied during the agent-shutdown wait, not just before it", async () => {
+    const { repo } = await makeRepo("recheck-during-shutdown");
+    const wt = await addWorktree(repo, "feat/recheck-shutdown");
+    await git(repo, [
+      "merge",
+      "--no-ff",
+      "-m",
+      "merge",
+      "feat/recheck-shutdown",
+    ]);
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+    expect(scan.candidates[0].dirty).toBe(false);
+
+    const withSession: PruneCandidate = {
+      ...scan.candidates[0],
+      sessions: [session({ pid: 4242, tmuxPane: "%9" })],
+    };
+    let alive = true;
+
+    const result = await runPrune([withSession], {
+      stateFiles: [],
+      log: () => {},
+      sleep: async () => {},
+      killProcess: (_pid, signal) => {
+        if (signal === "SIGTERM") {
+          alive = false;
+          return;
+        }
+        if (!alive) throw new Error("ESRCH");
+      },
+      // An agent flushing state to disk on its way out, mid-shutdown-wait —
+      // exactly the window a check that runs before `stopSessions` cannot see.
+      closePane: async () => {
+        writeFileSync(join(wt, "flushed-during-shutdown.txt"), "late write\n");
+        return "closed";
+      },
+    });
+
+    expect(result.outcomes[0].removed).toBe(false);
+    expect(result.outcomes[0].error).toContain("became dirty");
+    expect(existsSync(wt)).toBe(true);
+  });
 });
 
 /**

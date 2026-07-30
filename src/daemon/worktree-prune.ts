@@ -902,6 +902,12 @@ export function trashPathFor(worktreePath: string, now: Date): string {
  * under their trash path and a mistake is recoverable by hand. Repo-level
  * metadata (`git worktree prune`, stale lock files) is reclaimed once per
  * repo rather than once per worktree.
+ *
+ * Per candidate, `stopSessions` (S9) runs BEFORE the dirty re-check (S8),
+ * which runs immediately before the rename. Checking dirt first would leave
+ * the whole agent-shutdown wait unguarded — exactly the gap that let a
+ * comment here claim "immediately before deletion" while the code ran the
+ * check before the wait that made it stale.
  */
 export async function runPrune(
   candidates: PruneCandidate[],
@@ -983,11 +989,20 @@ export async function runPrune(
       });
     }
 
-    // Re-check at the point of no return. The scan-time answer can be tens of
-    // seconds old by now — a `gh pr list` per worktree, plus up to 3s per
-    // session waiting for an agent to exit — and someone editing in a shell in
-    // this worktree during that window would otherwise lose the work with no
-    // opt-in. One `git status`, immediately before the directory moves.
+    // Stop the worktree's agents (and close their panes) BEFORE the dirty
+    // re-check and the rename, not after (S8). The wait below is up to
+    // PROCESS_EXIT_TIMEOUT_MS per session, and running it AFTER the re-check
+    // — the previous order — left that whole window unguarded: an agent
+    // flushing state during its own shutdown, or a user editing in a shell,
+    // could dirty the directory in the gap between the check and the rename.
+    outcome.panesClosed = await stopSessions(candidate, options, steps);
+
+    // Re-check at the point of no return, AFTER the shutdown wait above, not
+    // before it (S8). The scan-time answer can be tens of seconds old by
+    // now — a `gh pr list` per worktree, plus the agent-exit wait
+    // `stopSessions` just ran — and someone editing in this worktree during
+    // that window would otherwise lose the work with no opt-in. One
+    // `git status`, immediately before the directory moves.
     if (!allowDirty.has(candidate.path)) {
       // Same setup-symlink exemption as the scan, or a worktree that passed
       // the list would be refused here for the link the tooling itself made.
@@ -1009,8 +1024,6 @@ export async function runPrune(
         continue;
       }
     }
-
-    outcome.panesClosed = await stopSessions(candidate, options, steps);
 
     const trash = trashPathFor(candidate.path, now());
     try {
