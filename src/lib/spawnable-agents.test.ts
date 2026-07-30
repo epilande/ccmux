@@ -72,9 +72,9 @@ describe("listSpawnableAgents", () => {
   });
 
   test("claude stays PATH-gated when no command is declared", () => {
-    expect(
-      listSpawnableAgents(BUILTIN_AGENTS, { which: whichNone }),
-    ).toEqual([]);
+    expect(listSpawnableAgents(BUILTIN_AGENTS, { which: whichNone })).toEqual(
+      [],
+    );
   });
 
   test("reports display name, short code, and prompt support", () => {
@@ -107,16 +107,43 @@ describe("listSpawnableAgents", () => {
     expect(result[0]!.displayName).toBe("Mine");
   });
 
-  test("a custom override of a built-in stays PATH-gated", () => {
+  test("a built-in with an overridden executable is listed off PATH", () => {
+    // Same argument as a custom agent's, and as claude's `command`: the user
+    // declared this binary by hand, and `POST /spawn` types it into a shell
+    // where a `~` path, a wrapper, or a shell function resolves. `Bun.which`
+    // resolves none of those, so gating on it hides a working agent.
+    for (const executable of [
+      "~/bin/codex-wrapper",
+      "/opt/wrap/codex",
+      "codex-nightly",
+    ]) {
+      const agents = getAgents({ agents: { codex: { executable } } });
+      const result = listSpawnableAgents(agents, { which: whichNone });
+      // Exactly codex: every other built-in is untouched, so it stays gated
+      // and drops out on a machine where nothing resolves.
+      expect(result.map((a) => a.name)).toEqual(["codex"]);
+    }
+  });
+
+  test("an overridden built-in that does resolve is still listed once", () => {
     const agents = getAgents({
       agents: { codex: { executable: "codex-nightly" } },
     });
-    expect(listSpawnableAgents(agents, { which: whichNone })).toEqual([]);
     expect(
       listSpawnableAgents(agents, { which: whichOnly("codex-nightly") }).map(
         (a) => a.name,
       ),
     ).toEqual(["codex"]);
+  });
+
+  test("an executable that matches the built-in default stays PATH-gated", () => {
+    // Declaring what was already true declares nothing: this is still the
+    // catalogue entry, and a menu entry that fails on Enter is worse than a
+    // short menu.
+    const agents = getAgents({
+      agents: { cursor: { executable: "cursor-agent" } },
+    });
+    expect(listSpawnableAgents(agents, { which: whichNone })).toEqual([]);
   });
 
   test("returns an empty list when nothing is installed", () => {
