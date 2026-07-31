@@ -19,6 +19,8 @@ import {
 } from "./agent-state";
 import {
   branchDeletionFor,
+  describeIgnoredDeletion,
+  describeIgnoredDirs,
   describeIgnoredFiles,
   ghPRStateLookup,
   isRepoAdminDir,
@@ -1711,9 +1713,11 @@ describe("ignored files", () => {
 
     const state = await readDirtyState(wt);
 
-    // The precious file is named; the regenerable directory is not counted.
+    // Files and directories stay in separate lists: only the files reach the
+    // row and the confirmations.
     expect(state.ignoredFiles).toEqual([".env"]);
-    // And it stays OUT of the dirty gate, which exists for tracked work.
+    expect(state.ignoredDirs).toEqual(["node_modules/"]);
+    // And neither joins the dirty gate, which exists for tracked work.
     expect(state.dirty).toBe(false);
   });
 
@@ -1754,6 +1758,191 @@ describe("ignored files", () => {
   });
 });
 
+/**
+ * A gitignored DIRECTORY used to be dropped on the floor by `readDirtyState`
+ * as presumed-regenerable build output, so a `notes/` full of work was
+ * deleted with no mention on the row, in either confirmation, or in the run
+ * log (#81). The fix is log-only on purpose: gating on it would fire for the
+ * `node_modules/` on essentially every worktree and train reflex approval,
+ * which is the exact failure the ignored-file policy is built to avoid.
+ */
+describe("ignored directories", () => {
+  /** A merged worktree carrying a gitignored `notes/` of real work. */
+  async function worktreeWithIgnoredDir(
+    name: string,
+    branch: string,
+    ignore = "notes/\n",
+  ): Promise<{ repo: string; wt: string }> {
+    const { repo } = await makeRepo(name);
+    const wt = await addWorktree(repo, branch);
+    writeFileSync(join(wt, ".gitignore"), ignore);
+    await git(wt, ["add", ".gitignore"]);
+    await git(wt, ["commit", "-qm", "ignore"]);
+    await git(repo, ["merge", "--no-ff", "-m", "merge", branch]);
+    await mkdir(join(wt, "notes"), { recursive: true });
+    writeFileSync(join(wt, "notes", "plan.md"), "real work\n");
+    return { repo, wt };
+  }
+
+  it("collects the ignored directory git collapses to one entry", async () => {
+    const { wt } = await worktreeWithIgnoredDir("ignored-dir", "feat/notes");
+
+    const state = await readDirtyState(wt);
+
+    // As git prints it: one entry, trailing slash, contents not enumerated.
+    expect(state.ignoredDirs).toEqual(["notes/"]);
+    expect(state.ignoredFiles).toEqual([]);
+  });
+
+  // The whole point of the log-only choice: surfacing must not add a gate.
+  it("does not make the worktree dirty or demand a dirty opt-in", async () => {
+    const { repo, wt } = await worktreeWithIgnoredDir(
+      "ignored-dir-gate",
+      "feat/notes2",
+    );
+
+    const state = await readDirtyState(wt);
+    expect(state.dirty).toBe(false);
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+    expect(scan.candidates[0].dirty).toBe(false);
+    expect(scan.candidates[0].ignoredDirs).toEqual(["notes/"]);
+
+    // No `allowDirtyPaths`, and it still goes: the gate did not move.
+    const result = await runPrune(scan.candidates, {
+      stateFiles: [],
+      log: () => {},
+    });
+
+    expect(result.outcomes[0].removed).toBe(true);
+    expect(result.outcomes[0].error).toBeUndefined();
+    expect(existsSync(wt)).toBe(false);
+  });
+
+  it("names it in the run log when the removal actually happens", async () => {
+    const { repo, wt } = await worktreeWithIgnoredDir(
+      "ignored-dir-log",
+      "feat/notes3",
+    );
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+
+    const result = await runPrune(scan.candidates, {
+      stateFiles: [],
+      log: () => {},
+    });
+
+    expect(existsSync(wt)).toBe(false);
+    const step = result.outcomes[0].steps.find(
+      (s) => s.step === "deleting ignored",
+    );
+    expect(step?.detail).toBe("1 ignored dir (notes/)");
+  });
+
+  it("names it in a dry run too, before anything is touched", async () => {
+    const { repo, wt } = await worktreeWithIgnoredDir(
+      "ignored-dir-dry",
+      "feat/notes4",
+    );
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+
+    const result = await runPrune(scan.candidates, {
+      dryRun: true,
+      stateFiles: [],
+      log: () => {},
+    });
+
+    expect(existsSync(wt)).toBe(true);
+    const step = result.outcomes[0].steps.find(
+      (s) => s.step === "would delete ignored",
+    );
+    expect(step?.detail).toBe("1 ignored dir (notes/)");
+  });
+
+  it("reports files and directories on the one line", async () => {
+    const { repo, wt } = await worktreeWithIgnoredDir(
+      "ignored-dir-both",
+      "feat/notes5",
+      "notes/\n.env\n",
+    );
+    writeFileSync(join(wt, ".env"), "SECRET=1\n");
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+
+    const result = await runPrune(scan.candidates, {
+      stateFiles: [],
+      log: () => {},
+    });
+
+    const step = result.outcomes[0].steps.find(
+      (s) => s.step === "deleting ignored",
+    );
+    expect(step?.detail).toBe("1 ignored file (.env), 1 ignored dir (notes/)");
+  });
+
+  /**
+   * The #80 case must not resurface here. A `node_modules/` gitignore pattern
+   * is directory-only, so the setup symlink arrives as `?? node_modules` and
+   * is exempted as untracked — it must not reappear as an ignored DIRECTORY
+   * and put a line about the user's setup link in the run log.
+   */
+  it("does not report a setup symlink as an ignored directory", async () => {
+    const { repo } = await makeRepo("ignored-dir-symlink");
+    mkdirSync(join(repo, ".claude"), { recursive: true });
+    writeFileSync(
+      join(repo, ".claude", "settings.json"),
+      JSON.stringify({ worktree: { symlinkDirectories: ["node_modules"] } }),
+    );
+    writeFileSync(join(repo, ".gitignore"), "node_modules/\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-qm", "config"]);
+    mkdirSync(join(repo, "node_modules"), { recursive: true });
+    const wt = await addWorktree(repo, "feat/linked-dir");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/linked-dir"]);
+    symlinkSync(join(repo, "node_modules"), join(wt, "node_modules"));
+
+    const state = await readDirtyState(wt, undefined, {
+      setupSymlinks: ["node_modules"],
+    });
+
+    expect(state.ignoredDirs).toEqual([]);
+    expect(state.ignoredFiles).toEqual([]);
+    expect(state.dirty).toBe(false);
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+    const result = await runPrune(scan.candidates, {
+      stateFiles: [],
+      log: () => {},
+    });
+
+    expect(result.outcomes[0].removed).toBe(true);
+    expect(
+      result.outcomes[0].steps.some((s) => s.step === "deleting ignored"),
+    ).toBe(false);
+    // The link was followed by nobody: the main checkout keeps its directory.
+    expect(existsSync(join(repo, "node_modules"))).toBe(true);
+  });
+
+  /**
+   * A bare-name pattern DOES match a symlink, and git prints it with no
+   * trailing slash — so it lands among the ignored FILES, where it was
+   * already going before this change. Pinned so the trailing-slash rule is
+   * not "fixed" into an isDirectory() stat that would move it.
+   */
+  it("keeps a symlink matched by a bare-name pattern among the files", async () => {
+    const { repo } = await makeRepo("ignored-bare-symlink");
+    writeFileSync(join(repo, ".gitignore"), "node_modules\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-qm", "config"]);
+    mkdirSync(join(repo, "node_modules"), { recursive: true });
+    const wt = await addWorktree(repo, "feat/bare-linked");
+    symlinkSync(join(repo, "node_modules"), join(wt, "node_modules"));
+
+    const state = await readDirtyState(wt);
+
+    expect(state.ignoredDirs).toEqual([]);
+    expect(state.ignoredFiles).toEqual(["node_modules"]);
+  });
+});
+
 describe("describeIgnoredFiles", () => {
   it("returns nothing for an empty list", () => {
     expect(describeIgnoredFiles([])).toBe("");
@@ -1766,6 +1955,41 @@ describe("describeIgnoredFiles", () => {
     );
     expect(describeIgnoredFiles(["a", "b", "c", "d", "e"])).toBe(
       "5 ignored files (a, b, c, +2 more)",
+    );
+  });
+});
+
+describe("describeIgnoredDirs", () => {
+  it("returns nothing for an empty list", () => {
+    expect(describeIgnoredDirs([])).toBe("");
+  });
+
+  it("names the directories and counts the overflow", () => {
+    expect(describeIgnoredDirs(["notes/"])).toBe("1 ignored dir (notes/)");
+    expect(describeIgnoredDirs(["notes/", "data/"])).toBe(
+      "2 ignored dirs (notes/, data/)",
+    );
+    expect(describeIgnoredDirs(["a/", "b/", "c/", "d/"])).toBe(
+      "4 ignored dirs (a/, b/, c/, +1 more)",
+    );
+  });
+});
+
+describe("describeIgnoredDeletion", () => {
+  it("says nothing when there is nothing to delete", () => {
+    expect(describeIgnoredDeletion([], [])).toBe("");
+  });
+
+  it("reports either half on its own", () => {
+    expect(describeIgnoredDeletion([".env"], [])).toBe("1 ignored file (.env)");
+    expect(describeIgnoredDeletion([], ["notes/"])).toBe(
+      "1 ignored dir (notes/)",
+    );
+  });
+
+  it("puts the unrecoverable files first when there are both", () => {
+    expect(describeIgnoredDeletion([".env"], ["notes/", "dist/"])).toBe(
+      "1 ignored file (.env), 2 ignored dirs (notes/, dist/)",
     );
   });
 });

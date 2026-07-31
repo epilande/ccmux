@@ -31,6 +31,7 @@ function candidate(overrides: Partial<PruneCandidate> = {}): PruneCandidate {
     modified: 0,
     untracked: 0,
     ignoredFiles: [],
+    ignoredDirs: [],
     branchDeletion: "force",
     adminDir: null,
     sessions: [],
@@ -212,10 +213,12 @@ describe("PruneDialog keys", () => {
     scan: PruneScan,
     opts: { compact?: boolean; onClose?: () => void } = {},
   ) {
-    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () =>
-      new Response(JSON.stringify(scan), {
-        headers: { "Content-Type": "application/json" },
-      })) as unknown as typeof fetch);
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(JSON.stringify(scan), {
+          headers: { "Content-Type": "application/json" },
+        })) as unknown as typeof fetch,
+    );
     setup = await testRender(
       () => (
         <PruneDialog
@@ -392,13 +395,19 @@ describe("PruneDialog keys", () => {
  * warning in half and lost the only text explaining why the row is held back.
  */
 describe("PruneDialog compact layout", () => {
-  const dirty = candidate({ dirty: true, untracked: 1, detail: "merged into origin/main" });
+  const dirty = candidate({
+    dirty: true,
+    untracked: 1,
+    detail: "merged into origin/main",
+  });
 
   it("keeps the whole dirty warning readable at sidebar width", async () => {
-    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () =>
-      new Response(JSON.stringify({ candidates: [dirty], skipped: [] }), {
-        headers: { "Content-Type": "application/json" },
-      })) as unknown as typeof fetch);
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(JSON.stringify({ candidates: [dirty], skipped: [] }), {
+          headers: { "Content-Type": "application/json" },
+        })) as unknown as typeof fetch,
+    );
     setup = await testRender(
       () => <PruneDialog repo={null} compact onClose={() => {}} />,
       { width: 44, height: 16 },

@@ -221,13 +221,24 @@ export interface DirtyState {
   untracked: number;
   /**
    * Individual ignored FILES, by path — `.env`, `.env.local`, a local config.
-   * Ignored DIRECTORIES (`node_modules/`, `dist/`) are deliberately excluded:
-   * git collapses them to a single entry, and they are regenerable build
-   * output, so counting them would flag every worktree alike.
    *
    * Not part of `dirty` — see {@link readDirtyState}.
    */
   ignoredFiles: string[];
+  /**
+   * Ignored DIRECTORIES, as git prints them: collapsed to one entry with a
+   * trailing slash (`node_modules/`, `dist/`, `notes/`).
+   *
+   * Kept separate from {@link ignoredFiles} because the two are surfaced
+   * differently: a file is named on the row and at both confirmation steps,
+   * while a directory is named only in the run log. Most of them are
+   * regenerable build output, so putting them in front of every confirmation
+   * would be noise on essentially every worktree — but `notes/` is a
+   * directory too, and deleting one with no record anywhere was the gap.
+   *
+   * Not part of `dirty` either, for the same reason the files are not.
+   */
+  ignoredDirs: string[];
 }
 
 /**
@@ -248,6 +259,14 @@ export interface DirtyState {
  * fire the opt-in gate on essentially every worktree (a stray `.DS_Store` is
  * an ignored file), and a gate that always fires trains people to clear it
  * reflexively, which is worse than no gate for the case it exists to catch.
+ *
+ * Ignored DIRECTORIES are collected too, into their own list. They used to be
+ * dropped here on the floor as presumed-regenerable build output, which is
+ * true of `node_modules/` and false of a gitignored `notes/` holding real
+ * work — and the file/directory split is only a proxy for "regenerable",
+ * never a test of it. They stay out of `dirty` and off every confirmation for
+ * the alarm-fatigue reason above; the run log names them, so a deletion that
+ * was not gated is at least recorded.
  */
 export async function readDirtyState(
   worktreePath: string,
@@ -262,7 +281,13 @@ export async function readDirtyState(
   // An unreadable worktree is reported dirty: refusing to remove something we
   // could not inspect is the safe direction for a destructive action.
   if (res.exitCode !== 0) {
-    return { dirty: true, modified: 0, untracked: 0, ignoredFiles: [] };
+    return {
+      dirty: true,
+      modified: 0,
+      untracked: 0,
+      ignoredFiles: [],
+      ignoredDirs: [],
+    };
   }
 
   const setupSymlinks = new Set(
@@ -272,12 +297,20 @@ export async function readDirtyState(
   let modified = 0;
   let untracked = 0;
   const ignoredFiles: string[] = [];
+  const ignoredDirs: string[] = [];
   for (const line of res.stdout.split("\n")) {
     if (line.trim() === "") continue;
     if (line.startsWith("!!")) {
       const path = line.slice(3).trim();
+      if (!path) continue;
       // A trailing slash is git's marker for a collapsed ignored directory.
-      if (path && !path.endsWith("/")) ignoredFiles.push(path);
+      // It is the only thing that distinguishes the two here, and it is
+      // reliable in the direction that matters: git prints it for a real
+      // directory and never for a symlink to one (a `node_modules` symlink
+      // matched by a bare-name pattern arrives as an ignored FILE), so a
+      // setup link can never be miscounted as a directory of work.
+      if (path.endsWith("/")) ignoredDirs.push(path);
+      else ignoredFiles.push(path);
     } else if (line.startsWith("??")) {
       if (isSetupSymlink(worktreePath, line.slice(3).trim(), setupSymlinks)) {
         continue;
@@ -290,6 +323,7 @@ export async function readDirtyState(
     modified,
     untracked,
     ignoredFiles,
+    ignoredDirs,
   };
 }
 

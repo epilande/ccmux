@@ -150,6 +150,15 @@ export interface PruneCandidate {
    * nothing else in git or in a backup would bring them back.
    */
   ignoredFiles: string[];
+  /**
+   * Ignored directories that would be deleted with it (`node_modules/`, but
+   * also a gitignored `notes/`). Named in the run log ONLY — not on the row
+   * and not at either confirmation step, where a `node_modules/` on every
+   * worktree would train reflex approval. Log-only still means the deletion
+   * is recorded somewhere the user can read it afterwards, which is the whole
+   * of what it was missing.
+   */
+  ignoredDirs: string[];
   branchDeletion: BranchDeletion;
   /** `.git/worktrees/<name>`, captured while the worktree still exists. */
   adminDir: string | null;
@@ -366,17 +375,52 @@ export interface ScanDeps {
   skipFetch?: boolean;
 }
 
+/** `N ignored <noun>s (a, b, c, +M more)`, or "" for an empty list. */
+function summarizeIgnored(
+  entries: string[],
+  noun: string,
+  max: number,
+): string {
+  if (entries.length === 0) return "";
+  const shown = entries.slice(0, max);
+  const rest = entries.length - shown.length;
+  const names = shown.join(", ") + (rest > 0 ? `, +${rest} more` : "");
+  const plural = entries.length === 1 ? "" : "s";
+  return `${entries.length} ignored ${noun}${plural} (${names})`;
+}
+
 /**
  * One-line summary of the ignored files a removal would take with it, or ""
  * when there are none. Shared by every surface so the truncation rule — and
  * therefore what a user is shown before confirming — is defined once.
  */
 export function describeIgnoredFiles(files: string[], max = 3): string {
-  if (files.length === 0) return "";
-  const shown = files.slice(0, max);
-  const rest = files.length - shown.length;
-  const names = shown.join(", ") + (rest > 0 ? `, +${rest} more` : "");
-  return `${files.length} ignored file${files.length === 1 ? "" : "s"} (${names})`;
+  return summarizeIgnored(files, "file", max);
+}
+
+/**
+ * The same, for the ignored DIRECTORIES. Separate from
+ * {@link describeIgnoredFiles} rather than folded into it because only the
+ * run log gets these: every other surface would show `node_modules/` on
+ * nearly every worktree.
+ */
+export function describeIgnoredDirs(dirs: string[], max = 3): string {
+  return summarizeIgnored(dirs, "dir", max);
+}
+
+/**
+ * The run log's line for everything ignored a removal takes with it, files
+ * and directories, or "" when there is nothing to say. Files first: they are
+ * the ones no backup and no git history can bring back.
+ */
+export function describeIgnoredDeletion(
+  files: string[],
+  dirs: string[],
+  max = 3,
+): string {
+  return [describeIgnoredFiles(files, max), describeIgnoredDirs(dirs, max)]
+    .filter((part) => part !== "")
+    .join(", ");
 }
 
 function detailFor(
@@ -689,6 +733,7 @@ async function classifyOne(
       modified: dirtyState.modified,
       untracked: dirtyState.untracked,
       ignoredFiles: dirtyState.ignoredFiles,
+      ignoredDirs: dirtyState.ignoredDirs,
       branchDeletion: branchDeletionFor(reason),
       adminDir: readAdminDir(path),
       sessions,
@@ -1074,6 +1119,17 @@ export async function runPrune(
       continue;
     }
 
+    // Everything gitignored the removal takes with it. The FILES are already
+    // on the row and in both confirmations; the DIRECTORIES are named here
+    // and nowhere else, because a `node_modules/` in front of every confirm
+    // trains the reflex approval the whole ignored policy exists to avoid —
+    // but a gitignored `notes/` used to go with no record at all.
+    const ignoredSummary = describeIgnoredDeletion(
+      candidate.ignoredFiles,
+      candidate.ignoredDirs,
+      10,
+    );
+
     if (dryRun) {
       outcome.removed = true;
       for (const session of candidate.sessions) {
@@ -1088,11 +1144,11 @@ export async function runPrune(
             ? ` (DIRTY: ${candidate.modified} modified, ${candidate.untracked} untracked)`
             : ""),
       });
-      if (candidate.ignoredFiles.length > 0) {
+      if (ignoredSummary !== "") {
         steps.push({
           step: "would delete ignored",
           ok: true,
-          detail: describeIgnoredFiles(candidate.ignoredFiles, 10),
+          detail: ignoredSummary,
         });
       }
       if (candidate.branch && candidate.branchDeletion !== "none") {
@@ -1108,11 +1164,11 @@ export async function runPrune(
     // Recorded before the directory moves: once it is gone, nothing else in
     // the log says these files ever existed, and they are the ones no git
     // history can bring back.
-    if (candidate.ignoredFiles.length > 0) {
+    if (ignoredSummary !== "") {
       steps.push({
         step: "deleting ignored",
         ok: true,
-        detail: describeIgnoredFiles(candidate.ignoredFiles, 10),
+        detail: ignoredSummary,
       });
     }
 
