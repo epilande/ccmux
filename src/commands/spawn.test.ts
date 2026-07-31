@@ -645,6 +645,25 @@ describe("ccmux spawn --with-changes reporting", () => {
     expect(out).toContain("git stash drop");
   });
 
+  it("names the directory the daemon actually moved out of", async () => {
+    // Under `--fork` the source is the forked session's checkout, which the
+    // daemon resolves and the CLI never sees. Printing the local cwd there
+    // names a directory nothing happened in.
+    const { out } = await runAgainst(200, {
+      success: true,
+      paneId: "%9",
+      command: "claude",
+      move: {
+        moved: 1,
+        untracked: { mode: "move", files: [] },
+        source: "/elsewhere/repo",
+      },
+    });
+
+    expect(out).toContain("out of /elsewhere/repo");
+    expect(out).not.toContain("/caller/dir");
+  });
+
   it("notes when the staged/unstaged split could not be kept", async () => {
     // Not an error — every edit landed — but a `git add` the user had
     // already done did not survive, and finding that out at commit time is

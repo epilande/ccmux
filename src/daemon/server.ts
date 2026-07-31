@@ -105,9 +105,14 @@ function errorMessage(err: unknown): string {
  * still leave behind (the entry was applied but could not be dropped), and it
  * is reported so it can be cleaned up rather than found later as a mystery.
  * `flattenedIndex` says the staged/unstaged split could not be preserved.
+ *
+ * `source` names the checkout the work came out of. The caller cannot derive
+ * it: on a `--fork` spawn the source is the forked session's directory, which
+ * is resolved here and nowhere else.
  */
 interface SpawnMoveReport {
   moved: number;
+  source: string;
   untracked: { mode: UntrackedMode; files: string[] };
   leftoverStash?: string;
   flattenedIndex?: boolean;
@@ -2817,6 +2822,7 @@ export class DaemonServer {
         spawnCwd = moved.worktreePath;
         moveInfo = {
           moved: moved.moved,
+          source: cwd,
           untracked: moved.untracked,
           ...(moved.leftoverStash
             ? { leftoverStash: moved.leftoverStash }

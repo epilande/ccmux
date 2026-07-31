@@ -5668,7 +5668,11 @@ describe("POST /spawn moving changes into a worktree", () => {
       });
       const body = (await res.json()) as {
         worktree?: { path: string; name: string };
-        move?: { moved: number; untracked: { mode: string; files: string[] } };
+        move?: {
+          moved: number;
+          source: string;
+          untracked: { mode: string; files: string[] };
+        };
       };
 
       expect(res.status).toBe(200);
@@ -5683,8 +5687,11 @@ describe("POST /spawn moving changes into a worktree", () => {
       expect(dirtyPaths(repo)).toEqual([]);
       // And the backup was dropped, since the work is safely in the worktree.
       expect(stashList(repo)).toBe("");
+      // `source` rides along because the CLI cannot derive it: on a `--fork`
+      // spawn it is the forked session's checkout, resolved only here.
       expect(body.move).toEqual({
         moved: 1,
+        source: repo,
         untracked: { mode: "move", files: ["new.txt"] },
       });
       // One worktree, and the agent started in it rather than in the source.
