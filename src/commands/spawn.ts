@@ -335,7 +335,17 @@ export function createSpawnCommand(): Command {
         }
 
         {
-          const data = (await response.json()) as SpawnResponse;
+          // Guarded the same way the error path is: a 200 whose body will not
+          // parse (a proxy in the way, a daemon killed mid-write) says nothing
+          // about what the daemon did, and throwing here surfaces as an
+          // unhandled rejection rather than as the failure it is.
+          const data = (await response
+            .json()
+            .catch(() => null)) as SpawnResponse | null;
+          if (!data) {
+            console.error("Failed to spawn session: unreadable response body");
+            process.exit(1);
+          }
           if (data.worktree) {
             const { name, path, branch, created, branchCreated, base } =
               data.worktree;

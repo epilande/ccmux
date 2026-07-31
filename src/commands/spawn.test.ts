@@ -856,6 +856,40 @@ describe("ccmux spawn --with-changes reporting", () => {
   });
 });
 
+describe("ccmux spawn response handling", () => {
+  it("fails cleanly on a 200 whose body cannot be read", async () => {
+    // The success path parses the body OUTSIDE the try that guards the
+    // request, so a truncated or non-JSON 200 (a proxy in the way, a daemon
+    // killed mid-write) surfaces as an unhandled rejection instead of the
+    // failure it is. The error path already answers this with a null guard.
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = typeof url === "string" ? url : url.toString();
+      if (href.endsWith("/server-info")) {
+        return new Response(JSON.stringify({ socketPath: null }), {
+          status: 200,
+        });
+      }
+      return new Response("<html>gateway</html>", { status: 200 });
+    }) as unknown as typeof fetch;
+    const err: string[] = [];
+    console.error = (line: string) => err.push(line);
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+
+    try {
+      const code = await runSpawnExpectingExit([]);
+      expect(code).toBe(1);
+      expect(err.join("\n")).toContain("Failed to spawn session");
+    } finally {
+      restoreEnv();
+      globalThis.fetch = original;
+    }
+  });
+});
+
 describe("ccmux spawn --worktree reporting", () => {
   /** Answer `/spawn` with a worktree result of the given shape. */
   function withWorktreeResponse(worktree: Record<string, unknown>) {
