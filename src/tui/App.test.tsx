@@ -4257,6 +4257,66 @@ describe("App move-changes reporting", () => {
     source: "/code/myapp",
   };
 
+  it("refuses a name with nothing a worktree name can be made of", async () => {
+    // The name is a real choice, not a suggestion: with a prompt present, a
+    // slug rule that quietly discards what was typed spawns the worktree
+    // under a name derived from the prompt instead, which is what a user who
+    // typed a name is not asking for.
+    const spawns: unknown[] = [];
+    const { restore } = withMoveDaemon(() => {
+      spawns.push(1);
+      return landed(relocated);
+    });
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await settle();
+      await setup.renderOnce();
+      const row = setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes("Move changes"));
+      await setup.mockMouse.click(7, row, MouseButtons.LEFT);
+      await settle();
+      await setup.renderOnce();
+
+      // A prompt to derive a name from, and a name of its own that no slug
+      // can be made of.
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("fix the flicker");
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("修复!!!");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      expect(spawns).toHaveLength(0);
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("lettersornumbers");
+      // Still on the dialog, with the typed name where it was left.
+      expect(frame).toContain("Movechangestoworktree");
+    } finally {
+      restore();
+    }
+  });
+
   it("gates on the same directory the move will run in", async () => {
     // A pane that has `cd`ed away moves out of where it IS, and the gate has
     // to answer about that same checkout — otherwise the item is offered (or

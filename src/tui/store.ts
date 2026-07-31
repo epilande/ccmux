@@ -1091,16 +1091,19 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
    * actually be created, rather than the keystrokes that led to it.
    *
    * An entry with nothing usable in it (punctuation, a non-Latin script)
-   * slugifies to nothing, and nothing is exactly the derived state: falling
-   * back is both the honest reading of an empty name and the only one that
-   * cannot post a name the daemon would refuse.
+   * slugifies to nothing, and is LEFT AS TYPED. Erasing it back to the
+   * derived placeholder is the one reading that cannot be right: the field is
+   * not empty, the user did not clear it, and a row that quietly swaps their
+   * name for one derived from the prompt reads as acceptance. Submitting is
+   * where it gets refused, out loud (see `submitNewSession` in App.tsx).
    */
   function settleWorktreeName(nextField: NewSessionField) {
     const draft = state.newSession;
     if (!draft || draft.field !== "worktreeName") return;
     if (nextField === "worktreeName" || draft.worktreeName === null) return;
     const slug = slugify(draft.worktreeName);
-    setState("newSession", "worktreeName", slug === "" ? null : slug);
+    if (slug === "") return;
+    setState("newSession", "worktreeName", slug);
   }
 
   const actions = {

@@ -3227,16 +3227,19 @@ describe("store", () => {
         expect(store.state.newSession?.worktreeName).toBe("Flaky Test ");
       });
 
-      it("falls back to derived when nothing usable was typed", () => {
+      it("keeps a name it cannot slugify, rather than erasing it", () => {
         const store = worktreeDialog();
         store.actions.setNewSessionField("worktreeName");
         store.actions.setNewSessionWorktreeName("修复!!!");
 
         store.actions.moveNewSessionField(1);
 
-        // Slugifies to nothing, which is the same request as an empty field,
-        // and the only reading that cannot post a name the daemon refuses.
-        expect(store.state.newSession?.worktreeName).toBeNull();
+        // Nothing survives the slug rule, but the field is not empty and the
+        // user did not clear it. Erasing it back to the derived placeholder
+        // (the old behaviour) reads as "accepted, and renamed to that", and
+        // Enter would then quietly spawn under a name nobody typed. The text
+        // stays put; submitting refuses it out loud. See App.tsx.
+        expect(store.state.newSession?.worktreeName).toBe("修复!!!");
       });
 
       it("moves focus off the name when the destination leaves the worktree", () => {

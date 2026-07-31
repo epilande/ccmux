@@ -1312,13 +1312,29 @@ export function App(props: AppProps) {
       return;
     }
     // The name the request will carry, settled by the daemon's own slug rule
-    // so that what the row showed is what gets created. Empty covers both an
-    // untouched field and one holding nothing a name can be made of, which
-    // are the same request: let the daemon derive one.
+    // so that what the row showed is what gets created. Empty means an
+    // untouched field: let the daemon derive one.
     const worktreeName =
       draft.destination === "worktree" && draft.worktreeName !== null
         ? slugify(draft.worktreeName)
         : "";
+    // A name was typed, and nothing survives the slug rule. Refused rather
+    // than derived: with a prompt present, deriving would spawn under a name
+    // the user did not type and did not ask for, and the field would still be
+    // showing theirs. The rule is named, because "why not" is the next
+    // question and the answer is not guessable from the refusal.
+    if (
+      draft.destination === "worktree" &&
+      draft.worktreeName !== null &&
+      draft.worktreeName.trim() !== "" &&
+      !worktreeName
+    ) {
+      store.actions.showToast(
+        "A worktree name needs letters or numbers; clear the field to derive one",
+        4000,
+      );
+      return;
+    }
     // With neither a name nor a prompt to derive one from there is nothing to
     // create. Refused here rather than posted: the daemon's own refusal reads
     // "pass one explicitly", which was CLI advice back when this dialog had
