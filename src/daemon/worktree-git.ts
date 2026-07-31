@@ -221,13 +221,24 @@ export interface DirtyState {
   untracked: number;
   /**
    * Individual ignored FILES, by path — `.env`, `.env.local`, a local config.
-   * Ignored DIRECTORIES (`node_modules/`, `dist/`) are deliberately excluded:
-   * git collapses them to a single entry, and they are regenerable build
-   * output, so counting them would flag every worktree alike.
    *
    * Not part of `dirty` — see {@link readDirtyState}.
    */
   ignoredFiles: string[];
+  /**
+   * Ignored DIRECTORIES, as git prints them: collapsed to one entry with a
+   * trailing slash (`node_modules/`, `dist/`, `notes/`).
+   *
+   * Kept separate from {@link ignoredFiles} because the two are surfaced
+   * differently: a file is named on the row and at both confirmation steps,
+   * while a directory is named only in the run log. Most of them are
+   * regenerable build output, so putting them in front of every confirmation
+   * would be noise on essentially every worktree — but `notes/` is a
+   * directory too, and deleting one with no record anywhere was the gap.
+   *
+   * Not part of `dirty` either, for the same reason the files are not.
+   */
+  ignoredDirs: string[];
 }
 
 /**
@@ -248,6 +259,14 @@ export interface DirtyState {
  * fire the opt-in gate on essentially every worktree (a stray `.DS_Store` is
  * an ignored file), and a gate that always fires trains people to clear it
  * reflexively, which is worse than no gate for the case it exists to catch.
+ *
+ * Ignored DIRECTORIES are collected too, into their own list. They used to be
+ * dropped here on the floor as presumed-regenerable build output, which is
+ * true of `node_modules/` and false of a gitignored `notes/` holding real
+ * work — and the file/directory split is only a proxy for "regenerable",
+ * never a test of it. They stay out of `dirty` and off every confirmation for
+ * the alarm-fatigue reason above; the run log names them, so a deletion that
+ * was not gated is at least recorded.
  */
 export async function readDirtyState(
   worktreePath: string,
@@ -262,7 +281,13 @@ export async function readDirtyState(
   // An unreadable worktree is reported dirty: refusing to remove something we
   // could not inspect is the safe direction for a destructive action.
   if (res.exitCode !== 0) {
-    return { dirty: true, modified: 0, untracked: 0, ignoredFiles: [] };
+    return {
+      dirty: true,
+      modified: 0,
+      untracked: 0,
+      ignoredFiles: [],
+      ignoredDirs: [],
+    };
   }
 
   const setupSymlinks = new Set(
@@ -272,12 +297,14 @@ export async function readDirtyState(
   let modified = 0;
   let untracked = 0;
   const ignoredFiles: string[] = [];
+  const ignoredDirs: string[] = [];
   for (const line of res.stdout.split("\n")) {
     if (line.trim() === "") continue;
     if (line.startsWith("!!")) {
       const path = line.slice(3).trim();
-      // A trailing slash is git's marker for a collapsed ignored directory.
-      if (path && !path.endsWith("/")) ignoredFiles.push(path);
+      if (!path) continue;
+      if (isCollapsedDirectory(path)) ignoredDirs.push(path);
+      else ignoredFiles.push(path);
     } else if (line.startsWith("??")) {
       if (isSetupSymlink(worktreePath, line.slice(3).trim(), setupSymlinks)) {
         continue;
@@ -290,7 +317,35 @@ export async function readDirtyState(
     modified,
     untracked,
     ignoredFiles,
+    ignoredDirs,
   };
+}
+
+/**
+ * Whether a porcelain path is a directory git collapsed to one entry.
+ *
+ * The trailing slash is git's own marker, and it is the only thing that
+ * separates a directory from a file here. It is reliable in the direction
+ * that matters: git prints it for a real directory and never for a symlink to
+ * one (a `node_modules` symlink matched by a bare-name pattern arrives as an
+ * ignored FILE), so a setup link can never be miscounted as a directory of
+ * work.
+ *
+ * The `/"` case is C-quoting, and it is not exotic. Porcelain quotes any path
+ * holding a space, a quote, a backslash, a control char or a non-ASCII byte,
+ * and the slash lands INSIDE the quotes: `"notes dir/"`, `"n\303\263tes/"`.
+ * A bare `endsWith("/")` filed `Design Assets/` and `nótes/` as ignored FILES,
+ * which put them on the row and both confirmation steps — the surfaces the
+ * directory list deliberately stays off.
+ *
+ * A string check rather than a git-side fix, because neither knob helps:
+ * `core.quotePath=false` only stops the non-ASCII escaping and still quotes a
+ * path with a space (verified against real git), and `-z` porcelain drops
+ * quoting but changes the record structure for renames, which is a rewrite of
+ * the parse for a case this handles in eight characters.
+ */
+function isCollapsedDirectory(path: string): boolean {
+  return path.endsWith("/") || path.endsWith('/"');
 }
 
 /**
