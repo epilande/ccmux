@@ -197,6 +197,61 @@ describe("moveChangesToWorktree", () => {
     ).toBe("buried\n");
   });
 
+  it("never carries gitignored content into the worktree", async () => {
+    // The one asymmetry that used to exist between the modes: `move` routes
+    // untracked files through a stash, which excludes ignored ones, while
+    // `copy` recursed into the collapsed `?? deep/` directory and swept up
+    // the .env sitting in it. Ignored content is the engine's file-setup
+    // job (symlinkDirectories, .worktreeinclude), never the move's.
+    const repo = await makeRepo();
+    writeFileSync(join(repo, ".gitignore"), "deep/.env\n");
+    await git(repo, ["add", ".gitignore"]);
+    await git(repo, ["commit", "-m", "ignore"]);
+    await mkdir(join(repo, "deep"), { recursive: true });
+    writeFileSync(join(repo, "deep", "index.ts"), "export {};\n");
+    writeFileSync(join(repo, "deep", ".env"), "TOKEN=secret\n");
+    writeFileSync(join(repo, "tracked.txt"), "edited\n");
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      untracked: "copy",
+      createWorktree: realCreator(repo),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(existsSync(join(result.worktreePath, "deep", "index.ts"))).toBe(
+      true,
+    );
+    expect(existsSync(join(result.worktreePath, "deep", ".env"))).toBe(false);
+    // And it is still where the user left it.
+    expect(readFileSync(join(repo, "deep", ".env"), "utf-8")).toBe(
+      "TOKEN=secret\n",
+    );
+    expect(result.untracked.files).toEqual(["deep/index.ts"]);
+  });
+
+  it("leaves gitignored content behind on 'move' too", async () => {
+    // The other half of the same rule, so the two modes agree.
+    const repo = await makeRepo();
+    writeFileSync(join(repo, ".gitignore"), ".env\n");
+    await git(repo, ["add", ".gitignore"]);
+    await git(repo, ["commit", "-m", "ignore"]);
+    writeFileSync(join(repo, ".env"), "TOKEN=secret\n");
+    writeFileSync(join(repo, "new.txt"), "brand new\n");
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      createWorktree: realCreator(repo),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(existsSync(join(result.worktreePath, "new.txt"))).toBe(true);
+    expect(existsSync(join(result.worktreePath, ".env"))).toBe(false);
+    expect(readFileSync(join(repo, ".env"), "utf-8")).toBe("TOKEN=secret\n");
+  });
+
   it("refuses when a merge is in progress, touching nothing", async () => {
     const repo = await makeRepo();
     await git(repo, ["checkout", "-b", "other"]);

@@ -429,11 +429,22 @@ async function carriedStagedContent(
 }
 
 /**
- * Copy untracked paths from the source into the new worktree.
+ * Copy untracked FILES from the source into the new worktree.
  *
  * Copying (rather than letting the stash carry them) is what makes `copy`
  * safe: the source never stops having the files, so there is no window where
  * they exist only inside a stash entry.
+ *
+ * One path per file, never a directory, which is the whole reason
+ * {@link readUncommitted} reads with `--untracked-files=all`. Handed git's
+ * collapsed `?? deep/` instead, this would recurse into it and copy the .env
+ * and the node_modules that git was deliberately excluding — content the move
+ * has no business relocating in either mode. Ignored files travel through the
+ * creation engine's file setup (`worktree.symlinkDirectories`,
+ * `.worktreeinclude`) or not at all.
+ *
+ * `recursive` stays on for `cpSync`'s benefit rather than for directories:
+ * it is what lets a single call handle whatever a path turns out to be.
  */
 function copyUntracked(
   source: string,
