@@ -4200,6 +4200,90 @@ describe("App move-changes reporting", () => {
     source: "/code/myapp",
   };
 
+  it("gates on the same directory the move will run in", async () => {
+    // A pane that has `cd`ed away moves out of where it IS, and the gate has
+    // to answer about that same checkout — otherwise the item is offered (or
+    // withheld) on the strength of a `git status` in an unrelated directory.
+    // Named explicitly rather than left to the daemon's default so the two
+    // cannot drift apart: this client already knows which one it means.
+    const asked: string[] = [];
+    const spawns: { cwd?: string }[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const href = String(url);
+      if (href.includes("/dirty")) {
+        asked.push(href);
+        return Response.json({ repo: true, dirty: true });
+      }
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: null });
+      }
+      if (href.endsWith("/agents")) {
+        return Response.json({
+          agents: [
+            {
+              name: "claude",
+              displayName: "Claude",
+              shortCode: "CC",
+              supportsPrompt: true,
+            },
+          ],
+        });
+      }
+      if (href.endsWith("/spawn")) {
+        spawns.push(JSON.parse(String(init?.body ?? "{}")) as { cwd?: string });
+        return Response.json({ success: true, paneId: "%99" });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            // The agent has cd'ed into a subdirectory since it started.
+            paneCwd: "/code/myapp/packages/core",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await settle();
+      await setup.renderOnce();
+
+      expect(asked).toHaveLength(1);
+      const gated = new URL(asked[0]!).searchParams.get("cwd");
+      expect(gated).toBe("/code/myapp/packages/core");
+
+      const row = setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes("Move changes"));
+      await setup.mockMouse.click(7, row, MouseButtons.LEFT);
+      await settle();
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("rescue");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]?.cwd).toBe(gated!);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("summarizes what the move did in the sidebar's toast", async () => {
     // The sidebar spawns without following the pane, so this line is the only
     // account of an operation that emptied the user's checkout.

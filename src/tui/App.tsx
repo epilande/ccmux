@@ -565,10 +565,21 @@ export function App(props: AppProps) {
    * same hazard that moved Fork below Restart. There is deliberately no
    * placeholder or "checking…" row in the meantime: the item is simply
    * absent, so the menu never shows something that isn't actionable.
+   *
+   * The directory is named explicitly rather than left to the endpoint's
+   * default, even though the two rules agree today. This client is what will
+   * POST the move, and it decides the source directory here, from this
+   * snapshot of the row; the daemon would answer from its own pane cache,
+   * which can be a tick behind. Asking about a different checkout than the one
+   * the move will run in is how a gate ends up offering an action that then
+   * refuses — or hiding one that would have worked.
    */
-  function refreshMenuDirty(sessionId: string): void {
+  function refreshMenuDirty(session: EnrichedSession): void {
+    const sessionId = session.id;
     setMenuDirty(null);
-    fetch(`${getDaemonUrl()}/sessions/${sessionId}/dirty`, {
+    const url = new URL(`${getDaemonUrl()}/sessions/${sessionId}/dirty`);
+    url.searchParams.set("cwd", sessionCwd(session));
+    fetch(url, {
       signal: AbortSignal.timeout(5_000),
     })
       .then(async (response) => {
@@ -601,7 +612,7 @@ export function App(props: AppProps) {
         event.x,
         event.y,
       );
-      refreshMenuDirty(item.filteredSession.session.id);
+      refreshMenuDirty(item.filteredSession.session);
     } else {
       store.actions.showGroupContextMenu(item.groupKey, event.x, event.y);
     }
