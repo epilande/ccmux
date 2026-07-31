@@ -75,6 +75,24 @@ function withFetchCapture(socketPath: string | null = null) {
   return { bodies, restore: () => (globalThis.fetch = original) };
 }
 
+/**
+ * Turn any network call into an error for the duration.
+ *
+ * For the validation tests, whose whole claim is that a bad command line is
+ * refused BEFORE anything reaches the daemon. `ensureDaemon` is neutralized
+ * above, but nothing stopped a regression from firing a real `/server-info`
+ * or `/spawn` at port 2269 — which is the SHARED port, so a regression would
+ * quietly act on the sessions of whoever ran the suite. With this in place it
+ * fails the test instead.
+ */
+function withNoFetch() {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL) => {
+    throw new Error(`unexpected network call to ${String(url)}`);
+  }) as unknown as typeof fetch;
+  return () => (globalThis.fetch = original);
+}
+
 /** Set env vars for one run, restoring exactly what was there before. */
 function withEnv(vars: Record<string, string | undefined>) {
   const previous = new Map<string, string | undefined>();
@@ -102,24 +120,38 @@ afterEach(() => {
   console.error = originalError;
 });
 
+/** Distinguishes "the command exited" from any other throw. */
+class ProcessExited extends Error {
+  constructor(readonly code: number) {
+    super(`process.exit:${code}`);
+  }
+}
+
 /**
  * Run the action with `process.exit` turned into a throw, so a validation
  * failure can be asserted on in-process instead of taking the test runner
  * down with it.
+ *
+ * The FIRST code is the answer, and the sentinel is rethrown rather than
+ * replaced. A second call can only come from something in the command
+ * catching the sentinel and exiting again — a bug in the code under test, not
+ * a different exit code — and reporting the later one made assertions pass
+ * against a code the real process would never have used. A dedicated class
+ * rather than a message match, so an unrelated error propagates instead of
+ * being read as an exit.
  */
 async function runSpawnExpectingExit(argv: string[]): Promise<number> {
   const realExit = process.exit;
+  let exited: ProcessExited | undefined;
   process.exit = ((code?: number) => {
-    throw new Error(`process.exit:${code ?? 0}`);
+    exited ??= new ProcessExited(code ?? 0);
+    throw exited;
   }) as typeof process.exit;
   try {
     await runSpawn(argv);
   } catch (err) {
-    const match = /^process\.exit:(\d+)$/.exec(
-      err instanceof Error ? err.message : "",
-    );
-    if (!match) throw err;
-    return Number(match[1]);
+    if (!(err instanceof ProcessExited)) throw err;
+    return err.code;
   } finally {
     process.exit = realExit;
   }
@@ -425,12 +457,17 @@ describe("--base requires --worktree", () => {
     const errors: string[] = [];
     console.error = (line: string) => errors.push(line);
     ensureDaemonCalls = 0;
+    const restoreFetch = withNoFetch();
 
-    const code = await runSpawnExpectingExit(["claude", "--base", "main"]);
+    try {
+      const code = await runSpawnExpectingExit(["claude", "--base", "main"]);
 
-    expect(code).toBe(1);
-    expect(errors.join("\n")).toContain("--base requires --worktree");
-    expect(ensureDaemonCalls).toBe(0);
+      expect(code).toBe(1);
+      expect(errors.join("\n")).toContain("--base requires --worktree");
+      expect(ensureDaemonCalls).toBe(0);
+    } finally {
+      restoreFetch();
+    }
   });
 });
 
@@ -484,30 +521,42 @@ describe("ccmux spawn --with-changes validation", () => {
     const errors: string[] = [];
     console.error = (line: string) => errors.push(line);
     ensureDaemonCalls = 0;
+    const restoreFetch = withNoFetch();
 
-    const code = await runSpawnExpectingExit(["claude", "--with-changes"]);
+    try {
+      const code = await runSpawnExpectingExit(["claude", "--with-changes"]);
 
-    expect(code).toBe(1);
-    expect(errors.join("\n")).toContain("--with-changes requires --worktree");
-    expect(ensureDaemonCalls).toBe(0);
+      expect(code).toBe(1);
+      expect(errors.join("\n")).toContain("--with-changes requires --worktree");
+      expect(ensureDaemonCalls).toBe(0);
+    } finally {
+      restoreFetch();
+    }
   });
 
   it("refuses --untracked with no move to apply it to", async () => {
     const errors: string[] = [];
     console.error = (line: string) => errors.push(line);
     ensureDaemonCalls = 0;
+    const restoreFetch = withNoFetch();
 
-    const code = await runSpawnExpectingExit([
-      "claude",
-      "--worktree",
-      "wt",
-      "--untracked",
-      "copy",
-    ]);
+    try {
+      const code = await runSpawnExpectingExit([
+        "claude",
+        "--worktree",
+        "wt",
+        "--untracked",
+        "copy",
+      ]);
 
-    expect(code).toBe(1);
-    expect(errors.join("\n")).toContain("--untracked requires --with-changes");
-    expect(ensureDaemonCalls).toBe(0);
+      expect(code).toBe(1);
+      expect(errors.join("\n")).toContain(
+        "--untracked requires --with-changes",
+      );
+      expect(ensureDaemonCalls).toBe(0);
+    } finally {
+      restoreFetch();
+    }
   });
 
   it("rejects an unknown untracked mode at parse time", async () => {
@@ -515,19 +564,24 @@ describe("ccmux spawn --with-changes validation", () => {
     // `ensureDaemon` even in principle.
     ensureDaemonCalls = 0;
     const command = createSpawnCommand().exitOverride();
+    const restoreFetch = withNoFetch();
 
-    await expect(
-      command.parseAsync([
-        "node",
-        "spawn",
-        "--worktree",
-        "wt",
-        "--with-changes",
-        "--untracked",
-        "delete",
-      ]),
-    ).rejects.toThrow(/move, copy, leave/);
-    expect(ensureDaemonCalls).toBe(0);
+    try {
+      await expect(
+        command.parseAsync([
+          "node",
+          "spawn",
+          "--worktree",
+          "wt",
+          "--with-changes",
+          "--untracked",
+          "delete",
+        ]),
+      ).rejects.toThrow(/move, copy, leave/);
+      expect(ensureDaemonCalls).toBe(0);
+    } finally {
+      restoreFetch();
+    }
   });
 });
 
