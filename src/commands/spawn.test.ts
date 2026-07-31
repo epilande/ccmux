@@ -25,7 +25,12 @@ interface SpawnBody {
   callerPane?: string;
   callerTty?: string;
   detach: boolean;
-  worktree?: { name?: string; base?: string };
+  worktree?: {
+    name?: string;
+    base?: string;
+    withChanges?: boolean;
+    untracked?: string;
+  };
 }
 
 /**
@@ -446,6 +451,240 @@ describe("ccmux spawn --worktree wire shape", () => {
       restoreEnv();
       restore();
     }
+  });
+});
+
+describe("ccmux spawn --with-changes validation", () => {
+  // Same rule and same placement as `--base requires --worktree`: pure
+  // argument validation must not start a daemon on the shared port. Moving
+  // uncommitted work is also the last operation that should begin on a
+  // half-understood command line.
+  it("refuses --with-changes with no destination, without starting a daemon", async () => {
+    const errors: string[] = [];
+    console.error = (line: string) => errors.push(line);
+    ensureDaemonCalls = 0;
+
+    const code = await runSpawnExpectingExit(["claude", "--with-changes"]);
+
+    expect(code).toBe(1);
+    expect(errors.join("\n")).toContain("--with-changes requires --worktree");
+    expect(ensureDaemonCalls).toBe(0);
+  });
+
+  it("refuses --untracked with no move to apply it to", async () => {
+    const errors: string[] = [];
+    console.error = (line: string) => errors.push(line);
+    ensureDaemonCalls = 0;
+
+    const code = await runSpawnExpectingExit([
+      "claude",
+      "--worktree",
+      "wt",
+      "--untracked",
+      "copy",
+    ]);
+
+    expect(code).toBe(1);
+    expect(errors.join("\n")).toContain("--untracked requires --with-changes");
+    expect(ensureDaemonCalls).toBe(0);
+  });
+
+  it("rejects an unknown untracked mode at parse time", async () => {
+    // Commander refuses before the action runs at all, so this cannot reach
+    // `ensureDaemon` even in principle.
+    ensureDaemonCalls = 0;
+    const command = createSpawnCommand().exitOverride();
+
+    await expect(
+      command.parseAsync([
+        "node",
+        "spawn",
+        "--worktree",
+        "wt",
+        "--with-changes",
+        "--untracked",
+        "delete",
+      ]),
+    ).rejects.toThrow(/move, copy, leave/);
+    expect(ensureDaemonCalls).toBe(0);
+  });
+});
+
+describe("ccmux spawn --with-changes wire shape", () => {
+  async function bodyFor(argv: string[]): Promise<SpawnBody | undefined> {
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture();
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn(argv);
+      return bodies[0];
+    } finally {
+      restoreEnv();
+      restore();
+    }
+  }
+
+  it("puts the move inside the worktree object, mode and all", async () => {
+    const body = await bodyFor([
+      "--worktree",
+      "wt",
+      "--with-changes",
+      "--untracked",
+      "leave",
+    ]);
+
+    expect(body?.worktree).toStrictEqual({
+      name: "wt",
+      withChanges: true,
+      untracked: "leave",
+    });
+  });
+
+  it("leaves the mode out so the daemon's default applies", async () => {
+    const body = await bodyFor(["--worktree", "--with-changes"]);
+
+    expect(body?.worktree?.withChanges).toBe(true);
+    expect(body?.worktree?.untracked).toBeUndefined();
+  });
+
+  it("sends no move fields at all without the flag", async () => {
+    // Not even `withChanges: false`: the daemon reads an untracked mode
+    // without a move as a contradiction, and a plain `--worktree` has to keep
+    // sending the shape it always did.
+    const body = await bodyFor(["--worktree", "wt"]);
+
+    expect(body?.worktree).toStrictEqual({ name: "wt" });
+  });
+});
+
+describe("ccmux spawn --with-changes reporting", () => {
+  function withResponse(status: number, payload: Record<string, unknown>) {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = typeof url === "string" ? url : url.toString();
+      if (href.endsWith("/server-info")) {
+        return new Response(JSON.stringify({ socketPath: null }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify(payload), { status });
+    }) as unknown as typeof fetch;
+    return () => (globalThis.fetch = original);
+  }
+
+  async function runAgainst(
+    status: number,
+    payload: Record<string, unknown>,
+  ): Promise<{ out: string; err: string; code: number | null }> {
+    const out: string[] = [];
+    const err: string[] = [];
+    console.log = (line: string) => out.push(line);
+    console.error = (line: string) => err.push(line);
+    const restore = withResponse(status, payload);
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    const argv = ["--worktree", "wt", "--with-changes"];
+    try {
+      const code =
+        status === 200
+          ? (await runSpawn(argv), null)
+          : await runSpawnExpectingExit(argv);
+      return { out: out.join("\n"), err: err.join("\n"), code };
+    } finally {
+      restoreEnv();
+      restore();
+    }
+  }
+
+  it("says what moved, counting untracked files separately", async () => {
+    const { out } = await runAgainst(200, {
+      success: true,
+      paneId: "%9",
+      command: "claude",
+      move: {
+        moved: 3,
+        untracked: { mode: "move", files: ["a.txt", "b.txt"] },
+      },
+    });
+
+    expect(out).toContain("Moved 3 files changed, 2 files untracked moved");
+    expect(out).toContain("/caller/dir");
+  });
+
+  it("says untracked files stayed behind on leave", async () => {
+    const { out } = await runAgainst(200, {
+      success: true,
+      paneId: "%9",
+      command: "claude",
+      move: { moved: 1, untracked: { mode: "leave", files: [] } },
+    });
+
+    expect(out).toContain("Moved 1 file changed, untracked files left behind");
+  });
+
+  // A successful move that could not drop its own backup. Silence would leave
+  // it to be found later as a stash entry nobody remembers making.
+  it("reports a stash entry the move could not clean up", async () => {
+    const { out } = await runAgainst(200, {
+      success: true,
+      paneId: "%9",
+      command: "claude",
+      move: {
+        moved: 1,
+        untracked: { mode: "move", files: [] },
+        leftoverStash: "abc123",
+      },
+    });
+
+    expect(out).toContain("abc123");
+    expect(out).toContain("git stash drop");
+  });
+
+  /**
+   * The recovery path. A refused move can leave the work in a stash entry,
+   * and the sha is the only handle the user has for getting it back, so it
+   * has to reach the terminal rather than staying in the response body.
+   */
+  it("names the stash entry when the move is refused", async () => {
+    const { err, code } = await runAgainst(400, {
+      error: "Could not create the worktree: Base ref not found: nope",
+      reason: "create-failed",
+      stashSha: "deadbeef",
+      sourceRestored: true,
+    });
+
+    expect(code).toBe(1);
+    expect(err).toContain("Base ref not found");
+    expect(err).toContain("deadbeef");
+    // Restored, so the entry is a redundant copy rather than the only one.
+    expect(err).toContain("back in the checkout");
+  });
+
+  it("tells an unrestored source that the stash is the only copy", async () => {
+    const { err } = await runAgainst(400, {
+      error: "Could not apply the changes in the new worktree: conflict",
+      reason: "apply-failed",
+      stashSha: "cafe1234",
+      sourceRestored: false,
+    });
+
+    expect(err).toContain("git stash apply cafe1234");
+    expect(err).not.toContain("back in the checkout");
+  });
+
+  it("says nothing about stashes when the refusal left none", async () => {
+    const { err } = await runAgainst(400, {
+      error: "Nothing to move: /caller/dir has no uncommitted changes.",
+      reason: "nothing-to-move",
+    });
+
+    expect(err).toContain("Nothing to move");
+    expect(err).not.toContain("stash");
   });
 });
 

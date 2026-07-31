@@ -3,6 +3,11 @@ import { resolve } from "node:path";
 import { getDaemonUrl } from "../lib/config";
 import { ensureDaemon } from "./shared";
 import { PANE_ID_PATTERN, type SpawnSplit } from "../daemon/spawn-command";
+import {
+  isUntrackedMode,
+  UNTRACKED_MODES,
+  type UntrackedMode,
+} from "../daemon/worktree-move-changes";
 import { isSameTmuxServer } from "../lib/tmux-server";
 import { resolveCurrentTmuxClientTty } from "../lib/tmux-client";
 import { BUILTIN_AGENTS } from "../lib/agents";
@@ -21,6 +26,21 @@ interface SpawnResponse {
     /** Absent when no branch was cut, so there is nothing to report it from. */
     base?: string;
   };
+  /** Present only when `--with-changes` relocated uncommitted work. */
+  move?: {
+    moved: number;
+    untracked: { mode: UntrackedMode; files: string[] };
+    leftoverStash?: string;
+  };
+}
+
+/** A refused spawn. The move fields are set only when a move failed. */
+interface SpawnErrorResponse {
+  error: string;
+  reason?: string;
+  /** The stash entry holding the user's work, when one was left in place. */
+  stashSha?: string;
+  sourceRestored?: boolean;
 }
 
 /**
@@ -37,6 +57,13 @@ function parseSplit(value: string): SpawnSplit {
   throw new InvalidArgumentError(
     `Expected 'h' (left/right) or 'v' (stacked).${hint}`,
   );
+}
+
+/** `--untracked`'s value, rejected at parse time so a typo never reaches the
+ *  daemon (or starts one). */
+function parseUntracked(value: string): UntrackedMode {
+  if (isUntrackedMode(value)) return value;
+  throw new InvalidArgumentError(`Expected ${UNTRACKED_MODES.join(", ")}.`);
 }
 
 /**
@@ -140,6 +167,15 @@ export function createSpawnCommand(): Command {
       "--base <ref>",
       "Branch the new worktree from this ref (default: the repository's current branch)",
     )
+    .option(
+      "--with-changes",
+      "Move the checkout's uncommitted changes into the new worktree, leaving it clean",
+    )
+    .option(
+      "--untracked <mode>",
+      `What --with-changes does with untracked files (${UNTRACKED_MODES.join(", ")})`,
+      parseUntracked,
+    )
     .action(
       async (
         agent: string,
@@ -153,6 +189,8 @@ export function createSpawnCommand(): Command {
           detach?: boolean;
           worktree?: string | boolean;
           base?: string;
+          withChanges?: boolean;
+          untracked?: UntrackedMode;
         },
       ) => {
         // `--base` alone is inert, and silently ignoring a flag someone typed
@@ -166,6 +204,17 @@ export function createSpawnCommand(): Command {
         // did to whoever ran it.
         if (options.base !== undefined && options.worktree === undefined) {
           console.error("--base requires --worktree");
+          process.exit(1);
+        }
+        // Same rule, same reason, and the same "before ensureDaemon" placement:
+        // there is nowhere for the changes to move without a destination, and
+        // moving work is the last operation that should start on a guess.
+        if (options.withChanges && options.worktree === undefined) {
+          console.error("--with-changes requires --worktree");
+          process.exit(1);
+        }
+        if (options.untracked !== undefined && !options.withChanges) {
+          console.error("--untracked requires --with-changes");
           process.exit(1);
         }
 
@@ -190,6 +239,12 @@ export function createSpawnCommand(): Command {
                     ? options.worktree
                     : undefined,
                 base: options.base,
+                // Omitted rather than sent as `false`: the daemon reads
+                // `untracked` without `withChanges` as a contradiction, and a
+                // plain `--worktree` should send the shape it always did.
+                ...(options.withChanges
+                  ? { withChanges: true, untracked: options.untracked }
+                  : {}),
               };
 
         // One `/server-info` round-trip for both placement fields, which have
@@ -230,8 +285,20 @@ export function createSpawnCommand(): Command {
           });
 
           if (response.status === 400) {
-            const data = (await response.json()) as { error: string };
+            const data = (await response.json()) as SpawnErrorResponse;
             console.error(data.error);
+            // A refused move can leave a stash entry behind, and the sha is
+            // the handle for getting the work back by hand. Which sentence
+            // applies turns on whether the source was restored: with the
+            // changes back in the checkout the entry is a redundant copy,
+            // without them it is the only one.
+            if (data.stashSha) {
+              console.error(
+                data.sourceRestored
+                  ? `Your changes are back in the checkout; stash entry ${data.stashSha} still holds a copy ('git stash list').`
+                  : `Your changes are in stash entry ${data.stashSha}; recover them with 'git stash apply ${data.stashSha}'.`,
+              );
+            }
             process.exit(1);
           }
 
@@ -260,6 +327,29 @@ export function createSpawnCommand(): Command {
                 ? `Created worktree ${name} on new branch ${branch}${base ? ` from ${base}` : ""}`
                 : `Created worktree ${name} on existing branch ${branch}`;
             console.log(`${what}: ${path}`);
+          }
+          if (data.move) {
+            const { moved, untracked, leftoverStash } = data.move;
+            // Both halves are named even at zero, because "0 untracked files"
+            // is the answer to "did it take my new files too" — the question
+            // `--untracked` exists for.
+            const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
+            const verb = untracked.mode === "copy" ? "copied" : "moved";
+            const untrackedNote =
+              untracked.mode === "leave"
+                ? "untracked files left behind"
+                : `${files(untracked.files.length)} untracked ${verb}`;
+            console.log(
+              `Moved ${files(moved)} changed, ${untrackedNote}, out of ${resolveSpawnCwd(options.cwd)}`,
+            );
+            // A successful move that could not drop its own backup. Harmless,
+            // but silence would leave it to be found later as a stash entry
+            // nobody remembers making.
+            if (leftoverStash) {
+              console.log(
+                `Left a redundant stash entry behind (${leftoverStash}); drop it with 'git stash drop'.`,
+              );
+            }
           }
           console.log(
             options.fork
