@@ -1,9 +1,31 @@
 import { describe, it, expect } from "bun:test";
-import { formatSubagentName, formatVersion, truncateText, truncateHighlighted } from "./format";
+import {
+  displayWidth,
+  formatSubagentName,
+  formatVersion,
+  sliceToWidth,
+  truncateText,
+  truncateHighlighted,
+} from "./format";
 
 /** Visible length: markup tags and ellipsis affixes excluded. */
 const visibleLen = (s: string) =>
   s.replace(/<\/?b>/g, "").replace(/…/g, "").length;
+
+/** Visible display columns: markup tags and ellipsis affixes excluded. */
+const visibleWidth = (s: string) =>
+  displayWidth(s.replace(/<\/?b>/g, "").replace(/…/g, ""));
+
+/** A half of a surrogate pair with no partner: what a code-unit slice
+ *  through an astral character leaves behind, rendered as `�`. */
+const hasLoneSurrogate = (s: string) =>
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+    s,
+  );
+
+const CJK = "日本語テキスト"; // 7 chars, 14 columns
+const FAMILY = "👨‍👩‍👧‍👦"; // 11 code units, 2 columns
+const FLAG = "🇯🇵"; // 4 code units, 2 columns
 
 describe("formatVersion", () => {
   it("should return empty string for null", () => {
@@ -36,6 +58,116 @@ describe("formatVersion", () => {
 
   it("should handle v prefix with suffix", () => {
     expect(formatVersion("v0.104.0-darwin-arm64")).toBe("v0.104.0");
+  });
+});
+
+describe("displayWidth", () => {
+  it("counts ASCII one column per character", () => {
+    expect(displayWidth("hello")).toBe(5);
+    expect(displayWidth("")).toBe(0);
+  });
+
+  it("counts wide glyphs as two columns, not as code units", () => {
+    expect(CJK.length).toBe(7);
+    expect(displayWidth(CJK)).toBe(14);
+  });
+
+  it("counts a ZWJ sequence as the single glyph it renders as", () => {
+    expect(FAMILY.length).toBe(11);
+    expect(displayWidth(FAMILY)).toBe(2);
+  });
+
+  it("counts a regional-indicator flag as one glyph", () => {
+    expect(FLAG.length).toBe(4);
+    expect(displayWidth(FLAG)).toBe(2);
+  });
+
+  it("adds up a mixed string", () => {
+    expect(displayWidth(`ok ${CJK} ${FLAG}`)).toBe(3 + 14 + 1 + 2);
+  });
+
+  it("treats ambiguous-width characters as narrow, like the renderer does", () => {
+    // OpenTUI draws ten of each in a ten-column box; a wcwidth table that
+    // called them wide would make every ellipsis-terminated string overflow.
+    for (const char of ["…", "▎", "α", "→", "①"]) {
+      expect(displayWidth(char)).toBe(1);
+    }
+  });
+});
+
+describe("sliceToWidth", () => {
+  it("returns the whole string when it already fits", () => {
+    expect(sliceToWidth("hello", 10)).toBe("hello");
+    expect(sliceToWidth(CJK, 14)).toBe(CJK);
+  });
+
+  it("cuts ASCII at the exact column", () => {
+    expect(sliceToWidth("hello world", 5)).toBe("hello");
+  });
+
+  it("cuts CJK by columns, not by characters", () => {
+    expect(sliceToWidth(CJK, 6)).toBe("日本語");
+    expect(displayWidth(sliceToWidth(CJK, 6))).toBe(6);
+  });
+
+  it("drops a wide glyph that would straddle the limit", () => {
+    // Odd budget: the fourth character needs two columns and only one is
+    // left, so the result lands a column short rather than a column over.
+    expect(sliceToWidth(CJK, 7)).toBe("日本語");
+  });
+
+  it("never splits a ZWJ sequence or a flag", () => {
+    expect(sliceToWidth(`${FAMILY}abc`, 3)).toBe(`${FAMILY}a`);
+    expect(sliceToWidth(FAMILY, 1)).toBe("");
+    expect(sliceToWidth(`${FLAG}x`, 2)).toBe(FLAG);
+    expect(sliceToWidth(FLAG, 1)).toBe("");
+  });
+
+  it("leaves no lone surrogate at any budget", () => {
+    const mixed = `a${FAMILY}${CJK}${FLAG}z`;
+    for (let budget = 0; budget <= displayWidth(mixed) + 2; budget++) {
+      const out = sliceToWidth(mixed, budget);
+      expect(hasLoneSurrogate(out)).toBe(false);
+      expect(displayWidth(out)).toBeLessThanOrEqual(budget);
+    }
+  });
+
+  it("returns nothing when there is no room", () => {
+    expect(sliceToWidth("hello", 0)).toBe("");
+    expect(sliceToWidth("hello", -3)).toBe("");
+  });
+});
+
+describe("truncateText", () => {
+  it("leaves text that fits alone", () => {
+    expect(truncateText("hello", 10)).toBe("hello");
+    expect(truncateText("hello", 5)).toBe("hello");
+  });
+
+  it("clips ASCII to the budget, ellipsis included", () => {
+    expect(truncateText("hello world", 8)).toBe("hello w…");
+    expect(displayWidth(truncateText("hello world", 8))).toBe(8);
+  });
+
+  it("measures CJK in columns rather than characters", () => {
+    // Seven characters, fourteen columns: it does NOT fit an 8-column cell.
+    const out = truncateText(CJK, 8);
+    expect(out).toBe("日本語…");
+    expect(displayWidth(out)).toBeLessThanOrEqual(8);
+  });
+
+  it("keeps emoji clusters whole and leaves no lone surrogate", () => {
+    const out = truncateText(FAMILY.repeat(3), 4);
+    expect(out).toBe(`${FAMILY}…`);
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(displayWidth(out)).toBeLessThanOrEqual(4);
+  });
+
+  it("fits a mixed string to its column budget", () => {
+    const out = truncateText(`ok ${FLAG} ${CJK}`, 10);
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(displayWidth(out)).toBeLessThanOrEqual(10);
+    expect(out.startsWith(`ok ${FLAG}`)).toBe(true);
   });
 });
 
@@ -114,6 +246,34 @@ describe("truncateHighlighted", () => {
   it("falls back to plain truncation when there is no span", () => {
     const plain = "plain long text well over the budget";
     expect(truncateHighlighted(plain, 10)).toBe(truncateText(plain, 10));
+  });
+
+  it("budgets a wide-glyph window in columns, not code units", () => {
+    const markup = `${CJK.repeat(3)}<b>探す</b>${CJK.repeat(3)}`;
+    const out = truncateHighlighted(markup, 20);
+    expect(out).toContain("<b>探す</b>"); // span intact
+    expect(out.startsWith("…")).toBe(true);
+    expect(out.endsWith("…")).toBe(true);
+    expect(visibleWidth(out)).toBeLessThanOrEqual(20);
+    expect(hasLoneSurrogate(out)).toBe(false);
+  });
+
+  it("keeps emoji clusters whole on both sides of the span", () => {
+    const markup = `${FAMILY.repeat(6)}<b>hit</b>${FLAG.repeat(6)}`;
+    const out = truncateHighlighted(markup, 16);
+    expect(out).toContain("<b>hit</b>");
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(visibleWidth(out)).toBeLessThanOrEqual(16);
+    // Whole families and whole flags survived, never a half of either.
+    const visible = out.replace(/<\/?b>|…|hit/g, "");
+    expect(visible.replace(new RegExp(`${FAMILY}|${FLAG}`, "gu"), "")).toBe("");
+  });
+
+  it("returns a wide-glyph markup untouched when it already fits", () => {
+    const markup = `<b>探す</b>${CJK}`;
+    expect(truncateHighlighted(markup, 18)).toBe(markup);
+    // ...and not when only its code-unit count fits.
+    expect(truncateHighlighted(markup, 12)).not.toBe(markup);
   });
 });
 

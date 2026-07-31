@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { NewSessionDialog, optionWindow, wrapText } from "./NewSessionDialog";
 import { expectFrameIntegrity, squish } from "./test-helpers";
+import { displayWidth } from "../utils/format";
 import type { SpawnableAgent } from "../../lib/spawnable-agents";
 import type { NewSessionDraft } from "../store";
 
@@ -112,6 +113,45 @@ describe("wrapText", () => {
 
   it("gives up rather than looping when there is no width to wrap into", () => {
     expect(wrapText("anything", 0)).toEqual(["anything"]);
+  });
+
+  /**
+   * Issue #91: the widths above are display columns, so a line of CJK fills
+   * its column exactly like an ASCII one. Measured in code units these lines
+   * were twice their claimed width and the renderer clipped half of each.
+   */
+  it("wraps wide glyphs to the column they actually occupy", () => {
+    const message = "エージェントを 解決できません でした デーモンを 再起動";
+    const lines = wrapText(message, 19);
+    for (const line of lines) {
+      expect(displayWidth(line)).toBeLessThanOrEqual(19);
+    }
+    expect(lines.join(" ")).toBe(message);
+  });
+
+  it("breaks an over-wide CJK word on a glyph boundary", () => {
+    const lines = wrapText("解決できませんでした", 9);
+    for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(9);
+    expect(lines.join("")).toBe("解決できませんでした");
+    // An odd budget stops a column short rather than splitting a glyph.
+    expect(lines[0]).toBe("解決でき");
+  });
+
+  it("never splits an emoji cluster across lines", () => {
+    const family = "👨‍👩‍👧‍👦";
+    const lines = wrapText(family.repeat(6), 5);
+    for (const line of lines) {
+      expect(displayWidth(line)).toBeLessThanOrEqual(5);
+      // Whole families only, so nothing renders as a replacement glyph.
+      expect(line.replace(new RegExp(family, "gu"), "")).toBe("");
+    }
+    expect(lines.join("")).toBe(family.repeat(6));
+  });
+
+  it("emits an unsplittable glyph rather than spinning on it", () => {
+    // A column too narrow for one wide glyph: it has to overflow, but the
+    // loop must still terminate.
+    expect(wrapText("日本", 1)).toEqual(["日本"]);
   });
 });
 
@@ -281,6 +321,38 @@ describe("NewSessionDialog", () => {
     expect(frame).toContain("Worktree");
     expect(frame).toContain("Directory");
     expect(frame).toContain("enter");
+  });
+
+  /**
+   * Issue #91, the reported repro: a Japanese agent error at a sidebar width.
+   * Wrapped by code units every line was twice the column it claimed, the
+   * renderer clipped the overflow, and the message read as garbage rather
+   * than as a truncation.
+   */
+  it("wraps a wide-glyph agent error to the column it renders in", async () => {
+    const error =
+      "エージェントを解決できませんでした デーモンを再起動してください";
+    const frame = await renderDialog({
+      agents: [],
+      agentsError: error,
+      width: 34,
+      height: 30,
+    });
+
+    expectFrameIntegrity(frame);
+    // Every rendered row of the message is a contiguous prefix of the
+    // original, in order, with nothing dropped between rows.
+    const rendered = squish(frame);
+    let cursor = 0;
+    for (const char of squish(error)) {
+      const at = rendered.indexOf(char, cursor);
+      expect(at).toBeGreaterThanOrEqual(cursor);
+      cursor = at + 1;
+    }
+    // And the fields budgeted below the (now correctly counted) rows survive.
+    expect(frame).toContain("New window");
+    expect(frame).toContain("Split down");
+    expect(frame).toContain("Directory");
   });
 
   /** An error too tall for the screen cannot be shown whole; what it must
