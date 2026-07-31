@@ -3,6 +3,7 @@ import {
   displayWidth,
   formatSubagentName,
   formatVersion,
+  padStartWidth,
   sliceToWidth,
   truncateText,
   truncateHighlighted,
@@ -135,6 +136,34 @@ describe("sliceToWidth", () => {
   it("returns nothing when there is no room", () => {
     expect(sliceToWidth("hello", 0)).toBe("");
     expect(sliceToWidth("hello", -3)).toBe("");
+  });
+});
+
+describe("padStartWidth", () => {
+  it("matches padStart for ASCII", () => {
+    expect(padStartWidth("hi", 5)).toBe("   hi");
+    expect(padStartWidth("", 3)).toBe("   ");
+  });
+
+  it("leaves text that already fills (or overflows) the width alone", () => {
+    expect(padStartWidth("hello", 5)).toBe("hello");
+    expect(padStartWidth("too long", 5)).toBe("too long");
+  });
+
+  it("pads a wide glyph by the columns it draws, not its code units", () => {
+    // padStart would count FAMILY as 11 and pad nothing at all; the cell needs
+    // 8 spaces to end on the same column as an ASCII neighbour.
+    expect(padStartWidth(FAMILY, 10)).toBe(" ".repeat(8) + FAMILY);
+    expect(displayWidth(padStartWidth(FAMILY, 10))).toBe(10);
+    expect(displayWidth(padStartWidth(CJK, 20))).toBe(20);
+  });
+
+  it("lands an emoji cell on the same column as an ASCII one", () => {
+    const width = 12;
+    for (const text of ["1:2.3", FLAG, `${FAMILY}:1.0`, `${CJK}`]) {
+      const padded = padStartWidth(text, width);
+      expect(displayWidth(padded)).toBe(Math.max(width, displayWidth(text)));
+    }
   });
 });
 

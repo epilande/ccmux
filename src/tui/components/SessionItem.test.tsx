@@ -5,6 +5,7 @@ import { createSignal } from "solid-js";
 import { SessionItem, alignText } from "./SessionItem";
 import { TickContext } from "../store";
 import { mockEnrichedSession } from "./test-helpers";
+import { displayWidth } from "../utils/format";
 import type { EnrichedSession } from "../../types";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
@@ -1144,6 +1145,15 @@ describe("alignText", () => {
     expect(alignText("", 3, "right")).toBe("   ");
     expect(alignText("", 3, "left")).toBe("");
   });
+
+  it("pads a wide glyph by the columns it draws", () => {
+    // `📚:1.0` is 7 code units but 6 columns, so a code-unit padStart would
+    // add 5 spaces and leave the cell a column left of its ASCII neighbours.
+    expect(alignText("📚:1.0", 12, "right")).toBe("      📚:1.0");
+    expect(displayWidth(alignText("📚:1.0", 12, "right"))).toBe(
+      displayWidth(alignText("dev:1.0", 12, "right")),
+    );
+  });
 });
 
 describe("SessionItem right-aligned fields", () => {
@@ -1158,5 +1168,49 @@ describe("SessionItem right-aligned fields", () => {
       160,
     );
     expect(frame).toContain("     dev:1.0");
+  });
+
+  // Both dirnames below are 13 characters; the CJK one draws 26 columns and
+  // has to give some back at this width, while the ASCII one fits whole.
+  // Under the code-unit budget both measured 13 and neither truncated, so the
+  // CJK row drew past its cell. One render per test so each gets torn down.
+  const dirnameRow = (dirname: string) =>
+    renderItem(
+      {
+        session: mockEnrichedSession({
+          cwd: `/Users/e/Code/${dirname}`,
+          paneCwd: `/Users/e/Code/${dirname}`,
+          gitBranch: "main",
+          tmuxTarget: "dev:1.0",
+          lastActivityAt: "2024-01-15T11:59:00Z",
+        }),
+      },
+      56,
+    );
+
+  it("leaves a 13-character ASCII dirname whole at 56 columns", async () => {
+    expect(await dirnameRow("abcdefghijklm")).toContain("abcdefghijklm:main");
+  });
+
+  it("truncates a 13-character CJK dirname at the same width", async () => {
+    expect(await dirnameRow("プロジェクトディレクトリ名前")).toContain(
+      "プロジェクトディレクトリ…:main",
+    );
+  });
+
+  it("right-aligns a wide-glyph pane cell to the same column as an ASCII one", async () => {
+    // Six columns of target in a 12-column cell: six spaces of pad. A
+    // code-unit pad counts the emoji's surrogate pair twice and stops at
+    // five, drawing the cell one column left of every ASCII row.
+    const frame = await renderItem(
+      {
+        session: mockEnrichedSession({
+          tmuxTarget: "📚:1.0",
+          lastActivityAt: "2024-01-15T11:59:00Z",
+        }),
+      },
+      160,
+    );
+    expect(frame).toContain("      📚:1.0");
   });
 });
