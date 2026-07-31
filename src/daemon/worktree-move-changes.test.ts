@@ -492,6 +492,45 @@ describe("moveChangesToWorktree", () => {
     expect(await git(repo, ["show", `${leftover}:tracked.txt`])).toBe("edited");
   });
 
+  it("names the entry a FAILED push still managed to create", async () => {
+    // git writes `refs/stash` before it finishes cleaning the working tree,
+    // so a push that fails partway (an untracked file it cannot remove) exits
+    // non-zero with a complete entry behind it. Reporting no sha there hides
+    // the only handle on work that is now half out of the tree.
+    const repo = await makeRepo();
+    dirty(repo);
+
+    const failingPush: GitRun = async (cwd, args) => {
+      const res = await runGit(cwd, args);
+      if (args[0] === "stash" && args[1] === "push") {
+        return {
+          exitCode: 1,
+          stdout: res.stdout,
+          stderr: "could not remove untracked file new.txt",
+        };
+      }
+      return res;
+    };
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      git: failingPush,
+      createWorktree: async () => {
+        throw new Error("must not be called");
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("stash-failed");
+    expect(result.stashSha).toMatch(/^[0-9a-f]{40}$/);
+    // A real handle on the real work, and named in the message the user sees.
+    expect(await git(repo, ["show", `${result.stashSha}:tracked.txt`])).toBe(
+      "edited",
+    );
+    expect(result.error).toContain(result.stashSha!);
+  });
+
   it("serializes moves that share a repo, so neither sees the other mid-flight", async () => {
     // The stash stack is shared by every worktree of a repo, so two moves
     // running at once read and push into the same stack. Interleaved, one
