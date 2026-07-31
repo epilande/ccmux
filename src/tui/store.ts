@@ -209,6 +209,16 @@ interface TUIState {
    * for the rest of the picker's life.
    */
   prune: { repo: string | null } | null;
+  /**
+   * A message that waits to be acknowledged, or null.
+   *
+   * The counterpart to `toastMessage`, and the difference is whether the user
+   * now owns state they did not before. A move that parked work in a stash, or
+   * that landed but left an entry to drop, hands them something to act on
+   * later; a message that disappears on a timer is where that gets lost. Plain
+   * refusals stay toasts.
+   */
+  notice: { title: string; lines: string[] } | null;
   iconStyle: IconStyle;
   previewWidth: number;
   activePaneId: string | null;
@@ -534,6 +544,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     previewFocused: false,
     showHelp: false,
     prune: null,
+    notice: null,
     iconStyle: options.iconStyle ?? "dot",
     previewWidth: options.previewWidth ?? 40,
     activePaneId: null,
@@ -1575,6 +1586,23 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         setState("selectedSessionId", sessionId);
         setSelectedHeaderKey(headerKey);
       });
+    },
+
+    /**
+     * Raise a message that stays until a key is pressed.
+     *
+     * For anything the user has to DO something about after the fact — a
+     * stash entry to apply or drop, work that now lives somewhere else. A
+     * toast is the right shape for feedback about an action just taken; it is
+     * the wrong one for an instruction, because it is gone before a hand
+     * reaches the keyboard.
+     */
+    showNotice(title: string, lines: string[]) {
+      setState("notice", { title, lines });
+    },
+
+    dismissNotice() {
+      setState("notice", null);
     },
 
     showToast(message: string, durationMs = 1500) {

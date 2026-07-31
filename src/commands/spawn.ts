@@ -4,11 +4,15 @@ import { getDaemonUrl } from "../lib/config";
 import { ensureDaemon } from "./shared";
 import { PANE_ID_PATTERN, type SpawnSplit } from "../daemon/spawn-command";
 import {
-  dropStashCommand,
   isUntrackedMode,
   UNTRACKED_MODES,
   type UntrackedMode,
 } from "../daemon/worktree-move-changes";
+import {
+  moveReportLines,
+  stashRecoveryLines,
+  type MoveReport,
+} from "../lib/move-report";
 import { isSameTmuxServer } from "../lib/tmux-server";
 import { resolveCurrentTmuxClientTty } from "../lib/tmux-client";
 import { BUILTIN_AGENTS } from "../lib/agents";
@@ -28,20 +32,7 @@ interface SpawnResponse {
     base?: string;
   };
   /** Present only when `--with-changes` relocated uncommitted work. */
-  move?: {
-    moved: number;
-    untracked: { mode: UntrackedMode; files: string[] };
-    /**
-     * The checkout the work came OUT of, absolute. Reported rather than
-     * assumed to be the caller's cwd: under `--fork` the daemon resolves it
-     * from the forked session, so the two differ. Optional only for a daemon
-     * older than this field.
-     */
-    source?: string;
-    leftoverStash?: string;
-    /** The staged/unstaged split could not be preserved. */
-    flattenedIndex?: boolean;
-  };
+  move?: MoveReport;
 }
 
 /**
@@ -145,54 +136,6 @@ async function callerClientTty(
 function resolveSpawnCwd(explicit?: string): string {
   const callerPwd = process.env.CCMUX_CALLER_PWD ?? process.cwd();
   return explicit ? resolve(callerPwd, explicit) : callerPwd;
-}
-
-/**
- * What a completed move did, as lines.
- *
- * Shared by the success path and by a failure that happened AFTER the move,
- * because both owe the user the same accounting: the work has left their
- * checkout either way, and a spawn that failed later is exactly when they
- * most need to be told where it went.
- */
-function moveLines(
-  move: NonNullable<SpawnResponse["move"]>,
-  fallbackSource: string,
-): string[] {
-  const { moved, untracked, source, leftoverStash, flattenedIndex } = move;
-  // Both halves are named even at zero, because "0 untracked files" is the
-  // answer to "did it take my new files too" — the question `--untracked`
-  // exists for.
-  const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
-  const verb = untracked.mode === "copy" ? "copied" : "moved";
-  const untrackedNote =
-    untracked.mode === "leave"
-      ? "untracked files left behind"
-      : `${files(untracked.files.length)} untracked ${verb}`;
-  const lines = [
-    // The daemon's source, not the caller's cwd: `--fork` resolves it from
-    // the forked session, so naming the local directory there would point at
-    // one nothing happened in.
-    `Moved ${files(moved)} changed, ${untrackedNote}, out of ${source ?? fallbackSource}`,
-  ];
-  // A note, not an error: every edit is in the new worktree, but the staged
-  // half arrived unstaged, and finding that out at commit time is worse than
-  // reading one line here.
-  if (flattenedIndex) {
-    lines.push(
-      "Everything moved, but not the staged/unstaged split: re-run 'git add' in the worktree for what you had staged.",
-    );
-  }
-  // A successful move that could not drop its own backup. Harmless, but
-  // silence would leave it to be found later as a stash entry nobody
-  // remembers making.
-  if (leftoverStash) {
-    lines.push(
-      `Left a redundant stash entry behind (${leftoverStash}); drop it with:`,
-      `  ${dropStashCommand(leftoverStash)}`,
-    );
-  }
-  return lines;
 }
 
 /** The daemon's tmux socket, or null when it can't be determined. */
@@ -372,28 +315,16 @@ export function createSpawnCommand(): Command {
             .catch(() => null)) as SpawnErrorResponse | null;
           console.error(data?.error ?? `Spawn failed: HTTP ${response.status}`);
           // A refused move can leave a stash entry behind, and the sha is
-          // the handle for getting the work back by hand. Which sentence
-          // applies turns on whether the source was restored: with the
-          // changes back in the checkout the entry is a redundant copy,
-          // without them it is the only one.
-          if (data?.stashSha) {
-            if (data.sourceRestored) {
-              console.error(
-                `Your changes are back in the checkout; stash entry ${data.stashSha} still holds a copy. Drop it with:`,
-              );
-              console.error(`  ${dropStashCommand(data.stashSha)}`);
-            } else {
-              // `apply` takes a sha directly, unlike `drop`.
-              console.error(
-                `Your changes are in stash entry ${data.stashSha}; recover them with 'git stash apply ${data.stashSha}'.`,
-              );
-            }
+          // the handle for getting the work back by hand. Same lines the
+          // picker raises for the same body; see `src/lib/move-report.ts`.
+          if (data) {
+            for (const line of stashRecoveryLines(data)) console.error(line);
           }
           // A move that DID complete before the spawn failed. The same
           // accounting the success path prints, because the work has left
           // the checkout either way.
           if (data?.move) {
-            for (const line of moveLines(
+            for (const line of moveReportLines(
               data.move,
               resolveSpawnCwd(options.cwd),
             )) {
@@ -427,7 +358,7 @@ export function createSpawnCommand(): Command {
             console.log(`${what}: ${path}`);
           }
           if (data.move) {
-            for (const line of moveLines(
+            for (const line of moveReportLines(
               data.move,
               resolveSpawnCwd(options.cwd),
             )) {

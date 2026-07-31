@@ -4100,3 +4100,174 @@ describe("App move-changes menu gate", () => {
     });
   });
 });
+
+/**
+ * What the picker says once the move has actually run.
+ *
+ * The move is the one spawn that can leave the user owning state they did not
+ * have before — work parked in a stash, a redundant entry to drop, a
+ * staged/unstaged split to rebuild — so these pin WHICH of those get a message
+ * that waits to be acknowledged and which stay a toast.
+ */
+describe("App move-changes reporting", () => {
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  /** A daemon that offers the move and answers `/spawn` with `spawn()`. */
+  function withMoveDaemon(spawn: () => Response) {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/dirty")) {
+        return Response.json({ repo: true, dirty: true });
+      }
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: null });
+      }
+      if (href.endsWith("/agents")) {
+        return Response.json({
+          agents: [
+            {
+              name: "claude",
+              displayName: "Claude",
+              shortCode: "CC",
+              supportsPrompt: true,
+            },
+          ],
+        });
+      }
+      if (href.endsWith("/spawn")) return spawn();
+      return Response.json({});
+    }) as unknown as typeof fetch;
+    return { restore: () => (globalThis.fetch = original) };
+  }
+
+  /** Open the row menu, pick "Move changes", name the worktree, submit. */
+  async function submitMove(
+    props: Record<string, unknown> = {},
+  ): Promise<void> {
+    await renderApp(120, 24, {
+      groupBy: "none",
+      persistent: true,
+      ...props,
+    });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "s1",
+          project: "myapp",
+          cwd: "/code/myapp",
+          tmuxPane: "%1",
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+    await settle();
+    await setup.renderOnce();
+    const row = setup
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes("Move changes"));
+    expect(row).toBeGreaterThan(0);
+    await setup.mockMouse.click(7, row, MouseButtons.LEFT);
+    await settle();
+    await setup.renderOnce();
+    // agent -> placement -> prompt -> name, past the locked destination.
+    setup.mockInput.pressTab();
+    setup.mockInput.pressTab();
+    setup.mockInput.pressTab();
+    await setup.renderOnce();
+    await setup.mockInput.typeText("rescue");
+    await setup.renderOnce();
+    setup.mockInput.pressEnter();
+    await settle();
+    await setup.renderOnce();
+  }
+
+  it("holds a refused move's stash recovery on screen until dismissed", async () => {
+    // The sha is the only handle on the user's work. A four-second toast that
+    // truncates it is the same as not printing it at all.
+    const { restore } = withMoveDaemon(() =>
+      Response.json(
+        {
+          error: "Could not apply the changes into the new worktree",
+          reason: "apply-failed",
+          stashSha: "abc1234def",
+          sourceRestored: false,
+        },
+        { status: 400 },
+      ),
+    );
+    try {
+      await submitMove();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("Couldnotapplythechanges");
+      expect(frame).toContain("gitstashapplyabc1234def");
+
+      // Dismissed by a keypress, and the dialog it was raised over is still
+      // there to correct and retry.
+      setup.mockInput.pressKey("escape");
+      await setup.renderOnce();
+      const after = squish(setup.captureCharFrame());
+      expect(after).not.toContain("gitstashapplyabc1234def");
+      expect(after).toContain("Movechangestoworktree");
+    } finally {
+      restore();
+    }
+  });
+
+  it("names where the work went when the spawn failed after the move", async () => {
+    const { restore } = withMoveDaemon(() =>
+      Response.json(
+        {
+          error:
+            "Failed to spawn session: tmux failed (your uncommitted changes were already moved out of /code/myapp to /code/myapp/.claude/worktrees/rescue)",
+          move: {
+            moved: 3,
+            untracked: { mode: "move", files: ["new.ts"] },
+            source: "/code/myapp",
+            flattenedIndex: true,
+          },
+        },
+        { status: 500 },
+      ),
+    );
+    try {
+      await submitMove();
+      const frame = squish(setup.captureCharFrame());
+      // The accounting, the worktree it landed in, and the staged/unstaged
+      // caveat the CLI prints for the same body.
+      expect(frame).toContain("Moved3fileschanged");
+      expect(frame).toContain("1fileuntrackedmoved");
+      expect(frame).toContain(".claude/worktrees/rescue");
+      expect(frame).toContain("staged/unstagedsplit");
+    } finally {
+      restore();
+    }
+  });
+
+  it("leaves a plain validation refusal a toast, in the daemon's own words", async () => {
+    // Nothing happened, so there is nothing to acknowledge: the message is
+    // advice for the field the user is still looking at.
+    const { restore } = withMoveDaemon(() =>
+      Response.json(
+        {
+          error:
+            "Worktree 'rescue' already exists at /code/myapp/.claude/worktrees/rescue; moving changes needs a fresh worktree (pick another name, or leave the name empty to derive one from the prompt).",
+          reason: "create-failed",
+        },
+        { status: 400 },
+      ),
+    );
+    try {
+      await submitMove();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("alreadyexists");
+      // A toast, not the acknowledgement dialog.
+      expect(frame).not.toContain("anykeytodismiss");
+    } finally {
+      restore();
+    }
+  });
+});

@@ -62,7 +62,14 @@ import {
   PLACEMENT_OPTIONS,
   UNTRACKED_OPTIONS,
 } from "./components/NewSessionDialog";
+import { NoticeDialog } from "./components/NoticeDialog";
 import { slugFromPrompt, slugify } from "../daemon/worktree-create";
+import {
+  failureNeedsAcknowledgement,
+  moveReportLines,
+  stashRecoveryLines,
+  type MoveReport,
+} from "../lib/move-report";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { PruneDialog } from "./components/PruneDialog";
 import { HelpOverlay } from "./components/HelpOverlay";
@@ -513,7 +520,8 @@ export function App(props: AppProps) {
       store.state.confirmMode ||
       store.state.previewFocused ||
       store.state.newSession !== null ||
-      store.state.prune !== null
+      store.state.prune !== null ||
+      store.state.notice !== null
     );
   }
 
@@ -1207,6 +1215,30 @@ export function App(props: AppProps) {
     if (value !== undefined) field.select(value);
   }
 
+  /** Acknowledge whatever the notice was reporting. */
+  function dismissNotice(): void {
+    store.actions.dismissNotice();
+  }
+
+  /**
+   * What `POST /spawn` answers with, success or failure.
+   *
+   * One shape for both, because the halves overlap: a spawn that failed AFTER
+   * relocating the changes carries the same `move` report a successful one
+   * does, and it is the only place that says the user's work has left their
+   * checkout. `stashSha`/`sourceRestored` describe a move that was refused
+   * before that point. Every field is optional — an older daemon answers
+   * without any of them (see the stale-daemon check in `reportMove`).
+   */
+  interface SpawnBody {
+    paneId?: string;
+    error?: string;
+    worktree?: { name?: string };
+    stashSha?: string;
+    sourceRestored?: boolean;
+    move?: MoveReport;
+  }
+
   async function submitNewSession(): Promise<void> {
     const draft = store.state.newSession;
     if (!draft || spawnInFlight) return;
@@ -1264,10 +1296,7 @@ export function App(props: AppProps) {
     // is to put you in the new pane, so it jumps and gets out of the way.
     const detach = props.sidebar === true;
     spawnInFlight = true;
-    let spawned: {
-      paneId?: string;
-      worktree?: { name?: string };
-    } | null = null;
+    let spawned: SpawnBody | null = null;
     try {
       const callerPane = await resolveSpawnPane();
       // A sidebar alone in its window has nothing to split but itself, and
@@ -1314,20 +1343,34 @@ export function App(props: AppProps) {
               : undefined,
         }),
       });
-      const body = (await response.json().catch(() => null)) as {
-        paneId?: string;
-        error?: string;
-        worktree?: { name?: string };
-      } | null;
+      const body = (await response
+        .json()
+        .catch(() => null)) as SpawnBody | null;
       if (response.ok) {
         spawned = body ?? {};
       } else {
-        // Leave the dialog open: every 400 here (agent can't take a prompt,
-        // cwd is gone) is something the user can fix in place.
-        store.actions.showToast(
-          `Spawn failed: ${body?.error ?? response.statusText}`,
-          4000,
-        );
+        // Leave the dialog open either way: every refusal here (agent can't
+        // take a prompt, cwd is gone, that worktree name is taken) is
+        // something the user can fix in the fields they are still looking at.
+        //
+        // What changes is how the message is delivered. A move can fail with
+        // the user's work parked in a stash, or after it has already been
+        // relocated, and those hand them something to do afterwards — a
+        // four-second toast that truncates a sha is the same as saying
+        // nothing. The daemon's own text leads in both cases: it is written
+        // to be actionable, and the fallback exists only for a body that
+        // never arrived.
+        const error = body?.error ?? response.statusText;
+        const what = draft.moveChanges ? "Move failed" : "Spawn failed";
+        if (body && failureNeedsAcknowledgement(body)) {
+          store.actions.showNotice(what, [
+            error,
+            ...stashRecoveryLines(body),
+            ...(body.move ? moveReportLines(body.move, draft.cwd) : []),
+          ]);
+        } else {
+          store.actions.showToast(`${what}: ${error}`, 4000);
+        }
       }
     } catch (err: unknown) {
       store.actions.showToast(`Spawn failed: ${errText(err)}`, 4000);
@@ -1768,6 +1811,16 @@ export function App(props: AppProps) {
     if (visibility && !visibility.visible()) visibility.refresh();
 
     const key = event.name;
+
+    // First, and it swallows the key that dismissed it. This is raised over
+    // whatever was already on screen (including the new-session dialog, which
+    // stays open behind it), so a key that both dismissed the notice and
+    // reached the dialog would act on a message the user had not read yet.
+    if (store.state.notice) {
+      dismissNotice();
+      event.preventDefault();
+      return;
+    }
 
     if (store.state.showHelp) {
       if (key === "?" || key === "q" || key === "escape") {
@@ -2335,6 +2388,19 @@ export function App(props: AppProps) {
               onSubmit={() => void submitNewSession()}
               onCancel={store.actions.closeNewSessionDialog}
               showKeyHints={props.sidebar === true}
+            />
+          )}
+        </Show>
+
+        {/* Over the new-session dialog on purpose: the dialog is left open so
+            a refused move can be corrected in place, and this is the record of
+            what that refusal left behind. */}
+        <Show when={store.state.notice}>
+          {(notice: () => NonNullable<typeof store.state.notice>) => (
+            <NoticeDialog
+              title={notice().title}
+              lines={notice().lines}
+              onDismiss={dismissNotice}
             />
           )}
         </Show>
