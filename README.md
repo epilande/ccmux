@@ -327,6 +327,16 @@ opens the new-session dialog already set to move: the destination is locked to
 a new worktree, an **Untracked** row appears, and the name and prompt stay
 editable.
 
+Whatever the move leaves you holding, the picker says so and waits for a
+keypress rather than flashing it past: a failure that parked your work in a
+stash (with the command to get it back), a move that completed but could not
+drop its own backup entry, a staged/unstaged split it could not preserve, or a
+spawn that failed after the changes had already moved — naming the worktree
+they moved into. Only refusals that changed nothing (a name already taken,
+nothing to move) are a passing toast, since the fields to fix them are still
+in front of you. The sidebar toasts what a clean move did; the picker jumps
+straight into the new pane, as it does for every other spawn.
+
 Untracked files move by default (agents create new files constantly, and
 leaving them behind would strand exactly the work you are relocating).
 `--untracked copy` puts them in both places, `--untracked leave` keeps them
@@ -485,9 +495,11 @@ Movement and number keys apply to the focused field, so <kbd>2</kbd> picks the s
 
 **Where** picks between this checkout and a new git worktree, whose branch is cut from the main checkout's current branch. Choosing a different base ref is CLI-only (`ccmux spawn --worktree --base <ref>`).
 
-Choosing the worktree adds a **Name** row showing the name it would create, derived from the prompt and updated as you type. Type over it to name the worktree yourself; clear the field to hand the name back to the prompt. The two are not the same request: a derived name that collides with an existing worktree is numbered (`-2`), which is what the row's `auto · -2 if taken` note means, while a name you typed opens that worktree if it is already there. Names are slugified the way `ccmux spawn --worktree <name>` slugifies them, so `Fix Sidebar Flicker` becomes `fix-sidebar-flicker`, and a name is enough on its own — a worktree no longer needs a prompt to be spawnable.
+Choosing the worktree adds a **Name** row showing the name it would create, derived from the prompt and updated as you type. Type over it to name the worktree yourself; clear the field to hand the name back to the prompt. The two are not the same request: a derived name that collides with an existing worktree is numbered (`-2`), which is what the row's `auto · -2 if taken` note means, while a name you typed opens that worktree if it is already there. Names are slugified the way `ccmux spawn --worktree <name>` slugifies them, so `Fix Sidebar Flicker` becomes `fix-sidebar-flicker`, and a name is enough on its own — a worktree no longer needs a prompt to be spawnable. A name with nothing to slugify (punctuation, a non-Latin script) is refused when you confirm rather than quietly replaced by the derived one.
 
 Opened from **Move changes**, the same dialog runs in move mode: the title says so, **Where** is locked to the new worktree (there is nowhere else the changes can go), the same editable **Name** row is there, and an **Untracked** field appears — <kbd>1</kbd> move, <kbd>2</kbd> copy to both, <kbd>3</kbd> leave here. <kbd>Tab</kbd> skips the locked field. See [Moving Uncommitted Changes](#moving-uncommitted-changes).
+
+In a pane too short for every row, the dialog drops what it can spare before anything you act on — the key hints first, then the move note, then the blank line, then the option lists become scrolling windows, and the directory row last; below the height its fields need, it says how many rows it wants instead of drawing over itself, and the number keys go quiet while it does.
 
 The working directory is derived, not typed: a session row uses that session's directory, a group header uses the group's, and no selection falls back to where the picker was launched. The picker jumps to the new pane, and a one-shot picker then closes while a `--persistent` board stays open; the sidebar spawns into the window's main area without stealing focus.
 
