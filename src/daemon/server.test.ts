@@ -5676,7 +5676,9 @@ describe("POST /spawn moving changes into a worktree", () => {
       // The whole point: the changes are there and the source has none.
       expect(readFileSync(join(path, "tracked.txt"), "utf8")).toBe("edited\n");
       expect(existsSync(join(path, "new.txt"))).toBe(true);
-      expect(readFileSync(join(repo, "tracked.txt"), "utf8")).toBe("original\n");
+      expect(readFileSync(join(repo, "tracked.txt"), "utf8")).toBe(
+        "original\n",
+      );
       expect(existsSync(join(repo, "new.txt"))).toBe(false);
       expect(dirtyPaths(repo)).toEqual([]);
       // And the backup was dropped, since the work is safely in the worktree.
@@ -5708,7 +5710,9 @@ describe("POST /spawn moving changes into a worktree", () => {
       expect(res.status).toBe(200);
       expect(existsSync(join(body.worktree!.path, "new.txt"))).toBe(true);
       // The tracked edit moved; the untracked file exists in both places.
-      expect(readFileSync(join(repo, "tracked.txt"), "utf8")).toBe("original\n");
+      expect(readFileSync(join(repo, "tracked.txt"), "utf8")).toBe(
+        "original\n",
+      );
       expect(dirtyPaths(repo)).toEqual(["?? new.txt"]);
     } finally {
       tmux.restore();
@@ -5807,6 +5811,56 @@ describe("POST /spawn moving changes into a worktree", () => {
       expect(dirtyPaths(repo)).toContain("M tracked.txt");
       expect(stashList(repo)).toBe("");
       expect(tmux.argv).toEqual([]);
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  /**
+   * A name that is already a worktree is refused BEFORE the stash, because
+   * the move's rollback force-removes the worktree and there is no way to
+   * tell git to take back only the part this run added. Refused up front,
+   * nothing has been touched at all.
+   */
+  it("refuses a name that already exists, before touching anything", async () => {
+    const repo = makeDirtyRepo();
+    runFixtureGit(
+      repo,
+      "worktree",
+      "add",
+      "-b",
+      "taken",
+      join(repo, ".claude", "worktrees", "taken"),
+    );
+    // Somebody's uncommitted work, sitting in the worktree being asked for.
+    const precious = join(
+      repo,
+      ".claude",
+      "worktrees",
+      "taken",
+      "PRECIOUS.txt",
+    );
+    writeFileSync(precious, "hours of work\n");
+
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "taken", withChanges: true },
+      });
+      const body = (await res.json()) as { error: string; reason?: string };
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("already exists");
+      expect(body.error).toContain("fresh worktree");
+      // Nothing happened: no pane, no stash, source still dirty, and the
+      // existing worktree still has its work.
+      expect(tmux.argv).toEqual([]);
+      expect(stashList(repo)).toBe("");
+      expect(dirtyPaths(repo)).toContain("M tracked.txt");
+      expect(readFileSync(precious, "utf8")).toBe("hours of work\n");
     } finally {
       tmux.restore();
     }

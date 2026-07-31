@@ -35,7 +35,11 @@ import {
   type SpawnPlacement,
   type SpawnSplit,
 } from "./spawn-command";
-import { createWorktree, type WorktreeCreation } from "./worktree-create";
+import {
+  createWorktree,
+  existingWorktreeFor,
+  type WorktreeCreation,
+} from "./worktree-create";
 import { getAgents, type AgentDef } from "../lib/agents";
 import { listSpawnableAgents, spawnBinaryFor } from "../lib/spawnable-agents";
 import {
@@ -2737,7 +2741,9 @@ export class DaemonServer {
        *
        * The full creation result is captured on the way past, because the
        * response still owes the caller the branch it landed on and whether
-       * the worktree was made or merely opened. The seam only carries a path.
+       * the worktree was made or merely opened. The seam carries the path and
+       * `created`, the latter because the move's rollback deletes what it
+       * made and must be able to tell a fresh worktree from an opened one.
        */
       const createForMove: CreateWorktree = async (opts) => {
         const created = await createWorktree(mainRepoRoot, {
@@ -2746,10 +2752,32 @@ export class DaemonServer {
         });
         if (!created.ok) throw new Error(created.error);
         worktreeInfo = created.result;
-        return { path: created.result.path };
+        return { path: created.result.path, created: created.result.created };
       };
 
       if (withChanges) {
+        // Refused here rather than inside the move, because here nothing has
+        // happened yet: no stash, no worktree, no half-finished anything.
+        // The move itself refuses an opened worktree too (it has to — this
+        // check can lose a race with a concurrent spawn), but by then the
+        // user's changes have been through a stash and back.
+        if (creation.name !== undefined) {
+          const occupied = await existingWorktreeFor(
+            mainRepoRoot,
+            creation.name,
+          );
+          if (occupied) {
+            return Response.json(
+              {
+                error:
+                  `Worktree '${creation.name}' already exists at ${occupied}; moving changes needs a fresh worktree ` +
+                  `(pick another name, or leave the name empty to derive one from the prompt).`,
+                reason: "create-failed",
+              },
+              { status: 400, headers },
+            );
+          }
+        }
         // Routed THROUGH the move, never beside it: the module owns the
         // ordering that keeps the work recoverable (stash, create, apply,
         // drop) and the rollback for every failure in it, so creating the

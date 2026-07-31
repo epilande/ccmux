@@ -78,11 +78,19 @@ export function isUntrackedMode(value: unknown): value is UntrackedMode {
  * curries the parts this module has no business knowing and converts a
  * refusal into a throw, which is what lands here as `create-failed`; see the
  * adapter in `server.ts`'s spawn handler.
+ *
+ * `created` is load-bearing rather than informational. The real engine is
+ * create-or-OPEN for an explicit name, so a path coming back here can be a
+ * worktree that was already on disk with somebody's uncommitted work in it,
+ * and this module's rollback deletes what it made with
+ * `worktree remove --force`. A seam that reported only the path would make
+ * those two indistinguishable, which is how a failed move came to delete a
+ * checkout it had merely opened. See {@link moveChangesToWorktree}.
  */
 export type CreateWorktree = (opts: {
   name?: string;
   base?: string;
-}) => Promise<{ path: string }>;
+}) => Promise<{ path: string; created: boolean }>;
 
 export interface MoveChangesInput {
   /** Checkout whose uncommitted work is being relocated. */
@@ -377,6 +385,24 @@ export async function moveChangesToWorktree(
   try {
     const created = await createWorktree({ name, base });
     worktreePath = created.path;
+    if (!created.created) {
+      // A worktree that was already there. The engine opens one happily for
+      // an explicit name, and for an ordinary spawn that is the right answer,
+      // but a move cannot use it: the rollback below force-removes the
+      // worktree, which would take a checkout this run did not make and
+      // whatever uncommitted work was sitting in it. Refusing costs a retry
+      // under another name; the alternative costs somebody their files.
+      const restored = await restoreSource();
+      return {
+        ok: false,
+        reason: "create-failed",
+        error:
+          `A worktree already exists at ${created.path}, and moving changes needs a fresh one ` +
+          `(pick another name, or leave the name empty). Nothing was moved.`,
+        stashSha,
+        sourceRestored: restored,
+      };
+    }
   } catch (err) {
     const restored = await restoreSource();
     return {
@@ -394,6 +420,10 @@ export async function moveChangesToWorktree(
    * Undo the creation. Best effort by design: the changes are what matter,
    * and a leftover directory is a far smaller problem than a failed rollback
    * masking the real error.
+   *
+   * Only ever reaches a worktree THIS run created: the branch above turns a
+   * merely-opened one into a `create-failed` before any of the callers below
+   * exist. That refusal is what makes an unconditional `--force` safe here.
    */
   const removeWorktree = async (): Promise<void> => {
     await git(source, ["worktree", "remove", "--force", worktreePath]);

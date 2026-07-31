@@ -668,6 +668,31 @@ export async function createWorktree(
 }
 
 /**
+ * The path an EXPLICIT worktree name already occupies, or null.
+ *
+ * Exists for the one caller that must not get create-or-open:
+ * `--with-changes` moves uncommitted work into the worktree and rolls the
+ * worktree back if anything goes wrong, so it needs a checkout nothing else
+ * owns. Asking here, before a single file has been touched, turns "that name
+ * is taken" into an argument error rather than something discovered halfway
+ * through a move.
+ *
+ * A name the engine would reject outright answers null: reporting it as
+ * occupied would be wrong, and {@link createWorktree} says why it is bad far
+ * better than this can.
+ */
+export async function existingWorktreeFor(
+  mainRepoRoot: string,
+  name: string,
+  git: GitRun = runGit,
+): Promise<string | null> {
+  const named = resolveWorktreeName(name, undefined);
+  if (!named.ok) return null;
+  const path = worktreePathFor(mainRepoRoot, named.name);
+  return (await isRegisteredWorktree(mainRepoRoot, path, git)) ? path : null;
+}
+
+/**
  * True only for a directory with nothing in it.
  *
  * A file, a symlink, and an unreadable path all answer false: this gates a

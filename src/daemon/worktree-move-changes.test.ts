@@ -66,7 +66,7 @@ function realCreator(repo: string, branch = "moved"): CreateWorktree {
       path,
       base ?? "HEAD",
     ]);
-    return { path };
+    return { path, created: true };
   };
 }
 
@@ -232,7 +232,7 @@ describe("moveChangesToWorktree", () => {
       source: repo,
       createWorktree: async () => {
         created = true;
-        return { path: "/nowhere" };
+        return { path: "/nowhere", created: true };
       },
     });
 
@@ -251,7 +251,7 @@ describe("moveChangesToWorktree", () => {
     const result = await moveChangesToWorktree({
       source: repo,
       untracked: "leave",
-      createWorktree: async () => ({ path: "/nowhere" }),
+      createWorktree: async () => ({ path: "/nowhere", created: true }),
     });
 
     expect(result.ok).toBe(false);
@@ -300,7 +300,7 @@ describe("moveChangesToWorktree", () => {
         writeFileSync(join(repo, "tracked.txt"), "touched during\n");
         const path = join(root, "wt", name ?? "moved");
         await git(repo, ["worktree", "add", "-b", "moved", path, "HEAD"]);
-        return { path };
+        return { path, created: true };
       },
     });
 
@@ -341,7 +341,7 @@ describe("moveChangesToWorktree", () => {
         create: (repo) => async () => {
           const path = join(root, "wt", "conflict");
           await git(repo, ["worktree", "add", "--detach", path, "diverged"]);
-          return { path };
+          return { path, created: true };
         },
       },
       {
@@ -353,7 +353,7 @@ describe("moveChangesToWorktree", () => {
           // Based on a commit where `collides` is a FILE, while the source
           // has it as an untracked DIRECTORY, so the copy cannot land.
           await git(repo, ["worktree", "add", "--detach", path, "hasfile"]);
-          return { path };
+          return { path, created: true };
         },
       },
     ];
@@ -432,7 +432,7 @@ describe("moveChangesToWorktree", () => {
       source: repo,
       createWorktree: async () => {
         await git(repo, ["worktree", "add", "--detach", wtPath, "diverged"]);
-        return { path: wtPath };
+        return { path: wtPath, created: true };
       },
     });
 
@@ -445,6 +445,47 @@ describe("moveChangesToWorktree", () => {
     expect(await stashCount(repo)).toBe(1);
     expect(result.sourceRestored).toBe(true);
     expect(readFileSync(join(repo, "tracked.txt"), "utf-8")).toBe("edited\n");
+  });
+
+  it("refuses a worktree it only OPENED, leaving it and its work alone", async () => {
+    // The creation engine is create-or-open for an explicit name, so the seam
+    // can hand back a worktree that was already there with the user's own
+    // uncommitted work in it. Rolling back would `worktree remove --force`
+    // that checkout and everything in it, which is the one outcome this
+    // module exists to prevent.
+    const repo = await makeRepo();
+    await git(repo, ["checkout", "-b", "diverged"]);
+    writeFileSync(join(repo, "tracked.txt"), "diverged content\n");
+    await git(repo, ["commit", "-am", "diverge"]);
+    await git(repo, ["checkout", "main"]);
+
+    const existing = join(root, "wt", "existing");
+    await git(repo, ["worktree", "add", "--detach", existing, "diverged"]);
+    // Hours of somebody else's work, tracked by nothing.
+    writeFileSync(join(existing, "PRECIOUS.txt"), "hours of work\n");
+    dirty(repo);
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      name: "existing",
+      // What the engine reports for a worktree it opened rather than made.
+      // The base is `diverged`, so an apply would conflict as well.
+      createWorktree: async () => ({ path: existing, created: false }),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("create-failed");
+    expect(result.error).toContain("already exists");
+    // The worktree and its untracked work are untouched.
+    expect(existsSync(existing)).toBe(true);
+    expect(readFileSync(join(existing, "PRECIOUS.txt"), "utf-8")).toBe(
+      "hours of work\n",
+    );
+    // And the source has its changes back.
+    expect(result.sourceRestored).toBe(true);
+    expect(readFileSync(join(repo, "tracked.txt"), "utf-8")).toBe("edited\n");
+    expect(result.stashSha).toBeDefined();
   });
 
   it("acts on ITS OWN stash entry when another push lands on top", async () => {
@@ -464,7 +505,7 @@ describe("moveChangesToWorktree", () => {
         writeFileSync(other, "sentinel\n");
         const path = join(root, "wt", name ?? "moved");
         await git(repo, ["worktree", "add", "-b", "moved", path, "HEAD"]);
-        return { path };
+        return { path, created: true };
       },
     });
 
@@ -494,7 +535,7 @@ describe("moveChangesToWorktree", () => {
         seen.push(opts);
         const path = join(root, "wt", "named");
         await git(repo, ["worktree", "add", "-b", "named", path, "main"]);
-        return { path };
+        return { path, created: true };
       },
     });
 
@@ -526,7 +567,7 @@ describe("moveChangesToWorktree", () => {
 
     const result = await moveChangesToWorktree({
       source: plain,
-      createWorktree: async () => ({ path: "/nowhere" }),
+      createWorktree: async () => ({ path: "/nowhere", created: true }),
     });
 
     expect(result.ok).toBe(false);
