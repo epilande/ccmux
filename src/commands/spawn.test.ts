@@ -1,4 +1,4 @@
-import { describe, it, expect, mock, afterEach } from "bun:test";
+import { describe, it, expect, mock, spyOn, afterEach } from "bun:test";
 
 // Neutralize ensureDaemon so the action never spawns/probes a real daemon.
 // Counted as well as neutralized: argument validation that runs BEFORE it is
@@ -23,6 +23,7 @@ interface SpawnBody {
   split: unknown;
   target?: string;
   callerPane?: string;
+  callerTty?: string;
   detach: boolean;
   worktree?: { name?: string; base?: string };
 }
@@ -224,6 +225,133 @@ describe("ccmux spawn caller pane", () => {
       expect(bodies[0]?.callerPane).toBeUndefined();
     } finally {
       restoreEnv();
+      restore();
+    }
+  });
+});
+
+describe("ccmux spawn caller client tty", () => {
+  // The daemon is attached to no tmux client, so a `--target` in another
+  // session can only be switched to by naming the caller's client with
+  // `switch-client -c <tty>` (issue #75). Only the CLI can find that tty.
+
+  const IN_TMUX = {
+    TMUX_PANE: "%12",
+    TMUX: "/tmp/tmux-501/default,123,0",
+    CCMUX_CALLER_PWD: "/caller/dir",
+  };
+
+  /**
+   * Stub the `tmux display-message` the tty lookup shells out to. `spyOn`
+   * rather than `mock.module`, which is process-wide and leaks into sibling
+   * test files.
+   */
+  function withTmuxClientTty(tty: string) {
+    const argv: string[][] = [];
+    const spy = spyOn(Bun, "spawn").mockImplementation(((spawned: string[]) => {
+      argv.push(spawned);
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob([`${tty}\n`]).stream(),
+        stderr: new Blob([""]).stream(),
+      };
+    }) as unknown as typeof Bun.spawn);
+    return { argv, restore: () => spy.mockRestore() };
+  }
+
+  it("sends the attached client's tty alongside an explicit --target", async () => {
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture("/tmp/tmux-501/default");
+    const tmux = withTmuxClientTty("/dev/ttys085");
+    const restoreEnv = withEnv(IN_TMUX);
+    try {
+      await runSpawn(["--target", "%5"]);
+      expect(bodies[0]?.callerTty).toBe("/dev/ttys085");
+      // The CLIENT's tty, which is what `switch-client -c` takes — not the
+      // pane's own pty, which tmux would not resolve to a client at all.
+      expect(tmux.argv[0]).toEqual([
+        "tmux",
+        "display-message",
+        "-p",
+        "#{client_tty}",
+      ]);
+    } finally {
+      restoreEnv();
+      tmux.restore();
+      restore();
+    }
+  });
+
+  it("does not look one up without a --target", async () => {
+    // A spawn placed by `callerPane` lands in the caller's own session by
+    // construction, so there is never a client to move: paying for a tmux
+    // round-trip on every ordinary spawn would buy nothing.
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture("/tmp/tmux-501/default");
+    const tmux = withTmuxClientTty("/dev/ttys085");
+    const restoreEnv = withEnv(IN_TMUX);
+    try {
+      await runSpawn([]);
+      expect(bodies[0]?.callerTty).toBeUndefined();
+      expect(tmux.argv).toHaveLength(0);
+    } finally {
+      restoreEnv();
+      tmux.restore();
+      restore();
+    }
+  });
+
+  it("omits it under --detach, which asks for no switch at all", async () => {
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture("/tmp/tmux-501/default");
+    const tmux = withTmuxClientTty("/dev/ttys085");
+    const restoreEnv = withEnv(IN_TMUX);
+    try {
+      await runSpawn(["--target", "%5", "--detach"]);
+      expect(bodies[0]?.callerTty).toBeUndefined();
+      expect(bodies[0]?.detach).toBe(true);
+      expect(tmux.argv).toHaveLength(0);
+    } finally {
+      restoreEnv();
+      tmux.restore();
+      restore();
+    }
+  });
+
+  it("drops it when the daemon watches another tmux server", async () => {
+    // Same reason `callerPane` is dropped: the daemon would be switching a
+    // client on a server whose panes have nothing to do with ours.
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture("/tmp/tmux-501/other");
+    const tmux = withTmuxClientTty("/dev/ttys085");
+    const restoreEnv = withEnv(IN_TMUX);
+    try {
+      await runSpawn(["--target", "%5"]);
+      expect(bodies[0]?.callerTty).toBeUndefined();
+      expect(tmux.argv).toHaveLength(0);
+    } finally {
+      restoreEnv();
+      tmux.restore();
+      restore();
+    }
+  });
+
+  it("sends nothing when run outside tmux", async () => {
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture(null);
+    const tmux = withTmuxClientTty("/dev/ttys085");
+    const restoreEnv = withEnv({
+      TMUX: undefined,
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn(["--target", "%5"]);
+      expect(bodies[0]?.callerTty).toBeUndefined();
+      expect(tmux.argv).toHaveLength(0);
+    } finally {
+      restoreEnv();
+      tmux.restore();
       restore();
     }
   });

@@ -7,16 +7,20 @@ import { getBuiltinAgent } from "../lib/agents-test-helpers";
 import {
   buildAgentForkCommand,
   buildAgentSpawnCommand,
+  buildSpawnFocusArgv,
   buildTmuxSpawnArgv,
   escapeSingleQuoted,
   MAX_SPAWN_COMMAND_BYTES,
   MAX_SPAWN_PROMPT_BYTES,
   normalizeBoolean,
+  normalizeClientTty,
   normalizePrompt,
   normalizeSplit,
   normalizeTarget,
   normalizeWorktreeRequest,
   quotedTemplateProblem,
+  resolveSpawnFocusArgv,
+  type ClientTtyProbe,
   spawnCommandTooLarge,
   substituteQuotedTemplate,
 } from "./spawn-command";
@@ -68,6 +72,188 @@ describe("normalizeTarget", () => {
     for (const bad of ["@3", "mysession:1.0", "0", "%", "%1a", 12]) {
       expect(normalizeTarget(bad).ok).toBe(false);
     }
+  });
+});
+
+describe("normalizeClientTty", () => {
+  // `callerTty` reaches tmux as a `switch-client -c` argument. Nothing here
+  // touches a shell, so the risk is not injection but a nonsense value tmux
+  // would resolve as some other client (or none), leaving the caller's view
+  // wherever it was with a success reported.
+
+  it("accepts the device paths tmux reports on macOS and Linux", () => {
+    expect(normalizeClientTty("/dev/ttys004")).toEqual({
+      ok: true,
+      value: "/dev/ttys004",
+    });
+    expect(normalizeClientTty("/dev/pts/3")).toEqual({
+      ok: true,
+      value: "/dev/pts/3",
+    });
+  });
+
+  it("treats absent, null and empty as no client", () => {
+    for (const blank of [undefined, null, ""]) {
+      expect(normalizeClientTty(blank)).toEqual({ ok: true, value: undefined });
+    }
+  });
+
+  it("rejects anything that is not a device path", () => {
+    for (const bad of ["ttys004", "/etc/passwd", "/dev/", 4, {}]) {
+      const result = normalizeClientTty(bad);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("callerTty");
+    }
+  });
+});
+
+describe("buildSpawnFocusArgv", () => {
+  // The whole point of the split: `select-window` moves the active window
+  // WITHIN a session, so against a target in another session it changes that
+  // session and leaves the attached client exactly where it was. Verified by
+  // hand on an isolated tmux server (issue #75).
+
+  const base = { paneId: "%99", detach: false };
+
+  it("selects the window for a same-session spawn, tty or not", () => {
+    expect(
+      buildSpawnFocusArgv({
+        ...base,
+        callerTty: "/dev/ttys004",
+        placementSessionId: "$3",
+        callerSessionId: "$3",
+      }),
+    ).toEqual(["select-window", "-t", "%99"]);
+    expect(buildSpawnFocusArgv(base)).toEqual(["select-window", "-t", "%99"]);
+  });
+
+  it("switches the caller's own client for a verified cross-session spawn", () => {
+    expect(
+      buildSpawnFocusArgv({
+        ...base,
+        callerTty: "/dev/ttys004",
+        placementSessionId: "$7",
+        callerSessionId: "$3",
+        ttyAttachedToCallerSession: true,
+      }),
+    ).toEqual(["switch-client", "-c", "/dev/ttys004", "-t", "%99"]);
+  });
+
+  it("runs nothing at all when detached, cross-session included", () => {
+    expect(
+      buildSpawnFocusArgv({
+        ...base,
+        detach: true,
+        callerTty: "/dev/ttys004",
+        placementSessionId: "$7",
+        callerSessionId: "$3",
+        ttyAttachedToCallerSession: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("falls back to select-window when the switch cannot be proven needed", () => {
+    // Each of these leaves a client that never asked to move: no tty to name
+    // it with, a session pair we could not resolve both halves of, or a tty
+    // nobody confirmed is even looking at the caller's session.
+    const cases = [
+      { placementSessionId: "$7", callerSessionId: "$3" }, // no tty
+      { callerTty: "/dev/ttys004", callerSessionId: "$3" }, // no placement
+      { callerTty: "/dev/ttys004", placementSessionId: "$7" }, // no caller
+      {
+        // Everything present, membership never established.
+        callerTty: "/dev/ttys004",
+        placementSessionId: "$7",
+        callerSessionId: "$3",
+      },
+    ];
+    for (const extra of cases) {
+      expect(buildSpawnFocusArgv({ ...base, ...extra })).toEqual([
+        "select-window",
+        "-t",
+        "%99",
+      ]);
+    }
+  });
+});
+
+describe("resolveSpawnFocusArgv", () => {
+  // The membership check. `#{client_tty}` is resolved by the CLI with tmux's
+  // `cmd_find_best_client`, which prefers a client of the caller's session but
+  // FALLS BACK to the most-recently-active client of any session when that
+  // session has none attached. So spawning from a DETACHED session hands the
+  // daemon a bystander's terminal, and switching it would drag a user with no
+  // stake in this spawn into the new pane. Verified live on tmux 3.6a:
+  // sessions A (attached), B and C detached, `--target <pane in C>` run from a
+  // pane in B resolved A's tty.
+
+  const crossSession = {
+    paneId: "%99",
+    detach: false,
+    callerTty: "/dev/ttys004",
+    placementSessionId: "$7",
+    callerSessionId: "$3",
+  };
+
+  it("switches when the tty is a client of the caller's session", async () => {
+    const asked: string[] = [];
+    const argv = await resolveSpawnFocusArgv(crossSession, async (session) => {
+      asked.push(session);
+      return ["/dev/ttys004"];
+    });
+
+    expect(argv).toEqual(["switch-client", "-c", "/dev/ttys004", "-t", "%99"]);
+    // The CALLER's session is what has to own the client, not the target's.
+    expect(asked).toEqual(["$3"]);
+  });
+
+  it("refuses a tty attached to some other session", async () => {
+    // The regression this guard exists for: without it the daemon yanks
+    // whichever client tmux happened to name.
+    const argv = await resolveSpawnFocusArgv(crossSession, async () => []);
+    expect(argv).toEqual(["select-window", "-t", "%99"]);
+  });
+
+  it("refuses when the session has clients, none of them ours", async () => {
+    const argv = await resolveSpawnFocusArgv(crossSession, async () => [
+      "/dev/ttys009",
+      "/dev/ttys012",
+    ]);
+    expect(argv).toEqual(["select-window", "-t", "%99"]);
+  });
+
+  it("falls back when the probe itself fails", async () => {
+    // An unanswerable probe is the same unproven state as an empty list, and
+    // the fallback is what this spawn would have done anyway.
+    const argv = await resolveSpawnFocusArgv(crossSession, async () => null);
+    expect(argv).toEqual(["select-window", "-t", "%99"]);
+  });
+
+  it("never probes for a same-session spawn or a detached one", async () => {
+    // The paths that were already correct must not pay a tmux round-trip for
+    // a question whose answer they would ignore.
+    let probes = 0;
+    const count: ClientTtyProbe = async () => {
+      probes++;
+      return null;
+    };
+
+    expect(
+      await resolveSpawnFocusArgv(
+        { ...crossSession, placementSessionId: "$3" },
+        count,
+      ),
+    ).toEqual(["select-window", "-t", "%99"]);
+    expect(
+      await resolveSpawnFocusArgv({ ...crossSession, detach: true }, count),
+    ).toBeNull();
+    expect(
+      await resolveSpawnFocusArgv(
+        { paneId: "%99", detach: false, callerSessionId: "$3" },
+        count,
+      ),
+    ).toEqual(["select-window", "-t", "%99"]);
+    expect(probes).toBe(0);
   });
 });
 
@@ -151,7 +337,9 @@ describe("spawnCommandTooLarge", () => {
   });
 
   it("refuses one byte over, naming the size and the budget", () => {
-    const problem = spawnCommandTooLarge("a".repeat(MAX_SPAWN_COMMAND_BYTES + 1));
+    const problem = spawnCommandTooLarge(
+      "a".repeat(MAX_SPAWN_COMMAND_BYTES + 1),
+    );
     expect(problem).toContain(String(MAX_SPAWN_COMMAND_BYTES + 1));
     expect(problem).toContain(String(MAX_SPAWN_COMMAND_BYTES));
   });
