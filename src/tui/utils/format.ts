@@ -29,25 +29,82 @@ export function formatSubagentName(agentId: string): string {
   return body.replace(/-[0-9a-f]{8,}$/, "");
 }
 
-/** Truncate plain text to `maxLen` chars, adding an ellipsis when clipped. */
+/**
+ * Terminal columns `text` occupies.
+ *
+ * `ambiguousIsNarrow` is pinned rather than left to Bun's default because the
+ * two measurers in play could disagree there: OpenTUI's renderer measures with
+ * its grapheme-aware "unicode" method, `Bun.stringWidth` is wcwidth-flavoured.
+ * They agree on CJK (2), ZWJ sequences (2) and flags (2); ambiguous-width
+ * characters are the only class where they can differ. Rendering probes of the
+ * ones ccmux actually draws (`…`, `▎`, `α`, `→`, `①`) put ten of each in a
+ * ten-column box, so OpenTUI treats them as narrow and so do we.
+ */
+const WIDTH_OPTIONS = { ambiguousIsNarrow: true } as const;
+
+export function displayWidth(text: string): number {
+  return Bun.stringWidth(text, WIDTH_OPTIONS);
+}
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/**
+ * Longest prefix of `text` that fits in `maxWidth` columns, cut on grapheme
+ * boundaries: a cluster is taken whole or not at all, so no slice can end
+ * mid-surrogate (a replacement glyph) or halfway through a ZWJ sequence. A
+ * wide cluster that would straddle the limit is dropped, leaving the result a
+ * column short of `maxWidth` rather than a column over.
+ */
+export function sliceToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+  if (displayWidth(text) <= maxWidth) return text;
+  let out = "";
+  let width = 0;
+  for (const { segment } of graphemes.segment(text)) {
+    const segmentWidth = displayWidth(segment);
+    if (width + segmentWidth > maxWidth) break;
+    out += segment;
+    width += segmentWidth;
+  }
+  return out;
+}
+
+/** `sliceToWidth` from the other end: the longest fitting SUFFIX. */
+function sliceTailToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+  if (displayWidth(text) <= maxWidth) return text;
+  const clusters = [...graphemes.segment(text)];
+  let out = "";
+  let width = 0;
+  for (let i = clusters.length - 1; i >= 0; i--) {
+    const segment = clusters[i]!.segment;
+    const segmentWidth = displayWidth(segment);
+    if (width + segmentWidth > maxWidth) break;
+    out = segment + out;
+    width += segmentWidth;
+  }
+  return out;
+}
+
+/** Truncate plain text to `maxLen` columns, adding an ellipsis when clipped. */
 export function truncateText(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  return text.slice(0, Math.max(1, maxLen - 1)) + "…";
+  if (displayWidth(text) <= maxLen) return text;
+  return sliceToWidth(text, Math.max(1, maxLen - 1)) + "…";
 }
 
 /**
  * Window single-span highlight markup (one `<b>…</b>`, as `wrapFirstMatch`
- * emits) to `maxLen` VISIBLE chars (tags excluded from the count) so a match
+ * emits) to `maxLen` VISIBLE columns (tags excluded from the count) so a match
  * deep in a long prompt still renders within a height-1 row instead of
  * wrapping/overlapping. The bold span is always kept whole; `…` is affixed
  * on whichever side is clipped. Leading pre-match context is capped hard (see
- * LEAD_CONTEXT_CAP) so the span starts within ~25 chars of the window even
+ * LEAD_CONTEXT_CAP) so the span starts within ~25 columns of the window even
  * when the real box is narrower than `maxLen` (maxLen is a layout budget, not
  * the actual box width: a row with long project/branch cells gets a narrower
  * box and OpenTUI clips the tail, so a span pushed far right by ~1/3-of-budget
  * leading context could be clipped off). Any leftover budget goes to the
  * trailing side. Markup with no span is treated as plain text. Mirrors the
- * daemon's radius-windowed transcript snippets, but works from a char budget.
+ * daemon's radius-windowed transcript snippets, but works from a column budget.
  */
 const LEAD_CONTEXT_CAP = 24;
 
@@ -61,21 +118,22 @@ export function truncateHighlighted(markup: string, maxLen: number): string {
   const span = markup.slice(open + 3, close);
   const post = markup.slice(close + 4);
 
-  if (pre.length + span.length + post.length <= maxLen) return markup;
+  const spanWidth = displayWidth(span);
+  if (displayWidth(pre) + spanWidth + displayWidth(post) <= maxLen) {
+    return markup;
+  }
 
-  // Chars left for context once the (always-kept) span is reserved.
-  const contextBudget = Math.max(0, maxLen - span.length);
+  // Columns left for context once the (always-kept) span is reserved.
+  const contextBudget = Math.max(0, maxLen - spanWidth);
   // Leading context is ~1/3 of the budget but hard-capped so the span always
   // starts near the window start (surviving a real box narrower than maxLen).
   // Any budget the (possibly short) leading side leaves goes to the trailing
   // side.
   const leadTarget = Math.min(Math.floor(contextBudget / 3), LEAD_CONTEXT_CAP);
-  const preShown = Math.min(pre.length, leadTarget);
-  const postShown = Math.min(post.length, contextBudget - preShown);
+  const preSlice = sliceTailToWidth(pre, leadTarget);
+  const postSlice = sliceToWidth(post, contextBudget - displayWidth(preSlice));
 
-  const lead = preShown < pre.length ? "…" : "";
-  const trail = postShown < post.length ? "…" : "";
-  const preSlice = pre.slice(pre.length - preShown);
-  const postSlice = post.slice(0, postShown);
+  const lead = preSlice.length < pre.length ? "…" : "";
+  const trail = postSlice.length < post.length ? "…" : "";
   return `${lead}${preSlice}<b>${span}</b>${postSlice}${trail}`;
 }

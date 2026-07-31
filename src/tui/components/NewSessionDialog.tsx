@@ -11,7 +11,12 @@ import {
   type NewSessionPlacement,
 } from "../store";
 import { slugFromPrompt } from "../../daemon/worktree-create";
-import { shortenCwd, truncateText } from "../utils/format";
+import {
+  displayWidth,
+  shortenCwd,
+  sliceToWidth,
+  truncateText,
+} from "../utils/format";
 import { agentColorFor } from "./SessionItem";
 import { theme } from "../theme";
 
@@ -72,30 +77,48 @@ export const DESTINATION_OPTIONS: readonly DestinationOption[] = [
  * boundary moves to the next row). Lines produced here already fit, so
  * nothing can wrap a second time and the budget cannot be wrong.
  *
- * Widths are UTF-16 code units, not display columns, so a line of wide
- * glyphs (CJK) over-fills its column — the same limitation `truncateText`
- * has, tracked in issue #91, whose real fix is a shared display-width helper.
+ * Widths are display columns (`displayWidth`), so a line of wide glyphs (CJK,
+ * emoji) fits its column like an ASCII one does, and mid-word breaks land on
+ * grapheme boundaries (issue #91).
  */
 export function wrapText(text: string, width: number): string[] {
   if (width <= 0) return [text];
   const lines: string[] = [];
   let line = "";
+  let lineWidth = 0;
   for (const word of text.split(/\s+/).filter(Boolean)) {
     let rest = word;
     // Longer than the whole column: it can only be broken mid-word.
-    while (rest.length > width) {
+    while (displayWidth(rest) > width) {
       if (line) {
         lines.push(line);
         line = "";
+        lineWidth = 0;
       }
-      lines.push(rest.slice(0, width));
-      rest = rest.slice(width);
+      const head = sliceToWidth(rest, width);
+      if (!head) {
+        // A single cluster wider than the whole column (a wide glyph at
+        // width 1): nothing can be split off it, so let the word overflow
+        // rather than slice a cluster or spin on an empty head.
+        lines.push(rest);
+        rest = "";
+        break;
+      }
+      lines.push(head);
+      rest = rest.slice(head.length);
     }
-    if (!line) line = rest;
-    else if (line.length + 1 + rest.length <= width) line += ` ${rest}`;
-    else {
+    if (!rest) continue;
+    const restWidth = displayWidth(rest);
+    if (!line) {
+      line = rest;
+      lineWidth = restWidth;
+    } else if (lineWidth + 1 + restWidth <= width) {
+      line += ` ${rest}`;
+      lineWidth += 1 + restWidth;
+    } else {
       lines.push(line);
       line = rest;
+      lineWidth = restWidth;
     }
   }
   if (line) lines.push(line);
