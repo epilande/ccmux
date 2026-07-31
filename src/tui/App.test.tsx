@@ -4169,10 +4169,17 @@ describe("App move-changes menu gate", () => {
 describe("App move-changes reporting", () => {
   const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
+  /** Bodies the dialog posted, in order, since the last daemon stub. */
+  const spawnBodies: {
+    split?: unknown;
+    worktree?: Record<string, unknown>;
+  }[] = [];
+
   /** A daemon that offers the move and answers `/spawn` with `spawn()`. */
   function withMoveDaemon(spawn: () => Response) {
     const original = globalThis.fetch;
-    globalThis.fetch = (async (url: string | URL) => {
+    spawnBodies.length = 0;
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
       const href = String(url);
       if (href.includes("/dirty")) {
         return Response.json({ repo: true, dirty: true });
@@ -4192,7 +4199,12 @@ describe("App move-changes reporting", () => {
           ],
         });
       }
-      if (href.endsWith("/spawn")) return spawn();
+      if (href.endsWith("/spawn")) {
+        spawnBodies.push(
+          JSON.parse(String(init?.body ?? "{}")) as (typeof spawnBodies)[number],
+        );
+        return spawn();
+      }
       return Response.json({});
     }) as unknown as typeof fetch;
     return { restore: () => (globalThis.fetch = original) };
@@ -4256,6 +4268,45 @@ describe("App move-changes reporting", () => {
     untracked: { mode: "move", files: ["new.ts"] },
     source: "/code/myapp",
   };
+
+  it("ignores the option keys while the dialog has no room to draw", async () => {
+    // Too short for the fields, so the dialog says what it needs instead of
+    // drawing them. A number key here would change a choice that is not on
+    // screen — worse than doing nothing, because the spawn would carry it.
+    const { restore } = withMoveDaemon(() => landed(relocated));
+    try {
+      await renderApp(80, 6, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Needs 7 rows");
+
+      // "2" is New worktree on the destination row, and "2"/"3" are splits on
+      // the placement row. Neither may take effect unseen.
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawnBodies).toHaveLength(1);
+      expect(spawnBodies[0]?.worktree).toBeUndefined();
+      expect(spawnBodies[0]?.split).toBe(false);
+    } finally {
+      restore();
+    }
+  });
 
   it("refuses a name with nothing a worktree name can be made of", async () => {
     // The name is a real choice, not a suggestion: with a prompt present, a

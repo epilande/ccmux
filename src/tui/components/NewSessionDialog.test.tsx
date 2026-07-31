@@ -1,6 +1,12 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { NewSessionDialog, optionWindow, wrapText } from "./NewSessionDialog";
+import {
+  NewSessionDialog,
+  newSessionFloorRows,
+  optionWindow,
+  planDialogRows,
+  wrapText,
+} from "./NewSessionDialog";
 import { expectFrameIntegrity, squish } from "./test-helpers";
 import { displayWidth } from "../utils/format";
 import type { SpawnableAgent } from "../../lib/spawnable-agents";
@@ -161,6 +167,85 @@ describe("wrapText", () => {
     // A column too narrow for one wide glyph: it has to overflow, but the
     // loop must still terminate.
     expect(wrapText("日本", 1)).toEqual(["日本"]);
+  });
+});
+
+describe("planDialogRows", () => {
+  /** The move-changes dialog on a sidebar rail: the tallest shape there is. */
+  const stackedMove = {
+    moveChanges: true,
+    namesAWorktree: true,
+    agentRows: 1,
+    stacked: true,
+    keyHints: true,
+  };
+
+  it("spends everything it has when the rows are there", () => {
+    const plan = planDialogRows(stackedMove, 40);
+    expect(plan.tooShort).toBe(false);
+    expect(plan.showKeyHints).toBe(true);
+    expect(plan.showMoveNote).toBe(true);
+    expect(plan.showDirectory).toBe(true);
+    expect(plan.untrackedRows).toBe(3);
+    // Nothing is padded out to fill the screen: the dialog is its content.
+    expect(plan.height).toBe(18);
+  });
+
+  it("gives up rows in an order that keeps the actionable ones", () => {
+    // Each step is the same dialog one row shorter, so the sequence IS the
+    // priority list: hints, then the move note, then the blank under the
+    // title, then the stacked options collapse, then the directory.
+    const given = (height: number) => {
+      const plan = planDialogRows(stackedMove, height);
+      return {
+        hints: plan.showKeyHints,
+        note: plan.showMoveNote,
+        spacer: plan.showTitleSpacer,
+        untracked: plan.untrackedRows,
+        placement: plan.placementRows,
+        directory: plan.showDirectory,
+        tooShort: plan.tooShort,
+      };
+    };
+    expect(given(16).hints).toBe(false);
+    expect(given(16).note).toBe(true);
+    expect(given(15).note).toBe(false);
+    expect(given(14).spacer).toBe(false);
+    // Now the options, bottom-up, and never below one row each.
+    expect(given(13).untracked).toBe(2);
+    expect(given(12).untracked).toBe(1);
+    expect(given(11).placement).toBe(2);
+    expect(given(10).placement).toBe(1);
+    expect(given(10).directory).toBe(true);
+    // The last thing to go, because in this mode it names the checkout being
+    // emptied.
+    expect(given(9).directory).toBe(false);
+    expect(given(9).tooShort).toBe(false);
+  });
+
+  it("shrinks the agent list before anything else", () => {
+    // It is the only field whose natural size is somebody else's list, and
+    // it already scrolls, so it gives up rows without losing anything.
+    const plan = planDialogRows({ ...stackedMove, agentRows: 9 }, 20);
+    expect(plan.agentRows).toBeLessThan(9);
+    expect(plan.showKeyHints).toBe(true);
+    expect(plan.showMoveNote).toBe(true);
+  });
+
+  it("refuses to draw a dialog shorter than its own fields", () => {
+    expect(planDialogRows(stackedMove, 8).tooShort).toBe(true);
+    expect(planDialogRows(stackedMove, 8).height).toBe(3);
+    // An ordinary spawn into this checkout has two fewer rows to find.
+    const plain = {
+      moveChanges: false,
+      namesAWorktree: false,
+      agentRows: 1,
+      stacked: false,
+      keyHints: false,
+    };
+    expect(newSessionFloorRows(plain)).toBe(7);
+    expect(planDialogRows(plain, 7).tooShort).toBe(false);
+    expect(planDialogRows(plain, 6).tooShort).toBe(true);
   });
 });
 
@@ -826,6 +911,139 @@ describe("NewSessionDialog move-changes mode", () => {
     expect(rowOf("Leave")).not.toBe(rowOf("Copy"));
     const widest = Math.max(...lines.map((line) => line.trimEnd().length));
     expect(widest).toBeLessThanOrEqual(34);
+  });
+
+  /**
+   * The mode's floor is twelve rows in the picker and eighteen stacked in the
+   * sidebar, and a terminal shorter than that is not hypothetical (a split
+   * pane, a laptop with a browser open). Nothing clips here: the box is
+   * clamped to the screen while its children are not, so the rows past the
+   * clamp draw straight over the ones above them, and the bottom border goes
+   * off the screen entirely.
+   */
+  describe("under height pressure", () => {
+    /** Every listed row exists, on its own line, in this order. */
+    function expectRowOrder(frame: string, order: string[]) {
+      const lines = frame.split("\n");
+      let previous = -1;
+      for (const text of order) {
+        const row = lines.findIndex((line) => line.includes(text));
+        expect([text, row]).not.toEqual([text, -1]);
+        expect([text, row]).toEqual([text, expect.any(Number)]);
+        expect(row).toBeGreaterThan(previous);
+        previous = row;
+      }
+    }
+
+    it("keeps every interactive row legible in an 11-row picker", async () => {
+      const frame = await renderDialog({
+        draft: moveDraft(),
+        width: 60,
+        height: 11,
+        showKeyHints: false,
+      });
+
+      // The fields, in order, each on a line of its own — and a border to
+      // close the dialog. What gives way under the pressure is the move note,
+      // not a row the user has to act on.
+      expectRowOrder(frame, [
+        "Agent",
+        "Placement",
+        "Prompt",
+        "Where",
+        "Name",
+        "Untracked",
+        "Directory",
+        "└",
+      ]);
+      expectFrameIntegrity(frame);
+    });
+
+    it("keeps every interactive row legible in a 16-row sidebar", async () => {
+      // Stacked: each option gets a row of its own, which is what makes the
+      // mode eighteen rows tall at this width.
+      const frame = await renderDialog({
+        draft: moveDraft(),
+        width: 30,
+        height: 16,
+        showKeyHints: true,
+      });
+
+      expectRowOrder(frame, [
+        "Agent",
+        "Placement",
+        "Prompt",
+        "Where",
+        "Name",
+        "Untracked",
+        "Directory",
+        "└",
+      ]);
+      expectFrameIntegrity(frame);
+    });
+
+    it("windows a stacked option field rather than drawing off the bottom", async () => {
+      // Below the point where every option can have a row, the field becomes
+      // a window over its own list — the same shape the agent list has always
+      // had — with the selection inside it and each option still showing the
+      // number that picks it.
+      const frame = await renderDialog({
+        draft: moveDraft({ untracked: "leave" }),
+        width: 30,
+        height: 12,
+        showKeyHints: true,
+      });
+
+      const lines = frame.split("\n");
+      const first = lines.findIndex((line) => line.includes("Untracked"));
+      expect(first).toBeGreaterThan(0);
+      const shown = lines.slice(first).join("\n");
+      // The selected one is what the window keeps, with its own number.
+      expect(shown).toContain("[Leave");
+      expect(shown).toContain("3");
+      expectFrameIntegrity(frame);
+    });
+
+    it("says what it needs when even the fields will not fit", async () => {
+      // Six rows cannot hold a six-field dialog. Drawing it anyway puts rows
+      // over each other and the border off screen; this says so in one row
+      // and leaves enter/esc working.
+      const frame = await renderDialog({
+        draft: moveDraft(),
+        width: 60,
+        height: 6,
+        showKeyHints: false,
+      });
+
+      expect(frame).toContain("Needs 9 rows");
+      expectFrameIntegrity(frame, 3);
+    });
+
+    it("shows every option its number key can select", async () => {
+      // One row short is the quiet failure: the third untracked choice is off
+      // the bottom while `3` still selects it, so the dialog acts on a choice
+      // that was never on screen.
+      const frame = await renderDialog({
+        draft: moveDraft(),
+        width: 30,
+        height: 17,
+        showKeyHints: true,
+      });
+
+      const lines = frame.split("\n");
+      // From the Untracked label down, so the title ("Move changes to…")
+      // cannot stand in for the option it names.
+      const first = lines.findIndex((line) => line.includes("Untracked"));
+      expect(first).toBeGreaterThan(0);
+      const optionRows = lines.slice(first);
+      for (const [index, label] of ["Move", "Copy", "Leave"].entries()) {
+        const row = optionRows.findIndex((line) => line.includes(label));
+        expect([label, row]).not.toEqual([label, -1]);
+        // The number beside it is the key that picks it.
+        expect(optionRows[row]).toContain(`${index + 1}`);
+      }
+      expectFrameIntegrity(frame);
+    });
   });
 
   it("keeps the agent list from overflowing the taller dialog", async () => {

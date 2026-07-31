@@ -61,6 +61,7 @@ import {
   DESTINATION_OPTIONS,
   PLACEMENT_OPTIONS,
   UNTRACKED_OPTIONS,
+  newSessionFloorRows,
 } from "./components/NewSessionDialog";
 import { NoticeDialog } from "./components/NoticeDialog";
 import { slugFromPrompt, slugify } from "../daemon/worktree-create";
@@ -153,6 +154,9 @@ const SPAWN_SPLIT: Record<NewSessionPlacement, "h" | "v" | false> = {
 
 export function App(props: AppProps) {
   const renderer = useRenderer();
+  /** The viewport, for the handful of key handlers that have to agree with
+   *  what a component decided it had room to draw. */
+  const appDims = useTerminalDimensions();
   // Probed once at launch (cheap `which`, no need to react to hunk being
   // installed mid-session): gates the footer hint and help row. `d` itself
   // re-probes live so a hunk installed after launch works without restart.
@@ -1187,6 +1191,18 @@ export function App(props: AppProps) {
   } | null {
     const draft = store.state.newSession;
     if (!draft) return null;
+    // Too short a terminal for the dialog to draw its fields at all: it says
+    // so instead, and the number keys must not act on choices that are not on
+    // screen. The same floor the component sizes itself against.
+    if (
+      appDims().height <
+      newSessionFloorRows({
+        moveChanges: draft.moveChanges,
+        namesAWorktree: draft.destination === "worktree" || draft.moveChanges,
+      })
+    ) {
+      return null;
+    }
     switch (draft.field) {
       case "agent":
         return {
