@@ -310,6 +310,12 @@ two different prompts landing in the same worktree would silently merge
 unrelated work. `--base <ref>` sets what the new branch is cut from,
 defaulting to the main checkout's current branch.
 
+Creating a worktree also adds `**/.claude/worktrees/` to the hosting repo's
+`.git/info/exclude` (the same line Claude Code writes, and the same file —
+local to your clone, never `.gitignore`), so the worktrees don't show up as
+untracked work in the checkout that hosts them. It is added once, only if git
+isn't already ignoring that path, and nothing else in the file is touched.
+
 ### Moving Uncommitted Changes
 
 An experiment that turned into a real change has a way of ending up sitting

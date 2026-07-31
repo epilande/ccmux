@@ -229,8 +229,15 @@ export interface UncommittedState {
  * under there, and the copy it feeds gets a directory to recurse into rather
  * than a list to enumerate — which sweeps up the .env and node_modules inside
  * it, since a recursive copy has no idea git was excluding them. Expanded,
- * every path here is a file git would actually move, ignored content
- * included in neither list.
+ * every path here is a file git would actually move, ignored content in
+ * neither list.
+ *
+ * With ONE exception git will not expand for us: a nested checkout (a linked
+ * worktree, a submodule) is reported as a directory even under `-uall`,
+ * because git refuses to descend into another repository. `.claude/worktrees/`
+ * is the case that matters, since ccmux puts its own worktrees there, and it
+ * is handled where it belongs — the hosting repo excludes the directory, so
+ * this read never sees it (`ensureWorktreesExcluded` in `worktree-create.ts`).
  *
  * The two-record shape of a rename is handled explicitly. `R  new\0old\0` is
  * ONE changed file described by two records, so counting records reports a

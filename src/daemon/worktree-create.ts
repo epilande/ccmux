@@ -45,14 +45,16 @@
  */
 
 import {
+  appendFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   symlinkSync,
 } from "node:fs";
 import { cp, rmdir } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   normalizePath,
   readSymlinkDirectories,
@@ -62,6 +64,15 @@ import {
 
 /** Where worktrees live, relative to the main checkout. */
 export const WORKTREE_DIR = join(".claude", "worktrees");
+
+/**
+ * The line written into the hosting repo's `.git/info/exclude`, matching what
+ * Claude Code writes for its own worktrees.
+ *
+ * Slash-separated regardless of platform: this is a gitignore pattern, not a
+ * path, and git does not accept a backslash separator.
+ */
+export const WORKTREE_EXCLUDE_PATTERN = "**/.claude/worktrees/";
 
 /** How many words of a prompt a derived slug may use. */
 const SLUG_WORDS = 3;
@@ -546,6 +557,12 @@ export async function createWorktree(
   if (!named.ok) return named;
 
   return withRepoLock(mainRepoRoot, async () => {
+    // Before anything looks at the directory, so the very first worktree in a
+    // repo is already invisible to git by the time it exists. Idempotent, so
+    // running it on the open path too costs one `check-ignore` and heals a
+    // repo whose worktrees predate this.
+    await ensureWorktreesExcluded(mainRepoRoot, git);
+
     // Inside the lock, so two spawns of one prompt cannot both settle on the
     // same free number.
     const resolved = named.derived
@@ -665,6 +682,78 @@ export async function createWorktree(
       },
     };
   });
+}
+
+/**
+ * Make `.claude/worktrees/` invisible to git in the repo that HOSTS the
+ * worktrees, the way Claude Code does for its own.
+ *
+ * Without it the first worktree turns the repo into one that permanently has
+ * "untracked work" in it, and everything downstream believes it: the picker's
+ * dirty gate offers a move for a checkout whose only change is other agents'
+ * checkouts, the move's counts include them, and `--untracked copy`
+ * physically duplicates every sibling worktree into the new one — a full
+ * recursive copy, `.git` link file and all. (`move` is spared only because
+ * git will not stash a nested worktree, so it silently relocates nothing
+ * while reporting that it did.)
+ *
+ * Written to `info/exclude` rather than `.gitignore`: the ignore file is the
+ * repo's, shared with everyone who clones it, and this is a fact about one
+ * machine's tooling. Located through `rev-parse --git-path` rather than by
+ * joining `.git/`, which gets a `.git` FILE (a linked worktree, a submodule)
+ * right for free — and `info/exclude` lives in the COMMON directory, so every
+ * worktree of the repo shares the one file.
+ *
+ * git's own `check-ignore` is the idempotency test, not a scan for our line.
+ * It answers the question that actually matters — "would git already ignore
+ * this?" — so a repo whose `.gitignore` covers `.claude/` gets nothing added,
+ * and neither does one that already has the entry. The trailing slash on the
+ * query is load-bearing: the pattern matches a DIRECTORY, and with the path
+ * absent from disk git cannot tell that it is one.
+ *
+ * Best effort throughout. A read-only `.git` is a reason to skip an
+ * optimization, never to fail a spawn.
+ *
+ * @returns whether a line was appended.
+ */
+export async function ensureWorktreesExcluded(
+  mainRepoRoot: string,
+  git: GitRun = runGit,
+): Promise<boolean> {
+  const ignored = await git(mainRepoRoot, [
+    "check-ignore",
+    "-q",
+    `${WORKTREE_DIR}/`,
+  ]);
+  // 0 = already ignored, nothing to do. 1 = not ignored. Anything else (128,
+  // 127) means we could not ask, and writing on a guess is how a tool ends up
+  // appending a duplicate line every run.
+  if (ignored.exitCode !== 1) return false;
+
+  const located = await git(mainRepoRoot, [
+    "rev-parse",
+    "--git-path",
+    "info/exclude",
+  ]);
+  if (located.exitCode !== 0) return false;
+  const relative = located.stdout.trim();
+  if (!relative) return false;
+  // `--git-path` answers relative to the cwd it ran in unless the git is new
+  // enough for `--path-format=absolute`, and that cwd is `mainRepoRoot`.
+  const path = isAbsolute(relative) ? relative : join(mainRepoRoot, relative);
+
+  try {
+    const existing = existsSync(path) ? readFileSync(path, "utf-8") : "";
+    // Only ever appends, and never without a newline of its own: the file is
+    // the user's, and a repo that has hand-written rules in here must get
+    // them back untouched.
+    const separator = existing === "" || existing.endsWith("\n") ? "" : "\n";
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, `${separator}${WORKTREE_EXCLUDE_PATTERN}\n`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

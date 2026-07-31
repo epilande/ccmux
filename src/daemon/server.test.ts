@@ -68,6 +68,7 @@ import {
   writeFileSync,
   rmSync,
 } from "fs";
+import { createWorktree } from "./worktree-create";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { resolvedHomeDir } from "../lib/config";
@@ -5603,6 +5604,11 @@ describe("POST /spawn moving changes into a worktree", () => {
     runFixtureGit(root, "init", "--initial-branch=main", repo);
     runFixtureGit(repo, "config", "user.email", "test@ccmux.invalid");
     runFixtureGit(repo, "config", "user.name", "ccmux test");
+    // git's DEFAULT excludes path (`~/.config/git/ignore`) is read even with
+    // GIT_CONFIG_GLOBAL neutered, because it is not a config value. These
+    // fixtures turn on whether a path is ignored, so without this they would
+    // pass or fail depending on whose machine ran them.
+    runFixtureGit(repo, "config", "core.excludesFile", "/dev/null");
     writeFileSync(join(repo, "tracked.txt"), "original\n");
     runFixtureGit(repo, "add", "tracked.txt");
     runFixtureGit(repo, "commit", "-m", "init");
@@ -5697,6 +5703,57 @@ describe("POST /spawn moving changes into a worktree", () => {
       // One worktree, and the agent started in it rather than in the source.
       const paneArgv = tmux.argv.find((a) => a.includes("-c"));
       expect(paneArgv?.[paneArgv.indexOf("-c") + 1]).toBe(path);
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  /**
+   * The live-e2e finding. In a repo where ccmux made the FIRST worktree,
+   * `.claude/` is untracked, so every later move saw the sibling checkouts as
+   * work: `copy` physically duplicated them (a full recursive copy, `.git`
+   * link file and all) and both modes counted them.
+   *
+   * The ordering is the subtle half. The move reads the source's status
+   * BEFORE it creates anything, so an exclude written during creation would
+   * arrive too late to affect this run's copy list.
+   */
+  it("does not treat a sibling worktree as work to move", async () => {
+    const repo = makeDirtyRepo();
+    // A worktree from an earlier spawn, added with raw git so the repo has
+    // no exclude entry — exactly the state the live run found.
+    const sibling = join(repo, ".claude", "worktrees", "earlier");
+    runFixtureGit(repo, "worktree", "add", "-b", "earlier", sibling);
+    writeFileSync(join(sibling, "SIBLING.txt"), "another agent's work\n");
+
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "second", withChanges: true, untracked: "copy" },
+      });
+      const body = (await res.json()) as {
+        worktree?: { path: string };
+        move?: { untracked: { files: string[] } };
+      };
+
+      expect(res.status).toBe(200);
+      const dest = body.worktree!.path;
+      // The genuine untracked file came across...
+      expect(existsSync(join(dest, "new.txt"))).toBe(true);
+      // ...and the sibling checkout did not, in any form.
+      expect(existsSync(join(dest, ".claude", "worktrees", "earlier"))).toBe(
+        false,
+      );
+      expect(existsSync(join(dest, ".claude", "worktrees"))).toBe(false);
+      // And the count is only what actually moved.
+      expect(body.move!.untracked.files).toEqual(["new.txt"]);
+      // The sibling is untouched where it lives.
+      expect(readFileSync(join(sibling, "SIBLING.txt"), "utf8")).toBe(
+        "another agent's work\n",
+      );
     } finally {
       tmux.restore();
     }
@@ -5986,6 +6043,9 @@ describe("GET /sessions/:id/dirty", () => {
     const repo = join(root, name);
     mkdirSync(repo, { recursive: true });
     runFixtureGit(root, "init", "--initial-branch=main", repo);
+    // See makeDirtyRepo: git's default excludes path is read regardless of
+    // GIT_CONFIG_GLOBAL, and these fixtures turn on what git ignores.
+    runFixtureGit(repo, "config", "core.excludesFile", "/dev/null");
     writeFileSync(join(repo, "tracked.txt"), "original\n");
     runFixtureGit(repo, "add", "tracked.txt");
     runFixtureGit(repo, "commit", "-m", "init");
@@ -6061,6 +6121,28 @@ describe("GET /sessions/:id/dirty", () => {
     expect(body.dirty).toBe(true);
     expect(body.modified).toBe(0);
     expect(body.untracked).toBe(1);
+  });
+
+  /**
+   * The desirable side effect of the exclude entry: a repo that HOSTS ccmux
+   * worktrees is not permanently "dirty" because of them, so the menu stops
+   * offering a move for a checkout whose only "work" is other agents'
+   * checkouts.
+   */
+  it("does not count the worktrees ccmux created as work", async () => {
+    const { manager, internals } = createServer();
+    const repo = makeRepo("hosts-worktrees");
+    // Through the real engine, which is what writes the exclude entry.
+    const created = await createWorktree(repo, { name: "sibling" });
+    expect(created.ok).toBe(true);
+    const id = sessionIn(manager, repo);
+
+    expect(await dirtyOf(internals, id)).toEqual({
+      repo: true,
+      dirty: false,
+      modified: 0,
+      untracked: 0,
+    });
   });
 
   it("counts the files inside an untracked directory, not the directory", async () => {

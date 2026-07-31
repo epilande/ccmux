@@ -58,6 +58,12 @@ async function makeRepo(name = "repo"): Promise<string> {
   await git(root, ["init", "--initial-branch=main", repo]);
   await git(repo, ["config", "user.email", "test@example.com"]);
   await git(repo, ["config", "user.name", "Test"]);
+  // The developer's own `~/.config/git/ignore` is read even with
+  // GIT_CONFIG_GLOBAL neutered — it is git's DEFAULT excludes path, not a
+  // config value — and one of these fixtures asks git whether a path is
+  // ignored. Without this, whether that test passes depends on whose machine
+  // it runs on.
+  await git(repo, ["config", "core.excludesFile", "/dev/null"]);
   writeFileSync(join(repo, "README.md"), "hello\n");
   await git(repo, ["add", "README.md"]);
   await git(repo, ["commit", "-m", "init"]);
@@ -749,6 +755,88 @@ describe("createWorktree", () => {
     expect([a.result.created, b.result.created].filter(Boolean)).toHaveLength(
       1,
     );
+  });
+});
+
+/**
+ * `.claude/worktrees/` has to be invisible to git in the repo that HOSTS the
+ * worktrees, the way Claude Code makes it. Otherwise the first worktree turns
+ * the second spawn's source checkout into one that has "untracked work" in
+ * it — and a `--with-changes --untracked copy` then physically duplicates
+ * every sibling checkout into the new one.
+ */
+describe("the worktrees exclude entry", () => {
+  function excludePath(repo: string): string {
+    return join(repo, ".git", "info", "exclude");
+  }
+
+  /** git's own answer, independent of how the entry got written. */
+  async function ignoresWorktrees(repo: string): Promise<boolean> {
+    // The trailing slash is load-bearing: the pattern matches a DIRECTORY,
+    // and with the path absent from disk git cannot tell it is one.
+    const res = await runGit(repo, [
+      "check-ignore",
+      "-q",
+      ".claude/worktrees/",
+    ]);
+    return res.exitCode === 0;
+  }
+
+  it("excludes the worktree directory when creating the first one", async () => {
+    const repo = await makeRepo();
+    expect(await ignoresWorktrees(repo)).toBe(false);
+
+    const created = await createWorktree(repo, { name: "first" });
+    expect(created.ok).toBe(true);
+
+    expect(await ignoresWorktrees(repo)).toBe(true);
+    expect(readFileSync(excludePath(repo), "utf-8")).toContain(
+      "**/.claude/worktrees/",
+    );
+    // The point of all of it: the new checkout is not work sitting in the
+    // source. `-uall` because that is how the move reads status.
+    expect(await git(repo, ["status", "--porcelain", "-uall"])).toBe("");
+  });
+
+  it("adds the entry once and leaves existing content alone", async () => {
+    const repo = await makeRepo();
+    writeFileSync(excludePath(repo), "# mine\n*.log\n");
+
+    await createWorktree(repo, { name: "one" });
+    const afterFirst = readFileSync(excludePath(repo), "utf-8");
+    await createWorktree(repo, { name: "two" });
+    const afterSecond = readFileSync(excludePath(repo), "utf-8");
+
+    expect(afterSecond).toBe(afterFirst);
+    expect(afterSecond).toContain("# mine");
+    expect(afterSecond).toContain("*.log");
+    expect(afterSecond.match(/\.claude\/worktrees/g)).toHaveLength(1);
+  });
+
+  it("appends cleanly to a file with no trailing newline", async () => {
+    const repo = await makeRepo();
+    writeFileSync(excludePath(repo), "*.log");
+
+    await createWorktree(repo, { name: "nonl" });
+
+    const after = readFileSync(excludePath(repo), "utf-8");
+    expect(after).toContain("*.log\n");
+    expect(after).toContain("**/.claude/worktrees/\n");
+    expect(await ignoresWorktrees(repo)).toBe(true);
+  });
+
+  it("writes nothing when the repo already ignores the directory", async () => {
+    // The user's own rule already covers it, so ours would be noise in a
+    // file we do not own.
+    const repo = await makeRepo();
+    writeFileSync(join(repo, ".gitignore"), ".claude/\n");
+    await git(repo, ["add", ".gitignore"]);
+    await git(repo, ["commit", "-m", "ignore .claude"]);
+    const before = readFileSync(excludePath(repo), "utf-8");
+
+    await createWorktree(repo, { name: "covered" });
+
+    expect(readFileSync(excludePath(repo), "utf-8")).toBe(before);
   });
 });
 

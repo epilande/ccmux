@@ -37,6 +37,7 @@ import {
 } from "./spawn-command";
 import {
   createWorktree,
+  ensureWorktreesExcluded,
   existingWorktreeFor,
   type WorktreeCreation,
 } from "./worktree-create";
@@ -2759,6 +2760,14 @@ export class DaemonServer {
       }
       const mainRepoRoot = gitInfo.mainRepoRoot;
       const { withChanges, untracked, ...creation } = worktreeRequest.value;
+
+      // Here rather than only inside the creation engine, because ORDER
+      // matters: a move reads the source's status BEFORE it creates anything,
+      // so an exclude written during creation lands too late to keep this
+      // run's sibling worktrees out of the copy list and the counts. The
+      // engine calls it too, and it is idempotent, so this is a cheap
+      // `check-ignore` on the path that needs it earliest.
+      await ensureWorktreesExcluded(mainRepoRoot);
 
       /**
        * The creation engine, adapted to the move module's seam.
