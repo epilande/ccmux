@@ -4185,6 +4185,108 @@ describe("App move-changes reporting", () => {
     await setup.renderOnce();
   }
 
+  /** A landed spawn, with whatever the move reported bolted on. */
+  const landed = (move?: Record<string, unknown>) =>
+    Response.json({
+      success: true,
+      paneId: "%99",
+      worktree: { name: "rescue" },
+      ...(move ? { move } : {}),
+    });
+
+  const relocated = {
+    moved: 3,
+    untracked: { mode: "move", files: ["new.ts"] },
+    source: "/code/myapp",
+  };
+
+  it("summarizes what the move did in the sidebar's toast", async () => {
+    // The sidebar spawns without following the pane, so this line is the only
+    // account of an operation that emptied the user's checkout.
+    const { restore } = withMoveDaemon(() => landed(relocated));
+    try {
+      await submitMove({ sidebar: true });
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("rescue");
+      expect(frame).toContain("moved3files");
+      expect(frame).toContain("untrackedmoved");
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not let a leftover stash entry expire on a timer", async () => {
+    // The move landed, but its own backup could not be dropped. That is a
+    // chore the user now owns, and a chore is not a toast.
+    const { restore } = withMoveDaemon(() =>
+      landed({ ...relocated, leftoverStash: "deadbee1234" }),
+    );
+    try {
+      await submitMove({ sidebar: true });
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("deadbee1234");
+      expect(frame).toContain("gitstashdrop");
+      expect(frame).toContain("anykeytodismiss");
+    } finally {
+      restore();
+    }
+  });
+
+  it("exits the picker into the new pane when the move was clean", async () => {
+    // The picker's whole job is to put you in the pane; an acknowledgement
+    // step for a move with nothing to acknowledge would be in the way.
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    const { restore } = withMoveDaemon(() => landed(relocated));
+    try {
+      await submitMove({ persistent: false });
+      expect(squish(setup.captureCharFrame())).not.toContain("anykeytodismiss");
+      expect(exitSpy).toHaveBeenCalled();
+    } finally {
+      restore();
+      restoreExit();
+    }
+  });
+
+  it("holds the picker's exit until a leftover stash is acknowledged", async () => {
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    const { restore } = withMoveDaemon(() =>
+      landed({ ...relocated, leftoverStash: "deadbee1234" }),
+    );
+    try {
+      await submitMove({ persistent: false });
+      expect(exitSpy).not.toHaveBeenCalled();
+      expect(squish(setup.captureCharFrame())).toContain("deadbee1234");
+
+      setup.mockInput.pressKey("escape");
+      await settle();
+      expect(exitSpy).toHaveBeenCalled();
+    } finally {
+      restore();
+      restoreExit();
+    }
+  });
+
+  it("calls out a daemon too old to have moved anything", async () => {
+    // The giveaway is a perfectly ordinary 200 with no `move` in it: an older
+    // daemon drops the keys it does not know, spawns into an empty worktree,
+    // and leaves the work exactly where it was.
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    const { restore } = withMoveDaemon(() => landed());
+    try {
+      await submitMove({ persistent: false });
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("olderbuild");
+      expect(frame).toContain("/code/myapp");
+      expect(frame).toContain("ccmuxdaemonrestart");
+      // Not a silent success: the picker does not vanish into the new pane
+      // as if the changes had gone with it.
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      restore();
+      restoreExit();
+    }
+  });
+
   it("holds a refused move's stash recovery on screen until dismissed", async () => {
     // The sha is the only handle on the user's work. A four-second toast that
     // truncates it is the same as not printing it at all.

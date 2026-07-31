@@ -83,6 +83,25 @@ export function moveReportLines(
 }
 
 /**
+ * The same accounting as {@link moveReportLines}' first line, minus the
+ * directory, for somewhere a single short line is all there is.
+ *
+ * The source is what goes, because it is the longest part and the least
+ * surprising: whoever is reading this asked for the move from that checkout a
+ * moment ago. Everything the caveats cover (a leftover stash, a flattened
+ * index) is deliberately absent — those need acknowledging, not summarizing.
+ */
+export function moveSummary(move: MoveReport): string {
+  const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
+  const verb = move.untracked.mode === "copy" ? "copied" : "moved";
+  const untracked =
+    move.untracked.mode === "leave"
+      ? "untracked left behind"
+      : `${files(move.untracked.files.length)} untracked ${verb}`;
+  return `moved ${files(move.moved)}, ${untracked}`;
+}
+
+/**
  * How to get the work back after a REFUSED move, as lines. Empty when the
  * failure left nothing behind to recover from.
  *

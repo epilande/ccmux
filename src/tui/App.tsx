@@ -66,7 +66,9 @@ import { NoticeDialog } from "./components/NoticeDialog";
 import { slugFromPrompt, slugify } from "../daemon/worktree-create";
 import {
   failureNeedsAcknowledgement,
+  moveNeedsAcknowledgement,
   moveReportLines,
+  moveSummary,
   stashRecoveryLines,
   type MoveReport,
 } from "../lib/move-report";
@@ -1215,9 +1217,21 @@ export function App(props: AppProps) {
     if (value !== undefined) field.select(value);
   }
 
-  /** Acknowledge whatever the notice was reporting. */
+  /**
+   * What to do once the current notice has been read — the picker's handover
+   * to a pane that already exists, held back so the message is not carried
+   * off screen by the exit it precedes. Null when the notice reports
+   * something that has no next step.
+   */
+  let afterNotice: (() => void) | null = null;
+
+  /** Acknowledge whatever the notice was reporting, then do what it was
+   *  holding up. */
   function dismissNotice(): void {
+    const next = afterNotice;
+    afterNotice = null;
     store.actions.dismissNotice();
+    next?.();
   }
 
   /**
@@ -1382,6 +1396,9 @@ export function App(props: AppProps) {
       if (!spawned) spawnInFlight = false;
     }
     if (!spawned) return;
+    // Const so the closures below keep the narrowing; `spawned` is the flag
+    // the `finally` above writes.
+    const landed = spawned;
 
     // The pane EXISTS from here on, so nothing below may report a spawn
     // failure. Remembering the agent is best-effort for exactly that reason:
@@ -1393,22 +1410,73 @@ export function App(props: AppProps) {
       store.actions.closeNewSessionDialog();
       spawnInFlight = false;
     }
+
+    /** Hand the board over to the new pane, which is what the picker is for. */
+    const enterPane = () => {
+      // The daemon already selected the new pane's window; tell the other
+      // boards so their active-row highlight doesn't lag a scan behind.
+      if (landed.paneId) notifyActivePane(landed.paneId);
+      if (!props.persistent) process.exit(0);
+    };
+
+    const notice = landedMoveNotice(draft, landed);
+    if (notice) {
+      // INTERPOSED, not instead of: the pane is real and the picker still
+      // hands over to it, but not before the one thing that outlives the
+      // spawn has been read. Exiting first would take the message with it.
+      store.actions.showNotice(notice.title, notice.lines);
+      if (!detach) afterNotice = enterPane;
+      return;
+    }
     if (detach) {
       // The daemon's name, not the row's preview: a derived name that
       // collided came back numbered, and a toast repeating the preview would
       // name a worktree the spawn did not land in.
-      const created = spawned.worktree?.name;
+      const created = landed.worktree?.name;
+      // The sidebar never follows the pane, so this line is the only account
+      // of an operation that emptied a checkout.
+      const summary = landed.move ? ` · ${moveSummary(landed.move)}` : "";
       store.actions.showToast(
         created
-          ? `Spawned ${agent.displayName} in ${created}`
-          : `Spawned ${agent.displayName}`,
+          ? `Spawned ${agent.displayName} in ${created}${summary}`
+          : `Spawned ${agent.displayName}${summary}`,
       );
       return;
     }
-    // The daemon already selected the new pane's window; tell the other
-    // boards so their active-row highlight doesn't lag a scan behind.
-    if (spawned.paneId) notifyActivePane(spawned.paneId);
-    if (!props.persistent) process.exit(0);
+    enterPane();
+  }
+
+  /**
+   * What a LANDED spawn still owes the user, or null when it owes nothing.
+   *
+   * Two cases, and both outlive the spawn. A move can complete and still leave
+   * a stash entry to drop or a staged/unstaged split to rebuild; and a daemon
+   * predating the move drops the keys it does not know, answers a perfectly
+   * ordinary 200, and starts the agent in an empty worktree while the work
+   * sits untouched where it always was. The missing report is the only
+   * evidence there is for the second, which is why an absent `move` on a
+   * request that asked for one is a failure and not a shrug.
+   */
+  function landedMoveNotice(
+    draft: NonNullable<typeof store.state.newSession>,
+    body: SpawnBody,
+  ): { title: string; lines: string[] } | null {
+    if (draft.moveChanges && !body.move) {
+      return {
+        title: "Changes were not moved",
+        lines: [
+          `The ccmux daemon is an older build that cannot move changes, so yours were not moved: they are still in ${draft.cwd}.`,
+          "Restart it with `ccmux daemon restart` from this build, then move them again.",
+        ],
+      };
+    }
+    if (body.move && moveNeedsAcknowledgement(body.move)) {
+      return {
+        title: "Changes moved, with one thing left over",
+        lines: moveReportLines(body.move, draft.cwd),
+      };
+    }
+    return null;
   }
 
   function handleNewSessionKey(event: KeyEvent): void {
