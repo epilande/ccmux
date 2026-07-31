@@ -274,6 +274,8 @@ ccmux spawn --prompt "fix the tests"                         # Send an initial p
 ccmux spawn --worktree --prompt "fix flicker"                # Spawn into a git worktree (name derived from the prompt)
 ccmux spawn --worktree fix-flicker                           # Spawn into a named worktree, creating it if needed
 ccmux spawn --worktree --base develop --prompt "fix flicker" # Branch the new worktree from develop
+ccmux spawn --worktree fix-flicker --with-changes            # Move this checkout's uncommitted work into it
+ccmux spawn --worktree fix-flicker --with-changes --untracked copy # Untracked files land in both
 ```
 
 Split directions use tmux's own vocabulary: `h` puts the new pane beside the
@@ -307,6 +309,36 @@ worktree gets a numeric suffix (`-2`, `-3`, ...) instead of reusing it, since
 two different prompts landing in the same worktree would silently merge
 unrelated work. `--base <ref>` sets what the new branch is cut from,
 defaulting to the main checkout's current branch.
+
+### Moving Uncommitted Changes
+
+An experiment that turned into a real change has a way of ending up sitting
+dirty on `main`. `--with-changes` relocates that work into the worktree it
+creates, so the new agent starts on top of it and the checkout you left is
+clean:
+
+```bash
+ccmux spawn --worktree fix-flicker --with-changes
+```
+
+**Move changes** in a session's context menu does the same thing from the
+picker. It only appears for a row whose checkout is actually dirty, and it
+opens the new-session dialog already set to move: the destination is locked to
+a new worktree, an **Untracked** row appears, and the name and prompt stay
+editable.
+
+Untracked files move by default (agents create new files constantly, and
+leaving them behind would strand exactly the work you are relocating).
+`--untracked copy` puts them in both places, `--untracked leave` keeps them
+where they are. Gitignored files are never part of this; `worktree.symlinkDirectories`
+and `.worktreeinclude` cover those.
+
+Nothing is moved until there is somewhere to put it, and nothing is lost if
+that fails. The changes are stashed first, applied into the new worktree, and
+only then is the stash entry dropped — so a failure anywhere in between puts
+your checkout back as it was and reports the stash entry holding your work.
+ccmux refuses to run at all while a merge, rebase, or cherry-pick is in
+progress.
 
 ### Forking Sessions
 
@@ -439,6 +471,8 @@ Opened with <kbd>n</kbd>, or from the right-click menu on a session row or a gro
 Movement and number keys apply to the focused field, so <kbd>2</kbd> picks the second agent on the Agent field and the second placement on the Placement field. In the Prompt field every key is text, so <kbd>↑</kbd> / <kbd>↓</kbd> (or <kbd>Ctrl</kbd>+<kbd>P</kbd> / <kbd>Ctrl</kbd>+<kbd>N</kbd>) move between fields there instead.
 
 **Where** picks between this checkout and a new git worktree. The worktree option carries the name it would create, derived from the prompt and updated as you type, and its branch is cut from the main checkout's current branch. Choosing a different base ref is CLI-only (`ccmux spawn --worktree --base <ref>`).
+
+Opened from **Move changes**, the same dialog runs in move mode: the title says so, **Where** is locked to the new worktree (there is nowhere else the changes can go), and an **Untracked** field appears — <kbd>1</kbd> move, <kbd>2</kbd> copy to both, <kbd>3</kbd> leave here. <kbd>Tab</kbd> skips the locked field. See [Moving Uncommitted Changes](#moving-uncommitted-changes).
 
 The working directory is derived, not typed: a session row uses that session's directory, a group header uses the group's, and no selection falls back to where the picker was launched. The picker jumps to the new pane, and a one-shot picker then closes while a `--persistent` board stays open; the sidebar spawns into the window's main area without stealing focus.
 
