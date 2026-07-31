@@ -1396,18 +1396,33 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       const fields = newSessionFields(draft);
       const count = fields.length;
       const current = fields.indexOf(draft.field);
-      const next = (((current + delta) % count) + count) % count;
+      // Focus on a field this draft does not have: there is no position to
+      // move from, so the movement resolves to the top of the list rather
+      // than to whatever `-1 + delta` happens to land on.
+      const next =
+        current === -1 ? 0 : (((current + delta) % count) + count) % count;
       batch(() => {
         settleWorktreeName(fields[next]!);
         setState("newSession", "field", fields[next]!);
       });
     },
 
+    /**
+     * Focus a field by name, for the dialog's click handlers.
+     *
+     * A field the draft does not have sends focus to the first one it does.
+     * The number keys are scoped to the FOCUSED field, so focus parked on an
+     * unrendered row means `1`-`9` quietly changing something nobody can see;
+     * landing somewhere real is both visible and harmless.
+     */
     setNewSessionField(field: NewSessionField) {
-      if (!state.newSession) return;
+      const draft = state.newSession;
+      if (!draft) return;
+      const fields = newSessionFields(draft);
+      const next = fields.includes(field) ? field : fields[0]!;
       batch(() => {
-        settleWorktreeName(field);
-        setState("newSession", "field", field);
+        settleWorktreeName(next);
+        setState("newSession", "field", next);
       });
     },
 

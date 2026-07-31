@@ -1217,6 +1217,12 @@ export function App(props: AppProps) {
           },
         };
       case "untracked":
+        // Move-changes mode only, and paired with `destination`'s guard
+        // above: the store keeps focus off a field the draft does not have,
+        // and this keeps the number keys off it if focus ever gets there
+        // anyway. A key that silently changes an invisible choice is the
+        // failure worth two guards.
+        if (!draft.moveChanges) return null;
         return {
           options: UNTRACKED_OPTIONS.map((option) => option.value),
           value: draft.untracked,

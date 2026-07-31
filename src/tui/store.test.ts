@@ -3174,6 +3174,21 @@ describe("store", () => {
         ]);
       });
 
+      it("never focuses a field this draft does not have", () => {
+        // The option keys are scoped to the focused field, so focus parked on
+        // a row that is not rendered means `1`-`9` acting on something the
+        // user cannot see. Reachable by a click handler for a row that has
+        // since gone, and by any caller naming a field the mode does not have.
+        const store = createTUIStore();
+        store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+
+        // `untracked` belongs to move-changes mode; this dialog has no such
+        // row and no such choice.
+        store.actions.setNewSessionField("untracked");
+
+        expect(store.state.newSession?.field).toBe("agent");
+      });
+
       it("stays derived while the prompt is typed", () => {
         const store = worktreeDialog();
 
