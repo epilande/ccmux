@@ -788,6 +788,34 @@ describe("readUncommitted", () => {
     expect(state!.untrackedPaths).toEqual([odd]);
   });
 
+  it("lists untracked FILES, not the directory git collapses them into", async () => {
+    // git reports a wholly untracked directory as one `?? deep/` record, so
+    // a reader that takes the records at face value says "1 untracked file"
+    // for a hundred of them, and hands the copy a directory to recurse
+    // rather than a list to enumerate.
+    const repo = await makeRepo();
+    await mkdir(join(repo, "deep", "nested"), { recursive: true });
+    writeFileSync(join(repo, "deep", "a.txt"), "1\n");
+    writeFileSync(join(repo, "deep", "nested", "b.txt"), "2\n");
+
+    const state = await readUncommitted(repo);
+    expect(state!.untrackedPaths.sort()).toEqual([
+      "deep/a.txt",
+      "deep/nested/b.txt",
+    ]);
+  });
+
+  it("counts a rename once, not twice", async () => {
+    // With `-z` a rename is TWO records — the new path, then the original —
+    // so counting records reports one `git mv` as two changed files.
+    const repo = await makeRepo();
+    await git(repo, ["mv", "tracked.txt", "renamed.txt"]);
+
+    const state = await readUncommitted(repo);
+    expect(state!.modified).toBe(1);
+    expect(state!.untrackedPaths).toEqual([]);
+  });
+
   it("counts staged changes as tracked work", async () => {
     const repo = await makeRepo();
     writeFileSync(join(repo, "tracked.txt"), "staged\n");

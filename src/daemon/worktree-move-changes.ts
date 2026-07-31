@@ -199,7 +199,7 @@ export async function readOperationInProgress(
 export interface UncommittedState {
   /** Tracked files with staged or unstaged changes. */
   modified: number;
-  /** Untracked paths, repo-relative. A trailing `/` is a collapsed directory. */
+  /** Untracked FILES, repo-relative. Never a directory; see below. */
   untrackedPaths: string[];
 }
 
@@ -210,26 +210,51 @@ export interface UncommittedState {
  * verbatim, while the default format quotes and escapes anything unusual. A
  * filename with a quote, a backslash, or a newline in it is rare but entirely
  * legal, and this list drives file copies.
+ *
+ * `--untracked-files=all` because git's default collapses a wholly untracked
+ * directory into one `?? deep/` record. That is two problems in one: the
+ * count it feeds ("3 untracked files") is wrong by however many files are
+ * under there, and the copy it feeds gets a directory to recurse into rather
+ * than a list to enumerate — which sweeps up the .env and node_modules inside
+ * it, since a recursive copy has no idea git was excluding them. Expanded,
+ * every path here is a file git would actually move, ignored content
+ * included in neither list.
+ *
+ * The two-record shape of a rename is handled explicitly. `R  new\0old\0` is
+ * ONE changed file described by two records, so counting records reports a
+ * single `git mv` as two.
  */
 export async function readUncommitted(
   checkout: string,
   git: GitRun = runGit,
 ): Promise<UncommittedState | null> {
-  const res = await git(checkout, ["status", "--porcelain", "-z"]);
+  const res = await git(checkout, [
+    "status",
+    "--porcelain",
+    "-z",
+    "--untracked-files=all",
+  ]);
   if (res.exitCode !== 0) return null;
 
   let modified = 0;
   const untrackedPaths: string[] = [];
-  for (const record of res.stdout.split("\0")) {
-    if (record === "") continue;
+  const records = res.stdout.split("\0");
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
+    if (!record) continue;
     const status = record.slice(0, 2);
     const path = record.slice(3);
     // Ignored entries are not requested, so anything here is one or the other.
     if (status === "??") {
       if (path) untrackedPaths.push(path);
-    } else {
-      modified++;
+      continue;
     }
+    modified++;
+    // A rename or a copy spends a second record on the ORIGINAL path. It is
+    // never a change of its own, so it is consumed here rather than counted.
+    // Either half of the code can carry the letter (`RM` is a rename that was
+    // edited afterwards), and no other status uses R or C.
+    if (status.includes("R") || status.includes("C")) i++;
   }
   return { modified, untrackedPaths };
 }

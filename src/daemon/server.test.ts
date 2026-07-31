@@ -6063,6 +6063,20 @@ describe("GET /sessions/:id/dirty", () => {
     expect(body.untracked).toBe(1);
   });
 
+  it("counts the files inside an untracked directory, not the directory", async () => {
+    // git collapses a wholly untracked directory into one `?? deep/` record,
+    // so the menu would offer to move "1 untracked file" for a tree of them.
+    const { manager, internals } = createServer();
+    const repo = await makeRepo("nested-untracked");
+    mkdirSync(join(repo, "deep", "nested"), { recursive: true });
+    writeFileSync(join(repo, "deep", "a.txt"), "1\n");
+    writeFileSync(join(repo, "deep", "nested", "b.txt"), "2\n");
+    const id = sessionIn(manager, repo);
+
+    const body = await dirtyOf(internals, id);
+    expect(body.untracked).toBe(2);
+  });
+
   it("answers 'not a repo' plainly rather than erroring", async () => {
     // An ordinary answer to what the menu is asking, not a failure. Note this
     // deliberately differs from readDirtyState, which calls an unreadable
