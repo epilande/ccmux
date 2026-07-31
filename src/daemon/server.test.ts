@@ -5824,6 +5824,51 @@ describe("POST /spawn moving changes into a worktree", () => {
   });
 
   /**
+   * The move is committed by the time tmux is asked for a pane, so a failure
+   * here leaves the source clean and the work somewhere the caller never
+   * named. A bare 500 would tell them the spawn failed and nothing else.
+   */
+  it("says where the work went when the pane fails after the move", async () => {
+    const repo = makeDirtyRepo();
+    const { internals } = createServer();
+    const original = Bun.spawn;
+    Bun.spawn = ((spawned: string[], opts?: unknown) => {
+      if (spawned[0] !== "tmux") {
+        return (original as (a: string[], b?: unknown) => unknown)(
+          spawned,
+          opts,
+        );
+      }
+      return {
+        exited: Promise.resolve(1),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob(["no server running\n"]).stream(),
+      };
+    }) as unknown as typeof Bun.spawn;
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "moved", withChanges: true },
+      });
+      const body = (await res.json()) as {
+        error: string;
+        move?: { moved: number; source: string };
+      };
+
+      expect(res.status).toBe(500);
+      // The move really did happen, so the failure has to account for it.
+      expect(dirtyPaths(repo)).toEqual([]);
+      expect(body.move?.moved).toBe(1);
+      expect(body.move?.source).toBe(repo);
+      expect(body.error).toContain("already moved");
+      expect(body.error).toContain(join(".claude", "worktrees", "moved"));
+    } finally {
+      Bun.spawn = original;
+    }
+  });
+
+  /**
    * A name that is already a worktree is refused BEFORE the stash, because
    * the move's rollback force-removes the worktree and there is no way to
    * tell git to take back only the part this run added. Refused up front,

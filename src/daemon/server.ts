@@ -2846,26 +2846,56 @@ export class DaemonServer {
     }
 
     /**
-     * Decorate a failure that happens AFTER the worktree was created.
+     * Decorate a failure that happens AFTER the setup steps landed.
      *
-     * The worktree is deliberately not rolled back: create-or-open makes a
-     * retry correct, and unwinding would risk deleting a worktree that
-     * already existed. But that only helps if the user is told, otherwise
-     * they are left wondering whether to clean it up by hand.
+     * Neither the worktree nor the move is rolled back here. The worktree is
+     * left because create-or-open makes a retry correct and unwinding would
+     * risk deleting one that already existed; the move is left because the
+     * only thing that could undo it is putting the changes back, and by this
+     * point they are a real working tree in the new checkout, not a stash
+     * entry anybody can replay. Both are safe ONLY if the user is told, so
+     * every note below exists to name state they now own.
      *
-     * The retry advice splits by mode because only an explicit name is
-     * stable: a derived name that is already taken gets a numeric suffix, so
-     * re-running the same command would build a sibling rather than reuse
-     * what is already there.
+     * The move note comes first, and does not care whether the worktree was
+     * created or opened: "the spawn failed" reads as "nothing happened", and
+     * the one thing that definitely happened is that their uncommitted work
+     * is no longer where they left it.
+     *
+     * The retry advice splits three ways. After a move there is nothing left
+     * to move, so re-running the same command would refuse; the useful action
+     * is starting an agent in the worktree. Otherwise only an explicit name
+     * is stable, since a derived name that is already taken gets a numeric
+     * suffix and a re-run would build a sibling.
      */
-    const withWorktreeNote = (error: string): string => {
-      if (!worktreeInfo?.created) return error;
-      const retry =
-        worktreeRequest.value?.name === undefined
-          ? `re-running will create a numbered sibling, pass --worktree '${worktreeInfo.name}' to reuse this one`
-          : "re-running the same command will reuse it";
-      return `${error} (the worktree '${worktreeInfo.name}' was created at ${worktreeInfo.path} and left in place; ${retry})`;
+    const withSetupNotes = (error: string): string => {
+      const notes: string[] = [];
+      if (moveInfo) {
+        notes.push(
+          `your uncommitted changes were already moved out of ${moveInfo.source} to ${spawnCwd}`,
+        );
+      }
+      if (worktreeInfo?.created) {
+        const retry = moveInfo
+          ? `re-running has nothing left to move, so start an agent there with --cwd '${worktreeInfo.path}' instead`
+          : worktreeRequest.value?.name === undefined
+            ? `re-running will create a numbered sibling, pass --worktree '${worktreeInfo.name}' to reuse this one`
+            : "re-running the same command will reuse it";
+        notes.push(
+          `the worktree '${worktreeInfo.name}' was created at ${worktreeInfo.path} and left in place; ${retry}`,
+        );
+      }
+      return notes.length > 0 ? `${error} (${notes.join("; ")})` : error;
     };
+
+    /**
+     * The body for one of those failures. `move` rides along for the same
+     * reason it does on success: the counts are only knowable here, and a
+     * caller that has to explain a half-done spawn needs them most.
+     */
+    const setupFailure = (error: string): Record<string, unknown> => ({
+      error: withSetupNotes(error),
+      ...(moveInfo ? { move: moveInfo } : {}),
+    });
 
     // Create tmux pane
     const tmuxArgv = buildTmuxSpawnArgv({
@@ -2906,9 +2936,7 @@ export class DaemonServer {
       if (exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();
         return Response.json(
-          {
-            error: withWorktreeNote(`tmux ${tmuxCmd} failed: ${stderr.trim()}`),
-          },
+          setupFailure(`tmux ${tmuxCmd} failed: ${stderr.trim()}`),
           { status: 500, headers },
         );
       }
@@ -2932,11 +2960,7 @@ export class DaemonServer {
         const stderr = await new Response(sendProc.stderr).text();
         await killPane();
         return Response.json(
-          {
-            error: withWorktreeNote(
-              `Failed to send command to pane: ${stderr.trim()}`,
-            ),
-          },
+          setupFailure(`Failed to send command to pane: ${stderr.trim()}`),
           { status: 500, headers },
         );
       }
@@ -3006,11 +3030,7 @@ export class DaemonServer {
       // already be set, and `killPane` no-ops otherwise.
       await killPane();
       return Response.json(
-        {
-          error: withWorktreeNote(
-            `Failed to spawn session: ${errorMessage(err)}`,
-          ),
-        },
+        setupFailure(`Failed to spawn session: ${errorMessage(err)}`),
         { status: 500, headers },
       );
     }

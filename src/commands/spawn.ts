@@ -43,13 +43,22 @@ interface SpawnResponse {
   };
 }
 
-/** A refused spawn. The move fields are set only when a move failed. */
+/**
+ * A failed spawn.
+ *
+ * `stashSha`/`sourceRestored` describe a move that was REFUSED, `move` a move
+ * that completed before something later went wrong. They never both appear:
+ * the first pair says the work is still recoverable from a stash, the second
+ * that it is already in the new worktree.
+ */
 interface SpawnErrorResponse {
   error: string;
   reason?: string;
   /** The stash entry holding the user's work, when one was left in place. */
   stashSha?: string;
   sourceRestored?: boolean;
+  /** A move that had already completed when the spawn failed. */
+  move?: SpawnResponse["move"];
 }
 
 /**
@@ -132,6 +141,53 @@ async function callerClientTty(
 function resolveSpawnCwd(explicit?: string): string {
   const callerPwd = process.env.CCMUX_CALLER_PWD ?? process.cwd();
   return explicit ? resolve(callerPwd, explicit) : callerPwd;
+}
+
+/**
+ * What a completed move did, as lines.
+ *
+ * Shared by the success path and by a failure that happened AFTER the move,
+ * because both owe the user the same accounting: the work has left their
+ * checkout either way, and a spawn that failed later is exactly when they
+ * most need to be told where it went.
+ */
+function moveLines(
+  move: NonNullable<SpawnResponse["move"]>,
+  fallbackSource: string,
+): string[] {
+  const { moved, untracked, source, leftoverStash, flattenedIndex } = move;
+  // Both halves are named even at zero, because "0 untracked files" is the
+  // answer to "did it take my new files too" — the question `--untracked`
+  // exists for.
+  const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
+  const verb = untracked.mode === "copy" ? "copied" : "moved";
+  const untrackedNote =
+    untracked.mode === "leave"
+      ? "untracked files left behind"
+      : `${files(untracked.files.length)} untracked ${verb}`;
+  const lines = [
+    // The daemon's source, not the caller's cwd: `--fork` resolves it from
+    // the forked session, so naming the local directory there would point at
+    // one nothing happened in.
+    `Moved ${files(moved)} changed, ${untrackedNote}, out of ${source ?? fallbackSource}`,
+  ];
+  // A note, not an error: every edit is in the new worktree, but the staged
+  // half arrived unstaged, and finding that out at commit time is worse than
+  // reading one line here.
+  if (flattenedIndex) {
+    lines.push(
+      "Everything moved, but not the staged/unstaged split: re-run 'git add' in the worktree for what you had staged.",
+    );
+  }
+  // A successful move that could not drop its own backup. Harmless, but
+  // silence would leave it to be found later as a stash entry nobody
+  // remembers making.
+  if (leftoverStash) {
+    lines.push(
+      `Left a redundant stash entry behind (${leftoverStash}); drop it with 'git stash drop'.`,
+    );
+  }
+  return lines;
 }
 
 /** The daemon's tmux socket, or null when it can't be determined. */
@@ -262,8 +318,12 @@ export function createSpawnCommand(): Command {
         const daemonSocket = optedOut ? null : await daemonTmuxSocket();
         const detach = options.detach ?? false;
 
+        // The try covers the round trip ONLY. Everything after it prints and
+        // exits, and wrapping those in a catch meant a `process.exit` walked
+        // straight back into it and was reported as a spawn failure.
+        let response: Response;
         try {
-          const response = await fetch(`${getDaemonUrl()}/spawn`, {
+          response = await fetch(`${getDaemonUrl()}/spawn`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -292,29 +352,47 @@ export function createSpawnCommand(): Command {
               worktree,
             }),
           });
+        } catch (error) {
+          console.error("Failed to spawn session:", error);
+          process.exit(1);
+        }
 
-          if (response.status === 400) {
-            const data = (await response.json()) as SpawnErrorResponse;
-            console.error(data.error);
-            // A refused move can leave a stash entry behind, and the sha is
-            // the handle for getting the work back by hand. Which sentence
-            // applies turns on whether the source was restored: with the
-            // changes back in the checkout the entry is a redundant copy,
-            // without them it is the only one.
-            if (data.stashSha) {
-              console.error(
-                data.sourceRestored
-                  ? `Your changes are back in the checkout; stash entry ${data.stashSha} still holds a copy ('git stash list').`
-                  : `Your changes are in stash entry ${data.stashSha}; recover them with 'git stash apply ${data.stashSha}'.`,
-              );
+        // EVERY non-ok status, not only 400. A failure after a successful
+        // move is a 500, and its body is the only place that says the user's
+        // uncommitted work has already left their checkout; collapsing that
+        // to "HTTP 500" throws away the one sentence they need.
+        if (!response.ok) {
+          const data = (await response
+            .json()
+            .catch(() => null)) as SpawnErrorResponse | null;
+          console.error(data?.error ?? `Spawn failed: HTTP ${response.status}`);
+          // A refused move can leave a stash entry behind, and the sha is
+          // the handle for getting the work back by hand. Which sentence
+          // applies turns on whether the source was restored: with the
+          // changes back in the checkout the entry is a redundant copy,
+          // without them it is the only one.
+          if (data?.stashSha) {
+            console.error(
+              data.sourceRestored
+                ? `Your changes are back in the checkout; stash entry ${data.stashSha} still holds a copy ('git stash list').`
+                : `Your changes are in stash entry ${data.stashSha}; recover them with 'git stash apply ${data.stashSha}'.`,
+            );
+          }
+          // A move that DID complete before the spawn failed. The same
+          // accounting the success path prints, because the work has left
+          // the checkout either way.
+          if (data?.move) {
+            for (const line of moveLines(
+              data.move,
+              resolveSpawnCwd(options.cwd),
+            )) {
+              console.error(line);
             }
-            process.exit(1);
           }
+          process.exit(1);
+        }
 
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-          }
-
+        {
           const data = (await response.json()) as SpawnResponse;
           if (data.worktree) {
             const { name, path, branch, created, branchCreated, base } =
@@ -338,38 +416,11 @@ export function createSpawnCommand(): Command {
             console.log(`${what}: ${path}`);
           }
           if (data.move) {
-            const { moved, untracked, source, leftoverStash, flattenedIndex } =
-              data.move;
-            // Both halves are named even at zero, because "0 untracked files"
-            // is the answer to "did it take my new files too" — the question
-            // `--untracked` exists for.
-            const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
-            const verb = untracked.mode === "copy" ? "copied" : "moved";
-            const untrackedNote =
-              untracked.mode === "leave"
-                ? "untracked files left behind"
-                : `${files(untracked.files.length)} untracked ${verb}`;
-            // The daemon's source, not the caller's cwd: `--fork` resolves it
-            // from the forked session, so naming the local directory there
-            // would point at one nothing happened in.
-            console.log(
-              `Moved ${files(moved)} changed, ${untrackedNote}, out of ${source ?? resolveSpawnCwd(options.cwd)}`,
-            );
-            // A note, not an error: every edit is in the new worktree, but
-            // the staged half arrived unstaged, and finding that out at
-            // commit time is worse than reading one line here.
-            if (flattenedIndex) {
-              console.log(
-                "Everything moved, but not the staged/unstaged split: re-run 'git add' in the worktree for what you had staged.",
-              );
-            }
-            // A successful move that could not drop its own backup. Harmless,
-            // but silence would leave it to be found later as a stash entry
-            // nobody remembers making.
-            if (leftoverStash) {
-              console.log(
-                `Left a redundant stash entry behind (${leftoverStash}); drop it with 'git stash drop'.`,
-              );
+            for (const line of moveLines(
+              data.move,
+              resolveSpawnCwd(options.cwd),
+            )) {
+              console.log(line);
             }
           }
           console.log(
@@ -377,9 +428,6 @@ export function createSpawnCommand(): Command {
               ? `Forked ${options.fork} into pane ${data.paneId}: ${data.command}`
               : `Spawned ${agent} in pane ${data.paneId}: ${data.command}`,
           );
-        } catch (error) {
-          console.error("Failed to spawn session:", error);
-          process.exit(1);
         }
       },
     );

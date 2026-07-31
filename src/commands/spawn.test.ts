@@ -645,6 +645,31 @@ describe("ccmux spawn --with-changes reporting", () => {
     expect(out).toContain("git stash drop");
   });
 
+  /**
+   * A failure AFTER the move succeeds is a 500, and its body is the only
+   * place that says the user's work has already left their checkout.
+   * Collapsing it to "HTTP 500" throws away exactly the sentence they need.
+   */
+  it("prints the daemon's own message for a failure after the move", async () => {
+    const { err, code } = await runAgainst(500, {
+      error:
+        "tmux new-window failed: no server running (your uncommitted changes were already moved out of /repo to /repo/.claude/worktrees/wt)",
+      move: {
+        moved: 2,
+        source: "/repo",
+        untracked: { mode: "move", files: ["a.txt"] },
+      },
+    });
+
+    expect(code).toBe(1);
+    expect(err).toContain("already moved out of /repo");
+    expect(err).not.toContain("HTTP 500");
+    // And the same accounting the success path prints, so the user can see
+    // what left the checkout.
+    expect(err).toContain("Moved 2 files changed");
+    expect(err).toContain("out of /repo");
+  });
+
   it("names the directory the daemon actually moved out of", async () => {
     // Under `--fork` the source is the forked session's checkout, which the
     // daemon resolves and the CLI never sees. Printing the local cwd there
