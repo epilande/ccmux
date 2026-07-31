@@ -212,6 +212,47 @@ async function renderApp(
   return setup.captureCharFrame();
 }
 
+/**
+ * Mocks the sidebar-hydration fetch used by App.tsx's onMount:
+ * `fetch(`${getDaemonUrl()}/sidebar-state`).then(r => r.json()).then(data =>
+ * {...}).catch(() => {})` (App.tsx:1404-1420). Returns a `getPromise()` the
+ * test awaits in place of a fixed sleep, plus `restore()` to put back the
+ * original `fetch`.
+ *
+ * The capture is gated on the URL containing "/sidebar-state" rather than
+ * being a bare last-write-wins assignment: onMount also fires
+ * `refreshServerInfo()`'s `/server-info` fetch first (App.tsx:1399-1405), so
+ * an ungated capture would only happen to grab the right promise because of
+ * today's statement order. Any other URL gets a harmless empty-json
+ * response instead of falling through to whatever `fetch` was previously
+ * installed, so callers of this helper don't inherit ambient fetch state
+ * from another test.
+ */
+function mockSidebarStateFetch(payload: Record<string, unknown>) {
+  const originalFetch = globalThis.fetch;
+  let hydrationFetchPromise:
+    | Promise<{ json: () => Promise<unknown> }>
+    | undefined;
+  globalThis.fetch = ((input: string | URL | Request) => {
+    const url =
+      typeof input === "string" || input instanceof URL
+        ? input.toString()
+        : input.url;
+    if (url.includes("/sidebar-state")) {
+      const promise = (async () => ({ json: async () => payload }))();
+      hydrationFetchPromise = promise;
+      return promise;
+    }
+    return (async () => ({ json: async () => ({}) }))();
+  }) as unknown as typeof fetch;
+  return {
+    getPromise: () => hydrationFetchPromise,
+    restore: () => {
+      globalThis.fetch = originalFetch;
+    },
+  };
+}
+
 describe("App", () => {
   it("renders header and footer on mount", async () => {
     const frame = await renderApp();
@@ -322,25 +363,10 @@ describe("App", () => {
   });
 
   it("sidebar hydration with null state does not clobber active-pane default", async () => {
-    const originalFetch = globalThis.fetch;
-    // Capture the promise our mock fetch returns so the test can await the
-    // hydration chain directly instead of guessing at a sleep duration. The
-    // fire-and-forget chain in App.tsx is
-    // fetch(...).then(r => r.json()).then(data => {...}).catch(...); App's
-    // .then callbacks are attached to this same promise before the test's own
-    // await, so once `hydrationFetchPromise` settles, App's `r.json()` call
-    // has already been made (see the extra microtask flush below).
-    let hydrationFetchPromise: Promise<unknown> | undefined;
-    globalThis.fetch = (() => {
-      const promise = (async () => ({
-        json: async () => ({
-          selectedSessionId: null,
-          selectedHeaderKey: null,
-        }),
-      }))();
-      hydrationFetchPromise = promise;
-      return promise;
-    }) as unknown as typeof fetch;
+    const { getPromise, restore } = mockSidebarStateFetch({
+      selectedSessionId: null,
+      selectedHeaderKey: null,
+    });
     try {
       await renderApp(120, 20, { sidebar: true, groupBy: "none" });
       sseCallbacks!.onInit(
@@ -361,12 +387,24 @@ describe("App", () => {
         "%20",
       );
       await setup.renderOnce();
-      // Await the hydration fetch chain instead of a fixed sleep: the mocked
-      // fetch's own promise settling means App's r.json() call has already
-      // fired, so a couple of microtask turns is enough to let its
-      // `.then((data) => {...})` callback (which calls
-      // applySidebarSelection) finish running.
+
+      // Guard against the hydration fetch silently not firing: if it stopped
+      // being called, `await undefined` below would resolve instantly and
+      // this test would pass vacuously (its asserted "beta" is also exactly
+      // what "no hydration happened" produces).
+      const hydrationFetchPromise = getPromise();
+      expect(hydrationFetchPromise).toBeDefined();
+      // Await the hydration fetch chain instead of a fixed sleep. App's
+      // .then callbacks are attached to this same promise before this await,
+      // so once it settles, App's `r.json()` call has already been made.
+      // From there the chain still has to: resolve `r.json()`'s own promise,
+      // then run the `.then((data) => {...})` callback that calls
+      // applySidebarSelection. Measured on this repo's Bun/JSC, that's a
+      // 3-microtask-turn worst case from a cold start; we flush exactly that
+      // many rather than relying on the renderApp/renderOnce awaits above to
+      // have already drained part of the chain.
       await hydrationFetchPromise;
+      await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
       await setup.renderOnce();
@@ -377,28 +415,17 @@ describe("App", () => {
       expect(frame).toContain("Kill Session?");
       expect(frame).toContain("beta");
     } finally {
-      globalThis.fetch = originalFetch;
+      restore();
     }
   });
 
   it("sidebar hydration with non-null state overrides active-pane default", async () => {
-    const originalFetch = globalThis.fetch;
     // Daemon reports another instance has selected s1 (alpha). That should win
     // over our active-pane default of s2 (beta).
-    // Capture the promise our mock fetch returns so the test can await the
-    // hydration chain directly instead of guessing at a sleep duration (see
-    // the sibling "null state" test above for the full rationale).
-    let hydrationFetchPromise: Promise<unknown> | undefined;
-    globalThis.fetch = (() => {
-      const promise = (async () => ({
-        json: async () => ({
-          selectedSessionId: "s1",
-          selectedHeaderKey: null,
-        }),
-      }))();
-      hydrationFetchPromise = promise;
-      return promise;
-    }) as unknown as typeof fetch;
+    const { getPromise, restore } = mockSidebarStateFetch({
+      selectedSessionId: "s1",
+      selectedHeaderKey: null,
+    });
     try {
       await renderApp(120, 20, { sidebar: true, groupBy: "none" });
       sseCallbacks!.onInit(
@@ -419,9 +446,13 @@ describe("App", () => {
         "%20",
       );
       await setup.renderOnce();
-      // Await the hydration fetch chain instead of a fixed sleep so
-      // applySidebarSelection has definitely run before we probe selection.
+
+      // See the sibling "null state" test above for the full rationale on
+      // both the definedness guard and the 3-flush count.
+      const hydrationFetchPromise = getPromise();
+      expect(hydrationFetchPromise).toBeDefined();
       await hydrationFetchPromise;
+      await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
       await setup.renderOnce();
@@ -432,7 +463,7 @@ describe("App", () => {
       expect(frame).toContain("Kill Session?");
       expect(frame).toContain("alpha");
     } finally {
-      globalThis.fetch = originalFetch;
+      restore();
     }
   });
 
