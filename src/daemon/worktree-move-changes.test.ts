@@ -10,6 +10,7 @@ import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  dropStashCommand,
   isUntrackedMode,
   moveChangesToWorktree,
   readOperationInProgress,
@@ -187,8 +188,8 @@ describe("moveChangesToWorktree", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    // git collapses an untracked directory to one `deep/` entry; the copy has
-    // to recurse rather than treat it as a file.
+    // The status read expands the directory, so the copy gets the buried
+    // file by name and has to create the directories on the way to it.
     expect(
       readFileSync(
         join(result.worktreePath, "deep", "nested", "file.txt"),
@@ -818,6 +819,45 @@ describe("moveChangesToWorktree", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toBe("not-a-repo");
+  });
+});
+
+describe("dropStashCommand", () => {
+  it("drops the named entry, where git's own by-sha form does not", async () => {
+    // The advice printed for a leftover entry, run against real git. Three
+    // entries deep with ours in the middle, so a bare `git stash drop` would
+    // take somebody else's.
+    const repo = await makeRepo();
+    writeFileSync(join(repo, "tracked.txt"), "first\n");
+    await git(repo, ["stash", "push", "--message", "keep me"]);
+    writeFileSync(join(repo, "tracked.txt"), "second\n");
+    await git(repo, ["stash", "push", "--message", "ccmux move-changes"]);
+    writeFileSync(join(repo, "tracked.txt"), "third\n");
+    await git(repo, ["stash", "push", "--message", "someone else"]);
+
+    const listing = await git(repo, ["stash", "list", "--format=%H %gs"]);
+    const ours = listing
+      .split("\n")
+      .find((line) => line.includes("ccmux move-changes"))!
+      .split(" ")[0]!;
+
+    // What the CLI used to suggest, and what git says about it.
+    const bySha = await runGit(repo, ["stash", "drop", ours]);
+    expect(bySha.exitCode).not.toBe(0);
+    expect(bySha.stderr).toContain("not a stash reference");
+
+    const advised = Bun.spawnSync(["sh", "-c", dropStashCommand(ours)], {
+      cwd: repo,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(advised.stderr.toString()).toBe("");
+    expect(advised.exitCode).toBe(0);
+
+    const after = await git(repo, ["stash", "list", "--format=%gs"]);
+    expect(after).not.toContain("ccmux move-changes");
+    expect(after).toContain("keep me");
+    expect(after).toContain("someone else");
   });
 });
 

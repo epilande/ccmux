@@ -669,7 +669,11 @@ describe("ccmux spawn --with-changes reporting", () => {
     });
 
     expect(out).toContain("abc123");
-    expect(out).toContain("git stash drop");
+    // Advice that finds the entry. A bare `git stash drop` takes whatever is
+    // on top, and `git stash drop <sha>` is rejected outright by git — see
+    // dropStashCommand and the real-git test that runs it.
+    expect(out).toContain("git stash list");
+    expect(out).not.toMatch(/'git stash drop'/);
   });
 
   /**

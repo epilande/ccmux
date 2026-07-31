@@ -259,6 +259,26 @@ export async function readUncommitted(
   return { modified, untrackedPaths };
 }
 
+/**
+ * A shell command that drops the stash entry with this SHA.
+ *
+ * Not `git stash drop <sha>`: drop only accepts a `stash@{N}` reflog
+ * reference and answers "'<sha>' is not a stash reference". And not a bare
+ * `git stash drop` either, which takes whatever is on top — precisely the
+ * entry this is trying not to name, since the reason a sha is being reported
+ * at all is that the stack has moved. Looking the position up first is what
+ * makes the advice work.
+ *
+ * `git stash apply <sha>` DOES work, which is why the recovery lines that
+ * name a sha directly are fine as they are.
+ *
+ * Lives here rather than with the CLI text so the module's own real-git tests
+ * can run the string and prove it.
+ */
+export function dropStashCommand(sha: string): string {
+  return `git stash drop $(git stash list --format="%gd %H" | grep ${sha} | cut -d" " -f1)`;
+}
+
 /** Marks the stash entry as ours, for identification and for recovery. */
 function stashMessage(name?: string): string {
   return `ccmux move-changes${name ? `: ${name}` : ""}`;

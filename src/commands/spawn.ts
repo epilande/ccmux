@@ -4,6 +4,7 @@ import { getDaemonUrl } from "../lib/config";
 import { ensureDaemon } from "./shared";
 import { PANE_ID_PATTERN, type SpawnSplit } from "../daemon/spawn-command";
 import {
+  dropStashCommand,
   isUntrackedMode,
   UNTRACKED_MODES,
   type UntrackedMode,
@@ -184,7 +185,8 @@ function moveLines(
   // remembers making.
   if (leftoverStash) {
     lines.push(
-      `Left a redundant stash entry behind (${leftoverStash}); drop it with 'git stash drop'.`,
+      `Left a redundant stash entry behind (${leftoverStash}); drop it with:`,
+      `  ${dropStashCommand(leftoverStash)}`,
     );
   }
   return lines;
@@ -372,11 +374,17 @@ export function createSpawnCommand(): Command {
           // changes back in the checkout the entry is a redundant copy,
           // without them it is the only one.
           if (data?.stashSha) {
-            console.error(
-              data.sourceRestored
-                ? `Your changes are back in the checkout; stash entry ${data.stashSha} still holds a copy ('git stash list').`
-                : `Your changes are in stash entry ${data.stashSha}; recover them with 'git stash apply ${data.stashSha}'.`,
-            );
+            if (data.sourceRestored) {
+              console.error(
+                `Your changes are back in the checkout; stash entry ${data.stashSha} still holds a copy. Drop it with:`,
+              );
+              console.error(`  ${dropStashCommand(data.stashSha)}`);
+            } else {
+              // `apply` takes a sha directly, unlike `drop`.
+              console.error(
+                `Your changes are in stash entry ${data.stashSha}; recover them with 'git stash apply ${data.stashSha}'.`,
+              );
+            }
           }
           // A move that DID complete before the spawn failed. The same
           // accounting the success path prints, because the work has left
