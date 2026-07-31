@@ -16,6 +16,20 @@ interface ContextMenuProps {
   x: number;
   y: number;
   items: ContextMenuItem[];
+  /**
+   * Rows to keep clear beneath the items for one that may still arrive.
+   *
+   * The row menu's "Move changes" is appended once a `git status` comes back,
+   * which is after the menu is on screen. Appending it last means nothing
+   * above it moves — but only where the menu grows downward. Against the
+   * bottom edge the clamp pins the BOTTOM instead, so a menu that grew would
+   * slide every row up a line under a pointer already travelling towards one.
+   *
+   * Reserved for the menu's whole life, not just until the answer lands: a
+   * reservation released because the item is not coming drops the menu back
+   * down by the row it was holding, which is the same shift a beat later.
+   */
+  reservedRows?: number;
   onClose: () => void;
 }
 
@@ -50,8 +64,15 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
     const max = Math.max(0, dims().width - MENU_WIDTH);
     return Math.min(Math.max(0, props.x), max);
   };
+  /** The height to keep on screen: what is drawn, plus what is being held
+   *  for an item still to come. */
+  const reservedHeight = () =>
+    menuHeight() + Math.max(0, props.reservedRows ?? 0);
+
   const clampedY = () => {
-    const max = Math.max(0, dims().height - menuHeight());
+    // Clamped against the RESERVED height, positioned at the drawn one: the
+    // box grows into the space below rather than pushing itself up out of it.
+    const max = Math.max(0, dims().height - reservedHeight());
     return Math.min(Math.max(0, props.y), max);
   };
 

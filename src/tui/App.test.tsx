@@ -3853,6 +3853,63 @@ describe("App move-changes menu gate", () => {
     }
   });
 
+  it("does not move a bottom-clamped menu when the item lands", async () => {
+    // The same invariant as above, at the edge where "append last" stops
+    // being enough: clamped against the bottom, a menu that grows has to grow
+    // upward, so every row it already drew slides out from under the pointer.
+    let release!: (r: Response) => void;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      if (String(url).includes("/dirty")) {
+        return new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch;
+
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        Array.from({ length: 20 }, (_, i) =>
+          mockEnrichedSession({
+            id: `s${i}`,
+            project: `p${i}`,
+            cwd: `/code/p${i}`,
+            tmuxPane: `%${i}`,
+          }),
+        ),
+        null,
+      );
+      await setup.renderOnce();
+      // A row low enough that the menu cannot fit below it.
+      await setup.mockMouse.click(5, 19, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      const topBefore = setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes("┌"));
+      expect(topBefore).toBeGreaterThan(0);
+      const before = menuRows();
+
+      release({ ok: true, json: async () => ({ dirty: true }) } as Response);
+      await settle();
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Move changes");
+      expect(frame.split("\n").findIndex((line) => line.includes("┌"))).toBe(
+        topBefore,
+      );
+      const after = menuRows();
+      for (const row of before) {
+        const moved = after.find((r) => r.label === row.label);
+        expect(`${row.label}@${moved?.row}`).toBe(`${row.label}@${row.row}`);
+      }
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("never gates one row's menu with another row's answer", async () => {
     // A slow answer for a dismissed menu must not resurrect the item
     // somewhere else.

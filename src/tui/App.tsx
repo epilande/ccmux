@@ -886,6 +886,28 @@ export function App(props: AppProps) {
     ];
   }
 
+  /**
+   * Rows the row menu holds for the "Move changes" item that may still
+   * arrive. See `ContextMenu`'s `reservedRows`: this is what keeps a
+   * bottom-clamped menu from sliding up as the dirty answer lands.
+   *
+   * Held from the moment the menu opens until it closes, and released only
+   * once the item is actually IN the list — a menu that never gets the item
+   * keeps the row of air, because taking it back moves the menu just as
+   * surely as growing into it would.
+   */
+  function sessionMenuReservedRows(): number {
+    const cm = store.state.contextMenu;
+    const session = cm
+      ? store.state.sessions.find((s) => s.id === cm.sessionId)
+      : undefined;
+    // Background rows never offer the move, so they have nothing to hold.
+    if (!session || session.trackingMode === "background") return 0;
+    const dirty = menuDirty();
+    const shown = dirty?.sessionId === session.id && dirty.dirty;
+    return shown ? 0 : 1;
+  }
+
   function groupMenuItems(): ContextMenuItem[] {
     const cm = store.state.groupContextMenu;
     const isCollapsed = cm ? store.collapsedGroups().has(cm.groupKey) : false;
@@ -2500,6 +2522,7 @@ export function App(props: AppProps) {
               x={cm().x}
               y={cm().y}
               items={sessionMenuItems()}
+              reservedRows={sessionMenuReservedRows()}
               onClose={store.actions.hideContextMenu}
             />
           )}
