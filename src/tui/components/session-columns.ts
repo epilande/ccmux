@@ -583,8 +583,10 @@ function branchLabelFor(
   return ":" + shown + (isWorktree ? "+" : "");
 }
 
-/** Narrowest branch label that still renders: ":" + one char + "~" + the
- *  worktree "+". Anything less and `shortenBranchLabel` returns "". */
+/** Narrowest budget that could still render a label: ":" + one column of
+ *  branch + "~" + the worktree "+". Anything less and `shortenBranchLabel`
+ *  returns "" outright; at or above it the label still drops when the branch
+ *  has no grapheme narrow enough to fill that one column. */
 function minBranchLabelWidth(isWorktree: boolean): number {
   return 3 + (isWorktree ? 1 : 0);
 }
@@ -595,6 +597,11 @@ function minBranchLabelWidth(isWorktree: boolean): number {
  * usable column, because a label that keeps a one-column body plus both
  * markers would come back WIDER than the room it was given, and on a worktree
  * row that single overspent column is enough to push the repo out of the cell.
+ *
+ * A body that comes back empty drops the whole label. The one usable column
+ * can hold no part of a wide-glyph branch (a CJK or emoji grapheme needs two),
+ * and `:~` names no branch while still charging two columns the row would
+ * rather spend on identity.
  */
 function shortenBranchLabel(
   branch: string,
@@ -605,7 +612,9 @@ function shortenBranchLabel(
   if (avail < minBranchLabelWidth(isWorktree)) return "";
   const bodyWidth = Math.max(1, avail - 1 /* colon */ - 1 /* ~ */ - wt.length);
   if (displayWidth(branch) <= bodyWidth) return ":" + branch + wt;
-  return ":" + sliceToWidth(branch, bodyWidth) + "~" + wt;
+  const body = sliceToWidth(branch, bodyWidth);
+  if (!body) return "";
+  return ":" + body + "~" + wt;
 }
 
 /** Fit the prefix into `avail` columns; dropped entirely under 2 usable ones. */

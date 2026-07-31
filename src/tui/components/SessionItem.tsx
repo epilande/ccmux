@@ -45,6 +45,7 @@ import {
   formatVersion,
   padStartWidth,
   shortenCwd,
+  sliceToWidth,
   truncateText,
   truncateHighlighted,
 } from "../utils/format";
@@ -88,15 +89,23 @@ interface SessionItemProps {
   onContextMenu?: (event: MouseEvent) => void;
 }
 
-function abbreviateTarget(target: string, maxLen: number = 12): string {
-  if (target.length <= maxLen) return target;
+/**
+ * Abbreviate a `session:window.pane` target to `maxLen` COLUMNS, keeping the
+ * `:window.pane` suffix whole and shortening the session name with `~`. The
+ * budget and every cut are column-true (a tmux session name is free-form user
+ * text, so it can hold emoji or CJK): a code-unit slice through an emoji left
+ * a lone surrogate in the cell, and a CJK session name drew past the fixed
+ * 12-column box it shares with the right-aligned metadata.
+ */
+export function abbreviateTarget(target: string, maxLen: number = 12): string {
+  if (displayWidth(target) <= maxLen) return target;
   const colonIdx = target.lastIndexOf(":");
-  if (colonIdx === -1) return target.slice(0, maxLen - 1) + "~";
+  if (colonIdx === -1) return sliceToWidth(target, maxLen - 1) + "~";
   const suffix = target.slice(colonIdx);
   const sessionName = target.slice(0, colonIdx);
-  const availableLen = maxLen - suffix.length - 1;
-  if (availableLen <= 0) return target.slice(0, maxLen - 1) + "~";
-  return sessionName.slice(0, availableLen) + "~" + suffix;
+  const availableLen = maxLen - displayWidth(suffix) - 1;
+  if (availableLen <= 0) return sliceToWidth(target, maxLen - 1) + "~";
+  return sliceToWidth(sessionName, availableLen) + "~" + suffix;
 }
 
 interface ProjectPathParts {
