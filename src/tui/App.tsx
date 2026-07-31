@@ -60,6 +60,7 @@ import {
   NewSessionDialog,
   DESTINATION_OPTIONS,
   PLACEMENT_OPTIONS,
+  UNTRACKED_OPTIONS,
 } from "./components/NewSessionDialog";
 import { slugFromPrompt } from "../daemon/worktree-create";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
@@ -702,14 +703,13 @@ export function App(props: AppProps) {
 
   /**
    * "Move changes to worktree": open the new-session dialog over this row's
-   * checkout, so the move's destination and agent are already right.
+   * checkout, in move-changes mode.
    *
-   * INCOMPLETE UNTIL #69 LANDS. The issue specifies three more prefills —
-   * destination LOCKED to a new worktree, changes-move enabled, and an
-   * "Untracked files" choice — and all three need the dialog's `destination`
-   * field, which arrives with worktree spawning. They are one call each once
-   * it exists; the gate that decides whether this item is offered at all is
-   * what lives here now.
+   * The mode carries the rest of the prefill (destination locked to a new
+   * worktree, the untracked-files choice), so this stays what it always was:
+   * the row's cwd and agent, plus the one flag that says what the dialog is
+   * for. Name and prompt are left editable, which is the point of routing
+   * through the dialog rather than moving on the click.
    */
   function contextMenuMoveChanges() {
     const cm = store.state.contextMenu;
@@ -717,7 +717,11 @@ export function App(props: AppProps) {
     const session = store.state.sessions.find((s) => s.id === cm.sessionId);
     store.actions.hideContextMenu();
     if (!session) return;
-    openNewSession({ cwd: sessionCwd(session), agent: session.agentType });
+    openNewSession({
+      cwd: sessionCwd(session),
+      agent: session.agentType,
+      moveChanges: true,
+    });
   }
 
   function groupContextMenuNewSession() {
@@ -1088,7 +1092,11 @@ export function App(props: AppProps) {
     return { cwd: pickerCwd() };
   }
 
-  function openNewSession(context: { cwd: string; agent?: string }): void {
+  function openNewSession(context: {
+    cwd: string;
+    agent?: string;
+    moveChanges?: boolean;
+  }): void {
     // Mirrors `reviewSession`: refuse at the point of intent rather than
     // opening a dialog with a blank Directory row whose Enter round-trips
     // to a 400 from the daemon.
@@ -1106,6 +1114,7 @@ export function App(props: AppProps) {
         store.state.lastSpawnAgent ??
         spawnableAgents()?.[0]?.name ??
         "claude",
+      moveChanges: context.moveChanges,
     });
   }
 
@@ -1153,12 +1162,24 @@ export function App(props: AppProps) {
           },
         };
       case "destination":
+        // Locked in move-changes mode, where the field is not reachable by
+        // Tab either; the store refuses the write regardless.
+        if (draft.moveChanges) return null;
         return {
           options: DESTINATION_OPTIONS.map((option) => option.value),
           value: draft.destination,
           select: (value) => {
             const option = DESTINATION_OPTIONS.find((o) => o.value === value);
             if (option) store.actions.setNewSessionDestination(option.value);
+          },
+        };
+      case "untracked":
+        return {
+          options: UNTRACKED_OPTIONS.map((option) => option.value),
+          value: draft.untracked,
+          select: (value) => {
+            const option = UNTRACKED_OPTIONS.find((o) => o.value === value);
+            if (option) store.actions.setNewSessionUntracked(option.value);
           },
         };
       default:
@@ -1259,7 +1280,15 @@ export function App(props: AppProps) {
           detach,
           // The daemon derives the name from the prompt when none is given,
           // which is the same rule the row previews, so the two cannot drift.
-          worktree: draft.destination === "worktree" ? {} : undefined,
+          // In move-changes mode the same field carries the move: the daemon
+          // routes creation through it, so the worktree is made once, with
+          // the changes already in it.
+          worktree:
+            draft.destination === "worktree"
+              ? draft.moveChanges
+                ? { withChanges: true, untracked: draft.untracked }
+                : {}
+              : undefined,
         }),
       });
       const body = (await response.json().catch(() => null)) as {
@@ -2268,6 +2297,7 @@ export function App(props: AppProps) {
               onSelectAgent={store.actions.setNewSessionAgent}
               onSelectPlacement={store.actions.setNewSessionPlacement}
               onSelectDestination={store.actions.setNewSessionDestination}
+              onSelectUntracked={store.actions.setNewSessionUntracked}
               onPromptInput={store.actions.setNewSessionPrompt}
               onSubmit={() => void submitNewSession()}
               onCancel={store.actions.closeNewSessionDialog}

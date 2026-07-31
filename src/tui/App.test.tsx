@@ -3547,12 +3547,16 @@ describe("App move-changes menu gate", () => {
       const href = String(url);
       if (href.includes("/dirty")) {
         asked.push(href);
-        if (answer === "never") return new Promise(() => {}) as Promise<Response>;
+        if (answer === "never")
+          return new Promise(() => {}) as Promise<Response>;
         if (answer === "error") return { ok: false, status: 500 } as Response;
         return { ok: true, json: async () => answer } as Response;
       }
       if (href.includes("/server-info")) {
-        return { ok: true, json: async () => ({ socketPath: null }) } as Response;
+        return {
+          ok: true,
+          json: async () => ({ socketPath: null }),
+        } as Response;
       }
       return { ok: true, json: async () => ({}) } as Response;
     }) as unknown as typeof fetch;
@@ -3731,8 +3735,18 @@ describe("App move-changes menu gate", () => {
       await renderApp(120, 24, { groupBy: "none", persistent: true });
       sseCallbacks!.onInit(
         [
-          mockEnrichedSession({ id: "s1", project: "a", cwd: "/a", tmuxPane: "%1" }),
-          mockEnrichedSession({ id: "s2", project: "b", cwd: "/b", tmuxPane: "%2" }),
+          mockEnrichedSession({
+            id: "s1",
+            project: "a",
+            cwd: "/a",
+            tmuxPane: "%1",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "b",
+            cwd: "/b",
+            tmuxPane: "%2",
+          }),
         ],
         null,
       );
@@ -3756,5 +3770,148 @@ describe("App move-changes menu gate", () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+
+  /**
+   * The item's whole job: hand the dialog a request that already knows it is
+   * a move. Driven from the click rather than the store so the prefill, the
+   * dialog and the POST are checked as one path.
+   */
+  describe("the dialog it opens", () => {
+    type SpawnBody = {
+      cwd?: string;
+      prompt?: string;
+      worktree?: { withChanges?: boolean; untracked?: string };
+    };
+
+    function withMoveDaemon() {
+      const spawns: SpawnBody[] = [];
+      const original = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+        const href = String(url);
+        if (href.includes("/dirty")) {
+          return { ok: true, json: async () => ({ dirty: true }) } as Response;
+        }
+        if (href.includes("/server-info")) {
+          return Response.json({ socketPath: null });
+        }
+        if (href.endsWith("/agents")) {
+          return Response.json({
+            agents: [
+              {
+                name: "claude",
+                displayName: "Claude",
+                shortCode: "CC",
+                supportsPrompt: true,
+              },
+            ],
+          });
+        }
+        if (href.endsWith("/spawn")) {
+          spawns.push(JSON.parse(String(init?.body ?? "{}")) as SpawnBody);
+          return Response.json({ success: true, paneId: "%99" });
+        }
+        return Response.json({});
+      }) as unknown as typeof fetch;
+      return { spawns, restore: () => (globalThis.fetch = original) };
+    }
+
+    /** Open the row menu, wait for the dirty answer, and click "Move changes". */
+    async function clickMoveChanges(): Promise<void> {
+      await openMenuOnRow();
+      await settle();
+      await setup.renderOnce();
+      const row = setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes("Move changes"));
+      expect(row).toBeGreaterThan(0);
+      await setup.mockMouse.click(7, row, MouseButtons.LEFT);
+      await settle();
+      await setup.renderOnce();
+    }
+
+    it("opens prefilled for a move, over the row's own checkout", async () => {
+      const { restore } = withMoveDaemon();
+      try {
+        await clickMoveChanges();
+        const frame = setup.captureCharFrame();
+
+        expect(frame).toContain("Move changes to worktree");
+        expect(frame).toContain("/code/myapp");
+        // Locked to a worktree, with the untracked choice this mode adds.
+        expect(frame).toContain("Where");
+        expect(frame).not.toContain("This checkout");
+        expect(frame).toContain("Untracked");
+        expect(frame).toContain("[Move]");
+      } finally {
+        restore();
+      }
+    });
+
+    it("posts the move with the chosen untracked mode", async () => {
+      const { spawns, restore } = withMoveDaemon();
+      try {
+        await clickMoveChanges();
+        // Type a prompt, which is also what names the worktree...
+        setup.mockInput.pressTab();
+        setup.mockInput.pressTab();
+        await setup.renderOnce();
+        await setup.mockInput.typeText("fix the flicker");
+        await setup.renderOnce();
+        // ...then tab to Untracked (straight past the locked destination)
+        // and pick "leave".
+        setup.mockInput.pressTab();
+        await setup.renderOnce();
+        setup.mockInput.pressKey("3");
+        await setup.renderOnce();
+        expect(setup.captureCharFrame()).toContain("[Leave here]");
+
+        setup.mockInput.pressEnter();
+        await settle();
+
+        expect(spawns).toHaveLength(1);
+        expect(spawns[0]?.cwd).toBe("/code/myapp");
+        expect(spawns[0]?.prompt).toBe("fix the flicker");
+        expect(spawns[0]?.worktree).toEqual({
+          withChanges: true,
+          untracked: "leave",
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it("sends no move on an ordinary new session", async () => {
+      // The same dialog, opened by `n`: the flag is what makes it a move, and
+      // nothing about the mode may leak into the request that did not ask.
+      const { spawns, restore } = withMoveDaemon();
+      try {
+        await renderApp(120, 24, { groupBy: "none", persistent: true });
+        sseCallbacks!.onInit(
+          [
+            mockEnrichedSession({
+              id: "s1",
+              project: "myapp",
+              cwd: "/code/myapp",
+              tmuxPane: "%1",
+            }),
+          ],
+          null,
+        );
+        await setup.renderOnce();
+        setup.mockInput.pressKey("n");
+        await settle();
+        await setup.renderOnce();
+        expect(setup.captureCharFrame()).toContain("New session");
+        setup.mockInput.pressEnter();
+        await settle();
+
+        expect(spawns).toHaveLength(1);
+        expect(spawns[0]?.worktree).toBeUndefined();
+      } finally {
+        restore();
+      }
+    });
   });
 });

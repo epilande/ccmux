@@ -15,7 +15,8 @@ mock.module("./utils/tmux", () => ({
   capturePane: capturePaneSpy,
 }));
 
-const { createTUIStore: _createTUIStore } = await import("./store");
+const { createTUIStore: _createTUIStore, NEW_SESSION_FIELDS } =
+  await import("./store");
 
 function headerLabels(items: FlatItem[]): string[] {
   return items
@@ -2954,6 +2955,10 @@ describe("store", () => {
         // default; a worktree is something you ask for.
         destination: "here",
         prompt: "",
+        // Not a move: an ordinary new session starts fresh, and the
+        // untracked choice is inert until one is.
+        moveChanges: false,
+        untracked: "move",
         field: "agent",
       });
     });
@@ -3011,8 +3016,98 @@ describe("store", () => {
         placement: "split-h",
         destination: "worktree",
         prompt: "fix the tests",
+        moveChanges: false,
+        untracked: "move",
         field: "prompt",
       });
+    });
+
+    it("opens in move-changes mode with the destination already locked", () => {
+      const store = createTUIStore();
+
+      store.actions.openNewSessionDialog({
+        cwd: "/repo",
+        agent: "claude",
+        moveChanges: true,
+      });
+
+      expect(store.state.newSession).toEqual({
+        cwd: "/repo",
+        agent: "claude",
+        placement: "window",
+        // The changes have nowhere to go but a new worktree, so the mode
+        // arrives with the destination already made rather than as a choice
+        // the user has to make a second time.
+        destination: "worktree",
+        prompt: "",
+        moveChanges: true,
+        untracked: "move",
+        field: "agent",
+      });
+    });
+
+    it("skips the locked destination when tabbing in move-changes mode", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({
+        cwd: "/repo",
+        agent: "claude",
+        moveChanges: true,
+      });
+
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("placement");
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("prompt");
+      // Straight past `destination`, which cannot be changed here, to the
+      // untracked choice, which only exists here.
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("untracked");
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("agent");
+      store.actions.moveNewSessionField(-1);
+      expect(store.state.newSession?.field).toBe("untracked");
+    });
+
+    it("never reaches the untracked field outside move-changes mode", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+
+      const seen = new Set<string>();
+      for (let i = 0; i < NEW_SESSION_FIELDS.length + 2; i++) {
+        seen.add(store.state.newSession!.field);
+        store.actions.moveNewSessionField(1);
+      }
+
+      expect(seen.has("untracked")).toBe(false);
+      expect(seen.has("destination")).toBe(true);
+    });
+
+    it("refuses to move the destination off the worktree in move-changes mode", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({
+        cwd: "/repo",
+        agent: "claude",
+        moveChanges: true,
+      });
+
+      // The destination is what makes the request a move; flipping it back
+      // would post a spawn that silently dropped the changes.
+      store.actions.setNewSessionDestination("here");
+
+      expect(store.state.newSession?.destination).toBe("worktree");
+    });
+
+    it("updates the untracked mode", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({
+        cwd: "/repo",
+        agent: "claude",
+        moveChanges: true,
+      });
+
+      store.actions.setNewSessionUntracked("leave");
+
+      expect(store.state.newSession?.untracked).toBe("leave");
     });
 
     it("ignores draft edits while the dialog is closed", () => {

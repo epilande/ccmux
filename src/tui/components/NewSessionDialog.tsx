@@ -10,6 +10,7 @@ import {
   type NewSessionField,
   type NewSessionPlacement,
 } from "../store";
+import type { UntrackedMode } from "../../daemon/worktree-move-changes";
 import { slugFromPrompt } from "../../daemon/worktree-create";
 import {
   displayWidth,
@@ -29,6 +30,9 @@ const MIN_WIDTH = 24;
 /** Rows that belong to no field: border (2), title, blank, directory. Every
  *  other row is a field's, counted from NEW_SESSION_FIELDS below. */
 const FIXED_CHROME_ROWS = 5;
+/** Move-changes mode adds one more derived row, saying what happens to the
+ *  source checkout. */
+const MOVE_NOTE_ROWS = 1;
 /** The blank spacer plus the key-hint row, when the dialog draws its own. */
 const KEY_HINT_ROWS = 2;
 /** Content width the placement row's full labels need (number, brackets,
@@ -64,6 +68,26 @@ interface DestinationOption {
 export const DESTINATION_OPTIONS: readonly DestinationOption[] = [
   { value: "here", label: "This checkout", compactLabel: "Here" },
   { value: "worktree", label: "New worktree", compactLabel: "Worktree" },
+];
+
+interface UntrackedOption {
+  value: UntrackedMode;
+  label: string;
+  compactLabel: string;
+}
+
+/**
+ * What a move does with files git is not tracking yet, in the order their
+ * number keys select them.
+ *
+ * The full labels name the DESTINATION rather than repeating the verb,
+ * because "Copy" alone leaves the question this field exists to answer (does
+ * the source keep them?) unanswered.
+ */
+export const UNTRACKED_OPTIONS: readonly UntrackedOption[] = [
+  { value: "move", label: "Move", compactLabel: "Move" },
+  { value: "copy", label: "Copy to both", compactLabel: "Copy" },
+  { value: "leave", label: "Leave here", compactLabel: "Leave" },
 ];
 
 /**
@@ -150,6 +174,7 @@ interface NewSessionDialogProps {
   onSelectAgent: (name: string) => void;
   onSelectPlacement: (placement: NewSessionPlacement) => void;
   onSelectDestination: (destination: NewSessionDestination) => void;
+  onSelectUntracked: (untracked: UntrackedMode) => void;
   onPromptInput: (prompt: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
@@ -196,6 +221,11 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const showKeyHints = () => props.showKeyHints !== false;
   const hintRows = () => (showKeyHints() ? KEY_HINT_ROWS : 0);
 
+  /** Relocating this checkout's uncommitted work, rather than starting fresh
+   *  in it. Changes the title, locks the destination, and adds the
+   *  untracked-files choice. */
+  const moveChanges = () => props.draft.moveChanges;
+
   const agents = createMemo(() => props.agents ?? []);
   const selectedAgentIndex = createMemo(() => {
     const index = agents().findIndex((a) => a.name === props.draft.agent);
@@ -221,7 +251,14 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         ? agentErrorLines().length
         : Math.max(1, visibleAgents().length),
     placement: () => (stacked() ? PLACEMENT_OPTIONS.length : 1),
-    destination: () => (stacked() ? DESTINATION_OPTIONS.length : 1),
+    // Locked in move-changes mode, where it renders as one derived row
+    // (no numbered options, so nothing to stack).
+    destination: () =>
+      moveChanges() || !stacked() ? 1 : DESTINATION_OPTIONS.length,
+    // Move-changes mode only; zero rows is how a hidden field keeps the
+    // height correct without the sum having to know which mode it is in.
+    untracked: () =>
+      !moveChanges() ? 0 : stacked() ? UNTRACKED_OPTIONS.length : 1,
     prompt: () => 1,
   };
 
@@ -238,7 +275,11 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const agentRoom = createMemo(() =>
     Math.max(
       1,
-      dims().height - FIXED_CHROME_ROWS - hintRows() - otherFieldRows("agent"),
+      dims().height -
+        FIXED_CHROME_ROWS -
+        (moveChanges() ? MOVE_NOTE_ROWS : 0) -
+        hintRows() -
+        otherFieldRows("agent"),
     ),
   );
 
@@ -304,6 +345,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     Math.min(
       dims().height,
       FIXED_CHROME_ROWS +
+        (moveChanges() ? MOVE_NOTE_ROWS : 0) +
         hintRows() +
         NEW_SESSION_FIELDS.reduce(
           (total, field) => total + fieldRows[field](),
@@ -344,6 +386,25 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const cwdLabel = () =>
     truncateText(shortenCwd(props.draft.cwd), contentWidth());
 
+  /**
+   * The locked destination row's text: the worktree that will be created,
+   * named the same way the selectable row names it (from the prompt), so the
+   * two modes cannot describe the same rule differently.
+   */
+  const lockedDestinationLabel = () => {
+    const base = stacked() ? "Worktree" : "New worktree";
+    const slug = slugFromPrompt(props.draft.prompt);
+    const text = slug ? `${base}: ${slug}` : `${base} (add a prompt)`;
+    return truncateText(text, contentWidth());
+  };
+
+  /** What the move does to the directory named on the row above. */
+  const moveNote = () =>
+    truncateText(
+      stacked() ? "Moved out" : "Moved out of this checkout",
+      contentWidth(),
+    );
+
   /** Says whether this agent can take a prompt at all, which is per-agent
    *  and not otherwise discoverable. Shortened on a narrow surface, where
    *  the full sentence would run past the border. */
@@ -380,7 +441,14 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     >
       <box height={1}>
         <text fg={theme.text}>
-          <strong>New session</strong>
+          {/* The title is the mode indicator: it is the one row the eye
+              lands on first, and "Move changes" is what makes this dialog
+              different from every other time it opens. */}
+          <strong>
+            {moveChanges()
+              ? truncateText("Move changes to worktree", width() - 4)
+              : "New session"}
+          </strong>
         </text>
       </box>
       <box height={1} />
@@ -516,79 +584,138 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         />
       </box>
 
-      <box flexDirection="row">
-        <FieldLabel field="destination" text="Where" />
-        <box
-          flexDirection={stacked() ? "column" : "row"}
-          flexGrow={1}
-          onMouseDown={() => props.onFocusField("destination")}
-        >
-          <For each={DESTINATION_OPTIONS}>
-            {(option, index) => {
-              const selected = () => option.value === props.draft.destination;
-              /* The worktree option carries the name it would create, so the
+      <Show when={moveChanges()}>
+        {/* Locked, so it is drawn like Directory rather than as a field: no
+            focus marker and no number keys, because a row that looks
+            selectable but refuses every key reads as broken. The changes have
+            nowhere to go but a new worktree, so there is no second choice to
+            offer. */}
+        <box flexDirection="row" height={1}>
+          <box width={LABEL_WIDTH} paddingLeft={1}>
+            <text fg={theme.overlay}>Where</text>
+          </box>
+          <text fg={theme.green}>{lockedDestinationLabel()}</text>
+        </box>
+      </Show>
+
+      <Show when={!moveChanges()}>
+        <box flexDirection="row">
+          <FieldLabel field="destination" text="Where" />
+          <box
+            flexDirection={stacked() ? "column" : "row"}
+            flexGrow={1}
+            onMouseDown={() => props.onFocusField("destination")}
+          >
+            <For each={DESTINATION_OPTIONS}>
+              {(option, index) => {
+                const selected = () => option.value === props.draft.destination;
+                /* The worktree option carries the name it would create, so the
                  choice is concrete rather than a promise. It tracks the
                  prompt as it is typed, which is also the answer to "where
                  did that branch name come from". */
-              const label = () => {
-                const base = optionLabel(option);
-                if (option.value !== "worktree") return base;
-                // Budgeted, not appended blindly: a long prompt yields a long
-                // slug, and on one row that pushed the dialog's own right
-                // border off screen. Each option spends a 2-wide number cell
-                // and two 1-wide brackets, and when side by side the first
-                // option also spends its label and a 2-wide margin.
-                const spent = stacked()
-                  ? 4
-                  : 8 + optionLabel(DESTINATION_OPTIONS[0]!).length + 2;
-                const room = contentWidth() - spent;
-                const slug = slugFromPrompt(props.draft.prompt);
-                if (!slug) {
-                  // A worktree is named by the prompt and nothing else, so
-                  // with no derivable name this option cannot spawn. Say so
-                  // while the choice is being made rather than on Enter, and
-                  // only while it is the choice: on the unselected row the
-                  // hint is noise. Appended only when it fits whole, since a
-                  // truncated `Worktree (a...` explains nothing.
-                  if (!selected()) return base;
-                  const hinted = `${base} (add a prompt)`;
-                  return hinted.length <= room ? hinted : base;
-                }
-                return truncateText(
-                  `${base}: ${slug}`,
-                  Math.max(base.length, room),
+                const label = () => {
+                  const base = optionLabel(option);
+                  if (option.value !== "worktree") return base;
+                  // Budgeted, not appended blindly: a long prompt yields a long
+                  // slug, and on one row that pushed the dialog's own right
+                  // border off screen. Each option spends a 2-wide number cell
+                  // and two 1-wide brackets, and when side by side the first
+                  // option also spends its label and a 2-wide margin.
+                  const spent = stacked()
+                    ? 4
+                    : 8 + optionLabel(DESTINATION_OPTIONS[0]!).length + 2;
+                  const room = contentWidth() - spent;
+                  const slug = slugFromPrompt(props.draft.prompt);
+                  if (!slug) {
+                    // A worktree is named by the prompt and nothing else, so
+                    // with no derivable name this option cannot spawn. Say so
+                    // while the choice is being made rather than on Enter, and
+                    // only while it is the choice: on the unselected row the
+                    // hint is noise. Appended only when it fits whole, since a
+                    // truncated `Worktree (a...` explains nothing.
+                    if (!selected()) return base;
+                    const hinted = `${base} (add a prompt)`;
+                    return hinted.length <= room ? hinted : base;
+                  }
+                  return truncateText(
+                    `${base}: ${slug}`,
+                    Math.max(base.length, room),
+                  );
+                };
+                return (
+                  <box
+                    height={1}
+                    flexDirection="row"
+                    flexShrink={0}
+                    marginRight={stacked() ? 0 : 2}
+                    onMouseDown={(event) => {
+                      if (event.button !== MouseButton.LEFT) return;
+                      props.onFocusField("destination");
+                      props.onSelectDestination(option.value);
+                    }}
+                  >
+                    <box width={2}>
+                      <text fg={theme.overlay}>{`${index() + 1}`}</text>
+                    </box>
+                    <box width={1}>
+                      <text fg={theme.green}>{selected() ? "[" : ""}</text>
+                    </box>
+                    <text fg={selected() ? theme.green : theme.subtext}>
+                      {label()}
+                    </text>
+                    <box width={1}>
+                      <text fg={theme.green}>{selected() ? "]" : ""}</text>
+                    </box>
+                  </box>
                 );
-              };
-              return (
-                <box
-                  height={1}
-                  flexDirection="row"
-                  flexShrink={0}
-                  marginRight={stacked() ? 0 : 2}
-                  onMouseDown={(event) => {
-                    if (event.button !== MouseButton.LEFT) return;
-                    props.onFocusField("destination");
-                    props.onSelectDestination(option.value);
-                  }}
-                >
-                  <box width={2}>
-                    <text fg={theme.overlay}>{`${index() + 1}`}</text>
-                  </box>
-                  <box width={1}>
-                    <text fg={theme.green}>{selected() ? "[" : ""}</text>
-                  </box>
-                  <text fg={selected() ? theme.green : theme.subtext}>
-                    {label()}
-                  </text>
-                  <box width={1}>
-                    <text fg={theme.green}>{selected() ? "]" : ""}</text>
-                  </box>
-                </box>
-              );
-            }}
-          </For>
+              }}
+            </For>
+          </box>
         </box>
-      </box>
+      </Show>
+
+      <Show when={moveChanges()}>
+        <box flexDirection="row">
+          <FieldLabel field="untracked" text="Untracked" />
+          <box
+            flexDirection={stacked() ? "column" : "row"}
+            flexGrow={1}
+            onMouseDown={() => props.onFocusField("untracked")}
+          >
+            <For each={UNTRACKED_OPTIONS}>
+              {(option, index) => {
+                const selected = () => option.value === props.draft.untracked;
+                return (
+                  <box
+                    height={1}
+                    flexDirection="row"
+                    flexShrink={0}
+                    marginRight={stacked() ? 0 : 2}
+                    onMouseDown={(event) => {
+                      if (event.button !== MouseButton.LEFT) return;
+                      props.onFocusField("untracked");
+                      props.onSelectUntracked(option.value);
+                    }}
+                  >
+                    <box width={2}>
+                      <text fg={theme.overlay}>{`${index() + 1}`}</text>
+                    </box>
+                    <box width={1}>
+                      <text fg={theme.green}>{selected() ? "[" : ""}</text>
+                    </box>
+                    <text fg={selected() ? theme.green : theme.subtext}>
+                      {optionLabel(option)}
+                    </text>
+                    <box width={1}>
+                      <text fg={theme.green}>{selected() ? "]" : ""}</text>
+                    </box>
+                  </box>
+                );
+              }}
+            </For>
+          </box>
+        </box>
+      </Show>
 
       <box flexDirection="row" height={1}>
         {/* Not a field: derived, never focused, so it only pads past the
@@ -598,6 +725,18 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         </box>
         <text fg={theme.subtext}>{cwdLabel()}</text>
       </box>
+
+      <Show when={moveChanges()}>
+        {/* The title says a move is happening; this says what it costs the
+            directory named directly above, which is the part someone can
+            still back out of at this point. */}
+        <box flexDirection="row" height={1}>
+          <box width={LABEL_WIDTH} paddingLeft={1}>
+            <text fg={theme.overlay}>Changes</text>
+          </box>
+          <text fg={theme.peach}>{moveNote()}</text>
+        </box>
+      </Show>
 
       <Show when={showKeyHints()}>
         <box height={1} />

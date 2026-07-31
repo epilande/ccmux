@@ -31,6 +31,7 @@ import { DEFAULT_PROMPT_DISPLAY } from "../lib/preferences";
 import { setUIState, type UIState } from "../lib/state";
 import { getDaemonUrl } from "../lib/config";
 import type { TranscriptMatch } from "../daemon/transcript-search";
+import type { UntrackedMode } from "../daemon/worktree-move-changes";
 import { normalizePrompt } from "./components/session-columns";
 import { capturePane } from "./utils/tmux";
 import { isSameServerCached } from "./utils/server-guard";
@@ -67,7 +68,12 @@ export type NewSessionPlacement = "window" | "split-h" | "split-v";
  */
 export type NewSessionDestination = "here" | "worktree";
 
-export type NewSessionField = "agent" | "placement" | "prompt" | "destination";
+export type NewSessionField =
+  | "agent"
+  | "placement"
+  | "prompt"
+  | "destination"
+  | "untracked";
 
 /**
  * The dialog's fields, in focus order. Focus movement, which field the
@@ -92,7 +98,30 @@ export const NEW_SESSION_FIELDS: readonly NewSessionField[] = [
   // something to derive it from. It also leaves the two-tab path to the
   // prompt, which people already have in their fingers, where it was.
   "destination",
+  // Move-changes mode only; see `newSessionFields`.
+  "untracked",
 ];
+
+/**
+ * The fields a given draft actually has, in focus order.
+ *
+ * Two of them are mode-exclusive. Move-changes mode locks the destination (a
+ * move has nowhere to go but a new worktree, so offering "here" would be a
+ * choice that cannot be taken) and adds the untracked-files choice; an
+ * ordinary new session has neither. A field that cannot be acted on must not
+ * be reachable by Tab either — focusing a row whose number keys do nothing is
+ * exactly the "reads as broken" outcome the picker hides items to avoid.
+ *
+ * The full list stays the source of truth for the DIALOG'S HEIGHT: every
+ * field declares a row count, and the hidden one declares zero.
+ */
+export function newSessionFields(draft: {
+  moveChanges: boolean;
+}): readonly NewSessionField[] {
+  return NEW_SESSION_FIELDS.filter((field) =>
+    draft.moveChanges ? field !== "destination" : field !== "untracked",
+  );
+}
 
 /**
  * In-progress "new session" request. Every field has a usable default, so
@@ -109,6 +138,14 @@ export interface NewSessionDraft {
   placement: NewSessionPlacement;
   destination: NewSessionDestination;
   prompt: string;
+  /**
+   * Relocate `cwd`'s uncommitted work into the new worktree (issue #71).
+   * Set only by the row menu's "Move changes", which is offered only for a
+   * checkout the daemon has confirmed is dirty, and it locks `destination`.
+   */
+  moveChanges: boolean;
+  /** What the move does with untracked files. Ignored unless `moveChanges`. */
+  untracked: UntrackedMode;
   /** Which field the option/text keys currently apply to. */
   field: NewSessionField;
 }
@@ -1247,7 +1284,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
      * that knows what the selection means (a session row, a group header,
      * or nothing at all).
      */
-    openNewSessionDialog(init: { cwd: string; agent: string }) {
+    openNewSessionDialog(init: {
+      cwd: string;
+      agent: string;
+      /** Open in move-changes mode: destination locked to a new worktree,
+       *  with the untracked-files choice. */
+      moveChanges?: boolean;
+    }) {
+      const moveChanges = init.moveChanges === true;
       batch(() => {
         setState("contextMenu", null);
         setState("groupContextMenu", null);
@@ -1255,9 +1299,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           cwd: init.cwd,
           agent: init.agent,
           placement: "window",
-          destination: "here",
+          // A move has nowhere to go but a new worktree; anything else is the
+          // ordinary spawn, which defaults to the directory it was opened over.
+          destination: moveChanges ? "worktree" : "here",
           prompt: "",
-          field: NEW_SESSION_FIELDS[0]!,
+          moveChanges,
+          // Agents create new files constantly, so leaving them behind would
+          // strand exactly the work being relocated. Same default as the CLI.
+          untracked: "move",
+          field: newSessionFields({ moveChanges })[0]!,
         });
       });
     },
@@ -1270,10 +1320,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     moveNewSessionField(delta: number) {
       const draft = state.newSession;
       if (!draft) return;
-      const count = NEW_SESSION_FIELDS.length;
-      const current = NEW_SESSION_FIELDS.indexOf(draft.field);
+      const fields = newSessionFields(draft);
+      const count = fields.length;
+      const current = fields.indexOf(draft.field);
       const next = (((current + delta) % count) + count) % count;
-      setState("newSession", "field", NEW_SESSION_FIELDS[next]!);
+      setState("newSession", "field", fields[next]!);
     },
 
     setNewSessionField(field: NewSessionField) {
@@ -1293,12 +1344,22 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     setNewSessionDestination(destination: NewSessionDestination) {
       if (!state.newSession) return;
+      // Locked in move-changes mode, and enforced here rather than only in the
+      // dialog: the destination is what makes the request a move at all, so
+      // any path that could flip it back to `here` would post a spawn that
+      // silently dropped the changes it was opened to relocate.
+      if (state.newSession.moveChanges) return;
       setState("newSession", "destination", destination);
     },
 
     setNewSessionPrompt(prompt: string) {
       if (!state.newSession) return;
       setState("newSession", "prompt", prompt);
+    },
+
+    setNewSessionUntracked(untracked: UntrackedMode) {
+      if (!state.newSession) return;
+      setState("newSession", "untracked", untracked);
     },
 
     /**
