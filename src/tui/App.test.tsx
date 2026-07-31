@@ -3758,6 +3758,37 @@ describe("App move-changes menu gate", () => {
     }
   });
 
+  it("never asks about a paneless background row", async () => {
+    // Its menu has no "Move changes" item to gate (see `sessionMenuItems`),
+    // so the question is a `git status -uall` on the daemon whose answer is
+    // discarded either way.
+    const { asked, restore } = captureDirty();
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "bg1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: null,
+            trackingMode: "background",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      // Anchored on the menu having actually opened, so this can't pass by
+      // the right-click landing nowhere.
+      expect(setup.captureCharFrame()).toContain("Attach agent");
+      expect(asked).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
   it("shows the item once the answer says dirty", async () => {
     const { restore } = captureDirty({ dirty: true });
     try {
@@ -4201,7 +4232,9 @@ describe("App move-changes reporting", () => {
       }
       if (href.endsWith("/spawn")) {
         spawnBodies.push(
-          JSON.parse(String(init?.body ?? "{}")) as (typeof spawnBodies)[number],
+          JSON.parse(
+            String(init?.body ?? "{}"),
+          ) as (typeof spawnBodies)[number],
         );
         return spawn();
       }

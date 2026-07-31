@@ -67,12 +67,15 @@ export const NoticeDialog: Component<NoticeDialogProps> = (props) => {
   return (
     <box
       position="absolute"
-      top="50%"
-      left="50%"
+      /* Centered by arithmetic rather than by a 50% offset and a negative
+         margin: those disagree by a row when the dialog and the terminal are
+         both odd-height, and the row they disagree by is the bottom border,
+         which lands off screen exactly when the dialog is already as tall as
+         the terminal. */
+      top={Math.max(0, Math.floor((dims().height - height()) / 2))}
+      left={Math.max(0, Math.floor((dims().width - width()) / 2))}
       width={width()}
       height={height()}
-      marginTop={-Math.floor(height() / 2)}
-      marginLeft={-Math.floor(width() / 2)}
       backgroundColor={theme.base}
       borderStyle="single"
       borderColor={theme.border}

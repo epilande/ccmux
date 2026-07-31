@@ -4,6 +4,7 @@ import { useTerminalDimensions } from "@opentui/solid";
 import { MouseButton } from "@opentui/core";
 import type { SpawnableAgent } from "../../lib/spawnable-agents";
 import {
+  namesAWorktree as draftNamesAWorktree,
   type NewSessionDestination,
   type NewSessionDraft,
   type NewSessionField,
@@ -170,6 +171,38 @@ export interface DialogShape {
   keyHints: boolean;
 }
 
+/** Rows a field is asking for, keyed by the field list itself. */
+type FieldRows = Record<NewSessionField, number>;
+
+/**
+ * One row per field the draft renders, and zero for the fields it does not.
+ *
+ * A `Record<NewSessionField, number>` on purpose. The height below is a SUM,
+ * and a field added to `NEW_SESSION_FIELDS` whose rows nobody counted makes
+ * that sum one short — which does not clip, it draws the extra row over its
+ * neighbour. Declaring the counts here is what turns that into a compile
+ * error: a new member of `NewSessionField` fails to typecheck until it says
+ * how many rows it wants.
+ */
+function floorFieldRows(shape: {
+  moveChanges: boolean;
+  namesAWorktree: boolean;
+}): FieldRows {
+  return {
+    agent: 1,
+    placement: 1,
+    prompt: 1,
+    // Present either way: a locked one-row restatement in move mode, the
+    // choice otherwise.
+    destination: 1,
+    worktreeName: shape.namesAWorktree ? 1 : 0,
+    untracked: shape.moveChanges ? 1 : 0,
+  };
+}
+
+const sumFieldRows = (rows: FieldRows): number =>
+  Object.values(rows).reduce((total, n) => total + n, 0);
+
 /**
  * The shortest the dialog can be drawn and still be a dialog: a border, its
  * title, and one row for every field it has. Everything else — the hints, the
@@ -184,11 +217,8 @@ export function newSessionFloorRows(shape: {
   moveChanges: boolean;
   namesAWorktree: boolean;
 }): number {
-  // Border (2) + title, then agent, placement, prompt and the destination row
-  // (a locked one in move mode, the choice otherwise).
-  const fields =
-    4 + (shape.namesAWorktree ? 1 : 0) + (shape.moveChanges ? 1 : 0);
-  return 3 + fields;
+  // Border (2) + title, then the fields.
+  return 3 + sumFieldRows(floorFieldRows(shape));
 }
 
 /** How the dialog spends the rows it has. Every count is final: the component
@@ -267,18 +297,23 @@ export function planDialogRows(
         : 1,
   };
 
+  /** What the fields currently want, as the plan gives their rows away. The
+   *  floor's presence rules, with the magnitudes the plan has settled on. */
+  const fieldRows = (): FieldRows => ({
+    ...floorFieldRows(shape),
+    agent: plan.agentRows,
+    placement: plan.placementRows,
+    destination: plan.destinationRows,
+    untracked: plan.untrackedRows,
+  });
+
   const total = (): number =>
     3 + // border and title
     (plan.showTitleSpacer ? 1 : 0) +
     (plan.showDirectory ? 1 : 0) +
     (plan.showMoveNote ? 1 : 0) +
     (plan.showKeyHints ? KEY_HINT_ROWS : 0) +
-    plan.agentRows +
-    plan.placementRows +
-    1 + // prompt
-    plan.destinationRows +
-    (shape.namesAWorktree ? 1 : 0) +
-    plan.untrackedRows;
+    sumFieldRows(fieldRows());
 
   /** Give up rows until it fits, or until this step has nothing left. */
   const shrink = (over: number, take: (n: number) => void, has: number) => {
@@ -398,8 +433,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
 
   /** Whether this spawn is making a worktree at all, which is what the name
    *  row exists for. Move-changes mode always is; see `newSessionFields`. */
-  const namesAWorktree = () =>
-    props.draft.destination === "worktree" || moveChanges();
+  const namesAWorktree = () => draftNamesAWorktree(props.draft);
 
   /** The name is the prompt's to give until someone types over it. */
   const derivedName = () => props.draft.worktreeName === null;

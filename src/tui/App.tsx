@@ -17,7 +17,12 @@ import {
 } from "@opentui/solid";
 import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../types/session";
-import { createTUIStore, TickContext, type NewSessionPlacement } from "./store";
+import {
+  createTUIStore,
+  namesAWorktree,
+  TickContext,
+  type NewSessionPlacement,
+} from "./store";
 import { killActionPath, restartActionPath } from "./utils/invoke-actions";
 import {
   formatReviewPrompt,
@@ -611,12 +616,12 @@ export function App(props: AppProps) {
     }
     store.actions.setSelectedIndex(index);
     if (item.type === "session") {
-      store.actions.showContextMenu(
-        item.filteredSession.session.id,
-        event.x,
-        event.y,
-      );
-      refreshMenuDirty(item.filteredSession.session);
+      const session = item.filteredSession.session;
+      store.actions.showContextMenu(session.id, event.x, event.y);
+      // Same condition both consumers gate on (`sessionMenuItems` and
+      // `sessionMenuReservedRows`): a background row has no move to offer, so
+      // asking would spend a `git status -uall` on an answer nobody reads.
+      if (session.trackingMode !== "background") refreshMenuDirty(session);
     } else {
       store.actions.showGroupContextMenu(item.groupKey, event.x, event.y);
     }
@@ -1198,7 +1203,7 @@ export function App(props: AppProps) {
       appDims().height <
       newSessionFloorRows({
         moveChanges: draft.moveChanges,
-        namesAWorktree: draft.destination === "worktree" || draft.moveChanges,
+        namesAWorktree: namesAWorktree(draft),
       })
     ) {
       return null;

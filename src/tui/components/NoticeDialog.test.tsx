@@ -39,27 +39,51 @@ describe("NoticeDialog", () => {
     }
   });
 
-  it("keeps its bottom border on screen when the message outruns the terminal", async () => {
-    // A capped message, not a dialog drawn past the viewport: content that
-    // overflows does not clip here, it draws over the rows above it.
+  // Odd heights included: a 50%-offset-plus-negative-margin centering rounds
+  // the two halves apart by a row, and the row it loses is the bottom border.
+  for (const height of [11, 12]) {
+    it(`keeps its bottom border on screen when the message outruns a ${height}-row terminal`, async () => {
+      // A capped message, not a dialog drawn past the viewport: content that
+      // overflows does not clip here, it draws over the rows above it.
+      setup = await testRender(
+        () => (
+          <NoticeDialog
+            title="Move failed"
+            lines={Array.from({ length: 40 }, (_, i) => `line ${i}`)}
+            onDismiss={() => {}}
+          />
+        ),
+        { width: 60, height },
+      );
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      const rows = frame.split("\n");
+      expect(rows[0]).toContain("┌");
+      // The last row carries the bottom border, and the dismiss hint is above.
+      const bottom = borderRows(frame).at(-1)!;
+      expect(rows[bottom]).toContain("└");
+      expect(rows[bottom - 1]).toContain("any key to dismiss");
+    });
+  }
+
+  it("centers itself rather than sitting a row below center", async () => {
     setup = await testRender(
       () => (
         <NoticeDialog
           title="Move failed"
-          lines={Array.from({ length: 40 }, (_, i) => `line ${i}`)}
+          lines={["something happened"]}
           onDismiss={() => {}}
         />
       ),
-      { width: 60, height: 12 },
+      { width: 60, height: 21 },
     );
     await setup.renderOnce();
-    const frame = setup.captureCharFrame();
-    const rows = frame.split("\n");
-    expect(rows[0]).toContain("┌");
-    // The last row carries the bottom border, and the dismiss hint is above it.
-    const bottom = borderRows(frame).at(-1)!;
-    expect(rows[bottom]).toContain("└");
-    expect(rows[bottom - 1]).toContain("any key to dismiss");
+    const rows = borderRows(setup.captureCharFrame());
+    const top = rows[0]!;
+    const bottom = rows.at(-1)!;
+    // CHROME_ROWS (6) + one message row = 7, centered in 21 rows: rows 7..13.
+    expect(top).toBe(7);
+    expect(bottom).toBe(13);
   });
 
   it("dismisses on a click", async () => {

@@ -15,8 +15,11 @@ mock.module("./utils/tmux", () => ({
   capturePane: capturePaneSpy,
 }));
 
-const { createTUIStore: _createTUIStore, NEW_SESSION_FIELDS } =
-  await import("./store");
+const {
+  createTUIStore: _createTUIStore,
+  NEW_SESSION_FIELDS,
+  namesAWorktree,
+} = await import("./store");
 
 function headerLabels(items: FlatItem[]): string[] {
   return items
@@ -3135,6 +3138,30 @@ describe("store", () => {
      * the daemon does on a collision: a DERIVED name gets numbered past an
      * existing worktree, an EXPLICIT one opens it. Null is derived.
      */
+    describe("namesAWorktree", () => {
+      // One rule with three consumers (field presence here, the dialog's Name
+      // row, and App's height floor). They must agree: a floor computed for
+      // fewer rows than the dialog renders overlaps a row rather than
+      // clipping it.
+      it("is true for a worktree destination", () => {
+        expect(
+          namesAWorktree({ moveChanges: false, destination: "worktree" }),
+        ).toBe(true);
+      });
+
+      it("is true for a move, whose destination lock could come loose", () => {
+        expect(namesAWorktree({ moveChanges: true, destination: "here" })).toBe(
+          true,
+        );
+      });
+
+      it("is false for a plain session in the checkout it opened over", () => {
+        expect(
+          namesAWorktree({ moveChanges: false, destination: "here" }),
+        ).toBe(false);
+      });
+    });
+
     describe("worktree name", () => {
       /** A dialog with a worktree destination and a prompt to derive from. */
       function worktreeDialog() {

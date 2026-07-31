@@ -88,11 +88,12 @@ export type NewSessionField =
  * a rework of the key handling.
  *
  * Additive is not the same as one line: the store action and open-time
- * default, App's option lookups, and the component's props, render branch,
- * and `fieldRows` entry all need the new case. TypeScript names each one —
- * `fieldRows` is a `Record<NewSessionField, …>` for exactly that reason,
- * since the height it replaced was a hand-summed constant that compiled
- * fine and clipped a row at runtime.
+ * default, App's option lookups, the component's props and render branch,
+ * and the row budget (`planDialogRows` / `newSessionFloorRows` in
+ * `NewSessionDialog.tsx`) all need the new case. TypeScript names the last
+ * one — the budget's per-field counts are a `Record<NewSessionField, number>`
+ * for exactly that reason, since a field whose rows nobody counted leaves a
+ * hand-summed height that compiles fine and draws a row over its neighbour.
  */
 export const NEW_SESSION_FIELDS: readonly NewSessionField[] = [
   "agent",
@@ -110,6 +111,24 @@ export const NEW_SESSION_FIELDS: readonly NewSessionField[] = [
   // Move-changes mode only; see `newSessionFields`.
   "untracked",
 ];
+
+/**
+ * Whether this draft's spawn makes a worktree, which is the one rule three
+ * different consumers have to agree on: whether the Name field exists at all
+ * (below), whether the dialog renders its row, and how many rows `App.tsx`
+ * budgets for the height floor. A consumer that disagreed would not clip the
+ * row it did not expect — it would draw it over its neighbour.
+ *
+ * Both disjuncts, though the store locks a move's destination to `worktree`:
+ * the name row is what a move names its worktree with, and a lock that ever
+ * came loose must not take the field with it.
+ */
+export function namesAWorktree(draft: {
+  moveChanges: boolean;
+  destination: NewSessionDestination;
+}): boolean {
+  return draft.destination === "worktree" || draft.moveChanges;
+}
 
 /**
  * The fields a given draft actually has, in focus order.
@@ -133,12 +152,7 @@ export function newSessionFields(draft: {
   return NEW_SESSION_FIELDS.filter((field) => {
     if (field === "destination") return !draft.moveChanges;
     if (field === "untracked") return draft.moveChanges;
-    // Both disjuncts, though the store locks a move's destination to
-    // `worktree`: the name row is what a move names its worktree with, and a
-    // lock that ever came loose must not take the field with it.
-    if (field === "worktreeName") {
-      return draft.destination === "worktree" || draft.moveChanges;
-    }
+    if (field === "worktreeName") return namesAWorktree(draft);
     return true;
   });
 }
