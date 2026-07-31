@@ -3505,26 +3505,33 @@ describe("POST /spawn", () => {
    * (E2BIG on macOS, a single over-128KiB argument on Linux) rather than
    * exiting non-zero.
    */
-  type TmuxOutcome = { code: number; out: string } | { throws: true };
+  type TmuxOutcome =
+    | { code: number; out: string; err?: string }
+    | { throws: true };
 
   /**
    * Stub `Bun.spawn`, recording every argv. Outcomes are matched by tmux
    * subcommand so a test only has to describe the calls it cares about;
    * anything unlisted succeeds with empty output.
    *
-   * `panes` overrides the pane probe per pane id (`%12` -> `"@9 $3"`), which
-   * a subcommand-keyed outcome cannot express: the cross-session cases probe
-   * two different panes and need two different answers.
+   * `panes` overrides the pane probe per pane id (`%12` -> `"@9 $3"`), and
+   * `clients` the attached-client probe per session id (`$3` -> ttys), neither
+   * of which a subcommand-keyed outcome can express: the cross-session cases
+   * probe two different panes and need two different answers, and an empty
+   * client list is a meaningful answer rather than a missing one.
    */
   function withTmuxRecorder(
     outcomes: Record<string, TmuxOutcome> = {},
     panes: Record<string, string> = {},
+    clients: Record<string, string[]> = {},
   ) {
     const original = Bun.spawn;
     const argv: string[][] = [];
     const defaults: Record<string, TmuxOutcome> = {
       // Pane probe: `#{window_id} #{session_id}` for a live pane.
       "display-message": { code: 0, out: "@9 $3\n" },
+      // Attached-client probe: a session with nobody looking at it.
+      "list-clients": { code: 0, out: "" },
     };
     Bun.spawn = ((spawned: string[]) => {
       argv.push(spawned);
@@ -3532,9 +3539,15 @@ describe("POST /spawn", () => {
       // `display-message -p -t <pane> -F ...`
       const probed =
         key === "display-message" ? panes[spawned[4] ?? ""] : undefined;
+      // `list-clients -t <session> -F ...`
+      const attached =
+        key === "list-clients" ? clients[spawned[3] ?? ""] : undefined;
       const next = (probed === undefined
         ? undefined
         : { code: 0, out: `${probed}\n` }) ??
+        (attached === undefined
+          ? undefined
+          : { code: 0, out: `${attached.join("\n")}\n` }) ??
         outcomes[key] ??
         defaults[key] ?? { code: 0, out: "%99\n" };
       if ("throws" in next) {
@@ -3543,7 +3556,7 @@ describe("POST /spawn", () => {
       return {
         exited: Promise.resolve(next.code),
         stdout: new Blob([next.out]).stream(),
-        stderr: new Blob([""]).stream(),
+        stderr: new Blob([next.err ?? ""]).stream(),
       };
     }) as unknown as typeof Bun.spawn;
     return { argv, restore: () => (Bun.spawn = original) };
@@ -4016,6 +4029,8 @@ describe("POST /spawn", () => {
     // isolated tmux server: a client attached to A stayed on A across
     // `select-window -t <pane in B>` and followed `switch-client -c <tty>`.
     const twoSessions = { "%1": "@1 $1", "%2": "@2 $2" };
+    /** The caller (session `$1`) has a terminal of its own attached. */
+    const callerAttached = { $1: ["/dev/ttys004"] };
 
     /** The tmux argv that was supposed to move the caller's view. */
     function focusCall(argv: string[][]): string[] | undefined {
@@ -4026,7 +4041,11 @@ describe("POST /spawn", () => {
 
     it("switches the caller's client to a target in another session", async () => {
       const { internals } = serverForAgents([promptAgent]);
-      const { argv, restore } = withTmuxRecorder({}, twoSessions);
+      const { argv, restore } = withTmuxRecorder(
+        {},
+        twoSessions,
+        callerAttached,
+      );
       try {
         const res = await internals.handleRequest(
           spawnRequest({
@@ -4073,6 +4092,73 @@ describe("POST /spawn", () => {
 
         expect(focusCall(argv)).toEqual(["tmux", "select-window", "-t", "%99"]);
         expect(argv.map((a) => a[1])).not.toContain("switch-client");
+        // Nothing to verify, so nothing is asked.
+        expect(argv.map((a) => a[1])).not.toContain("list-clients");
+      } finally {
+        restore();
+      }
+    });
+
+    it("refuses to move a client that is not in the caller's session", async () => {
+      // The bystander case, and the reason the tty alone is not enough:
+      // spawning from a DETACHED session makes tmux's `#{client_tty}` fall
+      // back to the most-recently-active client of ANY session, so the CLI
+      // honestly reports a terminal that belongs to someone else's work.
+      // Switching it would drag that user into a pane they never asked for —
+      // strictly worse than the `select-window` this replaced.
+      const { internals } = serverForAgents([promptAgent]);
+      const { argv, restore } = withTmuxRecorder({}, twoSessions, {
+        // The caller's session `$1` has nobody attached; the tty the CLI sent
+        // is a client of some third session entirely.
+        $1: [],
+      });
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({
+            agent: "prompty",
+            cwd,
+            target: "%2",
+            callerPane: "%1",
+            callerTty: "/dev/ttys004",
+          }),
+        );
+
+        expect(res.status).toBe(200);
+        expect(focusCall(argv)).toEqual(["tmux", "select-window", "-t", "%99"]);
+        expect(argv.map((a) => a[1])).not.toContain("switch-client");
+        // Membership is asked about the CALLER's session, not the target's.
+        expect(argv.find((a) => a[1] === "list-clients")).toEqual([
+          "tmux",
+          "list-clients",
+          "-t",
+          "$1",
+          "-F",
+          "#{client_tty}",
+        ]);
+      } finally {
+        restore();
+      }
+    });
+
+    it("refuses when the membership probe itself fails", async () => {
+      const { internals } = serverForAgents([promptAgent]);
+      const { argv, restore } = withTmuxRecorder(
+        { "list-clients": { code: 1, out: "" } },
+        twoSessions,
+      );
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({
+            agent: "prompty",
+            cwd,
+            target: "%2",
+            callerPane: "%1",
+            callerTty: "/dev/ttys004",
+          }),
+        );
+
+        expect(res.status).toBe(200);
+        expect(focusCall(argv)).toEqual(["tmux", "select-window", "-t", "%99"]);
       } finally {
         restore();
       }
@@ -4123,6 +4209,46 @@ describe("POST /spawn", () => {
         // exactly the tmux round-trips it always did.
         expect(argv.filter((a) => a[1] === "display-message")).toHaveLength(1);
       } finally {
+        restore();
+      }
+    });
+
+    it("logs a focus command tmux refused instead of dropping it", async () => {
+      // The response still says `success: true`, and honestly so — the pane
+      // exists and the agent is running. But a switch that silently did
+      // nothing would leave the user with a view that never moved and no
+      // trace anywhere of why. `can't find client` is the live failure mode
+      // now that the tty arrives from off-process.
+      const errors: string[] = [];
+      const errorSpy = spyOn(console, "error").mockImplementation(
+        (...args: unknown[]) => {
+          errors.push(args.join(" "));
+        },
+      );
+      const { internals } = serverForAgents([promptAgent]);
+      const { restore } = withTmuxRecorder(
+        { "switch-client": { code: 1, out: "", err: "can't find client\n" } },
+        twoSessions,
+        callerAttached,
+      );
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({
+            agent: "prompty",
+            cwd,
+            target: "%2",
+            callerPane: "%1",
+            callerTty: "/dev/ttys004",
+          }),
+        );
+
+        expect(res.status).toBe(200);
+        const logged = errors.join("\n");
+        expect(logged).toContain("switch-client");
+        expect(logged).toContain("%99");
+        expect(logged).toContain("can't find client");
+      } finally {
+        errorSpy.mockRestore();
         restore();
       }
     });

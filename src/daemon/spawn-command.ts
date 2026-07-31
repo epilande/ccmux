@@ -799,6 +799,43 @@ export interface SpawnFocusInput {
   placementSessionId?: string;
   /** The session the caller was in, when it named a pane to resolve it from. */
   callerSessionId?: string;
+  /**
+   * Whether `callerTty` was VERIFIED to be a client of `callerSessionId`.
+   *
+   * Not redundant with having a tty at all, because the tty the CLI resolves
+   * is not guaranteed to belong to the session it was resolved from: tmux's
+   * `#{client_tty}` falls back to the most-recently-active client of any
+   * session when the caller's own session has none attached (see
+   * `lib/tmux-client.ts`). Spawning from a DETACHED session therefore hands
+   * us some bystander's terminal, and switching it would drag a user who has
+   * nothing to do with this spawn into the new pane — strictly worse than the
+   * `select-window` this replaced. Left unset, no switch happens.
+   */
+  ttyAttachedToCallerSession?: boolean;
+}
+
+/** Ttys of the clients attached to a tmux session; `null` if unknowable. */
+export type ClientTtyProbe = (sessionId: string) => Promise<string[] | null>;
+
+/**
+ * The cross-session switch's preconditions, or `null` when this spawn is not
+ * one. Separated out so the probe below and the decision above cannot drift
+ * on what "cross-session" means.
+ */
+function crossSessionSwitch(
+  input: SpawnFocusInput,
+): { callerTty: string; callerSessionId: string } | null {
+  const { detach, callerTty, placementSessionId, callerSessionId } = input;
+  if (detach) return null;
+  if (
+    callerTty === undefined ||
+    placementSessionId === undefined ||
+    callerSessionId === undefined ||
+    placementSessionId === callerSessionId
+  ) {
+    return null;
+  }
+  return { callerTty, callerSessionId };
 }
 
 /**
@@ -816,22 +853,40 @@ export interface SpawnFocusInput {
  *   own it must name the caller's by tty (`-c`), the same way
  *   `src/commands/switch.ts` does when it runs outside tmux.
  *
- * Anything unknown falls back to `select-window`: a missing tty or an
- * unresolved session means we cannot show that a switch is needed, and
- * guessing would move a client that never asked to be moved.
+ * Anything short of proof falls back to `select-window` — a missing tty, an
+ * unresolved session, or a tty nobody has confirmed is attached to the
+ * caller's session. Moving the wrong client is a worse failure than not
+ * moving one, since the user it interrupts never asked for anything.
  */
 export function buildSpawnFocusArgv(input: SpawnFocusInput): string[] | null {
-  const { paneId, detach, callerTty, placementSessionId, callerSessionId } =
-    input;
+  const { paneId, detach, ttyAttachedToCallerSession } = input;
   if (detach) return null;
-  const crossSession =
-    callerTty !== undefined &&
-    placementSessionId !== undefined &&
-    callerSessionId !== undefined &&
-    placementSessionId !== callerSessionId;
-  return crossSession
-    ? ["switch-client", "-c", callerTty, "-t", paneId]
+  const cross = crossSessionSwitch(input);
+  return cross && ttyAttachedToCallerSession
+    ? ["switch-client", "-c", cross.callerTty, "-t", paneId]
     : ["select-window", "-t", paneId];
+}
+
+/**
+ * {@link buildSpawnFocusArgv} with the membership check run for it.
+ *
+ * The probe costs a tmux round-trip, so it is asked only when everything else
+ * already points at a switch; every other spawn short-circuits to the pure
+ * decision and touches tmux exactly as often as it always did.
+ */
+export async function resolveSpawnFocusArgv(
+  input: SpawnFocusInput,
+  listClientTtys: ClientTtyProbe,
+): Promise<string[] | null> {
+  const cross = crossSessionSwitch(input);
+  if (!cross) return buildSpawnFocusArgv(input);
+  // A failed probe reads as "not attached": it is the same unproven state as
+  // an empty list, and the fallback is the behavior this spawn had anyway.
+  const ttys = await listClientTtys(cross.callerSessionId);
+  return buildSpawnFocusArgv({
+    ...input,
+    ttyAttachedToCallerSession: ttys?.includes(cross.callerTty) ?? false,
+  });
 }
 
 /** A request to spawn into a worktree rather than the given cwd. */

@@ -38,15 +38,22 @@ export async function getActiveTmuxClientPid(): Promise<number | null> {
 }
 
 /**
- * The tty of the tmux client the CURRENT context is being viewed with, i.e.
- * the terminal the user is attached with when this runs inside a pane. Only
+ * A tmux client tty for the CURRENT context, from `#{client_tty}`. Only
  * meaningful with `$TMUX` set; outside tmux there is no current context and
  * {@link resolveActiveTmuxClientTty} is the right fallback.
  *
- * Deliberately not the pane's own tty: `#{client_tty}` is the ATTACHED
- * client's device (`/dev/ttys085`), while the pane runs on its own pty
- * (`/dev/ttys079`). Only the former is a valid `switch-client -c` target,
- * which is what `ccmux spawn` sends it for.
+ * Deliberately not the pane's own tty: `#{client_tty}` is a CLIENT's device
+ * (`/dev/ttys085`), while the pane runs on its own pty (`/dev/ttys079`), and
+ * only the former is a valid `switch-client -c` target.
+ *
+ * NOT a promise that the answer belongs to the caller's session. tmux resolves
+ * the current client with `cmd_find_best_client`, which prefers a client of
+ * the resolved session but FALLS BACK to the most-recently-active client of
+ * any session when that session has none attached. So a pane in a detached
+ * session yields some other session's terminal, and anything that would MOVE
+ * the returned client (`ccmux spawn`'s cross-session switch) has to verify
+ * membership itself with {@link listTmuxClientTtys} — otherwise it yanks a
+ * client that was never involved. Verified live on tmux 3.6a.
  */
 export async function resolveCurrentTmuxClientTty(): Promise<string | null> {
   try {
@@ -59,6 +66,36 @@ export async function resolveCurrentTmuxClientTty(): Promise<string | null> {
     if (exitCode !== 0) return null;
     const tty = output.trim();
     return tty || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The ttys of the clients attached to one session, for callers that must know
+ * whether a given client is actually looking at it. An empty array is a real
+ * answer (nobody is attached); `null` means the query failed and nothing
+ * should be concluded from it.
+ *
+ * `-t` is what makes this a membership test rather than a popularity contest:
+ * unlike `#{client_tty}`, `list-clients -t` has no best-effort fallback, so a
+ * detached session returns nothing at all.
+ */
+export async function listTmuxClientTtys(
+  sessionId: string,
+): Promise<string[] | null> {
+  try {
+    const proc = Bun.spawn(
+      ["tmux", "list-clients", "-t", sessionId, "-F", "#{client_tty}"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const output = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) return null;
+    return output
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
   } catch {
     return null;
   }

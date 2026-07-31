@@ -9,6 +9,7 @@ import {
   resolvedHomeDir,
 } from "../lib/config";
 import { getPreferences } from "../lib/preferences";
+import { listTmuxClientTtys } from "../lib/tmux-client";
 import {
   capturePane,
   resolvePaneLocation,
@@ -18,12 +19,12 @@ import {
 import {
   buildAgentForkCommand,
   buildAgentSpawnCommand,
-  buildSpawnFocusArgv,
   buildTmuxSpawnArgv,
   forkResumesByIdAlone,
   normalizeBoolean,
   normalizeClientTty,
   normalizePrompt,
+  resolveSpawnFocusArgv,
   normalizeSplit,
   normalizeTarget,
   normalizeWorktreeRequest,
@@ -2749,20 +2750,35 @@ export class DaemonServer {
       // caller can already see in `tmux list-panes` would be reported as
       // failed and torn down out from under them. Best effort, log and
       // continue.
-      const focusArgv = buildSpawnFocusArgv({
-        paneId,
-        detach,
-        callerTty,
-        placementSessionId,
-        callerSessionId,
-      });
+      const focusArgv = await resolveSpawnFocusArgv(
+        {
+          paneId,
+          detach,
+          callerTty,
+          placementSessionId,
+          callerSessionId,
+        },
+        listTmuxClientTtys,
+      );
       if (focusArgv) {
         try {
           const focusProc = Bun.spawn(["tmux", ...focusArgv], {
             stdout: "pipe",
             stderr: "pipe",
           });
-          await focusProc.exited;
+          const focusExit = await focusProc.exited;
+          // Reported rather than swallowed: the response still says
+          // `success: true` (it is), so a silently skipped switch would leave
+          // the user with a pane they were told about, a view that never
+          // moved, and nothing anywhere to explain it. `can't find client` is
+          // the live failure mode now that a tty arrives from off-process.
+          if (focusExit !== 0) {
+            const stderr = (await new Response(focusProc.stderr).text()).trim();
+            console.error(
+              `tmux ${focusArgv[0]} for pane ${paneId} exited ${focusExit}` +
+                (stderr ? `: ${stderr}` : ""),
+            );
+          }
         } catch (err: unknown) {
           console.error(`Failed to focus pane ${paneId}: ${errorMessage(err)}`);
         }
