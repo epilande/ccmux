@@ -5,6 +5,7 @@ import {
   formatVersion,
   padStartWidth,
   sliceToWidth,
+  truncateMiddle,
   truncateText,
   truncateHighlighted,
 } from "./format";
@@ -197,6 +198,45 @@ describe("truncateText", () => {
     expect(hasLoneSurrogate(out)).toBe(false);
     expect(displayWidth(out)).toBeLessThanOrEqual(10);
     expect(out.startsWith(`ok ${FLAG}`)).toBe(true);
+  });
+});
+
+describe("truncateMiddle", () => {
+  it("leaves text that fits alone", () => {
+    expect(truncateMiddle("fix-the-bug", 20)).toBe("fix-the-bug");
+    expect(truncateMiddle("fix-the-bug", 11)).toBe("fix-the-bug");
+  });
+
+  it("keeps both ends of a name that does not fit", () => {
+    // The tail is what tells two "fix sidebar" tasks apart, which is the
+    // whole reason this is not a right-hand truncation.
+    const out = truncateMiddle("fix-sidebar-flicker", 15);
+    expect(out).toBe("fix-sid…flicker");
+    expect(displayWidth(out)).toBe(15);
+  });
+
+  it("gives the odd column to the head", () => {
+    const out = truncateMiddle("abcdefghij", 6);
+    expect(out).toBe("abc…ij");
+    expect(displayWidth(out)).toBe(6);
+  });
+
+  it("degrades to the ellipsis alone rather than a one-column head", () => {
+    expect(truncateMiddle("abcdef", 1)).toBe("…");
+    expect(truncateMiddle("abcdef", 0)).toBe("");
+  });
+
+  it("measures CJK in columns rather than characters", () => {
+    // Two columns per character, so an 8-column budget buys three of them
+    // and the ellipsis rather than seven.
+    expect(truncateMiddle(CJK, 8)).toBe("日本…ト");
+    expect(displayWidth(truncateMiddle(CJK, 8))).toBeLessThanOrEqual(8);
+  });
+
+  it("cuts both ends on grapheme boundaries", () => {
+    const out = truncateMiddle(`${FAMILY}${FLAG}${FAMILY}${FLAG}`, 5);
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(displayWidth(out)).toBeLessThanOrEqual(5);
   });
 });
 

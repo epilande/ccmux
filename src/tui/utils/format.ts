@@ -105,6 +105,29 @@ export function truncateText(text: string, maxLen: number): string {
 }
 
 /**
+ * Truncate to `maxLen` columns from the MIDDLE, keeping both ends readable.
+ *
+ * For text whose tail carries as much meaning as its head, which is the case
+ * for a derived worktree name: `fix-sidebar-flicker-on-resize` clipped from
+ * the right leaves `fix-sidebar-…`, and every task that opens the same way
+ * looks identical. Cutting the middle keeps the words that tell them apart.
+ *
+ * Columns, not code units, and cut on grapheme boundaries at both ends, so a
+ * name holding wide glyphs fits its row like an ASCII one does.
+ */
+export function truncateMiddle(text: string, maxLen: number): string {
+  if (maxLen <= 0) return "";
+  if (displayWidth(text) <= maxLen) return text;
+  // Nothing but the ellipsis fits; a one-column head would say less than it.
+  if (maxLen === 1) return "…";
+  const room = maxLen - 1;
+  // The head gets the odd column: reading starts there.
+  const head = sliceToWidth(text, Math.ceil(room / 2));
+  const tail = sliceTailToWidth(text, room - displayWidth(head));
+  return `${head}…${tail}`;
+}
+
+/**
  * Window single-span highlight markup (one `<b>…</b>`, as `wrapFirstMatch`
  * emits) to `maxLen` VISIBLE columns (tags excluded from the count) so a match
  * deep in a long prompt still renders within a height-1 row instead of
