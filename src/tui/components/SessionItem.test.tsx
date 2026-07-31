@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import { createSignal } from "solid-js";
-import { SessionItem, alignText } from "./SessionItem";
+import { SessionItem, abbreviateTarget, alignText } from "./SessionItem";
 import { TickContext } from "../store";
 import { mockEnrichedSession } from "./test-helpers";
 import { displayWidth } from "../utils/format";
@@ -1124,6 +1124,52 @@ describe("SessionItem active indicator", () => {
   });
 });
 
+describe("abbreviateTarget", () => {
+  /** A half of a surrogate pair with no partner: what a code-unit slice
+   *  through an astral character leaves behind, rendered as `�`. */
+  const hasLoneSurrogate = (s: string) =>
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+      s,
+    );
+
+  it("leaves the ASCII shapes exactly as they were", () => {
+    expect(abbreviateTarget("dev:1.0")).toBe("dev:1.0");
+    expect(abbreviateTarget("FlashJump:3.4")).toBe("FlashJu~:3.4");
+    expect(abbreviateTarget("some-really-long-session:12.34")).toBe(
+      "some-~:12.34",
+    );
+    expect(abbreviateTarget("nocolon-but-very-long-name")).toBe("nocolon-but~");
+  });
+
+  it("cuts an emoji session name on a cluster, never mid-pair", () => {
+    // The code-unit slice landed between the two surrogates of the fourth
+    // 📚 and drew a replacement glyph in the pane cell.
+    const out = abbreviateTarget("📚📚📚📚📚📚:1.0");
+    expect(out).toBe("📚📚📚~:1.0");
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(displayWidth(out)).toBeLessThanOrEqual(12);
+  });
+
+  it("shortens a CJK session name to the box it renders in", () => {
+    // 6 characters of session name draw 12 columns, so the untouched target
+    // drew 16 into a 12-column cell.
+    const out = abbreviateTarget("プロジェクト:1.0");
+    expect(out).toBe("プロジ~:1.0");
+    expect(displayWidth(out)).toBeLessThanOrEqual(12);
+  });
+
+  it("keeps a ZWJ sequence whole", () => {
+    // Three families draw 6 columns, so the whole target already fits; the
+    // code-unit gate called it 37 and sliced through the first family's ZWJ
+    // chain, splitting one glyph into several.
+    const family = "👨‍👩‍👧‍👦";
+    const out = abbreviateTarget(`${family}${family}${family}:10.2`);
+    expect(out).toBe(`${family}${family}${family}:10.2`);
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(displayWidth(out)).toBeLessThanOrEqual(12);
+  });
+});
+
 describe("alignText", () => {
   it("passes through for left side", () => {
     expect(alignText("hi", 10, "left")).toBe("hi");
@@ -1212,5 +1258,51 @@ describe("SessionItem right-aligned fields", () => {
       160,
     );
     expect(frame).toContain("      📚:1.0");
+  });
+
+  it("budgets an inline prompt against the columns the project cell draws", async () => {
+    // `projectCellWidth` feeds the prompt's budget. Measured in code units it
+    // reports 13 for a cell drawing 26 columns, so the prompt is handed a
+    // budget it cannot have, skips its own `…`, and gets flex-clipped
+    // mid-word instead ("please refactor the entire" with nothing to say it
+    // was cut).
+    const cwd = "/Users/e/Code/プロジェクトディレクトリ名前";
+    const frame = await renderItem(
+      {
+        session: mockEnrichedSession({
+          cwd,
+          paneCwd: cwd,
+          gitBranch: "main",
+          tmuxTarget: "dev:1.0",
+          lastPrompt:
+            "please refactor the entire authentication module and add tests",
+          lastActivityAt: "2024-01-15T11:59:00Z",
+        }),
+      },
+      120,
+    );
+    expect(frame).toContain("please refactor the entire…");
+  });
+
+  it("reserves the columns a short wide-glyph prompt needs on row 1", async () => {
+    // The prompt floor reserves min(prompt width, 16) before the project cell
+    // spends the rest. Counting this 8-character prompt as 8 instead of the
+    // 16 columns it draws hands the path 8 columns that were the prompt's,
+    // and the prompt comes back clipped to `予算パイプ`.
+    const cwd = "/Users/e/Code/some-long-project-directory-name";
+    const frame = await renderItem(
+      {
+        session: mockEnrichedSession({
+          cwd,
+          paneCwd: cwd,
+          gitBranch: "feature/long-branch-name",
+          tmuxTarget: "dev:1.0",
+          lastPrompt: "予算パイプライン",
+          lastActivityAt: "2024-01-15T11:59:00Z",
+        }),
+      },
+      100,
+    );
+    expect(frame).toContain("予算パイプライン");
   });
 });

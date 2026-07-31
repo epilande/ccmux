@@ -924,12 +924,11 @@ describe("trailingLabelsWidth", () => {
 
   it("reserves what a wide-glyph label draws, not its code units", () => {
     // The label renders through the column-true `truncateText`, so the
-    // reserve has to agree: `.length` counted this tool name as 12 and
-    // reserved the full cap for something that draws 7 columns.
-    const s = mockEnrichedSession({ pendingTool: "Bash(🚀 go)" });
-    expect(trailingLabelsWidth(s, false)).toBe(
-      displayWidth("Bash(🚀 go)"), // 11 columns for 12 code units
-    );
+    // reserve has to agree: `Bash(検索)` is 8 code units but draws 10 columns,
+    // and reserving 8 leaves the label overhanging whatever sits next to it.
+    const s = mockEnrichedSession({ pendingTool: "Bash(検索)" });
+    expect("Bash(検索)".length).toBe(8);
+    expect(trailingLabelsWidth(s, false)).toBe(10);
     expect(trailingLabelsWidth(s, false)).toBeLessThanOrEqual(
       ATTENTION_LABEL_MAX,
     );
@@ -1350,6 +1349,47 @@ describe("fitProjectCell with wide glyphs", () => {
     );
     expect(out.branchLabel).toBe(":🚀🚀🚀~");
     expect(displayWidth(out.branchLabel)).toBeLessThanOrEqual(8 + 1);
+  });
+
+  it("drops a branch label whose body cannot hold one wide grapheme", () => {
+    // One usable column, and every grapheme of this branch needs two: the
+    // body comes back empty, and `:~` (or `:~+`) would name no branch while
+    // still charging the row two columns it would rather spend on identity.
+    const out = fitProjectCell(
+      {
+        prefix: "epilande/",
+        dirname: "ccm",
+        branch: "日本語ブランチ",
+        isWorktree: true,
+        repoPrefix: true,
+      },
+      16,
+      8,
+    );
+    expect(out.branchLabel).toBe("");
+    expect(out.prefix).toBe("epilande/");
+    expect(cellWidth(out)).toBeLessThanOrEqual(16);
+  });
+
+  it("never emits a content-free branch label at any budget", () => {
+    for (const branch of ["日本語ブランチ", "🚀🚀🚀-go", `${FAMILY}x`]) {
+      for (const isWorktree of [false, true]) {
+        for (let budget = 0; budget <= 40; budget++) {
+          const out = fitProjectCell(
+            {
+              prefix: "epilande/",
+              dirname: "ccm",
+              branch,
+              isWorktree,
+              repoPrefix: true,
+            },
+            budget,
+            8,
+          );
+          expect(out.branchLabel).not.toMatch(/^:~\+?$/);
+        }
+      }
+    }
   });
 
   it("shortens an emoji branch on clusters, never mid-pair", () => {
