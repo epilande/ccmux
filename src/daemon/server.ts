@@ -78,7 +78,12 @@ import {
   type WorktreeSession,
 } from "./worktree-prune";
 import { fetchPrune, normalizePath } from "./worktree-git";
-import { readUncommitted } from "./worktree-move-changes";
+import {
+  moveChangesToWorktree,
+  readUncommitted,
+  type CreateWorktree,
+  type UntrackedMode,
+} from "./worktree-move-changes";
 import type {
   NotificationActionInput,
   NotificationActionResult,
@@ -86,6 +91,20 @@ import type {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * What a `withChanges` spawn relocated, echoed back on success.
+ *
+ * `moved` counts tracked files; `untracked` says which mode ran and which
+ * paths it covered. `leftoverStash` is the one thing a SUCCESSFUL move can
+ * still leave behind (the entry was applied but could not be dropped), and it
+ * is reported so it can be cleaned up rather than found later as a mystery.
+ */
+interface SpawnMoveReport {
+  moved: number;
+  untracked: { mode: UntrackedMode; files: string[] };
+  leftoverStash?: string;
 }
 
 function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
@@ -2696,6 +2715,7 @@ export class DaemonServer {
     // and a branch behind for the user to clean up.
     let spawnCwd = cwd;
     let worktreeInfo: WorktreeCreation | undefined;
+    let moveInfo: SpawnMoveReport | undefined;
     if (worktreeRequest.value) {
       const gitInfo = await this.getGitInfo(cwd);
       if (!gitInfo.mainRepoRoot) {
@@ -2704,18 +2724,88 @@ export class DaemonServer {
           { status: 400, headers },
         );
       }
-      const created = await createWorktree(gitInfo.mainRepoRoot, {
-        ...worktreeRequest.value,
-        prompt: prompt ?? undefined,
-      });
-      if (!created.ok) {
-        return Response.json(
-          { error: created.error },
-          { status: 400, headers },
-        );
+      const mainRepoRoot = gitInfo.mainRepoRoot;
+      const { withChanges, untracked, ...creation } = worktreeRequest.value;
+
+      /**
+       * The creation engine, adapted to the move module's seam.
+       *
+       * Two conversions: the repo root and the name-deriving prompt are
+       * curried away (the move module knows neither), and a refusal becomes a
+       * throw, which is how that module classifies a `create-failed` — the
+       * arm that puts the stashed work back before returning.
+       *
+       * The full creation result is captured on the way past, because the
+       * response still owes the caller the branch it landed on and whether
+       * the worktree was made or merely opened. The seam only carries a path.
+       */
+      const createForMove: CreateWorktree = async (opts) => {
+        const created = await createWorktree(mainRepoRoot, {
+          ...opts,
+          prompt: prompt ?? undefined,
+        });
+        if (!created.ok) throw new Error(created.error);
+        worktreeInfo = created.result;
+        return { path: created.result.path };
+      };
+
+      if (withChanges) {
+        // Routed THROUGH the move, never beside it: the module owns the
+        // ordering that keeps the work recoverable (stash, create, apply,
+        // drop) and the rollback for every failure in it, so creating the
+        // worktree here as well would both duplicate the checkout and step
+        // outside those guarantees.
+        const moved = await moveChangesToWorktree({
+          source: cwd,
+          name: creation.name,
+          base: creation.base,
+          untracked,
+          createWorktree: createForMove,
+        });
+        if (!moved.ok) {
+          // Every move failure is a 400, including the ones that fail
+          // mid-git: the request was refused in full, nothing was spawned,
+          // and the module has already put the source back. `reason` and
+          // `stashSha` ride along because a stranded stash entry is the one
+          // thing the user may still have to clean up by hand, and a 5xx is
+          // the status callers report without the body.
+          return Response.json(
+            {
+              error: moved.error,
+              reason: moved.reason,
+              ...(moved.stashSha ? { stashSha: moved.stashSha } : {}),
+              ...(moved.sourceRestored !== undefined
+                ? { sourceRestored: moved.sourceRestored }
+                : {}),
+              // Deliberately no `worktree`: the module takes back whatever it
+              // created on every failure after creation, so echoing one here
+              // would name a directory that is no longer there.
+            },
+            { status: 400, headers },
+          );
+        }
+        spawnCwd = moved.worktreePath;
+        moveInfo = {
+          moved: moved.moved,
+          untracked: moved.untracked,
+          ...(moved.leftoverStash
+            ? { leftoverStash: moved.leftoverStash }
+            : {}),
+        };
+      } else {
+        const created = await createWorktree(mainRepoRoot, {
+          ...creation,
+          prompt: prompt ?? undefined,
+        });
+        if (!created.ok) {
+          return Response.json(
+            { error: created.error },
+            { status: 400, headers },
+          );
+        }
+        worktreeInfo = created.result;
+        spawnCwd = created.result.path;
       }
-      worktreeInfo = created.result;
-      spawnCwd = created.result.path;
     }
 
     /**
@@ -2859,8 +2949,18 @@ export class DaemonServer {
       // it did not name: the path, branch and base ref are decided here, and
       // `created` / `branchCreated` say which of the two the request made
       // rather than found, so a caller can report it without overclaiming.
+      //
+      // `move` reports what a `withChanges` spawn actually relocated, for the
+      // same reason: the counts are only knowable here, and `leftoverStash`
+      // is the one thing a SUCCESSFUL move can still leave behind.
       return Response.json(
-        { success: true, paneId, command, worktree: worktreeInfo },
+        {
+          success: true,
+          paneId,
+          command,
+          worktree: worktreeInfo,
+          move: moveInfo,
+        },
         { headers },
       );
     } catch (err: unknown) {

@@ -70,8 +70,14 @@ export function isUntrackedMode(value: unknown): value is UntrackedMode {
  *
  * Kept injected rather than imported so this module can be exercised against
  * fixture repos, and so it composes with whatever creation engine the caller
- * has. The shape matches the real engine's (`{ name?, base? }` in, created
- * path out) so wiring the two together is a single call.
+ * has.
+ *
+ * It is deliberately NARROWER than the real engine (`createWorktree` in
+ * `worktree-create.ts`, which also takes the repo root and a prompt to derive
+ * a name from, and reports a result union rather than throwing). The caller
+ * curries the parts this module has no business knowing and converts a
+ * refusal into a throw, which is what lands here as `create-failed`; see the
+ * adapter in `server.ts`'s spawn handler.
  */
 export type CreateWorktree = (opts: {
   name?: string;
