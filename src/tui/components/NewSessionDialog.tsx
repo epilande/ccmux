@@ -62,6 +62,47 @@ export const DESTINATION_OPTIONS: readonly DestinationOption[] = [
 ];
 
 /**
+ * Greedy word-wrap into lines of at most `width` columns, breaking a word
+ * that cannot fit on a line of its own.
+ *
+ * The dialog wraps its agent error itself rather than handing a long string
+ * to the renderer, because the height budget below has to know the row count
+ * BEFORE layout and the renderer's own wrapping cannot be predicted from
+ * here (it breaks mid-word at the tail of a line, and a space landing on the
+ * boundary moves to the next row). Lines produced here already fit, so
+ * nothing can wrap a second time and the budget cannot be wrong.
+ *
+ * Widths are UTF-16 code units, not display columns, so a line of wide
+ * glyphs (CJK) over-fills its column — the same limitation `truncateText`
+ * has, tracked in issue #91, whose real fix is a shared display-width helper.
+ */
+export function wrapText(text: string, width: number): string[] {
+  if (width <= 0) return [text];
+  const lines: string[] = [];
+  let line = "";
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    let rest = word;
+    // Longer than the whole column: it can only be broken mid-word.
+    while (rest.length > width) {
+      if (line) {
+        lines.push(line);
+        line = "";
+      }
+      lines.push(rest.slice(0, width));
+      rest = rest.slice(width);
+    }
+    if (!line) line = rest;
+    else if (line.length + 1 + rest.length <= width) line += ` ${rest}`;
+    else {
+      lines.push(line);
+      line = rest;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.length > 0 ? lines : [""];
+}
+
+/**
  * Slice of a longer option list to show, keeping the selection visible and
  * centered where it can be. Exported for its own tests: an off-by-one here
  * hides the row the user is on.
@@ -148,11 +189,14 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    * constant type-checked fine and silently clipped the bottom row instead.
    */
   const fieldRows: Record<NewSessionField, () => number> = {
-    // Declared before `visibleAgents` but never CALLED before it exists:
-    // `otherFieldRows("agent")` is the only caller during that window and
-    // it filters this entry out. createMemo runs eagerly, so the ordering
-    // is load-bearing, not stylistic.
-    agent: () => Math.max(1, visibleAgents().length),
+    // Declared before `visibleAgents` and `agentErrorLines` but never CALLED
+    // before they exist: `otherFieldRows("agent")` is the only caller during
+    // that window and it filters this entry out. createMemo runs eagerly, so
+    // the ordering is load-bearing, not stylistic.
+    agent: () =>
+      showAgentError()
+        ? agentErrorLines().length
+        : Math.max(1, visibleAgents().length),
     placement: () => (stacked() ? PLACEMENT_OPTIONS.length : 1),
     destination: () => (stacked() ? DESTINATION_OPTIONS.length : 1),
     prompt: () => 1,
@@ -166,19 +210,24 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
       0,
     );
 
+  /** Rows the agent field may claim before the dialog outgrows the screen:
+   *  everything the other fields and the chrome have not already spent. */
+  const agentRoom = createMemo(() =>
+    Math.max(
+      1,
+      dims().height - FIXED_CHROME_ROWS - hintRows() - otherFieldRows("agent"),
+    ),
+  );
+
   /** Where the visible slice of the agent list starts. Split from the slice
    *  itself so the rows can derive their absolute number from it without the
    *  slice having to carry a wrapper object per entry (see below). */
   const agentWindowStart = createMemo(() => {
     const list = agents();
-    const room = Math.max(
-      1,
-      dims().height - FIXED_CHROME_ROWS - hintRows() - otherFieldRows("agent"),
-    );
     return optionWindow(
       list.length,
       selectedAgentIndex(),
-      Math.min(room, list.length),
+      Math.min(agentRoom(), list.length),
     ).start;
   });
 
@@ -193,12 +242,39 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    */
   const visibleAgents = createMemo(() => {
     const list = agents();
-    const room = Math.max(
-      1,
-      dims().height - FIXED_CHROME_ROWS - hintRows() - otherFieldRows("agent"),
-    );
     const start = agentWindowStart();
-    return list.slice(start, start + Math.min(room, list.length));
+    return list.slice(start, start + Math.min(agentRoom(), list.length));
+  });
+
+  /** The agent field carries an error instead of a list: the daemon answered
+   *  with one, or answered with nothing to spawn. */
+  const showAgentError = () => props.agents !== null && agents().length === 0;
+
+  /**
+   * The agent error, pre-wrapped to the content column and capped at the rows
+   * the field actually has. Budgeting this field as one row was what clipped
+   * the dialog's bottom rows outside its border whenever the message wrapped
+   * (issue #85) — the stale-daemon message is three rows at a sidebar width.
+   * Capping matters too: an error longer than the screen would otherwise push
+   * the height past `dims().height`, where the clamp below re-creates exactly
+   * the same clipping.
+   */
+  const agentErrorLines = createMemo(() => {
+    // `||`, not `??`: the daemon's own error text is passed straight through
+    // (App.tsx takes `body?.error` at its word), and a `{"error": ""}` body
+    // would otherwise render an empty red row that says nothing at all.
+    const text = props.agentsError || "No agents found on PATH";
+    const lines = wrapText(text, contentWidth());
+    const room = agentRoom();
+    if (lines.length <= room) return lines;
+    // Say that it was cut, rather than ending mid-sentence: the last visible
+    // row carries as much of the remainder as fits, with an ellipsis.
+    const kept = lines.slice(0, room);
+    kept[room - 1] = truncateText(
+      lines.slice(room - 1).join(" "),
+      contentWidth(),
+    );
+    return kept;
   });
 
   const height = () =>
@@ -291,14 +367,28 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         <box flexDirection="column" flexGrow={1}>
           <Show
             when={props.agents !== null}
-            fallback={<text fg={theme.overlay}>Loading agents...</text>}
+            fallback={
+              <box height={1}>
+                <text fg={theme.overlay}>
+                  {truncateText("Loading agents...", contentWidth())}
+                </text>
+              </box>
+            }
           >
             <Show
               when={agents().length > 0}
               fallback={
-                <text fg={theme.red}>
-                  {props.agentsError ?? "No agents found on PATH"}
-                </text>
+                /* One row per pre-wrapped line, which is the same count the
+                   height was budgeted from. Left to the renderer instead,
+                   a long message wrapped past its single budgeted row and
+                   pushed the dialog's last rows outside the border. */
+                <For each={agentErrorLines()}>
+                  {(line) => (
+                    <box height={1}>
+                      <text fg={theme.red}>{line}</text>
+                    </box>
+                  )}
+                </For>
               }
             >
               <For each={visibleAgents()}>

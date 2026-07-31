@@ -2,6 +2,7 @@ import type { Component } from "solid-js";
 import { createSignal, For } from "solid-js";
 import { useTerminalDimensions } from "@opentui/solid";
 import { MouseButton } from "@opentui/core";
+import { truncateText } from "../utils/format";
 import { theme } from "../theme";
 
 export interface ContextMenuItem {
@@ -19,11 +20,30 @@ interface ContextMenuProps {
 }
 
 const MENU_WIDTH = 22;
+/** Columns an item row actually has: the width less its border and padding. */
+const CONTENT_WIDTH = MENU_WIDTH - 4;
+
+/**
+ * The label as it fits beside its key hint, with the hint's own columns (and
+ * one of air) spent first.
+ *
+ * A label wide enough to wrap used to render two rows while still counting as
+ * one item, which made `menuHeight` — and with it the viewport clamp — wrong
+ * for the whole menu, silently. The rows are pinned to one row each so the
+ * height stays honest by construction; truncating here is what keeps an
+ * over-long label legible instead of merely clipped.
+ */
+function fittedLabel(label: string, hint: string): string {
+  const spent = hint ? hint.length + 1 : 0;
+  return truncateText(label, Math.max(1, CONTENT_WIDTH - spent));
+}
 
 export const ContextMenu: Component<ContextMenuProps> = (props) => {
   const dims = useTerminalDimensions();
   const [hovered, setHovered] = createSignal<number | null>(null);
 
+  /** One row per item plus the border. True by construction: every item row
+   *  is pinned to a single row below. */
   const menuHeight = () => props.items.length + 2;
 
   const clampedX = () => {
@@ -41,6 +61,7 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
       left={clampedX()}
       top={clampedY()}
       width={MENU_WIDTH}
+      height={menuHeight()}
       backgroundColor={theme.surface}
       borderStyle="single"
       borderColor={theme.border}
@@ -50,6 +71,8 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
         {(item, i) => (
           <box
             flexDirection="row"
+            height={1}
+            flexShrink={0}
             paddingLeft={1}
             paddingRight={1}
             backgroundColor={hovered() === i() ? theme.border : theme.surface}
@@ -61,7 +84,7 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
             }}
           >
             <box flexGrow={1}>
-              <text fg={item.color}>{item.label}</text>
+              <text fg={item.color}>{fittedLabel(item.label, item.hint)}</text>
             </box>
             <text fg={theme.overlay}>{item.hint}</text>
           </box>
