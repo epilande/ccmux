@@ -16,6 +16,7 @@ import {
   displayWidth,
   shortenCwd,
   sliceToWidth,
+  truncateMiddle,
   truncateText,
 } from "../utils/format";
 import { agentColorFor } from "./SessionItem";
@@ -89,6 +90,19 @@ export const UNTRACKED_OPTIONS: readonly UntrackedOption[] = [
   { value: "copy", label: "Copy to both", compactLabel: "Copy" },
   { value: "leave", label: "Leave here", compactLabel: "Leave" },
 ];
+
+/**
+ * What a derived name row says about itself.
+ *
+ * The name shown is a preview of a rule, not a reservation: two prompts that
+ * open the same way derive the same slug, and the daemon numbers the second
+ * one rather than joining it. Someone who reads the row as a promise and
+ * finds `-2` on disk has been misled by a row that could have said so.
+ *
+ * The short form is what survives once the name itself has eaten the row.
+ */
+export const NAME_HINT = "auto · -2 if taken";
+export const NAME_HINT_SHORT = "auto";
 
 /**
  * Greedy word-wrap into lines of at most `width` columns, breaking a word
@@ -176,6 +190,8 @@ interface NewSessionDialogProps {
   onSelectDestination: (destination: NewSessionDestination) => void;
   onSelectUntracked: (untracked: UntrackedMode) => void;
   onPromptInput: (prompt: string) => void;
+  /** A keystroke in the name field. Empty means "back to derived". */
+  onWorktreeNameInput: (name: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
   /**
@@ -226,6 +242,67 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    *  untracked-files choice. */
   const moveChanges = () => props.draft.moveChanges;
 
+  /** Whether this spawn is making a worktree at all, which is what the name
+   *  row exists for. Move-changes mode always is; see `newSessionFields`. */
+  const namesAWorktree = () =>
+    props.draft.destination === "worktree" || moveChanges();
+
+  /** The name is the prompt's to give until someone types over it. */
+  const derivedName = () => props.draft.worktreeName === null;
+
+  /** What a derived name currently resolves to, or "" with nothing to derive
+   *  it from. Empty for an explicit name, which needs no preview. */
+  const derivedSlug = () =>
+    derivedName() ? slugFromPrompt(props.draft.prompt) : "";
+
+  /**
+   * The suffix caveat, when it fits beside the name it applies to.
+   *
+   * The name is given the whole row first and the hint takes the leftovers,
+   * rather than the other way round: the row exists to make the name legible,
+   * and a caveat that squeezed the thing it is about would defeat it. The
+   * short form is the fallback, and no hint at all is the last resort — at a
+   * sidebar width every column belongs to the name.
+   */
+  const nameHint = () => {
+    const slug = derivedSlug();
+    if (!slug) return "";
+    const spare = contentWidth() - displayWidth(slug) - 1;
+    if (spare >= displayWidth(NAME_HINT)) return NAME_HINT;
+    if (spare >= displayWidth(NAME_HINT_SHORT)) return NAME_HINT_SHORT;
+    return "";
+  };
+
+  /** Columns the name itself gets, once the hint has taken its own. */
+  const nameRoom = () => {
+    const hint = nameHint();
+    return Math.max(1, contentWidth() - (hint ? displayWidth(hint) + 1 : 0));
+  };
+
+  /**
+   * The derived name, or what to do about there not being one.
+   *
+   * Drawn as the input's PLACEHOLDER rather than its value, which is what
+   * makes the two states tell themselves apart: dim text is a preview the
+   * prompt still owns, and typing replaces it with a name of your own.
+   *
+   * Truncated from the middle, and truncated here rather than by the layout,
+   * because the input draws its placeholder in full past its own box. A slug
+   * clipped from the right leaves `fix-sidebar-…`, and every task that starts
+   * "fix sidebar" looks the same; the tail is what tells them apart.
+   */
+  const namePlaceholder = () => {
+    const slug = derivedSlug();
+    if (slug) return truncateMiddle(slug, nameRoom());
+    if (!derivedName()) return "";
+    // Nothing to derive from yet. Both ways out are named, because the second
+    // one is new (issue #83) and the row is where it is discoverable.
+    return truncateText(
+      stacked() ? "Prompt or name" : "Type a prompt, or a name here",
+      nameRoom(),
+    );
+  };
+
   const agents = createMemo(() => props.agents ?? []);
   const selectedAgentIndex = createMemo(() => {
     const index = agents().findIndex((a) => a.name === props.draft.agent);
@@ -259,6 +336,9 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     // height correct without the sum having to know which mode it is in.
     untracked: () =>
       !moveChanges() ? 0 : stacked() ? UNTRACKED_OPTIONS.length : 1,
+    // Worktree destinations only, and one row whatever the width: it is a
+    // text input, so it scrolls rather than wrapping.
+    worktreeName: () => (namesAWorktree() ? 1 : 0),
     prompt: () => 1,
   };
 
@@ -387,16 +467,12 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     truncateText(shortenCwd(props.draft.cwd), contentWidth());
 
   /**
-   * The locked destination row's text: the worktree that will be created,
-   * named the same way the selectable row names it (from the prompt), so the
-   * two modes cannot describe the same rule differently.
+   * The locked destination row's text. Only where the changes are going: the
+   * name they will go under is the Name row's, in both modes, so that the one
+   * editable field is in the same place wherever it is reached from.
    */
-  const lockedDestinationLabel = () => {
-    const base = stacked() ? "Worktree" : "New worktree";
-    const slug = slugFromPrompt(props.draft.prompt);
-    const text = slug ? `${base}: ${slug}` : `${base} (add a prompt)`;
-    return truncateText(text, contentWidth());
-  };
+  const lockedDestinationLabel = () =>
+    truncateText(stacked() ? "Worktree" : "New worktree", contentWidth());
 
   /** What the move does to the directory named on the row above. */
   const moveNote = () =>
@@ -609,39 +685,12 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
             <For each={DESTINATION_OPTIONS}>
               {(option, index) => {
                 const selected = () => option.value === props.draft.destination;
-                /* The worktree option carries the name it would create, so the
-                 choice is concrete rather than a promise. It tracks the
-                 prompt as it is typed, which is also the answer to "where
-                 did that branch name come from". */
-                const label = () => {
-                  const base = optionLabel(option);
-                  if (option.value !== "worktree") return base;
-                  // Budgeted, not appended blindly: a long prompt yields a long
-                  // slug, and on one row that pushed the dialog's own right
-                  // border off screen. Each option spends a 2-wide number cell
-                  // and two 1-wide brackets, and when side by side the first
-                  // option also spends its label and a 2-wide margin.
-                  const spent = stacked()
-                    ? 4
-                    : 8 + optionLabel(DESTINATION_OPTIONS[0]!).length + 2;
-                  const room = contentWidth() - spent;
-                  const slug = slugFromPrompt(props.draft.prompt);
-                  if (!slug) {
-                    // A worktree is named by the prompt and nothing else, so
-                    // with no derivable name this option cannot spawn. Say so
-                    // while the choice is being made rather than on Enter, and
-                    // only while it is the choice: on the unselected row the
-                    // hint is noise. Appended only when it fits whole, since a
-                    // truncated `Worktree (a...` explains nothing.
-                    if (!selected()) return base;
-                    const hinted = `${base} (add a prompt)`;
-                    return hinted.length <= room ? hinted : base;
-                  }
-                  return truncateText(
-                    `${base}: ${slug}`,
-                    Math.max(base.length, room),
-                  );
-                };
+                /* Just the choice. The name the worktree option would create
+                   used to be appended here and truncated against what the row
+                   had left, which at this dialog's width meant committing to
+                   `fix-sidebar-…` (issue #83). Selecting it opens a row of its
+                   own below, where the name is both legible and editable. */
+                const label = () => optionLabel(option);
                 return (
                   <box
                     height={1}
@@ -671,6 +720,32 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               }}
             </For>
           </box>
+        </box>
+      </Show>
+
+      <Show when={namesAWorktree()}>
+        {/* A row of its own, which is the point: the name was a suffix on the
+            row above, truncated against whatever that row had left. Here it
+            gets the width, and the keyboard. */}
+        <box flexDirection="row" height={1}>
+          <FieldLabel field="worktreeName" text="Name" />
+          <input
+            value={props.draft.worktreeName ?? ""}
+            onInput={props.onWorktreeNameInput}
+            focused={props.draft.field === "worktreeName"}
+            placeholder={namePlaceholder()}
+            placeholderColor={theme.overlay}
+            textColor={theme.text}
+            cursorColor={theme.blue}
+            backgroundColor="transparent"
+            focusedBackgroundColor="transparent"
+            flexGrow={1}
+          />
+          <Show when={nameHint()}>
+            <box flexShrink={0} marginLeft={1}>
+              <text fg={theme.overlay}>{nameHint()}</text>
+            </box>
+          </Show>
         </box>
       </Show>
 

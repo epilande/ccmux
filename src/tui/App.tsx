@@ -62,7 +62,7 @@ import {
   PLACEMENT_OPTIONS,
   UNTRACKED_OPTIONS,
 } from "./components/NewSessionDialog";
-import { slugFromPrompt } from "../daemon/worktree-create";
+import { slugFromPrompt, slugify } from "../daemon/worktree-create";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { PruneDialog } from "./components/PruneDialog";
 import { HelpOverlay } from "./components/HelpOverlay";
@@ -1232,13 +1232,25 @@ export function App(props: AppProps) {
       );
       return;
     }
-    // The dialog has no name field, so the prompt is the only name it can
-    // offer. Refuse here rather than posting: the daemon's own refusal reads
-    // "pass one explicitly", which is advice for the CLI and not something
-    // this dialog can act on.
-    if (draft.destination === "worktree" && !slugFromPrompt(prompt)) {
+    // The name the request will carry, settled by the daemon's own slug rule
+    // so that what the row showed is what gets created. Empty covers both an
+    // untouched field and one holding nothing a name can be made of, which
+    // are the same request: let the daemon derive one.
+    const worktreeName =
+      draft.destination === "worktree" && draft.worktreeName !== null
+        ? slugify(draft.worktreeName)
+        : "";
+    // With neither a name nor a prompt to derive one from there is nothing to
+    // create. Refused here rather than posted: the daemon's own refusal reads
+    // "pass one explicitly", which was CLI advice back when this dialog had
+    // no field to act on it with.
+    if (
+      draft.destination === "worktree" &&
+      !worktreeName &&
+      !slugFromPrompt(prompt)
+    ) {
       store.actions.showToast(
-        "Type a prompt to name the worktree, or use ccmux spawn --worktree <name>",
+        "Name the worktree, or type a prompt to derive one from",
         4000,
       );
       return;
@@ -1252,7 +1264,10 @@ export function App(props: AppProps) {
     // is to put you in the new pane, so it jumps and gets out of the way.
     const detach = props.sidebar === true;
     spawnInFlight = true;
-    let spawned: { paneId?: string } | null = null;
+    let spawned: {
+      paneId?: string;
+      worktree?: { name?: string };
+    } | null = null;
     try {
       const callerPane = await resolveSpawnPane();
       // A sidebar alone in its window has nothing to split but itself, and
@@ -1278,22 +1293,31 @@ export function App(props: AppProps) {
           callerPane: callerPane ?? undefined,
           prompt: prompt || undefined,
           detach,
-          // The daemon derives the name from the prompt when none is given,
-          // which is the same rule the row previews, so the two cannot drift.
+          // A name is sent only when one was TYPED. Left out, the daemon
+          // derives it from the prompt by the same rule the row previews and
+          // numbers it past a collision; sent, it means that worktree
+          // specifically, and an existing one of that name is opened rather
+          // than sidestepped. Posting the preview as if it had been typed
+          // would silently swap the first behaviour for the second.
+          //
           // In move-changes mode the same field carries the move: the daemon
           // routes creation through it, so the worktree is made once, with
           // the changes already in it.
           worktree:
             draft.destination === "worktree"
-              ? draft.moveChanges
-                ? { withChanges: true, untracked: draft.untracked }
-                : {}
+              ? {
+                  ...(worktreeName ? { name: worktreeName } : {}),
+                  ...(draft.moveChanges
+                    ? { withChanges: true, untracked: draft.untracked }
+                    : {}),
+                }
               : undefined,
         }),
       });
       const body = (await response.json().catch(() => null)) as {
         paneId?: string;
         error?: string;
+        worktree?: { name?: string };
       } | null;
       if (response.ok) {
         spawned = body ?? {};
@@ -1327,7 +1351,15 @@ export function App(props: AppProps) {
       spawnInFlight = false;
     }
     if (detach) {
-      store.actions.showToast(`Spawned ${agent.displayName}`);
+      // The daemon's name, not the row's preview: a derived name that
+      // collided came back numbered, and a toast repeating the preview would
+      // name a worktree the spawn did not land in.
+      const created = spawned.worktree?.name;
+      store.actions.showToast(
+        created
+          ? `Spawned ${agent.displayName} in ${created}`
+          : `Spawned ${agent.displayName}`,
+      );
       return;
     }
     // The daemon already selected the new pane's window; tell the other
@@ -1359,11 +1391,11 @@ export function App(props: AppProps) {
       return;
     }
 
-    // The prompt input owns every remaining key while it has focus, so a
-    // prompt can contain `j`, `3`, or anything else a field shortcut would
-    // otherwise swallow. Field movement there is limited to the keys the
-    // input doesn't consume, exactly as in search mode.
-    if (draft.field === "prompt") {
+    // A text input owns every remaining key while it has focus, so a prompt
+    // (or a worktree name) can contain `j`, `3`, or anything else a field
+    // shortcut would otherwise swallow. Field movement there is limited to
+    // the keys the input doesn't consume, exactly as in search mode.
+    if (draft.field === "prompt" || draft.field === "worktreeName") {
       if (key === "down" || (key === "n" && event.ctrl)) {
         store.actions.moveNewSessionField(1);
         event.preventDefault();
@@ -2299,6 +2331,7 @@ export function App(props: AppProps) {
               onSelectDestination={store.actions.setNewSessionDestination}
               onSelectUntracked={store.actions.setNewSessionUntracked}
               onPromptInput={store.actions.setNewSessionPrompt}
+              onWorktreeNameInput={store.actions.setNewSessionWorktreeName}
               onSubmit={() => void submitNewSession()}
               onCancel={store.actions.closeNewSessionDialog}
               showKeyHints={props.sidebar === true}

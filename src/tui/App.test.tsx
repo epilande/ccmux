@@ -2745,14 +2745,18 @@ describe("App new session dialog", () => {
    * The destination field is the picker half of issue #69. It sends the
    * daemon an empty `worktree` object rather than a name: the daemon derives
    * the name from the same prompt the row previewed, so the two cannot drift.
+   *
+   * The empty object is load-bearing, not incidental. A name in it means
+   * create-OR-OPEN, so an untouched dialog that posted its own preview would
+   * drop the agent into whatever worktree already answers to that slug,
+   * instead of the numbered sibling a derived name gets (issue #83).
    */
-  it("asks for a worktree when the destination is set to one", async () => {
+  it("asks for a worktree by prompt alone, naming nothing", async () => {
     const { spawns, restore } = withDaemon();
     const { restore: restoreExit } = withExitSpy();
     try {
       await openDialog();
-      // agent -> placement -> prompt. The prompt is the only name this dialog
-      // can offer, so a worktree submit carries one.
+      // agent -> placement -> prompt.
       setup.mockInput.pressTab();
       setup.mockInput.pressTab();
       await setup.renderOnce();
@@ -2763,11 +2767,13 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
       setup.mockInput.pressKey("2");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("[New worktree: fix-bug]");
+      // The name it would get, on its own row and left untouched.
+      expect(setup.captureCharFrame()).toContain("fix-bug");
       setup.mockInput.pressEnter();
       await settle();
 
       expect(spawns[0]?.worktree).toEqual({});
+      expect(spawns[0]?.worktree).not.toHaveProperty("name");
       expect(spawns[0]?.prompt).toBe("fix bug");
     } finally {
       restoreExit();
@@ -2776,10 +2782,106 @@ describe("App new session dialog", () => {
   });
 
   /**
-   * The dialog has no name field, so a prompt that derives nothing leaves the
-   * worktree destination unspawnable. It refuses locally rather than posting:
-   * the daemon's own refusal advises passing a name explicitly, which is CLI
-   * advice this dialog has no field for.
+   * Typing in the name field is the opposite request: THAT worktree, opened
+   * if it is already there. Only a typed name may travel as one.
+   */
+  it("sends a typed name, slugified the way the daemon would", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("fix bug");
+      await setup.renderOnce();
+      // prompt -> destination, choose the worktree, then tab onto the name
+      // row the choice just revealed.
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("Rescue The Flaky Test");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns[0]?.worktree).toEqual({ name: "rescue-the-flaky-test" });
+      // The prompt still goes to the agent; it just no longer names anything.
+      expect(spawns[0]?.prompt).toBe("fix bug");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  /**
+   * A name is enough on its own. Before issue #83 this dialog could only name
+   * a worktree through the prompt, and a promptless one was unspawnable.
+   */
+  it("spawns a named worktree with no prompt at all", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      // agent -> destination, walking backwards to the last visible field.
+      setup.mockInput.pressTab({ shift: true });
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("rescue");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]?.worktree).toEqual({ name: "rescue" });
+      expect(spawns[0]?.prompt).toBeUndefined();
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  /**
+   * The keys the name field has to own. `2` would otherwise pick a
+   * destination and `j` would move an option, so a name could not contain
+   * either — exactly the guarantee the prompt field already carries.
+   */
+  it("lets the name contain the option keys", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressTab({ shift: true });
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("fix2j");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns[0]?.worktree).toEqual({ name: "fix2j" });
+      // Nothing leaked into the fields those keys belong to.
+      expect(spawns[0]?.split).toBe(false);
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  /**
+   * With neither a name nor a prompt to derive one from there is nothing to
+   * create. It refuses locally rather than posting: the daemon's own refusal
+   * advises passing a name explicitly, which was CLI advice back when this
+   * dialog had no field to act on it with.
    */
   it("refuses a worktree with no derivable name instead of posting", async () => {
     const { spawns, restore } = withDaemon();
@@ -2799,7 +2901,7 @@ describe("App new session dialog", () => {
 
       expect(spawns).toHaveLength(0);
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Type a prompt to name the");
+      expect(frame).toContain("Name the worktree, or type a prompt");
       // Fixable in place, so the dialog stays up with the draft intact.
       expect(frame).toContain("New session");
     } finally {
@@ -2828,9 +2930,49 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
 
       expect(spawns).toHaveLength(0);
-      expect(setup.captureCharFrame()).toContain("Type a prompt to name the");
+      expect(setup.captureCharFrame()).toContain(
+        "Name the worktree, or type a prompt",
+      );
     } finally {
       restoreExit();
+      restore();
+    }
+  });
+
+  /**
+   * A derived name can come back numbered: the daemon appends `-2` rather
+   * than joining a worktree that already answers to the slug. The toast says
+   * where the agent actually landed, so it has to read the RESPONSE, not the
+   * name the row previewed.
+   */
+  it("names the worktree the daemon reports, not the one it previewed", async () => {
+    const { restore } = withDaemon({
+      spawnBody: {
+        success: true,
+        paneId: "%99",
+        worktree: { name: "fix-bug-2", path: "/code/myapp/.wt/fix-bug-2" },
+      },
+    });
+    try {
+      // The sidebar spawns without leaving, so it is the surface that has a
+      // toast to show at all.
+      await openDialog({ sidebar: true, persistent: true });
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("fix bug");
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("fix-bug-2");
+    } finally {
       restore();
     }
   });
@@ -3781,7 +3923,7 @@ describe("App move-changes menu gate", () => {
     type SpawnBody = {
       cwd?: string;
       prompt?: string;
-      worktree?: { withChanges?: boolean; untracked?: string };
+      worktree?: { withChanges?: boolean; untracked?: string; name?: string };
     };
 
     function withMoveDaemon() {
@@ -3859,8 +4001,12 @@ describe("App move-changes menu gate", () => {
         await setup.renderOnce();
         await setup.mockInput.typeText("fix the flicker");
         await setup.renderOnce();
-        // ...then tab to Untracked (straight past the locked destination)
-        // and pick "leave".
+        // ...tab straight past the locked destination to the name, which the
+        // prompt has been naming as it was typed...
+        setup.mockInput.pressTab();
+        await setup.renderOnce();
+        expect(setup.captureCharFrame()).toContain("fix-the-flicker");
+        // ...then on to Untracked and pick "leave".
         setup.mockInput.pressTab();
         await setup.renderOnce();
         setup.mockInput.pressKey("3");
@@ -3873,10 +4019,43 @@ describe("App move-changes menu gate", () => {
         expect(spawns).toHaveLength(1);
         expect(spawns[0]?.cwd).toBe("/code/myapp");
         expect(spawns[0]?.prompt).toBe("fix the flicker");
+        // Untouched name, so the move goes into a worktree the daemon names
+        // and numbers, not into whatever already answers to that slug.
         expect(spawns[0]?.worktree).toEqual({
           withChanges: true,
           untracked: "leave",
         });
+      } finally {
+        restore();
+      }
+    });
+
+    /**
+     * The destination is locked but the name is not, which is the reason the
+     * move routes through the dialog rather than happening on the click.
+     */
+    it("posts the move under a name typed into the dialog", async () => {
+      const { spawns, restore } = withMoveDaemon();
+      try {
+        await clickMoveChanges();
+        // agent -> placement -> prompt -> name, past the locked destination.
+        setup.mockInput.pressTab();
+        setup.mockInput.pressTab();
+        setup.mockInput.pressTab();
+        await setup.renderOnce();
+        await setup.mockInput.typeText("Rescue Work");
+        await setup.renderOnce();
+        setup.mockInput.pressEnter();
+        await settle();
+
+        expect(spawns).toHaveLength(1);
+        expect(spawns[0]?.worktree).toEqual({
+          name: "rescue-work",
+          withChanges: true,
+          untracked: "move",
+        });
+        // No prompt was typed, and the move no longer needs one to be named.
+        expect(spawns[0]?.prompt).toBeUndefined();
       } finally {
         restore();
       }

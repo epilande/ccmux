@@ -2959,6 +2959,9 @@ describe("store", () => {
         // untracked choice is inert until one is.
         moveChanges: false,
         untracked: "move",
+        // No name until one is typed: null is the DERIVED state, and the
+        // difference is what keeps an untouched dialog off create-or-open.
+        worktreeName: null,
         field: "agent",
       });
     });
@@ -3018,6 +3021,7 @@ describe("store", () => {
         prompt: "fix the tests",
         moveChanges: false,
         untracked: "move",
+        worktreeName: null,
         field: "prompt",
       });
     });
@@ -3042,6 +3046,7 @@ describe("store", () => {
         prompt: "",
         moveChanges: true,
         untracked: "move",
+        worktreeName: null,
         field: "agent",
       });
     });
@@ -3059,7 +3064,10 @@ describe("store", () => {
       store.actions.moveNewSessionField(1);
       expect(store.state.newSession?.field).toBe("prompt");
       // Straight past `destination`, which cannot be changed here, to the
-      // untracked choice, which only exists here.
+      // name of the worktree the move is going into...
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("worktreeName");
+      // ...and then the untracked choice, which only exists here.
       store.actions.moveNewSessionField(1);
       expect(store.state.newSession?.field).toBe("untracked");
       store.actions.moveNewSessionField(1);
@@ -3116,9 +3124,154 @@ describe("store", () => {
       store.actions.setNewSessionAgent("pi");
       store.actions.setNewSessionPlacement("split-v");
       store.actions.setNewSessionPrompt("hi");
+      store.actions.setNewSessionWorktreeName("nope");
       store.actions.moveNewSessionField(1);
 
       expect(store.state.newSession).toBeNull();
+    });
+
+    /**
+     * The worktree name (issue #83). Two states, and the difference is what
+     * the daemon does on a collision: a DERIVED name gets numbered past an
+     * existing worktree, an EXPLICIT one opens it. Null is derived.
+     */
+    describe("worktree name", () => {
+      /** A dialog with a worktree destination and a prompt to derive from. */
+      function worktreeDialog() {
+        const store = createTUIStore();
+        store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+        store.actions.setNewSessionDestination("worktree");
+        store.actions.setNewSessionPrompt("fix the flaky test");
+        return store;
+      }
+
+      it("reaches the name only once a worktree is the destination", () => {
+        const store = createTUIStore();
+        store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+
+        const walk = () => {
+          store.actions.setNewSessionField("agent");
+          const seen: string[] = [];
+          for (let i = 0; i < NEW_SESSION_FIELDS.length; i++) {
+            seen.push(store.state.newSession!.field);
+            store.actions.moveNewSessionField(1);
+          }
+          return seen;
+        };
+
+        // Nothing is being named, so the row would refuse every key.
+        expect(walk()).not.toContain("worktreeName");
+        store.actions.setNewSessionDestination("worktree");
+        // Directly after the destination: a name means nothing until there is
+        // a worktree to give it to.
+        expect(walk()).toEqual([
+          "agent",
+          "placement",
+          "prompt",
+          "destination",
+          "worktreeName",
+          "agent",
+        ]);
+      });
+
+      it("stays derived while the prompt is typed", () => {
+        const store = worktreeDialog();
+
+        store.actions.setNewSessionPrompt("fix something else");
+
+        // Still the prompt's to name: nothing was typed into the field, so
+        // the request must not start carrying a name of its own.
+        expect(store.state.newSession?.worktreeName).toBeNull();
+      });
+
+      it("freezes the name once it is typed into", () => {
+        const store = worktreeDialog();
+
+        store.actions.setNewSessionWorktreeName("flaky-fix");
+        store.actions.setNewSessionPrompt("a completely different prompt");
+
+        expect(store.state.newSession?.worktreeName).toBe("flaky-fix");
+      });
+
+      it("returns to derived when the field is cleared", () => {
+        const store = worktreeDialog();
+        store.actions.setNewSessionWorktreeName("flaky-fix");
+
+        // An empty text input is the only way to spell "no name of my own".
+        store.actions.setNewSessionWorktreeName("");
+
+        expect(store.state.newSession?.worktreeName).toBeNull();
+      });
+
+      it("settles the typed name to its slug when focus leaves", () => {
+        const store = worktreeDialog();
+        store.actions.setNewSessionField("worktreeName");
+        store.actions.setNewSessionWorktreeName("Flaky Test Fix!");
+
+        store.actions.moveNewSessionField(1);
+
+        // The daemon slugifies whatever it is given; showing the same thing
+        // is what makes the row a preview rather than a guess.
+        expect(store.state.newSession?.worktreeName).toBe("flaky-test-fix");
+      });
+
+      it("leaves the name alone while the field still has focus", () => {
+        const store = worktreeDialog();
+        store.actions.setNewSessionField("worktreeName");
+        store.actions.setNewSessionWorktreeName("Flaky Test ");
+
+        // A click on the row it is already on is not a blur, and slugifying
+        // mid-word would eat the trailing space the next word needs.
+        store.actions.setNewSessionField("worktreeName");
+
+        expect(store.state.newSession?.worktreeName).toBe("Flaky Test ");
+      });
+
+      it("falls back to derived when nothing usable was typed", () => {
+        const store = worktreeDialog();
+        store.actions.setNewSessionField("worktreeName");
+        store.actions.setNewSessionWorktreeName("修复!!!");
+
+        store.actions.moveNewSessionField(1);
+
+        // Slugifies to nothing, which is the same request as an empty field,
+        // and the only reading that cannot post a name the daemon refuses.
+        expect(store.state.newSession?.worktreeName).toBeNull();
+      });
+
+      it("moves focus off the name when the destination leaves the worktree", () => {
+        const store = worktreeDialog();
+        store.actions.setNewSessionField("worktreeName");
+
+        store.actions.setNewSessionDestination("here");
+
+        // The row is gone; focus left on it would make the next Tab start
+        // from a field the list has never heard of.
+        expect(store.state.newSession?.field).toBe("destination");
+      });
+
+      it("keeps a typed name across a round trip through this checkout", () => {
+        const store = worktreeDialog();
+        store.actions.setNewSessionWorktreeName("flaky-fix");
+
+        store.actions.setNewSessionDestination("here");
+        store.actions.setNewSessionDestination("worktree");
+
+        expect(store.state.newSession?.worktreeName).toBe("flaky-fix");
+      });
+
+      it("gives a move-changes dialog the same field", () => {
+        const store = createTUIStore();
+        store.actions.openNewSessionDialog({
+          cwd: "/repo",
+          agent: "claude",
+          moveChanges: true,
+        });
+
+        store.actions.setNewSessionWorktreeName("rescue");
+
+        expect(store.state.newSession?.worktreeName).toBe("rescue");
+      });
     });
 
     it("restores the last spawned agent from persisted state", () => {

@@ -32,6 +32,10 @@ import { setUIState, type UIState } from "../lib/state";
 import { getDaemonUrl } from "../lib/config";
 import type { TranscriptMatch } from "../daemon/transcript-search";
 import type { UntrackedMode } from "../daemon/worktree-move-changes";
+// The daemon's own slug rule, imported rather than mirrored: a name the
+// dialog settles differently from the one that gets created is worse than
+// showing no name at all.
+import { slugify } from "../daemon/worktree-create";
 import { normalizePrompt } from "./components/session-columns";
 import { capturePane } from "./utils/tmux";
 import { isSameServerCached } from "./utils/server-guard";
@@ -73,6 +77,7 @@ export type NewSessionField =
   | "placement"
   | "prompt"
   | "destination"
+  | "worktreeName"
   | "untracked";
 
 /**
@@ -93,11 +98,15 @@ export const NEW_SESSION_FIELDS: readonly NewSessionField[] = [
   "agent",
   "placement",
   "prompt",
-  // Last, and after the prompt on purpose: the worktree name is DERIVED from
-  // the prompt, so the row can only show what you would get once there is
+  // After the prompt on purpose: the worktree name is DERIVED from the prompt
+  // by default, so these rows can only show what you would get once there is
   // something to derive it from. It also leaves the two-tab path to the
   // prompt, which people already have in their fingers, where it was.
   "destination",
+  // After the destination for the same reason: a name means nothing until
+  // there is a worktree to give it to. Worktree destinations only; see
+  // `newSessionFields`.
+  "worktreeName",
   // Move-changes mode only; see `newSessionFields`.
   "untracked",
 ];
@@ -105,22 +114,33 @@ export const NEW_SESSION_FIELDS: readonly NewSessionField[] = [
 /**
  * The fields a given draft actually has, in focus order.
  *
- * Two of them are mode-exclusive. Move-changes mode locks the destination (a
+ * Three of them are conditional. Move-changes mode locks the destination (a
  * move has nowhere to go but a new worktree, so offering "here" would be a
  * choice that cannot be taken) and adds the untracked-files choice; an
- * ordinary new session has neither. A field that cannot be acted on must not
- * be reachable by Tab either — focusing a row whose number keys do nothing is
- * exactly the "reads as broken" outcome the picker hides items to avoid.
+ * ordinary new session has neither. The name belongs to whichever of the two
+ * is making a worktree, and to neither when the session starts in the
+ * checkout it was opened over. A field that cannot be acted on must not be
+ * reachable by Tab either — focusing a row whose keys do nothing is exactly
+ * the "reads as broken" outcome the picker hides items to avoid.
  *
  * The full list stays the source of truth for the DIALOG'S HEIGHT: every
- * field declares a row count, and the hidden one declares zero.
+ * field declares a row count, and a hidden one declares zero.
  */
 export function newSessionFields(draft: {
   moveChanges: boolean;
+  destination: NewSessionDestination;
 }): readonly NewSessionField[] {
-  return NEW_SESSION_FIELDS.filter((field) =>
-    draft.moveChanges ? field !== "destination" : field !== "untracked",
-  );
+  return NEW_SESSION_FIELDS.filter((field) => {
+    if (field === "destination") return !draft.moveChanges;
+    if (field === "untracked") return draft.moveChanges;
+    // Both disjuncts, though the store locks a move's destination to
+    // `worktree`: the name row is what a move names its worktree with, and a
+    // lock that ever came loose must not take the field with it.
+    if (field === "worktreeName") {
+      return draft.destination === "worktree" || draft.moveChanges;
+    }
+    return true;
+  });
 }
 
 /**
@@ -146,6 +166,18 @@ export interface NewSessionDraft {
   moveChanges: boolean;
   /** What the move does with untracked files. Ignored unless `moveChanges`. */
   untracked: UntrackedMode;
+  /**
+   * The worktree's name, or null to let the daemon derive one (issue #83).
+   *
+   * Null is not the same as the derived name spelled out, and the difference
+   * is why this is nullable rather than a string seeded with the preview: the
+   * daemon treats an EXPLICIT name as create-or-open and a DERIVED one as
+   * create-with-a-`-2`-suffix. Posting the previewed slug as an explicit name
+   * would quietly turn "spawn beside the worktree that is already there" into
+   * "drop this agent into it", which is not what an untouched dialog asked
+   * for. Typing here freezes the name; clearing the field returns to derived.
+   */
+  worktreeName: string | null;
   /** Which field the option/text keys currently apply to. */
   field: NewSessionField;
 }
@@ -1039,6 +1071,27 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     }
   }
 
+  /**
+   * Settle a typed worktree name as focus leaves its field.
+   *
+   * The daemon slugifies whatever name it is given, so `Fix Sidebar Flicker`
+   * becomes `fix-sidebar-flicker` whether or not the dialog says so. Applying
+   * the same rule on the way out makes the row show the name that will
+   * actually be created, rather than the keystrokes that led to it.
+   *
+   * An entry with nothing usable in it (punctuation, a non-Latin script)
+   * slugifies to nothing, and nothing is exactly the derived state: falling
+   * back is both the honest reading of an empty name and the only one that
+   * cannot post a name the daemon would refuse.
+   */
+  function settleWorktreeName(nextField: NewSessionField) {
+    const draft = state.newSession;
+    if (!draft || draft.field !== "worktreeName") return;
+    if (nextField === "worktreeName" || draft.worktreeName === null) return;
+    const slug = slugify(draft.worktreeName);
+    setState("newSession", "worktreeName", slug === "" ? null : slug);
+  }
+
   const actions = {
     setSessions(sessions: EnrichedSession[]) {
       // Preserve client-synthesized subprocess invoke rows. They live only
@@ -1307,7 +1360,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           // Agents create new files constantly, so leaving them behind would
           // strand exactly the work being relocated. Same default as the CLI.
           untracked: "move",
-          field: newSessionFields({ moveChanges })[0]!,
+          // Derived until typed in: the dialog opens with no prompt, so there
+          // is nothing to name a worktree after yet.
+          worktreeName: null,
+          field: newSessionFields({
+            moveChanges,
+            destination: moveChanges ? "worktree" : "here",
+          })[0]!,
         });
       });
     },
@@ -1324,12 +1383,18 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       const count = fields.length;
       const current = fields.indexOf(draft.field);
       const next = (((current + delta) % count) + count) % count;
-      setState("newSession", "field", fields[next]!);
+      batch(() => {
+        settleWorktreeName(fields[next]!);
+        setState("newSession", "field", fields[next]!);
+      });
     },
 
     setNewSessionField(field: NewSessionField) {
       if (!state.newSession) return;
-      setState("newSession", "field", field);
+      batch(() => {
+        settleWorktreeName(field);
+        setState("newSession", "field", field);
+      });
     },
 
     setNewSessionAgent(agent: string) {
@@ -1343,13 +1408,26 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     setNewSessionDestination(destination: NewSessionDestination) {
-      if (!state.newSession) return;
+      const draft = state.newSession;
+      if (!draft) return;
       // Locked in move-changes mode, and enforced here rather than only in the
       // dialog: the destination is what makes the request a move at all, so
       // any path that could flip it back to `here` would post a spawn that
       // silently dropped the changes it was opened to relocate.
-      if (state.newSession.moveChanges) return;
-      setState("newSession", "destination", destination);
+      if (draft.moveChanges) return;
+      batch(() => {
+        setState("newSession", "destination", destination);
+        // The name field goes with the worktree. Focus cannot be left on a
+        // row that no longer exists, or the next Tab would start from a field
+        // the list has never heard of. The typed name itself is KEPT: coming
+        // back to the worktree destination should find it as it was left.
+        if (
+          destination !== "worktree" &&
+          state.newSession?.field === "worktreeName"
+        ) {
+          setState("newSession", "field", "destination");
+        }
+      });
     },
 
     setNewSessionPrompt(prompt: string) {
@@ -1360,6 +1438,17 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     setNewSessionUntracked(untracked: UntrackedMode) {
       if (!state.newSession) return;
       setState("newSession", "untracked", untracked);
+    },
+
+    /**
+     * Take a keystroke in the name field. An empty field is the derived
+     * state, not an empty name: clearing what you typed is how you hand the
+     * name back to the prompt, and there is no other way to spell "no name"
+     * in a text input.
+     */
+    setNewSessionWorktreeName(name: string) {
+      if (!state.newSession) return;
+      setState("newSession", "worktreeName", name === "" ? null : name);
     },
 
     /**
