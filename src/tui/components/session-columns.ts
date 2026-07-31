@@ -16,7 +16,7 @@ import {
   DEFAULT_BREAKPOINTS,
 } from "../../lib/preferences";
 import type { EnrichedSession, BranchPR } from "../../types";
-import { truncateText } from "../utils/format";
+import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
 
 const RESPONSIVE_KEYS = new Set([
   "default",
@@ -536,8 +536,8 @@ export function trailingLabelsWidth(
   const attn = getAttentionLabel(session);
   if (sidebar) return attn ? 1 : 0;
   const sub = subagentCountLabel(session);
-  const attnW = attn ? Math.min(attn.length, ATTENTION_LABEL_MAX) : 0;
-  const subW = sub ? sub.length : 0;
+  const attnW = attn ? Math.min(displayWidth(attn), ATTENTION_LABEL_MAX) : 0;
+  const subW = sub ? displayWidth(sub) : 0;
   const gap = attn && sub ? 1 : 0; // the space between the two labels
   return attnW + subW + gap;
 }
@@ -567,7 +567,9 @@ export interface ProjectCellDisplay {
 
 /**
  * The `:branch` label with the existing conventions: capped at `maxBranchLen`
- * with a trailing `~`, worktree `+` appended.
+ * COLUMNS with a trailing `~`, worktree `+` appended. Every budget in this
+ * pipeline is a column count, so a branch of wide glyphs is capped by what it
+ * draws rather than by how many code units it happens to spend.
  */
 function branchLabelFor(
   branch: string,
@@ -575,8 +577,8 @@ function branchLabelFor(
   maxBranchLen: number,
 ): string {
   const shown =
-    branch.length > maxBranchLen
-      ? branch.slice(0, maxBranchLen - 1) + "~"
+    displayWidth(branch) > maxBranchLen
+      ? sliceToWidth(branch, maxBranchLen - 1) + "~"
       : branch;
   return ":" + shown + (isWorktree ? "+" : "");
 }
@@ -588,11 +590,11 @@ function minBranchLabelWidth(isWorktree: boolean): number {
 }
 
 /**
- * Shorten a branch label to `avail` chars using the `~` marker; "" if too
+ * Shorten a branch label to `avail` columns using the `~` marker; "" if too
  * tight. "Too tight" counts the worktree `+` as well as the ":" and one
- * usable char, because a label that keeps a one-char body plus both markers
- * would come back WIDER than the room it was given — and on a worktree row
- * that single overspent char is enough to push the repo out of the cell.
+ * usable column, because a label that keeps a one-column body plus both
+ * markers would come back WIDER than the room it was given, and on a worktree
+ * row that single overspent column is enough to push the repo out of the cell.
  */
 function shortenBranchLabel(
   branch: string,
@@ -601,42 +603,47 @@ function shortenBranchLabel(
 ): string {
   const wt = isWorktree ? "+" : "";
   if (avail < minBranchLabelWidth(isWorktree)) return "";
-  const bodyLen = Math.max(1, avail - 1 /* colon */ - 1 /* ~ */ - wt.length);
-  if (branch.length <= bodyLen) return ":" + branch + wt;
-  return ":" + branch.slice(0, bodyLen) + "~" + wt;
+  const bodyWidth = Math.max(1, avail - 1 /* colon */ - 1 /* ~ */ - wt.length);
+  if (displayWidth(branch) <= bodyWidth) return ":" + branch + wt;
+  return ":" + sliceToWidth(branch, bodyWidth) + "~" + wt;
 }
 
-/** Fit the prefix into `avail` chars; dropped entirely under 2 usable ones. */
+/** Fit the prefix into `avail` columns; dropped entirely under 2 usable ones. */
 function fitPrefix(prefix: string, avail: number): string {
   if (avail < 2) return "";
-  return prefix.length > avail ? truncateText(prefix, avail) : prefix;
+  return displayWidth(prefix) > avail ? truncateText(prefix, avail) : prefix;
 }
 
 /** The dirname is the cell's last identifiable part, so it holds this many
- *  chars even when the budget says otherwise. */
+ *  columns even when the budget says otherwise. */
 const DIRNAME_FLOOR = 5;
 /** Floor for a dirname that shares the cell with a repo prefix: the repo is
  *  the identity there, so the worktree name gives up more before the repo
  *  gives up anything. */
 const WORKTREE_NAME_FLOOR = 3;
 
-/** Fit the dirname into `avail` chars, never below `floor` (the caller
+/** Fit the dirname into `avail` columns, never below `floor` (the caller
  *  absorbs the overflow elsewhere). */
 function fitDirname(
   dirname: string,
   avail: number,
   floor = DIRNAME_FLOOR,
 ): string {
-  if (dirname.length <= avail) return dirname;
+  if (displayWidth(dirname) <= avail) return dirname;
   return truncateText(dirname, Math.max(floor, avail));
 }
 
 /**
- * Fit the project (path:branch) cell into `budget` chars, never silently
+ * Fit the project (path:branch) cell into `budget` COLUMNS, never silently
  * clipping: any shortening shows `…` (or the existing `~` for the branch).
  * Shrink order matches the design: prefix first (drop it under 2 usable
- * chars), then the dirname (kept to a small floor), then the branch as a last
- * resort.
+ * columns), then the dirname (kept to a small floor), then the branch as a
+ * last resort.
+ *
+ * Every budget here is measured with `displayWidth`, not `.length`: the parts
+ * are cut by `truncateText`/`sliceToWidth`, which are column-true, so counting
+ * the leftovers in code units would let a wide-glyph dirname (or an emoji in a
+ * branch name) buy room the terminal never gives it back.
  *
  * A `repoPrefix` cell (a worktree's `<repo>/<worktree>`) reverses the first
  * two, since the repo a worktree belongs to is worth more than the tail of
@@ -660,6 +667,8 @@ export function fitProjectCell(
   maxBranchLen: number,
 ): ProjectCellDisplay {
   const { prefix, dirname, branch, isWorktree, repoPrefix } = input;
+  const prefixWidth = displayWidth(prefix);
+  const dirnameWidth = displayWidth(dirname);
   let branchLabel = branch
     ? branchLabelFor(branch, isWorktree, maxBranchLen)
     : "";
@@ -674,11 +683,11 @@ export function fitProjectCell(
     // branch blink out of existence as the terminal *widens* into the band
     // where the repo starts fitting.
     const identityReserve =
-      prefix.length + Math.min(dirname.length, WORKTREE_NAME_FLOOR);
+      prefixWidth + Math.min(dirnameWidth, WORKTREE_NAME_FLOOR);
     const minBranch = minBranchLabelWidth(isWorktree);
     if (
       identityReserve + minBranch <= budget &&
-      branchLabel.length > budget - identityReserve
+      displayWidth(branchLabel) > budget - identityReserve
     ) {
       branchLabel = shortenBranchLabel(
         branch,
@@ -689,9 +698,9 @@ export function fitProjectCell(
   }
 
   // What the path parts get to share once the branch label has its width.
-  const pathBudget = budget - branchLabel.length;
+  const pathBudget = budget - displayWidth(branchLabel);
 
-  if (prefix.length + dirname.length <= pathBudget) {
+  if (prefixWidth + dirnameWidth <= pathBudget) {
     return { prefix, dirname, branchLabel };
   }
 
@@ -702,10 +711,10 @@ export function fitProjectCell(
     // 1. Shrink the worktree name first, keeping the repo whole.
     outDirname = fitDirname(
       dirname,
-      pathBudget - prefix.length,
+      pathBudget - prefixWidth,
       WORKTREE_NAME_FLOOR,
     );
-    if (prefix.length + outDirname.length > pathBudget) {
+    if (prefixWidth + displayWidth(outDirname) > pathBudget) {
       // 2. Even at its floor the pair doesn't fit: drop the repo whole (never
       //    a stub) and give the worktree name the entire path budget back.
       outPrefix = "";
@@ -713,17 +722,18 @@ export function fitProjectCell(
     }
   } else {
     // 1. Shrink the prefix first: give it what's left after dirname+branch.
-    outPrefix = fitPrefix(prefix, pathBudget - dirname.length);
+    outPrefix = fitPrefix(prefix, pathBudget - dirnameWidth);
     // 2. Then the dirname, kept to a small floor so it stays identifiable.
-    outDirname = fitDirname(dirname, pathBudget - outPrefix.length);
+    outDirname = fitDirname(dirname, pathBudget - displayWidth(outPrefix));
   }
-  if (outPrefix.length + outDirname.length <= pathBudget) {
+  if (displayWidth(outPrefix) + displayWidth(outDirname) <= pathBudget) {
     return { prefix: outPrefix, dirname: outDirname, branchLabel };
   }
 
   // 3. Last resort: shorten the branch further with the `~` marker.
   if (branch) {
-    const availForBranch = budget - outPrefix.length - outDirname.length;
+    const availForBranch =
+      budget - displayWidth(outPrefix) - displayWidth(outDirname);
     branchLabel = shortenBranchLabel(branch, isWorktree, availForBranch);
   }
   return { prefix: outPrefix, dirname: outDirname, branchLabel };
