@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { NewSessionDialog, optionWindow } from "./NewSessionDialog";
+import { NewSessionDialog, optionWindow, wrapText } from "./NewSessionDialog";
+import { expectFrameIntegrity, squish } from "./test-helpers";
 import type { SpawnableAgent } from "../../lib/spawnable-agents";
 import type { NewSessionDraft } from "../store";
 
@@ -85,6 +86,32 @@ describe("optionWindow", () => {
       const { start, end } = optionWindow(9, selected, 4);
       expect(selected >= start && selected < end).toBe(true);
     }
+  });
+});
+
+describe("wrapText", () => {
+  it("breaks on words and keeps every line within the width", () => {
+    const lines = wrapText("Daemon is out of date - run restart", 13);
+    expect(lines).toEqual(["Daemon is out", "of date - run", "restart"]);
+    for (const line of lines) expect(line.length).toBeLessThanOrEqual(13);
+  });
+
+  it("breaks a word that cannot fit a line of its own", () => {
+    expect(wrapText("run ccmuxdaemonrestart now", 8)).toEqual([
+      "run",
+      "ccmuxdae",
+      "monresta",
+      "rt now",
+    ]);
+  });
+
+  it("always yields at least one line", () => {
+    expect(wrapText("", 10)).toEqual([""]);
+    expect(wrapText("   ", 10)).toEqual([""]);
+  });
+
+  it("gives up rather than looping when there is no width to wrap into", () => {
+    expect(wrapText("anything", 0)).toEqual(["anything"]);
   });
 });
 
@@ -221,6 +248,54 @@ describe("NewSessionDialog", () => {
     expect(frame).toContain("bad regex");
   });
 
+  /**
+   * Issue #85. The Agent field was budgeted one row for its error, so a
+   * message that wrapped left the dialog that many rows short and its last
+   * rows fell outside the border — at a sidebar width the third placement
+   * and the whole Where field disappeared.
+   */
+  it("keeps every row inside the border when the agent error wraps", async () => {
+    const error = "Daemon is out of date - run `ccmux daemon restart`";
+    const frame = await renderDialog({
+      agents: [],
+      agentsError: error,
+      width: 34,
+      height: 30,
+    });
+
+    expectFrameIntegrity(frame);
+    // The whole message survived, wherever the wrap fell.
+    expect(squish(frame)).toContain(squish(error));
+    // And so did every row budgeted below it, down to the last one.
+    expect(frame).toContain("New window");
+    expect(frame).toContain("Split right");
+    expect(frame).toContain("Split down");
+    expect(frame).toContain("Where");
+    expect(frame).toContain("Here");
+    expect(frame).toContain("Worktree");
+    expect(frame).toContain("Directory");
+    expect(frame).toContain("enter");
+  });
+
+  /** An error too tall for the screen cannot be shown whole; what it must
+   *  not do is push the fields below it off the dialog. */
+  it("caps an error taller than the screen instead of clipping the fields", async () => {
+    const frame = await renderDialog({
+      agents: [],
+      agentsError: "spawnable agents could not be resolved ".repeat(20),
+      width: 34,
+      height: 22,
+    });
+
+    expectFrameIntegrity(frame);
+    expect(frame).toContain("…");
+    expect(frame).toContain("Split down");
+    expect(frame).toContain("Directory");
+    expect(
+      frame.split("\n").filter((l) => l.includes("│")).length,
+    ).toBeLessThan(22);
+  });
+
   it("shortens a home-relative directory", async () => {
     const home = process.env.HOME ?? "/Users/dev";
     const frame = await renderDialog({
@@ -316,14 +391,7 @@ describe("NewSessionDialog destination", () => {
     const frame = setup.captureCharFrame();
     expect(frame).toContain("New worktree: fix-sidebar-");
     // Every row of the box still ends with its border.
-    const boxRows = frame
-      .split("\n")
-      .filter((row) => row.includes("│"))
-      .map((row) => row.trimEnd());
-    expect(boxRows.length).toBeGreaterThan(0);
-    for (const row of boxRows) {
-      expect(row.endsWith("│")).toBe(true);
-    }
+    expectFrameIntegrity(frame);
   });
 
   /**
@@ -337,12 +405,7 @@ describe("NewSessionDialog destination", () => {
     expect(frame).toContain("[New worktree (add a prompt)]");
     expect(frame).not.toContain("New worktree:");
     // The hint is budgeted like the name is; the border still closes.
-    for (const row of frame
-      .split("\n")
-      .filter((row) => row.includes("│"))
-      .map((row) => row.trimEnd())) {
-      expect(row.endsWith("│")).toBe(true);
-    }
+    expectFrameIntegrity(frame);
   });
 
   it("keeps the hint off the unselected row, where it is only noise", async () => {

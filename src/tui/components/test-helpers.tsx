@@ -1,3 +1,4 @@
+import { expect } from "bun:test";
 import type { EnrichedSession, Session } from "../../types";
 import type { FilteredSession, StatusSummary } from "../utils/grouping";
 
@@ -95,6 +96,25 @@ export function membersFromSummary(summary: StatusSummary): FilteredSession[] {
   add(summary.waitingGeneric, { status: "waiting", attentionType: null });
   add(summary.idle, { status: "idle" });
   return members;
+}
+
+/**
+ * Assert every row of a rendered single-border box closes with its border.
+ *
+ * The check that catches content wrapping past the rows its container
+ * budgeted for it: the content assertions still pass in that case (the text
+ * is all there), while the box is drawn wrong. Live captures, not tests, are
+ * what caught the last two instances of it.
+ */
+export function expectFrameIntegrity(frame: string): void {
+  const boxRows = frame
+    .split("\n")
+    .filter((row) => row.includes("│"))
+    .map((row) => row.trimEnd());
+  expect(boxRows.length).toBeGreaterThan(0);
+  for (const row of boxRows) {
+    expect(row.endsWith("│")).toBe(true);
+  }
 }
 
 // Strip single-border box chars and whitespace from a captured frame so an
