@@ -16,7 +16,7 @@ import {
   readUncommitted,
   type CreateWorktree,
 } from "./worktree-move-changes";
-import { runGit } from "./worktree-git";
+import { runGit, type GitRun } from "./worktree-git";
 
 /**
  * These tests drive REAL git against throwaway fixture repos under the OS temp
@@ -445,6 +445,101 @@ describe("moveChangesToWorktree", () => {
     expect(await stashCount(repo)).toBe(1);
     expect(result.sourceRestored).toBe(true);
     expect(readFileSync(join(repo, "tracked.txt"), "utf-8")).toBe("edited\n");
+  });
+
+  it("refuses rather than adopting a previous run's leftover entry", async () => {
+    // `git stash push` exits 0 with "No local changes to save" and creates
+    // NOTHING when the tree went clean since the status read. The entry on
+    // top is then somebody else's, and identifying ours by message alone
+    // would apply and then DROP it.
+    const repo = await makeRepo();
+    dirty(repo);
+
+    // Run one fails after stashing, so its entry stays behind holding the
+    // work, named exactly the way run two's would be.
+    const first = await moveChangesToWorktree({
+      source: repo,
+      createWorktree: async () => {
+        throw new Error("disk full");
+      },
+    });
+    expect(first.ok).toBe(false);
+    expect(await stashCount(repo)).toBe(1);
+    const leftover = await git(repo, ["rev-parse", "refs/stash"]);
+
+    // Run two, on a source that goes clean between the status read and the
+    // push: an agent in that pane reverting its own edit.
+    const raced: GitRun = async (cwd, args) => {
+      const res = await runGit(cwd, args);
+      if (args[0] === "status") {
+        await runGit(repo, ["checkout", "--", "tracked.txt"]);
+        rmSync(join(repo, "new.txt"), { force: true });
+      }
+      return res;
+    };
+    const second = await moveChangesToWorktree({
+      source: repo,
+      git: raced,
+      createWorktree: realCreator(repo),
+    });
+
+    expect(second.ok).toBe(false);
+    if (second.ok) return;
+    expect(second.reason).toBe("nothing-to-move");
+    // Run one's work is exactly where it was.
+    expect(await stashCount(repo)).toBe(1);
+    expect(await git(repo, ["rev-parse", "refs/stash"])).toBe(leftover);
+    expect(await git(repo, ["show", `${leftover}:tracked.txt`])).toBe("edited");
+  });
+
+  it("serializes moves that share a repo, so neither sees the other mid-flight", async () => {
+    // The stash stack is shared by every worktree of a repo, so two moves
+    // running at once read and push into the same stack. Interleaved, one
+    // reads a status the other already stashed away.
+    const repo = await makeRepo();
+    dirty(repo);
+
+    const trace: string[] = [];
+    const traced =
+      (label: string): GitRun =>
+      async (cwd, args) => {
+        // Only the transaction's own steps; the pre-lock repo probe is not
+        // part of what has to be serialized.
+        if (args[0] === "status" || args[0] === "stash") {
+          trace.push(`${label}:${args[0]}`);
+        }
+        return runGit(cwd, args);
+      };
+
+    await Promise.all([
+      moveChangesToWorktree({
+        source: repo,
+        name: "first",
+        git: traced("a"),
+        createWorktree: async ({ name }) => {
+          // Long enough that an unserialized second move runs to completion
+          // inside this window.
+          await new Promise((r) => setTimeout(r, 50));
+          const path = join(root, "wt", name ?? "first");
+          await git(repo, ["worktree", "add", "-b", "first", path, "HEAD"]);
+          return { path, created: true };
+        },
+      }),
+      moveChangesToWorktree({
+        source: repo,
+        name: "second",
+        git: traced("b"),
+        createWorktree: realCreator(repo, "second"),
+      }),
+    ]);
+
+    // Two contiguous runs of one label each: one move finished before the
+    // other looked.
+    const labels = trace.map((entry) => entry.split(":")[0]);
+    const blocks = labels.filter((label, i) => label !== labels[i - 1]);
+    expect(`${blocks.length} blocks in ${trace.join(",")}`).toBe(
+      `2 blocks in ${trace.join(",")}`,
+    );
   });
 
   it("refuses a worktree it only OPENED, leaving it and its work alone", async () => {

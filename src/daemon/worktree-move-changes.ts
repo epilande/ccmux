@@ -32,6 +32,15 @@
  * every later reference re-resolves it, so this can only ever apply or drop
  * the entry it created.
  *
+ * OURS ONLY, PROVEN BY THE REF MOVING. `git stash push` exits 0 having
+ * created NOTHING when the tree went clean between the status read and the
+ * push ("No local changes to save"), and its message is not a unique
+ * identifier — an entry from an earlier run of this very function carries the
+ * same one. Recognising our entry by what is on top and what it is called
+ * therefore adopts somebody else's work and then, at step 6, drops it. So
+ * `refs/stash` is read before AND after the push, and only a ref that MOVED
+ * proves an entry is ours. See {@link readStashRef}.
+ *
  * There is deliberately NO `git reset --hard` on the source. `stash push`
  * already left it clean, so a reset would be redundant on the happy path and
  * destructive on any other: an agent working in that pane can create files in
@@ -40,8 +49,8 @@
  */
 
 import { cpSync, existsSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { runGit, type GitRun } from "./worktree-git";
+import { dirname, isAbsolute, join } from "node:path";
+import { normalizePath, runGit, type GitRun } from "./worktree-git";
 
 /**
  * What happens to files git is not tracking yet.
@@ -222,6 +231,92 @@ function stashMessage(name?: string): string {
 }
 
 /**
+ * The SHA at the top of the stash stack, or null when the stack is empty.
+ *
+ * Read either side of the push, because a ref that MOVED is the only proof
+ * that the entry on top is the one this run made; see the module header.
+ */
+async function readStashRef(
+  checkout: string,
+  git: GitRun,
+): Promise<string | null> {
+  const res = await git(checkout, [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    "refs/stash",
+  ]);
+  if (res.exitCode !== 0) return null;
+  return res.stdout.trim() || null;
+}
+
+/** The message of a stash entry, for confirming it is ours. */
+async function stashSubject(
+  checkout: string,
+  sha: string,
+  git: GitRun,
+): Promise<string> {
+  const res = await git(checkout, ["log", "-1", "--format=%s", sha]);
+  return res.exitCode === 0 ? res.stdout : "";
+}
+
+/**
+ * The repository whose stash stack a checkout shares, as a lock key.
+ *
+ * The shared admin directory rather than the working tree: every linked
+ * worktree of a repo pushes onto ONE stack, so two moves running from two
+ * worktrees of the same repo are exactly the collision that has to be
+ * serialized, and their `--show-toplevel` paths differ. Resolved through
+ * `normalizePath` so two routes to one repo (a symlinked `/tmp` on macOS,
+ * a symlinked home) do not take two different locks over one stack.
+ */
+async function stashScopeKey(
+  source: string,
+  git: GitRun,
+): Promise<string | null> {
+  const res = await git(source, ["rev-parse", "--git-common-dir"]);
+  if (res.exitCode !== 0) return null;
+  const dir = res.stdout.trim();
+  if (!dir) return null;
+  return normalizePath(isAbsolute(dir) ? dir : join(source, dir));
+}
+
+/**
+ * Per-repository serialization of the WHOLE move transaction, from the status
+ * read to the drop.
+ *
+ * Every step in between reads or writes state the next move would read
+ * differently: a status that another move has already stashed away reports a
+ * clean tree, and a push that lands mid-transaction renumbers a stack the
+ * other run is still holding a handle into. Serializing is what lets each run
+ * reason about the stack as if it were alone with it.
+ *
+ * A SEPARATE map from `worktree-create.ts`'s `withRepoLock`, deliberately.
+ * This lock is held ACROSS the creation engine's call, so the two would
+ * deadlock the moment they shared a key, and keying them differently by
+ * coincidence (an admin dir is not a repo root) is not a property worth
+ * relying on. Nothing under the creation lock ever takes this one, so the
+ * nesting has no cycle to close.
+ */
+const moveLocks = new Map<string, Promise<unknown>>();
+
+async function withMoveLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = moveLocks.get(key) ?? Promise.resolve();
+  // Chained off the previous holder's settlement, not its value, so one
+  // failed move does not poison the queue behind it.
+  const run = previous.then(fn, fn);
+  moveLocks.set(
+    key,
+    run.catch(() => undefined),
+  );
+  try {
+    return await run;
+  } finally {
+    if (moveLocks.get(key) === run) moveLocks.delete(key);
+  }
+}
+
+/**
  * Locate our stash entry's CURRENT position by SHA.
  *
  * Everything that touches the entry after creation goes through this, because
@@ -269,6 +364,25 @@ function copyUntracked(
 export async function moveChangesToWorktree(
   input: MoveChangesInput,
 ): Promise<MoveChangesResult> {
+  const { source, git = runGit } = input;
+
+  // Resolved before the lock is taken, because it IS the lock's key. Doubles
+  // as the "is this a checkout at all" probe, which is why the refusal below
+  // is the not-a-repo one.
+  const scope = await stashScopeKey(source, git);
+  if (!scope) {
+    return {
+      ok: false,
+      reason: "not-a-repo",
+      error: `Not a git checkout: ${source}`,
+    };
+  }
+
+  return withMoveLock(scope, () => runMove(input));
+}
+
+/** The transaction itself. Only ever called under {@link withMoveLock}. */
+async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
   const {
     source,
     name,
@@ -333,42 +447,67 @@ export async function moveChangesToWorktree(
     // Only `move` hands untracked files to the stash; `copy` duplicates them
     // by hand afterwards and `leave` never touches them.
     if (mode === "move") args.push("--include-untracked");
+    // Read either side of the push: only a ref that MOVED proves the entry on
+    // top belongs to this run.
+    const before = await readStashRef(source, git);
     const pushed = await git(source, args);
-    if (pushed.exitCode !== 0) {
-      return {
-        ok: false,
-        reason: "stash-failed",
-        error: `Could not stash changes in ${source}: ${pushed.stderr.trim()}`,
-      };
-    }
+    const after = await readStashRef(source, git);
+    const fresh = after && after !== before ? after : null;
 
-    const head = await git(source, [
-      "rev-parse",
-      "--verify",
-      "--quiet",
-      "refs/stash",
-    ]);
-    const sha = head.stdout.trim();
-    const subject = await git(source, [
-      "log",
-      "-1",
-      "--format=%s",
-      "refs/stash",
-    ]);
-    // The entry we just made must be the one on top. If it is not, something
-    // else pushed a stash in the microseconds since, and acting on the wrong
-    // entry is exactly the mistake this module refuses to make.
-    if (!sha || !subject.stdout.includes(marker)) {
+    if (pushed.exitCode !== 0) {
+      // A failed push can still have created the entry: git writes
+      // `refs/stash` before it cleans the working tree, so a failure while
+      // removing untracked files leaves a complete entry behind a non-zero
+      // exit. Reporting no sha there would hide the only handle on work that
+      // is now half out of the tree.
+      const ours =
+        fresh && (await stashSubject(source, fresh, git)).includes(marker)
+          ? fresh
+          : undefined;
       return {
         ok: false,
         reason: "stash-failed",
         error:
-          `Stashed the changes in ${source}, but could not confirm which stash entry ` +
-          `holds them, so nothing further was done. The work is safe in the stash; ` +
-          `recover it with 'git stash list' and 'git stash pop'.`,
-        stashSha: sha || undefined,
+          `Could not stash changes in ${source}: ${pushed.stderr.trim()}` +
+          (ours
+            ? ` A stash entry was created before it failed; your changes are in ${ours}.`
+            : ""),
+        ...(ours ? { stashSha: ours } : {}),
       };
     }
+
+    if (!fresh) {
+      // Exit 0 and nothing created: "No local changes to save", because the
+      // tree went clean between the status read above and this push. The
+      // entry on top (if any) is somebody else's — a previous run of this
+      // function included, since they share this message — and adopting it
+      // would apply and then DROP their work.
+      return {
+        ok: false,
+        reason: "nothing-to-move",
+        error:
+          `Nothing to move: ${source} had no uncommitted changes left by the time they ` +
+          `were stashed.`,
+      };
+    }
+
+    // Ours was created, but something else pushed on top of it in between.
+    // Our entry is still in the stack, but nothing here can tell it apart
+    // from an identically-named one left by an earlier run, so this refuses
+    // rather than guessing — and above all does not report the entry that
+    // landed on top as if it were ours.
+    if (!(await stashSubject(source, fresh, git)).includes(marker)) {
+      return {
+        ok: false,
+        reason: "stash-failed",
+        error:
+          `Stashed the changes in ${source}, but another stash was pushed on top before ` +
+          `they could be confirmed, so nothing further was done. The work is safe in the ` +
+          `stash; find the 'ccmux move-changes' entry with 'git stash list' and recover it ` +
+          `with 'git stash pop stash@{N}'.`,
+      };
+    }
+    const sha = fresh;
     stashSha = sha;
   }
 
