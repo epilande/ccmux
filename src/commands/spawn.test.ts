@@ -45,9 +45,30 @@ function withFetchCapture(socketPath: string | null = null) {
     if (href.endsWith("/server-info")) {
       return new Response(JSON.stringify({ socketPath }), { status: 200 });
     }
-    bodies.push(JSON.parse(String(init?.body)) as SpawnBody);
+    const body = JSON.parse(String(init?.body)) as SpawnBody;
+    bodies.push(body);
     return new Response(
-      JSON.stringify({ success: true, paneId: "%9", command: "claude" }),
+      JSON.stringify({
+        success: true,
+        paneId: "%9",
+        command: "claude",
+        // Echoed when the request asked for a move, the way the daemon does.
+        // A 200 with no `move` means a daemon too old to have honored
+        // `--with-changes`, which the CLI treats as a failure, so a stub that
+        // never sent one would make every `--with-changes` case exit.
+        ...(body.worktree?.withChanges
+          ? {
+              move: {
+                moved: 0,
+                source: body.cwd,
+                untracked: {
+                  mode: body.worktree.untracked ?? "move",
+                  files: [],
+                },
+              },
+            }
+          : {}),
+      }),
       { status: 200 },
     );
   }) as unknown as typeof fetch;
@@ -575,9 +596,16 @@ describe("ccmux spawn --with-changes reporting", () => {
     return () => (globalThis.fetch = original);
   }
 
+  /**
+   * `exits` is explicit rather than derived from the status: a 200 can still
+   * exit non-zero (a daemon too old to have honored `--with-changes` answers
+   * 200 with no `move`), so "did it exit" is a property of the case, not of
+   * the status code.
+   */
   async function runAgainst(
     status: number,
     payload: Record<string, unknown>,
+    { exits = status !== 200 }: { exits?: boolean } = {},
   ): Promise<{ out: string; err: string; code: number | null }> {
     const out: string[] = [];
     const err: string[] = [];
@@ -590,10 +618,9 @@ describe("ccmux spawn --with-changes reporting", () => {
     });
     const argv = ["--worktree", "wt", "--with-changes"];
     try {
-      const code =
-        status === 200
-          ? (await runSpawn(argv), null)
-          : await runSpawnExpectingExit(argv);
+      const code = exits
+        ? await runSpawnExpectingExit(argv)
+        : (await runSpawn(argv), null);
       return { out: out.join("\n"), err: err.join("\n"), code };
     } finally {
       restoreEnv();
@@ -643,6 +670,25 @@ describe("ccmux spawn --with-changes reporting", () => {
 
     expect(out).toContain("abc123");
     expect(out).toContain("git stash drop");
+  });
+
+  /**
+   * A daemon older than `--with-changes` drops the keys it does not know and
+   * answers 200. The spawn then lands in a worktree with none of the user's
+   * work in it, and nothing in the response says so — the absent `move` is
+   * the only evidence there is, so it has to be treated as one.
+   */
+  it("refuses a 200 that carries no move, which means a stale daemon", async () => {
+    const { err, code } = await runAgainst(
+      200,
+      { success: true, paneId: "%9", command: "claude" },
+      { exits: true },
+    );
+
+    expect(code).toBe(1);
+    expect(err).toContain("older build");
+    expect(err).toContain("--with-changes");
+    expect(err).toContain("not moved");
   });
 
   /**

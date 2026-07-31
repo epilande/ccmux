@@ -428,6 +428,22 @@ export function createSpawnCommand(): Command {
               ? `Forked ${options.fork} into pane ${data.paneId}: ${data.command}`
               : `Spawned ${agent} in pane ${data.paneId}: ${data.command}`,
           );
+
+          // Reported last, after everything that DID happen, and as a
+          // failure. A daemon predating `--with-changes` drops the keys it
+          // does not know and answers a perfectly ordinary 200, so the agent
+          // starts in an empty worktree while the work sits untouched in the
+          // original checkout. The absent `move` is the only evidence there
+          // is, and exiting 0 on it would make a silent no-op look like a
+          // completed move.
+          if (options.withChanges && !data.move) {
+            console.error(
+              `The running ccmux daemon is an older build that does not support --with-changes, ` +
+                `so your changes were not moved: they are still in ${resolveSpawnCwd(options.cwd)}. ` +
+                `Restart it with 'ccmux daemon restart' and move them again.`,
+            );
+            process.exit(1);
+          }
         }
       },
     );
