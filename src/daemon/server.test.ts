@@ -3511,8 +3511,15 @@ describe("POST /spawn", () => {
    * Stub `Bun.spawn`, recording every argv. Outcomes are matched by tmux
    * subcommand so a test only has to describe the calls it cares about;
    * anything unlisted succeeds with empty output.
+   *
+   * `panes` overrides the pane probe per pane id (`%12` -> `"@9 $3"`), which
+   * a subcommand-keyed outcome cannot express: the cross-session cases probe
+   * two different panes and need two different answers.
    */
-  function withTmuxRecorder(outcomes: Record<string, TmuxOutcome> = {}) {
+  function withTmuxRecorder(
+    outcomes: Record<string, TmuxOutcome> = {},
+    panes: Record<string, string> = {},
+  ) {
     const original = Bun.spawn;
     const argv: string[][] = [];
     const defaults: Record<string, TmuxOutcome> = {
@@ -3522,7 +3529,14 @@ describe("POST /spawn", () => {
     Bun.spawn = ((spawned: string[]) => {
       argv.push(spawned);
       const key = spawned[1] ?? "";
-      const next = outcomes[key] ?? defaults[key] ?? { code: 0, out: "%99\n" };
+      // `display-message -p -t <pane> -F ...`
+      const probed =
+        key === "display-message" ? panes[spawned[4] ?? ""] : undefined;
+      const next = (probed === undefined
+        ? undefined
+        : { code: 0, out: `${probed}\n` }) ??
+        outcomes[key] ??
+        defaults[key] ?? { code: 0, out: "%99\n" };
       if ("throws" in next) {
         throw new Error("posix_spawn failed: E2BIG (Argument list too long)");
       }
@@ -3991,6 +4005,150 @@ describe("POST /spawn", () => {
     } finally {
       restore();
     }
+  });
+
+  describe("cross-session target (#75)", () => {
+    // `--target` accepts any pane on the server, so it can name one in a
+    // DIFFERENT session than the caller. `select-window` cannot move an
+    // attached client between sessions — it only changes which window is
+    // current inside the target's session — so the spawn used to report
+    // success and leave the user where they were. Verified by hand on an
+    // isolated tmux server: a client attached to A stayed on A across
+    // `select-window -t <pane in B>` and followed `switch-client -c <tty>`.
+    const twoSessions = { "%1": "@1 $1", "%2": "@2 $2" };
+
+    /** The tmux argv that was supposed to move the caller's view. */
+    function focusCall(argv: string[][]): string[] | undefined {
+      return argv.find(
+        (a) => a[1] === "select-window" || a[1] === "switch-client",
+      );
+    }
+
+    it("switches the caller's client to a target in another session", async () => {
+      const { internals } = serverForAgents([promptAgent]);
+      const { argv, restore } = withTmuxRecorder({}, twoSessions);
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({
+            agent: "prompty",
+            cwd,
+            target: "%2",
+            callerPane: "%1",
+            callerTty: "/dev/ttys004",
+          }),
+        );
+
+        expect(res.status).toBe(200);
+        expect(focusCall(argv)).toEqual([
+          "tmux",
+          "switch-client",
+          "-c",
+          "/dev/ttys004",
+          "-t",
+          "%99",
+        ]);
+      } finally {
+        restore();
+      }
+    });
+
+    it("still just selects the window when the target is in the caller's session", async () => {
+      // Byte-for-byte the pre-fix behavior, which is the whole safety
+      // property: a spawn in your own session must not touch your client.
+      const { internals } = serverForAgents([promptAgent]);
+      const { argv, restore } = withTmuxRecorder(
+        {},
+        { "%1": "@1 $1", "%2": "@2 $1" },
+      );
+      try {
+        await internals.handleRequest(
+          spawnRequest({
+            agent: "prompty",
+            cwd,
+            target: "%2",
+            callerPane: "%1",
+            callerTty: "/dev/ttys004",
+          }),
+        );
+
+        expect(focusCall(argv)).toEqual(["tmux", "select-window", "-t", "%99"]);
+        expect(argv.map((a) => a[1])).not.toContain("switch-client");
+      } finally {
+        restore();
+      }
+    });
+
+    it("suppresses the switch entirely when detached", async () => {
+      const { internals } = serverForAgents([promptAgent]);
+      const { argv, restore } = withTmuxRecorder({}, twoSessions);
+      try {
+        await internals.handleRequest(
+          spawnRequest({
+            agent: "prompty",
+            cwd,
+            target: "%2",
+            callerPane: "%1",
+            callerTty: "/dev/ttys004",
+            detach: true,
+          }),
+        );
+
+        expect(focusCall(argv)).toBeUndefined();
+        // And the caller's pane is not even probed: nothing downstream of
+        // `--detach` can use the answer.
+        expect(argv.filter((a) => a[1] === "display-message")).toHaveLength(1);
+      } finally {
+        restore();
+      }
+    });
+
+    it("selects the window when no client tty was sent", async () => {
+      // Older CLIs, and every caller that places by `callerPane` alone. The
+      // daemon has no client of its own, so with nothing to name it falls
+      // back rather than moving whichever client tmux would have picked.
+      const { internals } = serverForAgents([promptAgent]);
+      const { argv, restore } = withTmuxRecorder({}, twoSessions);
+      try {
+        await internals.handleRequest(
+          spawnRequest({
+            agent: "prompty",
+            cwd,
+            target: "%2",
+            callerPane: "%1",
+          }),
+        );
+
+        expect(focusCall(argv)).toEqual(["tmux", "select-window", "-t", "%99"]);
+        // The second probe is skipped too, so a spawn with no tty costs
+        // exactly the tmux round-trips it always did.
+        expect(argv.filter((a) => a[1] === "display-message")).toHaveLength(1);
+      } finally {
+        restore();
+      }
+    });
+
+    it("rejects a callerTty that is not a device path", async () => {
+      const { internals } = serverForAgents([promptAgent]);
+      const { argv, restore } = withTmuxRecorder({}, twoSessions);
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({
+            agent: "prompty",
+            cwd,
+            target: "%2",
+            callerTty: "not-a-tty",
+          }),
+        );
+
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as { error: string }).error).toContain(
+          "callerTty",
+        );
+        expect(argv).toHaveLength(0);
+      } finally {
+        restore();
+      }
+    });
   });
 
   it("succeeds without killing the pane when select-window itself throws", async () => {

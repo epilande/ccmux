@@ -284,9 +284,9 @@ the end of your session, which leaves every existing window index alone; pass
 `--target <pane-id>` to insert one directly after that pane's window instead
 (tmux renumbers the windows after it), or `--target none` to let tmux place it.
 
-Targeting a pane in a _different_ tmux session creates the pane there but does
-not move you to it, so pair that with `--detach`
-(see [#75](https://github.com/epilande/ccmux/issues/75)).
+`--target` accepts any pane on the server, including one in a _different_ tmux
+session: ccmux creates the pane there and moves your client over to it, the
+same jump `ccmux switch` makes. Pass `--detach` to leave your view where it is.
 
 `--prompt` starts the agent interactively with the prompt already submitted.
 It is supported for the agents whose interactive-with-prompt invocation ccmux

@@ -67,6 +67,31 @@ export function normalizeTarget(
 }
 
 /**
+ * The only accepted shape for a tmux client tty (`callerTty`). tmux reports
+ * `#{client_tty}` as an absolute device path (`/dev/ttys004` on macOS,
+ * `/dev/pts/3` on Linux), and the value travels straight into a tmux argv, so
+ * anything outside that shape is a caller mistake worth naming rather than a
+ * flag to hand to tmux.
+ */
+export const CLIENT_TTY_PATTERN = /^\/dev\/[A-Za-z0-9._/-]{1,64}$/;
+
+/** Validate a wire tmux-client-tty field (`callerTty`). */
+export function normalizeClientTty(
+  value: unknown,
+  field = "callerTty",
+): BuildResult<string | undefined> {
+  if (value === undefined || value === null || value === "")
+    return { ok: true, value: undefined };
+  if (typeof value !== "string" || !CLIENT_TTY_PATTERN.test(value)) {
+    return {
+      ok: false,
+      error: `Invalid '${field}' field: expected a tmux client tty such as "/dev/ttys004"`,
+    };
+  }
+  return { ok: true, value };
+}
+
+/**
  * Validate a wire boolean field (`detach`). Every other spawn field goes
  * through a normalizer that rejects anything not in its accepted shape; this
  * one used to be an unchecked cast, so a truthy non-boolean like the string
@@ -757,6 +782,56 @@ export function buildTmuxSpawnArgv(input: TmuxSpawnArgvInput): string[] {
 
   argv.push("-c", cwd, "-P", "-F", "#{pane_id}");
   return argv;
+}
+
+export interface SpawnFocusInput {
+  /** The pane tmux just created. */
+  paneId: string;
+  /** `--detach`: leave the caller's view exactly where it is. */
+  detach: boolean;
+  /**
+   * tty of the tmux client that asked for the spawn, when the caller sent
+   * one. The daemon is attached to no client of its own, so this is the only
+   * handle it has on "the terminal the user is looking at".
+   */
+  callerTty?: string;
+  /** The session the new pane lands in, when placement resolved one. */
+  placementSessionId?: string;
+  /** The session the caller was in, when it named a pane to resolve it from. */
+  callerSessionId?: string;
+}
+
+/**
+ * argv for the tmux command that puts the caller's view on the new pane,
+ * minus the binary. `null` when nothing should run at all.
+ *
+ * Two shapes, because tmux has two different operations here and the wrong
+ * one silently does nothing:
+ *
+ * - Same session (or anything we cannot prove is cross-session):
+ *   `select-window`, which is what every spawn has always run.
+ * - A pane in a DIFFERENT session: `select-window` only changes which window
+ *   is current *within* that session; moving an attached client between
+ *   sessions needs `switch-client`, and since the daemon has no client of its
+ *   own it must name the caller's by tty (`-c`), the same way
+ *   `src/commands/switch.ts` does when it runs outside tmux.
+ *
+ * Anything unknown falls back to `select-window`: a missing tty or an
+ * unresolved session means we cannot show that a switch is needed, and
+ * guessing would move a client that never asked to be moved.
+ */
+export function buildSpawnFocusArgv(input: SpawnFocusInput): string[] | null {
+  const { paneId, detach, callerTty, placementSessionId, callerSessionId } =
+    input;
+  if (detach) return null;
+  const crossSession =
+    callerTty !== undefined &&
+    placementSessionId !== undefined &&
+    callerSessionId !== undefined &&
+    placementSessionId !== callerSessionId;
+  return crossSession
+    ? ["switch-client", "-c", callerTty, "-t", paneId]
+    : ["select-window", "-t", paneId];
 }
 
 /** A request to spawn into a worktree rather than the given cwd. */

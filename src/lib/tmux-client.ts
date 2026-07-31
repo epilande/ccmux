@@ -38,6 +38,33 @@ export async function getActiveTmuxClientPid(): Promise<number | null> {
 }
 
 /**
+ * The tty of the tmux client the CURRENT context is being viewed with, i.e.
+ * the terminal the user is attached with when this runs inside a pane. Only
+ * meaningful with `$TMUX` set; outside tmux there is no current context and
+ * {@link resolveActiveTmuxClientTty} is the right fallback.
+ *
+ * Deliberately not the pane's own tty: `#{client_tty}` is the ATTACHED
+ * client's device (`/dev/ttys085`), while the pane runs on its own pty
+ * (`/dev/ttys079`). Only the former is a valid `switch-client -c` target,
+ * which is what `ccmux spawn` sends it for.
+ */
+export async function resolveCurrentTmuxClientTty(): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(["tmux", "display-message", "-p", "#{client_tty}"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const output = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) return null;
+    const tty = output.trim();
+    return tty || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The tty of the most-recently-active attached tmux client (highest
  * `#{client_activity}` wins), for callers with no implicit current client
  * (invoked outside tmux entirely, e.g. a notification click). Returns null

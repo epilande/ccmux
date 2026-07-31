@@ -4,6 +4,7 @@ import { getDaemonUrl } from "../lib/config";
 import { ensureDaemon } from "./shared";
 import { PANE_ID_PATTERN, type SpawnSplit } from "../daemon/spawn-command";
 import { isSameTmuxServer } from "../lib/tmux-server";
+import { resolveCurrentTmuxClientTty } from "../lib/tmux-client";
 import { BUILTIN_AGENTS } from "../lib/agents";
 
 interface SpawnResponse {
@@ -54,6 +55,31 @@ function callerPane(daemonSocket: string | null): string | undefined {
   const pane = process.env.TMUX_PANE;
   if (!pane || !PANE_ID_PATTERN.test(pane)) return undefined;
   return isSameTmuxServer(daemonSocket) ? pane : undefined;
+}
+
+/**
+ * The tty of the tmux client the caller is attached with, so the daemon can
+ * move it to a pane in ANOTHER session: `select-window` only changes which
+ * window is current within the target's session, and the daemon has no client
+ * of its own to `switch-client` with. `src/commands/switch.ts` solves the same
+ * problem the same way.
+ *
+ * Resolved only when an explicit `--target` was given, because that is the
+ * only way a spawn can land outside the caller's session: without one the new
+ * pane goes wherever `callerPane` is, which IS the caller's session. Skipping
+ * it otherwise keeps an ordinary `ccmux spawn` at exactly the tmux round-trips
+ * it always made.
+ *
+ * Same cross-server gate as {@link callerPane}, and pointless when nothing
+ * will be switched (`--detach`, or running outside tmux with no client to
+ * name).
+ */
+async function callerClientTty(
+  daemonSocket: string | null,
+): Promise<string | undefined> {
+  if (!process.env.TMUX) return undefined;
+  if (!isSameTmuxServer(daemonSocket)) return undefined;
+  return (await resolveCurrentTmuxClientTty()) ?? undefined;
 }
 
 /**
@@ -166,6 +192,12 @@ export function createSpawnCommand(): Command {
                 base: options.base,
               };
 
+        // One `/server-info` round-trip for both placement fields, which have
+        // the same cross-server gate. Still skipped entirely when placement is
+        // opted out of, since neither field is sent then.
+        const daemonSocket = optedOut ? null : await daemonTmuxSocket();
+        const detach = options.detach ?? false;
+
         try {
           const response = await fetch(`${getDaemonUrl()}/spawn`, {
             method: "POST",
@@ -185,10 +217,14 @@ export function createSpawnCommand(): Command {
               prompt: options.prompt,
               split: options.split ?? false,
               target: explicitTarget,
-              callerPane: optedOut
-                ? undefined
-                : callerPane(await daemonTmuxSocket()),
-              detach: options.detach ?? false,
+              callerPane: optedOut ? undefined : callerPane(daemonSocket),
+              // What the daemon switches to the new pane with when that pane
+              // lands in another session; see `callerClientTty`.
+              callerTty:
+                explicitTarget && !detach
+                  ? await callerClientTty(daemonSocket)
+                  : undefined,
+              detach,
               worktree,
             }),
           });

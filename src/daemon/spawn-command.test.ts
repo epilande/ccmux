@@ -7,11 +7,13 @@ import { getBuiltinAgent } from "../lib/agents-test-helpers";
 import {
   buildAgentForkCommand,
   buildAgentSpawnCommand,
+  buildSpawnFocusArgv,
   buildTmuxSpawnArgv,
   escapeSingleQuoted,
   MAX_SPAWN_COMMAND_BYTES,
   MAX_SPAWN_PROMPT_BYTES,
   normalizeBoolean,
+  normalizeClientTty,
   normalizePrompt,
   normalizeSplit,
   normalizeTarget,
@@ -67,6 +69,99 @@ describe("normalizeTarget", () => {
   it("rejects window ids, session names, and other target forms", () => {
     for (const bad of ["@3", "mysession:1.0", "0", "%", "%1a", 12]) {
       expect(normalizeTarget(bad).ok).toBe(false);
+    }
+  });
+});
+
+describe("normalizeClientTty", () => {
+  // `callerTty` reaches tmux as a `switch-client -c` argument. Nothing here
+  // touches a shell, so the risk is not injection but a nonsense value tmux
+  // would resolve as some other client (or none), leaving the caller's view
+  // wherever it was with a success reported.
+
+  it("accepts the device paths tmux reports on macOS and Linux", () => {
+    expect(normalizeClientTty("/dev/ttys004")).toEqual({
+      ok: true,
+      value: "/dev/ttys004",
+    });
+    expect(normalizeClientTty("/dev/pts/3")).toEqual({
+      ok: true,
+      value: "/dev/pts/3",
+    });
+  });
+
+  it("treats absent, null and empty as no client", () => {
+    for (const blank of [undefined, null, ""]) {
+      expect(normalizeClientTty(blank)).toEqual({ ok: true, value: undefined });
+    }
+  });
+
+  it("rejects anything that is not a device path", () => {
+    for (const bad of ["ttys004", "/etc/passwd", "/dev/", 4, {}]) {
+      const result = normalizeClientTty(bad);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("callerTty");
+    }
+  });
+});
+
+describe("buildSpawnFocusArgv", () => {
+  // The whole point of the split: `select-window` moves the active window
+  // WITHIN a session, so against a target in another session it changes that
+  // session and leaves the attached client exactly where it was. Verified by
+  // hand on an isolated tmux server (issue #75).
+
+  const base = { paneId: "%99", detach: false };
+
+  it("selects the window for a same-session spawn, tty or not", () => {
+    expect(
+      buildSpawnFocusArgv({
+        ...base,
+        callerTty: "/dev/ttys004",
+        placementSessionId: "$3",
+        callerSessionId: "$3",
+      }),
+    ).toEqual(["select-window", "-t", "%99"]);
+    expect(buildSpawnFocusArgv(base)).toEqual(["select-window", "-t", "%99"]);
+  });
+
+  it("switches the caller's own client for a cross-session spawn", () => {
+    expect(
+      buildSpawnFocusArgv({
+        ...base,
+        callerTty: "/dev/ttys004",
+        placementSessionId: "$7",
+        callerSessionId: "$3",
+      }),
+    ).toEqual(["switch-client", "-c", "/dev/ttys004", "-t", "%99"]);
+  });
+
+  it("runs nothing at all when detached, cross-session included", () => {
+    expect(
+      buildSpawnFocusArgv({
+        ...base,
+        detach: true,
+        callerTty: "/dev/ttys004",
+        placementSessionId: "$7",
+        callerSessionId: "$3",
+      }),
+    ).toBeNull();
+  });
+
+  it("falls back to select-window when the switch cannot be proven needed", () => {
+    // Each of these leaves a client that never asked to move: no tty to name
+    // it with, or a session pair we could not resolve both halves of.
+    const cases = [
+      { placementSessionId: "$7", callerSessionId: "$3" }, // no tty
+      { callerTty: "/dev/ttys004", callerSessionId: "$3" }, // no placement
+      { callerTty: "/dev/ttys004", placementSessionId: "$7" }, // no caller
+    ];
+    for (const extra of cases) {
+      expect(buildSpawnFocusArgv({ ...base, ...extra })).toEqual([
+        "select-window",
+        "-t",
+        "%99",
+      ]);
     }
   });
 });
@@ -151,7 +246,9 @@ describe("spawnCommandTooLarge", () => {
   });
 
   it("refuses one byte over, naming the size and the budget", () => {
-    const problem = spawnCommandTooLarge("a".repeat(MAX_SPAWN_COMMAND_BYTES + 1));
+    const problem = spawnCommandTooLarge(
+      "a".repeat(MAX_SPAWN_COMMAND_BYTES + 1),
+    );
     expect(problem).toContain(String(MAX_SPAWN_COMMAND_BYTES + 1));
     expect(problem).toContain(String(MAX_SPAWN_COMMAND_BYTES));
   });

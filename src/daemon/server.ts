@@ -18,9 +18,11 @@ import {
 import {
   buildAgentForkCommand,
   buildAgentSpawnCommand,
+  buildSpawnFocusArgv,
   buildTmuxSpawnArgv,
   forkResumesByIdAlone,
   normalizeBoolean,
+  normalizeClientTty,
   normalizePrompt,
   normalizeSplit,
   normalizeTarget,
@@ -2323,6 +2325,7 @@ export class DaemonServer {
       split?: SpawnSplit;
       target?: string;
       callerPane?: string;
+      callerTty?: unknown;
       detach?: unknown;
       worktree?: unknown;
     };
@@ -2392,6 +2395,19 @@ export class DaemonServer {
       );
     }
     const callerPane = callerPaneResult.value;
+
+    // The tty of the tmux client the caller is attached with. Only the CLI
+    // knows it (the daemon has no client of its own), and it is only ever
+    // used to move that client to a pane in another session — see
+    // `buildSpawnFocusArgv`.
+    const callerTtyResult = normalizeClientTty(body.callerTty);
+    if (!callerTtyResult.ok) {
+      return Response.json(
+        { error: callerTtyResult.error },
+        { status: 400, headers },
+      );
+    }
+    const callerTty = callerTtyResult.value;
 
     const promptResult = normalizePrompt(body.prompt);
     if (!promptResult.ok) {
@@ -2554,6 +2570,12 @@ export class DaemonServer {
     // on the other.
     const placementPane = target ?? callerPane;
     let placement: SpawnPlacement | undefined;
+    // The session the new pane will land in, and the one the caller is
+    // looking at. Equal for every spawn that places by `callerPane`; they
+    // diverge only when an explicit `target` names a pane in another session,
+    // which is the case `buildSpawnFocusArgv` has to switch the client for.
+    let placementSessionId: string | undefined;
+    let callerSessionId: string | undefined;
     if (placementPane) {
       const location = await resolvePaneLocation(placementPane);
       if (!location) {
@@ -2562,6 +2584,8 @@ export class DaemonServer {
           { status: 400, headers },
         );
       }
+      placementSessionId = location.sessionId;
+      if (placementPane === callerPane) callerSessionId = location.sessionId;
       if (split) {
         placement = { kind: "pane", id: placementPane };
       } else if (target) {
@@ -2574,6 +2598,22 @@ export class DaemonServer {
         // break `select-window -t N` muscle memory and bindings.
         placement = { kind: "session", id: location.sessionId };
       }
+    }
+
+    // A second pane probe, deliberately narrow: it runs only when an explicit
+    // target decided the placement AND the caller sent a client to move, so
+    // an ordinary spawn costs exactly the tmux round-trips it always did.
+    // Best-effort — a caller pane that vanished between the request and here
+    // leaves the session unknown, which `buildSpawnFocusArgv` reads as "not
+    // provably cross-session" and answers with today's `select-window`.
+    if (
+      !detach &&
+      callerTty &&
+      callerPane &&
+      placementSessionId !== undefined &&
+      callerSessionId === undefined
+    ) {
+      callerSessionId = (await resolvePaneLocation(callerPane))?.sessionId;
     }
 
     // Creating the worktree is the handler's first side effect, so it comes
@@ -2709,17 +2749,22 @@ export class DaemonServer {
       // caller can already see in `tmux list-panes` would be reported as
       // failed and torn down out from under them. Best effort, log and
       // continue.
-      if (!detach) {
+      const focusArgv = buildSpawnFocusArgv({
+        paneId,
+        detach,
+        callerTty,
+        placementSessionId,
+        callerSessionId,
+      });
+      if (focusArgv) {
         try {
-          const selectProc = Bun.spawn(
-            ["tmux", "select-window", "-t", paneId],
-            { stdout: "pipe", stderr: "pipe" },
-          );
-          await selectProc.exited;
+          const focusProc = Bun.spawn(["tmux", ...focusArgv], {
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          await focusProc.exited;
         } catch (err: unknown) {
-          console.error(
-            `Failed to select window for pane ${paneId}: ${errorMessage(err)}`,
-          );
+          console.error(`Failed to focus pane ${paneId}: ${errorMessage(err)}`);
         }
       }
 
