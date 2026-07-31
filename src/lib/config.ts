@@ -1,3 +1,4 @@
+import { realpathSync } from "fs";
 import { join, resolve } from "path";
 import { homedir } from "os";
 
@@ -6,6 +7,27 @@ import { homedir } from "os";
  */
 export const CLAUDE_DIR = join(homedir(), ".claude");
 export const PROJECTS_DIR = join(CLAUDE_DIR, "projects");
+
+/**
+ * The home directory with symlinks resolved.
+ *
+ * Anything compared against a path git produced has to be realpath'd first:
+ * `git rev-parse --path-format=absolute` resolves symlinks, so on a machine
+ * where `$HOME` is a link (`/home/me` -> `/mnt/data/me`, a relocated macOS
+ * home) a raw `homedir()` never compares equal to git's answer and every
+ * "is this $HOME" guard silently stops firing. Falls back to the unresolved
+ * value when the path cannot be resolved, since a home directory that does not
+ * exist is not a reason to throw at startup.
+ *
+ * Takes the raw home as an argument so the resolution itself is testable.
+ */
+export function resolvedHomeDir(home: string = homedir()): string {
+  try {
+    return realpathSync(home);
+  } catch {
+    return home;
+  }
+}
 
 /** Expand a leading `~` / `~/` to the user's home directory. */
 function expandHome(p: string): string {

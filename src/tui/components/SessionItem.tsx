@@ -40,9 +40,12 @@ import {
 import { theme } from "../theme";
 import type { MatchSource } from "../utils/grouping";
 import {
+  displayWidth,
   formatRelativeTime,
   formatVersion,
+  padStartWidth,
   shortenCwd,
+  sliceToWidth,
   truncateText,
   truncateHighlighted,
 } from "../utils/format";
@@ -86,15 +89,23 @@ interface SessionItemProps {
   onContextMenu?: (event: MouseEvent) => void;
 }
 
-function abbreviateTarget(target: string, maxLen: number = 12): string {
-  if (target.length <= maxLen) return target;
+/**
+ * Abbreviate a `session:window.pane` target to `maxLen` COLUMNS, keeping the
+ * `:window.pane` suffix whole and shortening the session name with `~`. The
+ * budget and every cut are column-true (a tmux session name is free-form user
+ * text, so it can hold emoji or CJK): a code-unit slice through an emoji left
+ * a lone surrogate in the cell, and a CJK session name drew past the fixed
+ * 12-column box it shares with the right-aligned metadata.
+ */
+export function abbreviateTarget(target: string, maxLen: number = 12): string {
+  if (displayWidth(target) <= maxLen) return target;
   const colonIdx = target.lastIndexOf(":");
-  if (colonIdx === -1) return target.slice(0, maxLen - 1) + "~";
+  if (colonIdx === -1) return sliceToWidth(target, maxLen - 1) + "~";
   const suffix = target.slice(colonIdx);
   const sessionName = target.slice(0, colonIdx);
-  const availableLen = maxLen - suffix.length - 1;
-  if (availableLen <= 0) return target.slice(0, maxLen - 1) + "~";
-  return sessionName.slice(0, availableLen) + "~" + suffix;
+  const availableLen = maxLen - displayWidth(suffix) - 1;
+  if (availableLen <= 0) return sliceToWidth(target, maxLen - 1) + "~";
+  return sliceToWidth(sessionName, availableLen) + "~" + suffix;
 }
 
 interface ProjectPathParts {
@@ -124,20 +135,22 @@ export function pathTail(path: string | null | undefined): string | null {
 
 /**
  * The repo a worktree row belongs to, for the `<repo>/<worktree>` label.
- * Null for anything that isn't a worktree, and for the case where the two
+ * Null for anything that isn't a worktree, for the case where the two
  * segments would read the same (a worktree directory named after its repo),
- * where the plain path parts say more.
+ * where the plain path parts say more, and for a worktree whose
+ * `mainRepoRoot` the daemon couldn't resolve (a worktree of a bare repo).
  *
- * Prefers `mainRepoRoot` (git's own answer, via the daemon) and falls back
- * to `project`, which resolves to the main checkout's basename for a
- * worktree and is what the row already groups under.
+ * Sourced from `mainRepoRoot` only (git's own answer, via the daemon), with
+ * no `project` fallback: `project` is a cwd basename in exactly the cases
+ * where `mainRepoRoot` is null, so falling back to it would fabricate a
+ * `<repo>/<worktree>` label out of a directory name that isn't a repo.
  */
 function worktreeRepoName(
   session: EnrichedSession,
   worktreeName: string,
 ): string | null {
   if (!session.isWorktree) return null;
-  const repo = pathTail(session.mainRepoRoot) ?? session.project;
+  const repo = pathTail(session.mainRepoRoot);
   if (!repo || repo === worktreeName) return null;
   return repo;
 }
@@ -201,9 +214,10 @@ function fittedProjectCell(
 }
 
 /**
- * Rendered char width of the `project` cell, used to budget an inline prompt
+ * Rendered column width of the `project` cell, used to budget an inline prompt
  * that shares row 1 with it. Derived from {@link fittedProjectCell} so it
- * reflects the truncated (`…`) rendering, not the natural width.
+ * reflects the truncated (`…`) rendering, not the natural width, and measured
+ * the same way `fitProjectCell` spends the budget.
  */
 function projectCellWidth(
   session: EnrichedSession,
@@ -213,7 +227,9 @@ function projectCellWidth(
 ): number {
   const fitted = fittedProjectCell(session, mode, budget, maxBranchLen);
   return (
-    fitted.prefix.length + fitted.dirname.length + fitted.branchLabel.length
+    displayWidth(fitted.prefix) +
+    displayWidth(fitted.dirname) +
+    displayWidth(fitted.branchLabel)
   );
 }
 
@@ -302,7 +318,10 @@ function dimColor(ctx: FieldRenderContext, color?: string): string | undefined {
  * Right-align `text` within a fixed-width cell on the right side by padding
  * the left with spaces. Left-side cells keep their natural left-alignment.
  * Opentui's `<text>` fills its parent box, so flex `justifyContent` alone
- * can't right-align a single text child — padStart does the job instead.
+ * can't right-align a single text child, so a left pad does the job instead.
+ * The pad is counted in columns (`padStartWidth`): a code-unit `padStart`
+ * over-pads a cell holding a wide glyph (an emoji tmux session name, a custom
+ * agent label) and shoves it right of its ASCII neighbours.
  */
 export function alignText(
   text: string,
@@ -310,8 +329,7 @@ export function alignText(
   side: "left" | "right",
 ): string {
   if (side !== "right") return text;
-  if (text.length >= width) return text;
-  return text.padStart(width);
+  return padStartWidth(text, width);
 }
 
 const FieldCell: Component<{
@@ -447,7 +465,7 @@ const FieldCell: Component<{
               <Show
                 when={
                   ctx.highlights?.gitBranch &&
-                  branch().length <= ctx.maxBranchLen
+                  displayWidth(branch()) <= ctx.maxBranchLen
                 }
                 fallback={
                   <text fg={dimColor(ctx, theme.blue)}>
@@ -627,10 +645,18 @@ const FieldCell: Component<{
       // Same `+` worktree marker the default project cell appends
       // (`branchLabelFor`), so moving `branch` into its own column doesn't
       // silently drop the indicator.
-      const branch = ctx.session.gitBranch;
-      const marker = ctx.session.isWorktree ? "+" : "";
-      const label = branch ? branch + marker : "";
-      return <text fg={dimColor(ctx, theme.blue)}>{label}</text>;
+      //
+      // Thunk, not a plain const: this component body runs once per mount
+      // and rows stay mounted across SSE deltas (see :385-387 and
+      // :910-912), so a const would freeze the cell at its mount-time
+      // branch and read stale after a `git checkout`. Matches the `pr`
+      // case's `label` thunk just below.
+      const label = () => {
+        const branch = ctx.session.gitBranch;
+        const marker = ctx.session.isWorktree ? "+" : "";
+        return branch ? branch + marker : "";
+      };
+      return <text fg={dimColor(ctx, theme.blue)}>{label()}</text>;
     }
     case "pr": {
       const label = () => prLabel(ctx.session, entry.mode);
@@ -806,16 +832,16 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   // only by SessionList, so it distinguishes the two contexts.
   const scrollbarReserve = () => (props.layout ? 3 : 1);
 
-  // Prompt-floor budgeting shorthand: how many chars an inline prompt is
+  // Prompt-floor budgeting shorthand: how many columns an inline prompt is
   // guaranteed on row 1 before the project cell starts yielding width. The
   // prompt truncates down to this floor first; only then does the path give
-  // up space. Bounded by data length so a short prompt reserves less.
+  // up space. Bounded by the prompt's own width so a short one reserves less.
   const PROMPT_MIN = 16;
 
   // Budget for the project cell's `…` truncation. Full width minus the item
   // padding, every row-1 sibling except project (and the prompt, budgeted via
   // its floor below), the reserved attention cell, and a small margin. Reads
-  // only the raw prompt length (capped at PROMPT_MIN), never maxPromptLen, so
+  // only the raw prompt width (capped at PROMPT_MIN), never maxPromptLen, so
   // maxPromptLen can depend on the fitted project width without a cycle.
   const maxProjectLen = createMemo(() => {
     const cols = columns();
@@ -834,7 +860,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     const promptFloor =
       promptOnRow1 && hasFieldData(props.session, "prompt")
         ? Math.min(
-            normalizePrompt(props.session.lastPrompt ?? "").length,
+            displayWidth(normalizePrompt(props.session.lastPrompt ?? "")),
             PROMPT_MIN,
           ) + 1
         : 0;

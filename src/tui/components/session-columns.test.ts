@@ -20,10 +20,29 @@ import {
   getAttentionLabel,
   subagentCountLabel,
   ATTENTION_LABEL_MAX,
+  type ProjectCellDisplay,
 } from "./session-columns";
 import type { SubagentState } from "../../types";
 import { DEFAULT_BREAKPOINTS, type Responsive } from "../../lib/preferences";
 import { mockEnrichedSession } from "./test-helpers";
+import { displayWidth } from "../utils/format";
+
+/** A half of a surrogate pair with no partner: what a code-unit slice through
+ *  an astral character leaves behind, rendered as `�`. */
+const hasLoneSurrogate = (s: string) =>
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+    s,
+  );
+
+/**
+ * Columns a fitted project cell draws. The budget `fitProjectCell` spends is a
+ * column count, so every assertion about "how much of the cell rendered"
+ * measures the same way; `.length` would read a wide glyph as two.
+ */
+const cellWidth = (out: ProjectCellDisplay): number =>
+  displayWidth(out.prefix) +
+  displayWidth(out.dirname) +
+  displayWidth(out.branchLabel);
 
 describe("resolveResponsive", () => {
   const bp = DEFAULT_BREAKPOINTS;
@@ -903,6 +922,18 @@ describe("trailingLabelsWidth", () => {
     ).toBe(ATTENTION_LABEL_MAX);
   });
 
+  it("reserves what a wide-glyph label draws, not its code units", () => {
+    // The label renders through the column-true `truncateText`, so the
+    // reserve has to agree: `Bash(検索)` is 8 code units but draws 10 columns,
+    // and reserving 8 leaves the label overhanging whatever sits next to it.
+    const s = mockEnrichedSession({ pendingTool: "Bash(検索)" });
+    expect("Bash(検索)".length).toBe(8);
+    expect(trailingLabelsWidth(s, false)).toBe(10);
+    expect(trailingLabelsWidth(s, false)).toBeLessThanOrEqual(
+      ATTENTION_LABEL_MAX,
+    );
+  });
+
   it("sums attention + subagent + the inter-label gap", () => {
     // pendingTool suppresses the subagent count, so use a waiting session with
     // subagents but no pending tool.
@@ -959,9 +990,7 @@ describe("fitProjectCell", () => {
     expect(out.dirname).toBe("ccmux");
     expect(out.branchLabel).toBe(":main");
     expect(out.prefix.endsWith("…")).toBe(true);
-    expect(
-      out.prefix.length + out.dirname.length + out.branchLabel.length,
-    ).toBe(12);
+    expect(cellWidth(out)).toBe(12);
   });
 
   it("drops the prefix entirely when under 2 usable chars remain", () => {
@@ -986,7 +1015,7 @@ describe("fitProjectCell", () => {
     expect(out.dirname.endsWith("…")).toBe(true);
     expect(out.dirname).not.toBe("claude-toolkit");
     // floor keeps it identifiable, never a negative slice
-    expect(out.dirname.length).toBeGreaterThanOrEqual(5);
+    expect(displayWidth(out.dirname)).toBeGreaterThanOrEqual(5);
   });
 
   it("never produces negative slices on a zero/negative budget", () => {
@@ -1004,7 +1033,7 @@ describe("fitProjectCell", () => {
     // raw mid-word clip), and no slice went negative.
     expect(out.prefix).toBe("");
     expect(out.dirname.endsWith("…")).toBe(true);
-    expect(out.dirname.length).toBeGreaterThanOrEqual(5);
+    expect(displayWidth(out.dirname)).toBeGreaterThanOrEqual(5);
   });
 
   it("keeps a short dirname whole even when the budget is exhausted", () => {
@@ -1032,9 +1061,7 @@ describe("fitProjectCell", () => {
     expect(out.prefix).toBe("ccmux/");
     expect(out.dirname.endsWith("…")).toBe(true);
     expect(out.branchLabel).toBe(":main+");
-    expect(
-      out.prefix.length + out.dirname.length + out.branchLabel.length,
-    ).toBeLessThanOrEqual(20);
+    expect(cellWidth(out)).toBeLessThanOrEqual(20);
   });
 
   it("takes the worktree name below the normal dirname floor to keep the repo", () => {
@@ -1052,11 +1079,9 @@ describe("fitProjectCell", () => {
       8,
     );
     expect(out.prefix).toBe("ccmux/");
-    expect(out.dirname.length).toBeLessThan(5);
+    expect(displayWidth(out.dirname)).toBeLessThan(5);
     expect(out.dirname.endsWith("…")).toBe(true);
-    expect(
-      out.prefix.length + out.dirname.length + out.branchLabel.length,
-    ).toBeLessThanOrEqual(19);
+    expect(cellWidth(out)).toBeLessThanOrEqual(19);
   });
 
   it("drops a repo prefix that no longer names the repo, giving the space back", () => {
@@ -1149,8 +1174,7 @@ describe("fitProjectCell", () => {
             budget,
             24,
           );
-          const width =
-            out.prefix.length + out.dirname.length + out.branchLabel.length;
+          const width = cellWidth(out);
           expect(width).toBeLessThanOrEqual(budget);
         }
       }
@@ -1173,8 +1197,7 @@ describe("fitProjectCell", () => {
             budget,
             24,
           );
-          const width =
-            out.prefix.length + out.dirname.length + out.branchLabel.length;
+          const width = cellWidth(out);
           expect(width).toBeGreaterThanOrEqual(previous);
           previous = width;
         }
@@ -1221,9 +1244,7 @@ describe("fitProjectCell", () => {
     expect(out.prefix).toBe("ccmux/");
     expect(out.dirname.startsWith("p")).toBe(true);
     expect(out.branchLabel.endsWith("~+")).toBe(true);
-    expect(
-      out.prefix.length + out.dirname.length + out.branchLabel.length,
-    ).toBeLessThanOrEqual(25);
+    expect(cellWidth(out)).toBeLessThanOrEqual(25);
   });
 
   it("leaves a branch-less cell without a stray colon", () => {
@@ -1256,8 +1277,200 @@ describe("fitProjectCell", () => {
     expect(out.branchLabel).toBe(":featu~");
     expect(out.branchLabel.endsWith("~")).toBe(true);
     // The cascade never overshoots its budget.
-    expect(
-      out.prefix.length + out.dirname.length + out.branchLabel.length,
-    ).toBeLessThanOrEqual(12);
+    expect(cellWidth(out)).toBeLessThanOrEqual(12);
+  });
+});
+
+describe("fitProjectCell with wide glyphs", () => {
+  const CJK = "プロジェクト"; // 6 chars, 12 columns
+  const FAMILY = "👨‍👩‍👧‍👦"; // 11 code units, 2 columns
+
+  it("truncates a CJK dirname by the columns it draws", () => {
+    // 12 columns of dirname in an 8-column cell. A code-unit budget saw 6 and
+    // let all six characters through, drawing 12 columns into 8.
+    const out = fitProjectCell(
+      { prefix: "", dirname: CJK, branch: null, isWorktree: false },
+      8,
+      24,
+    );
+    expect(out.dirname).toBe("プロジ…");
+    expect(cellWidth(out)).toBeLessThanOrEqual(8);
+  });
+
+  it("keeps the issue's CJK worktree case inside its cell", () => {
+    // The regression the issue reports: budget 8 rendered `プロ…` plus `:ma~+`
+    // at 10 columns, because the code-unit gate freed room for a branch label
+    // the cell could not actually pay for.
+    const out = fitProjectCell(
+      { prefix: "", dirname: CJK, branch: "main", isWorktree: true },
+      8,
+      24,
+    );
+    expect(cellWidth(out)).toBeLessThanOrEqual(8);
+  });
+
+  it("truncates an emoji dirname by columns, keeping the emoji whole", () => {
+    const dirname = "docs-📚"; // 7 columns, 8 code units
+    const fits = fitProjectCell(
+      { prefix: "", dirname, branch: null, isWorktree: false },
+      7,
+      24,
+    );
+    expect(fits.dirname).toBe(dirname);
+
+    const tight = fitProjectCell(
+      { prefix: "", dirname, branch: null, isWorktree: false },
+      6,
+      24,
+    );
+    // The emoji needs two columns and only one is left, so it is dropped
+    // whole rather than sliced into a lone surrogate.
+    expect(tight.dirname).toBe("docs-…");
+    expect(cellWidth(tight)).toBeLessThanOrEqual(6);
+  });
+
+  it("truncates an emoji prefix by columns", () => {
+    const out = fitProjectCell(
+      { prefix: "📚docs/", dirname: "ccmux", branch: null, isWorktree: false },
+      10,
+      24,
+    );
+    expect(out.prefix).toBe("📚do…");
+    expect(out.dirname).toBe("ccmux");
+    expect(cellWidth(out)).toBe(10);
+  });
+
+  it("caps an emoji branch at maxBranchLen columns", () => {
+    // Six rockets are 12 columns; the 8-column cap keeps three plus the `~`.
+    const out = fitProjectCell(
+      { prefix: "", dirname: "app", branch: "🚀🚀🚀🚀🚀🚀", isWorktree: false },
+      40,
+      8,
+    );
+    expect(out.branchLabel).toBe(":🚀🚀🚀~");
+    expect(displayWidth(out.branchLabel)).toBeLessThanOrEqual(8 + 1);
+  });
+
+  it("drops a branch label whose body cannot hold one wide grapheme", () => {
+    // One usable column, and every grapheme of this branch needs two: the
+    // body comes back empty, and `:~` (or `:~+`) would name no branch while
+    // still charging the row two columns it would rather spend on identity.
+    const out = fitProjectCell(
+      {
+        prefix: "epilande/",
+        dirname: "ccm",
+        branch: "日本語ブランチ",
+        isWorktree: true,
+        repoPrefix: true,
+      },
+      16,
+      8,
+    );
+    expect(out.branchLabel).toBe("");
+    expect(out.prefix).toBe("epilande/");
+    expect(cellWidth(out)).toBeLessThanOrEqual(16);
+  });
+
+  it("never emits a content-free branch label at any budget", () => {
+    for (const branch of ["日本語ブランチ", "🚀🚀🚀-go", `${FAMILY}x`]) {
+      for (const isWorktree of [false, true]) {
+        for (let budget = 0; budget <= 40; budget++) {
+          const out = fitProjectCell(
+            {
+              prefix: "epilande/",
+              dirname: "ccm",
+              branch,
+              isWorktree,
+              repoPrefix: true,
+            },
+            budget,
+            8,
+          );
+          expect(out.branchLabel).not.toMatch(/^:~\+?$/);
+        }
+      }
+    }
+  });
+
+  it("shortens an emoji branch on clusters, never mid-pair", () => {
+    const out = fitProjectCell(
+      {
+        prefix: "",
+        dirname: "app",
+        branch: "🚀🚀🚀🚀-launch",
+        isWorktree: true,
+      },
+      12,
+      24,
+    );
+    expect(out.branchLabel).toBe(":🚀🚀🚀~+");
+    expect(cellWidth(out)).toBeLessThanOrEqual(12);
+  });
+
+  it("never splits a ZWJ sequence in the dirname", () => {
+    const out = fitProjectCell(
+      {
+        prefix: "",
+        dirname: `${FAMILY}-team`,
+        branch: null,
+        isWorktree: false,
+      },
+      5,
+      24,
+    );
+    // Either the whole family renders or none of it does; a code-unit slice
+    // would have left a bare 👨 (or half of one) behind.
+    expect(out.dirname).toBe(`${FAMILY}-t…`);
+    expect(cellWidth(out)).toBeLessThanOrEqual(5);
+  });
+
+  it("reserves a wide repo prefix at its drawn width", () => {
+    const out = fitProjectCell(
+      {
+        prefix: "📚repo/",
+        dirname: CJK,
+        branch: "main",
+        isWorktree: true,
+        repoPrefix: true,
+      },
+      20,
+      24,
+    );
+    expect(out.prefix).toBe("📚repo/");
+    expect(out.branchLabel).toBe(":main+");
+    expect(cellWidth(out)).toBeLessThanOrEqual(20);
+  });
+
+  it("stays inside its budget across a wide-glyph sweep", () => {
+    // Every prefix x dirname x branch x budget combination of mixed ASCII,
+    // emoji, ZWJ and CJK content: the rendered cell fits, and no output holds
+    // a lone surrogate (the `�` a code-unit slice through an astral character
+    // leaves). The sweep starts at the dirname floor, below which nothing can
+    // fit by construction (the same documented trade the ASCII sweep skips).
+    const prefixes = ["", "epilande/", "📚docs/", `${FAMILY}team/`, "プロ/"];
+    const dirnames = ["ccmux", "docs-📚", FAMILY, CJK, "emoji-🎉-dir"];
+    const branches = [null, "main", "feat/🚀-launch", "機能/ブランチ"];
+    let checked = 0;
+    for (const prefix of prefixes) {
+      for (const dirname of dirnames) {
+        for (const branch of branches) {
+          for (const repoPrefix of [false, true]) {
+            for (let budget = 5; budget <= 30; budget++) {
+              const out = fitProjectCell(
+                { prefix, dirname, branch, isWorktree: true, repoPrefix },
+                budget,
+                12,
+              );
+              expect(cellWidth(out)).toBeLessThanOrEqual(budget);
+              expect(
+                hasLoneSurrogate(out.prefix + out.dirname + out.branchLabel),
+              ).toBe(false);
+              checked++;
+            }
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(1000);
   });
 });

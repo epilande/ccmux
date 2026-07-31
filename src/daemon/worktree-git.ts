@@ -15,9 +15,23 @@
  * Nothing here mutates a repo; the removal side lives in `worktree-prune.ts`.
  */
 
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+
+/**
+ * Resolve a path through symlinks so git's recorded worktree path and a
+ * caller's computed one compare equal. Git stores the realpath, so on macOS
+ * a `/tmp` path recorded as `/private/tmp` otherwise never matches. Falls
+ * back to the input for a path that does not exist yet.
+ */
+export function normalizePath(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
+}
 
 export interface GitResult {
   exitCode: number;
@@ -207,13 +221,24 @@ export interface DirtyState {
   untracked: number;
   /**
    * Individual ignored FILES, by path — `.env`, `.env.local`, a local config.
-   * Ignored DIRECTORIES (`node_modules/`, `dist/`) are deliberately excluded:
-   * git collapses them to a single entry, and they are regenerable build
-   * output, so counting them would flag every worktree alike.
    *
    * Not part of `dirty` — see {@link readDirtyState}.
    */
   ignoredFiles: string[];
+  /**
+   * Ignored DIRECTORIES, as git prints them: collapsed to one entry with a
+   * trailing slash (`node_modules/`, `dist/`, `notes/`).
+   *
+   * Kept separate from {@link ignoredFiles} because the two are surfaced
+   * differently: a file is named on the row and at both confirmation steps,
+   * while a directory is named only in the run log. Most of them are
+   * regenerable build output, so putting them in front of every confirmation
+   * would be noise on essentially every worktree — but `notes/` is a
+   * directory too, and deleting one with no record anywhere was the gap.
+   *
+   * Not part of `dirty` either, for the same reason the files are not.
+   */
+  ignoredDirs: string[];
 }
 
 /**
@@ -234,6 +259,14 @@ export interface DirtyState {
  * fire the opt-in gate on essentially every worktree (a stray `.DS_Store` is
  * an ignored file), and a gate that always fires trains people to clear it
  * reflexively, which is worse than no gate for the case it exists to catch.
+ *
+ * Ignored DIRECTORIES are collected too, into their own list. They used to be
+ * dropped here on the floor as presumed-regenerable build output, which is
+ * true of `node_modules/` and false of a gitignored `notes/` holding real
+ * work — and the file/directory split is only a proxy for "regenerable",
+ * never a test of it. They stay out of `dirty` and off every confirmation for
+ * the alarm-fatigue reason above; the run log names them, so a deletion that
+ * was not gated is at least recorded.
  */
 export async function readDirtyState(
   worktreePath: string,
@@ -248,7 +281,13 @@ export async function readDirtyState(
   // An unreadable worktree is reported dirty: refusing to remove something we
   // could not inspect is the safe direction for a destructive action.
   if (res.exitCode !== 0) {
-    return { dirty: true, modified: 0, untracked: 0, ignoredFiles: [] };
+    return {
+      dirty: true,
+      modified: 0,
+      untracked: 0,
+      ignoredFiles: [],
+      ignoredDirs: [],
+    };
   }
 
   const setupSymlinks = new Set(
@@ -258,12 +297,14 @@ export async function readDirtyState(
   let modified = 0;
   let untracked = 0;
   const ignoredFiles: string[] = [];
+  const ignoredDirs: string[] = [];
   for (const line of res.stdout.split("\n")) {
     if (line.trim() === "") continue;
     if (line.startsWith("!!")) {
       const path = line.slice(3).trim();
-      // A trailing slash is git's marker for a collapsed ignored directory.
-      if (path && !path.endsWith("/")) ignoredFiles.push(path);
+      if (!path) continue;
+      if (isCollapsedDirectory(path)) ignoredDirs.push(path);
+      else ignoredFiles.push(path);
     } else if (line.startsWith("??")) {
       if (isSetupSymlink(worktreePath, line.slice(3).trim(), setupSymlinks)) {
         continue;
@@ -276,7 +317,35 @@ export async function readDirtyState(
     modified,
     untracked,
     ignoredFiles,
+    ignoredDirs,
   };
+}
+
+/**
+ * Whether a porcelain path is a directory git collapsed to one entry.
+ *
+ * The trailing slash is git's own marker, and it is the only thing that
+ * separates a directory from a file here. It is reliable in the direction
+ * that matters: git prints it for a real directory and never for a symlink to
+ * one (a `node_modules` symlink matched by a bare-name pattern arrives as an
+ * ignored FILE), so a setup link can never be miscounted as a directory of
+ * work.
+ *
+ * The `/"` case is C-quoting, and it is not exotic. Porcelain quotes any path
+ * holding a space, a quote, a backslash, a control char or a non-ASCII byte,
+ * and the slash lands INSIDE the quotes: `"notes dir/"`, `"n\303\263tes/"`.
+ * A bare `endsWith("/")` filed `Design Assets/` and `nótes/` as ignored FILES,
+ * which put them on the row and both confirmation steps — the surfaces the
+ * directory list deliberately stays off.
+ *
+ * A string check rather than a git-side fix, because neither knob helps:
+ * `core.quotePath=false` only stops the non-ASCII escaping and still quotes a
+ * path with a space (verified against real git), and `-z` porcelain drops
+ * quoting but changes the record structure for renames, which is a rewrite of
+ * the parse for a case this handles in eight characters.
+ */
+function isCollapsedDirectory(path: string): boolean {
+  return path.endsWith("/") || path.endsWith('/"');
 }
 
 /**
@@ -382,6 +451,32 @@ export async function resolveBaseRefs(
  * A squash or rebase merge does NOT satisfy this (the tip commit never
  * appears on the base), which is why the PR-derived reasons exist alongside
  * it rather than on top of it.
+ *
+ * A branch sitting exactly ON a base tip is NOT merged, even though ancestry
+ * says yes (a commit is an ancestor of itself). That shape is a brand new
+ * worktree: `git worktree add -b feat/x <path> main` gives the branch the
+ * base's tip and nothing else, so treating it as merged offered a worktree
+ * created seconds ago, still holding a live agent, for removal under "merged
+ * into main", branch deletion included. There is nothing else locally to tell
+ * the two apart, since zero commits of your own and every commit already
+ * upstream are the same refs.
+ *
+ * Matching ANY eligible base tip answers false for ALL of them, rather than
+ * merely dropping that one base from the loop. Per-base skipping leaks in the
+ * ordinary not-yet-pulled state, which this feature's own `fetch --prune`
+ * produces: with local `main` at B and `origin/main` already at C, a worktree
+ * cut from local `main` has tip B, so the `origin/main` iteration sees unequal
+ * tips, asks whether B is an ancestor of C, and gets yes. Since `origin/main`
+ * is resolved BEFORE `main`, the brand-new worktree classified as merged
+ * anyway. Whether the base a branch sits on happens to be behind another base
+ * says nothing about whether its work is finished.
+ *
+ * This deliberately also suppresses a branch that was FAST-FORWARD merged and
+ * then left where it was. Accepted: `pr-merged` and `upstream-gone` still
+ * catch those, and losing a reason costs a cleanup while keeping it cost live
+ * work. Do not "fix" it with `git rev-list --count <base>..<branch> == 0`
+ * either. That count is also 0 for a genuinely merged branch, so it suppresses
+ * the reason entirely rather than just this shape.
  */
 export async function isMergedInto(
   repoRoot: string,
@@ -389,10 +484,21 @@ export async function isMergedInto(
   baseRefs: string[],
   git: GitRun = runGit,
 ): Promise<boolean> {
-  for (const base of baseRefs) {
-    // Never call a branch "merged into itself": the default branch's own
-    // worktree would otherwise classify as removable.
-    if (base === branch || base.endsWith(`/${branch}`)) continue;
+  const branchRef = `refs/heads/${branch}`;
+  const tips = await readTips(repoRoot, [branchRef, ...baseRefs], git);
+  const branchTip = tips.get(branchRef);
+  // Never call a branch "merged into itself": the default branch's own
+  // worktree would otherwise classify as removable. Applied once, so the
+  // equality rule and the ancestry loop consider the same set of bases.
+  const bases = baseRefs.filter(
+    (base) => !(base === branch || base.endsWith(`/${branch}`)),
+  );
+
+  if (branchTip && bases.some((base) => tips.get(base) === branchTip)) {
+    return false;
+  }
+
+  for (const base of bases) {
     const res = await git(repoRoot, [
       "merge-base",
       "--is-ancestor",
@@ -401,12 +507,38 @@ export async function isMergedInto(
       // branch's name silently answered this question about the tag. An
       // unmerged branch then classified `merged-locally` and lost its
       // directory on a false reason.
-      `refs/heads/${branch}`,
+      branchRef,
       base,
     ]);
     if (res.exitCode === 0) return true;
   }
   return false;
+}
+
+/**
+ * Commit SHA per ref, resolved in one `rev-parse`.
+ *
+ * All or nothing: git interleaves its "unknown revision" complaint with the
+ * SHAs it did resolve, so a short reply cannot be mapped back to the refs that
+ * produced it. An empty map means "no equality knowledge", which leaves
+ * {@link isMergedInto} on the ancestry answer alone.
+ */
+async function readTips(
+  repoRoot: string,
+  refs: string[],
+  git: GitRun,
+): Promise<Map<string, string>> {
+  const res = await git(
+    repoRoot,
+    ["rev-parse"].concat(refs.map((ref) => `${ref}^{commit}`)),
+  );
+  if (res.exitCode !== 0) return new Map();
+  const lines = res.stdout
+    .trim()
+    .split("\n")
+    .map((line) => line.trim());
+  if (lines.length !== refs.length) return new Map();
+  return new Map(refs.map((ref, i) => [ref, lines[i]]));
 }
 
 export interface UpstreamState {
@@ -447,6 +579,77 @@ export async function readUpstreamStates(
     });
   }
   return states;
+}
+
+/**
+ * What this repo's remotes say about whether a pull request could exist.
+ *
+ * Read on the PR-lookup FAILURE path only (see `ghPRStateLookup`), to separate
+ * "gh could not answer" from "there was nothing for gh to answer about".
+ *
+ * - `none`: the repo has no remote URLs at all. A pull request has nowhere to
+ *   live, so gh refusing to run here IS the answer, and a locally merged
+ *   worktree stays prunable. This is the only case the permissive branch gets,
+ *   because it is the only one absence is provable in.
+ * - `github`: some remote URL is recognizably github.com, so a PR could exist
+ *   and a gh failure is hiding it.
+ * - `unknown`: remotes exist but none is recognizably github.com. A GitHub
+ *   Enterprise custom domain, an ssh config alias (`git@gh-personal:o/r.git`)
+ *   and an `insteadOf` shorthand (`gh:o/r`) all land here, and none of them is
+ *   derivable from the URL. It is handled exactly like `github`: an
+ *   unrecognized host is not proof that no PR exists, and the branch that
+ *   deletes directories does not get to guess.
+ */
+export type RemoteHosting = "github" | "none" | "unknown";
+
+/**
+ * Whether a single remote URL is recognizably github.com.
+ *
+ * Bounded on both sides so a lookalike host cannot pass: `evil-github.com`
+ * fails the left boundary (`-` is not a host separator) and
+ * `github.com.evil.io` fails the right one (the host does not end there).
+ */
+export function isGitHubRemoteUrl(url: string): boolean {
+  return /(^|[@/.])github\.com([/:]|$)/i.test(url.trim());
+}
+
+/** @see RemoteHosting */
+export async function classifyRemoteHosting(
+  cwd: string,
+  git: GitRun = runGit,
+): Promise<RemoteHosting> {
+  // Two probes, because one cannot answer both halves. This one establishes
+  // repo-ness: outside a repo there is no config to read and nothing to
+  // conclude, which is the only thing scoping the config read to `--local`
+  // was ever buying.
+  const repo = await git(cwd, ["rev-parse", "--git-dir"]);
+  if (repo.exitCode !== 0) return "unknown";
+
+  // Remotes are then read at FULL config scope, NOT `--local`. A remote can
+  // live in global or system config (dotfiles that `include.path` a shared
+  // file, an `includeIf` per-directory block, `GIT_CONFIG_GLOBAL`), where
+  // `git remote -v` and `gh` both still see it. `--local` reported those repos
+  // as having no remote at all, which is the one permissive answer: a broken
+  // `gh` then read as "no PR can exist here" and a locally merged worktree was
+  // offered for force-deletion with its PR still open.
+  const res = await git(cwd, ["config", "--get-regexp", "^remote\\..*\\.url"]);
+  // Exit 1 is git's documented "no key matched": no remote URLs at all.
+  if (res.exitCode === 1) return "none";
+  // Anything else (git missing, config unreadable) tells us nothing about the
+  // remotes, so claim the strict path rather than the convenient one.
+  if (res.exitCode !== 0) return "unknown";
+
+  // `--get-regexp` prints `<key> <value>`; the value is everything after the
+  // first space, since a remote URL may itself be a path containing spaces.
+  const urls = res.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+    .map((line) => line.slice(line.indexOf(" ") + 1));
+  // Exit 0 with nothing to read is a shape git is not supposed to produce, so
+  // it goes to the strict side rather than being read as "no remotes".
+  if (urls.length === 0) return "unknown";
+  return urls.some(isGitHubRemoteUrl) ? "github" : "unknown";
 }
 
 /**

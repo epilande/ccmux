@@ -39,7 +39,7 @@ import {
   type OpenAgentsResult,
 } from "./utils/tmux";
 import { isSameServerCached, setDaemonSocketPath } from "./utils/server-guard";
-import { getDaemonUrl, STATE_FILE } from "../lib/config";
+import { getDaemonUrl, resolvedHomeDir, STATE_FILE } from "../lib/config";
 import { getUIState } from "../lib/state";
 import {
   PERF_ENABLED,
@@ -58,8 +58,10 @@ import { GroupPreview } from "./components/GroupPreview";
 import { ConfirmationDialog } from "./components/ConfirmationDialog";
 import {
   NewSessionDialog,
+  DESTINATION_OPTIONS,
   PLACEMENT_OPTIONS,
 } from "./components/NewSessionDialog";
+import { slugFromPrompt } from "../daemon/worktree-create";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { PruneDialog } from "./components/PruneDialog";
 import { HelpOverlay } from "./components/HelpOverlay";
@@ -434,9 +436,9 @@ export function App(props: AppProps) {
    *
    * The picker only chooses the DESTINATION here (`split` + `target` /
    * `callerPane`); how to continue the conversation is the daemon's
-   * `forkCommand` template. Note the cwd is NOT ours to choose: Claude
-   * resolves a resumed session against the project directory for its cwd, so
-   * the daemon refuses a fork into a different one.
+   * `forkCommand` template. No cwd is sent, which the daemon reads as "the
+   * source's directory" — a product choice (a fork sits beside its original),
+   * not a constraint: the daemon accepts an explicit cwd for a fork.
    */
   async function forkSession(session: EnrichedSession) {
     if (!canForkSession(session)) return;
@@ -721,9 +723,16 @@ export function App(props: AppProps) {
   function groupContextMenuNewSession() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
-    const first = store.selectedGroupSessions()[0];
+    // Through `newSessionContext`, the same resolver the `n` key uses: this
+    // path used to take the first member's cwd unconditionally, so a header
+    // grouped by tmux session or window answered one way to the keyboard and
+    // another to the mouse. Located by the menu's own group key rather than
+    // the selection, which SSE re-sorts underneath an open menu.
+    const header = store
+      .flatItems()
+      .find((item) => item.type === "header" && item.groupKey === cm.groupKey);
     store.actions.hideGroupContextMenu();
-    openNewSession({ cwd: first ? sessionCwd(first) : pickerCwd() });
+    openNewSession(newSessionContext(header ?? null));
   }
 
   function contextMenuReview() {
@@ -1026,6 +1035,9 @@ export function App(props: AppProps) {
    * Grouped by tmux session or window, its members can span unrelated
    * repositories, so the first member's cwd would be an arbitrary pick —
    * the picker's own directory is at least a defensible default.
+   *
+   * Every entry point (the `n` key, both context menus) routes through here,
+   * so key and mouse cannot answer the same question differently.
    */
   function newSessionContext(item: FlatItem | null): {
     cwd: string;
@@ -1039,7 +1051,38 @@ export function App(props: AppProps) {
       item?.type === "header" &&
       GROUPINGS_BY_DIRECTORY.has(store.state.groupBy)
     ) {
-      const first = item.members[0]?.session;
+      const members = item.members.map((member) => member.session);
+      // A project group is repo-level: it holds the main checkout AND every
+      // worktree hanging off it, and members are sorted by status then
+      // activity, so `members[0]` is an arbitrary sibling worktree that can
+      // change between two opens. The repo root is the directory the group
+      // stands for, but only when the group PROVES it, which takes two
+      // conditions:
+      //
+      // - Unanimous. The group key is a repo NAME (a basename), so ~/work/api
+      //   and ~/oss/api share one group; picking whichever member carried a
+      //   root would answer with one of two unrelated repositories depending
+      //   on the sort.
+      // - Not the home directory. A literal ~/.git (dotfiles initialized in
+      //   $HOME) resolves every member's `mainRepoRoot` to $HOME while the
+      //   group is labelled after a subdirectory, so "agreement" there means
+      //   opening at the top of the user's home.
+      //
+      // Anything else falls back to a member's own cwd, which is at least a
+      // directory one of the sessions is really in. `cwd` grouping keys off
+      // the directory itself, so it always takes the member's.
+      if (store.state.groupBy === "project") {
+        const roots = new Set(
+          members
+            .map((member) => member.mainRepoRoot)
+            .filter((root): root is string => Boolean(root)),
+        );
+        const [repoRoot] = roots;
+        if (roots.size === 1 && repoRoot && repoRoot !== resolvedHomeDir()) {
+          return { cwd: repoRoot };
+        }
+      }
+      const first = members[0];
       if (first) return { cwd: sessionCwd(first) };
     }
     return { cwd: pickerCwd() };
@@ -1109,6 +1152,15 @@ export function App(props: AppProps) {
             if (option) store.actions.setNewSessionPlacement(option.value);
           },
         };
+      case "destination":
+        return {
+          options: DESTINATION_OPTIONS.map((option) => option.value),
+          value: draft.destination,
+          select: (value) => {
+            const option = DESTINATION_OPTIONS.find((o) => o.value === value);
+            if (option) store.actions.setNewSessionDestination(option.value);
+          },
+        };
       default:
         return null;
     }
@@ -1159,6 +1211,17 @@ export function App(props: AppProps) {
       );
       return;
     }
+    // The dialog has no name field, so the prompt is the only name it can
+    // offer. Refuse here rather than posting: the daemon's own refusal reads
+    // "pass one explicitly", which is advice for the CLI and not something
+    // this dialog can act on.
+    if (draft.destination === "worktree" && !slugFromPrompt(prompt)) {
+      store.actions.showToast(
+        "Type a prompt to name the worktree, or use ccmux spawn --worktree <name>",
+        4000,
+      );
+      return;
+    }
     // Placement carries a `%N` from OUR tmux server; against a daemon
     // watching a different one it would resolve to an unrelated pane, and
     // the agent would start where nobody is looking.
@@ -1194,6 +1257,9 @@ export function App(props: AppProps) {
           callerPane: callerPane ?? undefined,
           prompt: prompt || undefined,
           detach,
+          // The daemon derives the name from the prompt when none is given,
+          // which is the same rule the row previews, so the two cannot drift.
+          worktree: draft.destination === "worktree" ? {} : undefined,
         }),
       });
       const body = (await response.json().catch(() => null)) as {
@@ -1213,7 +1279,11 @@ export function App(props: AppProps) {
     } catch (err: unknown) {
       store.actions.showToast(`Spawn failed: ${errText(err)}`, 4000);
     } finally {
-      spawnInFlight = false;
+      // Released only on the paths that leave the dialog open. A landed spawn
+      // holds the guard until the draft is gone: the state write below is a
+      // real file read, write and rename, and an Enter delivered during it
+      // would otherwise pass BOTH guards and open a second pane.
+      if (!spawned) spawnInFlight = false;
     }
     if (!spawned) return;
 
@@ -1221,8 +1291,12 @@ export function App(props: AppProps) {
     // failure. Remembering the agent is best-effort for exactly that reason:
     // an unwritable ~/.config would otherwise surface as "Spawn failed", and
     // the user — reasonably — would press Enter again and get a second pane.
-    await store.actions.setLastSpawnAgent(agent.name).catch(() => {});
-    store.actions.closeNewSessionDialog();
+    try {
+      await store.actions.setLastSpawnAgent(agent.name).catch(() => {});
+    } finally {
+      store.actions.closeNewSessionDialog();
+      spawnInFlight = false;
+    }
     if (detach) {
       store.actions.showToast(`Spawned ${agent.displayName}`);
       return;
@@ -2193,6 +2267,7 @@ export function App(props: AppProps) {
               onFocusField={store.actions.setNewSessionField}
               onSelectAgent={store.actions.setNewSessionAgent}
               onSelectPlacement={store.actions.setNewSessionPlacement}
+              onSelectDestination={store.actions.setNewSessionDestination}
               onPromptInput={store.actions.setNewSessionPrompt}
               onSubmit={() => void submitNewSession()}
               onCancel={store.actions.closeNewSessionDialog}

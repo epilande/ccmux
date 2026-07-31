@@ -1,5 +1,12 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, unlinkSync } from "fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  unlinkSync,
+  realpathSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join, basename, relative } from "path";
 import {
@@ -274,7 +281,9 @@ describe("deriveProject", () => {
     expect(walked.project).toBe(basename(bareWorktree));
     // ...while git, asked directly, calls it a worktree of a bare repo with
     // no main checkout to name.
-    expect(worktreeFacts(bareWorktree, bareWorktreeGitdir, bare)).toEqual({
+    expect(
+      worktreeFacts(bareWorktree, bareWorktreeGitdir, bare, bareWorktree),
+    ).toEqual({
       isWorktree: true,
       mainRepoRoot: null,
     });
@@ -290,5 +299,143 @@ describe("deriveProject", () => {
     expect(deriveProject(a, "fallback", { cache })).toBe(basename(a));
     expect(deriveProject(b, "fallback", { cache })).toBe(basename(b));
     expect(cache.size).toBe(2);
+  });
+});
+
+/**
+ * Run a real `git` command, failing the test loudly if it doesn't exit 0.
+ * These fixtures exist because `worktreeFacts`'s inputs are the four lines
+ * `git rev-parse` prints, and getting those shapes right for a submodule, a
+ * `--separate-git-dir` repo, and a bare-repo worktree by hand-modeling them
+ * is exactly how a wrong assumption about git's own behavior would slip
+ * through unit-level string fixtures.
+ */
+function git(args: string[], cwd: string): void {
+  const result = Bun.spawnSync(["git", "-C", cwd, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `git ${args.join(" ")} (cwd=${cwd}) failed: ${result.stderr.toString()}`,
+    );
+  }
+}
+
+/** The four `rev-parse` lines ccmux's daemon reads, for a given cwd. */
+function revParseFacts(cwd: string): {
+  topLevel: string;
+  gitDir: string;
+  commonDir: string;
+} {
+  const result = Bun.spawnSync(
+    [
+      "git",
+      "-C",
+      cwd,
+      "rev-parse",
+      "--path-format=absolute",
+      "--abbrev-ref",
+      "HEAD",
+      "--show-toplevel",
+      "--git-dir",
+      "--git-common-dir",
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`git rev-parse (cwd=${cwd}) failed`);
+  }
+  const lines = result.stdout.toString().trim().split("\n");
+  const [, topLevel, gitDir, commonDir] = lines;
+  return { topLevel, gitDir, commonDir };
+}
+
+function initRepo(dir: string): void {
+  git(["init", "-q"], dir);
+  git(["config", "user.email", "test@example.com"], dir);
+  git(["config", "user.name", "Test"], dir);
+  writeFileSync(join(dir, "f"), "hi\n");
+  git(["add", "f"], dir);
+  git(["commit", "-qm", "init"], dir);
+}
+
+describe("worktreeFacts against real git layouts", () => {
+  it("resolves mainRepoRoot via --show-toplevel for a submodule checkout", () => {
+    const subSrc = tempDir("s5-sub-src");
+    initRepo(subSrc);
+
+    const outer = tempDir("s5-outer");
+    initRepo(outer);
+    git(
+      [
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        subSrc,
+        "sub",
+      ],
+      outer,
+    );
+
+    const submodule = join(outer, "sub");
+    const { topLevel, gitDir, commonDir } = revParseFacts(submodule);
+
+    // Real git: submodule's own git-dir and common-dir are the same path
+    // (inside the superproject's .git/modules), so this is NOT a worktree.
+    expect(gitDir).toBe(commonDir);
+
+    expect(worktreeFacts(submodule, gitDir, commonDir, topLevel)).toEqual({
+      isWorktree: false,
+      // realpath'd: macOS's mkdtemp cwd is under the /var symlink, while
+      // git (and this fixture's own rev-parse) resolves through it to
+      // /private/var.
+      mainRepoRoot: realpathSync(submodule),
+    });
+  });
+
+  it("resolves mainRepoRoot via --show-toplevel for a --separate-git-dir repo", () => {
+    const root = tempDir("s5-sepgit");
+    const worktreeDir = join(root, "work");
+    const gitDirPath = join(root, "actual.git");
+    git(["init", "-q", "--separate-git-dir", gitDirPath, worktreeDir], root);
+    initRepo(worktreeDir);
+
+    const { topLevel, gitDir, commonDir } = revParseFacts(worktreeDir);
+
+    // The git dir's basename is "actual.git", not ".git", which is exactly
+    // what the old basename(commonDir) === ".git" test missed.
+    expect(basename(commonDir)).not.toBe(".git");
+    expect(gitDir).toBe(commonDir);
+
+    expect(worktreeFacts(worktreeDir, gitDir, commonDir, topLevel)).toEqual({
+      isWorktree: false,
+      mainRepoRoot: realpathSync(worktreeDir),
+    });
+  });
+
+  it("keeps mainRepoRoot null for a worktree of a bare repo (no main checkout exists)", () => {
+    const seed = tempDir("s5-bare-seed");
+    initRepo(seed);
+
+    const host = tempDir("s5-bare-host");
+    const bareRepo = join(host, "repo.git");
+    git(["clone", "-q", "--bare", seed, bareRepo], host);
+
+    const worktree = join(host, "wt");
+    git(["worktree", "add", "-q", worktree, "-b", "feat"], bareRepo);
+
+    const { topLevel, gitDir, commonDir } = revParseFacts(worktree);
+
+    // This IS a worktree (git-dir sits under repo.git/worktrees/), but the
+    // "repo" is bare, so there is no main checkout directory to point at.
+    expect(gitDir).not.toBe(commonDir);
+
+    expect(worktreeFacts(worktree, gitDir, commonDir, topLevel)).toEqual({
+      isWorktree: true,
+      mainRepoRoot: null,
+    });
   });
 });

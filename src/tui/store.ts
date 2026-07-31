@@ -60,7 +60,14 @@ export type ConfirmAction =
  *  `split-h`/`split-v` are tmux's own directions (`-h` is left/right). */
 export type NewSessionPlacement = "window" | "split-h" | "split-v";
 
-export type NewSessionField = "agent" | "placement" | "prompt";
+/**
+ * Where the new session's checkout comes from. `here` is the directory the
+ * dialog was opened over; `worktree` creates one under the repo's
+ * `.claude/worktrees/`, named from the prompt (issue #69).
+ */
+export type NewSessionDestination = "here" | "worktree";
+
+export type NewSessionField = "agent" | "placement" | "prompt" | "destination";
 
 /**
  * The dialog's fields, in focus order. Focus movement, which field the
@@ -80,6 +87,11 @@ export const NEW_SESSION_FIELDS: readonly NewSessionField[] = [
   "agent",
   "placement",
   "prompt",
+  // Last, and after the prompt on purpose: the worktree name is DERIVED from
+  // the prompt, so the row can only show what you would get once there is
+  // something to derive it from. It also leaves the two-tab path to the
+  // prompt, which people already have in their fingers, where it was.
+  "destination",
 ];
 
 /**
@@ -95,6 +107,7 @@ export interface NewSessionDraft {
   cwd: string;
   agent: string;
   placement: NewSessionPlacement;
+  destination: NewSessionDestination;
   prompt: string;
   /** Which field the option/text keys currently apply to. */
   field: NewSessionField;
@@ -374,6 +387,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     }
     const merged = { ...pendingUpdates, ...updates };
     pendingUpdates = {};
+    // A flush with nothing to say still cancels the timer above, but it must
+    // not turn into a disk write: callers flush unconditionally so the queue
+    // always drains, and `setUIState` is a real read-modify-write.
+    if (Object.keys(merged).length === 0) return Promise.resolve();
     return Promise.resolve(persistStateFn(merged));
   }
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1238,6 +1255,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           cwd: init.cwd,
           agent: init.agent,
           placement: "window",
+          destination: "here",
           prompt: "",
           field: NEW_SESSION_FIELDS[0]!,
         });
@@ -1273,6 +1291,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("newSession", "placement", placement);
     },
 
+    setNewSessionDestination(destination: NewSessionDestination) {
+      if (!state.newSession) return;
+      setState("newSession", "destination", destination);
+    },
+
     setNewSessionPrompt(prompt: string) {
       if (!state.newSession) return;
       setState("newSession", "prompt", prompt);
@@ -1291,7 +1314,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
      * bypassing) takes any pending `f`/`p`/`b` toggle to disk with it.
      */
     setLastSpawnAgent(agent: string): Promise<void> {
-      if (state.lastSpawnAgent === agent) return Promise.resolve();
+      // Re-spawning the same agent is not a state change, but it still owes
+      // the flush: same-agent is the DEFAULT branch (the value is seeded from
+      // disk and the dialog opens on it), and this is the only path that
+      // drains the debounce queue before the exit that follows a spawn. An
+      // empty flush is a no-op write, so this costs nothing when there is
+      // nothing pending.
+      if (state.lastSpawnAgent === agent) return flushUIState({});
       setState("lastSpawnAgent", agent);
       return flushUIState({ lastSpawnAgent: agent });
     },

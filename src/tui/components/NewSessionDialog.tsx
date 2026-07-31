@@ -5,11 +5,18 @@ import { MouseButton } from "@opentui/core";
 import type { SpawnableAgent } from "../../lib/spawnable-agents";
 import {
   NEW_SESSION_FIELDS,
+  type NewSessionDestination,
   type NewSessionDraft,
   type NewSessionField,
   type NewSessionPlacement,
 } from "../store";
-import { shortenCwd, truncateText } from "../utils/format";
+import { slugFromPrompt } from "../../daemon/worktree-create";
+import {
+  displayWidth,
+  shortenCwd,
+  sliceToWidth,
+  truncateText,
+} from "../utils/format";
 import { agentColorFor } from "./SessionItem";
 import { theme } from "../theme";
 
@@ -47,6 +54,77 @@ export const PLACEMENT_OPTIONS: readonly PlacementOption[] = [
   { value: "split-v", label: "Split down", compactLabel: "Down" },
 ];
 
+interface DestinationOption {
+  value: NewSessionDestination;
+  label: string;
+  compactLabel: string;
+}
+
+/** Destination choices, in the order their number keys select them. */
+export const DESTINATION_OPTIONS: readonly DestinationOption[] = [
+  { value: "here", label: "This checkout", compactLabel: "Here" },
+  { value: "worktree", label: "New worktree", compactLabel: "Worktree" },
+];
+
+/**
+ * Greedy word-wrap into lines of at most `width` columns, breaking a word
+ * that cannot fit on a line of its own.
+ *
+ * The dialog wraps its agent error itself rather than handing a long string
+ * to the renderer, because the height budget below has to know the row count
+ * BEFORE layout and the renderer's own wrapping cannot be predicted from
+ * here (it breaks mid-word at the tail of a line, and a space landing on the
+ * boundary moves to the next row). Lines produced here already fit, so
+ * nothing can wrap a second time and the budget cannot be wrong.
+ *
+ * Widths are display columns (`displayWidth`), so a line of wide glyphs (CJK,
+ * emoji) fits its column like an ASCII one does, and mid-word breaks land on
+ * grapheme boundaries (issue #91).
+ */
+export function wrapText(text: string, width: number): string[] {
+  if (width <= 0) return [text];
+  const lines: string[] = [];
+  let line = "";
+  let lineWidth = 0;
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    let rest = word;
+    // Longer than the whole column: it can only be broken mid-word.
+    while (displayWidth(rest) > width) {
+      if (line) {
+        lines.push(line);
+        line = "";
+        lineWidth = 0;
+      }
+      const head = sliceToWidth(rest, width);
+      if (!head) {
+        // A single cluster wider than the whole column (a wide glyph at
+        // width 1): nothing can be split off it, so let the word overflow
+        // rather than slice a cluster or spin on an empty head.
+        lines.push(rest);
+        rest = "";
+        break;
+      }
+      lines.push(head);
+      rest = rest.slice(head.length);
+    }
+    if (!rest) continue;
+    const restWidth = displayWidth(rest);
+    if (!line) {
+      line = rest;
+      lineWidth = restWidth;
+    } else if (lineWidth + 1 + restWidth <= width) {
+      line += ` ${rest}`;
+      lineWidth += 1 + restWidth;
+    } else {
+      lines.push(line);
+      line = rest;
+      lineWidth = restWidth;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.length > 0 ? lines : [""];
+}
+
 /**
  * Slice of a longer option list to show, keeping the selection visible and
  * centered where it can be. Exported for its own tests: an off-by-one here
@@ -71,6 +149,7 @@ interface NewSessionDialogProps {
   onFocusField: (field: NewSessionField) => void;
   onSelectAgent: (name: string) => void;
   onSelectPlacement: (placement: NewSessionPlacement) => void;
+  onSelectDestination: (destination: NewSessionDestination) => void;
   onPromptInput: (prompt: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
@@ -94,16 +173,20 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const stacked = () => contentWidth() < STACKED_CONTENT_WIDTH;
 
   /**
-   * The label to draw for a placement option.
+   * The label to draw for a numbered option, shared by Placement and Where.
    *
    * Stacking gives each option its own row, but a row is not unlimited: at
    * the sidebar's real 30-column rail the dialog is 26 wide and the label
    * column is 8, which renders `New window` / `Split right` / `Split down`
-   * as `New` / `Split` / `Split` — two of the three indistinguishable. The
-   * full label is therefore used only when it actually fits, and the short
-   * label (which exists for exactly this) is the fallback in both layouts.
+   * as `New` / `Split` / `Split` — two of the three indistinguishable, and
+   * `This checkout` / `New worktree` the same way. The full label is
+   * therefore used only when it actually fits, and the short label (which
+   * exists for exactly this) is the fallback in both layouts.
    */
-  const placementLabel = (option: PlacementOption): string => {
+  const optionLabel = (option: {
+    label: string;
+    compactLabel: string;
+  }): string => {
     // The row also spends a 2-wide number cell and two 1-wide bracket cells.
     const room = contentWidth() - 4;
     if (!stacked()) return compact() ? option.compactLabel : option.label;
@@ -124,18 +207,21 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
 
   /**
    * How many rows each field occupies. Exhaustive over `NewSessionField` by
-   * type, which is the point: a field added to `NEW_SESSION_FIELDS` (issue
-   * #69's worktree destination is next) fails to compile until its height
-   * is declared here. The previous hand-summed constant type-checked fine
-   * and silently clipped the bottom row instead.
+   * type, which is the point: a field added to `NEW_SESSION_FIELDS` fails to
+   * compile until its height is declared here. The previous hand-summed
+   * constant type-checked fine and silently clipped the bottom row instead.
    */
   const fieldRows: Record<NewSessionField, () => number> = {
-    // Declared before `visibleAgents` but never CALLED before it exists:
-    // `otherFieldRows("agent")` is the only caller during that window and
-    // it filters this entry out. createMemo runs eagerly, so the ordering
-    // is load-bearing, not stylistic.
-    agent: () => Math.max(1, visibleAgents().length),
+    // Declared before `visibleAgents` and `agentErrorLines` but never CALLED
+    // before they exist: `otherFieldRows("agent")` is the only caller during
+    // that window and it filters this entry out. createMemo runs eagerly, so
+    // the ordering is load-bearing, not stylistic.
+    agent: () =>
+      showAgentError()
+        ? agentErrorLines().length
+        : Math.max(1, visibleAgents().length),
     placement: () => (stacked() ? PLACEMENT_OPTIONS.length : 1),
+    destination: () => (stacked() ? DESTINATION_OPTIONS.length : 1),
     prompt: () => 1,
   };
 
@@ -147,19 +233,24 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
       0,
     );
 
+  /** Rows the agent field may claim before the dialog outgrows the screen:
+   *  everything the other fields and the chrome have not already spent. */
+  const agentRoom = createMemo(() =>
+    Math.max(
+      1,
+      dims().height - FIXED_CHROME_ROWS - hintRows() - otherFieldRows("agent"),
+    ),
+  );
+
   /** Where the visible slice of the agent list starts. Split from the slice
    *  itself so the rows can derive their absolute number from it without the
    *  slice having to carry a wrapper object per entry (see below). */
   const agentWindowStart = createMemo(() => {
     const list = agents();
-    const room = Math.max(
-      1,
-      dims().height - FIXED_CHROME_ROWS - hintRows() - otherFieldRows("agent"),
-    );
     return optionWindow(
       list.length,
       selectedAgentIndex(),
-      Math.min(room, list.length),
+      Math.min(agentRoom(), list.length),
     ).start;
   });
 
@@ -174,12 +265,39 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    */
   const visibleAgents = createMemo(() => {
     const list = agents();
-    const room = Math.max(
-      1,
-      dims().height - FIXED_CHROME_ROWS - hintRows() - otherFieldRows("agent"),
-    );
     const start = agentWindowStart();
-    return list.slice(start, start + Math.min(room, list.length));
+    return list.slice(start, start + Math.min(agentRoom(), list.length));
+  });
+
+  /** The agent field carries an error instead of a list: the daemon answered
+   *  with one, or answered with nothing to spawn. */
+  const showAgentError = () => props.agents !== null && agents().length === 0;
+
+  /**
+   * The agent error, pre-wrapped to the content column and capped at the rows
+   * the field actually has. Budgeting this field as one row was what clipped
+   * the dialog's bottom rows outside its border whenever the message wrapped
+   * (issue #85) — the stale-daemon message is three rows at a sidebar width.
+   * Capping matters too: an error longer than the screen would otherwise push
+   * the height past `dims().height`, where the clamp below re-creates exactly
+   * the same clipping.
+   */
+  const agentErrorLines = createMemo(() => {
+    // `||`, not `??`: the daemon's own error text is passed straight through
+    // (App.tsx takes `body?.error` at its word), and a `{"error": ""}` body
+    // would otherwise render an empty red row that says nothing at all.
+    const text = props.agentsError || "No agents found on PATH";
+    const lines = wrapText(text, contentWidth());
+    const room = agentRoom();
+    if (lines.length <= room) return lines;
+    // Say that it was cut, rather than ending mid-sentence: the last visible
+    // row carries as much of the remainder as fits, with an ellipsis.
+    const kept = lines.slice(0, room);
+    kept[room - 1] = truncateText(
+      lines.slice(room - 1).join(" "),
+      contentWidth(),
+    );
+    return kept;
   });
 
   const height = () =>
@@ -272,14 +390,28 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         <box flexDirection="column" flexGrow={1}>
           <Show
             when={props.agents !== null}
-            fallback={<text fg={theme.overlay}>Loading agents...</text>}
+            fallback={
+              <box height={1}>
+                <text fg={theme.overlay}>
+                  {truncateText("Loading agents...", contentWidth())}
+                </text>
+              </box>
+            }
           >
             <Show
               when={agents().length > 0}
               fallback={
-                <text fg={theme.red}>
-                  {props.agentsError ?? "No agents found on PATH"}
-                </text>
+                /* One row per pre-wrapped line, which is the same count the
+                   height was budgeted from. Left to the renderer instead,
+                   a long message wrapped past its single budgeted row and
+                   pushed the dialog's last rows outside the border. */
+                <For each={agentErrorLines()}>
+                  {(line) => (
+                    <box height={1}>
+                      <text fg={theme.red}>{line}</text>
+                    </box>
+                  )}
+                </For>
               }
             >
               <For each={visibleAgents()}>
@@ -356,7 +488,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                     <text fg={theme.green}>{selected() ? "[" : ""}</text>
                   </box>
                   <text fg={selected() ? theme.green : theme.subtext}>
-                    {placementLabel(option)}
+                    {optionLabel(option)}
                   </text>
                   <box width={1}>
                     <text fg={theme.green}>{selected() ? "]" : ""}</text>
@@ -382,6 +514,80 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           focusedBackgroundColor="transparent"
           flexGrow={1}
         />
+      </box>
+
+      <box flexDirection="row">
+        <FieldLabel field="destination" text="Where" />
+        <box
+          flexDirection={stacked() ? "column" : "row"}
+          flexGrow={1}
+          onMouseDown={() => props.onFocusField("destination")}
+        >
+          <For each={DESTINATION_OPTIONS}>
+            {(option, index) => {
+              const selected = () => option.value === props.draft.destination;
+              /* The worktree option carries the name it would create, so the
+                 choice is concrete rather than a promise. It tracks the
+                 prompt as it is typed, which is also the answer to "where
+                 did that branch name come from". */
+              const label = () => {
+                const base = optionLabel(option);
+                if (option.value !== "worktree") return base;
+                // Budgeted, not appended blindly: a long prompt yields a long
+                // slug, and on one row that pushed the dialog's own right
+                // border off screen. Each option spends a 2-wide number cell
+                // and two 1-wide brackets, and when side by side the first
+                // option also spends its label and a 2-wide margin.
+                const spent = stacked()
+                  ? 4
+                  : 8 + optionLabel(DESTINATION_OPTIONS[0]!).length + 2;
+                const room = contentWidth() - spent;
+                const slug = slugFromPrompt(props.draft.prompt);
+                if (!slug) {
+                  // A worktree is named by the prompt and nothing else, so
+                  // with no derivable name this option cannot spawn. Say so
+                  // while the choice is being made rather than on Enter, and
+                  // only while it is the choice: on the unselected row the
+                  // hint is noise. Appended only when it fits whole, since a
+                  // truncated `Worktree (a...` explains nothing.
+                  if (!selected()) return base;
+                  const hinted = `${base} (add a prompt)`;
+                  return hinted.length <= room ? hinted : base;
+                }
+                return truncateText(
+                  `${base}: ${slug}`,
+                  Math.max(base.length, room),
+                );
+              };
+              return (
+                <box
+                  height={1}
+                  flexDirection="row"
+                  flexShrink={0}
+                  marginRight={stacked() ? 0 : 2}
+                  onMouseDown={(event) => {
+                    if (event.button !== MouseButton.LEFT) return;
+                    props.onFocusField("destination");
+                    props.onSelectDestination(option.value);
+                  }}
+                >
+                  <box width={2}>
+                    <text fg={theme.overlay}>{`${index() + 1}`}</text>
+                  </box>
+                  <box width={1}>
+                    <text fg={theme.green}>{selected() ? "[" : ""}</text>
+                  </box>
+                  <text fg={selected() ? theme.green : theme.subtext}>
+                    {label()}
+                  </text>
+                  <box width={1}>
+                    <text fg={theme.green}>{selected() ? "]" : ""}</text>
+                  </box>
+                </box>
+              );
+            }}
+          </For>
+        </box>
       </box>
 
       <box flexDirection="row" height={1}>

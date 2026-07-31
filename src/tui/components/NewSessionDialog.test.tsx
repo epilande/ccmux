@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { NewSessionDialog, optionWindow } from "./NewSessionDialog";
+import { NewSessionDialog, optionWindow, wrapText } from "./NewSessionDialog";
+import { expectFrameIntegrity, squish } from "./test-helpers";
+import { displayWidth } from "../utils/format";
 import type { SpawnableAgent } from "../../lib/spawnable-agents";
 import type { NewSessionDraft } from "../store";
 
@@ -26,6 +28,7 @@ const draft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft => ({
   cwd: "/Users/dev/code/ccmux",
   agent: "claude",
   placement: "window",
+  destination: "here",
   prompt: "",
   field: "agent",
   ...overrides,
@@ -48,6 +51,7 @@ async function renderDialog(props: {
         onFocusField={() => {}}
         onSelectAgent={() => {}}
         onSelectPlacement={() => {}}
+        onSelectDestination={() => {}}
         onPromptInput={() => {}}
         onSubmit={() => {}}
         onCancel={() => {}}
@@ -83,6 +87,71 @@ describe("optionWindow", () => {
       const { start, end } = optionWindow(9, selected, 4);
       expect(selected >= start && selected < end).toBe(true);
     }
+  });
+});
+
+describe("wrapText", () => {
+  it("breaks on words and keeps every line within the width", () => {
+    const lines = wrapText("Daemon is out of date - run restart", 13);
+    expect(lines).toEqual(["Daemon is out", "of date - run", "restart"]);
+    for (const line of lines) expect(line.length).toBeLessThanOrEqual(13);
+  });
+
+  it("breaks a word that cannot fit a line of its own", () => {
+    expect(wrapText("run ccmuxdaemonrestart now", 8)).toEqual([
+      "run",
+      "ccmuxdae",
+      "monresta",
+      "rt now",
+    ]);
+  });
+
+  it("always yields at least one line", () => {
+    expect(wrapText("", 10)).toEqual([""]);
+    expect(wrapText("   ", 10)).toEqual([""]);
+  });
+
+  it("gives up rather than looping when there is no width to wrap into", () => {
+    expect(wrapText("anything", 0)).toEqual(["anything"]);
+  });
+
+  /**
+   * Issue #91: the widths above are display columns, so a line of CJK fills
+   * its column exactly like an ASCII one. Measured in code units these lines
+   * were twice their claimed width and the renderer clipped half of each.
+   */
+  it("wraps wide glyphs to the column they actually occupy", () => {
+    const message = "エージェントを 解決できません でした デーモンを 再起動";
+    const lines = wrapText(message, 19);
+    for (const line of lines) {
+      expect(displayWidth(line)).toBeLessThanOrEqual(19);
+    }
+    expect(lines.join(" ")).toBe(message);
+  });
+
+  it("breaks an over-wide CJK word on a glyph boundary", () => {
+    const lines = wrapText("解決できませんでした", 9);
+    for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(9);
+    expect(lines.join("")).toBe("解決できませんでした");
+    // An odd budget stops a column short rather than splitting a glyph.
+    expect(lines[0]).toBe("解決でき");
+  });
+
+  it("never splits an emoji cluster across lines", () => {
+    const family = "👨‍👩‍👧‍👦";
+    const lines = wrapText(family.repeat(6), 5);
+    for (const line of lines) {
+      expect(displayWidth(line)).toBeLessThanOrEqual(5);
+      // Whole families only, so nothing renders as a replacement glyph.
+      expect(line.replace(new RegExp(family, "gu"), "")).toBe("");
+    }
+    expect(lines.join("")).toBe(family.repeat(6));
+  });
+
+  it("emits an unsplittable glyph rather than spinning on it", () => {
+    // A column too narrow for one wide glyph: it has to overflow, but the
+    // loop must still terminate.
+    expect(wrapText("日本", 1)).toEqual(["日本"]);
   });
 });
 
@@ -209,6 +278,12 @@ describe("NewSessionDialog", () => {
   it("reports an empty agent list instead of rendering nothing", async () => {
     const frame = await renderDialog({ agents: [] });
     expect(frame).toContain("No agents found on PATH");
+    setup.renderer.destroy();
+
+    // The daemon's error text is passed through as it comes, so an empty one
+    // reaches here and must not render as a blank red row.
+    const blank = await renderDialog({ agents: [], agentsError: "" });
+    expect(blank).toContain("No agents found on PATH");
   });
 
   it("surfaces the daemon's error when the list could not be resolved", async () => {
@@ -217,6 +292,86 @@ describe("NewSessionDialog", () => {
       agentsError: "Failed to resolve agents: bad regex",
     });
     expect(frame).toContain("bad regex");
+  });
+
+  /**
+   * Issue #85. The Agent field was budgeted one row for its error, so a
+   * message that wrapped left the dialog that many rows short and its last
+   * rows fell outside the border — at a sidebar width the third placement
+   * and the whole Where field disappeared.
+   */
+  it("keeps every row inside the border when the agent error wraps", async () => {
+    const error = "Daemon is out of date - run `ccmux daemon restart`";
+    const frame = await renderDialog({
+      agents: [],
+      agentsError: error,
+      width: 34,
+      height: 30,
+    });
+
+    expectFrameIntegrity(frame);
+    // The whole message survived, wherever the wrap fell.
+    expect(squish(frame)).toContain(squish(error));
+    // And so did every row budgeted below it, down to the last one.
+    expect(frame).toContain("New window");
+    expect(frame).toContain("Split right");
+    expect(frame).toContain("Split down");
+    expect(frame).toContain("Where");
+    expect(frame).toContain("Here");
+    expect(frame).toContain("Worktree");
+    expect(frame).toContain("Directory");
+    expect(frame).toContain("enter");
+  });
+
+  /**
+   * Issue #91, the reported repro: a Japanese agent error at a sidebar width.
+   * Wrapped by code units every line was twice the column it claimed, the
+   * renderer clipped the overflow, and the message read as garbage rather
+   * than as a truncation.
+   */
+  it("wraps a wide-glyph agent error to the column it renders in", async () => {
+    const error =
+      "エージェントを解決できませんでした デーモンを再起動してください";
+    const frame = await renderDialog({
+      agents: [],
+      agentsError: error,
+      width: 34,
+      height: 30,
+    });
+
+    expectFrameIntegrity(frame);
+    // Every rendered row of the message is a contiguous prefix of the
+    // original, in order, with nothing dropped between rows.
+    const rendered = squish(frame);
+    let cursor = 0;
+    for (const char of squish(error)) {
+      const at = rendered.indexOf(char, cursor);
+      expect(at).toBeGreaterThanOrEqual(cursor);
+      cursor = at + 1;
+    }
+    // And the fields budgeted below the (now correctly counted) rows survive.
+    expect(frame).toContain("New window");
+    expect(frame).toContain("Split down");
+    expect(frame).toContain("Directory");
+  });
+
+  /** An error too tall for the screen cannot be shown whole; what it must
+   *  not do is push the fields below it off the dialog. */
+  it("caps an error taller than the screen instead of clipping the fields", async () => {
+    const frame = await renderDialog({
+      agents: [],
+      agentsError: "spawnable agents could not be resolved ".repeat(20),
+      width: 34,
+      height: 22,
+    });
+
+    expectFrameIntegrity(frame);
+    expect(frame).toContain("…");
+    expect(frame).toContain("Split down");
+    expect(frame).toContain("Directory");
+    expect(
+      frame.split("\n").filter((l) => l.includes("│")).length,
+    ).toBeLessThan(22);
   });
 
   it("shortens a home-relative directory", async () => {
@@ -268,5 +423,111 @@ describe("NewSessionDialog", () => {
     const withoutHints = await renderDialog({ showKeyHints: false });
     // The row plus its blank spacer, and no stray gap left behind.
     expect(tall - boxRows(withoutHints)).toBe(2);
+  });
+});
+
+/**
+ * The worktree destination (issue #69). The row shows the name it WOULD
+ * create, derived from the prompt, so the choice is concrete rather than a
+ * promise and the branch name never arrives as a surprise.
+ */
+describe("NewSessionDialog destination", () => {
+  it("offers both destinations, with this checkout selected by default", async () => {
+    await renderDialog({});
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Where");
+    expect(frame).toContain("[This checkout]");
+    expect(frame).toContain("New worktree");
+  });
+
+  it("previews the derived worktree name from the prompt", async () => {
+    await renderDialog({
+      // A short prompt so the whole derived name fits: the dialog is capped
+      // at MAX_WIDTH regardless of terminal size, so a long one is always
+      // truncated (covered by the next test).
+      draft: draft({ destination: "worktree", prompt: "fix bug" }),
+    });
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("[New worktree: fix-bug]");
+  });
+
+  /**
+   * The derived name is budgeted against the row, not appended blindly. A
+   * long slug pushed the dialog's own right border off screen, which reads
+   * as a broken dialog rather than a long name.
+   */
+  it("truncates the name rather than overflowing the border", async () => {
+    await renderDialog({
+      draft: draft({
+        destination: "worktree",
+        prompt: "fix sidebar flicker on resize",
+      }),
+    });
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("New worktree: fix-sidebar-");
+    // Every row of the box still ends with its border.
+    expectFrameIntegrity(frame);
+  });
+
+  /**
+   * With no derivable name the option cannot spawn at all, so the row says
+   * what is missing instead of showing a name it does not have.
+   */
+  it("asks for a prompt until there is something to derive a name from", async () => {
+    await renderDialog({ draft: draft({ destination: "worktree" }) });
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("[New worktree (add a prompt)]");
+    expect(frame).not.toContain("New worktree:");
+    // The hint is budgeted like the name is; the border still closes.
+    expectFrameIntegrity(frame);
+  });
+
+  it("keeps the hint off the unselected row, where it is only noise", async () => {
+    const frame = await renderDialog({ draft: draft({ destination: "here" }) });
+
+    expect(frame).toContain("[This checkout]");
+    expect(frame).not.toContain("add a prompt");
+  });
+
+  /** A CJK-only prompt derives nothing, exactly like an empty one. */
+  it("asks for a prompt when the prompt derives no slug at all", async () => {
+    const frame = await renderDialog({
+      draft: draft({ destination: "worktree", prompt: "修复侧边栏" }),
+    });
+
+    expect(frame).toContain("[New worktree (add a prompt)]");
+  });
+
+  /**
+   * The destination shares its label rule with Placement, so a sidebar-width
+   * surface has to keep BOTH choices readable and on their own rows — the
+   * same failure the placements had, where two options rendered identically.
+   */
+  it("stacks and abbreviates the destinations on a sidebar-width surface", async () => {
+    const frame = await renderDialog({ width: 34, height: 30 });
+
+    // The capitalized short labels, which only the abbreviated forms carry
+    // (`This checkout` / `New worktree` spell theirs differently), on rows of
+    // their own rather than sharing one.
+    const lines = frame.split("\n");
+    const hereRow = lines.findIndex((line) => line.includes("Here"));
+    const worktreeRow = lines.findIndex((line) => line.includes("Worktree"));
+    expect(hereRow).toBeGreaterThanOrEqual(0);
+    expect(worktreeRow).toBeGreaterThanOrEqual(0);
+    expect(worktreeRow).not.toBe(hereRow);
+    const widest = Math.max(...lines.map((line) => line.trimEnd().length));
+    expect(widest).toBeLessThanOrEqual(34);
+  });
+
+  // The dialog grows a row per field; the height is derived from the field
+  // list so a new one cannot silently clip the row below it.
+  it("keeps the directory row visible with the destination row present", async () => {
+    await renderDialog({ draft: draft({ destination: "worktree" }) });
+
+    expect(setup.captureCharFrame()).toContain("Directory");
   });
 });

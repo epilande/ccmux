@@ -2950,6 +2950,9 @@ describe("store", () => {
         cwd: "/repo",
         agent: "codex",
         placement: "window",
+        // Spawning into the directory the dialog was opened over stays the
+        // default; a worktree is something you ask for.
+        destination: "here",
         prompt: "",
         field: "agent",
       });
@@ -2982,20 +2985,23 @@ describe("store", () => {
       expect(store.state.newSession?.field).toBe("placement");
       store.actions.moveNewSessionField(1);
       expect(store.state.newSession?.field).toBe("prompt");
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("destination");
       // Wraps forward past the last field...
       store.actions.moveNewSessionField(1);
       expect(store.state.newSession?.field).toBe("agent");
       // ...and backward past the first.
       store.actions.moveNewSessionField(-1);
-      expect(store.state.newSession?.field).toBe("prompt");
+      expect(store.state.newSession?.field).toBe("destination");
     });
 
-    it("updates agent, placement, prompt, and field", () => {
+    it("updates agent, placement, destination, prompt, and field", () => {
       const store = createTUIStore();
       store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
 
       store.actions.setNewSessionAgent("pi");
       store.actions.setNewSessionPlacement("split-h");
+      store.actions.setNewSessionDestination("worktree");
       store.actions.setNewSessionPrompt("fix the tests");
       store.actions.setNewSessionField("prompt");
 
@@ -3003,6 +3009,7 @@ describe("store", () => {
         cwd: "/repo",
         agent: "pi",
         placement: "split-h",
+        destination: "worktree",
         prompt: "fix the tests",
         field: "prompt",
       });
@@ -3058,12 +3065,35 @@ describe("store", () => {
       store.actions.toggleHideIdle();
       await store.actions.setLastSpawnAgent("codex");
 
-      expect(persisted).toEqual([
-        { hideIdle: true, lastSpawnAgent: "codex" },
-      ]);
+      expect(persisted).toEqual([{ hideIdle: true, lastSpawnAgent: "codex" }]);
 
       // The queue is now empty, so the cancelled timer can't fire a second,
       // stale write afterwards.
+      await waitForDebounce();
+      expect(persisted).toHaveLength(1);
+    });
+
+    it("carries a pending debounced write even when the agent is unchanged", async () => {
+      // Same-agent is the DEFAULT branch, not an edge: `lastSpawnAgent` is
+      // seeded from disk at boot and the dialog opens on it, so re-spawning
+      // it is the commonest spawn there is. Returning early there skipped
+      // the only flush the queued `f` would ever get before the picker's
+      // `process.exit(0)` took the 300ms timer with it.
+      const persisted: Record<string, unknown>[] = [];
+      const store = _createTUIStore({
+        lastSpawnAgent: "codex",
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
+      });
+
+      store.actions.toggleHideIdle();
+      await store.actions.setLastSpawnAgent("codex");
+
+      expect(persisted).toEqual([{ hideIdle: true }]);
+
+      // And the queue is drained, so the cancelled timer can't fire a stale
+      // second write.
       await waitForDebounce();
       expect(persisted).toHaveLength(1);
     });

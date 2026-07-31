@@ -89,9 +89,11 @@ export interface AgentDef {
   /**
    * Shell command template that starts a session whose conversation
    * CONTINUES the given session's history while leaving that session
-   * untouched, used by `POST /spawn`'s fork path. `{id}` is the source
-   * session's native id and `{bin}` the resolved launcher binary, both
-   * substituted in one pass (see `substitutePlaceholders`).
+   * untouched, used by `POST /spawn`'s fork path. It must name the source
+   * with `{path}` (its transcript file, single-quoted) or `{id}` (its native
+   * session id); `{bin}` is the resolved launcher binary. All are substituted
+   * in one pass (see `buildAgentForkCommand`, which explains why the built-in
+   * prefers the path form and why the id form stays).
    *
    * Undefined means "forking this agent has not been verified", and fork is
    * refused for it — both at the route and in the picker's menu. There is no
@@ -503,7 +505,15 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // carry on being used. Verified against a live original, including one
     // mid-turn: the source writes to its own transcript and the fork only
     // reads it (`docs/agent-adapters.md#forking-a-session`).
-    forkCommand: "{bin} --resume {id} --fork-session",
+    //
+    // `{path}` (the transcript file), not `{id}`: an id is resolved against
+    // project directories derived from the launch cwd plus every checkout
+    // `git worktree list` reports, so it is repo-scoped, while an absolute
+    // path skips resolution and resumes from any directory. That form is
+    // undocumented (absent from `claude --help`), verified on Claude Code
+    // 2.1.218 through 2.1.220, and not publicly guaranteed, so `{id}` remains
+    // supported and this is revertable from ccmux.json alone.
+    forkCommand: "{bin} --resume '{path}' --fork-session",
     sessionFilePattern:
       /\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i,
     terminalRules: [
@@ -1423,13 +1433,22 @@ export function getAgents(preferences?: Preferences): AgentDef[] {
  *
  * Shared with `buildAgentForkCommand` so the picker's gate and the route's
  * refusal cannot drift: a truthiness check offered Fork for a template that
- * was a number, an object, whitespace, or simply missing `{id}`, and the
- * action then failed on click — the exact "reads as broken" outcome the
- * hide-don't-disable choice exists to avoid. Preferences are unvalidated
- * JSON, so every one of those is reachable from ccmux.json.
+ * was a number, an object, whitespace, or named neither the source's
+ * transcript nor its id, and the action then failed on click — the exact
+ * "reads as broken" outcome the hide-don't-disable choice exists to avoid.
+ * Preferences are unvalidated JSON, so every one of those is reachable from
+ * ccmux.json.
+ *
+ * Placeholder shape only. Whether a `{path}` template is quoted safely, and
+ * whether the row actually has a readable transcript, are the builder's to
+ * judge — the second is per session rather than per agent, so it could not be
+ * a display gate even in principle.
  */
 export function isUsableForkCommand(template: unknown): template is string {
-  return typeof template === "string" && template.includes("{id}");
+  return (
+    typeof template === "string" &&
+    (template.includes("{path}") || template.includes("{id}"))
+  );
 }
 
 /**

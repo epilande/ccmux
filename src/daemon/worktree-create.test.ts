@@ -1,0 +1,798 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  applyWorktreeFileSetup,
+  createWorktree,
+  resolveWorktreeIncludes,
+  resolveBase,
+  resolveWorktreeName,
+  slugFromPrompt,
+  slugify,
+  withRepoLock,
+  worktreePathFor,
+} from "./worktree-create";
+import { runGit } from "./worktree-git";
+
+/**
+ * Real git against throwaway fixture repos under the OS temp dir. Nothing
+ * here touches a repo outside `root`, which matters more than usual for this
+ * module: its placement convention is `<repo>/.claude/worktrees/<name>`, the
+ * same path the real checkout uses for live agent worktrees.
+ */
+
+let root: string;
+
+async function git(cwd: string, args: string[]): Promise<string> {
+  const res = await runGit(cwd, args);
+  if (res.exitCode !== 0) {
+    throw new Error(`git ${args.join(" ")} failed in ${cwd}: ${res.stderr}`);
+  }
+  return res.stdout.trim();
+}
+
+/** `lstatSync` throws on an absent path, and absent is an answer here. */
+function lstatIsSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+async function makeRepo(name = "repo"): Promise<string> {
+  const repo = join(root, name);
+  mkdirSync(repo, { recursive: true });
+  await git(root, ["init", "--initial-branch=main", repo]);
+  await git(repo, ["config", "user.email", "test@example.com"]);
+  await git(repo, ["config", "user.name", "Test"]);
+  writeFileSync(join(repo, "README.md"), "hello\n");
+  await git(repo, ["add", "README.md"]);
+  await git(repo, ["commit", "-m", "init"]);
+  return repo;
+}
+
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), "ccmux-wt-create-"));
+});
+
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true });
+});
+
+describe("slugify", () => {
+  it("lowercases and collapses non-alphanumerics to single hyphens", () => {
+    expect(slugify("Fix Sidebar Flicker")).toBe("fix-sidebar-flicker");
+    expect(slugify("feat/some__thing")).toBe("feat-some-thing");
+    expect(slugify("  spaced  out  ")).toBe("spaced-out");
+  });
+
+  it("never leaves leading or trailing hyphens", () => {
+    expect(slugify("---edge---")).toBe("edge");
+    expect(slugify("!!!")).toBe("");
+  });
+
+  it("caps length without leaving a trailing hyphen", () => {
+    const slug = slugify("a".repeat(80));
+    expect(slug.length).toBeLessThanOrEqual(40);
+    expect(slug.endsWith("-")).toBe(false);
+  });
+});
+
+describe("slugFromPrompt", () => {
+  // The example from the issue, kept verbatim so a change to word count or
+  // punctuation handling is visible as a change to the documented behavior.
+  it("derives a name from the first words", () => {
+    expect(slugFromPrompt("fix sidebar flicker on resize")).toBe(
+      "fix-sidebar-flicker",
+    );
+  });
+
+  it("is deterministic", () => {
+    const prompt = "refactor the parser to stream input";
+    expect(slugFromPrompt(prompt)).toBe(slugFromPrompt(prompt));
+  });
+
+  // Punctuation is stripped BEFORE the split, so `fix:` does not consume a
+  // word slot and leave a two-word name.
+  it("does not let punctuation eat a word", () => {
+    expect(slugFromPrompt("fix: sidebar flicker on resize")).toBe(
+      "fix-sidebar-flicker",
+    );
+  });
+
+  it("returns nothing usable for an unusable prompt", () => {
+    expect(slugFromPrompt("!!! ???")).toBe("");
+  });
+});
+
+describe("resolveWorktreeName", () => {
+  it("prefers an explicit name, slugified", () => {
+    const out = resolveWorktreeName("Fix Sidebar", "some prompt text");
+    expect(out).toEqual({ ok: true, name: "fix-sidebar", derived: false });
+  });
+
+  // `derived` is what decides whether a collision opens the existing worktree
+  // or takes the next number, so it travels with the name.
+  it("falls back to the prompt, marked derived", () => {
+    const out = resolveWorktreeName(undefined, "fix sidebar flicker on resize");
+    expect(out).toEqual({
+      ok: true,
+      name: "fix-sidebar-flicker",
+      derived: true,
+    });
+  });
+
+  // Neither is an error rather than a generated placeholder: an invented
+  // name is a directory and a branch the user cannot guess later.
+  it("errors with neither a name nor a prompt", () => {
+    const out = resolveWorktreeName(undefined, undefined);
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toContain("needs a name");
+  });
+
+  it("errors on a name with nothing usable in it", () => {
+    const out = resolveWorktreeName("!!!", undefined);
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toContain("no usable characters");
+  });
+});
+
+describe("resolveBase", () => {
+  it("defaults to the main checkout's current branch", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["checkout", "-q", "-b", "release/2.0"]);
+
+    const out = await resolveBase(repo, undefined);
+
+    expect(out).toEqual({ ok: true, base: "release/2.0" });
+  });
+
+  it("accepts an explicit ref that exists", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "other"]);
+
+    expect(await resolveBase(repo, "other")).toEqual({
+      ok: true,
+      base: "other",
+    });
+  });
+
+  it("rejects a ref that does not exist", async () => {
+    const repo = await makeRepo();
+
+    const out = await resolveBase(repo, "no-such-ref");
+
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toContain("Base ref not found");
+  });
+});
+
+describe("file setup", () => {
+  /**
+   * `.worktreeinclude` is GITIGNORE SYNTAX under a dual filter: a path is
+   * included only if it matches a pattern AND is gitignored. Both halves are
+   * delegated to git, so this exercises the real thing against a fixture
+   * rather than asserting on a hand-rolled parse.
+   */
+  it("resolves .worktreeinclude patterns under the dual filter", async () => {
+    const repo = await makeRepo("includes");
+    writeFileSync(join(repo, ".gitignore"), "node_modules/\n.env\n*.local\n");
+    // Matches a pattern below, but is TRACKED: must never be duplicated.
+    writeFileSync(join(repo, "config.local"), "tracked\n");
+    writeFileSync(join(repo, ".worktreeinclude"), ".env\n*.local\nnotes.txt\n");
+    await git(repo, [
+      "add",
+      "-f",
+      ".gitignore",
+      ".worktreeinclude",
+      "config.local",
+    ]);
+    await git(repo, ["commit", "-m", "config"]);
+
+    writeFileSync(join(repo, ".env"), "SECRET=1\n");
+    writeFileSync(join(repo, "app.local"), "settings\n");
+    // Gitignored but matches no include pattern.
+    mkdirSync(join(repo, "node_modules"), { recursive: true });
+    writeFileSync(join(repo, "node_modules", "dep.js"), "x\n");
+    // Matches a pattern but is NOT gitignored, so the dual filter drops it.
+    writeFileSync(join(repo, "notes.txt"), "notes\n");
+
+    const resolved = await resolveWorktreeIncludes(repo);
+
+    expect(resolved.sort()).toEqual([".env", "app.local"]);
+    expect(resolved).not.toContain("config.local");
+    expect(resolved).not.toContain("notes.txt");
+  });
+
+  it("resolves nothing when there is no .worktreeinclude", async () => {
+    const repo = await makeRepo("no-includes");
+    expect(await resolveWorktreeIncludes(repo)).toEqual([]);
+  });
+
+  it("symlinks configured directories and copies included files", async () => {
+    const repo = await makeRepo();
+    mkdirSync(join(repo, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(join(repo, "node_modules", "pkg", "index.js"), "x\n");
+    mkdirSync(join(repo, ".claude"), { recursive: true });
+    writeFileSync(
+      join(repo, ".claude", "settings.json"),
+      JSON.stringify({ worktree: { symlinkDirectories: ["node_modules"] } }),
+    );
+    writeFileSync(join(repo, ".worktreeinclude"), ".env\n");
+    // Gitignored as well as matched: the include contract is a dual filter,
+    // so a pattern alone would (correctly) resolve to nothing.
+    writeFileSync(join(repo, ".gitignore"), "node_modules/\n.env\n");
+    await git(repo, ["add", "-f", ".gitignore"]);
+    await git(repo, ["commit", "-m", "ignore"]);
+    writeFileSync(join(repo, ".env"), "SECRET=1\n");
+    const wt = join(root, "target");
+    mkdirSync(wt, { recursive: true });
+
+    const out = await applyWorktreeFileSetup(repo, wt);
+
+    expect(out.symlinked).toEqual(["node_modules"]);
+    expect(lstatSync(join(wt, "node_modules")).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(join(wt, "node_modules"))).toBe(
+      join(repo, "node_modules"),
+    );
+    // Copied, not linked: an edit to a local settings file or a secret in one
+    // worktree must not propagate back to the main checkout.
+    expect(out.included).toEqual([".env"]);
+    expect(lstatSync(join(wt, ".env")).isSymbolicLink()).toBe(false);
+    expect(readFileSync(join(wt, ".env"), "utf-8")).toBe("SECRET=1\n");
+  });
+
+  it("skips sources that do not exist and targets that already do", async () => {
+    const repo = await makeRepo();
+    mkdirSync(join(repo, ".claude"), { recursive: true });
+    writeFileSync(
+      join(repo, ".claude", "settings.json"),
+      JSON.stringify({ worktree: { symlinkDirectories: ["absent", "kept"] } }),
+    );
+    mkdirSync(join(repo, "kept"), { recursive: true });
+    const wt = join(root, "target2");
+    mkdirSync(join(wt, "kept"), { recursive: true });
+    writeFileSync(join(wt, "kept", "tracked.txt"), "repo content\n");
+
+    const out = await applyWorktreeFileSetup(repo, wt);
+
+    // Neither is linked: one has no source, and replacing the other would
+    // delete a checked-out path of the same name.
+    expect(out.symlinked).toEqual([]);
+    expect(readFileSync(join(wt, "kept", "tracked.txt"), "utf-8")).toBe(
+      "repo content\n",
+    );
+  });
+
+  // `.claude/settings.json` and `.worktreeinclude` are repo content, so on a
+  // repo written by someone else they are untrusted input that this turns
+  // into filesystem writes.
+  it("refuses configured paths that escape the worktree", async () => {
+    const repo = await makeRepo();
+    mkdirSync(join(repo, ".claude"), { recursive: true });
+    writeFileSync(
+      join(repo, ".claude", "settings.json"),
+      JSON.stringify({ worktree: { symlinkDirectories: ["../escape"] } }),
+    );
+    writeFileSync(join(repo, ".worktreeinclude"), "../escape-file\n");
+    // Both sources exist, so the escape guard is the only thing standing
+    // between this config and a write outside the worktree. A missing source
+    // would be skipped for an unrelated reason and prove nothing.
+    mkdirSync(join(root, "escape"), { recursive: true });
+    writeFileSync(join(root, "escape", "occupant.txt"), "mine\n");
+    writeFileSync(join(root, "escape-file"), "no\n");
+    // Nested one level deeper than the repo, so `..` from the worktree names a
+    // DIFFERENT directory than `..` from the repo. As siblings under `root`
+    // each entry's source and target collide on one path, and a broken guard
+    // would fail on that collision rather than on the guard.
+    const wt = join(root, "nest", "target3");
+    mkdirSync(wt, { recursive: true });
+    // git never lists a path outside the repo, so the real resolver can't
+    // produce an escaping include even from an escaping pattern. Fed directly
+    // instead: the guard is what is under test, not git's own filtering.
+    const escapingGit = async () => ({
+      exitCode: 0,
+      stdout: "../escape-file\n",
+      stderr: "",
+    });
+
+    const out = await applyWorktreeFileSetup(repo, wt, escapingGit);
+
+    // The filesystem first: the report is secondary to whether a write
+    // actually landed outside the worktree.
+    //
+    // Nothing was written at either escape target...
+    expect(existsSync(join(root, "nest", "escape"))).toBe(false);
+    expect(lstatIsSymlink(join(root, "nest", "escape"))).toBe(false);
+    expect(existsSync(join(root, "nest", "escape-file"))).toBe(false);
+    // ...the escaped-to directory is untouched...
+    expect(readdirSync(join(root, "escape"))).toEqual(["occupant.txt"]);
+    // ...and nothing landed inside the worktree either, so the entries were
+    // refused rather than redirected.
+    expect(readdirSync(wt)).toEqual([]);
+    expect(out.symlinked).toEqual([]);
+    expect(out.included).toEqual([]);
+  });
+
+  // The escape guard cannot see this one: the entry itself stays inside the
+  // worktree, and the way out is the LINK TEXT of a path git checked out
+  // there. `existsSync` follows symlinks, so a dangling one reads as absent
+  // and a copy writes THROUGH it to whatever it names.
+  it("refuses to copy over a dangling symlink in the worktree", async () => {
+    const repo = await makeRepo("through-link");
+    const leaked = join(root, "leaked.txt");
+    // Four levels up from `<repo>/.claude/worktrees/wt` is `root`, so the
+    // committed link names a path outside the repo entirely.
+    symlinkSync(
+      join("..", "..", "..", "..", "leaked.txt"),
+      join(repo, "env.local"),
+    );
+    writeFileSync(join(repo, ".gitignore"), "env.local\n");
+    writeFileSync(join(repo, ".worktreeinclude"), "env.local\n");
+    await git(repo, [
+      "add",
+      "-f",
+      ".gitignore",
+      ".worktreeinclude",
+      "env.local",
+    ]);
+    await git(repo, ["commit", "-m", "link"]);
+    await git(repo, ["branch", "old"]);
+    // The main checkout's own copy is a real, untracked, ignored file: the one
+    // the include pass then tries to copy in on top of the checked-out link.
+    await git(repo, ["rm", "--cached", "-q", "env.local"]);
+    rmSync(join(repo, "env.local"));
+    writeFileSync(join(repo, "env.local"), "SECRET=1\n");
+    await git(repo, ["commit", "-m", "untrack"]);
+
+    const out = await createWorktree(repo, { name: "wt", base: "old" });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    // The filesystem first: what a regression costs is a secret written to a
+    // path outside the repo.
+    expect(existsSync(leaked)).toBe(false);
+    expect(lstatIsSymlink(join(out.result.path, "env.local"))).toBe(true);
+    expect(out.result.included).not.toContain("env.local");
+  });
+
+  // `git ls-files` C-quotes a non-ASCII path by default, handing back the
+  // literal `"caf\303\251.local"`, which names nothing on disk and got
+  // silently skipped. Both calls run NUL-terminated so an entry arrives as
+  // its real bytes.
+  it("includes a non-ASCII path", async () => {
+    const repo = await makeRepo("non-ascii");
+    writeFileSync(join(repo, ".gitignore"), "*.local\n");
+    writeFileSync(join(repo, ".worktreeinclude"), "*.local\n");
+    await git(repo, ["add", "-f", ".gitignore", ".worktreeinclude"]);
+    await git(repo, ["commit", "-m", "config"]);
+    writeFileSync(join(repo, "café.local"), "SECRET=1\n");
+    const wt = join(root, "target-non-ascii");
+    mkdirSync(wt, { recursive: true });
+
+    const out = await applyWorktreeFileSetup(repo, wt);
+
+    expect(out.included).toEqual(["café.local"]);
+    expect(readFileSync(join(wt, "café.local"), "utf-8")).toBe("SECRET=1\n");
+  });
+});
+
+describe("createWorktree", () => {
+  it("creates the worktree at the shared convention path, on a new branch", async () => {
+    const repo = await makeRepo();
+
+    const out = await createWorktree(repo, { name: "Fix Sidebar" });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.result.name).toBe("fix-sidebar");
+    expect(out.result.path).toBe(worktreePathFor(repo, "fix-sidebar"));
+    expect(out.result.path).toContain(join(".claude", "worktrees"));
+    expect(out.result.created).toBe(true);
+    expect(out.result.branchCreated).toBe(true);
+    // The base is reported so a caller can say where the branch came from
+    // instead of leaving the user to guess which ref it was cut at.
+    expect(out.result.base).toBe("main");
+    expect(existsSync(out.result.path)).toBe(true);
+    expect(
+      await git(out.result.path, ["rev-parse", "--abbrev-ref", "HEAD"]),
+    ).toBe("fix-sidebar");
+  });
+
+  it("derives the name from a prompt when none is given", async () => {
+    const repo = await makeRepo();
+
+    const out = await createWorktree(repo, {
+      prompt: "fix sidebar flicker on resize",
+    });
+
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.result.name).toBe("fix-sidebar-flicker");
+  });
+
+  it("branches from --base when given", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["checkout", "-q", "-b", "feature"]);
+    writeFileSync(join(repo, "f.txt"), "f\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-m", "on feature"]);
+    const featureTip = await git(repo, ["rev-parse", "HEAD"]);
+    await git(repo, ["checkout", "-q", "main"]);
+
+    const out = await createWorktree(repo, {
+      name: "off-feature",
+      base: "feature",
+    });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(await git(out.result.path, ["rev-parse", "HEAD"])).toBe(featureTip);
+    expect(out.result.base).toBe("feature");
+  });
+
+  // "Spawn an agent on this task" is satisfiable when the worktree is already
+  // there, so the second spawn of a name opens rather than fails.
+  it("opens an existing worktree instead of failing", async () => {
+    const repo = await makeRepo();
+    const first = await createWorktree(repo, { name: "shared" });
+    expect(first.ok).toBe(true);
+
+    const second = await createWorktree(repo, { name: "shared" });
+
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.result.created).toBe(false);
+    expect(second.result.branch).toBe("shared");
+    // Nothing was cut for this request, so there is no base to report.
+    expect(second.result.branchCreated).toBe(false);
+    expect(second.result.base).toBeUndefined();
+    if (first.ok) expect(second.result.path).toBe(first.result.path);
+  });
+
+  // The branch reuse is intentional, but a reused branch can already carry
+  // twenty commits, so the result must not describe it as newly cut.
+  it("reuses an existing branch of the same name, and says so", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "already-there"]);
+
+    const out = await createWorktree(repo, { name: "already-there" });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(
+      await git(out.result.path, ["rev-parse", "--abbrev-ref", "HEAD"]),
+    ).toBe("already-there");
+    expect(out.result.created).toBe(true);
+    expect(out.result.branchCreated).toBe(false);
+    expect(out.result.base).toBeUndefined();
+  });
+
+  // Two tasks that open the same way derive one slug, and there is no name
+  // here anyone typed, so joining the first agent's worktree and branch would
+  // be a collision the user never sees. "Start three agents on this prompt" is
+  // the headline case for the feature, so it has to yield three worktrees.
+  it("numbers a derived name that collides instead of opening it", async () => {
+    const repo = await makeRepo();
+
+    const first = await createWorktree(repo, {
+      prompt: "fix the flaky test in the sidebar renderer",
+    });
+    const second = await createWorktree(repo, {
+      prompt: "fix the flaky test in the binder",
+    });
+
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(first.result.name).toBe("fix-the-flaky");
+    expect(second.result.name).toBe("fix-the-flaky-2");
+    expect(second.result.created).toBe(true);
+    expect(second.result.branchCreated).toBe(true);
+    expect(second.result.path).not.toBe(first.result.path);
+    expect(
+      await git(second.result.path, ["rev-parse", "--abbrev-ref", "HEAD"]),
+    ).toBe("fix-the-flaky-2");
+  });
+
+  it("gives three concurrent spawns of one prompt three worktrees", async () => {
+    const repo = await makeRepo();
+    const prompt = "refactor the parser to stream input";
+
+    const results = await Promise.all([
+      createWorktree(repo, { prompt }),
+      createWorktree(repo, { prompt }),
+      createWorktree(repo, { prompt }),
+    ]);
+
+    expect(results.every((r) => r.ok)).toBe(true);
+    const names = results.map((r) => (r.ok ? r.result.name : "")).sort();
+    expect(names).toEqual([
+      "refactor-the-parser",
+      "refactor-the-parser-2",
+      "refactor-the-parser-3",
+    ]);
+    for (const name of names) {
+      expect(existsSync(worktreePathFor(repo, name))).toBe(true);
+    }
+  });
+
+  // A branch counts as taken too: the create path reuses a branch it finds,
+  // which for a name nobody typed would start the agent on unrelated history.
+  it("skips a derived candidate a branch already holds", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "fix-the-flaky"]);
+
+    const out = await createWorktree(repo, {
+      prompt: "fix the flaky test in the sidebar",
+    });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.result.name).toBe("fix-the-flaky-2");
+    expect(out.result.branchCreated).toBe(true);
+  });
+
+  // `withRepoLock` is process-local, so a branch of the derived name can
+  // appear between the candidate probe and the add: another checkout of this
+  // repo, another tool, a person at a shell. Reusing it would start the agent
+  // on unrelated history under a name nobody chose, so a derived name always
+  // passes `-b` and lets git refuse.
+  it("fails loudly when a branch takes the derived name mid-create", async () => {
+    const repo = await makeRepo();
+    // A commit off main's tip, so reuse would visibly start the agent
+    // somewhere other than where this spawn asked to start.
+    writeFileSync(join(repo, "theirs.txt"), "unrelated work\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-m", "work this spawn knows nothing about"]);
+    const interloperTip = await git(repo, ["rev-parse", "HEAD"]);
+    await git(repo, ["branch", "elsewhere"]);
+    await git(repo, ["reset", "-q", "--hard", "HEAD~1"]);
+
+    // Plants the branch in the window the real race opens: after the candidate
+    // probe reports the name free, before `git worktree add` runs.
+    let planted = false;
+    const racingGit = async (cwd: string, args: string[]) => {
+      const res = await runGit(cwd, args);
+      if (
+        !planted &&
+        args[0] === "rev-parse" &&
+        args.at(-1) === "refs/heads/fix-the-flaky"
+      ) {
+        planted = true;
+        await runGit(repo, ["branch", "fix-the-flaky", interloperTip]);
+      }
+      return res;
+    };
+
+    const out = await createWorktree(
+      repo,
+      { prompt: "fix the flaky test" },
+      { git: racingGit },
+    );
+
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toContain("worktree add -b fix-the-flaky");
+    // The interloper's branch still points where it did, and no worktree was
+    // handed the agent on top of it.
+    expect(await git(repo, ["rev-parse", "fix-the-flaky"])).toBe(interloperTip);
+    expect(existsSync(worktreePathFor(repo, "fix-the-flaky"))).toBe(false);
+  });
+
+  // An explicit name is documented intent, so it keeps create-or-open: the
+  // numbering exists for names the user never chose.
+  it("still opens an explicitly named worktree on a collision", async () => {
+    const repo = await makeRepo();
+    await createWorktree(repo, { name: "explicit" });
+
+    const second = await createWorktree(repo, {
+      name: "explicit",
+      prompt: "explicit something else",
+    });
+
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.result.name).toBe("explicit");
+    expect(second.result.created).toBe(false);
+    expect(existsSync(worktreePathFor(repo, "explicit-2"))).toBe(false);
+  });
+
+  it("adds into a leftover directory that is empty", async () => {
+    const repo = await makeRepo();
+    const target = worktreePathFor(repo, "debris");
+    mkdirSync(target, { recursive: true });
+
+    const out = await createWorktree(repo, { name: "debris" });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(existsSync(join(target, ".git"))).toBe(true);
+  });
+
+  // Clearing a non-empty directory buys nothing, since `git worktree add`
+  // refuses a non-empty target anyway, and the top level does not say whose
+  // files these are. Refusing costs one message; clearing costs the files.
+  it("refuses a non-empty leftover directory", async () => {
+    const repo = await makeRepo();
+    const target = worktreePathFor(repo, "debris");
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, "leftover.txt"), "from an interrupted run\n");
+
+    const out = await createWorktree(repo, { name: "debris" });
+
+    // The file first: what a regression here costs is the content, and a
+    // failure should name that rather than the return shape.
+    expect(existsSync(join(target, "leftover.txt"))).toBe(true);
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toContain("is not empty");
+  });
+
+  // The hazard the top-level check cannot see: an interrupted clone at
+  // `<path>/sub` is a repository with work in it, and a recursive delete of
+  // the target would take the whole thing.
+  it("refuses a leftover directory holding a nested repo", async () => {
+    const repo = await makeRepo();
+    const target = worktreePathFor(repo, "nested");
+    mkdirSync(join(target, "sub", ".git"), { recursive: true });
+    writeFileSync(join(target, "sub", "precious.txt"), "someone's work\n");
+
+    const out = await createWorktree(repo, { name: "nested" });
+
+    expect(existsSync(join(target, "sub", "precious.txt"))).toBe(true);
+    expect(out.ok).toBe(false);
+  });
+
+  // A directory with a `.git` belongs to some repository. Removing it could
+  // destroy work, so this refuses rather than guessing.
+  it("refuses a leftover directory that contains a .git", async () => {
+    const repo = await makeRepo();
+    const target = worktreePathFor(repo, "occupied");
+    mkdirSync(join(target, ".git"), { recursive: true });
+    writeFileSync(join(target, "precious.txt"), "someone's work\n");
+
+    const out = await createWorktree(repo, { name: "occupied" });
+
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toContain("contains a .git");
+    expect(existsSync(join(target, "precious.txt"))).toBe(true);
+  });
+
+  // `existsSync` follows symlinks, so a `.git` pointing nowhere reads as
+  // absent. It still says the directory was a checkout, and reading it as
+  // debris would recursively delete everything beside it.
+  it("refuses a leftover directory whose .git is a broken symlink", async () => {
+    const repo = await makeRepo();
+    const target = worktreePathFor(repo, "dangling");
+    mkdirSync(target, { recursive: true });
+    symlinkSync(join(root, "no-such-git-dir"), join(target, ".git"));
+    writeFileSync(join(target, "precious.txt"), "someone's work\n");
+
+    const out = await createWorktree(repo, { name: "dangling" });
+
+    expect(existsSync(join(target, "precious.txt"))).toBe(true);
+    expect(lstatIsSymlink(join(target, ".git"))).toBe(true);
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toContain("contains a .git");
+  });
+
+  it("reports a bad base without creating anything", async () => {
+    const repo = await makeRepo();
+
+    const out = await createWorktree(repo, {
+      name: "nope",
+      base: "missing-ref",
+    });
+
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toContain("Base ref not found");
+    expect(existsSync(worktreePathFor(repo, "nope"))).toBe(false);
+  });
+
+  it("applies file setup to a newly created worktree", async () => {
+    const repo = await makeRepo();
+    mkdirSync(join(repo, "node_modules"), { recursive: true });
+    mkdirSync(join(repo, ".claude"), { recursive: true });
+    writeFileSync(
+      join(repo, ".claude", "settings.json"),
+      JSON.stringify({ worktree: { symlinkDirectories: ["node_modules"] } }),
+    );
+
+    const out = await createWorktree(repo, { name: "with-setup" });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.result.symlinked).toEqual(["node_modules"]);
+    expect(
+      lstatSync(join(out.result.path, "node_modules")).isSymbolicLink(),
+    ).toBe(true);
+  });
+
+  // Two spawns racing on one repo is the normal case for this feature, not
+  // an edge case: "start three agents on this" is the point.
+  it("serializes concurrent creates on one repo", async () => {
+    const repo = await makeRepo();
+
+    const results = await Promise.all([
+      createWorktree(repo, { name: "one" }),
+      createWorktree(repo, { name: "two" }),
+      createWorktree(repo, { name: "three" }),
+    ]);
+
+    expect(results.every((r) => r.ok)).toBe(true);
+    for (const name of ["one", "two", "three"]) {
+      expect(existsSync(worktreePathFor(repo, name))).toBe(true);
+    }
+  });
+
+  it("lets concurrent requests for one name settle as create-then-open", async () => {
+    const repo = await makeRepo();
+
+    const [a, b] = await Promise.all([
+      createWorktree(repo, { name: "same" }),
+      createWorktree(repo, { name: "same" }),
+    ]);
+
+    expect(a.ok && b.ok).toBe(true);
+    if (!a.ok || !b.ok) return;
+    // Exactly one of them did the creating.
+    expect([a.result.created, b.result.created].filter(Boolean)).toHaveLength(
+      1,
+    );
+  });
+});
+
+describe("withRepoLock", () => {
+  it("runs one repo's work in order", async () => {
+    const order: string[] = [];
+    const task = (label: string, ms: number) => async () => {
+      await new Promise((r) => setTimeout(r, ms));
+      order.push(label);
+    };
+
+    await Promise.all([
+      withRepoLock("/repo", task("slow", 20)),
+      withRepoLock("/repo", task("fast", 1)),
+    ]);
+
+    expect(order).toEqual(["slow", "fast"]);
+  });
+
+  // A queue that poisons on one failure would turn a single bad request into
+  // a repo-wide outage for the daemon's lifetime.
+  it("keeps running after a failure", async () => {
+    const failing = withRepoLock("/repo2", async () => {
+      throw new Error("boom");
+    });
+    await expect(failing).rejects.toThrow("boom");
+
+    await expect(withRepoLock("/repo2", async () => "fine")).resolves.toBe(
+      "fine",
+    );
+  });
+
+  it("does not serialize unrelated repos", async () => {
+    const order: string[] = [];
+    await Promise.all([
+      withRepoLock("/a", async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        order.push("a");
+      }),
+      withRepoLock("/b", async () => {
+        order.push("b");
+      }),
+    ]);
+
+    expect(order).toEqual(["b", "a"]);
+  });
+});

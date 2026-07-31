@@ -3,6 +3,9 @@ import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import type { SSECallbacks } from "./utils/sse";
 import { mockEnrichedSession, squish } from "./components/test-helpers";
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // Capture SSE callbacks so tests can fire events
 let sseCallbacks: SSECallbacks | null = null;
@@ -134,10 +137,17 @@ const realUiState = await import("../lib/state");
  *  channel for the exit-vs-write test, which pushes its own marker here. */
 const uiStateWrites: unknown[] = [];
 
+/** When set, `setUIState` parks on it instead of resolving immediately, so a
+ *  test can hold open the window the real one has: the pane already exists,
+ *  the state write is mid-flight (read, write, rename), and the dialog is
+ *  still on screen. */
+let uiStateGate: Promise<void> | null = null;
+
 mock.module("../lib/state", () => ({
   ...realUiState,
   setUIState: async (updates: unknown) => {
     uiStateWrites.push(updates);
+    if (uiStateGate) await uiStateGate;
   },
 }));
 
@@ -179,6 +189,7 @@ beforeEach(() => {
   resolveLaunchPaneSpy.mockClear();
   resolveLaunchPaneSpy.mockImplementation(async () => "%7");
   uiStateWrites.length = 0;
+  uiStateGate = null;
   hunkAvailable = true;
   runHunkReviewSpy.mockClear();
   runHunkReviewSpy.mockImplementation(async () => ({ ok: true, notes: [] }));
@@ -199,6 +210,47 @@ async function renderApp(
   setup = await testRender(() => <App {...props} />, { width, height });
   await setup.renderOnce();
   return setup.captureCharFrame();
+}
+
+/**
+ * Mocks the sidebar-hydration fetch used by App.tsx's onMount:
+ * `fetch(`${getDaemonUrl()}/sidebar-state`).then(r => r.json()).then(data =>
+ * {...}).catch(() => {})` (App.tsx:1404-1420). Returns a `getPromise()` the
+ * test awaits in place of a fixed sleep, plus `restore()` to put back the
+ * original `fetch`.
+ *
+ * The capture is gated on the URL containing "/sidebar-state" rather than
+ * being a bare last-write-wins assignment: onMount also fires
+ * `refreshServerInfo()`'s `/server-info` fetch first (App.tsx:1399-1405), so
+ * an ungated capture would only happen to grab the right promise because of
+ * today's statement order. Any other URL gets a harmless empty-json
+ * response instead of falling through to whatever `fetch` was previously
+ * installed, so callers of this helper don't inherit ambient fetch state
+ * from another test.
+ */
+function mockSidebarStateFetch(payload: Record<string, unknown>) {
+  const originalFetch = globalThis.fetch;
+  let hydrationFetchPromise:
+    | Promise<{ json: () => Promise<unknown> }>
+    | undefined;
+  globalThis.fetch = ((input: string | URL | Request) => {
+    const url =
+      typeof input === "string" || input instanceof URL
+        ? input.toString()
+        : input.url;
+    if (url.includes("/sidebar-state")) {
+      const promise = (async () => ({ json: async () => payload }))();
+      hydrationFetchPromise = promise;
+      return promise;
+    }
+    return (async () => ({ json: async () => ({}) }))();
+  }) as unknown as typeof fetch;
+  return {
+    getPromise: () => hydrationFetchPromise,
+    restore: () => {
+      globalThis.fetch = originalFetch;
+    },
+  };
 }
 
 describe("App", () => {
@@ -311,13 +363,10 @@ describe("App", () => {
   });
 
   it("sidebar hydration with null state does not clobber active-pane default", async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => ({
-      json: async () => ({
-        selectedSessionId: null,
-        selectedHeaderKey: null,
-      }),
-    })) as unknown as typeof fetch;
+    const { getPromise, restore } = mockSidebarStateFetch({
+      selectedSessionId: null,
+      selectedHeaderKey: null,
+    });
     try {
       await renderApp(120, 20, { sidebar: true, groupBy: "none" });
       sseCallbacks!.onInit(
@@ -338,8 +387,26 @@ describe("App", () => {
         "%20",
       );
       await setup.renderOnce();
-      // Let the hydration fetch promise resolve before we probe selection.
-      await new Promise((r) => setTimeout(r, 10));
+
+      // Guard against the hydration fetch silently not firing: if it stopped
+      // being called, `await undefined` below would resolve instantly and
+      // this test would pass vacuously (its asserted "beta" is also exactly
+      // what "no hydration happened" produces).
+      const hydrationFetchPromise = getPromise();
+      expect(hydrationFetchPromise).toBeDefined();
+      // Await the hydration fetch chain instead of a fixed sleep. App's
+      // .then callbacks are attached to this same promise before this await,
+      // so once it settles, App's `r.json()` call has already been made.
+      // From there the chain still has to: resolve `r.json()`'s own promise,
+      // then run the `.then((data) => {...})` callback that calls
+      // applySidebarSelection. Measured on this repo's Bun/JSC, that's a
+      // 3-microtask-turn worst case from a cold start; we flush exactly that
+      // many rather than relying on the renderApp/renderOnce awaits above to
+      // have already drained part of the chain.
+      await hydrationFetchPromise;
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
       await setup.renderOnce();
 
       setup.mockInput.pressKey("x");
@@ -348,20 +415,17 @@ describe("App", () => {
       expect(frame).toContain("Kill Session?");
       expect(frame).toContain("beta");
     } finally {
-      globalThis.fetch = originalFetch;
+      restore();
     }
   });
 
   it("sidebar hydration with non-null state overrides active-pane default", async () => {
-    const originalFetch = globalThis.fetch;
     // Daemon reports another instance has selected s1 (alpha). That should win
     // over our active-pane default of s2 (beta).
-    globalThis.fetch = (async () => ({
-      json: async () => ({
-        selectedSessionId: "s1",
-        selectedHeaderKey: null,
-      }),
-    })) as unknown as typeof fetch;
+    const { getPromise, restore } = mockSidebarStateFetch({
+      selectedSessionId: "s1",
+      selectedHeaderKey: null,
+    });
     try {
       await renderApp(120, 20, { sidebar: true, groupBy: "none" });
       sseCallbacks!.onInit(
@@ -382,8 +446,15 @@ describe("App", () => {
         "%20",
       );
       await setup.renderOnce();
-      // Let the hydration fetch promise resolve so its applySidebarSelection runs.
-      await new Promise((r) => setTimeout(r, 10));
+
+      // See the sibling "null state" test above for the full rationale on
+      // both the definedness guard and the 3-flush count.
+      const hydrationFetchPromise = getPromise();
+      expect(hydrationFetchPromise).toBeDefined();
+      await hydrationFetchPromise;
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
       await setup.renderOnce();
 
       setup.mockInput.pressKey("x");
@@ -392,7 +463,7 @@ describe("App", () => {
       expect(frame).toContain("Kill Session?");
       expect(frame).toContain("alpha");
     } finally {
-      globalThis.fetch = originalFetch;
+      restore();
     }
   });
 
@@ -2179,7 +2250,7 @@ describe("App fork (F / context menu)", () => {
     }
   });
 
-  it("also fires for the name-\"F\" spelling some terminals send", async () => {
+  it('also fires for the name-"F" spelling some terminals send', async () => {
     // Terminals disagree: most send a capital as name `"f"` with `shift` set
     // (what `pressKey("F")` above produces — it emits the same byte 0x46, so
     // driving this case through `pressKey("f", {shift:true})` would just
@@ -2434,13 +2505,24 @@ describe("App new session dialog", () => {
     callerPane?: string;
     prompt?: string;
     detach?: boolean;
+    worktree?: { name?: string; base?: string };
   };
 
   const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
   const AGENTS = [
-    { name: "claude", displayName: "Claude", shortCode: "CC", supportsPrompt: true },
-    { name: "codex", displayName: "Codex", shortCode: "CX", supportsPrompt: true },
+    {
+      name: "claude",
+      displayName: "Claude",
+      shortCode: "CC",
+      supportsPrompt: true,
+    },
+    {
+      name: "codex",
+      displayName: "Codex",
+      shortCode: "CX",
+      supportsPrompt: true,
+    },
     { name: "pi", displayName: "Pi", shortCode: "PI", supportsPrompt: false },
   ];
 
@@ -2659,12 +2741,125 @@ describe("App new session dialog", () => {
     }
   });
 
+  /**
+   * The destination field is the picker half of issue #69. It sends the
+   * daemon an empty `worktree` object rather than a name: the daemon derives
+   * the name from the same prompt the row previewed, so the two cannot drift.
+   */
+  it("asks for a worktree when the destination is set to one", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      // agent -> placement -> prompt. The prompt is the only name this dialog
+      // can offer, so a worktree submit carries one.
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("fix bug");
+      await setup.renderOnce();
+      // prompt -> destination.
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("[New worktree: fix-bug]");
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns[0]?.worktree).toEqual({});
+      expect(spawns[0]?.prompt).toBe("fix bug");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  /**
+   * The dialog has no name field, so a prompt that derives nothing leaves the
+   * worktree destination unspawnable. It refuses locally rather than posting:
+   * the daemon's own refusal advises passing a name explicitly, which is CLI
+   * advice this dialog has no field for.
+   */
+  it("refuses a worktree with no derivable name instead of posting", async () => {
+    const { spawns, restore } = withDaemon();
+    // Spied even though this path must not spawn: a regression here would
+    // otherwise exit the runner on success and read as a silent pass.
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      // agent -> destination, walking backwards to the last field.
+      setup.mockInput.pressTab({ shift: true });
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      expect(spawns).toHaveLength(0);
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Type a prompt to name the");
+      // Fixable in place, so the dialog stays up with the draft intact.
+      expect(frame).toContain("New session");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("refuses a worktree when a non-Latin prompt derives no name", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      // Every character is stripped by the slug rules, so this is as nameless
+      // as an empty prompt while looking nothing like one.
+      await setup.mockInput.typeText("修复侧边栏");
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      expect(spawns).toHaveLength(0);
+      expect(setup.captureCharFrame()).toContain("Type a prompt to name the");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("sends no worktree field when the destination is this checkout", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns[0]?.worktree).toBeUndefined();
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
   it("shift-tab walks the fields backwards", async () => {
     const { spawns, restore } = withDaemon();
     const { restore: restoreExit } = withExitSpy();
     try {
       await openDialog();
-      // agent -> prompt -> placement, then pick the stacked split.
+      // agent -> destination -> prompt -> placement, then pick the stacked
+      // split. `destination` is last in the field order, so walking backwards
+      // from `agent` reaches it first.
+      setup.mockInput.pressTab({ shift: true });
+      await setup.renderOnce();
       setup.mockInput.pressTab({ shift: true });
       await setup.renderOnce();
       setup.mockInput.pressTab({ shift: true });
@@ -2753,6 +2948,45 @@ describe("App new session dialog", () => {
       await settle();
       expect(spawns).toHaveLength(1);
     } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("does not spawn twice when Enter lands while the agent is being remembered", async () => {
+    // The spawn is no longer in flight here but the pane already exists, and
+    // remembering the agent is a real file read, write and rename. The dialog
+    // stays on screen for all of it, so an Enter delivered in that window
+    // used to pass both guards and open a second pane. Durable on the sidebar
+    // and the persistent picker, where nothing exits to end the race.
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    let release: () => void = () => {};
+    uiStateGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await openDialog({ sidebar: true });
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      // Parked mid-write: one pane exists, the dialog is still up.
+      expect(spawns).toHaveLength(1);
+      expect(uiStateWrites).toContainEqual({ lastSpawnAgent: "claude" });
+      expect(setup.captureCharFrame()).toContain("New session");
+
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(spawns).toHaveLength(1);
+
+      release();
+      await settle();
+      await setup.renderOnce();
+      expect(spawns).toHaveLength(1);
+      expect(setup.captureCharFrame()).not.toContain("New session");
+    } finally {
+      release();
       restoreExit();
       restore();
     }
@@ -3116,6 +3350,167 @@ describe("App new session dialog", () => {
       expect(frame).toContain("New session");
       expect(frame).not.toContain("New session here");
       expect(frame).not.toContain("Attach");
+    } finally {
+      restore();
+    }
+  });
+
+  /** Right-click the group header on row 1 and click its "New session here"
+   *  item, located by label so a menu reshuffle can't fire a different
+   *  action. Returns the frame with the dialog open. */
+  async function openGroupMenuNewSession(): Promise<string> {
+    await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+    await setup.renderOnce();
+    const menuRow = setup
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes("New session here"));
+    expect(menuRow).toBeGreaterThan(0);
+    await setup.mockMouse.click(7, menuRow, MouseButtons.LEFT);
+    await settle();
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  }
+
+  it("gives the same directory for a group whether opened by key or by mouse", async () => {
+    // Grouped by tmux session, a header's members can span unrelated repos,
+    // so the first member's cwd is an arbitrary pick and the picker's own
+    // directory is the defensible answer. The key path already gated on that;
+    // the menu path took the first member unconditionally, so the same header
+    // answered differently depending on how it was opened.
+    const { restore } = withDaemon();
+    const originalPwd = process.env.CCMUX_CALLER_PWD;
+    process.env.CCMUX_CALLER_PWD = "/where/the/picker/ran";
+    const grouped = [
+      session({ id: "s1", cwd: "/code/other-repo", tmuxTarget: "dev:1.0" }),
+      session({ id: "s2", cwd: "/code/myapp", tmuxTarget: "dev:2.0" }),
+    ];
+    try {
+      await renderApp(120, 24, { groupBy: "session" });
+      sseCallbacks!.onInit(grouped, null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+      const byKey = setup.captureCharFrame();
+      expect(byKey).toContain("/where/the/picker/ran");
+
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+
+      const byMouse = await openGroupMenuNewSession();
+      expect(byMouse).toContain("New session");
+      expect(byMouse).toContain("/where/the/picker/ran");
+      expect(byMouse).not.toContain("/code/other-repo");
+    } finally {
+      if (originalPwd === undefined) delete process.env.CCMUX_CALLER_PWD;
+      else process.env.CCMUX_CALLER_PWD = originalPwd;
+      restore();
+    }
+  });
+
+  it("uses the repo root for a project group, not a member's worktree", async () => {
+    // A project group is repo-level: it holds the main checkout AND every
+    // worktree of it, and members are sorted by status then activity. Taking
+    // members[0] made the directory a sibling worktree that changes between
+    // two opens; the repo root is the one directory the whole group agrees on.
+    const { restore } = withDaemon();
+    const worktree = session({
+      id: "s1",
+      cwd: "/code/myapp/.claude/worktrees/feature",
+      project: "myapp",
+      isWorktree: true,
+      mainRepoRoot: "/code/myapp",
+    });
+    const checkout = session({
+      id: "s2",
+      cwd: "/code/myapp",
+      project: "myapp",
+      mainRepoRoot: "/code/myapp",
+    });
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit([worktree, checkout], null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+      const byKey = setup.captureCharFrame();
+      expect(byKey).toContain("/code/myapp");
+      expect(byKey).not.toContain("worktrees/feature");
+
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+
+      const byMouse = await openGroupMenuNewSession();
+      expect(byMouse).toContain("/code/myapp");
+      expect(byMouse).not.toContain("worktrees/feature");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps a member's directory when the group's members disagree on the repo", async () => {
+    // The project group key is a repo NAME, not a path, so ~/work/api and
+    // ~/oss/api land in ONE group. Taking whichever member happened to carry a
+    // mainRepoRoot answered with one of two unrelated repositories depending on
+    // the status sort, so a disagreement falls back to the member's own cwd.
+    const { restore } = withDaemon();
+    const first = session({
+      id: "s1",
+      cwd: "/code/work/api/src",
+      project: "api",
+      mainRepoRoot: "/code/work/api",
+    });
+    const second = session({
+      id: "s2",
+      cwd: "/code/oss/api/src",
+      project: "api",
+      mainRepoRoot: "/code/oss/api",
+    });
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit([first, second], null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+
+      // The member's own cwd, not either repo root. Spelled out with the
+      // field label so a row behind the dialog cannot satisfy it.
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Directory /code/work/api/src");
+      expect(frame).not.toContain("Directory /code/oss/api");
+    } finally {
+      restore();
+    }
+  });
+
+  it("never answers with the home directory for a project group", async () => {
+    // A literal ~/.git dotfiles repo resolves every member's mainRepoRoot to
+    // $HOME while the group stands for one subdirectory of it, so agreeing on
+    // $HOME is agreement on the wrong directory: a new session would start at
+    // the top of the user's home.
+    const { restore } = withDaemon();
+    const home = realpathSync(homedir());
+    const inHome = session({
+      id: "s1",
+      cwd: join(home, "dotfiles-notes"),
+      project: "dotfiles-notes",
+      mainRepoRoot: home,
+    });
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit([inHome], null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+
+      // Labelled, so the session row behind the dialog cannot satisfy it.
+      expect(setup.captureCharFrame()).toContain("Directory ~/dotfiles-notes");
     } finally {
       restore();
     }

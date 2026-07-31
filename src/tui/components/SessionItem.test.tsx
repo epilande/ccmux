@@ -2,9 +2,10 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import { createSignal } from "solid-js";
-import { SessionItem, alignText } from "./SessionItem";
+import { SessionItem, abbreviateTarget, alignText } from "./SessionItem";
 import { TickContext } from "../store";
 import { mockEnrichedSession } from "./test-helpers";
+import { displayWidth } from "../utils/format";
 import type { EnrichedSession } from "../../types";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
@@ -164,20 +165,30 @@ describe("SessionItem", () => {
     expect(frame).toContain("trees/ccmux");
   });
 
-  it("labels a worktree from `project` when the daemon sent no repo root", async () => {
-    // Older daemon: neither field is on the wire at all (absent, not null),
-    // but `project` already resolves to the main checkout's name for a
-    // worktree, and the cwd still ends at the worktree directory.
+  it("does not fabricate a repo prefix when mainRepoRoot is null (O1)", async () => {
+    // A worktree of a bare repo (or a `--separate-git-dir` layout) has no
+    // main checkout, so mainRepoRoot is genuinely null (S5). `project` in
+    // that case is just the pane cwd's basename, not a repo name - a stale
+    // `?? session.project` fallback here would fabricate a `<repo>/<worktree>`
+    // label out of it. Pane cwd basename ("featx") deliberately differs from
+    // the worktree root's tail ("wt") so the `repo === worktreeName` guard
+    // can't accidentally suppress the fabrication and mask the bug.
+    //
+    // Dirname (compact) mode: a real repoPrefix survives width pressure and
+    // compact mode (see the earlier "keeps the repo... in compact mode"
+    // test), so this is where a fabricated one would be most visible.
     const frame = await renderItem({
       session: mockEnrichedSession({
-        cwd: "/Users/test/Code/ccmux/.claude/worktrees/parking",
-        mainRepoRoot: undefined,
-        worktreeRoot: undefined,
-        project: "ccmux",
+        cwd: "/Users/test/Code/host/wt/src/featx",
+        worktreeRoot: "/Users/test/Code/host/wt",
+        mainRepoRoot: null,
+        project: "featx",
         isWorktree: true,
       }),
+      columns: { row1: { left: [{ field: "project", mode: "dirname" }] } },
     });
-    expect(frame).toContain("ccmux/parking");
+    expect(frame).not.toContain("featx/wt");
+    expect(frame).not.toContain("wt");
   });
 
   it("falls back to the plain path for a non-worktree row", async () => {
@@ -1113,6 +1124,52 @@ describe("SessionItem active indicator", () => {
   });
 });
 
+describe("abbreviateTarget", () => {
+  /** A half of a surrogate pair with no partner: what a code-unit slice
+   *  through an astral character leaves behind, rendered as `�`. */
+  const hasLoneSurrogate = (s: string) =>
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+      s,
+    );
+
+  it("leaves the ASCII shapes exactly as they were", () => {
+    expect(abbreviateTarget("dev:1.0")).toBe("dev:1.0");
+    expect(abbreviateTarget("FlashJump:3.4")).toBe("FlashJu~:3.4");
+    expect(abbreviateTarget("some-really-long-session:12.34")).toBe(
+      "some-~:12.34",
+    );
+    expect(abbreviateTarget("nocolon-but-very-long-name")).toBe("nocolon-but~");
+  });
+
+  it("cuts an emoji session name on a cluster, never mid-pair", () => {
+    // The code-unit slice landed between the two surrogates of the fourth
+    // 📚 and drew a replacement glyph in the pane cell.
+    const out = abbreviateTarget("📚📚📚📚📚📚:1.0");
+    expect(out).toBe("📚📚📚~:1.0");
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(displayWidth(out)).toBeLessThanOrEqual(12);
+  });
+
+  it("shortens a CJK session name to the box it renders in", () => {
+    // 6 characters of session name draw 12 columns, so the untouched target
+    // drew 16 into a 12-column cell.
+    const out = abbreviateTarget("プロジェクト:1.0");
+    expect(out).toBe("プロジ~:1.0");
+    expect(displayWidth(out)).toBeLessThanOrEqual(12);
+  });
+
+  it("keeps a ZWJ sequence whole", () => {
+    // Three families draw 6 columns, so the whole target already fits; the
+    // code-unit gate called it 37 and sliced through the first family's ZWJ
+    // chain, splitting one glyph into several.
+    const family = "👨‍👩‍👧‍👦";
+    const out = abbreviateTarget(`${family}${family}${family}:10.2`);
+    expect(out).toBe(`${family}${family}${family}:10.2`);
+    expect(hasLoneSurrogate(out)).toBe(false);
+    expect(displayWidth(out)).toBeLessThanOrEqual(12);
+  });
+});
+
 describe("alignText", () => {
   it("passes through for left side", () => {
     expect(alignText("hi", 10, "left")).toBe("hi");
@@ -1134,6 +1191,15 @@ describe("alignText", () => {
     expect(alignText("", 3, "right")).toBe("   ");
     expect(alignText("", 3, "left")).toBe("");
   });
+
+  it("pads a wide glyph by the columns it draws", () => {
+    // `📚:1.0` is 7 code units but 6 columns, so a code-unit padStart would
+    // add 5 spaces and leave the cell a column left of its ASCII neighbours.
+    expect(alignText("📚:1.0", 12, "right")).toBe("      📚:1.0");
+    expect(displayWidth(alignText("📚:1.0", 12, "right"))).toBe(
+      displayWidth(alignText("dev:1.0", 12, "right")),
+    );
+  });
 });
 
 describe("SessionItem right-aligned fields", () => {
@@ -1148,5 +1214,95 @@ describe("SessionItem right-aligned fields", () => {
       160,
     );
     expect(frame).toContain("     dev:1.0");
+  });
+
+  // Both dirnames below are 13 characters; the CJK one draws 26 columns and
+  // has to give some back at this width, while the ASCII one fits whole.
+  // Under the code-unit budget both measured 13 and neither truncated, so the
+  // CJK row drew past its cell. One render per test so each gets torn down.
+  const dirnameRow = (dirname: string) =>
+    renderItem(
+      {
+        session: mockEnrichedSession({
+          cwd: `/Users/e/Code/${dirname}`,
+          paneCwd: `/Users/e/Code/${dirname}`,
+          gitBranch: "main",
+          tmuxTarget: "dev:1.0",
+          lastActivityAt: "2024-01-15T11:59:00Z",
+        }),
+      },
+      56,
+    );
+
+  it("leaves a 13-character ASCII dirname whole at 56 columns", async () => {
+    expect(await dirnameRow("abcdefghijklm")).toContain("abcdefghijklm:main");
+  });
+
+  it("truncates a 13-character CJK dirname at the same width", async () => {
+    expect(await dirnameRow("プロジェクトディレクトリ名前")).toContain(
+      "プロジェクトディレクトリ…:main",
+    );
+  });
+
+  it("right-aligns a wide-glyph pane cell to the same column as an ASCII one", async () => {
+    // Six columns of target in a 12-column cell: six spaces of pad. A
+    // code-unit pad counts the emoji's surrogate pair twice and stops at
+    // five, drawing the cell one column left of every ASCII row.
+    const frame = await renderItem(
+      {
+        session: mockEnrichedSession({
+          tmuxTarget: "📚:1.0",
+          lastActivityAt: "2024-01-15T11:59:00Z",
+        }),
+      },
+      160,
+    );
+    expect(frame).toContain("      📚:1.0");
+  });
+
+  it("budgets an inline prompt against the columns the project cell draws", async () => {
+    // `projectCellWidth` feeds the prompt's budget. Measured in code units it
+    // reports 13 for a cell drawing 26 columns, so the prompt is handed a
+    // budget it cannot have, skips its own `…`, and gets flex-clipped
+    // mid-word instead ("please refactor the entire" with nothing to say it
+    // was cut).
+    const cwd = "/Users/e/Code/プロジェクトディレクトリ名前";
+    const frame = await renderItem(
+      {
+        session: mockEnrichedSession({
+          cwd,
+          paneCwd: cwd,
+          gitBranch: "main",
+          tmuxTarget: "dev:1.0",
+          lastPrompt:
+            "please refactor the entire authentication module and add tests",
+          lastActivityAt: "2024-01-15T11:59:00Z",
+        }),
+      },
+      120,
+    );
+    expect(frame).toContain("please refactor the entire…");
+  });
+
+  it("reserves the columns a short wide-glyph prompt needs on row 1", async () => {
+    // The prompt floor reserves min(prompt width, 16) before the project cell
+    // spends the rest. Counting this 8-character prompt as 8 instead of the
+    // 16 columns it draws hands the path 8 columns that were the prompt's,
+    // and the prompt comes back clipped to `予算パイプ`.
+    const cwd = "/Users/e/Code/some-long-project-directory-name";
+    const frame = await renderItem(
+      {
+        session: mockEnrichedSession({
+          cwd,
+          paneCwd: cwd,
+          gitBranch: "feature/long-branch-name",
+          tmuxTarget: "dev:1.0",
+          lastPrompt: "予算パイプライン",
+          lastActivityAt: "2024-01-15T11:59:00Z",
+        }),
+      },
+      100,
+    );
+    expect(frame).toContain("予算パイプライン");
   });
 });
