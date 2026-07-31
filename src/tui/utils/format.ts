@@ -86,6 +86,18 @@ function sliceTailToWidth(text: string, maxWidth: number): string {
   return out;
 }
 
+/**
+ * Left-pad `text` with spaces until it occupies `width` columns; the
+ * column-true counterpart of `String.padStart`, which counts code units and so
+ * over-pads anything holding a wide glyph (an emoji pads as if it were its two
+ * surrogates, pushing a right-aligned cell out of line with its ASCII
+ * neighbours). Text already at or over `width` comes back untouched.
+ */
+export function padStartWidth(text: string, width: number): string {
+  const pad = width - displayWidth(text);
+  return pad > 0 ? " ".repeat(pad) + text : text;
+}
+
 /** Truncate plain text to `maxLen` columns, adding an ellipsis when clipped. */
 export function truncateText(text: string, maxLen: number): string {
   if (displayWidth(text) <= maxLen) return text;
