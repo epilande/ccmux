@@ -2853,7 +2853,10 @@ export class DaemonServer {
         spawnCwd = moved.worktreePath;
         moveInfo = {
           moved: moved.moved,
-          source: cwd,
+          // The module's own answer, not the request's `cwd`: a stash empties
+          // the whole checkout, and the request routinely names a
+          // subdirectory of it (a pane's cwd, the CLI's pwd).
+          source: moved.source,
           untracked: moved.untracked,
           ...(moved.leftoverStash
             ? { leftoverStash: moved.leftoverStash }

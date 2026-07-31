@@ -23,6 +23,13 @@ export interface MoveReport {
   flattenedIndex?: boolean;
 }
 
+/**
+ * Both halves of the accounting are named even at zero, because "0 untracked
+ * files" is the answer to "did it take my new files too" — the question
+ * `--untracked` exists for.
+ */
+const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
+
 /** A failed move's recoverable leftovers, as the daemon reports them. */
 export interface MoveFailure {
   /** The stash entry holding the user's work, when one was left in place. */
@@ -47,10 +54,6 @@ export function moveReportLines(
   fallbackSource: string,
 ): string[] {
   const { moved, untracked, source, leftoverStash, flattenedIndex } = move;
-  // Both halves are named even at zero, because "0 untracked files" is the
-  // answer to "did it take my new files too" — the question `--untracked`
-  // exists for.
-  const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
   const verb = untracked.mode === "copy" ? "copied" : "moved";
   const untrackedNote =
     untracked.mode === "leave"
@@ -92,7 +95,6 @@ export function moveReportLines(
  * index) is deliberately absent — those need acknowledging, not summarizing.
  */
 export function moveSummary(move: MoveReport): string {
-  const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
   const verb = move.untracked.mode === "copy" ? "copied" : "moved";
   const untracked =
     move.untracked.mode === "leave"

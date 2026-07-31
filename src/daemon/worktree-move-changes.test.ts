@@ -17,7 +17,8 @@ import {
   readUncommitted,
   type CreateWorktree,
 } from "./worktree-move-changes";
-import { runGit, type GitRun } from "./worktree-git";
+import { normalizePath, runGit, type GitRun } from "./worktree-git";
+import { failureNeedsAcknowledgement } from "../lib/move-report";
 
 /**
  * These tests drive REAL git against throwaway fixture repos under the OS temp
@@ -46,6 +47,12 @@ async function makeRepo(name = "repo"): Promise<string> {
   await git(root, ["init", "--initial-branch=main", repo]);
   await git(repo, ["config", "user.email", "test@example.com"]);
   await git(repo, ["config", "user.name", "Test"]);
+  // The developer's own `~/.config/git/ignore` is read even with
+  // GIT_CONFIG_GLOBAL neutered — it is git's DEFAULT excludes path, not a
+  // config value — and the gitignore fixtures below ask git what it excludes.
+  // Without this, whether those tests pass depends on whose machine they run
+  // on.
+  await git(repo, ["config", "core.excludesFile", "/dev/null"]);
   writeFileSync(join(repo, "tracked.txt"), "original\n");
   await git(repo, ["add", "tracked.txt"]);
   await git(repo, ["commit", "-m", "init"]);
@@ -696,6 +703,9 @@ describe("moveChangesToWorktree", () => {
     if (result.ok) return;
     expect(result.reason).toBe("stash-failed");
     expect(result.stashSha).toMatch(/^[0-9a-f]{40}$/);
+    // An entry exists, so the work is out of the tree and nothing put it
+    // back: a refusal the user has to acknowledge, not one to show briefly.
+    expect(result.sourceRestored).toBe(false);
     // A real handle on the real work, and named in the message the user sees.
     expect(await git(repo, ["show", `${result.stashSha}:tracked.txt`])).toBe(
       "edited",
@@ -867,6 +877,293 @@ describe("moveChangesToWorktree", () => {
     expect(list).toContain("ccmux move-changes: my-worktree");
   });
 
+  it("moves the whole checkout's work when run from a SUBDIRECTORY", async () => {
+    // The source is routinely a subdirectory: the picker passes a pane's cwd
+    // and the CLI passes its own pwd. Status paths are repo-root relative, so
+    // every git call and every copy has to run from the root or they resolve
+    // against the wrong base.
+    const repo = await makeRepo();
+    await mkdir(join(repo, "sub"), { recursive: true });
+    writeFileSync(join(repo, "sub", "inside.txt"), "under the subdir\n");
+    dirty(repo);
+
+    const result = await moveChangesToWorktree({
+      source: join(repo, "sub"),
+      createWorktree: realCreator(repo),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const wt = result.worktreePath;
+    expect(readFileSync(join(wt, "sub", "inside.txt"), "utf-8")).toBe(
+      "under the subdir\n",
+    );
+    expect(readFileSync(join(wt, "tracked.txt"), "utf-8")).toBe("edited\n");
+    expect(readFileSync(join(wt, "new.txt"), "utf-8")).toBe("brand new\n");
+    expect(await statusOf(repo)).toBe("");
+    // The checkout emptied is the whole worktree, whichever directory the
+    // request named, so that is what the report has to say: naming the
+    // subdirectory misattributes repo-wide work to it. Compared through
+    // `normalizePath` because git answers with the physical path, and the
+    // fixture root goes through /var on macOS.
+    expect(normalizePath(result.source)).toBe(normalizePath(repo));
+  });
+
+  it("copies untracked files when run from a SUBDIRECTORY", async () => {
+    // The silent one: repo-root-relative status paths joined onto the
+    // subdirectory name files that do not exist, so the copy skips every one
+    // of them and reports a success that moved nothing.
+    const repo = await makeRepo();
+    await mkdir(join(repo, "sub"), { recursive: true });
+    writeFileSync(join(repo, "sub", "inside.txt"), "under the subdir\n");
+    writeFileSync(join(repo, "tracked.txt"), "edited\n");
+
+    const result = await moveChangesToWorktree({
+      source: join(repo, "sub"),
+      untracked: "copy",
+      createWorktree: realCreator(repo),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      readFileSync(join(result.worktreePath, "sub", "inside.txt"), "utf-8"),
+    ).toBe("under the subdir\n");
+    expect(existsSync(join(repo, "sub", "inside.txt"))).toBe(true);
+    expect(result.untracked.files).toEqual(["sub/inside.txt"]);
+  });
+
+  it("succeeds from a subdirectory the stash itself deletes", async () => {
+    // The worst version of the same bug. Stashing the only files under the
+    // source directory removes the directory, so every git call after the
+    // push runs from a cwd that is gone — read as an empty stash stack, and
+    // reported as "nothing to move" with the work already in an entry nobody
+    // named.
+    const repo = await makeRepo();
+    await mkdir(join(repo, "sub"), { recursive: true });
+    writeFileSync(join(repo, "sub", "only.txt"), "all there is\n");
+
+    const result = await moveChangesToWorktree({
+      source: join(repo, "sub"),
+      createWorktree: realCreator(repo),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      readFileSync(join(result.worktreePath, "sub", "only.txt"), "utf-8"),
+    ).toBe("all there is\n");
+    expect(await statusOf(repo)).toBe("");
+    expect(await stashCount(repo)).toBe(0);
+  });
+
+  it("refuses when the stash ref cannot be READ, rather than calling it empty", async () => {
+    // Exit 1 from `rev-parse --verify --quiet refs/stash` is "no such ref",
+    // the one non-zero code that means an empty stack. Anything else is a
+    // question that could not be asked, and answering it as an empty stack
+    // reports "nothing to move" for work that has just left the tree.
+    const repo = await makeRepo();
+    dirty(repo);
+
+    let pushed = false;
+    const blindAfterPush: GitRun = async (cwd, args) => {
+      if (pushed && args[0] === "rev-parse" && args.includes("refs/stash")) {
+        return { exitCode: 128, stdout: "", stderr: "fatal: cannot read ref" };
+      }
+      const res = await runGit(cwd, args);
+      if (args[0] === "stash" && args[1] === "push") pushed = true;
+      return res;
+    };
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      git: blindAfterPush,
+      createWorktree: realCreator(repo),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("stash-failed");
+    // The changes are out of the tree, so this is not a refusal to show for
+    // four seconds and forget.
+    expect(result.sourceRestored).toBe(false);
+    expect(await stashCount(repo)).toBe(1);
+  });
+
+  it("flags an unconfirmable entry as work that left the checkout", async () => {
+    // Ours was created and something landed on top before it could be
+    // confirmed. The entry cannot be told apart from an earlier run's, so the
+    // move refuses — but the changes ARE out of the tree, which is the
+    // difference between a message worth interrupting someone for and an
+    // ordinary validation refusal.
+    const repo = await makeRepo();
+    dirty(repo);
+
+    const pushOnTop: GitRun = async (cwd, args) => {
+      const res = await runGit(cwd, args);
+      if (args[0] === "stash" && args[1] === "push" && res.exitCode === 0) {
+        writeFileSync(join(repo, "tracked.txt"), "someone else's edit\n");
+        await runGit(repo, ["stash", "push", "--message", "unrelated"]);
+      }
+      return res;
+    };
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      git: pushOnTop,
+      createWorktree: realCreator(repo),
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("stash-failed");
+    expect(result.sourceRestored).toBe(false);
+    expect(failureNeedsAcknowledgement(result)).toBe(true);
+  });
+
+  it("leaves a push that created NOTHING reported as an intact tree", async () => {
+    // The other half of the push failure: no entry means the work never left
+    // the working tree, so claiming an unrestored source would send the user
+    // hunting through a stash stack for changes that are still in front of
+    // them.
+    const repo = await makeRepo();
+    dirty(repo);
+
+    const refusedPush: GitRun = async (cwd, args) => {
+      if (args[0] === "stash" && args[1] === "push") {
+        return { exitCode: 1, stdout: "", stderr: "cannot write stash" };
+      }
+      return runGit(cwd, args);
+    };
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      git: refusedPush,
+      createWorktree: async () => {
+        throw new Error("must not be called");
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("stash-failed");
+    expect(result.stashSha).toBeUndefined();
+    expect(result.sourceRestored).toBeUndefined();
+    expect(readFileSync(join(repo, "tracked.txt"), "utf-8")).toBe("edited\n");
+  });
+
+  it("survives a name git's own formatting would reshape", async () => {
+    // git reads a stash message back through `%s`, which strips trailing
+    // whitespace and collapses newlines, so a marker built from the raw name
+    // is not what comes back out. An ordinary typo — a trailing space in
+    // `--worktree "my feature "` — then lands in the "another stash was
+    // pushed on top" arm and refuses a move that was going fine.
+    const repo = await makeRepo();
+    dirty(repo);
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      name: "my feature ",
+      // Named by hand: a ref cannot contain a space, so the fixture creator's
+      // name-as-branch-name would fail on this input for its own reasons.
+      createWorktree: async () => {
+        const path = join(root, "wt", "trailing");
+        await git(repo, ["worktree", "add", "-b", "trailing", path, "HEAD"]);
+        return { path, created: true };
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      readFileSync(join(result.worktreePath, "tracked.txt"), "utf-8"),
+    ).toBe("edited\n");
+    expect(await stashCount(repo)).toBe(0);
+  });
+
+  it("copies on past a file that vanished after the status read", async () => {
+    // The pane's agent deleting its own scratch file in the seconds this
+    // takes is not a reason to fail a move and roll back the worktree.
+    const repo = await makeRepo();
+    writeFileSync(join(repo, "tracked.txt"), "edited\n");
+    writeFileSync(join(repo, "keep.txt"), "keep\n");
+    writeFileSync(join(repo, "doomed.txt"), "not for long\n");
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      untracked: "copy",
+      createWorktree: async ({ name }) => {
+        rmSync(join(repo, "doomed.txt"), { force: true });
+        const path = join(root, "wt", name ?? "moved");
+        await git(repo, ["worktree", "add", "-b", "moved", path, "HEAD"]);
+        return { path, created: true };
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(readFileSync(join(result.worktreePath, "keep.txt"), "utf-8")).toBe(
+      "keep\n",
+    );
+    expect(existsSync(join(result.worktreePath, "doomed.txt"))).toBe(false);
+    // And the report names what LANDED, not what the status read listed. The
+    // skipped file is sorted first, so this also proves the copy carried on
+    // past it.
+    expect(result.untracked.files).toEqual(["keep.txt"]);
+  });
+
+  it("never copies a nested checkout git could not expand", async () => {
+    // git refuses to descend into another repository, so a stray clone or a
+    // submodule arrives as one collapsed `vendor/` record even under -uall.
+    // Copied as a directory it brings its .git, its node_modules and its
+    // secrets with it.
+    const repo = await makeRepo();
+    writeFileSync(join(repo, "tracked.txt"), "edited\n");
+    const nested = join(repo, "vendor");
+    await mkdir(nested, { recursive: true });
+    await git(root, ["init", "--initial-branch=main", nested]);
+    writeFileSync(join(nested, ".env"), "TOKEN=secret\n");
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      untracked: "copy",
+      createWorktree: realCreator(repo),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(existsSync(join(result.worktreePath, "vendor"))).toBe(false);
+    // And the report does not claim it either.
+    expect(result.untracked.files).toEqual([]);
+    // Untouched where the user left it.
+    expect(readFileSync(join(nested, ".env"), "utf-8")).toBe("TOKEN=secret\n");
+  });
+
+  it("never reports a nested checkout 'move' could not take either", async () => {
+    // `git stash push --include-untracked` prints "Ignoring path vendor/" and
+    // exits 0: git will not stash another repository. The directory stays put,
+    // so naming it in the report would tell the user their work moved when it
+    // is still sitting in the source.
+    const repo = await makeRepo();
+    writeFileSync(join(repo, "tracked.txt"), "edited\n");
+    const nested = join(repo, "vendor");
+    await mkdir(nested, { recursive: true });
+    await git(root, ["init", "--initial-branch=main", nested]);
+    writeFileSync(join(nested, ".env"), "TOKEN=secret\n");
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      createWorktree: realCreator(repo),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.untracked.files).toEqual([]);
+    // Still where the user left it, which is why the report cannot claim it.
+    expect(readFileSync(join(nested, ".env"), "utf-8")).toBe("TOKEN=secret\n");
+    expect(existsSync(join(result.worktreePath, "vendor"))).toBe(false);
+  });
+
   it("reports a non-repo instead of throwing", async () => {
     const plain = join(root, "not-a-repo");
     await mkdir(plain, { recursive: true });
@@ -918,6 +1215,45 @@ describe("dropStashCommand", () => {
     expect(after).not.toContain("ccmux move-changes");
     expect(after).toContain("keep me");
     expect(after).toContain("someone else");
+  });
+
+  it("drops NOTHING when the entry is not in the stack", async () => {
+    // The predicate that produces this advice is the same one that empties
+    // the grep: a leftover is reported when the entry cannot be found. With
+    // no argument, `git stash drop` takes whatever is on top — so the advice
+    // for an entry that is gone destroys an unrelated one.
+    const repo = await makeRepo();
+    writeFileSync(join(repo, "tracked.txt"), "first\n");
+    await git(repo, ["stash", "push", "--message", "keep me"]);
+
+    const absent = "0".repeat(40);
+    expect(dropStashCommand(absent)).toContain('[ -n "$ref" ]');
+    Bun.spawnSync(["sh", "-c", dropStashCommand(absent)], {
+      cwd: repo,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(await stashCount(repo)).toBe(1);
+    expect(await git(repo, ["stash", "list", "--format=%gs"])).toContain(
+      "keep me",
+    );
+  });
+
+  it("never lets something that is not a sha reach the shell", async () => {
+    // Defense in depth: the sha comes back from git, but this string is
+    // printed for a person to paste into their own shell, and a value that is
+    // not a sha has no business being expanded there.
+    const repo = await makeRepo();
+    const sentinel = join(root, "pwned");
+
+    Bun.spawnSync(["sh", "-c", dropStashCommand(`$(touch ${sentinel})`)], {
+      cwd: repo,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(existsSync(sentinel)).toBe(false);
   });
 });
 
