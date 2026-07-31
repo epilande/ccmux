@@ -944,7 +944,7 @@ export class DaemonServer {
       req.method === "GET"
     ) {
       const sessionId = path.slice("/sessions/".length, -"/dirty".length);
-      return await this.handleSessionDirty(sessionId, corsHeaders);
+      return await this.handleSessionDirty(sessionId, url, corsHeaders);
     }
 
     if (path.startsWith("/sessions/") && req.method === "GET") {
@@ -1453,9 +1453,20 @@ export class DaemonServer {
    * direction for prune, which is destructive) and counts ignored files
    * separately. A gate that said "dirty" where the move would answer
    * "nothing to move" would offer an action that then refuses.
+   *
+   * Which DIRECTORY it answers about matters for the same reason. A pane that
+   * has `cd`ed somewhere else moves out of where it is now, not out of where
+   * the session started, so the default is the session's effective cwd — the
+   * pane's current path when there is one — exactly like every other
+   * cwd-derived fact on a row. A caller that has already decided which
+   * directory it will move from can name it with `?cwd=`, which is only
+   * checked for shape: this endpoint runs one `git status` and reads nothing
+   * out of it but counts, and a stricter rule (must equal the session's own
+   * paths) would 400 on a pane cache one tick behind the caller's.
    */
   private async handleSessionDirty(
     sessionId: string,
+    url: URL,
     headers: Record<string, string>,
   ): Promise<Response> {
     const session = this.sessionManager.getSession(sessionId);
@@ -1465,14 +1476,25 @@ export class DaemonServer {
         { status: 404, headers },
       );
     }
-    if (!session.cwd) {
+
+    const requested = url.searchParams.get("cwd");
+    if (requested !== null && !isAbsolute(requested)) {
+      return Response.json(
+        { error: `'cwd' must be an absolute path, got '${requested}'` },
+        { status: 400, headers },
+      );
+    }
+
+    const checkout =
+      requested ?? this.effectiveCwd(session, this.getPaneCache());
+    if (!checkout) {
       return Response.json(
         { error: "Session has no working directory" },
         { status: 400, headers },
       );
     }
 
-    const state = await readUncommitted(session.cwd);
+    const state = await readUncommitted(checkout);
     // Null means the cwd is not a readable git checkout. Reported as
     // `repo: false` rather than as an error: "this row has nothing to move"
     // is a perfectly ordinary answer to the question the menu is asking.

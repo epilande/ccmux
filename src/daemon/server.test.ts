@@ -5976,28 +5976,19 @@ describe("GET /sessions/:id/dirty", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  async function git(cwd: string, args: string[]): Promise<void> {
-    const proc = Bun.spawn(["git", "-C", cwd, ...args], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const code = await proc.exited;
-    if (code !== 0) {
-      throw new Error(
-        `git ${args.join(" ")} failed: ${await new Response(proc.stderr).text()}`,
-      );
-    }
-  }
-
-  async function makeRepo(name: string): Promise<string> {
+  /**
+   * Fixture setup goes through `runFixtureGit` like every other real-git
+   * fixture in this file, so a machine with no ambient git identity (CI)
+   * fails at the setup step naming git's own error rather than several
+   * assertions later.
+   */
+  function makeRepo(name: string): string {
     const repo = join(root, name);
     mkdirSync(repo, { recursive: true });
-    await git(root, ["init", "--initial-branch=main", repo]);
-    await git(repo, ["config", "user.email", "test@example.com"]);
-    await git(repo, ["config", "user.name", "Test"]);
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
     writeFileSync(join(repo, "tracked.txt"), "original\n");
-    await git(repo, ["add", "tracked.txt"]);
-    await git(repo, ["commit", "-m", "init"]);
+    runFixtureGit(repo, "add", "tracked.txt");
+    runFixtureGit(repo, "commit", "-m", "init");
     return repo;
   }
 
@@ -6012,19 +6003,28 @@ describe("GET /sessions/:id/dirty", () => {
     return session.id;
   }
 
+  async function dirtyRequest(
+    internals: ServerInternals,
+    id: string,
+    query = "",
+  ): Promise<Response> {
+    return internals.handleRequest(
+      new Request(`http://localhost/sessions/${id}/dirty${query}`),
+    );
+  }
+
   async function dirtyOf(
     internals: ServerInternals,
     id: string,
+    query = "",
   ): Promise<Record<string, unknown>> {
-    const res = await internals.handleRequest(
-      new Request(`http://localhost/sessions/${id}/dirty`),
-    );
+    const res = await dirtyRequest(internals, id, query);
     return (await res.json()) as Record<string, unknown>;
   }
 
   it("reports a clean checkout as not dirty", async () => {
     const { manager, internals } = createServer();
-    const repo = await makeRepo("clean");
+    const repo = makeRepo("clean");
     const id = sessionIn(manager, repo);
 
     expect(await dirtyOf(internals, id)).toEqual({
@@ -6037,7 +6037,7 @@ describe("GET /sessions/:id/dirty", () => {
 
   it("counts tracked edits and untracked files separately", async () => {
     const { manager, internals } = createServer();
-    const repo = await makeRepo("messy");
+    const repo = makeRepo("messy");
     writeFileSync(join(repo, "tracked.txt"), "edited\n");
     writeFileSync(join(repo, "new.txt"), "new\n");
     const id = sessionIn(manager, repo);
@@ -6053,7 +6053,7 @@ describe("GET /sessions/:id/dirty", () => {
   it("counts untracked-only work as dirty", async () => {
     // The move can relocate it, so the menu has to offer the action.
     const { manager, internals } = createServer();
-    const repo = await makeRepo("untracked-only");
+    const repo = makeRepo("untracked-only");
     writeFileSync(join(repo, "new.txt"), "new\n");
     const id = sessionIn(manager, repo);
 
@@ -6067,7 +6067,7 @@ describe("GET /sessions/:id/dirty", () => {
     // git collapses a wholly untracked directory into one `?? deep/` record,
     // so the menu would offer to move "1 untracked file" for a tree of them.
     const { manager, internals } = createServer();
-    const repo = await makeRepo("nested-untracked");
+    const repo = makeRepo("nested-untracked");
     mkdirSync(join(repo, "deep", "nested"), { recursive: true });
     writeFileSync(join(repo, "deep", "a.txt"), "1\n");
     writeFileSync(join(repo, "deep", "nested", "b.txt"), "2\n");
@@ -6102,14 +6102,46 @@ describe("GET /sessions/:id/dirty", () => {
     expect(res.status).toBe(404);
   });
 
+  /**
+   * The menu has to ask about the directory the move will actually run in,
+   * which is the pane's current path when the pane has `cd`ed somewhere, not
+   * the directory the session started in.
+   */
+  it("answers about an explicit cwd rather than the session's", async () => {
+    const { manager, internals } = createServer();
+    const started = makeRepo("started-here");
+    const elsewhere = makeRepo("moved-here");
+    writeFileSync(join(elsewhere, "tracked.txt"), "edited\n");
+    const id = sessionIn(manager, started);
+
+    // The session's own checkout is clean...
+    expect(await dirtyOf(internals, id)).toMatchObject({ dirty: false });
+    // ...while the one the caller names is not.
+    expect(
+      await dirtyOf(internals, id, `?cwd=${encodeURIComponent(elsewhere)}`),
+    ).toEqual({ repo: true, dirty: true, modified: 1, untracked: 0 });
+  });
+
+  it("rejects a cwd that is not an absolute path", async () => {
+    const { manager, internals } = createServer();
+    const repo = makeRepo("relative");
+    const id = sessionIn(manager, repo);
+
+    const res = await dirtyRequest(internals, id, "?cwd=../elsewhere");
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain(
+      "absolute",
+    );
+  });
+
   it("ignores gitignored files, which the move never relocates", async () => {
     // The engine's own file setup covers ignored content, so counting it here
     // would offer a move for a checkout that has nothing to move.
     const { manager, internals } = createServer();
-    const repo = await makeRepo("ignored");
+    const repo = makeRepo("ignored");
     writeFileSync(join(repo, ".gitignore"), "secret.env\n");
-    await git(repo, ["add", ".gitignore"]);
-    await git(repo, ["commit", "-m", "ignore"]);
+    runFixtureGit(repo, "add", ".gitignore");
+    runFixtureGit(repo, "commit", "-m", "ignore");
     writeFileSync(join(repo, "secret.env"), "TOKEN=1\n");
     const id = sessionIn(manager, repo);
 
