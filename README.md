@@ -431,7 +431,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Jump to first/last    | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd>                                            | Go to top / bottom                                                                                                     |
 | Jump to session       | <kbd>1</kbd>–<kbd>9</kbd>                                                          | Switch directly to session N                                                                                           |
 | Switch to session     | <kbd>Enter</kbd>                                                                   | Switch tmux to the selected pane                                                                                       |
-| New session           | <kbd>n</kbd>                                                                       | Open the new-session dialog (agent, placement, prompt, worktree; directory derived from the selected row)              |
+| New session           | <kbd>n</kbd>                                                                       | Open the new-session dialog (agent, placement, prompt, worktree + name; directory derived from the selected row)       |
 | Search                | <kbd>/</kbd>                                                                       | Enter fuzzy search mode                                                                                                |
 | Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel                                                                                            |
 | Scroll preview        | <kbd>Ctrl+D</kbd> / <kbd>Ctrl+U</kbd>                                              | Half-page scroll in preview                                                                                            |
@@ -465,14 +465,17 @@ Opened with <kbd>n</kbd>, or from the right-click menu on a session row or a gro
 | Move within a field | <kbd>j</kbd> / <kbd>k</kbd> or <kbd>↑</kbd> / <kbd>↓</kbd> |
 | Pick by number      | <kbd>1</kbd>–<kbd>9</kbd>                                  |
 | Where it runs       | <kbd>1</kbd> This checkout / <kbd>2</kbd> New worktree     |
+| Name the worktree   | Type on the **Name** row (worktree destinations only)      |
 | Spawn               | <kbd>Enter</kbd>                                           |
 | Cancel              | <kbd>Esc</kbd>                                             |
 
-Movement and number keys apply to the focused field, so <kbd>2</kbd> picks the second agent on the Agent field and the second placement on the Placement field. In the Prompt field every key is text, so <kbd>↑</kbd> / <kbd>↓</kbd> (or <kbd>Ctrl</kbd>+<kbd>P</kbd> / <kbd>Ctrl</kbd>+<kbd>N</kbd>) move between fields there instead.
+Movement and number keys apply to the focused field, so <kbd>2</kbd> picks the second agent on the Agent field and the second placement on the Placement field. In the Prompt and Name fields every key is text, so <kbd>↑</kbd> / <kbd>↓</kbd> (or <kbd>Ctrl</kbd>+<kbd>P</kbd> / <kbd>Ctrl</kbd>+<kbd>N</kbd>) move between fields there instead.
 
-**Where** picks between this checkout and a new git worktree. The worktree option carries the name it would create, derived from the prompt and updated as you type, and its branch is cut from the main checkout's current branch. Choosing a different base ref is CLI-only (`ccmux spawn --worktree --base <ref>`).
+**Where** picks between this checkout and a new git worktree, whose branch is cut from the main checkout's current branch. Choosing a different base ref is CLI-only (`ccmux spawn --worktree --base <ref>`).
 
-Opened from **Move changes**, the same dialog runs in move mode: the title says so, **Where** is locked to the new worktree (there is nowhere else the changes can go), and an **Untracked** field appears — <kbd>1</kbd> move, <kbd>2</kbd> copy to both, <kbd>3</kbd> leave here. <kbd>Tab</kbd> skips the locked field. See [Moving Uncommitted Changes](#moving-uncommitted-changes).
+Choosing the worktree adds a **Name** row showing the name it would create, derived from the prompt and updated as you type. Type over it to name the worktree yourself; clear the field to hand the name back to the prompt. The two are not the same request: a derived name that collides with an existing worktree is numbered (`-2`), which is what the row's `auto · -2 if taken` note means, while a name you typed opens that worktree if it is already there. Names are slugified the way `ccmux spawn --worktree <name>` slugifies them, so `Fix Sidebar Flicker` becomes `fix-sidebar-flicker`, and a name is enough on its own — a worktree no longer needs a prompt to be spawnable.
+
+Opened from **Move changes**, the same dialog runs in move mode: the title says so, **Where** is locked to the new worktree (there is nowhere else the changes can go), the same editable **Name** row is there, and an **Untracked** field appears — <kbd>1</kbd> move, <kbd>2</kbd> copy to both, <kbd>3</kbd> leave here. <kbd>Tab</kbd> skips the locked field. See [Moving Uncommitted Changes](#moving-uncommitted-changes).
 
 The working directory is derived, not typed: a session row uses that session's directory, a group header uses the group's, and no selection falls back to where the picker was launched. The picker jumps to the new pane, and a one-shot picker then closes while a `--persistent` board stays open; the sidebar spawns into the window's main area without stealing focus.
 
