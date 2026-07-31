@@ -22,7 +22,10 @@ afterEach(() => {
   setup?.renderer.destroy();
 });
 
-async function renderLive(overrides: Partial<EnrichedSession> = {}) {
+async function renderLive(
+  overrides: Partial<EnrichedSession> = {},
+  columns?: import("../../lib/preferences").ColumnsConfig,
+) {
   const [tick, setTick] = createSignal(0);
   const [state, setState] = createStore({
     session: mockEnrichedSession(overrides),
@@ -35,6 +38,7 @@ async function renderLive(overrides: Partial<EnrichedSession> = {}) {
           selected={false}
           index={0}
           previewWidth={30}
+          columns={columns}
         />
       </TickContext.Provider>
     ),
@@ -89,6 +93,28 @@ describe("SessionItem live updates (no remount)", () => {
     setState("session", "lastPrompt", "second prompt");
     await setup.renderOnce();
     expect(setup.captureCharFrame()).toContain("second prompt");
+  });
+
+  it("updates the standalone branch column after a checkout (S6)", async () => {
+    // The standalone `branch` column (opt-in, not in the default layout)
+    // used to read `ctx.session.gitBranch` into a plain const inside
+    // FieldCell's body, which runs once per mount; since rows stay mounted
+    // across SSE deltas, the cell froze at whatever branch was checked out
+    // when the row first mounted. A single `renderOnce` can't catch this
+    // class of bug (it would pass on both the frozen and the live version);
+    // it takes a second render after a live mutation, matching every other
+    // test in this file.
+    const { setState } = await renderLive(
+      { gitBranch: "main", isWorktree: false },
+      { row1: { left: [{ field: "branch" }] } },
+    );
+    expect(setup.captureCharFrame()).toContain("main");
+
+    setState("session", "gitBranch", "feature/checked-out");
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("feature/checked-out");
+    expect(frame).not.toContain("main");
   });
 
   it("updates the PR cell when a PR is detected", async () => {

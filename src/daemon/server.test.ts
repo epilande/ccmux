@@ -62,12 +62,15 @@ import {
   mkdirSync,
   mkdtempSync,
   realpathSync,
+  symlinkSync,
   writeFileSync,
   rmSync,
 } from "fs";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import { join } from "path";
+import { resolvedHomeDir } from "../lib/config";
 import type { sendLiteralToPane, sendPromptToPane } from "./pane-io";
+import { MAX_SPAWN_PROMPT_BYTES } from "./spawn-command";
 
 /**
  * Access private methods/fields on DaemonServer for unit testing.
@@ -148,6 +151,9 @@ type ServerInternals = {
     string,
     { id: string; controller: { enqueue(data: string): void } }
   >;
+  /** Stubbable for S4's $HOME-boundary tests; see project-derivation.ts's
+   *  identical `DeriveProjectOptions.homeDir` for why a plain field. */
+  homeDir: string;
 };
 
 function createServer(
@@ -937,10 +943,141 @@ describe("DaemonServer", () => {
         const enriched = await internals.enrichSession(fakeSession("s1"));
 
         expect(enriched.isWorktree).toBe(false);
-        // The common dir is the module dir, not a checkout's `.git`.
-        expect(enriched.mainRepoRoot).toBeNull();
+        // The common dir is the module dir, not a checkout's `.git`, but
+        // this is not a worktree, so mainRepoRoot falls back to
+        // --show-toplevel (S5), which is the submodule's own checkout root.
+        expect(enriched.mainRepoRoot).toBe("/super/sub");
       } finally {
         git.restore();
+      }
+    });
+
+    it("does not let a literal ~/.git collapse every home subdirectory into one project (S4)", async () => {
+      const { internals } = createServer();
+      internals.homeDir = "/Users/homie";
+      const git = stubGitSpawn({
+        stdout: "main\n/Users/homie\n/Users/homie/.git\n/Users/homie/.git\n",
+      });
+      const session = fakeSession("s1");
+      session.cwd = "/Users/homie/notes";
+      session.project = "notes";
+
+      try {
+        const enriched = await internals.enrichSession(session);
+
+        // Git resolved mainRepoRoot to $HOME itself. Trusting that would
+        // name every non-repo directory under home after the home
+        // directory, so this must fall through to deriveProject's
+        // $HOME-bounded walk instead, landing on the cwd's own basename.
+        expect(enriched.mainRepoRoot).toBe("/Users/homie");
+        expect(enriched.project).toBe("notes");
+        expect(enriched.project).not.toBe("homie");
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("still guards when $HOME is a symlink, which git's answer never is (S4)", async () => {
+      // `mainRepoRoot` comes from `git rev-parse --path-format=absolute`, which
+      // resolves symlinks. An unresolved home therefore never compares equal to
+      // it, and on a machine with a relocated home the guard silently stopped
+      // firing: `resolvedHomeDir` is what keeps the two comparable.
+      const fixture = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-s4-")));
+      const realHome = join(fixture, "real-home");
+      const linkedHome = join(fixture, "linked-home");
+      mkdirSync(join(realHome, "notes"), { recursive: true });
+      symlinkSync(realHome, linkedHome);
+      const gitAnswer = `main\n${realHome}\n${realHome}/.git\n${realHome}/.git\n`;
+
+      const unresolved = createServer();
+      unresolved.internals.homeDir = linkedHome;
+      const resolved = createServer();
+      resolved.internals.homeDir = resolvedHomeDir(linkedHome);
+      const git = stubGitSpawn({ stdout: gitAnswer });
+      try {
+        const inHome = (server: typeof unresolved) => {
+          const session = fakeSession("s1");
+          session.cwd = join(realHome, "notes");
+          session.project = "notes";
+          return server.internals.enrichSession(session);
+        };
+
+        // The bug: git says $HOME, the guard compares against a link and lets
+        // the home directory's own name through.
+        expect((await inHome(unresolved)).project).toBe("real-home");
+        expect((await inHome(resolved)).project).toBe("notes");
+      } finally {
+        git.restore();
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    });
+
+    it("initializes the $HOME boundary from the resolved home directory (S4)", async () => {
+      // The field the guard reads must come through the resolver, not a raw
+      // `homedir()`; on a machine whose home is a link this is the difference
+      // between the guard working and doing nothing.
+      const { internals } = createServer();
+      expect(internals.homeDir).toBe(realpathSync(homedir()));
+    });
+
+    it("does not suppress git's project name when mainRepoRoot is merely under home, not $HOME itself (S4)", async () => {
+      // A real repo checked out under home (e.g. ~/dotfiles) is not the
+      // pattern the guard targets: only mainRepoRoot === $HOME exactly
+      // triggers it, so an ordinary repo elsewhere under home keeps
+      // grouping by its own name.
+      const { internals } = createServer();
+      internals.homeDir = "/Users/homie";
+      const git = stubGitSpawn({
+        stdout:
+          "main\n/Users/homie/dotfiles\n/Users/homie/dotfiles/.git\n/Users/homie/dotfiles/.git\n",
+      });
+      const session = fakeSession("s1");
+      session.cwd = "/Users/homie/dotfiles";
+
+      try {
+        const enriched = await internals.enrichSession(session);
+
+        expect(enriched.mainRepoRoot).toBe("/Users/homie/dotfiles");
+        expect(enriched.project).toBe("dotfiles");
+      } finally {
+        git.restore();
+      }
+    });
+
+    it("warns once when git echoes an unrecognized flag back, the real old-git shape (O3)", async () => {
+      // Real git on a version without `--path-format` doesn't just fail to
+      // answer it - it echoes the flag back as an EXTRA stdout line and
+      // still answers the rest of the argv, so the actual shape is 5
+      // lines, not 4: the echoed flag, then branch/topLevel/gitDir/
+      // commonDir in argument order. A 4-line mock of this case is a shape
+      // real git cannot produce, and it hid that the length gate used to
+      // return UNKNOWN_GIT_INFO before the warning check ever ran.
+      const { internals } = createServer();
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
+      const git = stubGitSpawn({
+        stdout:
+          "--path-format=absolute\nmain\n/Users/test/proj\n/Users/test/proj/.git\n/Users/test/proj/.git\n",
+      });
+
+      try {
+        const enriched = await internals.enrichSession(fakeSession("s1"));
+
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]?.[0]).toContain("older than 2.31");
+        expect(enriched.gitBranch).toBeNull();
+        expect(enriched.isWorktree).toBe(false);
+        expect(enriched.mainRepoRoot).toBeNull();
+        expect(enriched.worktreeRoot).toBeNull();
+
+        // Said once, not per lookup: a second session on a different cwd
+        // hits the same unanswerable git, but the warning doesn't repeat.
+        const secondSession = fakeSession("s2");
+        secondSession.cwd = "/Users/test/other";
+        await internals.enrichSession(secondSession);
+        expect(warn).toHaveBeenCalledTimes(1);
+      } finally {
+        git.restore();
+        warn.mockRestore();
       }
     });
 
@@ -3363,16 +3500,22 @@ describe("POST /spawn", () => {
   // with Enter. Both are pinned end to end through the route.
 
   /**
+   * A stubbed subcommand either exits with a code and output, or throws
+   * synchronously the way `Bun.spawn` really does for an oversized argv
+   * (E2BIG on macOS, a single over-128KiB argument on Linux) rather than
+   * exiting non-zero.
+   */
+  type TmuxOutcome = { code: number; out: string } | { throws: true };
+
+  /**
    * Stub `Bun.spawn`, recording every argv. Outcomes are matched by tmux
    * subcommand so a test only has to describe the calls it cares about;
    * anything unlisted succeeds with empty output.
    */
-  function withTmuxRecorder(
-    outcomes: Record<string, { code: number; out: string }> = {},
-  ) {
+  function withTmuxRecorder(outcomes: Record<string, TmuxOutcome> = {}) {
     const original = Bun.spawn;
     const argv: string[][] = [];
-    const defaults: Record<string, { code: number; out: string }> = {
+    const defaults: Record<string, TmuxOutcome> = {
       // Pane probe: `#{window_id} #{session_id}` for a live pane.
       "display-message": { code: 0, out: "@9 $3\n" },
     };
@@ -3380,6 +3523,9 @@ describe("POST /spawn", () => {
       argv.push(spawned);
       const key = spawned[1] ?? "";
       const next = outcomes[key] ?? defaults[key] ?? { code: 0, out: "%99\n" };
+      if ("throws" in next) {
+        throw new Error("posix_spawn failed: E2BIG (Argument list too long)");
+      }
       return {
         exited: Promise.resolve(next.code),
         stdout: new Blob([next.out]).stream(),
@@ -3645,6 +3791,123 @@ describe("POST /spawn", () => {
     }
   });
 
+  it("rejects an over-cap prompt before any pane exists", async () => {
+    // `/spawn` has no config gate on prompt size, unlike `/invoke`'s
+    // `MAX_INVOKE_PROMPT_BYTES`. Below this cap `Bun.spawn` throws E2BIG
+    // rather than exiting non-zero, well after the pane exists; the cap
+    // turns that into a clean 400 with nothing created.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({
+          agent: "prompty",
+          cwd,
+          prompt: "a".repeat(MAX_SPAWN_PROMPT_BYTES + 1),
+        }),
+      );
+      expect(res.status).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error).toContain(String(MAX_SPAWN_PROMPT_BYTES));
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects a prompt Linux could not pass as one argument", async () => {
+    // 200 KiB passed the old 256 KiB cap and then threw at spawn time on
+    // Linux, where a SINGLE argument over 128 KiB (MAX_ARG_STRLEN) is rejected
+    // no matter how small the rest of the argv is. That throw surfaced as a
+    // 500 after the pane existed, which is exactly what the cap exists to
+    // prevent, so the cap has to sit below the per-argument limit.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({
+          agent: "prompty",
+          cwd,
+          prompt: "a".repeat(200 * 1024),
+        }),
+      );
+      expect(res.status).toBe(400);
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects a prompt whose ESCAPED form outgrows the argument limit", async () => {
+    // A raw-prompt cap cannot make the promise on its own: every single quote
+    // becomes four bytes ('\''), so a prompt well inside the cap can build a
+    // command that no longer fits. Measured on the built string instead, and
+    // still before any pane exists.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const prompt = "'".repeat(64 * 1024);
+      expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(
+        MAX_SPAWN_PROMPT_BYTES,
+      );
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, prompt }),
+      );
+
+      expect(res.status).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error).toContain("single command argument");
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("accepts a prompt exactly at the byte cap", async () => {
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({
+          agent: "prompty",
+          cwd,
+          prompt: "a".repeat(MAX_SPAWN_PROMPT_BYTES),
+          detach: true,
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(argv.length).toBeGreaterThan(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("kills the pane when a post-creation tmux spawn throws instead of exiting non-zero", async () => {
+    // `Bun.spawn` throws synchronously for an oversized argv rather than
+    // exiting non-zero (confirmed: E2BIG at ~1MB on macOS, a single
+    // over-128KiB argument on Linux). Before this fix, that throw skipped
+    // straight to the outer catch, which had no pane id in scope and left
+    // the orphan behind.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder({
+      "send-keys": { throws: true },
+    });
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, detach: true }),
+      );
+      expect(res.status).toBeGreaterThanOrEqual(500);
+      expect(argv.map((a) => a[1])).toEqual([
+        "new-window",
+        "send-keys",
+        "kill-pane",
+      ]);
+      expect(argv[2]).toEqual(["tmux", "kill-pane", "-t", "%99"]);
+    } finally {
+      restore();
+    }
+  });
+
   it("detaching passes -d and skips select-window", async () => {
     // Both halves are needed. `-d` stops tmux making the new window
     // current (which it does by default), and skipping select-window
@@ -3674,6 +3937,77 @@ describe("POST /spawn", () => {
       );
       expect(argv[0]).not.toContain("-d");
       expect(argv.map((a) => a[1])).toContain("select-window");
+    } finally {
+      restore();
+    }
+  });
+
+  it("omitted detach behaves like false", async () => {
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      await internals.handleRequest(spawnRequest({ agent: "prompty", cwd }));
+      expect(argv[0]).not.toContain("-d");
+      expect(argv.map((a) => a[1])).toContain("select-window");
+    } finally {
+      restore();
+    }
+  });
+
+  it("treats an explicitly null detach as absent", async () => {
+    // The rest of the spawn body (prompt, resume, fork) deliberately reads an
+    // explicit null as "field omitted", for clients that serialize it that
+    // way; detach 400ing on it was the odd one out.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, detach: null }),
+      );
+
+      expect(res.status).toBe(200);
+      expect(argv[0]).not.toContain("-d");
+      expect(argv.map((a) => a[1])).toContain("select-window");
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects a truthy non-boolean detach instead of treating it as true", async () => {
+    // Before the fix, `body` was an unchecked cast: the string "false" is
+    // truthy, so it passed tmux `-d` and suppressed `select-window` — the
+    // opposite of what the caller wrote.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, detach: "false" }),
+      );
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain(
+        "detach",
+      );
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("succeeds without killing the pane when select-window itself throws", async () => {
+    // The agent is already running by the time select-window runs
+    // (send-keys succeeded), so a focus-switch failure here must not be
+    // reported as a failed spawn or tear down a session the caller can
+    // already see.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder({
+      "select-window": { throws: true },
+    });
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, detach: false }),
+      );
+      expect(res.status).toBe(200);
+      expect(argv.map((a) => a[1])).not.toContain("kill-pane");
     } finally {
       restore();
     }
@@ -3778,6 +4112,30 @@ describe("POST /spawn", () => {
       executable: "unforkable",
       forkCommand: undefined,
     };
+    /** The shape Claude ships: resume by transcript PATH, so the fork is not
+     *  tied to the directory the source happens to be sitting in. */
+    const pathForkAgent: AgentDef = {
+      ...forkAgent,
+      name: "pathy",
+      executable: "pathy",
+      forkCommand: "{bin} --resume '{path}' --fork-session",
+    };
+
+    /** A readable transcript on disk, since a `{path}` fork stats the file. */
+    function transcriptFor(
+      manager: SessionManager,
+      sessionId: string,
+      name = "src-sid.jsonl",
+    ): { path: string; cleanup: () => void } {
+      const dir = mkdtempSync(join(tmpdir(), "ccmux-forkpath-"));
+      const path = join(dir, name);
+      writeFileSync(path, "{}\n");
+      manager.setLogPath(sessionId, path);
+      return {
+        path,
+        cleanup: () => rmSync(dir, { recursive: true, force: true }),
+      };
+    }
 
     /** A row of `agentType` sitting in a pane in a real cwd. `null` for the
      *  native id is the no-hooks case: an agent ccmux can see but whose
@@ -3834,11 +4192,7 @@ describe("POST /spawn", () => {
           }),
         );
         expect(res.status).toBe(200);
-        // And it starts in the SOURCE's directory. This used to assert that
-        // an explicit cwd wins, which live testing disproved: Claude looks a
-        // resumed session up under the project dir for the current cwd, so a
-        // fork elsewhere finds no conversation. That combination is now
-        // refused outright (see the test below).
+        // And with no cwd sent it starts in the SOURCE's directory.
         expect(argv[0]).toContain(source.cwd);
         expect(argv[1]?.[4]).toContain("forky --resume src-sid");
       } finally {
@@ -3928,14 +4282,15 @@ describe("POST /spawn", () => {
       }
     });
 
-    it("refuses a fork into a DIFFERENT directory", async () => {
-      // Verified live on Claude Code 2.1.220: the pane opens, send-keys
-      // succeeds, the route answers 200, and the agent prints "No
-      // conversation found with session ID" before dropping to a bare shell,
-      // because Claude looks a resumed session up under the project dir for
-      // the CURRENT cwd. A clear 400 beats a dead pane nothing can detect.
-      const { manager, internals } = serverForAgents([forkAgent]);
-      const source = trackedSession(manager, "forky");
+    it("forks into a DIFFERENT directory", async () => {
+      // This used to be a 400. The model behind it was wrong: `--resume <id>`
+      // is repo-scoped (it also tries every checkout `git worktree list`
+      // reports), and the built-in template now resumes by transcript path,
+      // which is directory-independent outright. The equality test refused
+      // destinations that work, and never fired on the path the picker uses.
+      const { manager, internals } = serverForAgents([pathForkAgent]);
+      const source = trackedSession(manager, "pathy");
+      const { path, cleanup } = transcriptFor(manager, source.id);
       const elsewhere = realpathSync(
         mkdtempSync(join(tmpdir(), "ccmux-fork-")),
       );
@@ -3944,21 +4299,127 @@ describe("POST /spawn", () => {
         const res = await internals.handleRequest(
           spawnRequest({ fork: source.id, cwd: elsewhere, detach: true }),
         );
-        expect(res.status).toBe(400);
-        const { error } = (await res.json()) as { error: string };
-        expect(error).toContain("different directory");
-        expect(error).toContain(source.cwd);
-        // Nothing was created, so there is no dead pane to clean up.
-        expect(argv).toHaveLength(0);
+        expect(res.status).toBe(200);
+        // The pane really is created in the requested directory, and the
+        // command it runs points at the source's own transcript.
+        expect(argv[0]).toContain(elsewhere);
+        expect(argv[1]?.[4]).toBe(`pathy --resume '${path}' --fork-session`);
       } finally {
         restore();
+        cleanup();
         rmSync(elsewhere, { recursive: true, force: true });
       }
     });
 
+    it("defaults to the source's directory when no cwd is sent", async () => {
+      // What the picker does, and the reason it is a default rather than a
+      // constraint: a fork belongs beside its original.
+      const { manager, internals } = serverForAgents([pathForkAgent]);
+      const source = trackedSession(manager, "pathy");
+      const { cleanup } = transcriptFor(manager, source.id);
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id, detach: true }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[0]).toContain(source.cwd);
+      } finally {
+        restore();
+        cleanup();
+      }
+    });
+
+    it("quotes a transcript path containing a space and a quote", async () => {
+      // Byte-exact, because this string is typed into a pane's shell and a
+      // project directory can legally hold either character.
+      const { manager, internals } = serverForAgents([pathForkAgent]);
+      const source = trackedSession(manager, "pathy");
+      const { path, cleanup } = transcriptFor(
+        manager,
+        source.id,
+        "it's a.jsonl",
+      );
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id, detach: true }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[1]?.[4]).toBe(
+          `pathy --resume '${path.replace(/'/g, "'\\''")}' --fork-session`,
+        );
+        // Spelled out once, so a change to the escaping cannot pass by
+        // rewriting the expression above.
+        expect(argv[1]?.[4]).toContain("/it'\\''s a.jsonl'");
+      } finally {
+        restore();
+        cleanup();
+      }
+    });
+
+    it("refuses a {path} fork with no usable transcript, creating no pane", async () => {
+      // The path form's whole value is that the agent opens the file instead
+      // of deriving a directory. A path that resolves to nothing reproduces
+      // the failure it prevents: a live pane that found no conversation,
+      // which ccmux cannot detect. So this has to 400 BEFORE tmux is touched.
+      const dir = mkdtempSync(join(tmpdir(), "ccmux-forkpath-"));
+      const unusable = [
+        // Never recorded (no hooks yet, or a row that has not taken a turn).
+        null,
+        // Relative, so it would resolve against the destination's cwd.
+        "relative/src-sid.jsonl",
+        // Absolute and named right, but not on disk.
+        join(dir, "gone.jsonl"),
+      ];
+      try {
+        for (const logPath of unusable) {
+          const { manager, internals } = serverForAgents([pathForkAgent]);
+          const source = trackedSession(manager, "pathy");
+          if (logPath !== null) manager.setLogPath(source.id, logPath);
+          const { argv, restore } = withTmuxRecorder();
+          try {
+            const res = await internals.handleRequest(
+              spawnRequest({ fork: source.id, detach: true }),
+            );
+            expect(res.status).toBe(400);
+            const { error } = (await res.json()) as { error: string };
+            expect(error).toContain("Cannot fork session src-sid");
+            // Actionable: names both ways out.
+            expect(error).toContain("ccmux setup");
+            expect(error).toContain("--resume {id}");
+            expect(argv).toHaveLength(0);
+          } finally {
+            restore();
+          }
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("still forks an id-based template with no transcript at all", async () => {
+      // The compatibility fallback. `--resume <absolute path>` is
+      // undocumented (verified on Claude Code 2.1.218 through 2.1.220), so
+      // reverting `agents.<name>.forkCommand` to the id form in ccmux.json
+      // has to keep working, transcript or no transcript.
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const source = trackedSession(manager, "forky");
+      expect(source.logPath).toBeNull();
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id, detach: true }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[1]?.[4]).toBe("forky --resume src-sid --fork-session");
+      } finally {
+        restore();
+      }
+    });
+
     it("allows an explicit cwd that MATCHES the source", async () => {
-      // The refusal is about a DIFFERENT directory, not about the field
-      // being present: a caller echoing the session's own cwd is fine.
+      // Echoing the session's own cwd is as accepted as omitting it.
       const { manager, internals } = serverForAgents([forkAgent]);
       const source = trackedSession(manager, "forky");
       const { argv, restore } = withTmuxRecorder();
@@ -3973,13 +4434,136 @@ describe("POST /spawn", () => {
       }
     });
 
+    /**
+     * The id-form template is repo-scoped, so its destination is not free the
+     * way a `{path}` fork's is. These two drive real git (the guard resolves
+     * both directories' main checkout), so tmux is stubbed on its own.
+     */
+    describe("an id-form template's destination", () => {
+      function withTmuxOnly() {
+        const original = Bun.spawn;
+        const argv: string[][] = [];
+        Bun.spawn = ((spawned: string[], opts?: unknown) => {
+          if (spawned[0] !== "tmux") {
+            return (original as (a: string[], b?: unknown) => unknown)(
+              spawned,
+              opts,
+            );
+          }
+          argv.push(spawned);
+          const out = spawned[1] === "display-message" ? "@9 $3\n" : "%99\n";
+          return {
+            exited: Promise.resolve(0),
+            stdout: new Blob([out]).stream(),
+            stderr: new Blob([""]).stream(),
+          };
+        }) as unknown as typeof Bun.spawn;
+        return { argv, restore: () => (Bun.spawn = original) };
+      }
+
+      const fixtureEnv = {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@t",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@t",
+      };
+      function fixtureGit(cwd: string, ...args: string[]): void {
+        const proc = Bun.spawnSync(["git", "-C", cwd, ...args], {
+          env: fixtureEnv,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        if (proc.exitCode !== 0) {
+          throw new Error(
+            `git ${args.join(" ")} failed: ${proc.stderr.toString()}`,
+          );
+        }
+      }
+      /** A one-commit repo, realpath'd so it compares equal to git's answer. */
+      function fixtureRepo(): string {
+        const repo = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-forkid-")));
+        Bun.spawnSync(["git", "init", "-q", repo], { env: fixtureEnv });
+        fixtureGit(repo, "commit", "-q", "--allow-empty", "-m", "x");
+        return repo;
+      }
+
+      it("is refused outside the source's repository, creating no pane", async () => {
+        // `claude --resume <id>` derives the project directory from the launch
+        // cwd and falls back to every checkout `git worktree list` reports, so
+        // from outside the repo it finds no conversation, prints "No
+        // conversation found" and drops to a shell: a live pane ccmux cannot
+        // tell from a working fork. Refused before tmux is touched.
+        const repo = fixtureRepo();
+        const elsewhere = realpathSync(
+          mkdtempSync(join(tmpdir(), "ccmux-forkid-out-")),
+        );
+        const { manager, internals } = serverForAgents([forkAgent]);
+        const source = manager.createPaneTrackedSession({
+          agentType: "forky",
+          paneId: "%3",
+          cwd: repo,
+          pid: 4242,
+          nativeSessionId: "src-sid",
+        });
+        const { argv, restore } = withTmuxOnly();
+        try {
+          const res = await internals.handleRequest(
+            spawnRequest({ fork: source.id, cwd: elsewhere, detach: true }),
+          );
+
+          expect(res.status).toBe(400);
+          const { error } = (await res.json()) as { error: string };
+          // Names the cause and the way out, since the id form is itself the
+          // escape hatch someone chose in ccmux.json.
+          expect(error).toContain("forkCommand");
+          expect(error).toContain("{path}");
+          expect(argv).toHaveLength(0);
+        } finally {
+          restore();
+          rmSync(repo, { recursive: true, force: true });
+          rmSync(elsewhere, { recursive: true, force: true });
+        }
+      });
+
+      it("accepts a sibling worktree of the same repository", async () => {
+        // The guard is repo-scoped, not the plain cwd equality it replaces:
+        // every checkout of the repo is a directory the id resolves from, and
+        // forking into one is the whole point of the worktree destination.
+        const repo = fixtureRepo();
+        const sibling = join(repo, "trees", "feature");
+        fixtureGit(repo, "worktree", "add", "-q", "-b", "feature", sibling);
+        const { manager, internals } = serverForAgents([forkAgent]);
+        const source = manager.createPaneTrackedSession({
+          agentType: "forky",
+          paneId: "%3",
+          cwd: repo,
+          pid: 4242,
+          nativeSessionId: "src-sid",
+        });
+        const { argv, restore } = withTmuxOnly();
+        try {
+          const res = await internals.handleRequest(
+            spawnRequest({ fork: source.id, cwd: sibling, detach: true }),
+          );
+
+          expect(res.status).toBe(200);
+          expect(argv[0]).toContain(sibling);
+          expect(argv[1]?.[4]).toBe("forky --resume src-sid --fork-session");
+        } finally {
+          restore();
+          rmSync(repo, { recursive: true, force: true });
+        }
+      });
+    });
+
     it("refuses a fork into a new worktree, creating nothing", async () => {
-      // Same wall as the explicit-cwd refusal above, reached a different way:
-      // a fork into a worktree sends no `cwd` at all, so that check passes and
-      // the relocation only appears once the worktree resolves. The source cwd
-      // is a REAL repo here, so the worktree would genuinely have been created
-      // had the refusal come later — which is what the directory assertion
-      // pins down.
+      // Not a resume-scoping wall any more (a fork into an existing directory
+      // is accepted above): this request CREATES its destination, and the
+      // combination is unverified against a live agent, so it stays refused
+      // until it ships as its own feature. The source cwd is a REAL repo
+      // here, so the worktree would genuinely have been created had the
+      // refusal come later — which is what the directory assertion pins down.
       //
       // The name is load-bearing. A fork carries no prompt, so a BARE
       // `worktree: {}` is already refused with "a worktree needs a name" and
@@ -4020,7 +4604,6 @@ describe("POST /spawn", () => {
         expect(res.status).toBe(400);
         const { error } = (await res.json()) as { error: string };
         expect(error).toContain("into a new worktree");
-        expect(error).toContain(repo);
         expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
         expect(argv).toHaveLength(0);
       } finally {
@@ -4332,6 +4915,56 @@ describe("worktree prune endpoints", () => {
     const body = (await res.json()) as { outcomes: unknown[] };
 
     expect(body.outcomes).toHaveLength(1);
+  });
+
+  /**
+   * O7: `MAX_PRUNE_PATHS` (500 in server.ts) used to silently `break` once
+   * the de-duplicated set hit the cap, dropping the remainder with no error
+   * and no field saying anything was dropped. It now rejects the request
+   * outright, for both `paths` and `allowDirty` (a silently dropped opt-in
+   * fails closed but is exactly as silent as a dropped path).
+   */
+  it("rejects a path list over the cap and names the cap", async () => {
+    const { repo } = makePruneFixture();
+    const { internals } = serverFor(repo);
+    const over = Array.from({ length: 501 }, (_, i) => join(root, `p${i}`));
+
+    const res = await post(internals, { paths: over });
+    const body = (await res.json()) as { error: string };
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("501");
+    expect(body.error).toContain("500");
+  });
+
+  it("rejects an over-cap allowDirty list too, not just paths", async () => {
+    const { repo, worktree } = makePruneFixture();
+    const { internals } = serverFor(repo);
+    const over = Array.from({ length: 501 }, (_, i) => join(root, `p${i}`));
+
+    const res = await post(internals, {
+      paths: [worktree],
+      allowDirty: over,
+    });
+    const body = (await res.json()) as { error: string };
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("501");
+    expect(existsSync(worktree)).toBe(true);
+  });
+
+  it("accepts a path list exactly at the cap", async () => {
+    const { repo } = makePruneFixture();
+    const { internals } = serverFor(repo);
+    const atCap = Array.from({ length: 500 }, (_, i) => join(root, `p${i}`));
+
+    const res = await post(internals, { paths: atCap });
+    const body = (await res.json()) as { error?: string };
+
+    // Not the cap rejection; it proceeds to the normal "not currently
+    // removable" refusal for these made-up paths instead.
+    expect(res.status).not.toBe(400);
+    expect(body.error ?? "").not.toContain("the limit is");
   });
 });
 

@@ -29,7 +29,16 @@ export function spawnBinaryFor(
   return agent.executable ?? agent.name;
 }
 
-const BUILTIN_NAMES = new Set(BUILTIN_AGENTS.map((agent) => agent.name));
+/**
+ * The binary each built-in launches when the user has declared nothing:
+ * `agent.executable ?? agent.name`, which is what `spawnBinaryFor` returns
+ * for an unconfigured def. A resolved binary that differs from its entry was
+ * hand-declared (`agents.<name>.executable`, or claude's `command`); a name
+ * with no entry at all is a custom agent.
+ */
+const BUILTIN_BINARIES = new Map(
+  BUILTIN_AGENTS.map((agent) => [agent.name, agent.executable ?? agent.name]),
+);
 
 /**
  * The agents worth offering in the new-session dialog, in `getAgents` order
@@ -41,8 +50,9 @@ const BUILTIN_NAMES = new Set(BUILTIN_AGENTS.map((agent) => agent.name));
  * agents from `ccmux.json` are listed unconditionally: the user declared
  * one by hand, and its `executable` is as likely to be a shell function or
  * a wrapper `Bun.which` cannot see as it is to be missing — so the honest
- * answer comes from the spawn attempt, not from hiding it. A `command`
- * preference makes Claude hand-declared in exactly the same way, so it is
+ * answer comes from the spawn attempt, not from hiding it. A built-in whose
+ * binary the user declared (claude's `command`, or any built-in's
+ * `executable` override) is hand-declared in exactly the same way, so it is
  * listed unconditionally too.
  */
 export function listSpawnableAgents(
@@ -55,17 +65,17 @@ export function listSpawnableAgents(
   const which = options.which ?? Bun.which;
   const spawnable: SpawnableAgent[] = [];
   for (const agent of agents) {
-    // A `command` preference is as hand-declared as a custom agent's
-    // `executable`, and the same argument applies: it is documented as
-    // possibly being a bare alias (`c`), a `~`-relative path, or
-    // `$HOME/.local/bin/claude` (see `buildAgentSpawnCommand`), and
-    // `Bun.which` resolves none of those. The command is typed into an
-    // interactive shell, where it does resolve — so gating on `which` here
-    // hides an agent that would spawn perfectly well.
-    const declaredClaudeCommand =
-      agent.name === "claude" && options.claudeCommand !== undefined;
-    if (BUILTIN_NAMES.has(agent.name) && !declaredClaudeCommand) {
-      const binary = spawnBinaryFor(agent, options.claudeCommand);
+    // Any hand-declared binary is as good as a custom agent's `executable`,
+    // and the same argument applies: it is documented as possibly being a
+    // bare alias (`c`), a `~`-relative path, or `$HOME/.local/bin/claude`
+    // (see `buildAgentSpawnCommand`), and `Bun.which` resolves none of
+    // those. It is typed into an interactive shell, where it does resolve —
+    // so gating on `which` here hides an agent that would spawn perfectly
+    // well. One test covers claude's `command` and every built-in's
+    // `executable` override alike: only a binary still equal to the
+    // catalogue default is PATH-gated.
+    const binary = spawnBinaryFor(agent, options.claudeCommand);
+    if (binary === BUILTIN_BINARIES.get(agent.name)) {
       if (which(binary) === null) continue;
     }
     spawnable.push({

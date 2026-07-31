@@ -1,3 +1,5 @@
+import { accessSync, constants, statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import type { AgentDef } from "../lib/agents";
 
 /**
@@ -65,6 +67,31 @@ export function normalizeTarget(
 }
 
 /**
+ * Validate a wire boolean field (`detach`). Every other spawn field goes
+ * through a normalizer that rejects anything not in its accepted shape; this
+ * one used to be an unchecked cast, so a truthy non-boolean like the string
+ * `"false"` silently reached tmux as `true`.
+ *
+ * Absent stays absent for the caller to default, and an explicit `null` counts
+ * as absent, the way `prompt`, `resume` and `fork` all treat it: a client that
+ * serializes omitted fields as null is saying nothing, not sending a bad value.
+ * Strings and numbers are still refused, since each of those is a caller who
+ * meant something specific and would otherwise get the opposite.
+ */
+export function normalizeBoolean(
+  value: unknown,
+  field: string,
+): BuildResult<boolean | undefined> {
+  if (value === undefined || value === null)
+    return { ok: true, value: undefined };
+  if (typeof value === "boolean") return { ok: true, value };
+  return {
+    ok: false,
+    error: `Invalid '${field}' field: expected true or false`,
+  };
+}
+
+/**
  * Control characters the prompt may not contain. A NUL in particular
  * survives shell escaping but makes `Bun.spawn` reject the argv — and it
  * would do so AFTER the pane exists, leaving an orphan behind and
@@ -75,11 +102,37 @@ export function normalizeTarget(
 const FORBIDDEN_PROMPT_CONTROL_CHARS = /[\x00-\x08\x0b\x0c\x0e-\x1f]/;
 
 /**
+ * Budget for the BUILT spawn command, which reaches tmux as one argv element
+ * (`send-keys -t <pane> <command> Enter`). Linux rejects an `execve` whose
+ * single argument exceeds `MAX_ARG_STRLEN` (128 KiB on 4 KiB pages) however
+ * small the rest of the argv is, so that per-argument limit, not the ~1 MB of
+ * total argv macOS enforces, is what decides whether `Bun.spawn` throws. Set
+ * conservatively below it by design, matching `MAX_ARGV_PROMPT_BYTES` in
+ * `invokers/constants.ts`, which caps the same OS limit for the same reason.
+ *
+ * Deliberately NOT the 256 KiB `/invoke` allows: an invoked prompt is written
+ * to stdin or chunked into a pane rather than travelling as one argument, so
+ * it has no per-argument ceiling to respect. The two numbers diverge because
+ * the transports do.
+ */
+export const MAX_SPAWN_COMMAND_BYTES = 120 * 1024;
+
+/**
+ * Upper bound on a spawn `prompt`'s byte size: the command budget less
+ * headroom for the template that wraps it. This is the friendlier of the two
+ * checks (it names the field the caller actually sent) but it cannot be the
+ * guarantee on its own, because the command is longer than the prompt: the
+ * template adds bytes, and `escapeSingleQuoted` turns every `'` into four.
+ * {@link spawnCommandTooLarge} is what makes the promise true.
+ */
+export const MAX_SPAWN_PROMPT_BYTES = MAX_SPAWN_COMMAND_BYTES - 2 * 1024;
+
+/**
  * Validate the wire `prompt` field. Absent stays absent; anything present
- * must be a non-blank string free of control characters. Empty is
- * rejected rather than ignored: `--prompt ""` silently spawning a bare
- * agent (and slipping past the refusal an agent without `promptCommand`
- * would otherwise get) is worse than a clear error.
+ * must be a non-blank string free of control characters, within the byte
+ * cap. Empty is rejected rather than ignored: `--prompt ""` silently
+ * spawning a bare agent (and slipping past the refusal an agent without
+ * `promptCommand` would otherwise get) is worse than a clear error.
  */
 export function normalizePrompt(
   value: unknown,
@@ -98,7 +151,34 @@ export function normalizePrompt(
       error: `Invalid 'prompt' field: must not contain control characters`,
     };
   }
+  const byteLength = Buffer.byteLength(value, "utf8");
+  if (byteLength > MAX_SPAWN_PROMPT_BYTES) {
+    return {
+      ok: false,
+      error:
+        `Invalid 'prompt' field: exceeds maximum size of ` +
+        `${MAX_SPAWN_PROMPT_BYTES} bytes (got ${byteLength})`,
+    };
+  }
   return { ok: true, value };
+}
+
+/**
+ * Why the built command cannot be handed to tmux, or undefined when it fits.
+ *
+ * Asked of the string a builder produced, since that is the argv element the
+ * OS measures. Everything the builders do is pure string work, so the caller
+ * can ask before it creates a pane or a worktree and turn what used to be a
+ * throw-then-500 into a 400 with nothing behind it.
+ */
+export function spawnCommandTooLarge(command: string): string | undefined {
+  const byteLength = Buffer.byteLength(command, "utf8");
+  if (byteLength <= MAX_SPAWN_COMMAND_BYTES) return undefined;
+  return (
+    `The command this spawn would run is ${byteLength} bytes, over the ` +
+    `${MAX_SPAWN_COMMAND_BYTES}-byte limit for a single command argument. ` +
+    `Shorten the prompt (quoting it grows it: every single quote becomes four bytes).`
+  );
 }
 
 /**
@@ -140,30 +220,77 @@ export function substitutePlaceholders(
   return template.replace(pattern, (_match, name: string) => values[name]!);
 }
 
+/**
+ * Placeholders whose value is free-form text made safe by
+ * `escapeSingleQuoted`, so each occurrence has to land in a genuine
+ * single-quoted context. `path` is here for the same reason `prompt` is: a
+ * filesystem path can hold quotes, spaces and shell metacharacters.
+ *
+ * Everything else a template can carry (`bin`, `id`) is inert by
+ * construction and validated separately.
+ */
+const QUOTED_PLACEHOLDERS = ["prompt", "path"] as const;
+
+const QUOTED_PLACEHOLDER_NAMES: ReadonlySet<string> = new Set(
+  QUOTED_PLACEHOLDERS,
+);
+const QUOTED_TOKENS = QUOTED_PLACEHOLDERS.map((name) => `{${name}}`);
+
+/**
+ * Escape the free-form values and substitute the whole template in ONE
+ * pass. `prompt` and `path` are escaped for a single-quoted word; every
+ * other value (`bin`, `id`) goes in verbatim, because it is inert by
+ * construction rather than by escaping.
+ *
+ * Callers must have cleared `quotedTemplateProblem` first: the escaping
+ * only holds inside the quoting that check proves is there.
+ */
+export function substituteQuotedTemplate(
+  template: string,
+  values: Record<string, string>,
+): string {
+  const substitutions: Record<string, string> = {};
+  for (const [name, value] of Object.entries(values)) {
+    substitutions[name] = QUOTED_PLACEHOLDER_NAMES.has(name)
+      ? escapeSingleQuoted(value)
+      : value;
+  }
+  return substitutePlaceholders(template, substitutions);
+}
+
 type QuoteState = "none" | "single" | "double";
 
 /**
  * Walk a template the way `sh` reads it, recording the quoting state at
- * each `{prompt}` and whether the template ends with every quote closed.
+ * each `{prompt}` / `{path}` and whether the template ends with every quote
+ * closed.
  *
- * Both placeholders are skipped as inert text, which is what their
- * substituted values are: the prompt is single-quote escaped, and the
- * binary is separately required to be quote-neutral (see
- * `binaryIsQuoteNeutral`) precisely so that skipping it here is sound.
+ * Every placeholder is skipped as inert text, which is what its substituted
+ * value is: `{prompt}` and `{path}` are single-quote escaped, and the binary
+ * is separately required to be quote-neutral (see `binaryIsQuoteNeutral`)
+ * precisely so that skipping it here is sound.
+ *
+ * There is no backslash handling because a backslash anywhere in the
+ * template is refused before this runs (see `UNSAFE_TEMPLATE_CONSTRUCTS`).
+ * Modelling it here is what caused the original bypass: consuming two
+ * characters at once swallowed the `{` of a following `{prompt}`, so the
+ * scan missed an occurrence that `substitutePlaceholders` still replaced.
  */
-function scanPromptPlaceholders(template: string): {
+function scanQuotedPlaceholders(template: string): {
   balanced: boolean;
-  states: QuoteState[];
+  placeholders: { token: string; state: QuoteState }[];
 } {
-  const PROMPT = "{prompt}";
   const BIN = "{bin}";
   let state: QuoteState = "none";
-  const states: QuoteState[] = [];
+  const placeholders: { token: string; state: QuoteState }[] = [];
 
   for (let i = 0; i < template.length; ) {
-    if (template.startsWith(PROMPT, i)) {
-      states.push(state);
-      i += PROMPT.length;
+    const token = QUOTED_TOKENS.find((candidate) =>
+      template.startsWith(candidate, i),
+    );
+    if (token !== undefined) {
+      placeholders.push({ token, state });
+      i += token.length;
       continue;
     }
     if (template.startsWith(BIN, i)) {
@@ -178,10 +305,6 @@ function scanPromptPlaceholders(template: string): {
       i += 1;
       continue;
     }
-    if (char === "\\") {
-      i += 2;
-      continue;
-    }
     if (state === "none") {
       if (char === "'") state = "single";
       else if (char === '"') state = "double";
@@ -191,39 +314,66 @@ function scanPromptPlaceholders(template: string): {
     i += 1;
   }
 
-  return { balanced: state === "none", states };
+  return { balanced: state === "none", placeholders };
 }
 
 /**
- * Constructs that make a template impossible to reason about safely. A
- * double quote means the single quotes around `{prompt}` may be inert
+ * Constructs that make a template impossible to reason about safely, each
+ * paired with the wording used to refuse it so someone hand-writing a
+ * template is told WHICH construct was rejected.
+ *
+ * A double quote means the single quotes around `{prompt}` may be inert
  * (`{bin} "pre'{prompt}'post"` expands `$(...)` straight out of prompt
  * text); backticks and `$(` mean part of the command is the OUTPUT of
  * another command, so even a correctly quoted prompt is re-split by the
- * shell after substitution. None of them are needed to name a launcher,
- * and false assurance is worse than no check, so they are refused
- * outright rather than modelled.
+ * shell after substitution. A backslash desynchronizes any quote scan from
+ * what the shell does (`{bin} '{prompt}' \{prompt}` emitted a second,
+ * unquoted copy of the prompt), which is also why `binaryIsQuoteNeutral`
+ * already refuses one in the launcher. `$'` opens bash and zsh ANSI-C
+ * quoting, where backslashes ARE interpreted, so `escapeSingleQuoted`'s
+ * `'\''` idiom is inert and prompt text breaks straight out; refusing it
+ * costs nothing, since the escaper only ever produces plain single-quoted
+ * output.
+ *
+ * None of them are needed to name a launcher, and false assurance is worse
+ * than no check, so they are refused outright rather than modelled.
  */
-const UNSAFE_TEMPLATE_CONSTRUCT = /["`]|\$\(/;
+const UNSAFE_TEMPLATE_CONSTRUCTS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/"/, "a double quote"],
+  [/`/, "a backtick"],
+  [/\$\(/, "a '$(' command substitution"],
+  [/\\/, "a backslash"],
+  [/\$'/, 'a "$\'" ANSI-C quote'],
+];
 
 /**
- * A `promptCommand` template is only safe if every `{prompt}` sits in a
- * genuine single-quoted context, because that is the quoting
- * `escapeSingleQuoted` produces. Checking only the adjacent characters is
- * not enough: in `sh -c "{bin} '{prompt}'"` the placeholder is flanked by
- * single quotes, but the enclosing word is double-quoted, where `'` is an
- * ordinary character and the escaping is inert. Templates come from the
- * user's config file, which is trusted to name a command but must not be
- * able to turn prompt text into shell syntax, so anything this cannot
- * prove safe is refused. Module-private: the check presupposes the
- * escaping it guards.
+ * A template is only safe if every `{prompt}` and `{path}` sits in a genuine
+ * single-quoted context, because that is the quoting `escapeSingleQuoted`
+ * produces. Checking only the adjacent characters is not enough: in
+ * `sh -c "{bin} '{prompt}'"` the placeholder is flanked by single quotes,
+ * but the enclosing word is double-quoted, where `'` is an ordinary
+ * character and the escaping is inert. Templates come from the user's config
+ * file, which is trusted to name a command but must not be able to turn
+ * prompt text or a path into shell syntax, so anything this cannot prove
+ * safe is refused.
+ *
+ * Returns the reason it could not be proven safe, or `undefined` when it is.
+ * Presupposes the escaping it guards, so it belongs with
+ * `substituteQuotedTemplate` and callers must run the two as a pair. Says
+ * nothing about WHICH placeholders a template needs; that is the caller's
+ * contract with its own config field.
  */
-function promptPlaceholderIsQuoted(template: string): boolean {
-  if (UNSAFE_TEMPLATE_CONSTRUCT.test(template)) return false;
-  const { balanced, states } = scanPromptPlaceholders(template);
-  return (
-    balanced && states.length > 0 && states.every((state) => state === "single")
-  );
+export function quotedTemplateProblem(template: string): string | undefined {
+  for (const [pattern, name] of UNSAFE_TEMPLATE_CONSTRUCTS) {
+    if (pattern.test(template)) return `it contains ${name}`;
+  }
+  const { balanced, placeholders } = scanQuotedPlaceholders(template);
+  if (!balanced) return "its quotes are not balanced";
+  const unquoted = placeholders.find((entry) => entry.state !== "single");
+  if (unquoted !== undefined) {
+    return `${unquoted.token} is not inside single quotes`;
+  }
+  return undefined;
 }
 
 /**
@@ -314,21 +464,30 @@ export function buildAgentSpawnCommand(
           `around the prompt.`,
       };
     }
-    if (!promptPlaceholderIsQuoted(template)) {
+    // Without `{prompt}` the prompt is silently dropped and the agent comes
+    // up with nothing to answer, which looks like the spawn half-worked.
+    if (!template.includes("{prompt}")) {
       return {
         ok: false,
         error:
-          `Invalid 'agents.${agent.name}.promptCommand': every {prompt} placeholder must sit ` +
-          `inside balanced single quotes, and the template may not contain double quotes, ` +
-          `backticks, or '$(' (e.g. "{bin} '{prompt}'").`,
+          `Invalid 'agents.${agent.name}.promptCommand': must contain the {prompt} ` +
+          `placeholder, otherwise the prompt would be dropped (e.g. "{bin} '{prompt}'").`,
+      };
+    }
+    const problem = quotedTemplateProblem(template);
+    if (problem !== undefined) {
+      return {
+        ok: false,
+        error:
+          `Invalid 'agents.${agent.name}.promptCommand': ${problem}. Every {prompt} ` +
+          `placeholder must sit inside balanced single quotes, and the template may not ` +
+          `contain double quotes, backticks, backslashes, '$(' or "$'" ` +
+          `(e.g. "{bin} '{prompt}'").`,
       };
     }
     return {
       ok: true,
-      value: substitutePlaceholders(template, {
-        bin: binary,
-        prompt: escapeSingleQuoted(prompt),
-      }),
+      value: substituteQuotedTemplate(template, { bin: binary, prompt }),
     };
   }
 
@@ -341,6 +500,76 @@ export interface AgentForkCommandInput {
   binary: string;
   /** The SOURCE session's native id, substituted for `{id}`. */
   sessionId: string;
+  /**
+   * The SOURCE session's transcript file, substituted for `{path}`. Only
+   * templates that use `{path}` need it, and it is validated here rather
+   * than by the caller (see `resolveForkTranscript`), so no route can lose
+   * the check.
+   */
+  logPath?: string | null;
+}
+
+/**
+ * The transcript file a `{path}` fork will resume, or why `logPath` cannot
+ * be handed to a resume flag.
+ *
+ * The point of resuming by path is that the agent opens the file instead of
+ * deriving a directory, so a path that does not resolve to a readable
+ * transcript produces the exact failure the path form exists to avoid: a
+ * live pane that found no conversation, which nothing downstream can see.
+ * Better to refuse before the pane exists.
+ *
+ * The `.jsonl` requirement is a shape guard, not a filesystem one:
+ * `Session.logPath` is whatever the source recorded (for a background row it
+ * is `state.json`'s scan path verbatim), so "a readable file" alone would
+ * happily pass a value that is not a transcript at all.
+ */
+function resolveForkTranscript(
+  logPath: string | null | undefined,
+): BuildResult<string> {
+  const refuse = (error: string): BuildResult<string> => ({ ok: false, error });
+  if (!logPath) return refuse("ccmux has recorded no transcript path for it");
+  if (!isAbsolute(logPath)) {
+    return refuse(`its recorded transcript path is not absolute (${logPath})`);
+  }
+  if (!logPath.endsWith(".jsonl")) {
+    return refuse(
+      `its recorded transcript path is not a .jsonl transcript (${logPath})`,
+    );
+  }
+  try {
+    if (!statSync(logPath).isFile()) {
+      return refuse(`its transcript path is not a file (${logPath})`);
+    }
+    accessSync(logPath, constants.R_OK);
+  } catch {
+    return refuse(`its transcript is missing or unreadable (${logPath})`);
+  }
+  return { ok: true, value: logPath };
+}
+
+/** Whether a fork template resumes by transcript path (see the builder). */
+function templateUsesTranscriptPath(template: string): boolean {
+  return template.includes("{path}");
+}
+
+/**
+ * Whether this agent's fork template resumes by `{id}` alone, which makes the
+ * fork REPO-SCOPED and its destination not free.
+ *
+ * `claude --resume <id>` resolves the id against project directories derived
+ * from the launch cwd, falling back to every checkout `git worktree list`
+ * reports: it finds the conversation from anywhere inside the source's repo
+ * and nowhere outside it, where it prints "No conversation found" and drops to
+ * a shell (a live pane no ccmux surface can tell from a working fork).
+ * `{path}` skips that resolution entirely, so only the id form constrains
+ * where a fork may land. The route asks before it creates anything; see
+ * `buildAgentForkCommand` for the two forms.
+ */
+export function forkResumesByIdAlone(agent: AgentDef): boolean {
+  const template = agent.forkCommand;
+  if (typeof template !== "string" || template === "") return false;
+  return !templateUsesTranscriptPath(template) && template.includes("{id}");
 }
 
 /**
@@ -353,15 +582,30 @@ export interface AgentForkCommandInput {
  * different `cwd` and destination, so that feature reuses this function
  * unchanged and only swaps the placement half.
  *
- * There is no quoting scan like `promptCommand`'s, because nothing
- * free-form is interpolated: `{id}` is constrained to
- * `NATIVE_SESSION_ID_PATTERN` right here, and `{bin}` is the same value
- * the bare-spawn path already sends to the shell verbatim.
+ * A template resumes by `{path}` (the source's transcript file) or by
+ * `{id}` (the source's native session id), and the difference is not
+ * cosmetic. `claude --resume <id>` resolves the id against project
+ * directories derived from the launch cwd, falling back to every checkout
+ * `git worktree list` reports, so it is REPO-scoped: it finds the
+ * conversation from anywhere inside the repo and nowhere outside it.
+ * `claude --resume <absolute path>` skips that resolution entirely and works
+ * from any directory, which is why the built-in template uses it and why the
+ * route no longer has to constrain the destination cwd.
+ *
+ * `{path}` is undocumented (absent from `claude --help`), verified on Claude
+ * Code 2.1.218 through 2.1.220 in print and interactive mode, and not
+ * publicly guaranteed. `{id}` therefore stays a first-class placeholder: if
+ * a release breaks the path form, `agents.claude.forkCommand` can be set
+ * back to the id form in ccmux.json without a ccmux change.
+ *
+ * `{id}` needs no quoting scan (`NATIVE_SESSION_ID_PATTERN` makes it inert
+ * to the shell). `{path}` does, and gets exactly `{prompt}`'s treatment:
+ * `quotedTemplateProblem` plus `substituteQuotedTemplate`.
  */
 export function buildAgentForkCommand(
   input: AgentForkCommandInput,
 ): BuildResult<string> {
-  const { agent, binary, sessionId } = input;
+  const { agent, binary, sessionId, logPath } = input;
   const template = agent.forkCommand;
 
   // Empty string shares this branch, not the placeholder check below. It is
@@ -390,24 +634,72 @@ export function buildAgentForkCommand(
       error: `Invalid 'agents.${agent.name}.forkCommand': expected a string.`,
     };
   }
-  // Without `{id}` the command starts a FRESH session: the pane appears, the
-  // agent runs, and the history the user asked to branch is silently absent.
-  // A refusal is far easier to act on than that.
-  if (!template.includes("{id}")) {
+  // Naming neither the transcript nor the id starts a FRESH session: the pane
+  // appears, the agent runs, and the history the user asked to branch is
+  // silently absent. A refusal is far easier to act on than that.
+  if (!templateUsesTranscriptPath(template) && !template.includes("{id}")) {
     return {
       ok: false,
       error:
-        `Invalid 'agents.${agent.name}.forkCommand': must contain the {id} placeholder, ` +
-        `otherwise the fork would start a fresh session instead of continuing this one.`,
+        `Invalid 'agents.${agent.name}.forkCommand': must contain the {path} placeholder ` +
+        `(the source's transcript file) or {id} (its native session id), otherwise the ` +
+        `fork would start a fresh session instead of continuing this one.`,
     };
   }
+  // Checked whether or not `{id}` is used: the id is what identifies the
+  // source everywhere else, so a value this loose is a bug worth surfacing
+  // even when it never reaches the shell.
   if (!NATIVE_SESSION_ID_PATTERN.test(sessionId)) {
     return { ok: false, error: `Invalid session id: ${sessionId}` };
   }
 
+  if (!templateUsesTranscriptPath(template)) {
+    return {
+      ok: true,
+      value: substitutePlaceholders(template, { id: sessionId, bin: binary }),
+    };
+  }
+
+  const transcript = resolveForkTranscript(logPath);
+  if (!transcript.ok) {
+    return {
+      ok: false,
+      error:
+        `Cannot fork session ${sessionId}: ${transcript.error}. ` +
+        `'agents.${agent.name}.forkCommand' resumes by transcript path, so the fork ` +
+        `cannot be built without one. Install hooks with 'ccmux setup' so ccmux records ` +
+        `the transcript, take a turn in the session, or set that template to the id form ` +
+        `("{bin} --resume {id} --fork-session") to resume by session id instead.`,
+    };
+  }
+  if (!binaryIsQuoteNeutral(binary)) {
+    return {
+      ok: false,
+      error:
+        `Cannot fork '${agent.name}': its launcher (${binary}) contains a quote, a ` +
+        `backslash, or a command substitution, which would break the quoting around the ` +
+        `transcript path.`,
+    };
+  }
+  const problem = quotedTemplateProblem(template);
+  if (problem !== undefined) {
+    return {
+      ok: false,
+      error:
+        `Invalid 'agents.${agent.name}.forkCommand': ${problem}. Every {path} ` +
+        `placeholder must sit inside balanced single quotes, and the template may not ` +
+        `contain double quotes, backticks, backslashes, '$(' or "$'" ` +
+        `(e.g. "{bin} --resume '{path}' --fork-session").`,
+    };
+  }
+
   return {
     ok: true,
-    value: substitutePlaceholders(template, { id: sessionId, bin: binary }),
+    value: substituteQuotedTemplate(template, {
+      id: sessionId,
+      bin: binary,
+      path: transcript.value,
+    }),
   };
 }
 

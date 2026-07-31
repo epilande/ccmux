@@ -46,6 +46,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 ### Prerequisites
 
 - [tmux](https://github.com/tmux/tmux) with active sessions running AI coding agents
+- git 2.31 or newer (for branch and worktree detection; ccmux still works without it, just without that info)
 
 ### Homebrew
 
@@ -317,10 +318,10 @@ and places the new pane beside the source's own. `ccmux spawn --fork
 `ccmux spawn`, relative to the pane you run it from. Either way the new pane
 is tracked like any other session, with its own row, state and id.
 
-The fork always starts in the source's directory. Claude looks a resumed
-session up under the project directory for the current working directory, so
-a fork somewhere else would find no conversation at all; `--cwd` pointing
-elsewhere is refused rather than silently opening an empty shell.
+The fork starts in the source's directory by default, because that is where a
+side-by-side fork belongs. It is a default, not a limit: `--cwd` elsewhere is
+honored, since the fork resumes the source's transcript by path rather than by
+looking a session id up under the current directory.
 
 Fork needs two things, and the picker hides the action when either is missing:
 the agent has to declare how it forks (`forkCommand`), and ccmux has to know
@@ -344,9 +345,9 @@ Agents create git worktrees faster than anyone cleans them up, and the ones wher
 | `upstream gone`  | The branch had an upstream and it's gone after a `fetch --prune`       |
 | `PR closed`      | The PR was closed without merging; the branch is kept                  |
 
-Removing a worktree deletes its directory, attempts to delete the local branch, closes the leftover pane once its agent has exited, prunes git's metadata, and drops the directory's entry from `~/.claude.json`. Branch deletion follows the evidence rather than the reason: a merged PR is force-deleted (`git branch -D`, since a squash merge leaves the tip unmerged by git's definition), `merged locally` and `upstream gone` use the safe `git branch -d` and report a refusal if git says the branch still holds unmerged work, and `PR closed` keeps the branch entirely.
+Removing a worktree stops its agent (SIGTERM, escalating to SIGKILL if it does not exit) as a backstop, since a worktree with a bound live session is never offered in the first place, closes the leftover pane, deletes the directory, attempts to delete the local branch, prunes git's metadata, and drops the directory's entry from `~/.claude.json`. A worktree whose agent still won't die even after SIGKILL is refused rather than deleted, so nothing is removed out from under a process that may still be writing to it. Branch deletion follows the evidence rather than the reason: a merged PR is force-deleted (`git branch -D`, since a squash merge leaves the tip unmerged by git's definition), `merged locally` and `upstream gone` use the safe `git branch -d` and report a refusal if git says the branch still holds unmerged work, and `PR closed` keeps the branch entirely.
 
-Safety rules, in short: a worktree with **any** bound session, working, idle, or waiting, is never offered, a branch still sitting on a base's tip is never classified as merged, nothing is pre-selected, dirty worktrees (uncommitted or untracked changes) need their own <kbd>D</kbd> opt-in on top of being selected and are re-checked immediately before deletion, a `worktree.symlinkDirectories` symlink does not count as dirty (it is setup, not your work), gitignored files that would be deleted are listed before you confirm, and the main checkout is never a candidate.
+Safety rules, in short: a worktree with **any** bound session, working, idle, or waiting, is never offered, a branch still sitting on a base's tip is never classified as merged, a worktree whose PR state cannot be established (`gh` missing, logged out, offline, or pointed at a host it does not recognize) is skipped with the reason shown rather than treated as having no PR, nothing is pre-selected, dirty worktrees (uncommitted or untracked changes) need their own <kbd>D</kbd> opt-in on top of being selected and are re-checked immediately before deletion, a `worktree.symlinkDirectories` symlink does not count as dirty (it is setup, not your work), gitignored files that would be deleted are surfaced before you confirm (the CLI lists them, the picker shows a count with up to two names on the row), and the main checkout is never a candidate.
 
 Each directory is renamed to a `.ccmux-trash-<name>-<timestamp>` sibling before being deleted, so the path frees immediately and the contents survive for the length of the run. If ccmux is interrupted mid-run, look for that directory next to where the worktree was: `mv .ccmux-trash-<name>-<timestamp> <name>` restores it, and `git worktree repair <name>` re-links it to the repo.
 
@@ -742,7 +743,9 @@ template the way `sh` does and refuses it unless every `{prompt}` lands in a
 real single-quoted context with the template's quotes balanced, so an unquoted
 or double-quoted placeholder is rejected, and so is one whose single quotes sit
 inside double quotes (`sh -c "agent '{prompt}'"`), where `'` is just an
-ordinary character and the escaping would do nothing. The optional `{bin}`
+ordinary character and the escaping would do nothing. Backticks, `$(`,
+backslashes, and bash/zsh `$'...'` quoting are rejected too, and the error
+names whichever one it found. The optional `{bin}`
 resolves to the agent's launcher, so a wrapper binary or `executable` override
 survives.
 
@@ -757,7 +760,7 @@ You can also override built-in agent settings by using the agent's name as the k
 | `versionPatterns`     | No       | Regex patterns to extract version from output                                       |
 | `resumeCommand`       | No       | Command template for restarting (`{id}` placeholder)                                |
 | `promptCommand`       | No       | Command template for `spawn --prompt` (`{prompt}` placeholder, single-quoted)       |
-| `forkCommand`         | No       | Command template for Fork / `spawn --fork` (`{id}` placeholder, optional `{bin}`)   |
+| `forkCommand`         | No       | Command template for Fork / `spawn --fork` (`{path}` single-quoted, or `{id}`)      |
 | `sessionFilePattern`  | No       | Regex to extract session ID from log filenames                                      |
 | `executable`          | No       | Command used to launch the agent (defaults to key)                                  |
 | `hooks`               | No       | `{ type }` (built-in override only; internal)                                       |

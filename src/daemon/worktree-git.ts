@@ -527,6 +527,77 @@ export async function readUpstreamStates(
 }
 
 /**
+ * What this repo's remotes say about whether a pull request could exist.
+ *
+ * Read on the PR-lookup FAILURE path only (see `ghPRStateLookup`), to separate
+ * "gh could not answer" from "there was nothing for gh to answer about".
+ *
+ * - `none`: the repo has no remote URLs at all. A pull request has nowhere to
+ *   live, so gh refusing to run here IS the answer, and a locally merged
+ *   worktree stays prunable. This is the only case the permissive branch gets,
+ *   because it is the only one absence is provable in.
+ * - `github`: some remote URL is recognizably github.com, so a PR could exist
+ *   and a gh failure is hiding it.
+ * - `unknown`: remotes exist but none is recognizably github.com. A GitHub
+ *   Enterprise custom domain, an ssh config alias (`git@gh-personal:o/r.git`)
+ *   and an `insteadOf` shorthand (`gh:o/r`) all land here, and none of them is
+ *   derivable from the URL. It is handled exactly like `github`: an
+ *   unrecognized host is not proof that no PR exists, and the branch that
+ *   deletes directories does not get to guess.
+ */
+export type RemoteHosting = "github" | "none" | "unknown";
+
+/**
+ * Whether a single remote URL is recognizably github.com.
+ *
+ * Bounded on both sides so a lookalike host cannot pass: `evil-github.com`
+ * fails the left boundary (`-` is not a host separator) and
+ * `github.com.evil.io` fails the right one (the host does not end there).
+ */
+export function isGitHubRemoteUrl(url: string): boolean {
+  return /(^|[@/.])github\.com([/:]|$)/i.test(url.trim());
+}
+
+/** @see RemoteHosting */
+export async function classifyRemoteHosting(
+  cwd: string,
+  git: GitRun = runGit,
+): Promise<RemoteHosting> {
+  // Two probes, because one cannot answer both halves. This one establishes
+  // repo-ness: outside a repo there is no config to read and nothing to
+  // conclude, which is the only thing scoping the config read to `--local`
+  // was ever buying.
+  const repo = await git(cwd, ["rev-parse", "--git-dir"]);
+  if (repo.exitCode !== 0) return "unknown";
+
+  // Remotes are then read at FULL config scope, NOT `--local`. A remote can
+  // live in global or system config (dotfiles that `include.path` a shared
+  // file, an `includeIf` per-directory block, `GIT_CONFIG_GLOBAL`), where
+  // `git remote -v` and `gh` both still see it. `--local` reported those repos
+  // as having no remote at all, which is the one permissive answer: a broken
+  // `gh` then read as "no PR can exist here" and a locally merged worktree was
+  // offered for force-deletion with its PR still open.
+  const res = await git(cwd, ["config", "--get-regexp", "^remote\\..*\\.url"]);
+  // Exit 1 is git's documented "no key matched": no remote URLs at all.
+  if (res.exitCode === 1) return "none";
+  // Anything else (git missing, config unreadable) tells us nothing about the
+  // remotes, so claim the strict path rather than the convenient one.
+  if (res.exitCode !== 0) return "unknown";
+
+  // `--get-regexp` prints `<key> <value>`; the value is everything after the
+  // first space, since a remote URL may itself be a path containing spaces.
+  const urls = res.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+    .map((line) => line.slice(line.indexOf(" ") + 1));
+  // Exit 0 with nothing to read is a shape git is not supposed to produce, so
+  // it goes to the strict side rather than being read as "no remotes".
+  if (urls.length === 0) return "unknown";
+  return urls.some(isGitHubRemoteUrl) ? "github" : "unknown";
+}
+
+/**
  * `git fetch --prune`, the call that turns a branch deleted on GitHub into a
  * locally visible `[gone]`. Slow (network) and therefore run once per repo
  * per prune surface, never per worktree. Failure is not fatal: without it the

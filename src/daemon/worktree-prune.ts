@@ -27,6 +27,7 @@ import {
 } from "./agent-state";
 
 import {
+  classifyRemoteHosting,
   fetchPrune,
   isMergedInto,
   listWorktrees,
@@ -38,6 +39,7 @@ import {
   resolveBaseRefs,
   runGit,
   type GitRun,
+  type RemoteHosting,
   type UpstreamState,
   type WorktreeEntry,
 } from "./worktree-git";
@@ -75,11 +77,39 @@ export interface PRState {
   state: "OPEN" | "MERGED" | "CLOSED";
 }
 
-/** Resolves the PR (if any) for a branch, including merged/closed ones. */
+/**
+ * Outcome of one PR lookup, discriminated on purpose.
+ *
+ * "This branch has no PR" and "the PR state could not be established" are
+ * opposite facts for a feature that deletes directories, and they used to be
+ * the same `null`: gh missing, unauthenticated, rate-limited, offline or
+ * returning garbage all read as "no PR", which is precisely how an OPEN PR
+ * goes undetected. See {@link classifyOne} for what a failure does instead.
+ */
+export type PRLookupResult =
+  | { ok: true; pr: PRState | null }
+  | { ok: false; error: string };
+
+/**
+ * What the REPO's remotes say about whether a PR could exist, resolved at most
+ * once for the whole scan. Remotes are repo-level config that every linked
+ * worktree shares, and the answer is only read on the lookup FAILURE path, so
+ * probing git per worktree would repeat an identical pair of calls for every
+ * worktree of a repo on exactly the machine where `gh` is already broken.
+ */
+export type RemoteHostingLookup = () => Promise<RemoteHosting>;
+
+/**
+ * Resolves the PR (if any) for a branch, including merged/closed ones.
+ *
+ * `hosting` is the scan's shared remote classification. It is optional so a
+ * one-off call (`ghPRStateLookup(cwd, branch)`) still classifies for itself.
+ */
 export type PRStateLookup = (
   cwd: string,
   branch: string,
-) => Promise<PRState | null>;
+  hosting?: RemoteHostingLookup,
+) => Promise<PRLookupResult>;
 
 /** A session living in a worktree, as the prune surfaces need to see it. */
 export interface WorktreeSession {
@@ -222,8 +252,44 @@ export function selectPRForBranch(
  * resolver filters out, and precisely the state that makes a worktree
  * removable. See {@link selectPRForBranch} for how one of the returned PRs is
  * proven to be about this branch rather than a namesake.
+ *
+ * Every way this can fail to reach an answer — gh absent, unauthenticated,
+ * rate-limited, offline, or replying with something that is not the requested
+ * JSON — reports `ok: false` rather than "no PR", because the caller deletes
+ * directories on the difference. The one exception is a repo that has no
+ * remotes at all ({@link classifyRemoteHosting}), where a refusal IS the
+ * answer.
  */
-export const ghPRStateLookup: PRStateLookup = async (cwd, branch) => {
+export const ghPRStateLookup: PRStateLookup = async (
+  cwd,
+  branch,
+  hostingLookup,
+) => {
+  /**
+   * A gh failure in a repo with NO remotes is not a missing answer: a PR has
+   * nowhere to live there, so the worktree stays classifiable. Every other
+   * repo, including one whose remotes are simply not recognizable as
+   * github.com, reports the failure as-is.
+   */
+  const failed = async (error: string): Promise<PRLookupResult> => {
+    const hosting = await (hostingLookup
+      ? hostingLookup()
+      : classifyRemoteHosting(cwd));
+    if (hosting === "none") return { ok: true, pr: null };
+    return {
+      ok: false,
+      error:
+        hosting === "unknown"
+          ? `${error} (no remote recognizable as github.com, so a PR cannot be ruled out)`
+          : error,
+    };
+  };
+
+  // A single try/catch around the whole spawn-through-parse sequence: a
+  // missing `gh` binary throws from `Bun.spawn` itself (ENOENT) rather than
+  // producing a process to await, so there is no exit code to branch on for
+  // that case. JSON parsing gets its own inner catch so its message can say
+  // "JSON" specifically rather than being folded into the generic one below.
   try {
     const proc = Bun.spawn(
       [
@@ -249,9 +315,20 @@ export const ghPRStateLookup: PRStateLookup = async (cwd, branch) => {
       { cwd, stdout: "pipe", stderr: "ignore", env: { ...process.env } },
     );
     const exitCode = await proc.exited;
-    if (exitCode !== 0) return null;
-    const rows = (await new Response(proc.stdout).json()) as GhPRRow[];
-    if (!Array.isArray(rows) || rows.length === 0) return null;
+    if (exitCode !== 0) return failed(`gh pr list exited ${exitCode}`);
+
+    let rows: GhPRRow[];
+    try {
+      rows = (await new Response(proc.stdout).json()) as GhPRRow[];
+    } catch (err) {
+      return failed(
+        `gh pr list did not return valid JSON: ${errorMessage(err)}`,
+      );
+    }
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return { ok: true, pr: null };
+    }
+
     // `refs/heads/` qualified for the same reason as `isMergedInto`: a tag
     // sharing the branch name outranks the branch in git's disambiguation,
     // and this SHA is what proves the PR belongs to this branch.
@@ -261,11 +338,15 @@ export const ghPRStateLookup: PRStateLookup = async (cwd, branch) => {
       `refs/heads/${branch}^{commit}`,
     ]);
     const localTip = tip.exitCode === 0 ? tip.stdout.trim() : null;
-    return selectPRForBranch(rows, localTip);
-  } catch {
-    return null;
+    return { ok: true, pr: selectPRForBranch(rows, localTip) };
+  } catch (err) {
+    return failed(`gh could not be run: ${errorMessage(err)}`);
   }
 };
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 export interface ScanDeps {
   git?: GitRun;
@@ -388,6 +469,10 @@ export async function scanRepo(
   const repoName = basename(repoRoot);
   // Read once per repo, not per worktree: it is the same file for all of them.
   const setupSymlinks = readSymlinkDirectories(repoRoot);
+  // Same reasoning, one step lazier: the remote classification is repo-level
+  // too, but only the PR-lookup failure path reads it, so it is resolved on
+  // first use and then shared instead of being probed per worktree.
+  const hosting = onceAsync(() => classifyRemoteHosting(repoRoot, git));
 
   // Bounded concurrency, not a serial loop: the expensive step is one
   // `gh pr list` per branch at ~0.5s of network latency each, so 15 worktrees
@@ -403,6 +488,7 @@ export async function scanRepo(
         baseRefs,
         upstreams,
         setupSymlinks,
+        hosting,
         git,
         deps,
       }),
@@ -417,6 +503,17 @@ export async function scanRepo(
 
 /** Concurrent `gh pr list` calls per repo during classification. */
 const CLASSIFY_CONCURRENCY = 6;
+
+/**
+ * Run an async producer at most once, sharing the SAME promise with every
+ * later caller. Sharing the promise (rather than the resolved value) is what
+ * makes it safe under `mapWithConcurrency`, where several worktrees can ask
+ * before the first answer has landed.
+ */
+function onceAsync<T>(produce: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | undefined;
+  return () => (pending ??= produce());
+}
 
 /**
  * `Promise.all` with a ceiling on how many run at once, preserving input
@@ -450,6 +547,8 @@ interface ClassifyContext {
   upstreams: Map<string, UpstreamState>;
   /** `worktree.symlinkDirectories`, so a setup symlink is not read as dirt. */
   setupSymlinks: string[];
+  /** The repo's shared remote classification. @see RemoteHostingLookup */
+  hosting: RemoteHostingLookup;
   git: GitRun;
   deps: ScanDeps;
 }
@@ -548,8 +647,26 @@ async function classifyOne(
   //   perfectly ordinary merged PR would go unseen.
   //
   // Concurrency across worktrees is where the time comes back instead.
+  //
+  // S7: a failed lookup is NOT treated as "no PR". `gh` missing,
+  // unauthenticated, rate-limited, offline, or replying with garbage used to
+  // collapse to the same `null` as a branch with no PR, which reproduces
+  // exactly the skip two paragraphs up warns against: an open PR going
+  // undetected. It only matters when local evidence would otherwise offer
+  // this worktree (`mergedLocally` or `upstream.gone`) — a failure can only
+  // ever WITHHOLD a worktree, never manufacture a reason, so `reasonFor` is
+  // never reached with a guessed PR state. A worktree with no local evidence
+  // either was never a candidate, gh or no gh, so it stays silent rather than
+  // turning every in-flight worktree into a skip line on a broken machine.
   const lookupPR = deps.lookupPR ?? ghPRStateLookup;
-  const pr = await lookupPR(path, branch);
+  const lookup = await lookupPR(path, branch, ctx.hosting);
+  if (!lookup.ok) {
+    if (mergedLocally || upstream.gone) {
+      return skip(`PR state could not be determined: ${lookup.error}`);
+    }
+    return {};
+  }
+  const pr = lookup.pr;
   if (pr?.state === "OPEN") return {};
 
   const reason = reasonFor(pr, mergedLocally, upstream.gone);
@@ -662,11 +779,25 @@ export interface PruneOptions extends PruneDeps {
    * the one outcome no amount of "I confirmed the list" should authorize by
    * itself. Enforced here, in the destructive core, so every surface inherits
    * it rather than each one re-implementing the gate.
+   *
+   * Compared against `normalizePath(candidate.path)`, not the raw path (S10):
+   * a caller (`server.ts`) normalizes this list before sending it, and
+   * `candidate.path` is git's own raw recorded path, which can differ from
+   * the normalized form by case (case-insensitive filesystem) or a resolved
+   * symlink. Comparing them un-normalized still fails closed, but dead-ends
+   * an opted-in removal on a spurious "was not opted in".
    */
   allowDirtyPaths?: string[];
 }
 
 const PROCESS_EXIT_TIMEOUT_MS = 3000;
+/**
+ * How long to wait for a SIGKILL to take effect after SIGTERM went
+ * unanswered (S9). SIGKILL cannot be trapped or ignored, so this only needs
+ * to cover the OS's own reap latency, not any agent shutdown work — kept
+ * short deliberately.
+ */
+const SIGKILL_VERIFY_TIMEOUT_MS = 1000;
 
 function defaultKill(pid: number, signal: NodeJS.Signals | 0): void {
   process.kill(pid, signal);
@@ -745,22 +876,59 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 /**
+ * Poll `kill(pid, 0)` until it throws (process gone) or `timeoutMs` elapses,
+ * reporting whether the process is STILL alive at the end of that window.
+ * Shared by the SIGTERM wait and the SIGKILL verify (S9): both are "did the
+ * signal already land" checks that differ only in the timeout and which
+ * signal preceded them.
+ */
+async function stillAliveAfter(
+  pid: number,
+  kill: (pid: number, signal: NodeJS.Signals | 0) => void,
+  sleep: (ms: number) => Promise<void>,
+  timeoutMs: number,
+): Promise<boolean> {
+  let alive = true;
+  const deadline = Date.now() + timeoutMs;
+  while (alive && Date.now() < deadline) {
+    try {
+      kill(pid, 0);
+      await sleep(50);
+    } catch {
+      alive = false;
+    }
+  }
+  return alive; // true == still answering when the window ran out
+}
+
+/**
  * Stop a worktree's agents and close their panes.
  *
- * The pane is closed only after the process is confirmed gone (or the wait
- * times out and is reported): closing first would leave the agent orphaned
- * mid-write against a directory that is about to be renamed out from under
- * it, which is exactly the shutdown this is trying to avoid.
+ * The pane is closed only after the process is confirmed gone (or SIGKILL was
+ * tried and its own wait ran out): closing first would leave the agent
+ * orphaned mid-write against a directory that is about to be renamed out from
+ * under it, which is exactly the shutdown this is trying to avoid.
+ *
+ * S9: a SIGTERM that goes unanswered for `PROCESS_EXIT_TIMEOUT_MS` escalates
+ * to SIGKILL, verified the same way. `allExited` in the returned summary is
+ * false only when a process still answers `kill(pid, 0)` after that
+ * escalation — at that point ccmux has done everything short of a bug in the
+ * OS to end it, and {@link runPrune} refuses to rename or delete that
+ * candidate's directory rather than delete out from under a process that may
+ * still be writing to it. The pane is still closed either way: closing it is
+ * a UI courtesy, not a data-safety measure, so it is not worth withholding
+ * over a process ccmux could not kill.
  */
 async function stopSessions(
   candidate: PruneCandidate,
   deps: PruneDeps,
   steps: PruneStep[],
-): Promise<string[]> {
+): Promise<{ closedPanes: string[]; allExited: boolean }> {
   const kill = deps.killProcess ?? defaultKill;
   const closePane = deps.closePane ?? defaultClosePane;
   const sleep = deps.sleep ?? defaultSleep;
   const closed: string[] = [];
+  let allExited = true;
 
   for (const session of candidate.sessions) {
     if (session.background) {
@@ -780,21 +948,40 @@ async function stopSessions(
       } catch {
         alive = false; // already gone
       }
-      const deadline = Date.now() + PROCESS_EXIT_TIMEOUT_MS;
-      while (alive && Date.now() < deadline) {
+      if (alive) {
+        alive = await stillAliveAfter(
+          session.pid,
+          kill,
+          sleep,
+          PROCESS_EXIT_TIMEOUT_MS,
+        );
+      }
+      let escalated = false;
+      if (alive) {
+        escalated = true;
         try {
-          kill(session.pid, 0);
-          await sleep(50);
+          kill(session.pid, "SIGKILL");
         } catch {
-          alive = false;
+          alive = false; // died between the check and the signal
+        }
+        if (alive) {
+          alive = await stillAliveAfter(
+            session.pid,
+            kill,
+            sleep,
+            SIGKILL_VERIFY_TIMEOUT_MS,
+          );
         }
       }
+      if (alive) allExited = false;
       steps.push({
         step: "stop agent",
         ok: !alive,
         detail: alive
-          ? `${session.agentType} pid ${session.pid} did not exit in ${PROCESS_EXIT_TIMEOUT_MS}ms; closing its pane anyway`
-          : `${session.agentType} pid ${session.pid} exited`,
+          ? `${session.agentType} pid ${session.pid} did not exit after SIGTERM or SIGKILL; this worktree will be refused`
+          : escalated
+            ? `${session.agentType} pid ${session.pid} did not exit in ${PROCESS_EXIT_TIMEOUT_MS}ms; SIGKILLed`
+            : `${session.agentType} pid ${session.pid} exited`,
       });
     }
 
@@ -810,7 +997,7 @@ async function stopSessions(
       });
     }
   }
-  return closed;
+  return { closedPanes: closed, allExited };
 }
 
 /**
@@ -835,6 +1022,12 @@ export function trashPathFor(worktreePath: string, now: Date): string {
  * under their trash path and a mistake is recoverable by hand. Repo-level
  * metadata (`git worktree prune`, stale lock files) is reclaimed once per
  * repo rather than once per worktree.
+ *
+ * Per candidate, `stopSessions` (S9) runs BEFORE the dirty re-check (S8),
+ * which runs immediately before the rename. Checking dirt first would leave
+ * the whole agent-shutdown wait unguarded — exactly the gap that let a
+ * comment here claim "immediately before deletion" while the code ran the
+ * check before the wait that made it stale.
  */
 export async function runPrune(
   candidates: PruneCandidate[],
@@ -863,7 +1056,14 @@ export async function runPrune(
     };
     outcomes.push(outcome);
 
-    if (candidate.dirty && !allowDirty.has(candidate.path)) {
+    // S10: compared against the normalized path on both sides. `allowDirty`
+    // arrives normalized (the server normalizes the opt-in list it was
+    // sent), but `candidate.path` is git's own raw recorded path, which can
+    // differ by case on a case-insensitive filesystem or by a symlink git
+    // resolved and the caller's echo did not. Comparing raw-to-normalized
+    // fails closed (nothing is destroyed) but dead-ends the user on a
+    // refusal for a worktree they did opt into.
+    if (candidate.dirty && !allowDirty.has(normalizePath(candidate.path))) {
       outcome.error =
         "has uncommitted or untracked changes and was not opted in";
       steps.push({
@@ -916,12 +1116,40 @@ export async function runPrune(
       });
     }
 
-    // Re-check at the point of no return. The scan-time answer can be tens of
-    // seconds old by now — a `gh pr list` per worktree, plus up to 3s per
-    // session waiting for an agent to exit — and someone editing in a shell in
-    // this worktree during that window would otherwise lose the work with no
-    // opt-in. One `git status`, immediately before the directory moves.
-    if (!allowDirty.has(candidate.path)) {
+    // Stop the worktree's agents (and close their panes) BEFORE the dirty
+    // re-check and the rename, not after (S8). The wait below is up to
+    // PROCESS_EXIT_TIMEOUT_MS per session, and running it AFTER the re-check
+    // — the previous order — left that whole window unguarded: an agent
+    // flushing state during its own shutdown, or a user editing in a shell,
+    // could dirty the directory in the gap between the check and the rename.
+    //
+    // S9: `stopSessions` escalates an unanswered SIGTERM to SIGKILL and
+    // reports whether every session's process is confirmed gone. A candidate
+    // whose agent survives even SIGKILL is refused here rather than deleted:
+    // the previous behavior renamed and deleted the directory unconditionally
+    // after the wait, so a wedged agent kept writing into the trash directory
+    // right up until it was removed.
+    const shutdown = await stopSessions(candidate, options, steps);
+    outcome.panesClosed = shutdown.closedPanes;
+    if (!shutdown.allExited) {
+      outcome.error =
+        "its agent could not be stopped even after SIGKILL; nothing was deleted";
+      steps.push({
+        step: "refused",
+        ok: false,
+        detail:
+          "a live process may still be writing to this worktree; it was left in place",
+      });
+      continue;
+    }
+
+    // Re-check at the point of no return, AFTER the shutdown wait above, not
+    // before it (S8). The scan-time answer can be tens of seconds old by
+    // now — a `gh pr list` per worktree, plus the agent-exit wait
+    // `stopSessions` just ran — and someone editing in this worktree during
+    // that window would otherwise lose the work with no opt-in. One
+    // `git status`, immediately before the directory moves.
+    if (!allowDirty.has(normalizePath(candidate.path))) {
       // Same setup-symlink exemption as the scan, or a worktree that passed
       // the list would be refused here for the link the tooling itself made.
       //
@@ -942,8 +1170,6 @@ export async function runPrune(
         continue;
       }
     }
-
-    outcome.panesClosed = await stopSessions(candidate, options, steps);
 
     const trash = trashPathFor(candidate.path, now());
     try {

@@ -1,11 +1,12 @@
 import { statSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, relative, isAbsolute, resolve } from "node:path";
 import {
   DAEMON_PORT,
   DAEMON_HOST,
   HEARTBEAT_INTERVAL_MS,
   MAX_SEND_TEXT_CHARS,
   isCcmuxPane,
+  resolvedHomeDir,
 } from "../lib/config";
 import { getPreferences } from "../lib/preferences";
 import {
@@ -18,10 +19,13 @@ import {
   buildAgentForkCommand,
   buildAgentSpawnCommand,
   buildTmuxSpawnArgv,
+  forkResumesByIdAlone,
+  normalizeBoolean,
   normalizePrompt,
   normalizeSplit,
   normalizeTarget,
   normalizeWorktreeRequest,
+  spawnCommandTooLarge,
   substitutePlaceholders,
   NATIVE_SESSION_ID_PATTERN,
   type BuildResult,
@@ -358,6 +362,20 @@ export class DaemonServer {
   private getScanHealth: () => DaemonHealth;
   /** When each repo last had `git fetch --prune` run for a prune scan. */
   private worktreeFetchedAt = new Map<string, number>();
+  /**
+   * Home directory, for the `project` $HOME-boundary guard (S4). A plain
+   * field rather than a constructor param, so a test can stub it directly
+   * the same way it reaches other private state through `ServerInternals` -
+   * matches `DeriveProjectOptions.homeDir` in project-derivation.ts, which
+   * exists for the identical reason: Bun's `os.homedir()` doesn't track a
+   * test-time `process.env.HOME` override.
+   *
+   * Realpath'd once here, because what it is compared against (`mainRepoRoot`,
+   * read from `git rev-parse --path-format=absolute`) already is: with a
+   * symlinked home the equality and the descendant test below both miss and
+   * the guard silently no-ops. @see resolvedHomeDir
+   */
+  private homeDir: string = resolvedHomeDir();
 
   constructor(
     sessionManager: SessionManager,
@@ -538,17 +556,21 @@ export class DaemonServer {
    * its own realpath'd getcwd() while ccmux would resolve them against the
    * cwd STRING — so a plain checkout reached through a symlinked path could
    * compare unequal and read as a worktree. An older git doesn't fail on the
-   * flag, it echoes it; the `isEchoedFlag` gate below turns that into "no
-   * git facts" rather than "everything is a worktree".
+   * flag, it echoes it as an EXTRA stdout line (still answering the rest),
+   * so the affected band emits 5 lines, not 4; the `isEchoedFlag` check
+   * below runs BEFORE the line-count gate for exactly that reason and turns
+   * it into "no git facts" rather than "everything is a worktree" (or, if
+   * it ran after, an unreachable warning masked by the length gate).
    *
-   * Gated on exit 0 AND exactly four lines. The exit-code check is what
-   * actually guards against a phantom `HEAD` branch: a bare repo with an
-   * unborn HEAD still prints one stdout line per argument ("HEAD" and the
-   * literal flags) while exiting 128, so a line-count-only gate would parse
-   * that as a real answer and misreport the branch. The line-count gate
-   * stays as defense-in-depth on top of the exit-code check, not as a
-   * substitute for it. A detached HEAD in a real repo still reports the
-   * literal `HEAD` (exit 0), which is pre-existing behavior and unchanged.
+   * Past the echoed-flag check, gated on exit 0 AND exactly four lines. The
+   * exit-code check is what actually guards against a phantom `HEAD`
+   * branch: a bare repo with an unborn HEAD still prints one stdout line
+   * per argument ("HEAD" and the literal flags) while exiting 128, so a
+   * line-count-only gate would parse that as a real answer and misreport
+   * the branch. The line-count gate stays as defense-in-depth on top of the
+   * exit-code check, not as a substitute for it. A detached HEAD in a real
+   * repo still reports the literal `HEAD` (exit 0), which is pre-existing
+   * behavior and unchanged.
    */
   private async readGitInfo(cwd: string): Promise<GitInfo> {
     const proc = Bun.spawn(
@@ -571,10 +593,18 @@ export class DaemonServer {
       new Response(proc.stdout).text(),
       proc.exited,
     ]);
-    const lines = stdout.trim().split("\n");
-    if (exitCode !== 0 || lines.length !== 4) return UNKNOWN_GIT_INFO;
-    const [branch, topLevel, gitDir, commonDir] = lines.map((l) => l.trim());
-    if ([topLevel, gitDir, commonDir].some(isEchoedFlag)) {
+    const lines = stdout
+      .trim()
+      .split("\n")
+      .map((l) => l.trim());
+    // Checked before, and independent of, the line-count gate below: real
+    // old git doesn't just fail to answer `--path-format` — it echoes the
+    // unrecognized flag back as an EXTRA stdout line and still answers the
+    // rest, so the affected band emits 5 lines, not 4. Gating on exit 0 and
+    // exactly 4 lines first meant that shape hit the length check and
+    // returned before this code ever ran, so the warning below could never
+    // fire for the real-world case it exists to explain.
+    if (exitCode === 0 && lines.some(isEchoedFlag)) {
       // Refusing the reply is right, but silently: every row loses its branch
       // and worktree marker with nothing on screen explaining why. Say it
       // once — the cause is the git binary, so it is the same answer for
@@ -590,11 +620,49 @@ export class DaemonServer {
       }
       return UNKNOWN_GIT_INFO;
     }
+    if (exitCode !== 0 || lines.length !== 4) return UNKNOWN_GIT_INFO;
+    const [branch, topLevel, gitDir, commonDir] = lines;
     return {
       branch: branch || null,
       worktreeRoot: topLevel || null,
-      ...worktreeFacts(cwd, gitDir, commonDir),
+      ...worktreeFacts(cwd, gitDir, commonDir, topLevel),
     };
+  }
+
+  /**
+   * The project name git's answer would give, or null to fall through to
+   * `deriveProject`'s $HOME-bounded walk (S4).
+   *
+   * `git rev-parse` has no notion of `$HOME` as a ceiling, so a literal
+   * `~/.git` (someone ran `git init` directly in their home directory for
+   * dotfiles) resolves `mainRepoRoot` to `$HOME` for every directory
+   * beneath it. Trusting that here would collapse every non-repo directory
+   * under home into one group named after the home directory - exactly the
+   * regression `deriveProject`'s own stop-at-`$HOME` guard
+   * (project-derivation.ts) was written to prevent, just reached through
+   * the git-info path instead of the filesystem walk.
+   *
+   * Only a strict descendant of `$HOME` triggers the bypass: a session
+   * whose effective cwd IS `$HOME` still gets git's answer (matching
+   * `deriveProject`'s own cwd === homeDir carve-out), and the common
+   * bare-repo dotfiles pattern (`~/.cfg --bare` with a worktree at `$HOME`)
+   * has `mainRepoRoot` at the bare repo's own path, never literally
+   * `$HOME`, so it is unaffected.
+   */
+  private gitProjectName(
+    mainRepoRoot: string | null,
+    cwd: string,
+  ): string | null {
+    if (!mainRepoRoot) return null;
+    if (mainRepoRoot === this.homeDir && this.isStrictDescendantOfHome(cwd)) {
+      return null;
+    }
+    return basename(mainRepoRoot);
+  }
+
+  private isStrictDescendantOfHome(cwd: string): boolean {
+    const rel = relative(this.homeDir, cwd);
+    return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
   }
 
   private async enrichSession(session: Session): Promise<EnrichedSession> {
@@ -632,12 +700,15 @@ export class DaemonServer {
       // `worktree add` into an existing empty directory) kept grouping under
       // the stale name for the daemon's whole life while its label named the
       // new repo. `deriveProject` remains the fallback for the cwds git
-      // can't answer for (not a repo, bare repo, deleted directory); its
-      // walk may be cold here, since the daemon only ever primed it with
-      // `session.cwd` and this is the pane-preferred cwd.
-      project: gitInfo.mainRepoRoot
-        ? basename(gitInfo.mainRepoRoot)
-        : deriveProject(effectiveCwd, session.project),
+      // can't answer for (not a repo, bare repo, deleted directory) AND for
+      // the cwds `gitProjectName` refuses to bless (a literal `~/.git`
+      // repo, S4); its walk may be cold here, since the daemon only ever
+      // primed it with `session.cwd` and this is the pane-preferred cwd.
+      project:
+        this.gitProjectName(gitInfo.mainRepoRoot, effectiveCwd) ??
+        deriveProject(effectiveCwd, session.project, {
+          homeDir: this.homeDir,
+        }),
       gitBranch,
       isWorktree: gitInfo.isWorktree,
       mainRepoRoot: gitInfo.mainRepoRoot,
@@ -1135,22 +1206,45 @@ export class DaemonServer {
       return Response.json({ error: "Invalid JSON" }, { status: 400, headers });
     }
 
-    // De-duplicated after normalization, and capped. Two spellings of one
-    // worktree (`/tmp` and `/private/tmp`, or a trailing slash) otherwise
-    // produce several outcomes for the same directory, and since branch
-    // deletion resolves an outcome by path it always found the FIRST one —
-    // so the later "already gone" failures overwrote a successful run's
-    // result and rendered it as a wall of errors.
+    // De-duplicated after normalization. Two spellings of one worktree
+    // (`/tmp` and `/private/tmp`, or a trailing slash) otherwise produce
+    // several outcomes for the same directory, and since branch deletion
+    // resolves an outcome by path it always found the FIRST one — so the
+    // later "already gone" failures overwrote a successful run's result and
+    // rendered it as a wall of errors.
     const asPaths = (value: unknown): string[] => {
       if (!Array.isArray(value)) return [];
       const seen = new Set<string>();
       for (const v of value) {
         if (typeof v !== "string") continue;
-        if (seen.size >= MAX_PRUNE_PATHS) break;
         seen.add(normalizePath(v));
       }
       return [...seen];
     };
+    // O7: reject an over-cap list outright rather than silently truncating.
+    // Checked on the RAW array length, before `asPaths` dedupes or
+    // normalizes anything — for both fields, since a silently dropped
+    // `allowDirty` opt-in fails closed (a real refusal) but is exactly as
+    // silent as a dropped path. Checking the raw length, rather than
+    // `asPaths(value).length`, also keeps `MAX_PRUNE_PATHS`'s original point
+    // intact: a malformed body with an absurd array cannot make the daemon
+    // run `normalizePath` (a `realpath` syscall per entry) over all of it
+    // just to find out it should have been rejected.
+    const overCap = (value: unknown, field: string): Response | null => {
+      if (!Array.isArray(value)) return null;
+      if (value.length <= MAX_PRUNE_PATHS) return null;
+      return Response.json(
+        {
+          error: `Too many ${field} (${value.length}); the limit is ${MAX_PRUNE_PATHS} per request`,
+        },
+        { status: 400, headers },
+      );
+    };
+    const pathsCapError = overCap(body.paths, "paths");
+    if (pathsCapError) return pathsCapError;
+    const allowDirtyCapError = overCap(body.allowDirty, "allowDirty entries");
+    if (allowDirtyCapError) return allowDirtyCapError;
+
     const paths = asPaths(body.paths);
     const allowDirty = asPaths(body.allowDirty);
     const cleanState = body.cleanState === true;
@@ -2058,9 +2152,8 @@ export class DaemonServer {
     fork?: unknown;
     resume?: string;
     prompt?: unknown;
-    cwd?: string;
   }): BuildResult<ForkSource | undefined> {
-    const { fork, cwd } = body;
+    const { fork } = body;
     if (fork === undefined || fork === null)
       return { ok: true, value: undefined };
 
@@ -2124,29 +2217,52 @@ export class DaemonServer {
           `Forking a background worker is not supported.`,
       };
     }
-    // Claude resolves `--resume <id>` against the project directory derived
-    // from the CURRENT cwd (`~/.claude/projects/<encoded-cwd>/`), so a fork
-    // started anywhere else cannot find the conversation: the pane opens,
-    // send-keys succeeds, the route answers 200, and the user gets "No
-    // conversation found with session ID" and a bare shell. Verified live on
-    // Claude Code 2.1.220. Refusing is the honest answer until something
-    // moves the transcript into the destination's project directory (see
-    // docs/agent-adapters.md#forking-a-session).
-    if (cwd !== undefined && cwd !== session.cwd) {
-      return {
-        ok: false,
-        error:
-          `Cannot fork ${fork} into a different directory. ` +
-          `${session.agentType} resolves a resumed session against the project directory for its cwd, ` +
-          `so the fork would start in ${cwd} and find no conversation. ` +
-          `Omit 'cwd' to fork in ${session.cwd}.`,
-      };
-    }
-
+    // The destination check is NOT here, because it depends on the agent's
+    // fork template and this runs before the agent is resolved. A `{path}`
+    // fork accepts any destination the ordinary spawn path does (resuming by
+    // transcript path skips directory resolution altogether), while an
+    // id-form one is repo-scoped: see `forkDestinationProblem`, which the
+    // route calls before its first side effect.
     return {
       ok: true,
       value: { session, nativeSessionId: session.nativeSessionId },
     };
+  }
+
+  /**
+   * Why `cwd` cannot host a fork of `session`, or null when it can.
+   *
+   * Only asked of an id-form template (see `forkResumesByIdAlone`), which
+   * resolves the conversation against the SOURCE's repository. Same repo, not
+   * same directory: every checkout git reports is a directory the id resolves
+   * from, so a sibling worktree is a legal destination and the plain equality
+   * test this replaces refused ones that work. A destination git cannot place
+   * (neither side is a repo) is held to equality, since a project directory
+   * derived from a cwd is all the agent has left to look in.
+   */
+  private async forkDestinationProblem(
+    session: Session,
+    cwd: string,
+  ): Promise<string | null> {
+    if (resolve(cwd) === resolve(session.cwd)) return null;
+    const [destination, source] = await Promise.all([
+      this.getGitInfo(cwd),
+      this.getGitInfo(session.cwd),
+    ]);
+    if (
+      destination.mainRepoRoot !== null &&
+      destination.mainRepoRoot === source.mainRepoRoot
+    ) {
+      return null;
+    }
+    return (
+      `Cannot fork ${session.agentType} into ${cwd}: ` +
+      `'agents.${session.agentType}.forkCommand' resumes by session id, which the agent ` +
+      `resolves against the source session's repository (${session.cwd}), so the fork would ` +
+      `come up in a pane with no conversation. Fork into a directory in that repository, or ` +
+      `set that template to the transcript-path form ("{bin} --resume '{path}' --fork-session"), ` +
+      `which resumes from anywhere.`
+    );
   }
 
   /**
@@ -2207,7 +2323,7 @@ export class DaemonServer {
       split?: SpawnSplit;
       target?: string;
       callerPane?: string;
-      detach?: boolean;
+      detach?: unknown;
       worktree?: unknown;
     };
     try {
@@ -2219,7 +2335,7 @@ export class DaemonServer {
       );
     }
 
-    const { resume, detach = false } = body;
+    const { resume } = body;
 
     // Forking is resolved first because the SOURCE session supplies both the
     // agent and the default cwd, so the usual "is cwd present" check below
@@ -2286,6 +2402,19 @@ export class DaemonServer {
     }
     const prompt = promptResult.value;
 
+    // Every other spawn field goes through a normalizer; `detach` used to be
+    // an unchecked cast, so `{"detach":"false"}` (a truthy string) reached
+    // tmux as `true`, passing `-d` and suppressing `select-window` — the
+    // opposite of what the caller wrote.
+    const detachResult = normalizeBoolean(body.detach, "detach");
+    if (!detachResult.ok) {
+      return Response.json(
+        { error: detachResult.error },
+        { status: 400, headers },
+      );
+    }
+    const detach = detachResult.value ?? false;
+
     // `resume` is interpolated into a shell command typed into the pane, so an
     // unconstrained value is command injection. Constrain it like `/invoke`.
     // `!= null` so an explicitly-null field means absent, as it does for
@@ -2330,21 +2459,21 @@ export class DaemonServer {
         { status: 400, headers },
       );
     }
-    // A worktree destination is a different directory, so it runs into exactly
-    // the wall `resolveForkSource` refuses an explicit `cwd` for: the fork
-    // would start in the new checkout and find no conversation there. That
-    // check cannot catch this one, because a fork into a worktree sends no
-    // `cwd` at all and only becomes a relocation once the worktree resolves.
-    // Refused BEFORE the worktree is created, so a rejected request leaves no
-    // directory and no branch behind.
+    // Fork-into-a-new-worktree is a destination CREATION, not just a
+    // different cwd, and nobody has run the combination against a live agent
+    // yet. Resuming by transcript path removed the resume-scoping wall this
+    // refusal used to cite, so what is left is an unshipped feature rather
+    // than a technical impossibility: it is tracked separately, with its own
+    // surface and its own live check. Refused BEFORE the worktree is created,
+    // so a rejected request leaves no directory and no branch behind.
     if (forkSource && worktreeRequest.value) {
       return Response.json(
         {
           error:
-            `Cannot fork ${forkSource.session.agentType} into a new worktree. ` +
-            `A resumed session is resolved against the project directory for its cwd, ` +
-            `so the fork would start in the worktree and find no conversation. ` +
-            `Spawn a fresh session into the worktree, or fork in ${forkSource.session.cwd}.`,
+            `Cannot fork ${forkSource.session.agentType} into a new worktree yet: ` +
+            `that combination has not been verified against a live agent. ` +
+            `Spawn a fresh session into the worktree, or fork into an existing ` +
+            `directory with 'cwd'.`,
         },
         { status: 400, headers },
       );
@@ -2359,6 +2488,20 @@ export class DaemonServer {
       );
     }
 
+    // A fork by session id only resolves inside the source's repository, so
+    // its destination is checked here: before the worktree and the pane, and
+    // after the agent whose template decides whether the question applies at
+    // all. A `{path}` fork is destination-independent and skips this.
+    if (forkSource && forkResumesByIdAlone(agent)) {
+      const problem = await this.forkDestinationProblem(
+        forkSource.session,
+        cwd,
+      );
+      if (problem) {
+        return Response.json({ error: problem }, { status: 400, headers });
+      }
+    }
+
     // Build agent command
     const preferences = await getPreferences();
     const cmd = spawnBinaryFor(agent, preferences.command);
@@ -2371,6 +2514,11 @@ export class DaemonServer {
           agent,
           binary: cmd,
           sessionId: forkSource.nativeSessionId,
+          // The builder decides whether it needs this and refuses when a
+          // `{path}` template cannot get a readable transcript out of it.
+          // Everything here runs before the first side effect, so that
+          // refusal is a 400 with no pane and no worktree behind it.
+          logPath: forkSource.session.logPath,
         })
       : buildAgentSpawnCommand({
           agent,
@@ -2385,6 +2533,20 @@ export class DaemonServer {
       );
     }
     const command = commandResult.value;
+
+    // Measured on the BUILT command, because that is the argv element tmux
+    // gets: the raw-prompt cap cannot promise it fits (the template adds bytes
+    // and escaping a quote-heavy prompt multiplies them), and an oversized
+    // single argument makes `Bun.spawn` THROW on Linux rather than exit
+    // non-zero. Still ahead of the worktree and the pane, so this stays a 400
+    // with nothing created.
+    const oversizedCommand = spawnCommandTooLarge(command);
+    if (oversizedCommand) {
+      return Response.json(
+        { error: oversizedCommand },
+        { status: 400, headers },
+      );
+    }
 
     // Resolve placement. The pane is probed even on the split path, where
     // tmux would report its own failure, so that a stale pane is one
@@ -2474,6 +2636,28 @@ export class DaemonServer {
       detach,
     });
     const tmuxCmd = tmuxArgv[0];
+    // Hoisted so the outer catch (below) can kill a pane that was created
+    // before a later step throws, not just before one that exits non-zero.
+    // `Bun.spawn` throws rather than exiting non-zero for an oversized argv
+    // (E2BIG on macOS, a single over-128KiB argument on Linux), and that
+    // throw happens on the send-keys spawn, well after the pane exists.
+    let paneId: string | undefined;
+    // Past this point a throw can happen with a pane already created, so
+    // every failure has to take it back down. Leaving it would strand an
+    // empty shell the caller never asked for, and a caller retrying a
+    // failing spawn would pile them up. No-ops if the pane was never
+    // created (paneId still unset).
+    const killPane = async (): Promise<void> => {
+      if (!paneId) return;
+      try {
+        await Bun.spawn(["tmux", "kill-pane", "-t", paneId], {
+          stdout: "pipe",
+          stderr: "pipe",
+        }).exited;
+      } catch {
+        // Best effort: the original failure is what we report.
+      }
+    };
     try {
       const proc = Bun.spawn(["tmux", ...tmuxArgv], {
         stdout: "pipe",
@@ -2490,21 +2674,7 @@ export class DaemonServer {
         );
       }
 
-      const paneId = (await new Response(proc.stdout).text()).trim();
-
-      // Past this point the pane exists, so every failure has to take it
-      // back down. Leaving it would strand an empty shell the caller never
-      // asked for, and a caller retrying a failing spawn would pile them up.
-      const killPane = async (): Promise<void> => {
-        try {
-          await Bun.spawn(["tmux", "kill-pane", "-t", paneId], {
-            stdout: "pipe",
-            stderr: "pipe",
-          }).exited;
-        } catch {
-          // Best effort: the original failure is what we report.
-        }
-      };
+      paneId = (await new Response(proc.stdout).text()).trim();
 
       // Send the agent command into the new pane.
       //
@@ -2532,13 +2702,25 @@ export class DaemonServer {
         );
       }
 
-      // Switch to the new pane unless detached
+      // Switch to the new pane unless detached. The session is already
+      // running by this point (send-keys succeeded), so a failure here is
+      // only a lost focus switch, not a failed spawn: it must not kill the
+      // pane or turn the response into an error, or a working session the
+      // caller can already see in `tmux list-panes` would be reported as
+      // failed and torn down out from under them. Best effort, log and
+      // continue.
       if (!detach) {
-        const selectProc = Bun.spawn(["tmux", "select-window", "-t", paneId], {
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        await selectProc.exited;
+        try {
+          const selectProc = Bun.spawn(
+            ["tmux", "select-window", "-t", paneId],
+            { stdout: "pipe", stderr: "pipe" },
+          );
+          await selectProc.exited;
+        } catch (err: unknown) {
+          console.error(
+            `Failed to select window for pane ${paneId}: ${errorMessage(err)}`,
+          );
+        }
       }
 
       // `worktree` is echoed back because the caller asked for a destination
@@ -2550,6 +2732,10 @@ export class DaemonServer {
         { headers },
       );
     } catch (err: unknown) {
+      // Covers a throwing spawn anywhere in the block above (e.g. an
+      // oversized send-keys argv), not just a non-zero exit: `paneId` may
+      // already be set, and `killPane` no-ops otherwise.
+      await killPane();
       return Response.json(
         {
           error: withWorktreeNote(

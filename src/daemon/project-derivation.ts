@@ -44,24 +44,41 @@ export interface ProjectInfo {
  * correct for a caller that didn't pass that flag (git prints a repo root's
  * git dir as a bare `.git`, and a common dir relative to the cwd).
  *
- * `mainRepoRoot` is the parent of the shared `.git` directory, for a main
- * checkout and a worktree alike. Null for a bare repo, whose common dir is
- * the repository itself and which has no checkout to point at.
+ * `mainRepoRoot` is the parent of the shared `.git` directory when the
+ * common dir is a plain `.git` folder. That string test alone used to be
+ * the whole answer, which made it null for three real layouts: a submodule
+ * checkout, a `--separate-git-dir` repo, and a worktree of a bare repo. The
+ * first two are NOT worktrees (`isWorktree` is false: their own git dir and
+ * common dir are the same path), and `topLevel` — `--show-toplevel` from
+ * the same `rev-parse` — is already the correct checkout root for both, so
+ * this falls back to it whenever `isWorktree` is false. A worktree of a
+ * bare repo has no main checkout to point at (the "repo" is the bare git
+ * dir, not a working tree), so `mainRepoRoot` deliberately stays null
+ * there; that is a decision, not a gap.
  */
 export function worktreeFacts(
   cwd: string,
   gitDir: string,
   commonDir: string,
+  topLevel: string,
 ): { isWorktree: boolean; mainRepoRoot: string | null } {
   const resolvedGitDir = resolve(cwd, gitDir);
   const resolvedCommonDir = resolve(cwd, commonDir);
-  return {
-    isWorktree: resolvedGitDir !== resolvedCommonDir,
-    mainRepoRoot:
-      basename(resolvedCommonDir) === ".git"
-        ? dirname(resolvedCommonDir)
-        : null,
-  };
+  const isWorktree = resolvedGitDir !== resolvedCommonDir;
+  if (isWorktree) {
+    return {
+      isWorktree: true,
+      mainRepoRoot:
+        basename(resolvedCommonDir) === ".git"
+          ? dirname(resolvedCommonDir)
+          : null,
+    };
+  }
+  // Not a worktree: submodule checkout, `--separate-git-dir` repo, or a
+  // plain main checkout. `topLevel` is `--show-toplevel`, resolved by git
+  // itself, and is correct for all three.
+  const resolvedTopLevel = resolve(cwd, topLevel);
+  return { isWorktree: false, mainRepoRoot: resolvedTopLevel || null };
 }
 
 /** Process-wide default cache for {@link deriveProject}. */

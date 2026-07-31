@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
@@ -9,9 +9,16 @@ import {
   buildAgentSpawnCommand,
   buildTmuxSpawnArgv,
   escapeSingleQuoted,
+  MAX_SPAWN_COMMAND_BYTES,
+  MAX_SPAWN_PROMPT_BYTES,
+  normalizeBoolean,
+  normalizePrompt,
   normalizeSplit,
   normalizeTarget,
   normalizeWorktreeRequest,
+  quotedTemplateProblem,
+  spawnCommandTooLarge,
+  substituteQuotedTemplate,
 } from "./spawn-command";
 
 const claudeAgent: AgentDef = getBuiltinAgent("claude");
@@ -61,6 +68,121 @@ describe("normalizeTarget", () => {
     for (const bad of ["@3", "mysession:1.0", "0", "%", "%1a", 12]) {
       expect(normalizeTarget(bad).ok).toBe(false);
     }
+  });
+});
+
+describe("normalizeBoolean", () => {
+  // `detach` used to be an unchecked cast, so a truthy non-boolean like the
+  // string "false" silently reached tmux as `true`.
+
+  it("treats absent as absent, leaving the caller's default", () => {
+    expect(normalizeBoolean(undefined, "detach")).toEqual({
+      ok: true,
+      value: undefined,
+    });
+  });
+
+  it("passes real booleans through", () => {
+    expect(normalizeBoolean(true, "detach")).toEqual({ ok: true, value: true });
+    expect(normalizeBoolean(false, "detach")).toEqual({
+      ok: true,
+      value: false,
+    });
+  });
+
+  it("treats an explicit null as absent too", () => {
+    // Matches `normalizePrompt`, `resume` and `fork`: a client that serializes
+    // omitted fields as null must not be refused for saying nothing.
+    expect(normalizeBoolean(null, "detach")).toEqual({
+      ok: true,
+      value: undefined,
+    });
+  });
+
+  it("rejects a truthy non-boolean, naming the field", () => {
+    for (const bad of ["false", "true", 0, 1, {}, []]) {
+      const result = normalizeBoolean(bad, "detach");
+      expect(result.ok).toBe(false);
+      expect(result.ok || result.error).toContain("detach");
+    }
+  });
+});
+
+describe("normalizePrompt", () => {
+  // Below this cap, `Bun.spawn` throws rather than exiting non-zero for an
+  // oversized argv (E2BIG on macOS around 1MB, a single over-128KiB
+  // argument on Linux), and that throw lands well after the pane already
+  // exists. The cap turns it into a clean 400 before anything is created.
+
+  it("accepts a prompt exactly at the byte cap", () => {
+    const prompt = "a".repeat(MAX_SPAWN_PROMPT_BYTES);
+    expect(normalizePrompt(prompt)).toEqual({ ok: true, value: prompt });
+  });
+
+  it("rejects a prompt one byte over the cap, naming the cap and the size", () => {
+    const prompt = "a".repeat(MAX_SPAWN_PROMPT_BYTES + 1);
+    const result = normalizePrompt(prompt);
+    expect(result.ok).toBe(false);
+    expect(result.ok || result.error).toContain(String(MAX_SPAWN_PROMPT_BYTES));
+    expect(result.ok || result.error).toContain(
+      String(MAX_SPAWN_PROMPT_BYTES + 1),
+    );
+  });
+
+  it("measures bytes, not characters, for multi-byte prompts", () => {
+    // Each of these is a 3-byte UTF-8 codepoint, so this string is over the
+    // cap in bytes while under it in character count.
+    const charCount = Math.floor(MAX_SPAWN_PROMPT_BYTES / 3) + 1;
+    const prompt = "☃".repeat(charCount);
+    expect(prompt.length).toBeLessThan(MAX_SPAWN_PROMPT_BYTES);
+    const result = normalizePrompt(prompt);
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe("spawnCommandTooLarge", () => {
+  // The prompt cap alone cannot decide this: what the OS measures is the
+  // built command, and it is always longer than the prompt inside it.
+
+  it("accepts a command exactly at the argument budget", () => {
+    expect(spawnCommandTooLarge("a".repeat(MAX_SPAWN_COMMAND_BYTES))).toBe(
+      undefined,
+    );
+  });
+
+  it("refuses one byte over, naming the size and the budget", () => {
+    const problem = spawnCommandTooLarge("a".repeat(MAX_SPAWN_COMMAND_BYTES + 1));
+    expect(problem).toContain(String(MAX_SPAWN_COMMAND_BYTES + 1));
+    expect(problem).toContain(String(MAX_SPAWN_COMMAND_BYTES));
+  });
+
+  it("catches an escaped prompt that grew past the budget", () => {
+    // A quote-only prompt inside the raw cap quadruples when escaped, so the
+    // command it builds is over budget while the prompt never was.
+    const prompt = "'".repeat(64 * 1024);
+    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(
+      MAX_SPAWN_PROMPT_BYTES,
+    );
+    const built = buildAgentSpawnCommand({
+      agent: { ...claudeAgent, promptCommand: "{bin} '{prompt}'" },
+      binary: "claude",
+      prompt,
+    });
+    expect(built.ok).toBe(true);
+    expect(built.ok && spawnCommandTooLarge(built.value)).toContain(
+      "single command argument",
+    );
+  });
+
+  it("stays under budget for a prompt at the raw cap", () => {
+    // The headroom between the two constants is what keeps an ordinary
+    // at-the-cap prompt from being refused by the second check instead.
+    const built = buildAgentSpawnCommand({
+      agent: { ...claudeAgent, promptCommand: "{bin} '{prompt}'" },
+      binary: "claude",
+      prompt: "a".repeat(MAX_SPAWN_PROMPT_BYTES),
+    });
+    expect(built.ok && spawnCommandTooLarge(built.value)).toBe(undefined);
   });
 });
 
@@ -509,6 +631,62 @@ describe("buildAgentSpawnCommand", () => {
     }
   });
 
+  it("refuses a template containing a backslash", () => {
+    // A backslash desynchronizes any quote scan from the shell. The scan
+    // used to consume the escaped character too, which swallowed the `{`
+    // of a following `{prompt}`: the occurrence was never seen, but
+    // `substitutePlaceholders` still replaced it, so the template below
+    // passed and emitted a SECOND, unquoted copy of the prompt. With
+    // prompt `x;touch <canary>;:` the emitted line was
+    // `printf '...' \x;touch <canary>;:`, which created the canary in
+    // /bin/sh, /bin/bash and /bin/zsh alike.
+    for (const template of [
+      "{bin} '{prompt}' \\{prompt}",
+      "{bin} \\'{prompt}\\'",
+      "{bin} '{prompt}' \\;",
+    ]) {
+      const result = buildAgentSpawnCommand({
+        agent: agentWith({ promptCommand: template }),
+        binary: "printf",
+        prompt: "hi",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("backslash");
+    }
+  });
+
+  it("refuses a template using $'...' ANSI-C quoting", () => {
+    // The scan read the `'` after `$` as an ordinary opening single quote,
+    // but bash and zsh INTERPRET backslashes inside `$'...'`, so
+    // `escapeSingleQuoted`'s `'\''` idiom is inert there. With prompt
+    // `a\';touch <canary>;#` the emitted `printf $'a\'\'';touch
+    // <canary>;#'` terminated the ANSI-C string early and ran the touch in
+    // /bin/sh, /bin/bash and /bin/zsh.
+    for (const template of ["{bin} $'{prompt}'", "{bin} -m $'x' '{prompt}'"]) {
+      const result = buildAgentSpawnCommand({
+        agent: agentWith({ promptCommand: template }),
+        binary: "printf",
+        prompt: "hi",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("ANSI-C");
+    }
+  });
+
+  it("still accepts every built-in promptCommand", () => {
+    // The two refusals above widened the guard; a built-in template caught
+    // by them would break prompt spawns for that agent outright.
+    for (const agent of BUILTIN_AGENTS) {
+      expect(
+        buildAgentSpawnCommand({
+          agent,
+          binary: agent.executable ?? agent.name,
+          prompt: "hi",
+        }).ok,
+      ).toBe(true);
+    }
+  });
+
   it("refuses a template with unbalanced quotes", () => {
     // Would leave the pane's shell waiting for a closing quote.
     for (const template of ["{bin} '{prompt}", "{bin} x '{prompt}''"]) {
@@ -570,6 +748,20 @@ describe("buildAgentForkCommand", () => {
     return { ...claudeAgent, ...overrides };
   }
 
+  /** A real readable transcript, since the `{path}` form stats the file. */
+  function transcript(name = "abc.jsonl"): {
+    path: string;
+    cleanup: () => void;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "ccmux-fork-"));
+    const path = join(dir, name);
+    writeFileSync(path, "{}\n");
+    return {
+      path,
+      cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    };
+  }
+
   it("substitutes the source id and the launcher in one pass", () => {
     expect(
       buildAgentForkCommand({
@@ -624,16 +816,20 @@ describe("buildAgentForkCommand", () => {
     }
   });
 
-  it("refuses a template with no {id}", () => {
-    // Without it the fork silently starts a FRESH session: a pane appears,
-    // the agent runs, and the history the user asked to branch is gone.
+  it("refuses a template that names neither the transcript nor the id", () => {
+    // Without one of them the fork silently starts a FRESH session: a pane
+    // appears, the agent runs, and the history the user asked to branch is
+    // gone.
     const result = buildAgentForkCommand({
       agent: agentWith({ forkCommand: "{bin} --fork-session" }),
       binary: "claude",
       sessionId: "abc",
     });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("{id}");
+    if (!result.ok) {
+      expect(result.error).toContain("{path}");
+      expect(result.error).toContain("{id}");
+    }
   });
 
   it("refuses a non-string template from config", () => {
@@ -666,22 +862,153 @@ describe("buildAgentForkCommand", () => {
       expect(result.ok).toBe(false);
     }
   });
+
+  describe("resuming by transcript path", () => {
+    const PATH_TEMPLATE = "{bin} --resume '{path}' --fork-session";
+
+    it("single-quote escapes the path, exactly as it does a prompt", () => {
+      // A directory name can hold a space and a quote, and this is a shell
+      // command typed into a pane: byte-exact, not "looks right".
+      const { path, cleanup } = transcript("it's a.jsonl");
+      try {
+        const result = buildAgentForkCommand({
+          agent: agentWith({ forkCommand: PATH_TEMPLATE }),
+          binary: "claude",
+          sessionId: "abc-123",
+          logPath: path,
+        });
+        expect(result).toEqual({
+          ok: true,
+          value: `claude --resume '${dirname(path)}/it'\\''s a.jsonl' --fork-session`,
+        });
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("refuses a missing, relative, or unreadable transcript", () => {
+      // The whole point of the path form is that the agent opens the file
+      // instead of deriving a directory, so a path that resolves to nothing
+      // reproduces the failure it exists to prevent: a live pane that found
+      // no conversation, which nothing downstream can detect.
+      const { path, cleanup } = transcript();
+      try {
+        const bad: (string | null | undefined)[] = [
+          undefined,
+          null,
+          "",
+          "relative/abc.jsonl",
+          // Absolute, but not a transcript at all: `Session.logPath` is
+          // whatever the source recorded, and a background row records a
+          // `state.json` scan path.
+          join(dirname(path), "state.json"),
+          // Absolute and .jsonl, but gone.
+          join(dirname(path), "missing.jsonl"),
+          // A directory, not a file.
+          dirname(path),
+        ];
+        for (const logPath of bad) {
+          const result = buildAgentForkCommand({
+            agent: agentWith({ forkCommand: PATH_TEMPLATE }),
+            binary: "claude",
+            sessionId: "abc-123",
+            logPath,
+          });
+          expect(result.ok).toBe(false);
+          if (!result.ok) {
+            // Actionable: names the escape hatch rather than just failing.
+            expect(result.error).toContain("ccmux setup");
+            expect(result.error).toContain("--resume {id}");
+          }
+        }
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("still builds an id-only template with no transcript at all", () => {
+      // The compatibility fallback: the path interface is undocumented, so
+      // reverting `forkCommand` to the id form in ccmux.json has to keep
+      // working for a row ccmux never recorded a transcript for.
+      expect(
+        buildAgentForkCommand({
+          agent: agentWith({
+            forkCommand: "{bin} --resume {id} --fork-session",
+          }),
+          binary: "claude",
+          sessionId: "abc-123",
+          logPath: null,
+        }),
+      ).toEqual({ ok: true, value: "claude --resume abc-123 --fork-session" });
+    });
+
+    it("refuses a {path} that is not in a real single-quoted context", () => {
+      // Same reasoning as `promptCommand`: the escaping is single-quote
+      // escaping, and it is inert anywhere else.
+      const { path, cleanup } = transcript();
+      try {
+        for (const template of [
+          "{bin} --resume {path}",
+          '{bin} --resume "{path}"',
+          `sh -c "{bin} --resume '{path}'"`,
+        ]) {
+          const result = buildAgentForkCommand({
+            agent: agentWith({ forkCommand: template }),
+            binary: "claude",
+            sessionId: "abc-123",
+            logPath: path,
+          });
+          expect(result.ok).toBe(false);
+        }
+      } finally {
+        cleanup();
+      }
+    });
+
+    it("refuses a launcher that would break the quoting around the path", () => {
+      // `{bin}` is skipped as inert by the template scan, which is only
+      // sound while the binary itself is quote-neutral.
+      const { path, cleanup } = transcript();
+      try {
+        const result = buildAgentForkCommand({
+          agent: agentWith({ forkCommand: PATH_TEMPLATE }),
+          binary: "/opt/it's/claude",
+          sessionId: "abc-123",
+          logPath: path,
+        });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error).toContain("launcher");
+      } finally {
+        cleanup();
+      }
+    });
+  });
 });
 
 describe("built-in fork invocations", () => {
-  it("forks Claude into a new session id, leaving the source alone", () => {
+  it("forks Claude by transcript path, leaving the source alone", () => {
     // `--fork-session` (not a bare `--resume`, which would APPEND to the
-    // source's transcript and fight the live original for it).
-    expect(
-      buildAgentForkCommand({
-        agent: getBuiltinAgent("claude"),
-        binary: "claude",
-        sessionId: "abc-123",
-      }),
-    ).toEqual({
-      ok: true,
-      value: "claude --resume abc-123 --fork-session",
-    });
+    // source's transcript and fight the live original for it), and by PATH
+    // rather than id, which is what lets the fork start in any directory
+    // (docs/agent-adapters.md#forking-a-session).
+    const dir = mkdtempSync(join(tmpdir(), "ccmux-fork-"));
+    const path = join(dir, "abc-123.jsonl");
+    writeFileSync(path, "{}\n");
+    try {
+      expect(
+        buildAgentForkCommand({
+          agent: getBuiltinAgent("claude"),
+          binary: "claude",
+          sessionId: "abc-123",
+          logPath: path,
+        }),
+      ).toEqual({
+        ok: true,
+        value: `claude --resume '${path}' --fork-session`,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("is the only built-in that claims to fork", () => {
@@ -745,6 +1072,155 @@ describe("escapeSingleQuoted", () => {
   });
 });
 
+describe("substituteQuotedTemplate", () => {
+  // `{path}` carries a filesystem path, which may legally contain quotes,
+  // spaces, newlines and every shell metacharacter. It gets the same
+  // single-quoted placement and escaping as `{prompt}`, through the same
+  // one-pass substitution.
+
+  it("escapes a path for the single-quoted word it lands in", () => {
+    // Byte-exact: this string is typed into a shell, so "looks fine" is
+    // not the contract.
+    expect(
+      substituteQuotedTemplate("{bin} --resume '{path}'", {
+        bin: "claude",
+        path: "/tmp/it's here/a b",
+      }),
+    ).toBe("claude --resume '/tmp/it'\\''s here/a b'");
+  });
+
+  it("leaves values that are inert by construction alone", () => {
+    // `bin` and `id` are validated rather than escaped, so escaping them
+    // would corrupt a legitimate `$HOME/bin/claude`.
+    expect(
+      substituteQuotedTemplate("{bin} --resume {id} --fork-session", {
+        bin: "$HOME/bin/claude",
+        id: "abc-123",
+      }),
+    ).toBe("$HOME/bin/claude --resume abc-123 --fork-session");
+  });
+
+  it("hands a real shell every hostile path as exactly one argument", () => {
+    // The shell is the oracle. `printf` stands in for the agent binary, and
+    // the canary proves nothing else ran, rather than just that stdout
+    // looked right.
+    const canary = join(mkdtempSync(join(tmpdir(), "spawn-path-")), "PWNED");
+    try {
+      for (const path of [
+        "/tmp/it's here",
+        '/tmp/say "hi"',
+        "/tmp/a b\tc",
+        "/tmp/$(touch " + canary + ")",
+        "/tmp/`touch " + canary + "`",
+        "/tmp/a;touch " + canary + ";:",
+        "/tmp/line\nbreak",
+        "/tmp/$HOME/${x}/$&/$`/$'",
+        "/tmp/'; touch " + canary + "; #",
+      ]) {
+        const command = substituteQuotedTemplate("printf '[%s]' '{path}'", {
+          bin: "printf",
+          path,
+        });
+        // zsh ships on macOS but not on Linux CI runners.
+        for (const shell of ["/bin/sh", "/bin/bash", "/bin/zsh"].filter(
+          existsSync,
+        )) {
+          const run = Bun.spawnSync([shell, "-c", command]);
+          expect(run.exitCode).toBe(0);
+          expect(run.stdout.toString()).toBe(`[${path}]`);
+          expect(existsSync(canary)).toBe(false);
+        }
+      }
+    } finally {
+      rmSync(dirname(canary), { recursive: true, force: true });
+    }
+  });
+
+  it("is not a raw substitution, which the same payload would execute", () => {
+    // The red half of the test above: the naive `.replace` into the same
+    // single-quoted slot closes the quote and runs the payload, and this
+    // asserts it really does before asserting that ours does not.
+    const canary = join(
+      mkdtempSync(join(tmpdir(), "spawn-path-raw-")),
+      "PWNED",
+    );
+    const template = "printf '[%s]' '{path}'";
+    const path = `/tmp/x';touch ${canary};#`;
+    try {
+      const naive = template.replace("{path}", path);
+      Bun.spawnSync(["/bin/sh", "-c", naive], { stderr: "ignore" });
+      expect(existsSync(canary)).toBe(true);
+
+      rmSync(canary, { force: true });
+      const safe = substituteQuotedTemplate(template, {
+        bin: "printf",
+        path,
+      });
+      expect(safe).not.toBe(naive);
+      const run = Bun.spawnSync(["/bin/sh", "-c", safe]);
+      expect(run.stdout.toString()).toBe(`[${path}]`);
+      expect(existsSync(canary)).toBe(false);
+    } finally {
+      rmSync(dirname(canary), { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a path containing {prompt} from relocating the prompt", () => {
+    // The one-pass property, on the new placeholder: a path substituted
+    // first must not be able to carry a later placeholder to a slot the
+    // guard never checked.
+    expect(
+      substituteQuotedTemplate("{bin} '{path}' '{prompt}'", {
+        bin: "x",
+        path: "/tmp/{prompt}",
+        prompt: "P",
+      }),
+    ).toBe("x '/tmp/{prompt}' 'P'");
+  });
+});
+
+describe("quotedTemplateProblem", () => {
+  it("accepts a single-quoted {path}", () => {
+    expect(
+      quotedTemplateProblem("{bin} --resume '{path}' --fork-session"),
+    ).toBeUndefined();
+  });
+
+  it("refuses a {path} that is not in a genuine single-quoted context", () => {
+    // Identical treatment to `{prompt}`: the escaping only holds inside
+    // real single quotes, so anything else is refused rather than modelled.
+    for (const template of [
+      "{bin} {path}",
+      `{bin} "{path}"`,
+      `{bin} sh -c "{bin} '{path}'"`,
+      "{bin} $'{path}'",
+      "{bin} \\{path}",
+      "{bin} '{path}",
+      "{bin} $(echo '{path}')",
+      "{bin} `echo '{path}'`",
+    ]) {
+      expect(quotedTemplateProblem(template)).toBeDefined();
+    }
+  });
+
+  it("names the placeholder it could not prove safe", () => {
+    // A hand-written template with several placeholders is unactionable
+    // otherwise.
+    expect(quotedTemplateProblem("{bin} '{prompt}' {path}")).toContain(
+      "{path}",
+    );
+    expect(quotedTemplateProblem("{bin} {prompt} '{path}'")).toContain(
+      "{prompt}",
+    );
+  });
+
+  it("says nothing about which placeholders a template needs", () => {
+    // Whether `{prompt}` or `{path}` is mandatory is the caller's contract
+    // with its own config field, checked next to that field's error text.
+    expect(quotedTemplateProblem("{bin} --continue")).toBeUndefined();
+  });
+});
+
 describe("normalizeWorktreeRequest", () => {
   it("treats absent, null and false as no worktree", () => {
     for (const value of [undefined, null, false]) {
@@ -760,9 +1236,9 @@ describe("normalizeWorktreeRequest", () => {
   });
 
   it("carries name and base through", () => {
-    expect(normalizeWorktreeRequest({ name: "fix-thing", base: "main" })).toEqual(
-      { ok: true, value: { name: "fix-thing", base: "main" } },
-    );
+    expect(
+      normalizeWorktreeRequest({ name: "fix-thing", base: "main" }),
+    ).toEqual({ ok: true, value: { name: "fix-thing", base: "main" } });
   });
 
   it("drops empty members rather than passing blanks downstream", () => {

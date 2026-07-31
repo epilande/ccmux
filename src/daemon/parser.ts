@@ -156,26 +156,44 @@ export function extractProjectInfo(logPath: string): {
  */
 export function readTranscriptCwd(
   path: string,
-  maxBytes = 256 * 1024,
+  initialBytes = 256 * 1024,
 ): string | null {
-  return scanTranscriptHead(path, maxBytes, (entry) =>
+  return scanTranscriptHead(path, initialBytes, (entry) =>
     typeof entry.cwd === "string" && entry.cwd.length > 0 ? entry.cwd : null,
   );
 }
 
 /**
- * Scan a transcript's bounded head for the first entry `extract` accepts.
- * Reads a single page of the file, drops a trailing partial line, and
- * tolerates malformed lines. Returns null when no early entry matches or
+ * Hard ceiling on how far `scanTranscriptHead` will grow its read window.
+ * Measured over a 496-transcript corpus, the cwd-bearing line itself (one
+ * giant pasted entry, typically at line index 2 or 3) ran 264 KB to 626 KB;
+ * this leaves generous headroom above that without growing unbounded on a
+ * pathological file.
+ */
+const TRANSCRIPT_HEAD_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Scan a transcript's head for the first entry `extract` accepts, expanding
+ * the read window (doubling from `initialBytes`) until 50 complete lines
+ * are available, EOF is reached, or `TRANSCRIPT_HEAD_MAX_BYTES` is hit.
+ *
+ * A fixed-size read is unsafe here: a single JSONL line can be hundreds of
+ * KB (one giant pasted entry), and when it straddles the read boundary the
+ * trailing-partial-line drop throws the whole line away, including
+ * whatever `extract` was looking for. The 50-line cap is the real logical
+ * limit ("early entries only") — the byte window is just how far we have
+ * to read to be sure we saw them, so it grows rather than staying fixed.
+ *
+ * Tolerates malformed lines. Returns null when no early entry matches or
  * on read error.
  *
- * Sync by design: callers need a single bounded page-in of a local file
- * (the binder consumes `readTranscriptCwd` through a pure observation
+ * Sync by design: callers need a bounded page-in of a local file (the
+ * binder consumes `readTranscriptCwd` through a pure observation
  * callback).
  */
 function scanTranscriptHead<T>(
   path: string,
-  maxBytes: number,
+  initialBytes: number,
   extract: (entry: Record<string, unknown>) => T | null,
 ): T | null {
   let fd: number;
@@ -185,22 +203,31 @@ function scanTranscriptHead<T>(
     return null;
   }
   try {
-    const buf = Buffer.alloc(maxBytes);
-    const bytes = readSync(fd, buf, 0, maxBytes, 0);
-    const head = buf.toString("utf-8", 0, bytes);
-    const lines = head.split("\n");
-    // Drop a trailing partial line unless the whole file fit in the head.
-    const complete = bytes < maxBytes ? lines : lines.slice(0, -1);
-    for (const line of complete.slice(0, 50)) {
-      if (!line.trim()) continue;
-      try {
-        const value = extract(JSON.parse(line) as Record<string, unknown>);
-        if (value !== null) return value;
-      } catch {
-        // Skip malformed lines.
+    let readSize = Math.min(initialBytes, TRANSCRIPT_HEAD_MAX_BYTES);
+    for (;;) {
+      const buf = Buffer.alloc(readSize);
+      const bytes = readSync(fd, buf, 0, readSize, 0);
+      const head = buf.toString("utf-8", 0, bytes);
+      const lines = head.split("\n");
+      const atEof = bytes < readSize;
+      // Drop a trailing partial line unless the whole file fit in the window.
+      const complete = atEof ? lines : lines.slice(0, -1);
+      const atCeiling = readSize >= TRANSCRIPT_HEAD_MAX_BYTES;
+      if (complete.length < 50 && !atEof && !atCeiling) {
+        readSize = Math.min(readSize * 2, TRANSCRIPT_HEAD_MAX_BYTES);
+        continue;
       }
+      for (const line of complete.slice(0, 50)) {
+        if (!line.trim()) continue;
+        try {
+          const value = extract(JSON.parse(line) as Record<string, unknown>);
+          if (value !== null) return value;
+        } catch {
+          // Skip malformed lines.
+        }
+      }
+      return null;
     }
-    return null;
   } catch {
     return null;
   } finally {

@@ -3073,6 +3073,31 @@ describe("store", () => {
       expect(persisted).toHaveLength(1);
     });
 
+    it("carries a pending debounced write even when the agent is unchanged", async () => {
+      // Same-agent is the DEFAULT branch, not an edge: `lastSpawnAgent` is
+      // seeded from disk at boot and the dialog opens on it, so re-spawning
+      // it is the commonest spawn there is. Returning early there skipped
+      // the only flush the queued `f` would ever get before the picker's
+      // `process.exit(0)` took the 300ms timer with it.
+      const persisted: Record<string, unknown>[] = [];
+      const store = _createTUIStore({
+        lastSpawnAgent: "codex",
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
+      });
+
+      store.actions.toggleHideIdle();
+      await store.actions.setLastSpawnAgent("codex");
+
+      expect(persisted).toEqual([{ hideIdle: true }]);
+
+      // And the queue is drained, so the cancelled timer can't fire a stale
+      // second write.
+      await waitForDebounce();
+      expect(persisted).toHaveLength(1);
+    });
+
     it("picks up a last spawned agent written by another instance", () => {
       const store = createTUIStore({ lastSpawnAgent: "claude" });
 

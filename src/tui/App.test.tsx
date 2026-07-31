@@ -3,6 +3,9 @@ import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import type { SSECallbacks } from "./utils/sse";
 import { mockEnrichedSession, squish } from "./components/test-helpers";
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // Capture SSE callbacks so tests can fire events
 let sseCallbacks: SSECallbacks | null = null;
@@ -134,10 +137,17 @@ const realUiState = await import("../lib/state");
  *  channel for the exit-vs-write test, which pushes its own marker here. */
 const uiStateWrites: unknown[] = [];
 
+/** When set, `setUIState` parks on it instead of resolving immediately, so a
+ *  test can hold open the window the real one has: the pane already exists,
+ *  the state write is mid-flight (read, write, rename), and the dialog is
+ *  still on screen. */
+let uiStateGate: Promise<void> | null = null;
+
 mock.module("../lib/state", () => ({
   ...realUiState,
   setUIState: async (updates: unknown) => {
     uiStateWrites.push(updates);
+    if (uiStateGate) await uiStateGate;
   },
 }));
 
@@ -179,6 +189,7 @@ beforeEach(() => {
   resolveLaunchPaneSpy.mockClear();
   resolveLaunchPaneSpy.mockImplementation(async () => "%7");
   uiStateWrites.length = 0;
+  uiStateGate = null;
   hunkAvailable = true;
   runHunkReviewSpy.mockClear();
   runHunkReviewSpy.mockImplementation(async () => ({ ok: true, notes: [] }));
@@ -2882,6 +2893,45 @@ describe("App new session dialog", () => {
     }
   });
 
+  it("does not spawn twice when Enter lands while the agent is being remembered", async () => {
+    // The spawn is no longer in flight here but the pane already exists, and
+    // remembering the agent is a real file read, write and rename. The dialog
+    // stays on screen for all of it, so an Enter delivered in that window
+    // used to pass both guards and open a second pane. Durable on the sidebar
+    // and the persistent picker, where nothing exits to end the race.
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    let release: () => void = () => {};
+    uiStateGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await openDialog({ sidebar: true });
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      // Parked mid-write: one pane exists, the dialog is still up.
+      expect(spawns).toHaveLength(1);
+      expect(uiStateWrites).toContainEqual({ lastSpawnAgent: "claude" });
+      expect(setup.captureCharFrame()).toContain("New session");
+
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(spawns).toHaveLength(1);
+
+      release();
+      await settle();
+      await setup.renderOnce();
+      expect(spawns).toHaveLength(1);
+      expect(setup.captureCharFrame()).not.toContain("New session");
+    } finally {
+      release();
+      restoreExit();
+      restore();
+    }
+  });
+
   it("refuses a prompt for an agent that cannot take one", async () => {
     const { spawns, restore } = withDaemon();
     try {
@@ -3240,6 +3290,167 @@ describe("App new session dialog", () => {
       expect(frame).toContain("New session");
       expect(frame).not.toContain("New session here");
       expect(frame).not.toContain("Attach");
+    } finally {
+      restore();
+    }
+  });
+
+  /** Right-click the group header on row 1 and click its "New session here"
+   *  item, located by label so a menu reshuffle can't fire a different
+   *  action. Returns the frame with the dialog open. */
+  async function openGroupMenuNewSession(): Promise<string> {
+    await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+    await setup.renderOnce();
+    const menuRow = setup
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes("New session here"));
+    expect(menuRow).toBeGreaterThan(0);
+    await setup.mockMouse.click(7, menuRow, MouseButtons.LEFT);
+    await settle();
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  }
+
+  it("gives the same directory for a group whether opened by key or by mouse", async () => {
+    // Grouped by tmux session, a header's members can span unrelated repos,
+    // so the first member's cwd is an arbitrary pick and the picker's own
+    // directory is the defensible answer. The key path already gated on that;
+    // the menu path took the first member unconditionally, so the same header
+    // answered differently depending on how it was opened.
+    const { restore } = withDaemon();
+    const originalPwd = process.env.CCMUX_CALLER_PWD;
+    process.env.CCMUX_CALLER_PWD = "/where/the/picker/ran";
+    const grouped = [
+      session({ id: "s1", cwd: "/code/other-repo", tmuxTarget: "dev:1.0" }),
+      session({ id: "s2", cwd: "/code/myapp", tmuxTarget: "dev:2.0" }),
+    ];
+    try {
+      await renderApp(120, 24, { groupBy: "session" });
+      sseCallbacks!.onInit(grouped, null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+      const byKey = setup.captureCharFrame();
+      expect(byKey).toContain("/where/the/picker/ran");
+
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+
+      const byMouse = await openGroupMenuNewSession();
+      expect(byMouse).toContain("New session");
+      expect(byMouse).toContain("/where/the/picker/ran");
+      expect(byMouse).not.toContain("/code/other-repo");
+    } finally {
+      if (originalPwd === undefined) delete process.env.CCMUX_CALLER_PWD;
+      else process.env.CCMUX_CALLER_PWD = originalPwd;
+      restore();
+    }
+  });
+
+  it("uses the repo root for a project group, not a member's worktree", async () => {
+    // A project group is repo-level: it holds the main checkout AND every
+    // worktree of it, and members are sorted by status then activity. Taking
+    // members[0] made the directory a sibling worktree that changes between
+    // two opens; the repo root is the one directory the whole group agrees on.
+    const { restore } = withDaemon();
+    const worktree = session({
+      id: "s1",
+      cwd: "/code/myapp/.claude/worktrees/feature",
+      project: "myapp",
+      isWorktree: true,
+      mainRepoRoot: "/code/myapp",
+    });
+    const checkout = session({
+      id: "s2",
+      cwd: "/code/myapp",
+      project: "myapp",
+      mainRepoRoot: "/code/myapp",
+    });
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit([worktree, checkout], null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+      const byKey = setup.captureCharFrame();
+      expect(byKey).toContain("/code/myapp");
+      expect(byKey).not.toContain("worktrees/feature");
+
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+
+      const byMouse = await openGroupMenuNewSession();
+      expect(byMouse).toContain("/code/myapp");
+      expect(byMouse).not.toContain("worktrees/feature");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps a member's directory when the group's members disagree on the repo", async () => {
+    // The project group key is a repo NAME, not a path, so ~/work/api and
+    // ~/oss/api land in ONE group. Taking whichever member happened to carry a
+    // mainRepoRoot answered with one of two unrelated repositories depending on
+    // the status sort, so a disagreement falls back to the member's own cwd.
+    const { restore } = withDaemon();
+    const first = session({
+      id: "s1",
+      cwd: "/code/work/api/src",
+      project: "api",
+      mainRepoRoot: "/code/work/api",
+    });
+    const second = session({
+      id: "s2",
+      cwd: "/code/oss/api/src",
+      project: "api",
+      mainRepoRoot: "/code/oss/api",
+    });
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit([first, second], null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+
+      // The member's own cwd, not either repo root. Spelled out with the
+      // field label so a row behind the dialog cannot satisfy it.
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Directory /code/work/api/src");
+      expect(frame).not.toContain("Directory /code/oss/api");
+    } finally {
+      restore();
+    }
+  });
+
+  it("never answers with the home directory for a project group", async () => {
+    // A literal ~/.git dotfiles repo resolves every member's mainRepoRoot to
+    // $HOME while the group stands for one subdirectory of it, so agreeing on
+    // $HOME is agreement on the wrong directory: a new session would start at
+    // the top of the user's home.
+    const { restore } = withDaemon();
+    const home = realpathSync(homedir());
+    const inHome = session({
+      id: "s1",
+      cwd: join(home, "dotfiles-notes"),
+      project: "dotfiles-notes",
+      mainRepoRoot: home,
+    });
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit([inHome], null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+
+      // Labelled, so the session row behind the dialog cannot satisfy it.
+      expect(setup.captureCharFrame()).toContain("Directory ~/dotfiles-notes");
     } finally {
       restore();
     }
