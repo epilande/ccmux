@@ -139,9 +139,8 @@ describe("ContextMenu sizing", () => {
     const items = itemSpies(["Attach", LONG, "Kill"]);
     const { frame } = await renderMenu({ items });
 
-    expectFrameIntegrity(frame);
-    const { height, lines, top } = boxBounds(frame);
-    expect(height).toBe(items.length + 2);
+    expectFrameIntegrity(frame, items.length + 2);
+    const { lines, top } = boxBounds(frame);
     // Legibly cut rather than merely clipped, and still beside its hint.
     const row = lines[top + 2]!;
     expect(row).toContain("Move changes to");
@@ -160,7 +159,7 @@ describe("ContextMenu sizing", () => {
     ];
     const { frame } = await renderMenu({ items });
 
-    expectFrameIntegrity(frame);
+    expectFrameIntegrity(frame, items.length + 2);
     for (const item of items) expect(frame).toContain(item.label);
     expect(frame).not.toContain("…");
   });
@@ -172,10 +171,12 @@ describe("ContextMenu sizing", () => {
     const size = { width: 40, height: 10 };
     const { frame } = await renderMenu({ items, x: 9999, y: 9999, size });
 
-    expectFrameIntegrity(frame);
-    const { top, bottom, height } = boxBounds(frame);
+    // The height assertion is the one that fails pre-fix here: a box taller
+    // than `menuHeight()` loses its bottom border off the viewport, so there
+    // is no `└` to measure to.
+    expectFrameIntegrity(frame, items.length + 2);
+    const { top, bottom } = boxBounds(frame);
     expect(top).toBeGreaterThanOrEqual(0);
-    expect(height).toBe(items.length + 2);
     // Flush against the bottom row of the viewport, not past it.
     expect(bottom).toBe(size.height - 1);
     // Every item is still on screen, first and last included.

@@ -99,22 +99,41 @@ export function membersFromSummary(summary: StatusSummary): FilteredSession[] {
 }
 
 /**
- * Assert every row of a rendered single-border box closes with its border.
+ * Assert a rendered single-border box is structurally intact: every row that
+ * carries a border character closes with one, and — when `expectedHeight` is
+ * given — the box spans exactly that many rows, its own borders included.
  *
- * The check that catches content wrapping past the rows its container
- * budgeted for it: the content assertions still pass in that case (the text
- * is all there), while the box is drawn wrong. Live captures, not tests, are
- * what caught the last two instances of it.
+ * Be clear about what the first half does NOT catch, because it reads like a
+ * general overflow detector and is not one. It only inspects rows that
+ * already contain `│`, so content that spills past the rows its container
+ * budgeted for it passes untouched: the overflowing rows have no border
+ * character to check, and garbling INSIDE the box leaves the borders intact.
+ * Run against the frames from both bugs this helper's tests cover (#85, #82)
+ * it passed on both. Treat it as a cheap structural check and let the height
+ * and content assertions carry the real weight — `expectedHeight` is here so
+ * that the one line that does catch a box drawn taller than it claims can
+ * ride along with it.
  */
-export function expectFrameIntegrity(frame: string): void {
-  const boxRows = frame
-    .split("\n")
+export function expectFrameIntegrity(
+  frame: string,
+  expectedHeight?: number,
+): void {
+  const lines = frame.split("\n");
+  const boxRows = lines
     .filter((row) => row.includes("│"))
     .map((row) => row.trimEnd());
   expect(boxRows.length).toBeGreaterThan(0);
   for (const row of boxRows) {
     expect(row.endsWith("│")).toBe(true);
   }
+  if (expectedHeight === undefined) return;
+  // Corners, not the `│` rows: a box whose bottom fell off the viewport has
+  // no `└` to find, which is exactly the failure worth reporting.
+  const top = lines.findIndex((row) => row.includes("┌"));
+  const bottom = lines.findIndex((row) => row.includes("└"));
+  expect(top).toBeGreaterThanOrEqual(0);
+  expect(bottom).toBeGreaterThanOrEqual(0);
+  expect(bottom - top + 1).toBe(expectedHeight);
 }
 
 // Strip single-border box chars and whitespace from a captured frame so an

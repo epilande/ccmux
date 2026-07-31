@@ -238,6 +238,12 @@ describe("NewSessionDialog", () => {
   it("reports an empty agent list instead of rendering nothing", async () => {
     const frame = await renderDialog({ agents: [] });
     expect(frame).toContain("No agents found on PATH");
+    setup.renderer.destroy();
+
+    // The daemon's error text is passed through as it comes, so an empty one
+    // reaches here and must not render as a blank red row.
+    const blank = await renderDialog({ agents: [], agentsError: "" });
+    expect(blank).toContain("No agents found on PATH");
   });
 
   it("surfaces the daemon's error when the list could not be resolved", async () => {

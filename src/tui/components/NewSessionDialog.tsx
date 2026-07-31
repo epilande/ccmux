@@ -71,6 +71,10 @@ export const DESTINATION_OPTIONS: readonly DestinationOption[] = [
  * here (it breaks mid-word at the tail of a line, and a space landing on the
  * boundary moves to the next row). Lines produced here already fit, so
  * nothing can wrap a second time and the budget cannot be wrong.
+ *
+ * Widths are UTF-16 code units, not display columns, so a line of wide
+ * glyphs (CJK) over-fills its column — the same limitation `truncateText`
+ * has, tracked in issue #91, whose real fix is a shared display-width helper.
  */
 export function wrapText(text: string, width: number): string[] {
   if (width <= 0) return [text];
@@ -256,7 +260,10 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    * the same clipping.
    */
   const agentErrorLines = createMemo(() => {
-    const text = props.agentsError ?? "No agents found on PATH";
+    // `||`, not `??`: the daemon's own error text is passed straight through
+    // (App.tsx takes `body?.error` at its word), and a `{"error": ""}` body
+    // would otherwise render an empty red row that says nothing at all.
+    const text = props.agentsError || "No agents found on PATH";
     const lines = wrapText(text, contentWidth());
     const room = agentRoom();
     if (lines.length <= room) return lines;
