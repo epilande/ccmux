@@ -104,11 +104,13 @@ function errorMessage(err: unknown): string {
  * paths it covered. `leftoverStash` is the one thing a SUCCESSFUL move can
  * still leave behind (the entry was applied but could not be dropped), and it
  * is reported so it can be cleaned up rather than found later as a mystery.
+ * `flattenedIndex` says the staged/unstaged split could not be preserved.
  */
 interface SpawnMoveReport {
   moved: number;
   untracked: { mode: UntrackedMode; files: string[] };
   leftoverStash?: string;
+  flattenedIndex?: boolean;
 }
 
 function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
@@ -2819,6 +2821,7 @@ export class DaemonServer {
           ...(moved.leftoverStash
             ? { leftoverStash: moved.leftoverStash }
             : {}),
+          ...(moved.flattenedIndex ? { flattenedIndex: true } : {}),
         };
       } else {
         const created = await createWorktree(mainRepoRoot, {

@@ -645,6 +645,26 @@ describe("ccmux spawn --with-changes reporting", () => {
     expect(out).toContain("git stash drop");
   });
 
+  it("notes when the staged/unstaged split could not be kept", async () => {
+    // Not an error — every edit landed — but a `git add` the user had
+    // already done did not survive, and finding that out at commit time is
+    // worse than reading one line here.
+    const { out, code } = await runAgainst(200, {
+      success: true,
+      paneId: "%9",
+      command: "claude",
+      move: {
+        moved: 2,
+        untracked: { mode: "move", files: [] },
+        flattenedIndex: true,
+      },
+    });
+
+    expect(code).toBe(null);
+    expect(out).toContain("staged");
+    expect(out).toContain("git add");
+  });
+
   /**
    * The recovery path. A refused move can leave the work in a stash entry,
    * and the sha is the only handle the user has for getting it back, so it

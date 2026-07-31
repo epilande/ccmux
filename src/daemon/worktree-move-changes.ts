@@ -135,6 +135,15 @@ export interface MoveChangesOk {
    * than discovered later as a mystery entry.
    */
   leftoverStash?: string;
+  /**
+   * Set when the changes landed as one worktree state instead of the staged
+   * and unstaged halves they left as. Nothing is lost — every edit is in the
+   * new checkout — but a `git add` the user had already done is not, so this
+   * is worth a line rather than a silent difference they find at commit time.
+   * Only ever set when there was a split to lose; see
+   * {@link carriedStagedContent}.
+   */
+  flattenedIndex?: boolean;
 }
 
 export interface MoveChangesError {
@@ -337,6 +346,64 @@ async function findStashRef(
 }
 
 /**
+ * Apply a stash entry into `checkout`, keeping the staged/unstaged split when
+ * git will let us.
+ *
+ * `--index` is what preserves it. A plain apply merges both halves into one
+ * worktree state, so once the entry drops the staged snapshot is gone — for
+ * content the user deliberately `git add`ed that is lost work, not a
+ * cosmetic difference in what `git status` prints.
+ *
+ * `--index` is ATTEMPTED only when the target's index already matches HEAD,
+ * rather than tried and retried on failure. It refuses outright when the
+ * target has staged changes of its own, and a failed attempt is not free: for
+ * an entry made with `--include-untracked` it has already written the
+ * untracked files back by then, so the plain retry fails with "already
+ * exists" on a case that would have applied cleanly on the first try. Asking
+ * first costs one `git diff --cached`. The retry stays for every other way
+ * `--index` can fail, where the plain apply is no worse off than it would
+ * have been alone.
+ */
+async function applyStash(
+  checkout: string,
+  ref: string,
+  git: GitRun,
+): Promise<{ ok: boolean; flattened: boolean; stderr: string }> {
+  const staged = await git(checkout, ["diff", "--cached", "--quiet"]);
+  if (staged.exitCode === 0) {
+    const withIndex = await git(checkout, ["stash", "apply", "--index", ref]);
+    if (withIndex.exitCode === 0) {
+      return { ok: true, flattened: false, stderr: "" };
+    }
+  }
+  const plain = await git(checkout, ["stash", "apply", ref]);
+  return {
+    ok: plain.exitCode === 0,
+    flattened: plain.exitCode === 0,
+    stderr: plain.stderr,
+  };
+}
+
+/**
+ * Whether a stash entry carries staged content, i.e. whether flattening it
+ * actually loses anything.
+ *
+ * A stash's second parent is the index at push time, its first is HEAD. When
+ * those trees agree there was nothing staged, and a plain apply reproduces
+ * exactly what `--index` would have.
+ */
+async function carriedStagedContent(
+  checkout: string,
+  sha: string,
+  git: GitRun,
+): Promise<boolean> {
+  const res = await git(checkout, ["diff", "--quiet", `${sha}^`, `${sha}^2`]);
+  // 1 is "they differ"; anything else (128) is a question we could not ask,
+  // and guessing "yes" would put a warning on a move that lost nothing.
+  return res.exitCode === 1;
+}
+
+/**
  * Copy untracked paths from the source into the new worktree.
  *
  * Copying (rather than letting the stash carry them) is what makes `copy`
@@ -511,12 +578,19 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
     stashSha = sha;
   }
 
-  /** Put the source back the way it was found. Used by every failure below. */
+  /**
+   * Put the source back the way it was found. Used by every failure below.
+   *
+   * Goes through {@link applyStash} for the same reason the worktree apply
+   * does: a source whose staged and unstaged halves were merged back into one
+   * is not the state it was found in. The flattening is not reported here —
+   * the caller is already being told the move failed, and which half a
+   * restored edit sits in is not the headline.
+   */
   const restoreSource = async (): Promise<boolean> => {
     if (!stashSha) return true;
     const ref = await findStashRef(source, stashSha, git);
-    const applied = await git(source, ["stash", "apply", ref ?? stashSha]);
-    return applied.exitCode === 0;
+    return (await applyStash(source, ref ?? stashSha, git)).ok;
   };
 
   // --- Step 3: create the worktree. ---
@@ -569,14 +643,11 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
   };
 
   // --- Step 4: apply into the new worktree. ---
+  let flattenedIndex = false;
   if (stashSha) {
     const ref = await findStashRef(source, stashSha, git);
-    const applied = await git(worktreePath, [
-      "stash",
-      "apply",
-      ref ?? stashSha,
-    ]);
-    if (applied.exitCode !== 0) {
+    const applied = await applyStash(worktreePath, ref ?? stashSha, git);
+    if (!applied.ok) {
       await removeWorktree();
       const restored = await restoreSource();
       return {
@@ -589,6 +660,9 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
         sourceRestored: restored,
       };
     }
+    // Worth mentioning only when there WAS a split to lose.
+    flattenedIndex =
+      applied.flattened && (await carriedStagedContent(source, stashSha, git));
   }
 
   // --- Step 5: untracked copies. ---
@@ -630,5 +704,6 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
       files: mode === "leave" ? [] : state.untrackedPaths,
     },
     ...(leftoverStash ? { leftoverStash } : {}),
+    ...(flattenedIndex ? { flattenedIndex: true } : {}),
   };
 }

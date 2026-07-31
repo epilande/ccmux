@@ -492,6 +492,62 @@ describe("moveChangesToWorktree", () => {
     expect(await git(repo, ["show", `${leftover}:tracked.txt`])).toBe("edited");
   });
 
+  it("preserves the staged/unstaged split", async () => {
+    // A plain `stash apply` merges the two halves into one worktree state,
+    // and once the entry drops the staged snapshot is gone. For content the
+    // user deliberately `git add`ed that is lost work, not a cosmetic
+    // difference in what `git status` prints.
+    const repo = await makeRepo();
+    writeFileSync(join(repo, "tracked.txt"), "staged\n");
+    await git(repo, ["add", "tracked.txt"]);
+    writeFileSync(join(repo, "tracked.txt"), "and then edited\n");
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      createWorktree: realCreator(repo),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const wt = result.worktreePath;
+    expect(await git(wt, ["status", "--porcelain"])).toBe("MM tracked.txt");
+    expect(await git(wt, ["show", ":tracked.txt"])).toBe("staged");
+    expect(readFileSync(join(wt, "tracked.txt"), "utf-8")).toBe(
+      "and then edited\n",
+    );
+    // Nothing was lost, so there is nothing to warn about.
+    expect(result.flattenedIndex).toBeUndefined();
+  });
+
+  it("still applies when the split cannot be kept, and says so", async () => {
+    // `--index` refuses a target that has staged changes of its own. The
+    // move must not fail over that — it just cannot keep the split, and the
+    // user is told rather than left to notice.
+    const repo = await makeRepo();
+    writeFileSync(join(repo, "tracked.txt"), "staged\n");
+    await git(repo, ["add", "tracked.txt"]);
+    writeFileSync(join(repo, "tracked.txt"), "and then edited\n");
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      createWorktree: async ({ name }) => {
+        const path = join(root, "wt", name ?? "moved");
+        await git(repo, ["worktree", "add", "-b", "moved", path, "HEAD"]);
+        writeFileSync(join(path, "sibling.txt"), "from file setup\n");
+        await git(path, ["add", "sibling.txt"]);
+        return { path, created: true };
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // All of the work is there; all of it landed in the worktree half.
+    expect(
+      readFileSync(join(result.worktreePath, "tracked.txt"), "utf-8"),
+    ).toBe("and then edited\n");
+    expect(result.flattenedIndex).toBe(true);
+  });
+
   it("names the entry a FAILED push still managed to create", async () => {
     // git writes `refs/stash` before it finishes cleaning the working tree,
     // so a push that fails partway (an untracked file it cannot remove) exits

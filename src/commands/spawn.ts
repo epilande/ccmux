@@ -31,6 +31,8 @@ interface SpawnResponse {
     moved: number;
     untracked: { mode: UntrackedMode; files: string[] };
     leftoverStash?: string;
+    /** The staged/unstaged split could not be preserved. */
+    flattenedIndex?: boolean;
   };
 }
 
@@ -329,7 +331,8 @@ export function createSpawnCommand(): Command {
             console.log(`${what}: ${path}`);
           }
           if (data.move) {
-            const { moved, untracked, leftoverStash } = data.move;
+            const { moved, untracked, leftoverStash, flattenedIndex } =
+              data.move;
             // Both halves are named even at zero, because "0 untracked files"
             // is the answer to "did it take my new files too" — the question
             // `--untracked` exists for.
@@ -342,6 +345,14 @@ export function createSpawnCommand(): Command {
             console.log(
               `Moved ${files(moved)} changed, ${untrackedNote}, out of ${resolveSpawnCwd(options.cwd)}`,
             );
+            // A note, not an error: every edit is in the new worktree, but
+            // the staged half arrived unstaged, and finding that out at
+            // commit time is worse than reading one line here.
+            if (flattenedIndex) {
+              console.log(
+                "Everything moved, but not the staged/unstaged split: re-run 'git add' in the worktree for what you had staged.",
+              );
+            }
             // A successful move that could not drop its own backup. Harmless,
             // but silence would leave it to be found later as a stash entry
             // nobody remembers making.
