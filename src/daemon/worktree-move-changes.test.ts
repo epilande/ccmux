@@ -604,6 +604,66 @@ describe("moveChangesToWorktree", () => {
     expect(result.flattenedIndex).toBe(true);
   });
 
+  it("reports a source it could NOT put back", async () => {
+    // The unhappiest path there is, and until now only ever reached through
+    // a stub. The pane's agent rewrites the very file the stash holds while
+    // the move is running, so the restore has nowhere to land — and the sha
+    // becomes the only handle on the work.
+    const repo = await makeRepo();
+    dirty(repo);
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      createWorktree: async () => {
+        writeFileSync(join(repo, "tracked.txt"), "rewritten while we worked\n");
+        throw new Error("disk full");
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("create-failed");
+    expect(result.sourceRestored).toBe(false);
+    expect(result.stashSha).toBeDefined();
+    // Still reachable, which is what makes reporting it worth anything.
+    expect(await git(repo, ["show", `${result.stashSha}:tracked.txt`])).toBe(
+      "edited",
+    );
+    expect(await stashCount(repo)).toBe(1);
+  });
+
+  it("reports a stash entry it could not drop", async () => {
+    // The move SUCCEEDS and the entry stays behind. Driven through the git
+    // seam because real git will not refuse a drop of an entry it just
+    // resolved, and an untested branch here would mean a leftover nobody is
+    // ever told about.
+    const repo = await makeRepo();
+    dirty(repo);
+
+    const noDrop: GitRun = async (cwd, args) => {
+      if (args[0] === "stash" && args[1] === "drop") {
+        return { exitCode: 1, stdout: "", stderr: "refusing to drop" };
+      }
+      return runGit(cwd, args);
+    };
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      git: noDrop,
+      createWorktree: realCreator(repo),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.leftoverStash).toMatch(/^[0-9a-f]{40}$/);
+    // The work landed anyway; the entry is a redundant copy, not a failure.
+    expect(
+      readFileSync(join(result.worktreePath, "tracked.txt"), "utf-8"),
+    ).toBe("edited\n");
+    expect(await statusOf(repo)).toBe("");
+    expect(await stashCount(repo)).toBe(1);
+  });
+
   it("names the entry a FAILED push still managed to create", async () => {
     // git writes `refs/stash` before it finishes cleaning the working tree,
     // so a push that fails partway (an untracked file it cannot remove) exits
