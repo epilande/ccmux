@@ -3856,6 +3856,12 @@ describe("App move-changes menu gate", () => {
   it("never gates one row's menu with another row's answer", async () => {
     // A slow answer for a dismissed menu must not resurrect the item
     // somewhere else.
+    //
+    // Belt and braces, honestly: mutating the guard it is aimed at does not
+    // make this fail, because the second menu's own (clean) answer already
+    // hides the item by the time the first one lands. Kept anyway — it pins
+    // the OBSERVABLE contract, and a future ordering change is exactly the
+    // sort of thing that would make it start earning its keep.
     let resolveFirst!: (r: Response) => void;
     const original = globalThis.fetch;
     const asked: string[] = [];

@@ -54,7 +54,6 @@ interface SpawnResponse {
  */
 interface SpawnErrorResponse {
   error: string;
-  reason?: string;
   /** The stash entry holding the user's work, when one was left in place. */
   stashSha?: string;
   sourceRestored?: boolean;
@@ -82,7 +81,11 @@ function parseSplit(value: string): SpawnSplit {
  *  daemon (or starts one). */
 function parseUntracked(value: string): UntrackedMode {
   if (isUntrackedMode(value)) return value;
-  throw new InvalidArgumentError(`Expected ${UNTRACKED_MODES.join(", ")}.`);
+  // Quoted, like parseSplit's: the values are literals to type, and an
+  // unquoted list reads as prose the moment one of them is a real word.
+  throw new InvalidArgumentError(
+    `Expected ${UNTRACKED_MODES.map((mode) => `'${mode}'`).join(", ")}.`,
+  );
 }
 
 /**
@@ -240,7 +243,7 @@ export function createSpawnCommand(): Command {
     )
     .option(
       "--untracked <mode>",
-      `What --with-changes does with untracked files (${UNTRACKED_MODES.join(", ")})`,
+      `What --with-changes does with untracked files (${UNTRACKED_MODES.join(", ")}; default ${UNTRACKED_MODES[0]})`,
       parseUntracked,
     )
     .action(

@@ -932,7 +932,7 @@ export function normalizeWorktreeRequest(
     return {
       ok: false,
       error:
-        "Invalid 'worktree' field: expected an object such as { name, base }",
+        "Invalid 'worktree' field: expected an object such as { name, base, withChanges, untracked }",
     };
   }
 

@@ -4,16 +4,28 @@
  * This is the one ccmux operation that handles work git cannot get back: a
  * commit is recoverable from the reflog, an uncommitted edit is not. So the
  * ordering below is the feature, not an implementation detail, and every
- * failure path is written to end with the user's changes still reachable.
+ * failure path is written to end with the user's changes still REACHABLE —
+ * which is a weaker and more honest claim than "put back". A restore can
+ * itself fail (the checkout changed underneath the move), and the confirmation
+ * failures around the push return before there is an entry this function can
+ * name. Every one of those still leaves the work in the stash, and every one
+ * of them says which situation the caller is in rather than implying the
+ * cheerful one: `sourceRestored` and `stashSha` exist for exactly that.
+ *
+ * The whole sequence runs under a per-repository lock, because the stash stack
+ * is shared by every worktree of a repo and reading a status another move has
+ * already stashed away answers the wrong question. See {@link withMoveLock}.
  *
  * The sequence:
  *
- *   1. Refuse outright if the source has a merge/rebase/cherry-pick in
- *      progress, or if there is nothing to move.
+ *   1. Refuse outright if the source has a merge/rebase/cherry-pick/revert or
+ *      bisect in progress, or if there is nothing to move.
  *   2. `git stash push` in the source. This is what removes the changes, and
  *      it is also the backup: from here until step 6 the work lives in a stash
  *      entry that nothing deletes.
- *   3. Create the worktree (injected; see {@link CreateWorktree}).
+ *   3. Create the worktree (injected; see {@link CreateWorktree}). It must be
+ *      a FRESH one — a worktree the engine merely opened is refused, because
+ *      the rollback below removes what it made.
  *   4. `git stash apply` INTO the new worktree.
  *   5. Copy untracked files across when the mode asks for it.
  *   6. Only now drop the stash entry.

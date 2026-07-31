@@ -330,15 +330,27 @@ editable.
 Untracked files move by default (agents create new files constantly, and
 leaving them behind would strand exactly the work you are relocating).
 `--untracked copy` puts them in both places, `--untracked leave` keeps them
-where they are. Gitignored files are never part of this; `worktree.symlinkDirectories`
-and `.worktreeinclude` cover those.
+where they are. Gitignored files are never part of this in any mode — not
+moved, not copied — because a `.env` sitting in an otherwise-new directory is
+not work to relocate; `worktree.symlinkDirectories` and `.worktreeinclude`
+cover those.
 
-Nothing is moved until there is somewhere to put it, and nothing is lost if
-that fails. The changes are stashed first, applied into the new worktree, and
-only then is the stash entry dropped — so a failure anywhere in between puts
-your checkout back as it was and reports the stash entry holding your work.
-ccmux refuses to run at all while a merge, rebase, or cherry-pick is in
-progress.
+The stash is the backup, and it is the first thing that happens. Your changes
+are stashed out of the checkout, the worktree is created, the entry is applied
+into it, and only then is the entry dropped. So there is a window where the
+work lives in a stash and nowhere else, and every failure inside it ends the
+same way: your checkout is put back as it was, and the stash entry holding
+your work is reported by sha whether or not the restore succeeded. Nothing is
+ever dropped before it has landed somewhere else.
+
+Staged and unstaged changes arrive as you left them where git allows it; if
+the split cannot be preserved, everything still moves and you are told to
+re-run `git add`.
+
+ccmux refuses to run at all while a merge, rebase, cherry-pick, revert, or
+bisect is in progress, and refuses a worktree name that already exists — a
+move needs a fresh worktree, because rolling one back would take a checkout
+it did not create.
 
 ### Forking Sessions
 

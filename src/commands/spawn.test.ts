@@ -577,7 +577,7 @@ describe("ccmux spawn --with-changes validation", () => {
           "--untracked",
           "delete",
         ]),
-      ).rejects.toThrow(/move, copy, leave/);
+      ).rejects.toThrow(/'move', 'copy', 'leave'/);
       expect(ensureDaemonCalls).toBe(0);
     } finally {
       restoreFetch();
