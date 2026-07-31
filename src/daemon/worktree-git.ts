@@ -303,13 +303,7 @@ export async function readDirtyState(
     if (line.startsWith("!!")) {
       const path = line.slice(3).trim();
       if (!path) continue;
-      // A trailing slash is git's marker for a collapsed ignored directory.
-      // It is the only thing that distinguishes the two here, and it is
-      // reliable in the direction that matters: git prints it for a real
-      // directory and never for a symlink to one (a `node_modules` symlink
-      // matched by a bare-name pattern arrives as an ignored FILE), so a
-      // setup link can never be miscounted as a directory of work.
-      if (path.endsWith("/")) ignoredDirs.push(path);
+      if (isCollapsedDirectory(path)) ignoredDirs.push(path);
       else ignoredFiles.push(path);
     } else if (line.startsWith("??")) {
       if (isSetupSymlink(worktreePath, line.slice(3).trim(), setupSymlinks)) {
@@ -325,6 +319,33 @@ export async function readDirtyState(
     ignoredFiles,
     ignoredDirs,
   };
+}
+
+/**
+ * Whether a porcelain path is a directory git collapsed to one entry.
+ *
+ * The trailing slash is git's own marker, and it is the only thing that
+ * separates a directory from a file here. It is reliable in the direction
+ * that matters: git prints it for a real directory and never for a symlink to
+ * one (a `node_modules` symlink matched by a bare-name pattern arrives as an
+ * ignored FILE), so a setup link can never be miscounted as a directory of
+ * work.
+ *
+ * The `/"` case is C-quoting, and it is not exotic. Porcelain quotes any path
+ * holding a space, a quote, a backslash, a control char or a non-ASCII byte,
+ * and the slash lands INSIDE the quotes: `"notes dir/"`, `"n\303\263tes/"`.
+ * A bare `endsWith("/")` filed `Design Assets/` and `nótes/` as ignored FILES,
+ * which put them on the row and both confirmation steps — the surfaces the
+ * directory list deliberately stays off.
+ *
+ * A string check rather than a git-side fix, because neither knob helps:
+ * `core.quotePath=false` only stops the non-ASCII escaping and still quotes a
+ * path with a space (verified against real git), and `-z` porcelain drops
+ * quoting but changes the record structure for renames, which is a rewrite of
+ * the parse for a case this handles in eight characters.
+ */
+function isCollapsedDirectory(path: string): boolean {
+  return path.endsWith("/") || path.endsWith('/"');
 }
 
 /**

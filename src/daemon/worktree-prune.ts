@@ -409,18 +409,25 @@ export function describeIgnoredDirs(dirs: string[], max = 3): string {
 }
 
 /**
- * The run log's line for everything ignored a removal takes with it, files
- * and directories, or "" when there is nothing to say. Files first: they are
- * the ones no backup and no git history can bring back.
+ * The run log's lines for everything ignored a removal takes with it: one per
+ * KIND, files first (they are the ones no backup and no git history can bring
+ * back), and an empty array when there is nothing to say.
+ *
+ * Two lines rather than one joined line because of where they are read. Each
+ * log step renders on a single un-wrapped row, so at sidebar width a combined
+ * `1 ignored file (.env), 2 ignored dirs (notes/, data/)` truncates away
+ * exactly the tail — the directory names, which the run log is the ONLY
+ * surface to carry. That is the #81 symptom growing back at 44 columns.
  */
 export function describeIgnoredDeletion(
   files: string[],
   dirs: string[],
   max = 3,
-): string {
-  return [describeIgnoredFiles(files, max), describeIgnoredDirs(dirs, max)]
-    .filter((part) => part !== "")
-    .join(", ");
+): string[] {
+  return [
+    describeIgnoredFiles(files, max),
+    describeIgnoredDirs(dirs, max),
+  ].filter((part) => part !== "");
 }
 
 function detailFor(
@@ -1124,7 +1131,9 @@ export async function runPrune(
     // and nowhere else, because a `node_modules/` in front of every confirm
     // trains the reflex approval the whole ignored policy exists to avoid —
     // but a gitignored `notes/` used to go with no record at all.
-    const ignoredSummary = describeIgnoredDeletion(
+    // One step per kind: a joined line loses its tail to truncation at
+    // sidebar width, and the tail is the half only this surface carries.
+    const ignoredSummaries = describeIgnoredDeletion(
       candidate.ignoredFiles,
       candidate.ignoredDirs,
       10,
@@ -1144,12 +1153,8 @@ export async function runPrune(
             ? ` (DIRTY: ${candidate.modified} modified, ${candidate.untracked} untracked)`
             : ""),
       });
-      if (ignoredSummary !== "") {
-        steps.push({
-          step: "would delete ignored",
-          ok: true,
-          detail: ignoredSummary,
-        });
+      for (const detail of ignoredSummaries) {
+        steps.push({ step: "would delete ignored", ok: true, detail });
       }
       if (candidate.branch && candidate.branchDeletion !== "none") {
         steps.push({
@@ -1164,12 +1169,8 @@ export async function runPrune(
     // Recorded before the directory moves: once it is gone, nothing else in
     // the log says these files ever existed, and they are the ones no git
     // history can bring back.
-    if (ignoredSummary !== "") {
-      steps.push({
-        step: "deleting ignored",
-        ok: true,
-        detail: ignoredSummary,
-      });
+    for (const detail of ignoredSummaries) {
+      steps.push({ step: "deleting ignored", ok: true, detail });
     }
 
     // Stop the worktree's agents (and close their panes) BEFORE the dirty

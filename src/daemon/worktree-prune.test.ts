@@ -1858,7 +1858,13 @@ describe("ignored directories", () => {
     expect(step?.detail).toBe("1 ignored dir (notes/)");
   });
 
-  it("reports files and directories on the one line", async () => {
+  /**
+   * Files and directories get a line each. A joined line renders on one
+   * un-wrapped row and loses its tail at sidebar width — and the tail is the
+   * directory half, which the run log is the only surface to carry, so
+   * truncation would put #81's symptom back at 44 columns.
+   */
+  it("reports files and directories on separate lines", async () => {
     const { repo, wt } = await worktreeWithIgnoredDir(
       "ignored-dir-both",
       "feat/notes5",
@@ -1872,10 +1878,90 @@ describe("ignored directories", () => {
       log: () => {},
     });
 
-    const step = result.outcomes[0].steps.find(
-      (s) => s.step === "deleting ignored",
+    const details = result.outcomes[0].steps
+      .filter((s) => s.step === "deleting ignored")
+      .map((s) => s.detail);
+    expect(details).toEqual([
+      "1 ignored file (.env)",
+      "1 ignored dir (notes/)",
+    ]);
+  });
+
+  it("splits the dry run's lines the same way", async () => {
+    const { repo, wt } = await worktreeWithIgnoredDir(
+      "ignored-dir-both-dry",
+      "feat/notes6",
+      "notes/\n.env\n",
     );
-    expect(step?.detail).toBe("1 ignored file (.env), 1 ignored dir (notes/)");
+    writeFileSync(join(wt, ".env"), "SECRET=1\n");
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+
+    const result = await runPrune(scan.candidates, {
+      dryRun: true,
+      stateFiles: [],
+      log: () => {},
+    });
+
+    const details = result.outcomes[0].steps
+      .filter((s) => s.step === "would delete ignored")
+      .map((s) => s.detail);
+    expect(details).toEqual([
+      "1 ignored file (.env)",
+      "1 ignored dir (notes/)",
+    ]);
+  });
+
+  /**
+   * Porcelain C-quotes any path holding a space, a quote, a backslash, a
+   * control char or a non-ASCII byte, and the trailing slash lands INSIDE the
+   * quotes: `!! "notes dir/"`, `!! "n\303\263tes/"` (both verified against
+   * real git). A bare `endsWith("/")` filed those as ignored FILES, which put
+   * them on the row and both confirmation steps — the surfaces the directory
+   * list deliberately stays off.
+   */
+  it("classifies a C-quoted directory as a directory, not a file", async () => {
+    const { repo } = await makeRepo("ignored-dir-quoted");
+    const wt = await addWorktree(repo, "feat/quoted");
+    writeFileSync(join(wt, ".gitignore"), "notes dir/\nnótes/\n");
+    await git(wt, ["add", ".gitignore"]);
+    await git(wt, ["commit", "-qm", "ignore"]);
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/quoted"]);
+    await mkdir(join(wt, "notes dir"), { recursive: true });
+    writeFileSync(join(wt, "notes dir", "plan.md"), "work\n");
+    await mkdir(join(wt, "nótes"), { recursive: true });
+    writeFileSync(join(wt, "nótes", "plan.md"), "work\n");
+
+    const state = await readDirtyState(wt);
+
+    // Quoted exactly as git printed them; unquoting for display is a
+    // pre-existing gap the ignored FILES have too, and out of scope here.
+    // The space case is asserted byte-exact because it is identical on every
+    // platform; the non-ASCII one only by shape, since a filesystem that
+    // normalizes to NFD would change WHICH octal escapes git prints without
+    // changing the thing under test (a quoted path ending `/"`).
+    expect(state.ignoredDirs).toContain('"notes dir/"');
+    expect(state.ignoredDirs).toHaveLength(2);
+    for (const dir of state.ignoredDirs) expect(dir).toEndWith('/"');
+    // The point of the fix: neither reaches the file list, which IS shown on
+    // the row and at both confirmation steps.
+    expect(state.ignoredFiles).toEqual([]);
+    expect(state.dirty).toBe(false);
+
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+    expect(scan.candidates[0].ignoredFiles).toEqual([]);
+    expect(scan.candidates[0].ignoredDirs).toHaveLength(2);
+
+    const result = await runPrune(scan.candidates, {
+      stateFiles: [],
+      log: () => {},
+    });
+
+    const details = result.outcomes[0].steps
+      .filter((s) => s.step === "deleting ignored")
+      .map((s) => s.detail);
+    expect(details).toHaveLength(1);
+    expect(details[0]).toStartWith("2 ignored dirs (");
+    expect(details[0]).toContain("notes dir/");
   });
 
   /**
@@ -1977,20 +2063,28 @@ describe("describeIgnoredDirs", () => {
 
 describe("describeIgnoredDeletion", () => {
   it("says nothing when there is nothing to delete", () => {
-    expect(describeIgnoredDeletion([], [])).toBe("");
+    expect(describeIgnoredDeletion([], [])).toEqual([]);
   });
 
-  it("reports either half on its own", () => {
-    expect(describeIgnoredDeletion([".env"], [])).toBe("1 ignored file (.env)");
-    expect(describeIgnoredDeletion([], ["notes/"])).toBe(
+  it("reports either half on its own as a single line", () => {
+    expect(describeIgnoredDeletion([".env"], [])).toEqual([
+      "1 ignored file (.env)",
+    ]);
+    expect(describeIgnoredDeletion([], ["notes/"])).toEqual([
       "1 ignored dir (notes/)",
-    );
+    ]);
   });
 
-  it("puts the unrecoverable files first when there are both", () => {
-    expect(describeIgnoredDeletion([".env"], ["notes/", "dist/"])).toBe(
-      "1 ignored file (.env), 2 ignored dirs (notes/, dist/)",
-    );
+  /**
+   * Two lines, not one joined line: each log step renders on a single
+   * un-wrapped row, so a combined line loses its TAIL at sidebar width — and
+   * the tail is the directory half, which no other surface shows at all.
+   */
+  it("keeps the two kinds on separate lines, files first", () => {
+    expect(describeIgnoredDeletion([".env"], ["notes/", "dist/"])).toEqual([
+      "1 ignored file (.env)",
+      "2 ignored dirs (notes/, dist/)",
+    ]);
   });
 });
 
