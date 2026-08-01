@@ -4658,3 +4658,298 @@ describe("App move-changes reporting", () => {
     }
   });
 });
+
+/**
+ * "Fork into worktree" (issue #70): the row menu's second fork, which routes
+ * through the new-session dialog so the worktree can be named before the
+ * conversation is continued in it. `F` stays the one-shot beside the source.
+ */
+describe("App fork into worktree", () => {
+  type ForkBody = {
+    fork?: string;
+    agent?: string;
+    cwd?: string;
+    prompt?: string;
+    split?: unknown;
+    target?: string;
+    detach?: boolean;
+    worktree?: { name?: string; withChanges?: boolean };
+  };
+
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  /** Answers everything the menu and the dialog ask on the way to a spawn. */
+  function withForkDaemon(
+    spawnResponse: () => Response = () =>
+      Response.json({ success: true, paneId: "%99" }),
+  ) {
+    const spawns: ForkBody[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const href = String(url);
+      // Clean, so "Move changes" stays out of the menu and cannot be the
+      // item a label search lands on.
+      if (href.includes("/dirty")) return Response.json({ dirty: false });
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: null });
+      }
+      if (href.endsWith("/agents")) {
+        return Response.json({
+          agents: [
+            {
+              name: "claude",
+              displayName: "Claude",
+              shortCode: "CC",
+              supportsPrompt: true,
+            },
+          ],
+        });
+      }
+      if (href.endsWith("/spawn")) {
+        spawns.push(JSON.parse(String(init?.body ?? "{}")) as ForkBody);
+        return spawnResponse();
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+    return { spawns, restore: () => (globalThis.fetch = original) };
+  }
+
+  async function openMenu(
+    sessionOverrides: Record<string, unknown> = {},
+    props: Record<string, unknown> = {},
+  ) {
+    await renderApp(120, 24, {
+      groupBy: "none",
+      persistent: true,
+      forkableAgents: ["claude"],
+      ...props,
+    });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "s1",
+          project: "myapp",
+          cwd: "/code/myapp",
+          agentType: "claude",
+          nativeSessionId: "native-1",
+          tmuxPane: "%1",
+          mainRepoRoot: "/code/myapp",
+          gitBranch: "feat/parking",
+          ...sessionOverrides,
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+    await settle();
+    await setup.renderOnce();
+  }
+
+  /** Open the menu and click the item, by label rather than by row: the
+   *  menu's order is deliberately not stable. */
+  async function openForkDialog(
+    sessionOverrides: Record<string, unknown> = {},
+    props: Record<string, unknown> = {},
+  ) {
+    await openMenu(sessionOverrides, props);
+    const row = setup
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes("Fork into"));
+    expect(row).toBeGreaterThan(0);
+    await setup.mockMouse.click(7, row, MouseButtons.LEFT);
+    await settle();
+    await setup.renderOnce();
+  }
+
+  it("offers it under the plain Fork on a forkable row in a repo", async () => {
+    const { restore } = withForkDaemon();
+    try {
+      await openMenu();
+      const lines = setup.captureCharFrame().split("\n");
+      const plain = lines.findIndex((line) => /Fork\s+F/.test(line));
+      const intoWorktree = lines.findIndex((line) =>
+        line.includes("Fork into"),
+      );
+      expect(plain).toBeGreaterThan(0);
+      // Directly under, so the one-shot stays where fingers already find it.
+      expect(intoWorktree).toBe(plain + 1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("hides it for a row that is not in a git repo", async () => {
+    // A worktree needs a repository to hang off. Hidden rather than offered
+    // and refused, which is the same rule the plain Fork item follows.
+    const { restore } = withForkDaemon();
+    try {
+      await openMenu({ mainRepoRoot: null });
+      const frame = setup.captureCharFrame();
+      // The plain fork still works there, which is what makes this specific.
+      expect(frame).toContain("Fork");
+      expect(frame).not.toContain("Fork into");
+    } finally {
+      restore();
+    }
+  });
+
+  it("hides it for a row ccmux cannot fork at all", async () => {
+    const { restore } = withForkDaemon();
+    try {
+      await openMenu({ nativeSessionId: undefined });
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Attach");
+      expect(frame).not.toContain("Fork");
+    } finally {
+      restore();
+    }
+  });
+
+  it("opens the dialog over the source, with the name it would derive", async () => {
+    const { spawns, restore } = withForkDaemon();
+    try {
+      await openForkDialog();
+      const frame = setup.captureCharFrame();
+
+      expect(frame).toContain("Fork into worktree");
+      // The source session and the checkout it sits in.
+      expect(frame).toContain("Source");
+      expect(frame).toContain("feat/parking");
+      expect(frame).toContain("/code/myapp");
+      // The daemon's own <branch>-fork rule, previewed.
+      expect(frame).toContain("feat-parking-fork");
+      // Nothing is sent by opening a dialog.
+      expect(spawns).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("omits the name entirely when the field was never touched", async () => {
+    const { spawns, restore } = withForkDaemon();
+    try {
+      await openForkDialog();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]).toMatchObject({
+        fork: "s1",
+        // A new window in the caller's session, and the picker owns the jump.
+        split: false,
+        detach: true,
+      });
+      // The worktree is asked for, but NOT named: an untouched row is the
+      // derived state, which the daemon numbers past a collision. Posting the
+      // preview as an explicit name would open whatever answers to that slug.
+      expect(spawns[0]?.worktree).toEqual({});
+      // Everything else comes off the session being forked.
+      expect(spawns[0]?.agent).toBeUndefined();
+      expect(spawns[0]?.cwd).toBeUndefined();
+      expect(spawns[0]?.prompt).toBeUndefined();
+    } finally {
+      restore();
+    }
+  });
+
+  it("sends a typed name explicitly, slugified as the row showed it", async () => {
+    const { spawns, restore } = withForkDaemon();
+    try {
+      await openForkDialog();
+      // Placement -> Name: the only two fields this mode has.
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("Parking Retry");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]?.worktree).toEqual({ name: "parking-retry" });
+      // Never a move: emptying the checkout the source is still running in is
+      // refused by the daemon, and this mode has no way to ask for it.
+      expect(spawns[0]?.worktree?.withChanges).toBeUndefined();
+    } finally {
+      restore();
+    }
+  });
+
+  it("sends nothing when the dialog is cancelled", async () => {
+    const { spawns, restore } = withForkDaemon();
+    try {
+      await openForkDialog();
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+
+      expect(spawns).toHaveLength(0);
+      expect(setup.captureCharFrame()).not.toContain("Fork into worktree");
+    } finally {
+      restore();
+    }
+  });
+
+  it("leaves the dialog up with the daemon's words on a refusal", async () => {
+    // Every refusal here is something the user can fix in the field they are
+    // still looking at, so the dialog stays and the message is a toast.
+    const { restore } = withForkDaemon(() =>
+      Response.json(
+        {
+          error:
+            "Worktree 'parking' already exists at /code/myapp/.claude/worktrees/parking",
+        },
+        { status: 400 },
+      ),
+    );
+    try {
+      await openForkDialog();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("alreadyexists");
+      expect(frame).toContain("Forkintoworktree");
+    } finally {
+      restore();
+    }
+  });
+
+  it("refuses a name with nothing left after slugifying", async () => {
+    const { spawns, restore } = withForkDaemon();
+    try {
+      await openForkDialog();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("!!!");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      // Refused out loud rather than silently derived: the field would still
+      // be showing the user's text while the worktree got another name.
+      expect(spawns).toHaveLength(0);
+      expect(squish(setup.captureCharFrame())).toContain("lettersornumbers");
+    } finally {
+      restore();
+    }
+  });
+
+  it("shows the derived-name hint when the branch is unknown", async () => {
+    // The daemon reads the source checkout's HEAD for itself, so there is a
+    // name coming even when the row carries no branch to preview.
+    const { restore } = withForkDaemon();
+    try {
+      await openForkDialog({ gitBranch: null });
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Fork into worktree");
+      expect(frame).toContain("auto");
+      expect(frame).not.toContain("Type a prompt");
+    } finally {
+      restore();
+    }
+  });
+});
