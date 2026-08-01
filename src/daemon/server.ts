@@ -2602,6 +2602,26 @@ export class DaemonServer {
         { status: 400, headers },
       );
     }
+    // Moving changes and forking are compatible intentions and an
+    // incompatible pair of operations: the move EMPTIES the checkout it takes
+    // the work from (a stash push, with deliberately no reset behind it), and
+    // a fork's whole premise is that the original session keeps running in
+    // that checkout. The agent would find its files gone mid-conversation.
+    // Refused before the stash and before the worktree, so a rejected request
+    // leaves nothing to put back.
+    if (forkSource && worktreeRequest.value?.withChanges) {
+      return Response.json(
+        {
+          error:
+            `Cannot fork ${forkSource.session.agentType} with 'worktree.withChanges': ` +
+            `moving the changes empties the checkout they come from, and the session being forked ` +
+            `is still running in ${forkSource.session.cwd}. Fork into the worktree without it, or ` +
+            `move the changes with an ordinary spawn.`,
+        },
+        { status: 400, headers },
+      );
+    }
+
     // Resolve agent definition (custom agents from config are also valid)
     const agent = this.getAgentByType(agentName);
     if (!agent) {

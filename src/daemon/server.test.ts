@@ -5075,6 +5075,40 @@ describe("POST /spawn", () => {
         }
       });
 
+      // A fork leaves the original running, and the checkout a move empties
+      // is the one it is running in.
+      it("refuses to move the changes with it, creating nothing", async () => {
+        const repo = fixtureRepo();
+        writeFileSync(join(repo, "dirty.txt"), "work in progress\n");
+        const { manager, internals } = serverForAgents([forkAgent]);
+        const source = sourceIn(manager, repo);
+        const { argv, restore } = withTmuxOnly();
+        try {
+          const res = await internals.handleRequest(
+            spawnRequest({
+              fork: source.id,
+              worktree: { withChanges: true },
+              detach: true,
+            }),
+          );
+
+          expect(res.status).toBe(400);
+          const { error } = (await res.json()) as { error: string };
+          expect(error).toContain("withChanges");
+          expect(error).toContain("still running");
+          // Refused before the first side effect: no worktree, no pane, and
+          // the work still where the user left it rather than in a stash.
+          expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
+          expect(argv).toHaveLength(0);
+          expect(gitOut(repo, ["status", "--porcelain"])).toContain(
+            "dirty.txt",
+          );
+        } finally {
+          restore();
+          rmSync(repo, { recursive: true, force: true });
+        }
+      });
+
       // A detached source answers the literal "HEAD" to `--abbrev-ref`, which
       // the main checkout would resolve to its own head.
       it("uses the sha when the source is on a detached HEAD", async () => {
