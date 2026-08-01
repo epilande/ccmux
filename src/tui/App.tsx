@@ -1508,6 +1508,16 @@ export function App(props: AppProps) {
       // The daemon's name, not the row's preview: a derived name that collided
       // came back numbered.
       const created = body.worktree?.name;
+      if (props.sidebar) {
+        // The dialog's own convention, which an ordinary spawn from the rail
+        // already follows: the sidebar is a board you watch, not a place you
+        // launch from and leave. The toast is then the only account there is
+        // of where the fork landed, so it says so even unnamed.
+        store.actions.showToast(
+          created ? `Forked into ${created}` : "Forked into a new worktree",
+        );
+        return;
+      }
       if (created) store.actions.showToast(`Forked into ${created}`);
       selectPane(body.paneId);
     } catch (err: unknown) {

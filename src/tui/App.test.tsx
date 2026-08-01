@@ -4938,6 +4938,44 @@ describe("App fork into worktree", () => {
     }
   });
 
+  it("jumps to the new pane when the picker is the one forking", async () => {
+    const { restore } = withForkDaemon();
+    try {
+      await openForkDialog();
+      setup.mockInput.pressEnter();
+      await settle();
+      // The picker's whole purpose is to put you where the work is.
+      expect(switchToPaneSpy).toHaveBeenCalledWith("%99");
+    } finally {
+      restore();
+    }
+  });
+
+  it("forks from the sidebar without stealing focus", async () => {
+    // The rail is a board you watch, not a place you launch from and leave —
+    // the same convention an ordinary spawn from the sidebar already
+    // follows. The toast is then the only account of where the fork landed.
+    const { spawns, restore } = withForkDaemon(() =>
+      Response.json({
+        success: true,
+        paneId: "%99",
+        worktree: { name: "feat-parking-fork" },
+      }),
+    );
+    try {
+      await openForkDialog({}, { sidebar: true, persistent: true });
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      expect(spawns).toHaveLength(1);
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+      expect(squish(setup.captureCharFrame())).toContain("feat-parking-fork");
+    } finally {
+      restore();
+    }
+  });
+
   it("does not preview a detached HEAD as a branch to name after", async () => {
     // A detached checkout reports the literal string "HEAD" as its branch,
     // but the daemon names a fork of one after the sha it is sitting on
