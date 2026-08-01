@@ -360,10 +360,17 @@ export function createSpawnCommand(): Command {
               !created && options.base
                 ? " (--base ignored: the worktree already existed)"
                 : "";
+            // A move resolves its own base to the SOURCE checkout's HEAD, so
+            // this is routinely 40 characters of hex where a `--base` is a
+            // ref name. Abbreviated the way git prints one; the ref the
+            // worktree was actually cut from is unchanged.
+            const from = base
+              ? ` from ${/^[0-9a-f]{40}$/.test(base) ? base.slice(0, 12) : base}`
+              : "";
             const what = !created
               ? `Reusing worktree ${name} on branch ${branch}${staleBase}`
               : branchCreated
-                ? `Created worktree ${name} on new branch ${branch}${base ? ` from ${base}` : ""}`
+                ? `Created worktree ${name} on new branch ${branch}${from}`
                 : `Created worktree ${name} on existing branch ${branch}`;
             console.log(`${what}: ${path}`);
           }

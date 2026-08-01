@@ -44,14 +44,18 @@
  * every later reference re-resolves it, so this can only ever apply or drop
  * the entry it created.
  *
- * OURS ONLY, PROVEN BY THE REF MOVING. `git stash push` exits 0 having
- * created NOTHING when the tree went clean between the status read and the
- * push ("No local changes to save"), and its message is not a unique
- * identifier — an entry from an earlier run of this very function carries the
- * same one. Recognising our entry by what is on top and what it is called
- * therefore adopts somebody else's work and then, at step 6, drops it. So
- * `refs/stash` is read before AND after the push, and only a ref that MOVED
- * proves an entry is ours. See {@link readStashRef}.
+ * OURS ONLY, PROVEN BY THE REF MOVING AND BY A NONCE. `git stash push` exits
+ * 0 having created NOTHING when the tree went clean between the status read
+ * and the push ("No local changes to save"), so `refs/stash` is read before
+ * AND after it: only a ref that MOVED proves this run created anything at
+ * all. WHICH entry it created is a second question, and the message alone is
+ * no answer to it, since an entry from an earlier run of this very function
+ * carries the same one and a name is a substring of every longer name. So
+ * each run mints a nonce into its message and finds its own entry by that,
+ * wherever it has ended up in a stack every worktree of the repo pushes onto.
+ * Recognising ours by what is on top and roughly what it is called instead
+ * adopts somebody else's work and then, at step 6, drops it. See
+ * {@link readStashRef} and {@link findStashByMarker}.
  *
  * There is deliberately NO `git reset --hard` on the source. `stash push`
  * already left it clean, so a reset would be redundant on the happy path and
@@ -60,6 +64,7 @@
  * stashed and cannot restore.
  */
 
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { cp, mkdir } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
@@ -108,11 +113,16 @@ export function isUntrackedMode(value: unknown): value is UntrackedMode {
  * `worktree remove --force`. A seam that reported only the path would make
  * those two indistinguishable, which is how a failed move came to delete a
  * checkout it had merely opened. See {@link moveChangesToWorktree}.
+ *
+ * `branch` is optional and reporting-only. Removing a worktree does not
+ * delete the branch it was created on, so every rollback below leaves one
+ * behind; without a name for it the user is left with a branch they never
+ * asked for and nothing saying where it came from.
  */
 export type CreateWorktree = (opts: {
   name?: string;
   base?: string;
-}) => Promise<{ path: string; created: boolean }>;
+}) => Promise<{ path: string; created: boolean; branch?: string }>;
 
 export interface MoveChangesInput {
   /** Checkout whose uncommitted work is being relocated. */
@@ -325,16 +335,25 @@ export function dropStashCommand(sha: string): string {
 /**
  * Marks the stash entry as ours, for identification and for recovery.
  *
+ * The nonce is what makes this an IDENTIFIER rather than a label. Every run
+ * of this function names its entry the same way, and a name is a substring of
+ * every longer name (`: foo` sits inside `: foo-bar`, and the unnamed marker
+ * sits inside all of them), so ownership decided from the text alone claims
+ * an entry the run never created. Four random bytes are plenty for the
+ * handful of moves that can overlap in one repository, and short enough that
+ * the message stays readable in `git stash list` — which is the other half of
+ * its job, since a stranded entry is found by eye.
+ *
  * The name is collapsed to a single line first, because the confirmation
- * below reads the message back through git's `%s` — which strips trailing
+ * below reads the message back through git's `%gs` — which strips trailing
  * whitespace and stops at the first blank line. A name carrying either (a
  * trailing space in `--worktree "my feature "` is an ordinary typo, and only
  * the picker slugifies before it asks) would come back different from what
  * was written, and the entry would fail to be recognized as our own.
  */
-function stashMessage(name?: string): string {
+function stashMessage(nonce: string, name?: string): string {
   const label = name?.replace(/\s+/g, " ").trim();
-  return `ccmux move-changes${label ? `: ${label}` : ""}`;
+  return `ccmux move-changes ${nonce}${label ? `: ${label}` : ""}`;
 }
 
 /**
@@ -367,14 +386,42 @@ async function readStashRef(
   return { read: true, sha: res.stdout.trim() || null };
 }
 
-/** The message of a stash entry, for confirming it is ours. */
-async function stashSubject(
+/**
+ * Whether our own entry could be found, and its SHA when it could.
+ *
+ * A read that FAILED is not the same answer as "not in the stack": an
+ * unreadable stack cannot rule out an entry holding the user's work, and the
+ * caller has to report those two differently.
+ */
+type StashLookup = { read: true; sha: string | null } | { read: false };
+
+/**
+ * Our stash entry's SHA, found by the nonce its message carries.
+ *
+ * The whole stack is searched rather than just the top, because it is shared
+ * by every worktree of the repo: a push by another agent between ours and
+ * this read leaves our entry one deeper, and refusing there would strand the
+ * user's work in the stash for a race that changed nothing about it.
+ *
+ * `%gs` is the reflog subject, which git writes as "On <branch>: <message>",
+ * so the marker is what a line ENDS with. Matched that way rather than by
+ * containment, which is what let a run named `foo` claim `foo-bar`'s entry.
+ */
+async function findStashByMarker(
   checkout: string,
-  sha: string,
+  marker: string,
   git: GitRun,
-): Promise<string> {
-  const res = await git(checkout, ["log", "-1", "--format=%s", sha]);
-  return res.exitCode === 0 ? res.stdout : "";
+): Promise<StashLookup> {
+  const res = await git(checkout, ["stash", "list", "--format=%H%x09%gs"]);
+  if (res.exitCode !== 0) return { read: false };
+  for (const line of res.stdout.split("\n")) {
+    const tab = line.indexOf("\t");
+    if (tab < 0) continue;
+    if (line.slice(tab + 1).endsWith(marker)) {
+      return { read: true, sha: line.slice(0, tab) };
+    }
+  }
+  return { read: true, sha: null };
 }
 
 /**
@@ -422,14 +469,15 @@ async function withMoveLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   // Chained off the previous holder's settlement, not its value, so one
   // failed move does not poison the queue behind it.
   const run = previous.then(fn, fn);
-  moveLocks.set(
-    key,
-    run.catch(() => undefined),
-  );
+  // The SAME promise goes into the map and is compared against on the way
+  // out. Storing a derived one leaves the identity check below permanently
+  // false, so every repository this daemon ever moves from keeps an entry.
+  const queued = run.catch(() => undefined);
+  moveLocks.set(key, queued);
   try {
     return await run;
   } finally {
-    if (moveLocks.get(key) === run) moveLocks.delete(key);
+    if (moveLocks.get(key) === queued) moveLocks.delete(key);
   }
 }
 
@@ -671,9 +719,32 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
     };
   }
 
+  // The start point the worktree is cut from, decided HERE rather than left
+  // to the creation engine. Its default is the MAIN checkout's current branch
+  // (`resolveBase` in `worktree-create.ts`), which is the right answer for an
+  // ordinary spawn and the wrong one for a move: the source is routinely a
+  // linked worktree on a feature branch, and an edit to a file both histories
+  // have applies cleanly onto main — so the work lands on a history missing
+  // the commits it was written against, with nothing about it looking like a
+  // failure. What the changes belong on top of is the source's own HEAD.
+  //
+  // A SHA, never `--abbrev-ref`: a detached source answers with the literal
+  // string "HEAD", which the main checkout would then resolve to its own.
+  //
+  // Read before the push, so it names the commit the work was written against
+  // even if the source moves on while this runs.
+  let startPoint = base;
+  if (startPoint === undefined) {
+    const head = await git(root, ["rev-parse", "HEAD"]);
+    const sha = head.stdout.trim();
+    // An unborn HEAD has no commit to cut from, so the engine's default (and
+    // its own error reporting) stands.
+    if (head.exitCode === 0 && sha) startPoint = sha;
+  }
+
   // --- Step 2: stash. Past here the source has been modified, so every
   // failure below has to put it back. ---
-  const marker = stashMessage(name);
+  const marker = stashMessage(randomBytes(4).toString("hex"), name);
   let stashSha: string | undefined;
   if (stashNeeded) {
     const args = ["stash", "push", "--message", marker];
@@ -712,7 +783,18 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
         sourceRestored: false,
       };
     }
-    const fresh = after.sha && after.sha !== before.sha ? after.sha : null;
+    // A ref that MOVED is what proves this run created an entry at all; the
+    // nonce in the message is what says WHICH entry. Nothing is looked up
+    // when the ref stayed put, because then there is nothing of ours to find.
+    const movedRef = after.sha !== null && after.sha !== before.sha;
+    const found: StashLookup = movedRef
+      ? await findStashByMarker(root, marker, git)
+      : { read: true, sha: null };
+    const ours = found.read ? found.sha : null;
+    // A stack that could not be listed after the ref moved may well hold
+    // ours, and reporting an intact source there sends the user looking for
+    // changes that have already left it.
+    const workLeftTree = ours !== null || (movedRef && !found.read);
 
     if (pushed.exitCode !== 0) {
       // A failed push can still have created the entry: git writes
@@ -720,10 +802,6 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
       // removing untracked files leaves a complete entry behind a non-zero
       // exit. Reporting no sha there would hide the only handle on work that
       // is now half out of the tree.
-      const ours =
-        fresh && (await stashSubject(root, fresh, git)).includes(marker)
-          ? fresh
-          : undefined;
       return {
         ok: false,
         reason: "stash-failed",
@@ -737,11 +815,11 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
         // Without one the push never got that far, and claiming an unrestored
         // source would send the user hunting for changes still in front of
         // them.
-        ...(fresh ? { sourceRestored: false } : {}),
+        ...(workLeftTree ? { sourceRestored: false } : {}),
       };
     }
 
-    if (!fresh) {
+    if (!movedRef) {
       // Exit 0 and nothing created: "No local changes to save", because the
       // tree went clean between the status read above and this push. The
       // entry on top (if any) is somebody else's — a previous run of this
@@ -756,28 +834,27 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
       };
     }
 
-    // Ours was created, but something else pushed on top of it in between.
-    // Our entry is still in the stack, but nothing here can tell it apart
-    // from an identically-named one left by an earlier run, so this refuses
-    // rather than guessing — and above all does not report the entry that
-    // landed on top as if it were ours.
-    if (!(await stashSubject(root, fresh, git)).includes(marker)) {
+    // The stack moved but carries nothing of ours: either the push created
+    // nothing and somebody else's landed in the same moment, or the stack
+    // could not be listed to look. Both leave an entry this run cannot name,
+    // so it refuses rather than guessing, and above all does not act on
+    // whatever else is in there.
+    if (!ours) {
       return {
         ok: false,
         reason: "stash-failed",
         error:
-          `Stashed the changes in ${root}, but another stash was pushed on top before ` +
-          `they could be confirmed, so nothing further was done. The work is safe in the ` +
-          `stash; find the 'ccmux move-changes' entry with 'git stash list' and recover it ` +
-          `with 'git stash pop stash@{N}'.`,
-        // Ours exists by definition here, so the changes are out of the tree
-        // and nothing put them back: a refusal the user has to act on, not
-        // one to show for four seconds.
+          `Stashed the changes in ${root}, but the entry holding them could not be ` +
+          `identified afterwards, so nothing further was done. The work is in the stash; ` +
+          `find the newest entry with 'git stash list' and recover it with ` +
+          `'git stash pop stash@{N}'.`,
+        // The stack moved, so changes have left a checkout and nothing here
+        // put them back: a refusal the user has to act on, not one to show
+        // for four seconds.
         sourceRestored: false,
       };
     }
-    const sha = fresh;
-    stashSha = sha;
+    stashSha = ours;
   }
 
   /**
@@ -797,9 +874,11 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
 
   // --- Step 3: create the worktree. ---
   let worktreePath: string;
+  let worktreeBranch: string | undefined;
   try {
-    const created = await createWorktree({ name, base });
+    const created = await createWorktree({ name, base: startPoint });
     worktreePath = created.path;
+    worktreeBranch = created.branch;
     if (!created.created) {
       // A worktree that was already there. The engine opens one happily for
       // an explicit name, and for an ordinary spawn that is the right answer,
@@ -840,8 +919,37 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
    * merely-opened one into a `create-failed` before any of the callers below
    * exist. That refusal is what makes an unconditional `--force` safe here.
    */
-  const removeWorktree = async (): Promise<void> => {
-    await git(root, ["worktree", "remove", "--force", worktreePath]);
+  const removeWorktree = async (): Promise<boolean> => {
+    const removed = await git(root, [
+      "worktree",
+      "remove",
+      "--force",
+      worktreePath,
+    ]);
+    return removed.exitCode === 0;
+  };
+
+  /**
+   * What the rollback actually left behind.
+   *
+   * Reported rather than asserted, because `worktree remove --force` is not
+   * guaranteed: a LOCKED worktree makes it exit 128 and stay exactly where it
+   * is, and a message claiming the removal is then a claim the user can check
+   * and find false. A removal that DID work still leaves the branch it was
+   * created on, so both halves name what survived: cleaning either up is the
+   * user's to do, and they can only do it if they are told what it is called.
+   */
+  const rollbackNote = (removed: boolean): string => {
+    const branch = worktreeBranch ? ` '${worktreeBranch}'` : "";
+    if (removed) {
+      return worktreeBranch
+        ? ` The worktree was removed, though its branch${branch} is still there.`
+        : ` The worktree was removed.`;
+    }
+    return (
+      ` The worktree at ${worktreePath} could not be removed and is still there` +
+      `${branch ? ` on branch${branch}` : ""}; clean it up with 'ccmux worktree prune'.`
+    );
   };
 
   // --- Step 4: apply into the new worktree. ---
@@ -850,14 +958,15 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
     const ref = await findStashRef(root, stashSha, git);
     const applied = await applyStash(worktreePath, ref ?? stashSha, git);
     if (!applied.ok) {
-      await removeWorktree();
+      const removed = await removeWorktree();
       const restored = await restoreSource();
       return {
         ok: false,
         reason: "apply-failed",
         error:
           `Could not apply the changes in the new worktree: ${applied.stderr.trim()}. ` +
-          `The worktree was removed and your changes were kept in the stash.`,
+          `Your changes were kept in the stash.` +
+          rollbackNote(removed),
         stashSha,
         sourceRestored: restored,
       };
@@ -873,14 +982,15 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
     try {
       copiedFiles = await copyUntracked(root, worktreePath, filesToCopy);
     } catch (err) {
-      await removeWorktree();
+      const removed = await removeWorktree();
       const restored = await restoreSource();
       return {
         ok: false,
         reason: "copy-failed",
-        error: `Could not copy untracked files into the worktree: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        error:
+          `Could not copy untracked files into the worktree: ${
+            err instanceof Error ? err.message : String(err)
+          }.` + rollbackNote(removed),
         stashSha,
         sourceRestored: restored,
       };

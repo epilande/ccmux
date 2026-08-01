@@ -2790,7 +2790,13 @@ export class DaemonServer {
         });
         if (!created.ok) throw new Error(created.error);
         worktreeInfo = created.result;
-        return { path: created.result.path, created: created.result.created };
+        return {
+          path: created.result.path,
+          created: created.result.created,
+          // Carried for the move's rollback messages: removing a worktree
+          // leaves its branch, and the user is the one who has to clean it up.
+          branch: created.result.branch,
+        };
       };
 
       if (withChanges) {

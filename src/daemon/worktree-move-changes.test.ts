@@ -494,14 +494,24 @@ describe("moveChangesToWorktree", () => {
     const result = await moveChangesToWorktree({
       source: repo,
       createWorktree: async () => {
-        await git(repo, ["worktree", "add", "--detach", wtPath, "diverged"]);
-        return { path: wtPath, created: true };
+        await git(repo, [
+          "worktree",
+          "add",
+          "-b",
+          "conflicted",
+          wtPath,
+          "diverged",
+        ]);
+        return { path: wtPath, created: true, branch: "conflicted" };
       },
     });
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toBe("apply-failed");
+    // Removing a worktree leaves its branch behind, so the message that
+    // reports the removal has to say what is still there.
+    expect(result.error).toContain("conflicted");
     // No state lost: worktree gone, stash intact, source back as it was.
     expect(existsSync(join(wtPath, "tracked.txt"))).toBe(false);
     expect(result.stashSha).toBeDefined();
@@ -763,6 +773,52 @@ describe("moveChangesToWorktree", () => {
     );
   });
 
+  it("names a worktree the rollback could NOT remove", async () => {
+    // `worktree remove --force` exits 128 and leaves the checkout there when
+    // it is locked, so a message that reports the removal unconditionally is
+    // a claim the user can check and find false — and the leftover is theirs
+    // to clean up, which they can only do if they are told where it is.
+    const repo = await makeRepo();
+    await git(repo, ["checkout", "-b", "diverged"]);
+    writeFileSync(join(repo, "tracked.txt"), "diverged content\n");
+    await git(repo, ["commit", "-am", "diverge"]);
+    await git(repo, ["checkout", "main"]);
+    dirty(repo);
+
+    const wtPath = join(root, "wt", "stuck");
+    const lockedWorktree: GitRun = async (cwd, args) => {
+      if (args[0] === "worktree" && args[1] === "remove") {
+        return {
+          exitCode: 128,
+          stdout: "",
+          stderr: "fatal: cannot remove a locked working tree",
+        };
+      }
+      return runGit(cwd, args);
+    };
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      git: lockedWorktree,
+      createWorktree: async () => {
+        await git(repo, ["worktree", "add", "-b", "stuck", wtPath, "diverged"]);
+        return { path: wtPath, created: true, branch: "stuck" };
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe("apply-failed");
+    expect(result.error).not.toContain("was removed");
+    // Named, because it is still there and the user has to deal with it.
+    expect(result.error).toContain(wtPath);
+    expect(result.error).toContain("stuck");
+    expect(existsSync(wtPath)).toBe(true);
+    // The work is still safe either way, which is what the rollback is for.
+    expect(result.stashSha).toBeDefined();
+    expect(result.sourceRestored).toBe(true);
+  });
+
   it("refuses a worktree it only OPENED, leaving it and its work alone", async () => {
     // The creation engine is create-or-open for an explicit name, so the seam
     // can hand back a worktree that was already there with the user's own
@@ -838,6 +894,90 @@ describe("moveChangesToWorktree", () => {
     expect(existsSync(other)).toBe(true);
   });
 
+  it("never adopts an entry whose name merely CONTAINS ours", async () => {
+    // The marker was a name, not an identifier: `: foo` is a substring of
+    // `: foo-bar`, and the unnamed marker is a substring of every named one.
+    // Confirming ownership by containment therefore applies somebody else's
+    // move and then, at the drop, deletes it.
+    const cases: { label: string; name?: string; foreign: string }[] = [
+      { label: "named", name: "foo", foreign: "ccmux move-changes: foo-bar" },
+      { label: "unnamed", foreign: "ccmux move-changes: their-feature" },
+    ];
+
+    for (const { label, name, foreign } of cases) {
+      const repo = await makeRepo(`repo-${label}`);
+      dirty(repo);
+
+      const pushColliding: GitRun = async (cwd, args) => {
+        const res = await runGit(cwd, args);
+        if (args[0] === "stash" && args[1] === "push" && res.exitCode === 0) {
+          // Another agent's move of its own work lands on top before ours can
+          // be confirmed, named in a way ours is a substring of.
+          writeFileSync(join(repo, "tracked.txt"), "someone else's edit\n");
+          await runGit(repo, ["stash", "push", "--message", foreign]);
+        }
+        return res;
+      };
+
+      const result = await moveChangesToWorktree({
+        source: repo,
+        name,
+        git: pushColliding,
+        createWorktree: realCreator(repo, `moved-${label}`),
+      });
+
+      // Whatever it decides, it must never act on THEIR entry: not applied
+      // into the worktree, and above all not dropped.
+      if (result.ok) {
+        expect(
+          readFileSync(join(result.worktreePath, "tracked.txt"), "utf-8"),
+          `${label} applied ours`,
+        ).toBe("edited\n");
+      }
+      expect(await stashCount(repo), `${label} keeps theirs`).toBe(1);
+      const remaining = await git(repo, ["stash", "list", "--format=%gs"]);
+      expect(remaining, `${label} keeps theirs`).toContain(foreign);
+      expect(
+        await git(repo, ["show", "refs/stash:tracked.txt"]),
+        `${label} keeps their work`,
+      ).toBe("someone else's edit");
+    }
+  });
+
+  it("completes when a foreign stash lands on top of ours", async () => {
+    // Our entry is identified by its nonce rather than by being on top, so a
+    // concurrent push (another agent, another pane; the stack is shared
+    // repo-wide) renumbers the stack without stranding the user's work in it.
+    const repo = await makeRepo();
+    dirty(repo);
+
+    const pushOnTop: GitRun = async (cwd, args) => {
+      const res = await runGit(cwd, args);
+      if (args[0] === "stash" && args[1] === "push" && res.exitCode === 0) {
+        writeFileSync(join(repo, "tracked.txt"), "someone else's edit\n");
+        await runGit(repo, ["stash", "push", "--message", "unrelated"]);
+      }
+      return res;
+    };
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      git: pushOnTop,
+      createWorktree: realCreator(repo),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      readFileSync(join(result.worktreePath, "tracked.txt"), "utf-8"),
+    ).toBe("edited\n");
+    // Ours was dropped, theirs was not.
+    expect(await stashCount(repo)).toBe(1);
+    expect(await git(repo, ["stash", "list", "--format=%gs"])).toContain(
+      "unrelated",
+    );
+  });
+
   it("passes the name and base through to the creation engine", async () => {
     const repo = await makeRepo();
     dirty(repo);
@@ -859,6 +999,71 @@ describe("moveChangesToWorktree", () => {
     expect(seen).toEqual([{ name: "my-worktree", base: "main" }]);
   });
 
+  it("cuts the worktree from the SOURCE's HEAD when no base was given", async () => {
+    // The source is routinely a LINKED worktree on a feature branch, and the
+    // creation engine's default base is the MAIN checkout's current branch.
+    // An edit to a file both histories have applies cleanly onto that base, so
+    // the work lands on a history missing the commits it was written against
+    // and nothing about it looks like a failure.
+    const repo = await makeRepo();
+    const feature = join(root, "wt", "feature");
+    await git(repo, ["worktree", "add", "-b", "feature", feature, "main"]);
+    writeFileSync(join(feature, "feature.txt"), "committed on the feature\n");
+    await git(feature, ["add", "feature.txt"]);
+    await git(feature, ["commit", "-m", "feature work"]);
+    const featureTip = await git(feature, ["rev-parse", "HEAD"]);
+    writeFileSync(join(feature, "tracked.txt"), "edited on the feature\n");
+
+    const result = await moveChangesToWorktree({
+      source: feature,
+      createWorktree: async ({ name, base }) => {
+        const path = join(root, "wt", name ?? "moved");
+        // What the real engine does with an absent base: resolves it in the
+        // MAIN checkout (`resolveBase` in `worktree-create.ts`).
+        const start =
+          base ?? (await git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]));
+        await git(repo, ["worktree", "add", "-b", "moved", path, start]);
+        return { path, created: true };
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(await git(result.worktreePath, ["rev-parse", "HEAD"])).toBe(
+      featureTip,
+    );
+    // The commit the moved work was written on top of came with it.
+    expect(existsSync(join(result.worktreePath, "feature.txt"))).toBe(true);
+    expect(
+      readFileSync(join(result.worktreePath, "tracked.txt"), "utf-8"),
+    ).toBe("edited on the feature\n");
+  });
+
+  it("hands the creation engine a SHA, never a branch name", async () => {
+    // A detached source answers `--abbrev-ref HEAD` with the literal string
+    // "HEAD", which the main checkout would then resolve to its own — the very
+    // bug the default exists to close.
+    const repo = await makeRepo();
+    dirty(repo);
+    const head = await git(repo, ["rev-parse", "HEAD"]);
+    const seen: { name?: string; base?: string }[] = [];
+
+    const result = await moveChangesToWorktree({
+      source: repo,
+      createWorktree: async (opts) => {
+        seen.push(opts);
+        const path = join(root, "wt", "moved");
+        await git(repo, ["worktree", "add", "-b", "moved", path, "HEAD"]);
+        return { path, created: true };
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    // The main checkout is the documented primary case, where this is the same
+    // commit the engine's own default would have picked.
+    expect(seen).toEqual([{ name: undefined, base: head }]);
+  });
+
   it("names its stash entry so an orphan is recognizable", async () => {
     // If anything strands the entry, the user should be able to tell what put
     // it there rather than finding an anonymous stash.
@@ -873,8 +1078,10 @@ describe("moveChangesToWorktree", () => {
       },
     });
 
+    // Kept as tight as the per-operation nonce allows: the prefix and the
+    // name are what a person scanning `git stash list` recognizes.
     const list = await git(repo, ["stash", "list"]);
-    expect(list).toContain("ccmux move-changes: my-worktree");
+    expect(list).toMatch(/ccmux move-changes [0-9a-f]{8}: my-worktree/);
   });
 
   it("moves the whole checkout's work when run from a SUBDIRECTORY", async () => {
@@ -991,26 +1198,31 @@ describe("moveChangesToWorktree", () => {
   });
 
   it("flags an unconfirmable entry as work that left the checkout", async () => {
-    // Ours was created and something landed on top before it could be
-    // confirmed. The entry cannot be told apart from an earlier run's, so the
-    // move refuses — but the changes ARE out of the tree, which is the
-    // difference between a message worth interrupting someone for and an
-    // ordinary validation refusal.
+    // The stack moved but carries no entry of ours, so the move refuses. The
+    // changes ARE out of the tree, which is the difference between a message
+    // worth interrupting someone for and an ordinary validation refusal.
     const repo = await makeRepo();
     dirty(repo);
 
-    const pushOnTop: GitRun = async (cwd, args) => {
-      const res = await runGit(cwd, args);
-      if (args[0] === "stash" && args[1] === "push" && res.exitCode === 0) {
-        writeFileSync(join(repo, "tracked.txt"), "someone else's edit\n");
-        await runGit(repo, ["stash", "push", "--message", "unrelated"]);
+    const pushedAsSomeoneElse: GitRun = async (cwd, args) => {
+      if (args[0] === "stash" && args[1] === "push") {
+        // The work leaves the checkout, under a message this run cannot
+        // claim: the shape of a push that created nothing while another
+        // agent's landed in the same moment.
+        return runGit(cwd, [
+          "stash",
+          "push",
+          "--include-untracked",
+          "--message",
+          "not ours",
+        ]);
       }
-      return res;
+      return runGit(cwd, args);
     };
 
     const result = await moveChangesToWorktree({
       source: repo,
-      git: pushOnTop,
+      git: pushedAsSomeoneElse,
       createWorktree: realCreator(repo),
     });
 

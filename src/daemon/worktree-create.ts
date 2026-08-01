@@ -189,6 +189,10 @@ export function worktreePathFor(mainRepoRoot: string, name: string): string {
  * {@link WorktreeCreation.base}, so the answer is visible rather than
  * assumed. A detached main checkout reports `HEAD`, which git accepts as a
  * start point.
+ *
+ * A MOVE never reaches this default: `runMove` resolves the source checkout's
+ * own HEAD sha and passes it as `base`, because relocating uncommitted work
+ * onto the main checkout's branch drops the commits it was written against.
  */
 export async function resolveBase(
   mainRepoRoot: string,
