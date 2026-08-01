@@ -5141,6 +5141,175 @@ describe("POST /spawn", () => {
       });
 
       /**
+       * The shipping template shape, `{path}`, all the way through a created
+       * worktree. Everything above drives the `{id}` form, which is the one
+       * whose destination is guarded; this is the one Claude actually uses,
+       * and it resumes from anywhere, so nothing about the worktree is
+       * allowed to disturb the transcript it resumes from.
+       */
+      it("starts a {path} fork inside the worktree it creates", async () => {
+        const repo = fixtureRepo();
+        fixtureGit(repo, "checkout", "-q", "-b", "feature");
+        const { manager, internals } = serverForAgents([pathForkAgent]);
+        const source = manager.createPaneTrackedSession({
+          agentType: "pathy",
+          paneId: "%3",
+          cwd: repo,
+          pid: 4242,
+          nativeSessionId: "src-sid",
+        });
+        const transcript = transcriptFor(manager, source.id);
+        const { argv, restore } = withTmuxOnly();
+        try {
+          const res = await internals.handleRequest(
+            spawnRequest({ fork: source.id, worktree: {}, detach: true }),
+          );
+
+          expect(res.status).toBe(200);
+          const body = (await res.json()) as {
+            worktree: { name: string; path: string; created: boolean };
+          };
+          expect(body.worktree).toMatchObject({
+            name: "feature-fork",
+            path: join(repo, ".claude", "worktrees", "feature-fork"),
+            created: true,
+          });
+          expect(argv[0]).toContain(body.worktree.path);
+          // The transcript is the source's, in the source's directory: a
+          // `{path}` resume does not follow the pane into the new checkout.
+          expect(argv[1]?.[4]).toBe(
+            `pathy --resume '${transcript.path}' --fork-session`,
+          );
+        } finally {
+          restore();
+          transcript.cleanup();
+          rmSync(repo, { recursive: true, force: true });
+        }
+      });
+
+      /**
+       * Whether the source's branch is taken as the base is gated on the two
+       * checkouts sharing a repository, and only a `{path}` fork can put them
+       * in different ones (the `{id}` form's destination guard refuses that
+       * outright). Both directions, because the gate is invisible from
+       * either one alone: same-repo passes with or without it, and cross-repo
+       * without it asks THIS repo to cut from a ref that lives in another.
+       */
+      describe("basing on the source's branch", () => {
+        /**
+         * A `{path}` fork whose source sits on `source-side` in a LINKED
+         * worktree, one commit ahead of the main checkout.
+         *
+         * Linked rather than the main checkout itself, so that "the source's
+         * branch" and "`resolveBase`'s default" are different answers. With
+         * the source on the main checkout the two coincide and the same-repo
+         * assertion below would hold whether or not the base was taken.
+         */
+        function pathSource() {
+          const repo = fixtureRepo();
+          const linked = join(repo, "trees", "source-side");
+          fixtureGit(
+            repo,
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "source-side",
+            linked,
+          );
+          fixtureGit(
+            linked,
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "only-here",
+          );
+          const { manager, internals } = serverForAgents([pathForkAgent]);
+          const source = manager.createPaneTrackedSession({
+            agentType: "pathy",
+            paneId: "%3",
+            cwd: linked,
+            pid: 4242,
+            nativeSessionId: "src-sid",
+          });
+          return {
+            repo,
+            linked,
+            internals,
+            source,
+            ...transcriptFor(manager, source.id),
+          };
+        }
+
+        it("takes it when the destination is the same repository", async () => {
+          const { repo, linked, internals, source, cleanup } = pathSource();
+          const expected = gitOut(linked, ["rev-parse", "HEAD"]);
+          // The commit that only exists on the source's branch is the whole
+          // point: cutting from the main checkout would start the continued
+          // conversation on history it was never written against.
+          expect(gitOut(repo, ["rev-parse", "HEAD"])).not.toBe(expected);
+          const { restore } = withTmuxOnly();
+          try {
+            const res = await internals.handleRequest(
+              spawnRequest({ fork: source.id, worktree: {}, detach: true }),
+            );
+
+            expect(res.status).toBe(200);
+            const body = (await res.json()) as {
+              worktree: { name: string; path: string; base?: string };
+            };
+            expect(body.worktree.name).toBe("source-side-fork");
+            expect(body.worktree.base).toBe("source-side");
+            expect(gitOut(body.worktree.path, ["rev-parse", "HEAD"])).toBe(
+              expected,
+            );
+          } finally {
+            restore();
+            cleanup();
+            rmSync(repo, { recursive: true, force: true });
+          }
+        });
+
+        // The name is a label and travels; the base is a ref and does not.
+        it("leaves it alone when the destination is another repository", async () => {
+          const { repo, internals, source, cleanup } = pathSource();
+          const destination = fixtureRepo();
+          const trunk = defaultBranch(destination);
+          const expected = gitOut(destination, ["rev-parse", "HEAD"]);
+          const { restore } = withTmuxOnly();
+          try {
+            const res = await internals.handleRequest(
+              spawnRequest({
+                fork: source.id,
+                cwd: destination,
+                worktree: {},
+                detach: true,
+              }),
+            );
+
+            expect(res.status).toBe(200);
+            const body = (await res.json()) as {
+              worktree: { name: string; path: string; base?: string };
+            };
+            expect(body.worktree.name).toBe("source-side-fork");
+            expect(body.worktree.path).toBe(
+              join(destination, ".claude", "worktrees", "source-side-fork"),
+            );
+            expect(body.worktree.base).toBe(trunk);
+            expect(gitOut(body.worktree.path, ["rev-parse", "HEAD"])).toBe(
+              expected,
+            );
+          } finally {
+            restore();
+            cleanup();
+            rmSync(destination, { recursive: true, force: true });
+            rmSync(repo, { recursive: true, force: true });
+          }
+        });
+      });
+
+      /**
        * When the name cannot be derived at all. The generic refusal for a
        * nameless worktree advises passing a name "or giving a prompt to
        * derive it from", and half of that is impossible here: a fork with a
