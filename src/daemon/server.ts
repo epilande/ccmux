@@ -2795,6 +2795,29 @@ export class DaemonServer {
             }
           }
         }
+        // Refused here rather than left to `resolveWorktreeName`, whose
+        // generic answer offers a name "or a prompt to derive it from" and
+        // sends half of a fork's users after something the route refuses
+        // (`resolveForkSource` rejects `fork` with `prompt`). Only when the
+        // request brought no name of its own: an explicit one needs nothing
+        // derived, and the two ways of arriving here — a branch that
+        // slugifies to nothing, and a HEAD that reads as null — are both
+        // cured by typing one.
+        if (
+          derivedName === undefined &&
+          (creation.name === undefined || creation.name.trim() === "")
+        ) {
+          return Response.json(
+            {
+              error:
+                `Cannot derive a worktree name from the fork's source checkout ` +
+                `(${forkSource.session.cwd}): its branch name has nothing usable in it, or it ` +
+                `has no commits yet. Name the worktree yourself: pass '--worktree <name>', or ` +
+                `type a name in the dialog's Name row.`,
+            },
+            { status: 400, headers },
+          );
+        }
       }
 
       // Here rather than only inside the creation engine, because ORDER

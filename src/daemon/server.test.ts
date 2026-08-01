@@ -5140,6 +5140,118 @@ describe("POST /spawn", () => {
         }
       });
 
+      /**
+       * When the name cannot be derived at all. The generic refusal for a
+       * nameless worktree advises passing a name "or giving a prompt to
+       * derive it from", and half of that is impossible here: a fork with a
+       * prompt is refused outright by `resolveForkSource`. Both ways of
+       * getting here are covered, because they are different code paths —
+       * a branch that slugifies to nothing, and a HEAD that reads as null.
+       */
+      describe("with no derivable name", () => {
+        function expectNamingRefusal(error: string): void {
+          expect(error).toContain("Cannot derive a worktree name");
+          expect(error).toContain("--worktree");
+          expect(error).toContain("Name row");
+          // The advice a fork cannot take.
+          expect(error).not.toContain("give a prompt");
+        }
+
+        it("refuses a source branch with nothing usable in it", async () => {
+          const repo = fixtureRepo();
+          fixtureGit(repo, "checkout", "-q", "-b", "日本語");
+          const { manager, internals } = serverForAgents([forkAgent]);
+          const source = sourceIn(manager, repo);
+          const { argv, restore } = withTmuxOnly();
+          try {
+            const res = await internals.handleRequest(
+              spawnRequest({ fork: source.id, worktree: {}, detach: true }),
+            );
+
+            expect(res.status).toBe(400);
+            const { error } = (await res.json()) as { error: string };
+            expectNamingRefusal(error);
+            expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
+            expect(argv).toHaveLength(0);
+          } finally {
+            restore();
+            rmSync(repo, { recursive: true, force: true });
+          }
+        });
+
+        /**
+         * The other path to the same place: `readCheckoutHead` answering
+         * null. It takes a `{path}` fork to reach, and that is not a
+         * contrivance — an unborn source is the ONLY shape that gets here,
+         * since a repo with no commits reports no root at all and an id-form
+         * fork out of one is refused by the destination guard first.
+         */
+        it("refuses a source whose HEAD is unborn", async () => {
+          const unborn = realpathSync(
+            mkdtempSync(join(tmpdir(), "ccmux-unborn-")),
+          );
+          Bun.spawnSync(["git", "init", "-q", unborn], { env: fixtureEnv });
+          const repo = fixtureRepo();
+          const { manager, internals } = serverForAgents([pathForkAgent]);
+          const source = manager.createPaneTrackedSession({
+            agentType: "pathy",
+            paneId: "%3",
+            cwd: unborn,
+            pid: 4242,
+            nativeSessionId: "src-sid",
+          });
+          const transcript = transcriptFor(manager, source.id);
+          const { argv, restore } = withTmuxOnly();
+          try {
+            const res = await internals.handleRequest(
+              spawnRequest({
+                fork: source.id,
+                cwd: repo,
+                worktree: {},
+                detach: true,
+              }),
+            );
+
+            expect(res.status).toBe(400);
+            const { error } = (await res.json()) as { error: string };
+            expectNamingRefusal(error);
+            expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
+            expect(argv).toHaveLength(0);
+          } finally {
+            restore();
+            transcript.cleanup();
+            rmSync(unborn, { recursive: true, force: true });
+            rmSync(repo, { recursive: true, force: true });
+          }
+        });
+
+        // The refusal is about the DERIVED name only: a name the user typed
+        // is one nothing has to be derived from.
+        it("still accepts an explicit name for the same source", async () => {
+          const repo = fixtureRepo();
+          fixtureGit(repo, "checkout", "-q", "-b", "日本語");
+          const { manager, internals } = serverForAgents([forkAgent]);
+          const source = sourceIn(manager, repo);
+          const { restore } = withTmuxOnly();
+          try {
+            const res = await internals.handleRequest(
+              spawnRequest({
+                fork: source.id,
+                worktree: { name: "mine" },
+                detach: true,
+              }),
+            );
+
+            expect(res.status).toBe(200);
+            const body = (await res.json()) as { worktree: { name: string } };
+            expect(body.worktree.name).toBe("mine");
+          } finally {
+            restore();
+            rmSync(repo, { recursive: true, force: true });
+          }
+        });
+      });
+
       // A detached source answers the literal "HEAD" to `--abbrev-ref`, which
       // the main checkout would resolve to its own head.
       it("uses the sha when the source is on a detached HEAD", async () => {
