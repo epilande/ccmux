@@ -1147,6 +1147,10 @@ describe("NewSessionDialog fork mode", () => {
 
     const nameRow = frame.split("\n").find((line) => line.includes("Name"));
     expect(nameRow).toContain("auto");
+    expect(nameRow).toContain("Named after the source branch");
+    // And no invented preview: with no branch to apply the rule to there is
+    // no name this row can honestly show.
+    expect(nameRow).not.toContain("-fork");
     // And nothing about a prompt, which this mode does not have.
     expect(frame).not.toContain("Type a prompt");
   });

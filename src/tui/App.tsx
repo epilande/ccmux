@@ -773,7 +773,15 @@ export function App(props: AppProps) {
         label: session.gitBranch
           ? `${session.agentType} · ${session.gitBranch}`
           : session.agentType,
-        branch: session.gitBranch,
+        // A detached checkout reports the literal string "HEAD" here, which
+        // is a branch column's honest answer and a naming rule's nonsense:
+        // the daemon names a fork of one after the sha (`readCheckoutHead`),
+        // so previewing `head-fork` promises a name nobody gets. Worse, the
+        // preview is typeable — sent as an EXPLICIT name it would make the
+        // second detached fork open the first one's checkout. Null instead,
+        // which is the row's existing "a name is coming, just not one this
+        // client can show" state. The label above keeps saying HEAD.
+        branch: session.gitBranch === "HEAD" ? null : session.gitBranch,
       },
     });
   }

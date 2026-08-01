@@ -4938,6 +4938,27 @@ describe("App fork into worktree", () => {
     }
   });
 
+  it("does not preview a detached HEAD as a branch to name after", async () => {
+    // A detached checkout reports the literal string "HEAD" as its branch,
+    // but the daemon names a fork of one after the sha it is sitting on
+    // (`readCheckoutHead`). Previewing `head-fork` promises a name nobody
+    // gets — and it is worse than cosmetic: typing the preview sends it as an
+    // EXPLICIT name, and a second detached fork then opens the first one's
+    // checkout instead of getting one of its own.
+    const { restore } = withForkDaemon();
+    try {
+      await openForkDialog({ gitBranch: "HEAD" });
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Fork into worktree");
+      // The Source row still says HEAD, verbatim, the way the picker's own
+      // branch column does. It is the derived NAME that has to stay quiet.
+      expect(frame).toContain("HEAD");
+      expect(frame).not.toContain("head-fork");
+    } finally {
+      restore();
+    }
+  });
+
   it("shows the derived-name hint when the branch is unknown", async () => {
     // The daemon reads the source checkout's HEAD for itself, so there is a
     // name coming even when the row carries no branch to preview.
