@@ -326,6 +326,24 @@ export function createSpawnCommand(): Command {
             .json()
             .catch(() => null)) as SpawnErrorResponse | null;
           console.error(data?.error ?? `Spawn failed: HTTP ${response.status}`);
+          // A daemon predating fork-into-a-worktree still carries the refusal
+          // that said the combination was unverified, and printed on its own
+          // it reads as "this feature does not exist" rather than "the
+          // process answering you is old". Matched on the sentence unique to
+          // that refusal, so an ordinary fork failure is left to speak for
+          // itself. Same treatment `--with-changes` gets below, for the same
+          // class of mismatch between a new CLI and an old daemon.
+          if (
+            options.fork &&
+            options.worktree !== undefined &&
+            data?.error?.includes("into a new worktree yet")
+          ) {
+            console.error(
+              `The running ccmux daemon is an older build that could not fork into a new ` +
+                `worktree; the feature is in this CLI. Restart it with 'ccmux daemon restart' ` +
+                `and try again.`,
+            );
+          }
           // A refused move can leave a stash entry behind, and the sha is
           // the handle for getting the work back by hand. Same lines the
           // picker raises for the same body; see `src/lib/move-report.ts`.

@@ -1113,6 +1113,97 @@ describe("ccmux spawn --fork", () => {
     }
   });
 
+  /**
+   * A daemon predating fork-into-a-worktree still has the refusal that said
+   * the combination was unverified, and it prints verbatim: read cold, "has
+   * not been verified against a live agent" says the feature does not exist
+   * and never will, when the fix is a restart. Same treatment
+   * `--with-changes` gets for the same class of mismatch.
+   */
+  it("blames a stale daemon for the old fork-into-worktree refusal", async () => {
+    const errors: string[] = [];
+    console.error = (line: string) => errors.push(line);
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = typeof url === "string" ? url : url.toString();
+      if (href.endsWith("/server-info")) {
+        return new Response(JSON.stringify({ socketPath: null }), {
+          status: 200,
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          error:
+            "Cannot fork claude into a new worktree yet: that combination has not " +
+            "been verified against a live agent. Spawn a fresh session into the " +
+            "worktree, or fork into an existing directory with 'cwd'.",
+        }),
+        { status: 400 },
+      );
+    }) as unknown as typeof fetch;
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+
+    try {
+      const code = await runSpawnExpectingExit([
+        "--fork",
+        "abc-123",
+        "--worktree",
+      ]);
+
+      expect(code).toBe(1);
+      const err = errors.join("\n");
+      // The daemon's own message still leads: it is what the daemon did.
+      expect(err).toContain("has not been verified");
+      expect(err).toContain("older build");
+      expect(err).toContain("ccmux daemon restart");
+    } finally {
+      restoreEnv();
+      globalThis.fetch = original;
+    }
+  });
+
+  // Only that refusal, not every fork failure: an ordinary 400 is the
+  // daemon's answer about THIS request, and a restart hint on it would send
+  // the user off to fix a daemon that is working.
+  it("leaves an unrelated fork refusal alone", async () => {
+    const errors: string[] = [];
+    console.error = (line: string) => errors.push(line);
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = typeof url === "string" ? url : url.toString();
+      if (href.endsWith("/server-info")) {
+        return new Response(JSON.stringify({ socketPath: null }), {
+          status: 200,
+        });
+      }
+      return new Response(
+        JSON.stringify({ error: "Session abc-123 not found" }),
+        { status: 400 },
+      );
+    }) as unknown as typeof fetch;
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+
+    try {
+      const code = await runSpawnExpectingExit([
+        "--fork",
+        "abc-123",
+        "--worktree",
+      ]);
+
+      expect(code).toBe(1);
+      expect(errors.join("\n")).not.toContain("older build");
+    } finally {
+      restoreEnv();
+      globalThis.fetch = original;
+    }
+  });
+
   it("reports the fork rather than the positional agent", async () => {
     const lines: string[] = [];
     console.log = (line: string) => lines.push(line);
