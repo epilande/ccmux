@@ -5,6 +5,7 @@ import {
   spyOn,
   afterAll,
   afterEach,
+  beforeEach,
   mock,
 } from "bun:test";
 import { join as joinPath } from "path";
@@ -61,11 +62,13 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   symlinkSync,
   writeFileSync,
   rmSync,
 } from "fs";
+import { createWorktree } from "./worktree-create";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { resolvedHomeDir } from "../lib/config";
@@ -5553,5 +5556,679 @@ describe("POST /spawn with a worktree", () => {
     } finally {
       tmux.restore();
     }
+  });
+});
+
+/**
+ * `POST /spawn` with `worktree.withChanges` — the endpoint half of issue #71.
+ *
+ * Real git again, and for a sharper reason than the plain worktree tests: the
+ * contract is about where the user's uncommitted work ENDS UP, and only git
+ * can answer that. tmux stays stubbed so no pane is ever opened.
+ */
+describe("POST /spawn moving changes into a worktree", () => {
+  let root: string;
+
+  function withTmuxOnlyStub() {
+    const original = Bun.spawn;
+    const argv: string[][] = [];
+    Bun.spawn = ((spawned: string[], opts?: unknown) => {
+      if (spawned[0] !== "tmux") {
+        return (original as (a: string[], b?: unknown) => unknown)(
+          spawned,
+          opts,
+        );
+      }
+      argv.push(spawned);
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob(["%99\n"]).stream(),
+        stderr: new Blob([""]).stream(),
+      };
+    }) as unknown as typeof Bun.spawn;
+    return { argv, restore: () => (Bun.spawn = original) };
+  }
+
+  /**
+   * A checkout with one commit, a tracked edit and an untracked file.
+   *
+   * The identity is written to the repo's own config rather than passed as
+   * env: the daemon spawns git itself, and `git stash` writes a commit, so a
+   * machine with no ambient identity (CI) would fail inside the code under
+   * test rather than in the fixture.
+   */
+  function makeDirtyRepo(): string {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-spawn-move-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    runFixtureGit(repo, "config", "user.email", "test@ccmux.invalid");
+    runFixtureGit(repo, "config", "user.name", "ccmux test");
+    // git's DEFAULT excludes path (`~/.config/git/ignore`) is read even with
+    // GIT_CONFIG_GLOBAL neutered, because it is not a config value. These
+    // fixtures turn on whether a path is ignored, so without this they would
+    // pass or fail depending on whose machine ran them.
+    runFixtureGit(repo, "config", "core.excludesFile", "/dev/null");
+    writeFileSync(join(repo, "tracked.txt"), "original\n");
+    runFixtureGit(repo, "add", "tracked.txt");
+    runFixtureGit(repo, "commit", "-m", "init");
+    writeFileSync(join(repo, "tracked.txt"), "edited\n");
+    writeFileSync(join(repo, "new.txt"), "brand new\n");
+    return repo;
+  }
+
+  /**
+   * The source's uncommitted paths, minus `.claude/` — the directory the
+   * worktree itself is created in, which git reports as untracked in the
+   * source. That is a property of where worktrees live (issue #69), not of
+   * the move, and it would otherwise mask the paths these tests are about.
+   */
+  function dirtyPaths(repo: string): string[] {
+    const proc = Bun.spawnSync(["git", "-C", repo, "status", "--porcelain"], {
+      env: GIT_FIXTURE_ENV,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return proc.stdout
+      .toString()
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "" && !line.endsWith(".claude/"));
+  }
+
+  function stashList(repo: string): string {
+    const proc = Bun.spawnSync(["git", "-C", repo, "stash", "list"], {
+      env: GIT_FIXTURE_ENV,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return proc.stdout.toString().trim();
+  }
+
+  async function spawnInto(
+    internals: ServerInternals,
+    body: Record<string, unknown>,
+  ): Promise<Response> {
+    return internals.handleRequest(
+      new Request("http://127.0.0.1:2269/spawn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("relocates the work and starts the agent in the worktree", async () => {
+    const repo = makeDirtyRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "moved", withChanges: true },
+      });
+      const body = (await res.json()) as {
+        worktree?: { path: string; name: string };
+        move?: {
+          moved: number;
+          source: string;
+          untracked: { mode: string; files: string[] };
+        };
+      };
+
+      expect(res.status).toBe(200);
+      const path = body.worktree!.path;
+      // The whole point: the changes are there and the source has none.
+      expect(readFileSync(join(path, "tracked.txt"), "utf8")).toBe("edited\n");
+      expect(existsSync(join(path, "new.txt"))).toBe(true);
+      expect(readFileSync(join(repo, "tracked.txt"), "utf8")).toBe(
+        "original\n",
+      );
+      expect(existsSync(join(repo, "new.txt"))).toBe(false);
+      expect(dirtyPaths(repo)).toEqual([]);
+      // And the backup was dropped, since the work is safely in the worktree.
+      expect(stashList(repo)).toBe("");
+      // `source` rides along because the CLI cannot derive it: on a `--fork`
+      // spawn it is the forked session's checkout, resolved only here.
+      expect(body.move).toEqual({
+        moved: 1,
+        source: repo,
+        untracked: { mode: "move", files: ["new.txt"] },
+      });
+      // One worktree, and the agent started in it rather than in the source.
+      const paneArgv = tmux.argv.find((a) => a.includes("-c"));
+      expect(paneArgv?.[paneArgv.indexOf("-c") + 1]).toBe(path);
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  /**
+   * The live-e2e finding. In a repo where ccmux made the FIRST worktree,
+   * `.claude/` is untracked, so every later move saw the sibling checkouts as
+   * work: `copy` physically duplicated them (a full recursive copy, `.git`
+   * link file and all) and both modes counted them.
+   *
+   * The ordering is the subtle half. The move reads the source's status
+   * BEFORE it creates anything, so an exclude written during creation would
+   * arrive too late to affect this run's copy list.
+   */
+  it("does not treat a sibling worktree as work to move", async () => {
+    const repo = makeDirtyRepo();
+    // A worktree from an earlier spawn, added with raw git so the repo has
+    // no exclude entry — exactly the state the live run found.
+    const sibling = join(repo, ".claude", "worktrees", "earlier");
+    runFixtureGit(repo, "worktree", "add", "-b", "earlier", sibling);
+    writeFileSync(join(sibling, "SIBLING.txt"), "another agent's work\n");
+
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "second", withChanges: true, untracked: "copy" },
+      });
+      const body = (await res.json()) as {
+        worktree?: { path: string };
+        move?: { untracked: { files: string[] } };
+      };
+
+      expect(res.status).toBe(200);
+      const dest = body.worktree!.path;
+      // The genuine untracked file came across...
+      expect(existsSync(join(dest, "new.txt"))).toBe(true);
+      // ...and the sibling checkout did not, in any form.
+      expect(existsSync(join(dest, ".claude", "worktrees", "earlier"))).toBe(
+        false,
+      );
+      expect(existsSync(join(dest, ".claude", "worktrees"))).toBe(false);
+      // And the count is only what actually moved.
+      expect(body.move!.untracked.files).toEqual(["new.txt"]);
+      // The sibling is untouched where it lives.
+      expect(readFileSync(join(sibling, "SIBLING.txt"), "utf8")).toBe(
+        "another agent's work\n",
+      );
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("leaves the source's untracked files alone on copy", async () => {
+    const repo = makeDirtyRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "copied", withChanges: true, untracked: "copy" },
+      });
+      const body = (await res.json()) as { worktree?: { path: string } };
+
+      expect(res.status).toBe(200);
+      expect(existsSync(join(body.worktree!.path, "new.txt"))).toBe(true);
+      // The tracked edit moved; the untracked file exists in both places.
+      expect(readFileSync(join(repo, "tracked.txt"), "utf8")).toBe(
+        "original\n",
+      );
+      expect(dirtyPaths(repo)).toEqual(["?? new.txt"]);
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("refuses a checkout with nothing to move, and opens no pane", async () => {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-spawn-clean-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "empty-move", withChanges: true },
+      });
+      const body = (await res.json()) as { error: string; reason?: string };
+
+      expect(res.status).toBe(400);
+      expect(body.reason).toBe("nothing-to-move");
+      expect(tmux.argv).toEqual([]);
+      // Refused before anything was created, so there is nothing to clean up.
+      expect(existsSync(join(repo, ".claude", "worktrees", "empty-move"))).toBe(
+        false,
+      );
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  /**
+   * The failure the module's whole ordering exists for: the changes are
+   * already stashed when creation refuses. No pane may be opened, and the
+   * response has to name the stash entry, because that sha is the handle for
+   * getting the work back by hand.
+   */
+  it("opens no pane and names the stash when the move fails", async () => {
+    const repo = makeDirtyRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: {
+          name: "doomed",
+          base: "no-such-ref",
+          withChanges: true,
+        },
+      });
+      const body = (await res.json()) as {
+        error: string;
+        reason?: string;
+        stashSha?: string;
+        sourceRestored?: boolean;
+      };
+
+      expect(res.status).toBe(400);
+      expect(body.reason).toBe("create-failed");
+      expect(tmux.argv).toEqual([]);
+      // The recovery handle, and it names a real entry.
+      expect(body.stashSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(stashList(repo)).toContain("ccmux move-changes");
+      // The changes are back where they started, so nothing was lost.
+      expect(body.sourceRestored).toBe(true);
+      expect(readFileSync(join(repo, "tracked.txt"), "utf8")).toBe("edited\n");
+      expect(existsSync(join(repo, "new.txt"))).toBe(true);
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  /**
+   * The move is the handler's first side effect, like the plain worktree
+   * creation it replaces. A request that cannot be satisfied must not stash
+   * the user's work on its way to a 400.
+   */
+  it("touches nothing when the request is refused first", async () => {
+    const repo = makeDirtyRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "no-such-agent",
+        cwd: repo,
+        worktree: { name: "never-made", withChanges: true },
+      });
+
+      expect(res.status).toBe(400);
+      expect(dirtyPaths(repo)).toContain("M tracked.txt");
+      expect(stashList(repo)).toBe("");
+      expect(tmux.argv).toEqual([]);
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  /**
+   * The move is committed by the time tmux is asked for a pane, so a failure
+   * here leaves the source clean and the work somewhere the caller never
+   * named. A bare 500 would tell them the spawn failed and nothing else.
+   */
+  it("says where the work went when the pane fails after the move", async () => {
+    const repo = makeDirtyRepo();
+    const { internals } = createServer();
+    const original = Bun.spawn;
+    Bun.spawn = ((spawned: string[], opts?: unknown) => {
+      if (spawned[0] !== "tmux") {
+        return (original as (a: string[], b?: unknown) => unknown)(
+          spawned,
+          opts,
+        );
+      }
+      return {
+        exited: Promise.resolve(1),
+        stdout: new Blob([""]).stream(),
+        stderr: new Blob(["no server running\n"]).stream(),
+      };
+    }) as unknown as typeof Bun.spawn;
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "moved", withChanges: true },
+      });
+      const body = (await res.json()) as {
+        error: string;
+        move?: { moved: number; source: string };
+      };
+
+      expect(res.status).toBe(500);
+      // The move really did happen, so the failure has to account for it.
+      expect(dirtyPaths(repo)).toEqual([]);
+      expect(body.move?.moved).toBe(1);
+      expect(body.move?.source).toBe(repo);
+      expect(body.error).toContain("already moved");
+      expect(body.error).toContain(join(".claude", "worktrees", "moved"));
+    } finally {
+      Bun.spawn = original;
+    }
+  });
+
+  /**
+   * A name that is already a worktree is refused BEFORE the stash, because
+   * the move's rollback force-removes the worktree and there is no way to
+   * tell git to take back only the part this run added. Refused up front,
+   * nothing has been touched at all.
+   */
+  it("refuses a name that already exists, before touching anything", async () => {
+    const repo = makeDirtyRepo();
+    runFixtureGit(
+      repo,
+      "worktree",
+      "add",
+      "-b",
+      "taken",
+      join(repo, ".claude", "worktrees", "taken"),
+    );
+    // Somebody's uncommitted work, sitting in the worktree being asked for.
+    const precious = join(
+      repo,
+      ".claude",
+      "worktrees",
+      "taken",
+      "PRECIOUS.txt",
+    );
+    writeFileSync(precious, "hours of work\n");
+
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "taken", withChanges: true },
+      });
+      const body = (await res.json()) as { error: string; reason?: string };
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("already exists");
+      expect(body.error).toContain("fresh worktree");
+      // Nothing happened: no pane, no stash, source still dirty, and the
+      // existing worktree still has its work.
+      expect(tmux.argv).toEqual([]);
+      expect(stashList(repo)).toBe("");
+      expect(dirtyPaths(repo)).toContain("M tracked.txt");
+      expect(readFileSync(precious, "utf8")).toBe("hours of work\n");
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("rejects an untracked mode with no move to apply it to", async () => {
+    const repo = makeDirtyRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "confused", untracked: "leave" },
+      });
+      const body = (await res.json()) as { error: string };
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("requires 'worktree.withChanges'");
+      expect(tmux.argv).toEqual([]);
+    } finally {
+      tmux.restore();
+    }
+  });
+
+  it("rejects an untracked mode it does not know", async () => {
+    const repo = makeDirtyRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "confused", withChanges: true, untracked: "delete" },
+      });
+      const body = (await res.json()) as { error: string };
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("move, copy, leave");
+      expect(dirtyPaths(repo)).toContain("M tracked.txt");
+      expect(tmux.argv).toEqual([]);
+    } finally {
+      tmux.restore();
+    }
+  });
+});
+
+/**
+ * `GET /sessions/:id/dirty` — the lazy gate behind the picker's "Move changes
+ * to worktree" item. Driven against a REAL fixture repo, because the property
+ * that matters is that it agrees with what the move itself would do.
+ */
+describe("GET /sessions/:id/dirty", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-dirty-")));
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  /**
+   * Fixture setup goes through `runFixtureGit` like every other real-git
+   * fixture in this file, so a machine with no ambient git identity (CI)
+   * fails at the setup step naming git's own error rather than several
+   * assertions later.
+   */
+  function makeRepo(name: string): string {
+    const repo = join(root, name);
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    // See makeDirtyRepo: git's default excludes path is read regardless of
+    // GIT_CONFIG_GLOBAL, and these fixtures turn on what git ignores.
+    runFixtureGit(repo, "config", "core.excludesFile", "/dev/null");
+    writeFileSync(join(repo, "tracked.txt"), "original\n");
+    runFixtureGit(repo, "add", "tracked.txt");
+    runFixtureGit(repo, "commit", "-m", "init");
+    return repo;
+  }
+
+  /** A session whose checkout is `cwd`. */
+  function sessionIn(manager: SessionManager, cwd: string): string {
+    const session = manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd,
+      pid: 999,
+    });
+    return session.id;
+  }
+
+  async function dirtyRequest(
+    internals: ServerInternals,
+    id: string,
+    query = "",
+  ): Promise<Response> {
+    return internals.handleRequest(
+      new Request(`http://localhost/sessions/${id}/dirty${query}`),
+    );
+  }
+
+  async function dirtyOf(
+    internals: ServerInternals,
+    id: string,
+    query = "",
+  ): Promise<Record<string, unknown>> {
+    const res = await dirtyRequest(internals, id, query);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  it("reports a clean checkout as not dirty", async () => {
+    const { manager, internals } = createServer();
+    const repo = makeRepo("clean");
+    const id = sessionIn(manager, repo);
+
+    expect(await dirtyOf(internals, id)).toEqual({
+      repo: true,
+      dirty: false,
+      modified: 0,
+      untracked: 0,
+    });
+  });
+
+  it("counts tracked edits and untracked files separately", async () => {
+    const { manager, internals } = createServer();
+    const repo = makeRepo("messy");
+    writeFileSync(join(repo, "tracked.txt"), "edited\n");
+    writeFileSync(join(repo, "new.txt"), "new\n");
+    const id = sessionIn(manager, repo);
+
+    expect(await dirtyOf(internals, id)).toEqual({
+      repo: true,
+      dirty: true,
+      modified: 1,
+      untracked: 1,
+    });
+  });
+
+  it("counts untracked-only work as dirty", async () => {
+    // The move can relocate it, so the menu has to offer the action.
+    const { manager, internals } = createServer();
+    const repo = makeRepo("untracked-only");
+    writeFileSync(join(repo, "new.txt"), "new\n");
+    const id = sessionIn(manager, repo);
+
+    const body = await dirtyOf(internals, id);
+    expect(body.dirty).toBe(true);
+    expect(body.modified).toBe(0);
+    expect(body.untracked).toBe(1);
+  });
+
+  /**
+   * The desirable side effect of the exclude entry: a repo that HOSTS ccmux
+   * worktrees is not permanently "dirty" because of them, so the menu stops
+   * offering a move for a checkout whose only "work" is other agents'
+   * checkouts.
+   */
+  it("does not count the worktrees ccmux created as work", async () => {
+    const { manager, internals } = createServer();
+    const repo = makeRepo("hosts-worktrees");
+    // Through the real engine, which is what writes the exclude entry.
+    const created = await createWorktree(repo, { name: "sibling" });
+    expect(created.ok).toBe(true);
+    const id = sessionIn(manager, repo);
+
+    expect(await dirtyOf(internals, id)).toEqual({
+      repo: true,
+      dirty: false,
+      modified: 0,
+      untracked: 0,
+    });
+  });
+
+  it("counts the files inside an untracked directory, not the directory", async () => {
+    // git collapses a wholly untracked directory into one `?? deep/` record,
+    // so the menu would offer to move "1 untracked file" for a tree of them.
+    const { manager, internals } = createServer();
+    const repo = makeRepo("nested-untracked");
+    mkdirSync(join(repo, "deep", "nested"), { recursive: true });
+    writeFileSync(join(repo, "deep", "a.txt"), "1\n");
+    writeFileSync(join(repo, "deep", "nested", "b.txt"), "2\n");
+    const id = sessionIn(manager, repo);
+
+    const body = await dirtyOf(internals, id);
+    expect(body.untracked).toBe(2);
+  });
+
+  it("answers 'not a repo' plainly rather than erroring", async () => {
+    // An ordinary answer to what the menu is asking, not a failure. Note this
+    // deliberately differs from readDirtyState, which calls an unreadable
+    // checkout DIRTY because its caller (prune) is destructive.
+    const { manager, internals } = createServer();
+    const plain = join(root, "plain");
+    mkdirSync(plain, { recursive: true });
+    const id = sessionIn(manager, plain);
+
+    expect(await dirtyOf(internals, id)).toEqual({
+      repo: false,
+      dirty: false,
+      modified: 0,
+      untracked: 0,
+    });
+  });
+
+  it("404s an unknown session", async () => {
+    const { internals } = createServer();
+    const res = await internals.handleRequest(
+      new Request("http://localhost/sessions/nope/dirty"),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  /**
+   * The menu has to ask about the directory the move will actually run in,
+   * which is the pane's current path when the pane has `cd`ed somewhere, not
+   * the directory the session started in.
+   */
+  it("answers about an explicit cwd rather than the session's", async () => {
+    const { manager, internals } = createServer();
+    const started = makeRepo("started-here");
+    const elsewhere = makeRepo("moved-here");
+    writeFileSync(join(elsewhere, "tracked.txt"), "edited\n");
+    const id = sessionIn(manager, started);
+
+    // The session's own checkout is clean...
+    expect(await dirtyOf(internals, id)).toMatchObject({ dirty: false });
+    // ...while the one the caller names is not.
+    expect(
+      await dirtyOf(internals, id, `?cwd=${encodeURIComponent(elsewhere)}`),
+    ).toEqual({ repo: true, dirty: true, modified: 1, untracked: 0 });
+  });
+
+  it("rejects a cwd that is not an absolute path", async () => {
+    const { manager, internals } = createServer();
+    const repo = makeRepo("relative");
+    const id = sessionIn(manager, repo);
+
+    const res = await dirtyRequest(internals, id, "?cwd=../elsewhere");
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain(
+      "absolute",
+    );
+  });
+
+  it("ignores gitignored files, which the move never relocates", async () => {
+    // The engine's own file setup covers ignored content, so counting it here
+    // would offer a move for a checkout that has nothing to move.
+    const { manager, internals } = createServer();
+    const repo = makeRepo("ignored");
+    writeFileSync(join(repo, ".gitignore"), "secret.env\n");
+    runFixtureGit(repo, "add", ".gitignore");
+    runFixtureGit(repo, "commit", "-m", "ignore");
+    writeFileSync(join(repo, "secret.env"), "TOKEN=1\n");
+    const id = sessionIn(manager, repo);
+
+    const body = await dirtyOf(internals, id);
+    expect(body.dirty).toBe(false);
+    expect(body.untracked).toBe(0);
   });
 });

@@ -3,6 +3,16 @@ import { resolve } from "node:path";
 import { getDaemonUrl } from "../lib/config";
 import { ensureDaemon } from "./shared";
 import { PANE_ID_PATTERN, type SpawnSplit } from "../daemon/spawn-command";
+import {
+  isUntrackedMode,
+  UNTRACKED_MODES,
+  type UntrackedMode,
+} from "../daemon/worktree-move-changes";
+import {
+  moveReportLines,
+  stashRecoveryLines,
+  type MoveReport,
+} from "../lib/move-report";
 import { isSameTmuxServer } from "../lib/tmux-server";
 import { resolveCurrentTmuxClientTty } from "../lib/tmux-client";
 import { BUILTIN_AGENTS } from "../lib/agents";
@@ -21,6 +31,25 @@ interface SpawnResponse {
     /** Absent when no branch was cut, so there is nothing to report it from. */
     base?: string;
   };
+  /** Present only when `--with-changes` relocated uncommitted work. */
+  move?: MoveReport;
+}
+
+/**
+ * A failed spawn.
+ *
+ * `stashSha`/`sourceRestored` describe a move that was REFUSED, `move` a move
+ * that completed before something later went wrong. They never both appear:
+ * the first pair says the work is still recoverable from a stash, the second
+ * that it is already in the new worktree.
+ */
+interface SpawnErrorResponse {
+  error: string;
+  /** The stash entry holding the user's work, when one was left in place. */
+  stashSha?: string;
+  sourceRestored?: boolean;
+  /** A move that had already completed when the spawn failed. */
+  move?: SpawnResponse["move"];
 }
 
 /**
@@ -36,6 +65,17 @@ function parseSplit(value: string): SpawnSplit {
     : "";
   throw new InvalidArgumentError(
     `Expected 'h' (left/right) or 'v' (stacked).${hint}`,
+  );
+}
+
+/** `--untracked`'s value, rejected at parse time so a typo never reaches the
+ *  daemon (or starts one). */
+function parseUntracked(value: string): UntrackedMode {
+  if (isUntrackedMode(value)) return value;
+  // Quoted, like parseSplit's: the values are literals to type, and an
+  // unquoted list reads as prose the moment one of them is a real word.
+  throw new InvalidArgumentError(
+    `Expected ${UNTRACKED_MODES.map((mode) => `'${mode}'`).join(", ")}.`,
   );
 }
 
@@ -140,6 +180,15 @@ export function createSpawnCommand(): Command {
       "--base <ref>",
       "Branch the new worktree from this ref (default: the repository's current branch)",
     )
+    .option(
+      "--with-changes",
+      "Move the checkout's uncommitted changes into the new worktree, leaving it clean",
+    )
+    .option(
+      "--untracked <mode>",
+      `What --with-changes does with untracked files (${UNTRACKED_MODES.join(", ")}; default ${UNTRACKED_MODES[0]})`,
+      parseUntracked,
+    )
     .action(
       async (
         agent: string,
@@ -153,6 +202,8 @@ export function createSpawnCommand(): Command {
           detach?: boolean;
           worktree?: string | boolean;
           base?: string;
+          withChanges?: boolean;
+          untracked?: UntrackedMode;
         },
       ) => {
         // `--base` alone is inert, and silently ignoring a flag someone typed
@@ -166,6 +217,17 @@ export function createSpawnCommand(): Command {
         // did to whoever ran it.
         if (options.base !== undefined && options.worktree === undefined) {
           console.error("--base requires --worktree");
+          process.exit(1);
+        }
+        // Same rule, same reason, and the same "before ensureDaemon" placement:
+        // there is nowhere for the changes to move without a destination, and
+        // moving work is the last operation that should start on a guess.
+        if (options.withChanges && options.worktree === undefined) {
+          console.error("--with-changes requires --worktree");
+          process.exit(1);
+        }
+        if (options.untracked !== undefined && !options.withChanges) {
+          console.error("--untracked requires --with-changes");
           process.exit(1);
         }
 
@@ -190,6 +252,12 @@ export function createSpawnCommand(): Command {
                     ? options.worktree
                     : undefined,
                 base: options.base,
+                // Omitted rather than sent as `false`: the daemon reads
+                // `untracked` without `withChanges` as a contradiction, and a
+                // plain `--worktree` should send the shape it always did.
+                ...(options.withChanges
+                  ? { withChanges: true, untracked: options.untracked }
+                  : {}),
               };
 
         // One `/server-info` round-trip for both placement fields, which have
@@ -198,8 +266,12 @@ export function createSpawnCommand(): Command {
         const daemonSocket = optedOut ? null : await daemonTmuxSocket();
         const detach = options.detach ?? false;
 
+        // The try covers the round trip ONLY. Everything after it prints and
+        // exits, and wrapping those in a catch meant a `process.exit` walked
+        // straight back into it and was reported as a spawn failure.
+        let response: Response;
         try {
-          const response = await fetch(`${getDaemonUrl()}/spawn`, {
+          response = await fetch(`${getDaemonUrl()}/spawn`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -228,18 +300,52 @@ export function createSpawnCommand(): Command {
               worktree,
             }),
           });
+        } catch (error) {
+          console.error("Failed to spawn session:", error);
+          process.exit(1);
+        }
 
-          if (response.status === 400) {
-            const data = (await response.json()) as { error: string };
-            console.error(data.error);
+        // EVERY non-ok status, not only 400. A failure after a successful
+        // move is a 500, and its body is the only place that says the user's
+        // uncommitted work has already left their checkout; collapsing that
+        // to "HTTP 500" throws away the one sentence they need.
+        if (!response.ok) {
+          const data = (await response
+            .json()
+            .catch(() => null)) as SpawnErrorResponse | null;
+          console.error(data?.error ?? `Spawn failed: HTTP ${response.status}`);
+          // A refused move can leave a stash entry behind, and the sha is
+          // the handle for getting the work back by hand. Same lines the
+          // picker raises for the same body; see `src/lib/move-report.ts`.
+          if (data) {
+            for (const line of stashRecoveryLines(data)) console.error(line);
+          }
+          // A move that DID complete before the spawn failed. The same
+          // accounting the success path prints, because the work has left
+          // the checkout either way.
+          if (data?.move) {
+            for (const line of moveReportLines(
+              data.move,
+              resolveSpawnCwd(options.cwd),
+            )) {
+              console.error(line);
+            }
+          }
+          process.exit(1);
+        }
+
+        {
+          // Guarded the same way the error path is: a 200 whose body will not
+          // parse (a proxy in the way, a daemon killed mid-write) says nothing
+          // about what the daemon did, and throwing here surfaces as an
+          // unhandled rejection rather than as the failure it is.
+          const data = (await response
+            .json()
+            .catch(() => null)) as SpawnResponse | null;
+          if (!data) {
+            console.error("Failed to spawn session: unreadable response body");
             process.exit(1);
           }
-
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-          }
-
-          const data = (await response.json()) as SpawnResponse;
           if (data.worktree) {
             const { name, path, branch, created, branchCreated, base } =
               data.worktree;
@@ -254,21 +360,49 @@ export function createSpawnCommand(): Command {
               !created && options.base
                 ? " (--base ignored: the worktree already existed)"
                 : "";
+            // A move resolves its own base to the SOURCE checkout's HEAD, so
+            // this is routinely 40 characters of hex where a `--base` is a
+            // ref name. Abbreviated the way git prints one; the ref the
+            // worktree was actually cut from is unchanged.
+            const from = base
+              ? ` from ${/^[0-9a-f]{40}$/.test(base) ? base.slice(0, 12) : base}`
+              : "";
             const what = !created
               ? `Reusing worktree ${name} on branch ${branch}${staleBase}`
               : branchCreated
-                ? `Created worktree ${name} on new branch ${branch}${base ? ` from ${base}` : ""}`
+                ? `Created worktree ${name} on new branch ${branch}${from}`
                 : `Created worktree ${name} on existing branch ${branch}`;
             console.log(`${what}: ${path}`);
+          }
+          if (data.move) {
+            for (const line of moveReportLines(
+              data.move,
+              resolveSpawnCwd(options.cwd),
+            )) {
+              console.log(line);
+            }
           }
           console.log(
             options.fork
               ? `Forked ${options.fork} into pane ${data.paneId}: ${data.command}`
               : `Spawned ${agent} in pane ${data.paneId}: ${data.command}`,
           );
-        } catch (error) {
-          console.error("Failed to spawn session:", error);
-          process.exit(1);
+
+          // Reported last, after everything that DID happen, and as a
+          // failure. A daemon predating `--with-changes` drops the keys it
+          // does not know and answers a perfectly ordinary 200, so the agent
+          // starts in an empty worktree while the work sits untouched in the
+          // original checkout. The absent `move` is the only evidence there
+          // is, and exiting 0 on it would make a silent no-op look like a
+          // completed move.
+          if (options.withChanges && !data.move) {
+            console.error(
+              `The running ccmux daemon is an older build that does not support --with-changes, ` +
+                `so your changes were not moved: they are still in ${resolveSpawnCwd(options.cwd)}. ` +
+                `Restart it with 'ccmux daemon restart' and move them again.`,
+            );
+            process.exit(1);
+          }
         }
       },
     );

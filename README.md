@@ -274,6 +274,8 @@ ccmux spawn --prompt "fix the tests"                         # Send an initial p
 ccmux spawn --worktree --prompt "fix flicker"                # Spawn into a git worktree (name derived from the prompt)
 ccmux spawn --worktree fix-flicker                           # Spawn into a named worktree, creating it if needed
 ccmux spawn --worktree --base develop --prompt "fix flicker" # Branch the new worktree from develop
+ccmux spawn --worktree fix-flicker --with-changes            # Move this checkout's uncommitted work into it
+ccmux spawn --worktree fix-flicker --with-changes --untracked copy # Untracked files land in both
 ```
 
 Split directions use tmux's own vocabulary: `h` puts the new pane beside the
@@ -307,6 +309,64 @@ worktree gets a numeric suffix (`-2`, `-3`, ...) instead of reusing it, since
 two different prompts landing in the same worktree would silently merge
 unrelated work. `--base <ref>` sets what the new branch is cut from,
 defaulting to the main checkout's current branch.
+
+Creating a worktree also adds `**/.claude/worktrees/` to the hosting repo's
+`.git/info/exclude` (the same line Claude Code writes, and the same file —
+local to your clone, never `.gitignore`), so the worktrees don't show up as
+untracked work in the checkout that hosts them. It is added once, only if git
+isn't already ignoring that path, and nothing else in the file is touched.
+
+### Moving Uncommitted Changes
+
+An experiment that turned into a real change has a way of ending up sitting
+dirty on `main`. `--with-changes` relocates that work into the worktree it
+creates, so the new agent starts on top of it and the checkout you left is
+clean:
+
+```bash
+ccmux spawn --worktree fix-flicker --with-changes
+```
+
+**Move changes** in a session's context menu does the same thing from the
+picker. It only appears for a row whose checkout is actually dirty, and it
+opens the new-session dialog already set to move: the destination is locked to
+a new worktree, an **Untracked** row appears, and the name and prompt stay
+editable.
+
+Whatever the move leaves you holding, the picker says so and waits for a
+keypress rather than flashing it past: a failure that parked your work in a
+stash (with the command to get it back), a move that completed but could not
+drop its own backup entry, a staged/unstaged split it could not preserve, or a
+spawn that failed after the changes had already moved — naming the worktree
+they moved into. Only refusals that changed nothing (a name already taken,
+nothing to move) are a passing toast, since the fields to fix them are still
+in front of you. The sidebar toasts what a clean move did; the picker jumps
+straight into the new pane, as it does for every other spawn.
+
+Untracked files move by default (agents create new files constantly, and
+leaving them behind would strand exactly the work you are relocating).
+`--untracked copy` puts them in both places, `--untracked leave` keeps them
+where they are. Gitignored files are never part of this in any mode — not
+moved, not copied — because a `.env` sitting in an otherwise-new directory is
+not work to relocate; `worktree.symlinkDirectories` and `.worktreeinclude`
+cover those.
+
+The stash is the backup, and it is the first thing that happens. Your changes
+are stashed out of the checkout, the worktree is created, the entry is applied
+into it, and only then is the entry dropped. So there is a window where the
+work lives in a stash and nowhere else, and every failure inside it ends the
+same way: your checkout is put back as it was, and the stash entry holding
+your work is reported by sha whether or not the restore succeeded. Nothing is
+ever dropped before it has landed somewhere else.
+
+Staged and unstaged changes arrive as you left them where git allows it; if
+the split cannot be preserved, everything still moves and you are told to
+re-run `git add`.
+
+ccmux refuses to run at all while a merge, rebase, cherry-pick, revert, or
+bisect is in progress, and refuses a worktree name that already exists — a
+move needs a fresh worktree, because rolling one back would take a checkout
+it did not create.
 
 ### Forking Sessions
 
@@ -399,7 +459,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Jump to first/last    | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd>                                            | Go to top / bottom                                                                                                     |
 | Jump to session       | <kbd>1</kbd>–<kbd>9</kbd>                                                          | Switch directly to session N                                                                                           |
 | Switch to session     | <kbd>Enter</kbd>                                                                   | Switch tmux to the selected pane                                                                                       |
-| New session           | <kbd>n</kbd>                                                                       | Open the new-session dialog (agent, placement, prompt, worktree; directory derived from the selected row)              |
+| New session           | <kbd>n</kbd>                                                                       | Open the new-session dialog (agent, placement, prompt, worktree + name; directory derived from the selected row)       |
 | Search                | <kbd>/</kbd>                                                                       | Enter fuzzy search mode                                                                                                |
 | Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel                                                                                            |
 | Scroll preview        | <kbd>Ctrl+D</kbd> / <kbd>Ctrl+U</kbd>                                              | Half-page scroll in preview                                                                                            |
@@ -433,12 +493,19 @@ Opened with <kbd>n</kbd>, or from the right-click menu on a session row or a gro
 | Move within a field | <kbd>j</kbd> / <kbd>k</kbd> or <kbd>↑</kbd> / <kbd>↓</kbd> |
 | Pick by number      | <kbd>1</kbd>–<kbd>9</kbd>                                  |
 | Where it runs       | <kbd>1</kbd> This checkout / <kbd>2</kbd> New worktree     |
+| Name the worktree   | Type on the **Name** row (worktree destinations only)      |
 | Spawn               | <kbd>Enter</kbd>                                           |
 | Cancel              | <kbd>Esc</kbd>                                             |
 
-Movement and number keys apply to the focused field, so <kbd>2</kbd> picks the second agent on the Agent field and the second placement on the Placement field. In the Prompt field every key is text, so <kbd>↑</kbd> / <kbd>↓</kbd> (or <kbd>Ctrl</kbd>+<kbd>P</kbd> / <kbd>Ctrl</kbd>+<kbd>N</kbd>) move between fields there instead.
+Movement and number keys apply to the focused field, so <kbd>2</kbd> picks the second agent on the Agent field and the second placement on the Placement field. In the Prompt and Name fields every key is text, so <kbd>↑</kbd> / <kbd>↓</kbd> (or <kbd>Ctrl</kbd>+<kbd>P</kbd> / <kbd>Ctrl</kbd>+<kbd>N</kbd>) move between fields there instead.
 
-**Where** picks between this checkout and a new git worktree. The worktree option carries the name it would create, derived from the prompt and updated as you type, and its branch is cut from the main checkout's current branch. Choosing a different base ref is CLI-only (`ccmux spawn --worktree --base <ref>`).
+**Where** picks between this checkout and a new git worktree, whose branch is cut from the main checkout's current branch. Choosing a different base ref is CLI-only (`ccmux spawn --worktree --base <ref>`). Moving changes is the one exception: its worktree is cut from the HEAD of the checkout the changes came out of, so the work lands on the history it was written against rather than on whatever the main checkout happens to be on.
+
+Choosing the worktree adds a **Name** row showing the name it would create, derived from the prompt and updated as you type. Type over it to name the worktree yourself; clear the field to hand the name back to the prompt. The two are not the same request: a derived name that collides with an existing worktree is numbered (`-2`), which is what the row's `auto · -2 if taken` note means, while a name you typed opens that worktree if it is already there. Names are slugified the way `ccmux spawn --worktree <name>` slugifies them, so `Fix Sidebar Flicker` becomes `fix-sidebar-flicker`, and a name is enough on its own — a worktree no longer needs a prompt to be spawnable. A name with nothing to slugify (punctuation, a non-Latin script) is refused when you confirm rather than quietly replaced by the derived one.
+
+Opened from **Move changes**, the same dialog runs in move mode: the title says so, **Where** is locked to the new worktree (there is nowhere else the changes can go), the same editable **Name** row is there, and an **Untracked** field appears — <kbd>1</kbd> move, <kbd>2</kbd> copy to both, <kbd>3</kbd> leave here. <kbd>Tab</kbd> skips the locked field. See [Moving Uncommitted Changes](#moving-uncommitted-changes).
+
+In a pane too short for every row, the dialog drops what it can spare before anything you act on — the key hints first, then the move note, then the blank line, then the option lists become scrolling windows, and the directory row last; below the height its fields need, it says how many rows it wants instead of drawing over itself, and the number keys go quiet while it does.
 
 The working directory is derived, not typed: a session row uses that session's directory, a group header uses the group's, and no selection falls back to where the picker was launched. The picker jumps to the new pane, and a one-shot picker then closes while a `--persistent` board stays open; the sidebar spawns into the window's main area without stealing focus.
 

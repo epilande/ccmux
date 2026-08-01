@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, mock } from "bun:test";
 import { testRender } from "@opentui/solid";
+import { createSignal } from "solid-js";
 import { MouseButtons } from "@opentui/core/testing";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { expectFrameIntegrity } from "./test-helpers";
@@ -31,6 +32,7 @@ async function renderMenu(
     y?: number;
     onClose?: ReturnType<typeof mock>;
     size?: { width: number; height: number };
+    reservedRows?: number;
   } = {},
 ) {
   const items = opts.items ?? itemSpies(["Attach", "Kill", "Restart"]);
@@ -42,6 +44,7 @@ async function renderMenu(
         x={opts.x ?? 5}
         y={opts.y ?? 2}
         items={items}
+        reservedRows={opts.reservedRows}
         onClose={onClose}
       />
     ),
@@ -182,5 +185,77 @@ describe("ContextMenu sizing", () => {
     // Every item is still on screen, first and last included.
     expect(frame).toContain("Attach");
     expect(frame).toContain("Restart");
+  });
+});
+
+/**
+ * A menu that has been DRAWN must never move.
+ *
+ * One of its items arrives asynchronously (the row menu's "Move changes",
+ * gated on a `git status` the daemon runs after the menu is up). Appending it
+ * last keeps everything above it still — but only where the menu grows
+ * downward. Clamped against the bottom edge it grows UPWARD instead, so every
+ * row slides one line up as the answer lands, under a pointer that is already
+ * travelling: the click aimed at Fork lands on Kill.
+ */
+describe("ContextMenu with an item still to come", () => {
+  it("holds its position at the bottom edge when the item arrives", async () => {
+    const base = itemSpies(["Attach", "New session", "Kill", "Restart"]);
+    const late = itemSpies(["Move changes"])[0]!;
+    const [items, setItems] = createSignal<ContextMenuItem[]>(base);
+    const [reserved, setReserved] = createSignal(1);
+    const size = { width: 40, height: 10 };
+
+    setup = await testRender(
+      () => (
+        <ContextMenu
+          x={5}
+          y={9999}
+          items={items()}
+          reservedRows={reserved()}
+          onClose={() => {}}
+        />
+      ),
+      size,
+    );
+    await setup.renderOnce();
+    const before = boxBounds(setup.captureCharFrame());
+    const rowOf = (label: string) =>
+      locate(setup.captureCharFrame(), label)?.row;
+    const killBefore = rowOf("Kill");
+
+    // The answer lands: the item is appended and its reservation released.
+    setItems([...base, late]);
+    setReserved(0);
+    await setup.renderOnce();
+
+    const frame = setup.captureCharFrame();
+    const after = boxBounds(frame);
+    expect(frame).toContain("Move changes");
+    // The top border, and therefore every row measured from it, is where it
+    // was. Asserted as a position, not a shape: this is about the pointer.
+    expect(after.top).toBe(before.top);
+    expect(rowOf("Kill")).toBe(killBefore);
+    // And it is still a whole menu on screen.
+    expectFrameIntegrity(frame, base.length + 3);
+    expect(after.bottom).toBe(size.height - 1);
+  });
+
+  it("stays put when the item never comes", async () => {
+    // A clean checkout answers "no item", and releasing the reservation then
+    // would drop the menu back down a row — the same shift, later.
+    const base = itemSpies(["Attach", "New session", "Kill", "Restart"]);
+    const size = { width: 40, height: 10 };
+    const { frame } = await renderMenu({
+      items: base,
+      y: 9999,
+      size,
+      reservedRows: 1,
+    });
+    const { top, bottom } = boxBounds(frame);
+    expect(bottom - top + 1).toBe(base.length + 2);
+    // One row of air below it: the space the item that never came would have
+    // taken.
+    expect(bottom).toBe(size.height - 2);
   });
 });

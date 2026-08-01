@@ -1,6 +1,11 @@
 import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { AgentDef } from "../lib/agents";
+import {
+  isUntrackedMode,
+  UNTRACKED_MODES,
+  type UntrackedMode,
+} from "./worktree-move-changes";
 
 /**
  * Requested split direction, in tmux's own vocabulary: `"h"` splits the
@@ -893,18 +898,29 @@ export async function resolveSpawnFocusArgv(
 export interface WorktreeRequest {
   name?: string;
   base?: string;
+  /** Relocate the cwd's uncommitted work into the new worktree (issue #71). */
+  withChanges?: boolean;
+  /** What happens to untracked files when `withChanges` is set. */
+  untracked?: UntrackedMode;
 }
 
 /**
  * Validate and normalize the wire `worktree` field.
  *
  * Absent (or `null`/`false`) means the ordinary spawn into `cwd`. An object
- * opts in, with both members optional: no `name` derives one from the prompt,
+ * opts in, with every member optional: no `name` derives one from the prompt,
  * no `base` branches from the main checkout's current branch.
  *
  * Deliberately one shape rather than also accepting `true`. The CLI's bare
  * `--worktree` sends `{}`, which says the same thing, and every extra
  * accepted spelling is another path that has to stay correct.
+ *
+ * Moving changes lives INSIDE this object rather than beside it, because it
+ * is a property of the destination ("create this worktree, and bring the
+ * uncommitted work with it"). That makes "changes need a worktree to move
+ * into" structural — there is no way to spell the invalid combination — so
+ * only the pairing that is still expressible, `untracked` without
+ * `withChanges`, has to be refused here.
  */
 export function normalizeWorktreeRequest(
   value: unknown,
@@ -916,11 +932,16 @@ export function normalizeWorktreeRequest(
     return {
       ok: false,
       error:
-        "Invalid 'worktree' field: expected an object such as { name, base }",
+        "Invalid 'worktree' field: expected an object such as { name, base, withChanges, untracked }",
     };
   }
 
-  const raw = value as { name?: unknown; base?: unknown };
+  const raw = value as {
+    name?: unknown;
+    base?: unknown;
+    withChanges?: unknown;
+    untracked?: unknown;
+  };
   const request: WorktreeRequest = {};
   for (const key of ["name", "base"] as const) {
     const member = raw[key];
@@ -933,5 +954,30 @@ export function normalizeWorktreeRequest(
     }
     request[key] = member;
   }
+
+  const withChanges = normalizeBoolean(raw.withChanges, "worktree.withChanges");
+  if (!withChanges.ok) return withChanges;
+  if (withChanges.value) request.withChanges = true;
+
+  if (raw.untracked !== undefined && raw.untracked !== null) {
+    if (!isUntrackedMode(raw.untracked)) {
+      return {
+        ok: false,
+        error:
+          `Invalid 'worktree.untracked' field: expected one of ` +
+          `${UNTRACKED_MODES.join(", ")}`,
+      };
+    }
+    // Refused rather than ignored: it reads as a setting that was honored,
+    // and the spawn it produces (no move at all) is not the one it describes.
+    if (!request.withChanges) {
+      return {
+        ok: false,
+        error: "'worktree.untracked' requires 'worktree.withChanges'",
+      };
+    }
+    request.untracked = raw.untracked;
+  }
+
   return { ok: true, value: request };
 }

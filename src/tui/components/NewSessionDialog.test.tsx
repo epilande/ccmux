@@ -1,6 +1,12 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { NewSessionDialog, optionWindow, wrapText } from "./NewSessionDialog";
+import {
+  NewSessionDialog,
+  newSessionFloorRows,
+  optionWindow,
+  planDialogRows,
+  wrapText,
+} from "./NewSessionDialog";
 import { expectFrameIntegrity, squish } from "./test-helpers";
 import { displayWidth } from "../utils/format";
 import type { SpawnableAgent } from "../../lib/spawnable-agents";
@@ -30,9 +36,16 @@ const draft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft => ({
   placement: "window",
   destination: "here",
   prompt: "",
+  moveChanges: false,
+  untracked: "move",
+  worktreeName: null,
   field: "agent",
   ...overrides,
 });
+
+/** A draft as the row menu's "Move changes" opens it. */
+const moveDraft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft =>
+  draft({ moveChanges: true, destination: "worktree", ...overrides });
 
 async function renderDialog(props: {
   draft?: NewSessionDraft;
@@ -52,7 +65,9 @@ async function renderDialog(props: {
         onSelectAgent={() => {}}
         onSelectPlacement={() => {}}
         onSelectDestination={() => {}}
+        onSelectUntracked={() => {}}
         onPromptInput={() => {}}
+        onWorktreeNameInput={() => {}}
         onSubmit={() => {}}
         onCancel={() => {}}
         showKeyHints={props.showKeyHints}
@@ -152,6 +167,85 @@ describe("wrapText", () => {
     // A column too narrow for one wide glyph: it has to overflow, but the
     // loop must still terminate.
     expect(wrapText("日本", 1)).toEqual(["日本"]);
+  });
+});
+
+describe("planDialogRows", () => {
+  /** The move-changes dialog on a sidebar rail: the tallest shape there is. */
+  const stackedMove = {
+    moveChanges: true,
+    namesAWorktree: true,
+    agentRows: 1,
+    stacked: true,
+    keyHints: true,
+  };
+
+  it("spends everything it has when the rows are there", () => {
+    const plan = planDialogRows(stackedMove, 40);
+    expect(plan.tooShort).toBe(false);
+    expect(plan.showKeyHints).toBe(true);
+    expect(plan.showMoveNote).toBe(true);
+    expect(plan.showDirectory).toBe(true);
+    expect(plan.untrackedRows).toBe(3);
+    // Nothing is padded out to fill the screen: the dialog is its content.
+    expect(plan.height).toBe(18);
+  });
+
+  it("gives up rows in an order that keeps the actionable ones", () => {
+    // Each step is the same dialog one row shorter, so the sequence IS the
+    // priority list: hints, then the move note, then the blank under the
+    // title, then the stacked options collapse, then the directory.
+    const given = (height: number) => {
+      const plan = planDialogRows(stackedMove, height);
+      return {
+        hints: plan.showKeyHints,
+        note: plan.showMoveNote,
+        spacer: plan.showTitleSpacer,
+        untracked: plan.untrackedRows,
+        placement: plan.placementRows,
+        directory: plan.showDirectory,
+        tooShort: plan.tooShort,
+      };
+    };
+    expect(given(16).hints).toBe(false);
+    expect(given(16).note).toBe(true);
+    expect(given(15).note).toBe(false);
+    expect(given(14).spacer).toBe(false);
+    // Now the options, bottom-up, and never below one row each.
+    expect(given(13).untracked).toBe(2);
+    expect(given(12).untracked).toBe(1);
+    expect(given(11).placement).toBe(2);
+    expect(given(10).placement).toBe(1);
+    expect(given(10).directory).toBe(true);
+    // The last thing to go, because in this mode it names the checkout being
+    // emptied.
+    expect(given(9).directory).toBe(false);
+    expect(given(9).tooShort).toBe(false);
+  });
+
+  it("shrinks the agent list before anything else", () => {
+    // It is the only field whose natural size is somebody else's list, and
+    // it already scrolls, so it gives up rows without losing anything.
+    const plan = planDialogRows({ ...stackedMove, agentRows: 9 }, 20);
+    expect(plan.agentRows).toBeLessThan(9);
+    expect(plan.showKeyHints).toBe(true);
+    expect(plan.showMoveNote).toBe(true);
+  });
+
+  it("refuses to draw a dialog shorter than its own fields", () => {
+    expect(planDialogRows(stackedMove, 8).tooShort).toBe(true);
+    expect(planDialogRows(stackedMove, 8).height).toBe(3);
+    // An ordinary spawn into this checkout has two fewer rows to find.
+    const plain = {
+      moveChanges: false,
+      namesAWorktree: false,
+      agentRows: 1,
+      stacked: false,
+      keyHints: false,
+    };
+    expect(newSessionFloorRows(plain)).toBe(7);
+    expect(planDialogRows(plain, 7).tooShort).toBe(false);
+    expect(planDialogRows(plain, 6).tooShort).toBe(true);
   });
 });
 
@@ -427,9 +521,9 @@ describe("NewSessionDialog", () => {
 });
 
 /**
- * The worktree destination (issue #69). The row shows the name it WOULD
- * create, derived from the prompt, so the choice is concrete rather than a
- * promise and the branch name never arrives as a surprise.
+ * The worktree destination (issue #69). The row is the choice alone; the name
+ * it would create moved to a row of its own with issue #83, so the two are
+ * checked separately below.
  */
 describe("NewSessionDialog destination", () => {
   it("offers both destinations, with this checkout selected by default", async () => {
@@ -441,65 +535,20 @@ describe("NewSessionDialog destination", () => {
     expect(frame).toContain("New worktree");
   });
 
-  it("previews the derived worktree name from the prompt", async () => {
+  /**
+   * The name used to be appended here and truncated against what the row had
+   * left, which is what made it unreadable at this dialog's width (#83).
+   */
+  it("leaves the name to its own row rather than appending it", async () => {
     await renderDialog({
-      // A short prompt so the whole derived name fits: the dialog is capped
-      // at MAX_WIDTH regardless of terminal size, so a long one is always
-      // truncated (covered by the next test).
       draft: draft({ destination: "worktree", prompt: "fix bug" }),
     });
 
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("[New worktree: fix-bug]");
-  });
-
-  /**
-   * The derived name is budgeted against the row, not appended blindly. A
-   * long slug pushed the dialog's own right border off screen, which reads
-   * as a broken dialog rather than a long name.
-   */
-  it("truncates the name rather than overflowing the border", async () => {
-    await renderDialog({
-      draft: draft({
-        destination: "worktree",
-        prompt: "fix sidebar flicker on resize",
-      }),
-    });
-
-    const frame = setup.captureCharFrame();
-    expect(frame).toContain("New worktree: fix-sidebar-");
-    // Every row of the box still ends with its border.
-    expectFrameIntegrity(frame);
-  });
-
-  /**
-   * With no derivable name the option cannot spawn at all, so the row says
-   * what is missing instead of showing a name it does not have.
-   */
-  it("asks for a prompt until there is something to derive a name from", async () => {
-    await renderDialog({ draft: draft({ destination: "worktree" }) });
-
-    const frame = setup.captureCharFrame();
-    expect(frame).toContain("[New worktree (add a prompt)]");
-    expect(frame).not.toContain("New worktree:");
-    // The hint is budgeted like the name is; the border still closes.
-    expectFrameIntegrity(frame);
-  });
-
-  it("keeps the hint off the unselected row, where it is only noise", async () => {
-    const frame = await renderDialog({ draft: draft({ destination: "here" }) });
-
-    expect(frame).toContain("[This checkout]");
-    expect(frame).not.toContain("add a prompt");
-  });
-
-  /** A CJK-only prompt derives nothing, exactly like an empty one. */
-  it("asks for a prompt when the prompt derives no slug at all", async () => {
-    const frame = await renderDialog({
-      draft: draft({ destination: "worktree", prompt: "修复侧边栏" }),
-    });
-
-    expect(frame).toContain("[New worktree (add a prompt)]");
+    expect(frame).toContain("[New worktree]");
+    expect(frame).not.toContain("New worktree: fix-bug");
+    expect(frame).toContain("Name");
+    expect(frame).toContain("fix-bug");
   });
 
   /**
@@ -529,5 +578,485 @@ describe("NewSessionDialog destination", () => {
     await renderDialog({ draft: draft({ destination: "worktree" }) });
 
     expect(setup.captureCharFrame()).toContain("Directory");
+  });
+});
+
+/**
+ * The worktree name (issue #83): shown in full on a row of its own, and
+ * editable, rather than previewed as a truncated suffix on the row above.
+ */
+describe("NewSessionDialog worktree name", () => {
+  /** The row a label owns, or -1. */
+  const rowOf = (frame: string, text: string) =>
+    frame.split("\n").findIndex((line) => line.includes(text));
+
+  /**
+   * The name row, asserted to have stayed inside the dialog's border.
+   *
+   * Row-scoped rather than `expectFrameIntegrity`, which the narrow cases
+   * cannot use: an input scrolled to its cursor draws past its own box, so a
+   * long PROMPT already breaks the border at a sidebar width whether or not
+   * this row exists. That is the input's behaviour and predates this field;
+   * what belongs to this row is that a derived name is budgeted to fit.
+   */
+  const nameRow = (frame: string): string => {
+    const line = frame.split("\n").find((l) => l.includes("Name"))!;
+    expect(line.trimEnd().endsWith("│")).toBe(true);
+    return line;
+  };
+
+  it("shows the derived name on a row of its own, under the destination", async () => {
+    const frame = await renderDialog({
+      draft: draft({
+        destination: "worktree",
+        prompt: "fix sidebar flicker on resize",
+      }),
+    });
+
+    // In full: the whole point of the row is that nothing was cut.
+    expect(frame).toContain("fix-sidebar-flicker");
+    expect(rowOf(frame, "Name")).toBeGreaterThan(rowOf(frame, "Where"));
+    expect(rowOf(frame, "Name")).toBeLessThan(rowOf(frame, "Directory"));
+    expectFrameIntegrity(frame);
+  });
+
+  it("has no name row when the session starts in this checkout", async () => {
+    const frame = await renderDialog({ draft: draft({ destination: "here" }) });
+
+    // Nothing is being named, so a field for the name would be a row that
+    // refuses every key.
+    expect(rowOf(frame, "Name")).toBe(-1);
+    expect(frame).not.toContain("auto");
+  });
+
+  /**
+   * Below the name's own width there is no truncation that keeps everything,
+   * so the cut goes in the middle: `fix-sidebar-…` loses exactly the words
+   * that tell two "fix sidebar" tasks apart, and both are shown here.
+   */
+  it("keeps both ends readable when the name outgrows the row", async () => {
+    const frame = await renderDialog({
+      draft: draft({
+        destination: "worktree",
+        prompt: "fix sidebar flicker on resize",
+      }),
+      width: 34,
+      height: 30,
+    });
+
+    expect(nameRow(frame)).toContain("fix-sid…flicker");
+  });
+
+  it("says a derived name may come back numbered", async () => {
+    const frame = await renderDialog({
+      draft: draft({ destination: "worktree", prompt: "fix bug" }),
+    });
+
+    // The name is a preview of a rule, not a reservation; the daemon numbers
+    // a derived name that collides rather than joining the worktree there.
+    expect(frame).toContain("auto · -2 if taken");
+  });
+
+  it("drops the hint before the name it is about", async () => {
+    const frame = await renderDialog({
+      draft: draft({
+        destination: "worktree",
+        // Long enough that the hint and the name cannot share the row.
+        prompt: "fix the flickering sidebar",
+      }),
+      width: 34,
+      height: 30,
+    });
+
+    // The name keeps the row; the caveat about it is what goes.
+    expect(nameRow(frame)).toContain("fix-the…ckering");
+    expect(frame).not.toContain("auto");
+  });
+
+  it("shows a typed name instead of the derived one, with no hint", async () => {
+    const frame = await renderDialog({
+      draft: draft({
+        destination: "worktree",
+        prompt: "fix bug",
+        worktreeName: "review-handback",
+      }),
+    });
+
+    expect(frame).toContain("review-handback");
+    // The prompt no longer names anything, and the suffix caveat is about
+    // derived names only: an explicit one is taken as written.
+    expect(frame).not.toContain("fix-bug");
+    expect(frame).not.toContain("auto");
+  });
+
+  it("names both ways out when there is nothing to derive from", async () => {
+    const frame = await renderDialog({
+      draft: draft({ destination: "worktree" }),
+    });
+
+    expect(frame).toContain("Type a prompt, or a name here");
+    expectFrameIntegrity(frame);
+  });
+
+  /** A CJK-only prompt derives nothing, exactly like an empty one. */
+  it("asks again when the prompt derives no slug at all", async () => {
+    const frame = await renderDialog({
+      draft: draft({ destination: "worktree", prompt: "修复侧边栏" }),
+    });
+
+    expect(frame).toContain("Type a prompt, or a name here");
+  });
+
+  it("shows the focus marker on the name field", async () => {
+    const frame = await renderDialog({
+      draft: draft({ destination: "worktree", field: "worktreeName" }),
+    });
+
+    const row = frame
+      .split("\n")
+      .find((line) => line.includes("Name"))
+      ?.trimEnd();
+    expect(row).toContain(">Name");
+  });
+
+  /**
+   * The name is a field, so it is a row the height has to have budgeted. A
+   * shortfall does not clip the bottom row, it draws two rows over each
+   * other, so the order is what catches it.
+   */
+  it("keeps every row inside the border with the name row present", async () => {
+    const frame = await renderDialog({
+      draft: draft({ destination: "worktree", prompt: "fix bug" }),
+      showKeyHints: true,
+    });
+
+    expectFrameIntegrity(frame);
+    const order = [
+      "Agent",
+      "Placement",
+      "Prompt",
+      "Where",
+      "Name",
+      "Directory",
+      "esc",
+      "└",
+    ];
+    let previous = -1;
+    for (const text of order) {
+      const row = rowOf(frame, text);
+      expect([text, row]).toEqual([text, expect.any(Number)]);
+      expect(row).toBeGreaterThan(previous);
+      previous = row;
+    }
+  });
+});
+
+/**
+ * Move-changes mode (issue #71): the same dialog, opened to relocate a
+ * checkout's uncommitted work rather than to start fresh in it.
+ */
+describe("NewSessionDialog move-changes mode", () => {
+  it("says what it is doing in the title", async () => {
+    const frame = await renderDialog({ draft: moveDraft() });
+
+    expect(frame).toContain("Move changes to worktree");
+    expect(frame).not.toContain("New session");
+  });
+
+  it("says the changes leave the checkout it names", async () => {
+    const frame = await renderDialog({ draft: moveDraft() });
+
+    // The two rows have to be read together: the note is only meaningful
+    // because the directory it applies to is directly above it.
+    expect(frame).toContain("Directory");
+    expect(frame).toContain("Changes");
+    expect(frame).toContain("Moved out of this checkout");
+  });
+
+  it("locks the destination to a worktree, with no second choice offered", async () => {
+    const frame = await renderDialog({
+      draft: moveDraft({ prompt: "fix bug" }),
+    });
+
+    expect(frame).toContain("Where");
+    expect(frame).toContain("New worktree");
+    // No numbered options and no "This checkout": the row is a statement,
+    // not a choice, so nothing on it invites a keypress that would be refused.
+    expect(frame).not.toContain("This checkout");
+    expect(frame).not.toContain("[New worktree");
+  });
+
+  /**
+   * The destination is locked but the NAME is not, which is why the move goes
+   * through the dialog at all rather than happening on the click. It is the
+   * same field the ordinary worktree destination gets: one implementation,
+   * reached from two places.
+   */
+  it("keeps the name editable under the locked destination", async () => {
+    const frame = await renderDialog({
+      draft: moveDraft({ prompt: "fix bug" }),
+    });
+
+    const lines = frame.split("\n");
+    const nameRow = lines.findIndex((line) => line.includes("Name"));
+    expect(nameRow).toBeGreaterThan(
+      lines.findIndex((line) => line.includes("Where")),
+    );
+    expect(lines[nameRow]).toContain("fix-bug");
+  });
+
+  it("names both ways out when a move has nothing to derive from", async () => {
+    const frame = await renderDialog({ draft: moveDraft() });
+
+    expect(frame).toContain("Type a prompt, or a name here");
+  });
+
+  it("offers the untracked choices, moving them by default", async () => {
+    const frame = await renderDialog({ draft: moveDraft() });
+
+    expect(frame).toContain("Untracked");
+    expect(frame).toContain("[Move]");
+    expect(frame).toContain("Copy to both");
+    expect(frame).toContain("Leave here");
+  });
+
+  it("marks the selected untracked mode", async () => {
+    const frame = await renderDialog({
+      draft: moveDraft({ untracked: "leave" }),
+    });
+
+    expect(frame).toContain("[Leave here]");
+    expect(frame).not.toContain("[Move]");
+  });
+
+  it("hides the untracked field outside move-changes mode", async () => {
+    const frame = await renderDialog({ draft: draft() });
+
+    expect(frame).not.toContain("Untracked");
+    expect(frame).not.toContain("Leave here");
+  });
+
+  it("shows the focus marker on the untracked field", async () => {
+    const frame = await renderDialog({
+      draft: moveDraft({ field: "untracked" }),
+    });
+
+    // The number keys are scoped to the focused field, so the marker is what
+    // says which field `1`/`2`/`3` will act on.
+    const row = frame
+      .split("\n")
+      .find((line) => line.includes("Untracked"))
+      ?.trimEnd();
+    expect(row).toContain(">Untracked");
+  });
+
+  /**
+   * The height is summed from the field list plus the chrome, and this mode
+   * adds two rows the ordinary dialog has not got. Getting it wrong clips the
+   * bottom rows outside the border rather than failing to compile.
+   */
+  it("keeps every row inside the border, including the last", async () => {
+    const frame = await renderDialog({
+      draft: moveDraft(),
+      showKeyHints: true,
+    });
+
+    expectFrameIntegrity(frame);
+    const lines = frame.split("\n");
+    const rowOf = (text: string) =>
+      lines.findIndex((line) => line.includes(text));
+    // Every row, in order, each on a line of its own. A height that
+    // under-counts by even one does not clip the bottom row — it renders two
+    // rows over each other ("Promptent fixNbugwindow]"), which destroys the
+    // labels rather than the border, so the ordering chain is what catches it.
+    const order = [
+      "Agent",
+      "Placement",
+      "Prompt",
+      "Where",
+      "Name",
+      "Untracked",
+      "Directory",
+      "Moved out of this checkout",
+      // Last, and the row a shortfall eats first when the content does fit:
+      // losing it takes both of the dialog's exits off the screen.
+      "esc",
+      "└",
+    ];
+    let previous = -1;
+    for (const text of order) {
+      const row = rowOf(text);
+      expect([text, row]).toEqual([text, expect.any(Number)]);
+      expect(row).toBeGreaterThan(previous);
+      previous = row;
+    }
+  });
+
+  it("stays inside its border on a sidebar-width surface", async () => {
+    const frame = await renderDialog({
+      draft: moveDraft({ prompt: "fix bug" }),
+      width: 34,
+      height: 30,
+      showKeyHints: true,
+    });
+
+    expectFrameIntegrity(frame);
+    // Stacked, so each untracked choice gets its own row rather than three
+    // clipped ones sharing a line.
+    const lines = frame.split("\n");
+    const rowOf = (text: string) =>
+      lines.findIndex((line) => line.includes(text));
+    expect(rowOf("Move")).toBeGreaterThanOrEqual(0);
+    expect(rowOf("Copy")).not.toBe(rowOf("Move"));
+    expect(rowOf("Leave")).not.toBe(rowOf("Copy"));
+    const widest = Math.max(...lines.map((line) => line.trimEnd().length));
+    expect(widest).toBeLessThanOrEqual(34);
+  });
+
+  /**
+   * The mode's floor is twelve rows in the picker and eighteen stacked in the
+   * sidebar, and a terminal shorter than that is not hypothetical (a split
+   * pane, a laptop with a browser open). Nothing clips here: the box is
+   * clamped to the screen while its children are not, so the rows past the
+   * clamp draw straight over the ones above them, and the bottom border goes
+   * off the screen entirely.
+   */
+  describe("under height pressure", () => {
+    /** Every listed row exists, on its own line, in this order. */
+    function expectRowOrder(frame: string, order: string[]) {
+      const lines = frame.split("\n");
+      let previous = -1;
+      for (const text of order) {
+        const row = lines.findIndex((line) => line.includes(text));
+        expect([text, row]).not.toEqual([text, -1]);
+        expect([text, row]).toEqual([text, expect.any(Number)]);
+        expect(row).toBeGreaterThan(previous);
+        previous = row;
+      }
+    }
+
+    it("keeps every interactive row legible in an 11-row picker", async () => {
+      const frame = await renderDialog({
+        draft: moveDraft(),
+        width: 60,
+        height: 11,
+        showKeyHints: false,
+      });
+
+      // The fields, in order, each on a line of its own — and a border to
+      // close the dialog. What gives way under the pressure is the move note,
+      // not a row the user has to act on.
+      expectRowOrder(frame, [
+        "Agent",
+        "Placement",
+        "Prompt",
+        "Where",
+        "Name",
+        "Untracked",
+        "Directory",
+        "└",
+      ]);
+      expectFrameIntegrity(frame);
+    });
+
+    it("keeps every interactive row legible in a 16-row sidebar", async () => {
+      // Stacked: each option gets a row of its own, which is what makes the
+      // mode eighteen rows tall at this width.
+      const frame = await renderDialog({
+        draft: moveDraft(),
+        width: 30,
+        height: 16,
+        showKeyHints: true,
+      });
+
+      expectRowOrder(frame, [
+        "Agent",
+        "Placement",
+        "Prompt",
+        "Where",
+        "Name",
+        "Untracked",
+        "Directory",
+        "└",
+      ]);
+      expectFrameIntegrity(frame);
+    });
+
+    it("windows a stacked option field rather than drawing off the bottom", async () => {
+      // Below the point where every option can have a row, the field becomes
+      // a window over its own list — the same shape the agent list has always
+      // had — with the selection inside it and each option still showing the
+      // number that picks it.
+      const frame = await renderDialog({
+        draft: moveDraft({ untracked: "leave" }),
+        width: 30,
+        height: 12,
+        showKeyHints: true,
+      });
+
+      const lines = frame.split("\n");
+      const first = lines.findIndex((line) => line.includes("Untracked"));
+      expect(first).toBeGreaterThan(0);
+      const shown = lines.slice(first).join("\n");
+      // The selected one is what the window keeps, with its own number.
+      expect(shown).toContain("[Leave");
+      expect(shown).toContain("3");
+      expectFrameIntegrity(frame);
+    });
+
+    it("says what it needs when even the fields will not fit", async () => {
+      // Six rows cannot hold a six-field dialog. Drawing it anyway puts rows
+      // over each other and the border off screen; this says so in one row
+      // and leaves enter/esc working.
+      const frame = await renderDialog({
+        draft: moveDraft(),
+        width: 60,
+        height: 6,
+        showKeyHints: false,
+      });
+
+      expect(frame).toContain("Needs 9 rows");
+      expectFrameIntegrity(frame, 3);
+    });
+
+    it("shows every option its number key can select", async () => {
+      // One row short is the quiet failure: the third untracked choice is off
+      // the bottom while `3` still selects it, so the dialog acts on a choice
+      // that was never on screen.
+      const frame = await renderDialog({
+        draft: moveDraft(),
+        width: 30,
+        height: 17,
+        showKeyHints: true,
+      });
+
+      const lines = frame.split("\n");
+      // From the Untracked label down, so the title ("Move changes to…")
+      // cannot stand in for the option it names.
+      const first = lines.findIndex((line) => line.includes("Untracked"));
+      expect(first).toBeGreaterThan(0);
+      const optionRows = lines.slice(first);
+      for (const [index, label] of ["Move", "Copy", "Leave"].entries()) {
+        const row = optionRows.findIndex((line) => line.includes(label));
+        expect([label, row]).not.toEqual([label, -1]);
+        // The number beside it is the key that picks it.
+        expect(optionRows[row]).toContain(`${index + 1}`);
+      }
+      expectFrameIntegrity(frame);
+    });
+  });
+
+  it("keeps the agent list from overflowing the taller dialog", async () => {
+    // The agent list sizes itself against whatever the other rows and the
+    // chrome have left, so the mode's extra rows have to shrink it rather
+    // than push the dialog past the screen.
+    const frame = await renderDialog({
+      draft: moveDraft(),
+      agents: Array.from({ length: 12 }, (_, i) => agent(`agent${i}`)),
+      height: 16,
+    });
+
+    expectFrameIntegrity(frame);
+    expect(squish(frame)).toContain("Movedoutofthischeckout");
   });
 });

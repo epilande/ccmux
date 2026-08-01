@@ -31,6 +31,11 @@ import { DEFAULT_PROMPT_DISPLAY } from "../lib/preferences";
 import { setUIState, type UIState } from "../lib/state";
 import { getDaemonUrl } from "../lib/config";
 import type { TranscriptMatch } from "../daemon/transcript-search";
+import type { UntrackedMode } from "../daemon/worktree-move-changes";
+// The daemon's own slug rule, imported rather than mirrored: a name the
+// dialog settles differently from the one that gets created is worse than
+// showing no name at all.
+import { slugify } from "../daemon/worktree-create";
 import { normalizePrompt } from "./components/session-columns";
 import { capturePane } from "./utils/tmux";
 import { isSameServerCached } from "./utils/server-guard";
@@ -67,7 +72,13 @@ export type NewSessionPlacement = "window" | "split-h" | "split-v";
  */
 export type NewSessionDestination = "here" | "worktree";
 
-export type NewSessionField = "agent" | "placement" | "prompt" | "destination";
+export type NewSessionField =
+  | "agent"
+  | "placement"
+  | "prompt"
+  | "destination"
+  | "worktreeName"
+  | "untracked";
 
 /**
  * The dialog's fields, in focus order. Focus movement, which field the
@@ -77,22 +88,74 @@ export type NewSessionField = "agent" | "placement" | "prompt" | "destination";
  * a rework of the key handling.
  *
  * Additive is not the same as one line: the store action and open-time
- * default, App's option lookups, and the component's props, render branch,
- * and `fieldRows` entry all need the new case. TypeScript names each one —
- * `fieldRows` is a `Record<NewSessionField, …>` for exactly that reason,
- * since the height it replaced was a hand-summed constant that compiled
- * fine and clipped a row at runtime.
+ * default, App's option lookups, the component's props and render branch,
+ * and the row budget (`planDialogRows` / `newSessionFloorRows` in
+ * `NewSessionDialog.tsx`) all need the new case. TypeScript names the last
+ * one — the budget's per-field counts are a `Record<NewSessionField, number>`
+ * for exactly that reason, since a field whose rows nobody counted leaves a
+ * hand-summed height that compiles fine and draws a row over its neighbour.
  */
 export const NEW_SESSION_FIELDS: readonly NewSessionField[] = [
   "agent",
   "placement",
   "prompt",
-  // Last, and after the prompt on purpose: the worktree name is DERIVED from
-  // the prompt, so the row can only show what you would get once there is
+  // After the prompt on purpose: the worktree name is DERIVED from the prompt
+  // by default, so these rows can only show what you would get once there is
   // something to derive it from. It also leaves the two-tab path to the
   // prompt, which people already have in their fingers, where it was.
   "destination",
+  // After the destination for the same reason: a name means nothing until
+  // there is a worktree to give it to. Worktree destinations only; see
+  // `newSessionFields`.
+  "worktreeName",
+  // Move-changes mode only; see `newSessionFields`.
+  "untracked",
 ];
+
+/**
+ * Whether this draft's spawn makes a worktree, which is the one rule three
+ * different consumers have to agree on: whether the Name field exists at all
+ * (below), whether the dialog renders its row, and how many rows `App.tsx`
+ * budgets for the height floor. A consumer that disagreed would not clip the
+ * row it did not expect — it would draw it over its neighbour.
+ *
+ * Both disjuncts, though the store locks a move's destination to `worktree`:
+ * the name row is what a move names its worktree with, and a lock that ever
+ * came loose must not take the field with it.
+ */
+export function namesAWorktree(draft: {
+  moveChanges: boolean;
+  destination: NewSessionDestination;
+}): boolean {
+  return draft.destination === "worktree" || draft.moveChanges;
+}
+
+/**
+ * The fields a given draft actually has, in focus order.
+ *
+ * Three of them are conditional. Move-changes mode locks the destination (a
+ * move has nowhere to go but a new worktree, so offering "here" would be a
+ * choice that cannot be taken) and adds the untracked-files choice; an
+ * ordinary new session has neither. The name belongs to whichever of the two
+ * is making a worktree, and to neither when the session starts in the
+ * checkout it was opened over. A field that cannot be acted on must not be
+ * reachable by Tab either — focusing a row whose keys do nothing is exactly
+ * the "reads as broken" outcome the picker hides items to avoid.
+ *
+ * The full list stays the source of truth for the DIALOG'S HEIGHT: every
+ * field declares a row count, and a hidden one declares zero.
+ */
+export function newSessionFields(draft: {
+  moveChanges: boolean;
+  destination: NewSessionDestination;
+}): readonly NewSessionField[] {
+  return NEW_SESSION_FIELDS.filter((field) => {
+    if (field === "destination") return !draft.moveChanges;
+    if (field === "untracked") return draft.moveChanges;
+    if (field === "worktreeName") return namesAWorktree(draft);
+    return true;
+  });
+}
 
 /**
  * In-progress "new session" request. Every field has a usable default, so
@@ -109,6 +172,26 @@ export interface NewSessionDraft {
   placement: NewSessionPlacement;
   destination: NewSessionDestination;
   prompt: string;
+  /**
+   * Relocate `cwd`'s uncommitted work into the new worktree (issue #71).
+   * Set only by the row menu's "Move changes", which is offered only for a
+   * checkout the daemon has confirmed is dirty, and it locks `destination`.
+   */
+  moveChanges: boolean;
+  /** What the move does with untracked files. Ignored unless `moveChanges`. */
+  untracked: UntrackedMode;
+  /**
+   * The worktree's name, or null to let the daemon derive one (issue #83).
+   *
+   * Null is not the same as the derived name spelled out, and the difference
+   * is why this is nullable rather than a string seeded with the preview: the
+   * daemon treats an EXPLICIT name as create-or-open and a DERIVED one as
+   * create-with-a-`-2`-suffix. Posting the previewed slug as an explicit name
+   * would quietly turn "spawn beside the worktree that is already there" into
+   * "drop this agent into it", which is not what an untouched dialog asked
+   * for. Typing here freezes the name; clearing the field returns to derived.
+   */
+  worktreeName: string | null;
   /** Which field the option/text keys currently apply to. */
   field: NewSessionField;
 }
@@ -140,6 +223,16 @@ interface TUIState {
    * for the rest of the picker's life.
    */
   prune: { repo: string | null } | null;
+  /**
+   * A message that waits to be acknowledged, or null.
+   *
+   * The counterpart to `toastMessage`, and the difference is whether the user
+   * now owns state they did not before. A move that parked work in a stash, or
+   * that landed but left an entry to drop, hands them something to act on
+   * later; a message that disappears on a timer is where that gets lost. Plain
+   * refusals stay toasts.
+   */
+  notice: { title: string; lines: string[] } | null;
   iconStyle: IconStyle;
   previewWidth: number;
   activePaneId: string | null;
@@ -465,6 +558,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     previewFocused: false,
     showHelp: false,
     prune: null,
+    notice: null,
     iconStyle: options.iconStyle ?? "dot",
     previewWidth: options.previewWidth ?? 40,
     activePaneId: null,
@@ -1002,6 +1096,30 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     }
   }
 
+  /**
+   * Settle a typed worktree name as focus leaves its field.
+   *
+   * The daemon slugifies whatever name it is given, so `Fix Sidebar Flicker`
+   * becomes `fix-sidebar-flicker` whether or not the dialog says so. Applying
+   * the same rule on the way out makes the row show the name that will
+   * actually be created, rather than the keystrokes that led to it.
+   *
+   * An entry with nothing usable in it (punctuation, a non-Latin script)
+   * slugifies to nothing, and is LEFT AS TYPED. Erasing it back to the
+   * derived placeholder is the one reading that cannot be right: the field is
+   * not empty, the user did not clear it, and a row that quietly swaps their
+   * name for one derived from the prompt reads as acceptance. Submitting is
+   * where it gets refused, out loud (see `submitNewSession` in App.tsx).
+   */
+  function settleWorktreeName(nextField: NewSessionField) {
+    const draft = state.newSession;
+    if (!draft || draft.field !== "worktreeName") return;
+    if (nextField === "worktreeName" || draft.worktreeName === null) return;
+    const slug = slugify(draft.worktreeName);
+    if (slug === "") return;
+    setState("newSession", "worktreeName", slug);
+  }
+
   const actions = {
     setSessions(sessions: EnrichedSession[]) {
       // Preserve client-synthesized subprocess invoke rows. They live only
@@ -1247,7 +1365,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
      * that knows what the selection means (a session row, a group header,
      * or nothing at all).
      */
-    openNewSessionDialog(init: { cwd: string; agent: string }) {
+    openNewSessionDialog(init: {
+      cwd: string;
+      agent: string;
+      /** Open in move-changes mode: destination locked to a new worktree,
+       *  with the untracked-files choice. */
+      moveChanges?: boolean;
+    }) {
+      const moveChanges = init.moveChanges === true;
       batch(() => {
         setState("contextMenu", null);
         setState("groupContextMenu", null);
@@ -1255,9 +1380,21 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           cwd: init.cwd,
           agent: init.agent,
           placement: "window",
-          destination: "here",
+          // A move has nowhere to go but a new worktree; anything else is the
+          // ordinary spawn, which defaults to the directory it was opened over.
+          destination: moveChanges ? "worktree" : "here",
           prompt: "",
-          field: NEW_SESSION_FIELDS[0]!,
+          moveChanges,
+          // Agents create new files constantly, so leaving them behind would
+          // strand exactly the work being relocated. Same default as the CLI.
+          untracked: "move",
+          // Derived until typed in: the dialog opens with no prompt, so there
+          // is nothing to name a worktree after yet.
+          worktreeName: null,
+          field: newSessionFields({
+            moveChanges,
+            destination: moveChanges ? "worktree" : "here",
+          })[0]!,
         });
       });
     },
@@ -1270,15 +1407,37 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     moveNewSessionField(delta: number) {
       const draft = state.newSession;
       if (!draft) return;
-      const count = NEW_SESSION_FIELDS.length;
-      const current = NEW_SESSION_FIELDS.indexOf(draft.field);
-      const next = (((current + delta) % count) + count) % count;
-      setState("newSession", "field", NEW_SESSION_FIELDS[next]!);
+      const fields = newSessionFields(draft);
+      const count = fields.length;
+      const current = fields.indexOf(draft.field);
+      // Focus on a field this draft does not have: there is no position to
+      // move from, so the movement resolves to the top of the list rather
+      // than to whatever `-1 + delta` happens to land on.
+      const next =
+        current === -1 ? 0 : (((current + delta) % count) + count) % count;
+      batch(() => {
+        settleWorktreeName(fields[next]!);
+        setState("newSession", "field", fields[next]!);
+      });
     },
 
+    /**
+     * Focus a field by name, for the dialog's click handlers.
+     *
+     * A field the draft does not have sends focus to the first one it does.
+     * The number keys are scoped to the FOCUSED field, so focus parked on an
+     * unrendered row means `1`-`9` quietly changing something nobody can see;
+     * landing somewhere real is both visible and harmless.
+     */
     setNewSessionField(field: NewSessionField) {
-      if (!state.newSession) return;
-      setState("newSession", "field", field);
+      const draft = state.newSession;
+      if (!draft) return;
+      const fields = newSessionFields(draft);
+      const next = fields.includes(field) ? field : fields[0]!;
+      batch(() => {
+        settleWorktreeName(next);
+        setState("newSession", "field", next);
+      });
     },
 
     setNewSessionAgent(agent: string) {
@@ -1292,13 +1451,47 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     setNewSessionDestination(destination: NewSessionDestination) {
-      if (!state.newSession) return;
-      setState("newSession", "destination", destination);
+      const draft = state.newSession;
+      if (!draft) return;
+      // Locked in move-changes mode, and enforced here rather than only in the
+      // dialog: the destination is what makes the request a move at all, so
+      // any path that could flip it back to `here` would post a spawn that
+      // silently dropped the changes it was opened to relocate.
+      if (draft.moveChanges) return;
+      batch(() => {
+        setState("newSession", "destination", destination);
+        // The name field goes with the worktree. Focus cannot be left on a
+        // row that no longer exists, or the next Tab would start from a field
+        // the list has never heard of. The typed name itself is KEPT: coming
+        // back to the worktree destination should find it as it was left.
+        if (
+          destination !== "worktree" &&
+          state.newSession?.field === "worktreeName"
+        ) {
+          setState("newSession", "field", "destination");
+        }
+      });
     },
 
     setNewSessionPrompt(prompt: string) {
       if (!state.newSession) return;
       setState("newSession", "prompt", prompt);
+    },
+
+    setNewSessionUntracked(untracked: UntrackedMode) {
+      if (!state.newSession) return;
+      setState("newSession", "untracked", untracked);
+    },
+
+    /**
+     * Take a keystroke in the name field. An empty field is the derived
+     * state, not an empty name: clearing what you typed is how you hand the
+     * name back to the prompt, and there is no other way to spell "no name"
+     * in a text input.
+     */
+    setNewSessionWorktreeName(name: string) {
+      if (!state.newSession) return;
+      setState("newSession", "worktreeName", name === "" ? null : name);
     },
 
     /**
@@ -1425,6 +1618,23 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         setState("selectedSessionId", sessionId);
         setSelectedHeaderKey(headerKey);
       });
+    },
+
+    /**
+     * Raise a message that stays until a key is pressed.
+     *
+     * For anything the user has to DO something about after the fact — a
+     * stash entry to apply or drop, work that now lives somewhere else. A
+     * toast is the right shape for feedback about an action just taken; it is
+     * the wrong one for an instruction, because it is gone before a hand
+     * reaches the keyboard.
+     */
+    showNotice(title: string, lines: string[]) {
+      setState("notice", { title, lines });
+    },
+
+    dismissNotice() {
+      setState("notice", null);
     },
 
     showToast(message: string, durationMs = 1500) {

@@ -25,7 +25,12 @@ interface SpawnBody {
   callerPane?: string;
   callerTty?: string;
   detach: boolean;
-  worktree?: { name?: string; base?: string };
+  worktree?: {
+    name?: string;
+    base?: string;
+    withChanges?: boolean;
+    untracked?: string;
+  };
 }
 
 /**
@@ -40,13 +45,52 @@ function withFetchCapture(socketPath: string | null = null) {
     if (href.endsWith("/server-info")) {
       return new Response(JSON.stringify({ socketPath }), { status: 200 });
     }
-    bodies.push(JSON.parse(String(init?.body)) as SpawnBody);
+    const body = JSON.parse(String(init?.body)) as SpawnBody;
+    bodies.push(body);
     return new Response(
-      JSON.stringify({ success: true, paneId: "%9", command: "claude" }),
+      JSON.stringify({
+        success: true,
+        paneId: "%9",
+        command: "claude",
+        // Echoed when the request asked for a move, the way the daemon does.
+        // A 200 with no `move` means a daemon too old to have honored
+        // `--with-changes`, which the CLI treats as a failure, so a stub that
+        // never sent one would make every `--with-changes` case exit.
+        ...(body.worktree?.withChanges
+          ? {
+              move: {
+                moved: 0,
+                source: body.cwd,
+                untracked: {
+                  mode: body.worktree.untracked ?? "move",
+                  files: [],
+                },
+              },
+            }
+          : {}),
+      }),
       { status: 200 },
     );
   }) as unknown as typeof fetch;
   return { bodies, restore: () => (globalThis.fetch = original) };
+}
+
+/**
+ * Turn any network call into an error for the duration.
+ *
+ * For the validation tests, whose whole claim is that a bad command line is
+ * refused BEFORE anything reaches the daemon. `ensureDaemon` is neutralized
+ * above, but nothing stopped a regression from firing a real `/server-info`
+ * or `/spawn` at port 2269 — which is the SHARED port, so a regression would
+ * quietly act on the sessions of whoever ran the suite. With this in place it
+ * fails the test instead.
+ */
+function withNoFetch() {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL) => {
+    throw new Error(`unexpected network call to ${String(url)}`);
+  }) as unknown as typeof fetch;
+  return () => (globalThis.fetch = original);
 }
 
 /** Set env vars for one run, restoring exactly what was there before. */
@@ -76,24 +120,38 @@ afterEach(() => {
   console.error = originalError;
 });
 
+/** Distinguishes "the command exited" from any other throw. */
+class ProcessExited extends Error {
+  constructor(readonly code: number) {
+    super(`process.exit:${code}`);
+  }
+}
+
 /**
  * Run the action with `process.exit` turned into a throw, so a validation
  * failure can be asserted on in-process instead of taking the test runner
  * down with it.
+ *
+ * The FIRST code is the answer, and the sentinel is rethrown rather than
+ * replaced. A second call can only come from something in the command
+ * catching the sentinel and exiting again — a bug in the code under test, not
+ * a different exit code — and reporting the later one made assertions pass
+ * against a code the real process would never have used. A dedicated class
+ * rather than a message match, so an unrelated error propagates instead of
+ * being read as an exit.
  */
 async function runSpawnExpectingExit(argv: string[]): Promise<number> {
   const realExit = process.exit;
+  let exited: ProcessExited | undefined;
   process.exit = ((code?: number) => {
-    throw new Error(`process.exit:${code ?? 0}`);
+    exited ??= new ProcessExited(code ?? 0);
+    throw exited;
   }) as typeof process.exit;
   try {
     await runSpawn(argv);
   } catch (err) {
-    const match = /^process\.exit:(\d+)$/.exec(
-      err instanceof Error ? err.message : "",
-    );
-    if (!match) throw err;
-    return Number(match[1]);
+    if (!(err instanceof ProcessExited)) throw err;
+    return err.code;
   } finally {
     process.exit = realExit;
   }
@@ -399,12 +457,17 @@ describe("--base requires --worktree", () => {
     const errors: string[] = [];
     console.error = (line: string) => errors.push(line);
     ensureDaemonCalls = 0;
+    const restoreFetch = withNoFetch();
 
-    const code = await runSpawnExpectingExit(["claude", "--base", "main"]);
+    try {
+      const code = await runSpawnExpectingExit(["claude", "--base", "main"]);
 
-    expect(code).toBe(1);
-    expect(errors.join("\n")).toContain("--base requires --worktree");
-    expect(ensureDaemonCalls).toBe(0);
+      expect(code).toBe(1);
+      expect(errors.join("\n")).toContain("--base requires --worktree");
+      expect(ensureDaemonCalls).toBe(0);
+    } finally {
+      restoreFetch();
+    }
   });
 });
 
@@ -445,6 +508,384 @@ describe("ccmux spawn --worktree wire shape", () => {
     } finally {
       restoreEnv();
       restore();
+    }
+  });
+});
+
+describe("ccmux spawn --with-changes validation", () => {
+  // Same rule and same placement as `--base requires --worktree`: pure
+  // argument validation must not start a daemon on the shared port. Moving
+  // uncommitted work is also the last operation that should begin on a
+  // half-understood command line.
+  it("refuses --with-changes with no destination, without starting a daemon", async () => {
+    const errors: string[] = [];
+    console.error = (line: string) => errors.push(line);
+    ensureDaemonCalls = 0;
+    const restoreFetch = withNoFetch();
+
+    try {
+      const code = await runSpawnExpectingExit(["claude", "--with-changes"]);
+
+      expect(code).toBe(1);
+      expect(errors.join("\n")).toContain("--with-changes requires --worktree");
+      expect(ensureDaemonCalls).toBe(0);
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  it("refuses --untracked with no move to apply it to", async () => {
+    const errors: string[] = [];
+    console.error = (line: string) => errors.push(line);
+    ensureDaemonCalls = 0;
+    const restoreFetch = withNoFetch();
+
+    try {
+      const code = await runSpawnExpectingExit([
+        "claude",
+        "--worktree",
+        "wt",
+        "--untracked",
+        "copy",
+      ]);
+
+      expect(code).toBe(1);
+      expect(errors.join("\n")).toContain(
+        "--untracked requires --with-changes",
+      );
+      expect(ensureDaemonCalls).toBe(0);
+    } finally {
+      restoreFetch();
+    }
+  });
+
+  it("rejects an unknown untracked mode at parse time", async () => {
+    // Commander refuses before the action runs at all, so this cannot reach
+    // `ensureDaemon` even in principle.
+    ensureDaemonCalls = 0;
+    const command = createSpawnCommand().exitOverride();
+    const restoreFetch = withNoFetch();
+
+    try {
+      await expect(
+        command.parseAsync([
+          "node",
+          "spawn",
+          "--worktree",
+          "wt",
+          "--with-changes",
+          "--untracked",
+          "delete",
+        ]),
+      ).rejects.toThrow(/'move', 'copy', 'leave'/);
+      expect(ensureDaemonCalls).toBe(0);
+    } finally {
+      restoreFetch();
+    }
+  });
+});
+
+describe("ccmux spawn --with-changes wire shape", () => {
+  async function bodyFor(argv: string[]): Promise<SpawnBody | undefined> {
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture();
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn(argv);
+      return bodies[0];
+    } finally {
+      restoreEnv();
+      restore();
+    }
+  }
+
+  it("puts the move inside the worktree object, mode and all", async () => {
+    const body = await bodyFor([
+      "--worktree",
+      "wt",
+      "--with-changes",
+      "--untracked",
+      "leave",
+    ]);
+
+    expect(body?.worktree).toStrictEqual({
+      name: "wt",
+      withChanges: true,
+      untracked: "leave",
+    });
+  });
+
+  it("leaves the mode out so the daemon's default applies", async () => {
+    const body = await bodyFor(["--worktree", "--with-changes"]);
+
+    expect(body?.worktree?.withChanges).toBe(true);
+    expect(body?.worktree?.untracked).toBeUndefined();
+  });
+
+  it("sends no move fields at all without the flag", async () => {
+    // Not even `withChanges: false`: the daemon reads an untracked mode
+    // without a move as a contradiction, and a plain `--worktree` has to keep
+    // sending the shape it always did.
+    const body = await bodyFor(["--worktree", "wt"]);
+
+    expect(body?.worktree).toStrictEqual({ name: "wt" });
+  });
+});
+
+describe("ccmux spawn --with-changes reporting", () => {
+  function withResponse(status: number, payload: Record<string, unknown>) {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = typeof url === "string" ? url : url.toString();
+      if (href.endsWith("/server-info")) {
+        return new Response(JSON.stringify({ socketPath: null }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify(payload), { status });
+    }) as unknown as typeof fetch;
+    return () => (globalThis.fetch = original);
+  }
+
+  /**
+   * `exits` is explicit rather than derived from the status: a 200 can still
+   * exit non-zero (a daemon too old to have honored `--with-changes` answers
+   * 200 with no `move`), so "did it exit" is a property of the case, not of
+   * the status code.
+   */
+  async function runAgainst(
+    status: number,
+    payload: Record<string, unknown>,
+    { exits = status !== 200 }: { exits?: boolean } = {},
+  ): Promise<{ out: string; err: string; code: number | null }> {
+    const out: string[] = [];
+    const err: string[] = [];
+    console.log = (line: string) => out.push(line);
+    console.error = (line: string) => err.push(line);
+    const restore = withResponse(status, payload);
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    const argv = ["--worktree", "wt", "--with-changes"];
+    try {
+      const code = exits
+        ? await runSpawnExpectingExit(argv)
+        : (await runSpawn(argv), null);
+      return { out: out.join("\n"), err: err.join("\n"), code };
+    } finally {
+      restoreEnv();
+      restore();
+    }
+  }
+
+  it("says what moved, counting untracked files separately", async () => {
+    const { out } = await runAgainst(200, {
+      success: true,
+      paneId: "%9",
+      command: "claude",
+      move: {
+        moved: 3,
+        untracked: { mode: "move", files: ["a.txt", "b.txt"] },
+      },
+    });
+
+    expect(out).toContain("Moved 3 files changed, 2 files untracked moved");
+    expect(out).toContain("/caller/dir");
+  });
+
+  it("says untracked files stayed behind on leave", async () => {
+    const { out } = await runAgainst(200, {
+      success: true,
+      paneId: "%9",
+      command: "claude",
+      move: { moved: 1, untracked: { mode: "leave", files: [] } },
+    });
+
+    expect(out).toContain("Moved 1 file changed, untracked files left behind");
+  });
+
+  // A successful move that could not drop its own backup. Silence would leave
+  // it to be found later as a stash entry nobody remembers making.
+  it("reports a stash entry the move could not clean up", async () => {
+    const { out } = await runAgainst(200, {
+      success: true,
+      paneId: "%9",
+      command: "claude",
+      move: {
+        moved: 1,
+        untracked: { mode: "move", files: [] },
+        leftoverStash: "abc123",
+      },
+    });
+
+    expect(out).toContain("abc123");
+    // Advice that finds the entry. A bare `git stash drop` takes whatever is
+    // on top, and `git stash drop <sha>` is rejected outright by git — see
+    // dropStashCommand and the real-git test that runs it.
+    expect(out).toContain("git stash list");
+    expect(out).not.toMatch(/'git stash drop'/);
+  });
+
+  /**
+   * A daemon older than `--with-changes` drops the keys it does not know and
+   * answers 200. The spawn then lands in a worktree with none of the user's
+   * work in it, and nothing in the response says so — the absent `move` is
+   * the only evidence there is, so it has to be treated as one.
+   */
+  it("refuses a 200 that carries no move, which means a stale daemon", async () => {
+    const { err, code } = await runAgainst(
+      200,
+      { success: true, paneId: "%9", command: "claude" },
+      { exits: true },
+    );
+
+    expect(code).toBe(1);
+    expect(err).toContain("older build");
+    expect(err).toContain("--with-changes");
+    expect(err).toContain("not moved");
+  });
+
+  /**
+   * A failure AFTER the move succeeds is a 500, and its body is the only
+   * place that says the user's work has already left their checkout.
+   * Collapsing it to "HTTP 500" throws away exactly the sentence they need.
+   */
+  it("prints the daemon's own message for a failure after the move", async () => {
+    const { err, code } = await runAgainst(500, {
+      error:
+        "tmux new-window failed: no server running (your uncommitted changes were already moved out of /repo to /repo/.claude/worktrees/wt)",
+      move: {
+        moved: 2,
+        source: "/repo",
+        untracked: { mode: "move", files: ["a.txt"] },
+      },
+    });
+
+    expect(code).toBe(1);
+    expect(err).toContain("already moved out of /repo");
+    expect(err).not.toContain("HTTP 500");
+    // And the same accounting the success path prints, so the user can see
+    // what left the checkout.
+    expect(err).toContain("Moved 2 files changed");
+    expect(err).toContain("out of /repo");
+  });
+
+  it("names the directory the daemon actually moved out of", async () => {
+    // Under `--fork` the source is the forked session's checkout, which the
+    // daemon resolves and the CLI never sees. Printing the local cwd there
+    // names a directory nothing happened in.
+    const { out } = await runAgainst(200, {
+      success: true,
+      paneId: "%9",
+      command: "claude",
+      move: {
+        moved: 1,
+        untracked: { mode: "move", files: [] },
+        source: "/elsewhere/repo",
+      },
+    });
+
+    expect(out).toContain("out of /elsewhere/repo");
+    expect(out).not.toContain("/caller/dir");
+  });
+
+  it("notes when the staged/unstaged split could not be kept", async () => {
+    // Not an error — every edit landed — but a `git add` the user had
+    // already done did not survive, and finding that out at commit time is
+    // worse than reading one line here.
+    const { out, code } = await runAgainst(200, {
+      success: true,
+      paneId: "%9",
+      command: "claude",
+      move: {
+        moved: 2,
+        untracked: { mode: "move", files: [] },
+        flattenedIndex: true,
+      },
+    });
+
+    expect(code).toBe(null);
+    expect(out).toContain("staged");
+    expect(out).toContain("git add");
+  });
+
+  /**
+   * The recovery path. A refused move can leave the work in a stash entry,
+   * and the sha is the only handle the user has for getting it back, so it
+   * has to reach the terminal rather than staying in the response body.
+   */
+  it("names the stash entry when the move is refused", async () => {
+    const { err, code } = await runAgainst(400, {
+      error: "Could not create the worktree: Base ref not found: nope",
+      reason: "create-failed",
+      stashSha: "deadbeef",
+      sourceRestored: true,
+    });
+
+    expect(code).toBe(1);
+    expect(err).toContain("Base ref not found");
+    expect(err).toContain("deadbeef");
+    // Restored, so the entry is a redundant copy rather than the only one.
+    expect(err).toContain("back in the checkout");
+  });
+
+  it("tells an unrestored source that the stash is the only copy", async () => {
+    const { err } = await runAgainst(400, {
+      error: "Could not apply the changes in the new worktree: conflict",
+      reason: "apply-failed",
+      stashSha: "cafe1234",
+      sourceRestored: false,
+    });
+
+    expect(err).toContain("git stash apply cafe1234");
+    expect(err).not.toContain("back in the checkout");
+  });
+
+  it("says nothing about stashes when the refusal left none", async () => {
+    const { err } = await runAgainst(400, {
+      error: "Nothing to move: /caller/dir has no uncommitted changes.",
+      reason: "nothing-to-move",
+    });
+
+    expect(err).toContain("Nothing to move");
+    expect(err).not.toContain("stash");
+  });
+});
+
+describe("ccmux spawn response handling", () => {
+  it("fails cleanly on a 200 whose body cannot be read", async () => {
+    // The success path parses the body OUTSIDE the try that guards the
+    // request, so a truncated or non-JSON 200 (a proxy in the way, a daemon
+    // killed mid-write) surfaces as an unhandled rejection instead of the
+    // failure it is. The error path already answers this with a null guard.
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = typeof url === "string" ? url : url.toString();
+      if (href.endsWith("/server-info")) {
+        return new Response(JSON.stringify({ socketPath: null }), {
+          status: 200,
+        });
+      }
+      return new Response("<html>gateway</html>", { status: 200 });
+    }) as unknown as typeof fetch;
+    const err: string[] = [];
+    console.error = (line: string) => err.push(line);
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+
+    try {
+      const code = await runSpawnExpectingExit([]);
+      expect(code).toBe(1);
+      expect(err.join("\n")).toContain("Failed to spawn session");
+    } finally {
+      restoreEnv();
+      globalThis.fetch = original;
     }
   });
 });

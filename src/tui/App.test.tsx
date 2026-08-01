@@ -2745,14 +2745,18 @@ describe("App new session dialog", () => {
    * The destination field is the picker half of issue #69. It sends the
    * daemon an empty `worktree` object rather than a name: the daemon derives
    * the name from the same prompt the row previewed, so the two cannot drift.
+   *
+   * The empty object is load-bearing, not incidental. A name in it means
+   * create-OR-OPEN, so an untouched dialog that posted its own preview would
+   * drop the agent into whatever worktree already answers to that slug,
+   * instead of the numbered sibling a derived name gets (issue #83).
    */
-  it("asks for a worktree when the destination is set to one", async () => {
+  it("asks for a worktree by prompt alone, naming nothing", async () => {
     const { spawns, restore } = withDaemon();
     const { restore: restoreExit } = withExitSpy();
     try {
       await openDialog();
-      // agent -> placement -> prompt. The prompt is the only name this dialog
-      // can offer, so a worktree submit carries one.
+      // agent -> placement -> prompt.
       setup.mockInput.pressTab();
       setup.mockInput.pressTab();
       await setup.renderOnce();
@@ -2763,11 +2767,13 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
       setup.mockInput.pressKey("2");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("[New worktree: fix-bug]");
+      // The name it would get, on its own row and left untouched.
+      expect(setup.captureCharFrame()).toContain("fix-bug");
       setup.mockInput.pressEnter();
       await settle();
 
       expect(spawns[0]?.worktree).toEqual({});
+      expect(spawns[0]?.worktree).not.toHaveProperty("name");
       expect(spawns[0]?.prompt).toBe("fix bug");
     } finally {
       restoreExit();
@@ -2776,10 +2782,106 @@ describe("App new session dialog", () => {
   });
 
   /**
-   * The dialog has no name field, so a prompt that derives nothing leaves the
-   * worktree destination unspawnable. It refuses locally rather than posting:
-   * the daemon's own refusal advises passing a name explicitly, which is CLI
-   * advice this dialog has no field for.
+   * Typing in the name field is the opposite request: THAT worktree, opened
+   * if it is already there. Only a typed name may travel as one.
+   */
+  it("sends a typed name, slugified the way the daemon would", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("fix bug");
+      await setup.renderOnce();
+      // prompt -> destination, choose the worktree, then tab onto the name
+      // row the choice just revealed.
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("Rescue The Flaky Test");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns[0]?.worktree).toEqual({ name: "rescue-the-flaky-test" });
+      // The prompt still goes to the agent; it just no longer names anything.
+      expect(spawns[0]?.prompt).toBe("fix bug");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  /**
+   * A name is enough on its own. Before issue #83 this dialog could only name
+   * a worktree through the prompt, and a promptless one was unspawnable.
+   */
+  it("spawns a named worktree with no prompt at all", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      // agent -> destination, walking backwards to the last visible field.
+      setup.mockInput.pressTab({ shift: true });
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("rescue");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]?.worktree).toEqual({ name: "rescue" });
+      expect(spawns[0]?.prompt).toBeUndefined();
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  /**
+   * The keys the name field has to own. `2` would otherwise pick a
+   * destination and `j` would move an option, so a name could not contain
+   * either — exactly the guarantee the prompt field already carries.
+   */
+  it("lets the name contain the option keys", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressTab({ shift: true });
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("fix2j");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns[0]?.worktree).toEqual({ name: "fix2j" });
+      // Nothing leaked into the fields those keys belong to.
+      expect(spawns[0]?.split).toBe(false);
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  /**
+   * With neither a name nor a prompt to derive one from there is nothing to
+   * create. It refuses locally rather than posting: the daemon's own refusal
+   * advises passing a name explicitly, which was CLI advice back when this
+   * dialog had no field to act on it with.
    */
   it("refuses a worktree with no derivable name instead of posting", async () => {
     const { spawns, restore } = withDaemon();
@@ -2799,7 +2901,7 @@ describe("App new session dialog", () => {
 
       expect(spawns).toHaveLength(0);
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Type a prompt to name the");
+      expect(frame).toContain("Name the worktree, or type a prompt");
       // Fixable in place, so the dialog stays up with the draft intact.
       expect(frame).toContain("New session");
     } finally {
@@ -2828,9 +2930,49 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
 
       expect(spawns).toHaveLength(0);
-      expect(setup.captureCharFrame()).toContain("Type a prompt to name the");
+      expect(setup.captureCharFrame()).toContain(
+        "Name the worktree, or type a prompt",
+      );
     } finally {
       restoreExit();
+      restore();
+    }
+  });
+
+  /**
+   * A derived name can come back numbered: the daemon appends `-2` rather
+   * than joining a worktree that already answers to the slug. The toast says
+   * where the agent actually landed, so it has to read the RESPONSE, not the
+   * name the row previewed.
+   */
+  it("names the worktree the daemon reports, not the one it previewed", async () => {
+    const { restore } = withDaemon({
+      spawnBody: {
+        success: true,
+        paneId: "%99",
+        worktree: { name: "fix-bug-2", path: "/code/myapp/.wt/fix-bug-2" },
+      },
+    });
+    try {
+      // The sidebar spawns without leaving, so it is the surface that has a
+      // toast to show at all.
+      await openDialog({ sidebar: true, persistent: true });
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("fix bug");
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("fix-bug-2");
+    } finally {
       restore();
     }
   });
@@ -3526,6 +3668,991 @@ describe("App new session dialog", () => {
       await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
       await setup.renderOnce();
       expect(setup.captureCharFrame()).toContain("New session here");
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("App move-changes menu gate", () => {
+  /**
+   * The gate is lazy: the dirty answer arrives AFTER the menu is on screen.
+   * These pin the two properties that makes that safe — the item is absent
+   * until the answer lands, and nothing above it moves when it does.
+   */
+  function captureDirty(
+    answer: { dirty: boolean } | "never" | "error" = { dirty: true },
+  ) {
+    const asked: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/dirty")) {
+        asked.push(href);
+        if (answer === "never")
+          return new Promise(() => {}) as Promise<Response>;
+        if (answer === "error") return { ok: false, status: 500 } as Response;
+        return { ok: true, json: async () => answer } as Response;
+      }
+      if (href.includes("/server-info")) {
+        return {
+          ok: true,
+          json: async () => ({ socketPath: null }),
+        } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch;
+    return { asked, restore: () => (globalThis.fetch = original) };
+  }
+
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  async function openMenuOnRow() {
+    await renderApp(120, 24, { groupBy: "none", persistent: true });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "s1",
+          project: "myapp",
+          cwd: "/code/myapp",
+          tmuxPane: "%1",
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+    await setup.renderOnce();
+  }
+
+  /** Rows of the open menu, by the labels visible in the frame. */
+  function menuRows(): { label: string; row: number }[] {
+    // "Review diff" matters most: it is the only row BELOW where an
+    // out-of-place item would be inserted, so leaving it out would make the
+    // no-shift assertion blind to the exact regression it guards.
+    const labels = [
+      "Attach",
+      "New session",
+      "Kill",
+      "Restart",
+      "Review diff",
+      "Move changes",
+    ];
+    return setup
+      .captureCharFrame()
+      .split("\n")
+      .flatMap((line, row) => {
+        const label = labels.find((l) => line.includes(l));
+        return label ? [{ label, row }] : [];
+      });
+  }
+
+  it("asks the daemon only when the menu opens", async () => {
+    const { asked, restore } = captureDirty();
+    try {
+      await openMenuOnRow();
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain("/sessions/s1/dirty");
+    } finally {
+      restore();
+    }
+  });
+
+  it("never asks about a paneless background row", async () => {
+    // Its menu has no "Move changes" item to gate (see `sessionMenuItems`),
+    // so the question is a `git status -uall` on the daemon whose answer is
+    // discarded either way.
+    const { asked, restore } = captureDirty();
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "bg1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: null,
+            trackingMode: "background",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      // Anchored on the menu having actually opened, so this can't pass by
+      // the right-click landing nowhere.
+      expect(setup.captureCharFrame()).toContain("Attach agent");
+      expect(asked).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("shows the item once the answer says dirty", async () => {
+    const { restore } = captureDirty({ dirty: true });
+    try {
+      await openMenuOnRow();
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Move changes");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps the item hidden for a clean checkout", async () => {
+    const { restore } = captureDirty({ dirty: false });
+    try {
+      await openMenuOnRow();
+      await settle();
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      // Anchored, so this can't pass by the menu never opening.
+      expect(frame).toContain("Attach");
+      expect(frame).not.toContain("Move changes");
+    } finally {
+      restore();
+    }
+  });
+
+  it("shows no placeholder while the answer is outstanding", async () => {
+    // Deliberately no "checking…" row: the menu never displays something
+    // that isn't actionable.
+    const { restore } = captureDirty("never");
+    try {
+      await openMenuOnRow();
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Attach");
+      expect(frame).not.toContain("Move changes");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps the item hidden when the daemon errors", async () => {
+    const { restore } = captureDirty("error");
+    try {
+      await openMenuOnRow();
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Move changes");
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not move any row already on screen when the item lands", async () => {
+    // THE invariant, and the reason the item is appended last. The answer
+    // arrives after the menu is drawn, so an item inserted anywhere else
+    // would shove the rows below it down under a cursor mid-travel. Asserts
+    // POSITIONS rather than timing, so it outlives whatever the latency is.
+    //
+    // The answer is held open deliberately: a mock that resolves immediately
+    // settles during the render await, so the "before" frame would already
+    // contain the item and the test would prove nothing.
+    let release!: (r: Response) => void;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      if (String(url).includes("/dirty")) {
+        return new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch;
+
+    try {
+      await openMenuOnRow();
+      const before = menuRows();
+      expect(before.length).toBeGreaterThan(2);
+      expect(before.some((r) => r.label === "Move changes")).toBe(false);
+
+      release({ ok: true, json: async () => ({ dirty: true }) } as Response);
+      await settle();
+      await setup.renderOnce();
+      const after = menuRows();
+      expect(after.some((r) => r.label === "Move changes")).toBe(true);
+
+      // Every row that existed before is still at exactly the same y.
+      for (const row of before) {
+        const moved = after.find((r) => r.label === row.label);
+        expect(`${row.label}@${moved?.row}`).toBe(`${row.label}@${row.row}`);
+      }
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("does not move a bottom-clamped menu when the item lands", async () => {
+    // The same invariant as above, at the edge where "append last" stops
+    // being enough: clamped against the bottom, a menu that grows has to grow
+    // upward, so every row it already drew slides out from under the pointer.
+    let release!: (r: Response) => void;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      if (String(url).includes("/dirty")) {
+        return new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch;
+
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        Array.from({ length: 20 }, (_, i) =>
+          mockEnrichedSession({
+            id: `s${i}`,
+            project: `p${i}`,
+            cwd: `/code/p${i}`,
+            tmuxPane: `%${i}`,
+          }),
+        ),
+        null,
+      );
+      await setup.renderOnce();
+      // A row low enough that the menu cannot fit below it.
+      await setup.mockMouse.click(5, 19, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      const topBefore = setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes("┌"));
+      expect(topBefore).toBeGreaterThan(0);
+      const before = menuRows();
+
+      release({ ok: true, json: async () => ({ dirty: true }) } as Response);
+      await settle();
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Move changes");
+      expect(frame.split("\n").findIndex((line) => line.includes("┌"))).toBe(
+        topBefore,
+      );
+      const after = menuRows();
+      for (const row of before) {
+        const moved = after.find((r) => r.label === row.label);
+        expect(`${row.label}@${moved?.row}`).toBe(`${row.label}@${row.row}`);
+      }
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("never gates one row's menu with another row's answer", async () => {
+    // A slow answer for a dismissed menu must not resurrect the item
+    // somewhere else.
+    //
+    // Belt and braces, honestly: mutating the guard it is aimed at does not
+    // make this fail, because the second menu's own (clean) answer already
+    // hides the item by the time the first one lands. Kept anyway — it pins
+    // the OBSERVABLE contract, and a future ordering change is exactly the
+    // sort of thing that would make it start earning its keep.
+    let resolveFirst!: (r: Response) => void;
+    const original = globalThis.fetch;
+    const asked: string[] = [];
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/dirty")) {
+        asked.push(href);
+        if (asked.length === 1) {
+          return new Promise<Response>((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return { ok: true, json: async () => ({ dirty: false }) } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch;
+
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "a",
+            cwd: "/a",
+            tmuxPane: "%1",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "b",
+            cwd: "/b",
+            tmuxPane: "%2",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      // Open on the first row, then dismiss and open on the second.
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("escape");
+      await setup.renderOnce();
+      await setup.mockMouse.click(5, 2, MouseButtons.RIGHT);
+      await setup.renderOnce();
+
+      // The first row's answer arrives late, and says dirty.
+      resolveFirst({
+        ok: true,
+        json: async () => ({ dirty: true }),
+      } as Response);
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Move changes");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  /**
+   * The item's whole job: hand the dialog a request that already knows it is
+   * a move. Driven from the click rather than the store so the prefill, the
+   * dialog and the POST are checked as one path.
+   */
+  describe("the dialog it opens", () => {
+    type SpawnBody = {
+      cwd?: string;
+      prompt?: string;
+      worktree?: { withChanges?: boolean; untracked?: string; name?: string };
+    };
+
+    function withMoveDaemon() {
+      const spawns: SpawnBody[] = [];
+      const original = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+        const href = String(url);
+        if (href.includes("/dirty")) {
+          return { ok: true, json: async () => ({ dirty: true }) } as Response;
+        }
+        if (href.includes("/server-info")) {
+          return Response.json({ socketPath: null });
+        }
+        if (href.endsWith("/agents")) {
+          return Response.json({
+            agents: [
+              {
+                name: "claude",
+                displayName: "Claude",
+                shortCode: "CC",
+                supportsPrompt: true,
+              },
+            ],
+          });
+        }
+        if (href.endsWith("/spawn")) {
+          spawns.push(JSON.parse(String(init?.body ?? "{}")) as SpawnBody);
+          return Response.json({ success: true, paneId: "%99" });
+        }
+        return Response.json({});
+      }) as unknown as typeof fetch;
+      return { spawns, restore: () => (globalThis.fetch = original) };
+    }
+
+    /** Open the row menu, wait for the dirty answer, and click "Move changes". */
+    async function clickMoveChanges(): Promise<void> {
+      await openMenuOnRow();
+      await settle();
+      await setup.renderOnce();
+      const row = setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes("Move changes"));
+      expect(row).toBeGreaterThan(0);
+      await setup.mockMouse.click(7, row, MouseButtons.LEFT);
+      await settle();
+      await setup.renderOnce();
+    }
+
+    it("opens prefilled for a move, over the row's own checkout", async () => {
+      const { restore } = withMoveDaemon();
+      try {
+        await clickMoveChanges();
+        const frame = setup.captureCharFrame();
+
+        expect(frame).toContain("Move changes to worktree");
+        expect(frame).toContain("/code/myapp");
+        // Locked to a worktree, with the untracked choice this mode adds.
+        expect(frame).toContain("Where");
+        expect(frame).not.toContain("This checkout");
+        expect(frame).toContain("Untracked");
+        expect(frame).toContain("[Move]");
+      } finally {
+        restore();
+      }
+    });
+
+    it("posts the move with the chosen untracked mode", async () => {
+      const { spawns, restore } = withMoveDaemon();
+      try {
+        await clickMoveChanges();
+        // Type a prompt, which is also what names the worktree...
+        setup.mockInput.pressTab();
+        setup.mockInput.pressTab();
+        await setup.renderOnce();
+        await setup.mockInput.typeText("fix the flicker");
+        await setup.renderOnce();
+        // ...tab straight past the locked destination to the name, which the
+        // prompt has been naming as it was typed...
+        setup.mockInput.pressTab();
+        await setup.renderOnce();
+        expect(setup.captureCharFrame()).toContain("fix-the-flicker");
+        // ...then on to Untracked and pick "leave".
+        setup.mockInput.pressTab();
+        await setup.renderOnce();
+        setup.mockInput.pressKey("3");
+        await setup.renderOnce();
+        expect(setup.captureCharFrame()).toContain("[Leave here]");
+
+        setup.mockInput.pressEnter();
+        await settle();
+
+        expect(spawns).toHaveLength(1);
+        expect(spawns[0]?.cwd).toBe("/code/myapp");
+        expect(spawns[0]?.prompt).toBe("fix the flicker");
+        // Untouched name, so the move goes into a worktree the daemon names
+        // and numbers, not into whatever already answers to that slug.
+        expect(spawns[0]?.worktree).toEqual({
+          withChanges: true,
+          untracked: "leave",
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    /**
+     * The destination is locked but the name is not, which is the reason the
+     * move routes through the dialog rather than happening on the click.
+     */
+    it("posts the move under a name typed into the dialog", async () => {
+      const { spawns, restore } = withMoveDaemon();
+      try {
+        await clickMoveChanges();
+        // agent -> placement -> prompt -> name, past the locked destination.
+        setup.mockInput.pressTab();
+        setup.mockInput.pressTab();
+        setup.mockInput.pressTab();
+        await setup.renderOnce();
+        await setup.mockInput.typeText("Rescue Work");
+        await setup.renderOnce();
+        setup.mockInput.pressEnter();
+        await settle();
+
+        expect(spawns).toHaveLength(1);
+        expect(spawns[0]?.worktree).toEqual({
+          name: "rescue-work",
+          withChanges: true,
+          untracked: "move",
+        });
+        // No prompt was typed, and the move no longer needs one to be named.
+        expect(spawns[0]?.prompt).toBeUndefined();
+      } finally {
+        restore();
+      }
+    });
+
+    it("sends no move on an ordinary new session", async () => {
+      // The same dialog, opened by `n`: the flag is what makes it a move, and
+      // nothing about the mode may leak into the request that did not ask.
+      const { spawns, restore } = withMoveDaemon();
+      try {
+        await renderApp(120, 24, { groupBy: "none", persistent: true });
+        sseCallbacks!.onInit(
+          [
+            mockEnrichedSession({
+              id: "s1",
+              project: "myapp",
+              cwd: "/code/myapp",
+              tmuxPane: "%1",
+            }),
+          ],
+          null,
+        );
+        await setup.renderOnce();
+        setup.mockInput.pressKey("n");
+        await settle();
+        await setup.renderOnce();
+        expect(setup.captureCharFrame()).toContain("New session");
+        setup.mockInput.pressEnter();
+        await settle();
+
+        expect(spawns).toHaveLength(1);
+        expect(spawns[0]?.worktree).toBeUndefined();
+      } finally {
+        restore();
+      }
+    });
+  });
+});
+
+/**
+ * What the picker says once the move has actually run.
+ *
+ * The move is the one spawn that can leave the user owning state they did not
+ * have before — work parked in a stash, a redundant entry to drop, a
+ * staged/unstaged split to rebuild — so these pin WHICH of those get a message
+ * that waits to be acknowledged and which stay a toast.
+ */
+describe("App move-changes reporting", () => {
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  /** Bodies the dialog posted, in order, since the last daemon stub. */
+  const spawnBodies: {
+    split?: unknown;
+    worktree?: Record<string, unknown>;
+  }[] = [];
+
+  /** A daemon that offers the move and answers `/spawn` with `spawn()`. */
+  function withMoveDaemon(spawn: () => Response) {
+    const original = globalThis.fetch;
+    spawnBodies.length = 0;
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const href = String(url);
+      if (href.includes("/dirty")) {
+        return Response.json({ repo: true, dirty: true });
+      }
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: null });
+      }
+      if (href.endsWith("/agents")) {
+        return Response.json({
+          agents: [
+            {
+              name: "claude",
+              displayName: "Claude",
+              shortCode: "CC",
+              supportsPrompt: true,
+            },
+          ],
+        });
+      }
+      if (href.endsWith("/spawn")) {
+        spawnBodies.push(
+          JSON.parse(
+            String(init?.body ?? "{}"),
+          ) as (typeof spawnBodies)[number],
+        );
+        return spawn();
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+    return { restore: () => (globalThis.fetch = original) };
+  }
+
+  /** Open the row menu, pick "Move changes", name the worktree, submit. */
+  async function submitMove(
+    props: Record<string, unknown> = {},
+  ): Promise<void> {
+    await renderApp(120, 24, {
+      groupBy: "none",
+      persistent: true,
+      ...props,
+    });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "s1",
+          project: "myapp",
+          cwd: "/code/myapp",
+          tmuxPane: "%1",
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+    await settle();
+    await setup.renderOnce();
+    const row = setup
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes("Move changes"));
+    expect(row).toBeGreaterThan(0);
+    await setup.mockMouse.click(7, row, MouseButtons.LEFT);
+    await settle();
+    await setup.renderOnce();
+    // agent -> placement -> prompt -> name, past the locked destination.
+    setup.mockInput.pressTab();
+    setup.mockInput.pressTab();
+    setup.mockInput.pressTab();
+    await setup.renderOnce();
+    await setup.mockInput.typeText("rescue");
+    await setup.renderOnce();
+    setup.mockInput.pressEnter();
+    await settle();
+    await setup.renderOnce();
+  }
+
+  /** A landed spawn, with whatever the move reported bolted on. */
+  const landed = (move?: Record<string, unknown>) =>
+    Response.json({
+      success: true,
+      paneId: "%99",
+      worktree: { name: "rescue" },
+      ...(move ? { move } : {}),
+    });
+
+  const relocated = {
+    moved: 3,
+    untracked: { mode: "move", files: ["new.ts"] },
+    source: "/code/myapp",
+  };
+
+  it("ignores the option keys while the dialog has no room to draw", async () => {
+    // Too short for the fields, so the dialog says what it needs instead of
+    // drawing them. A number key here would change a choice that is not on
+    // screen — worse than doing nothing, because the spawn would carry it.
+    const { restore } = withMoveDaemon(() => landed(relocated));
+    try {
+      await renderApp(80, 6, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Needs 7 rows");
+
+      // "2" is New worktree on the destination row, and "2"/"3" are splits on
+      // the placement row. Neither may take effect unseen.
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawnBodies).toHaveLength(1);
+      expect(spawnBodies[0]?.worktree).toBeUndefined();
+      expect(spawnBodies[0]?.split).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it("refuses a name with nothing a worktree name can be made of", async () => {
+    // The name is a real choice, not a suggestion: with a prompt present, a
+    // slug rule that quietly discards what was typed spawns the worktree
+    // under a name derived from the prompt instead, which is what a user who
+    // typed a name is not asking for.
+    const spawns: unknown[] = [];
+    const { restore } = withMoveDaemon(() => {
+      spawns.push(1);
+      return landed(relocated);
+    });
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await settle();
+      await setup.renderOnce();
+      const row = setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes("Move changes"));
+      await setup.mockMouse.click(7, row, MouseButtons.LEFT);
+      await settle();
+      await setup.renderOnce();
+
+      // A prompt to derive a name from, and a name of its own that no slug
+      // can be made of.
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("fix the flicker");
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("修复!!!");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      expect(spawns).toHaveLength(0);
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("lettersornumbers");
+      // Still on the dialog, with the typed name where it was left.
+      expect(frame).toContain("Movechangestoworktree");
+    } finally {
+      restore();
+    }
+  });
+
+  it("gates on the same directory the move will run in", async () => {
+    // A pane that has `cd`ed away moves out of where it IS, and the gate has
+    // to answer about that same checkout — otherwise the item is offered (or
+    // withheld) on the strength of a `git status` in an unrelated directory.
+    // Named explicitly rather than left to the daemon's default so the two
+    // cannot drift apart: this client already knows which one it means.
+    const asked: string[] = [];
+    const spawns: { cwd?: string }[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const href = String(url);
+      if (href.includes("/dirty")) {
+        asked.push(href);
+        return Response.json({ repo: true, dirty: true });
+      }
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: null });
+      }
+      if (href.endsWith("/agents")) {
+        return Response.json({
+          agents: [
+            {
+              name: "claude",
+              displayName: "Claude",
+              shortCode: "CC",
+              supportsPrompt: true,
+            },
+          ],
+        });
+      }
+      if (href.endsWith("/spawn")) {
+        spawns.push(JSON.parse(String(init?.body ?? "{}")) as { cwd?: string });
+        return Response.json({ success: true, paneId: "%99" });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            // The agent has cd'ed into a subdirectory since it started.
+            paneCwd: "/code/myapp/packages/core",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await settle();
+      await setup.renderOnce();
+
+      expect(asked).toHaveLength(1);
+      const gated = new URL(asked[0]!).searchParams.get("cwd");
+      expect(gated).toBe("/code/myapp/packages/core");
+
+      const row = setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes("Move changes"));
+      await setup.mockMouse.click(7, row, MouseButtons.LEFT);
+      await settle();
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("rescue");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]?.cwd).toBe(gated!);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("summarizes what the move did in the sidebar's toast", async () => {
+    // The sidebar spawns without following the pane, so this line is the only
+    // account of an operation that emptied the user's checkout.
+    const { restore } = withMoveDaemon(() => landed(relocated));
+    try {
+      await submitMove({ sidebar: true });
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("rescue");
+      expect(frame).toContain("moved3files");
+      expect(frame).toContain("untrackedmoved");
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not let a leftover stash entry expire on a timer", async () => {
+    // The move landed, but its own backup could not be dropped. That is a
+    // chore the user now owns, and a chore is not a toast.
+    const { restore } = withMoveDaemon(() =>
+      landed({ ...relocated, leftoverStash: "deadbee1234" }),
+    );
+    try {
+      await submitMove({ sidebar: true });
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("deadbee1234");
+      expect(frame).toContain("gitstashdrop");
+      expect(frame).toContain("anykeytodismiss");
+    } finally {
+      restore();
+    }
+  });
+
+  it("exits the picker into the new pane when the move was clean", async () => {
+    // The picker's whole job is to put you in the pane; an acknowledgement
+    // step for a move with nothing to acknowledge would be in the way.
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    const { restore } = withMoveDaemon(() => landed(relocated));
+    try {
+      await submitMove({ persistent: false });
+      expect(squish(setup.captureCharFrame())).not.toContain("anykeytodismiss");
+      expect(exitSpy).toHaveBeenCalled();
+    } finally {
+      restore();
+      restoreExit();
+    }
+  });
+
+  it("holds the picker's exit until a leftover stash is acknowledged", async () => {
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    const { restore } = withMoveDaemon(() =>
+      landed({ ...relocated, leftoverStash: "deadbee1234" }),
+    );
+    try {
+      await submitMove({ persistent: false });
+      expect(exitSpy).not.toHaveBeenCalled();
+      expect(squish(setup.captureCharFrame())).toContain("deadbee1234");
+
+      setup.mockInput.pressKey("escape");
+      await settle();
+      expect(exitSpy).toHaveBeenCalled();
+    } finally {
+      restore();
+      restoreExit();
+    }
+  });
+
+  it("calls out a daemon too old to have moved anything", async () => {
+    // The giveaway is a perfectly ordinary 200 with no `move` in it: an older
+    // daemon drops the keys it does not know, spawns into an empty worktree,
+    // and leaves the work exactly where it was.
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    const { restore } = withMoveDaemon(() => landed());
+    try {
+      await submitMove({ persistent: false });
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("olderbuild");
+      expect(frame).toContain("/code/myapp");
+      expect(frame).toContain("ccmuxdaemonrestart");
+      // Not a silent success: the picker does not vanish into the new pane
+      // as if the changes had gone with it.
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      restore();
+      restoreExit();
+    }
+  });
+
+  it("holds a refused move's stash recovery on screen until dismissed", async () => {
+    // The sha is the only handle on the user's work. A four-second toast that
+    // truncates it is the same as not printing it at all.
+    const { restore } = withMoveDaemon(() =>
+      Response.json(
+        {
+          error: "Could not apply the changes into the new worktree",
+          reason: "apply-failed",
+          stashSha: "abc1234def",
+          sourceRestored: false,
+        },
+        { status: 400 },
+      ),
+    );
+    try {
+      await submitMove();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("Couldnotapplythechanges");
+      expect(frame).toContain("gitstashapplyabc1234def");
+
+      // Dismissed by a keypress, and the dialog it was raised over is still
+      // there to correct and retry.
+      setup.mockInput.pressKey("escape");
+      await setup.renderOnce();
+      const after = squish(setup.captureCharFrame());
+      expect(after).not.toContain("gitstashapplyabc1234def");
+      expect(after).toContain("Movechangestoworktree");
+    } finally {
+      restore();
+    }
+  });
+
+  it("names where the work went when the spawn failed after the move", async () => {
+    const { restore } = withMoveDaemon(() =>
+      Response.json(
+        {
+          error:
+            "Failed to spawn session: tmux failed (your uncommitted changes were already moved out of /code/myapp to /code/myapp/.claude/worktrees/rescue)",
+          move: {
+            moved: 3,
+            untracked: { mode: "move", files: ["new.ts"] },
+            source: "/code/myapp",
+            flattenedIndex: true,
+          },
+        },
+        { status: 500 },
+      ),
+    );
+    try {
+      await submitMove();
+      const frame = squish(setup.captureCharFrame());
+      // The accounting, the worktree it landed in, and the staged/unstaged
+      // caveat the CLI prints for the same body.
+      expect(frame).toContain("Moved3fileschanged");
+      expect(frame).toContain("1fileuntrackedmoved");
+      expect(frame).toContain(".claude/worktrees/rescue");
+      expect(frame).toContain("staged/unstagedsplit");
+    } finally {
+      restore();
+    }
+  });
+
+  it("leaves a plain validation refusal a toast, in the daemon's own words", async () => {
+    // Nothing happened, so there is nothing to acknowledge: the message is
+    // advice for the field the user is still looking at.
+    const { restore } = withMoveDaemon(() =>
+      Response.json(
+        {
+          error:
+            "Worktree 'rescue' already exists at /code/myapp/.claude/worktrees/rescue; moving changes needs a fresh worktree (pick another name, or leave the name empty to derive one from the prompt).",
+          reason: "create-failed",
+        },
+        { status: 400 },
+      ),
+    );
+    try {
+      await submitMove();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("alreadyexists");
+      // A toast, not the acknowledgement dialog.
+      expect(frame).not.toContain("anykeytodismiss");
     } finally {
       restore();
     }

@@ -1,0 +1,1028 @@
+/**
+ * Relocating a checkout's UNCOMMITTED work into a fresh worktree.
+ *
+ * This is the one ccmux operation that handles work git cannot get back: a
+ * commit is recoverable from the reflog, an uncommitted edit is not. So the
+ * ordering below is the feature, not an implementation detail, and every
+ * failure path is written to end with the user's changes still REACHABLE —
+ * which is a weaker and more honest claim than "put back". A restore can
+ * itself fail (the checkout changed underneath the move), and the confirmation
+ * failures around the push return before there is an entry this function can
+ * name. Every one of those still leaves the work in the stash, and every one
+ * of them says which situation the caller is in rather than implying the
+ * cheerful one: `sourceRestored` and `stashSha` exist for exactly that.
+ *
+ * The whole sequence runs under a per-repository lock, because the stash stack
+ * is shared by every worktree of a repo and reading a status another move has
+ * already stashed away answers the wrong question. See {@link withMoveLock}.
+ *
+ * The sequence:
+ *
+ *   1. Refuse outright if the source has a merge/rebase/cherry-pick/revert or
+ *      bisect in progress, or if there is nothing to move.
+ *   2. `git stash push` in the source. This is what removes the changes, and
+ *      it is also the backup: from here until step 6 the work lives in a stash
+ *      entry that nothing deletes.
+ *   3. Create the worktree (injected; see {@link CreateWorktree}). It must be
+ *      a FRESH one — a worktree the engine merely opened is refused, because
+ *      the rollback below removes what it made.
+ *   4. `git stash apply` INTO the new worktree.
+ *   5. Copy untracked files across when the mode asks for it.
+ *   6. Only now drop the stash entry.
+ *
+ * Two deliberate choices make the failure paths safe:
+ *
+ * APPLY, THEN DROP — never `pop`. `pop` is apply-and-drop, so a partial apply
+ * takes the backup with it. Applying leaves the entry untouched, which makes
+ * step 6 the single commit point: before it, every failure can put the source
+ * back exactly as it was; after it, the work is in the worktree.
+ *
+ * BY SHA, never by position. `stash@{0}` names whatever is on top RIGHT NOW,
+ * and stashes are shared across every worktree of a repo, so a concurrent
+ * `git stash push` (a person, or another agent in another pane) silently
+ * renumbers them. The entry's SHA is captured immediately after the push and
+ * every later reference re-resolves it, so this can only ever apply or drop
+ * the entry it created.
+ *
+ * OURS ONLY, PROVEN BY THE REF MOVING AND BY A NONCE. `git stash push` exits
+ * 0 having created NOTHING when the tree went clean between the status read
+ * and the push ("No local changes to save"), so `refs/stash` is read before
+ * AND after it: only a ref that MOVED proves this run created anything at
+ * all. WHICH entry it created is a second question, and the message alone is
+ * no answer to it, since an entry from an earlier run of this very function
+ * carries the same one and a name is a substring of every longer name. So
+ * each run mints a nonce into its message and finds its own entry by that,
+ * wherever it has ended up in a stack every worktree of the repo pushes onto.
+ * Recognising ours by what is on top and roughly what it is called instead
+ * adopts somebody else's work and then, at step 6, drops it. See
+ * {@link readStashRef} and {@link findStashByMarker}.
+ *
+ * There is deliberately NO `git reset --hard` on the source. `stash push`
+ * already left it clean, so a reset would be redundant on the happy path and
+ * destructive on any other: an agent working in that pane can create files in
+ * the seconds this takes, and a reset would delete work this function never
+ * stashed and cannot restore.
+ */
+
+import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
+import { cp, mkdir } from "node:fs/promises";
+import { dirname, isAbsolute, join } from "node:path";
+import { normalizePath, runGit, type GitRun } from "./worktree-git";
+
+/**
+ * What happens to files git is not tracking yet.
+ *
+ * `move` is the default because agents create new files constantly, and a
+ * mode that quietly left them behind would strand exactly the work the user
+ * was trying to relocate.
+ */
+export type UntrackedMode = "move" | "copy" | "leave";
+
+export const UNTRACKED_MODES: readonly UntrackedMode[] = [
+  "move",
+  "copy",
+  "leave",
+];
+
+export function isUntrackedMode(value: unknown): value is UntrackedMode {
+  return (
+    typeof value === "string" &&
+    (UNTRACKED_MODES as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * The worktree-creation seam.
+ *
+ * Kept injected rather than imported so this module can be exercised against
+ * fixture repos, and so it composes with whatever creation engine the caller
+ * has.
+ *
+ * It is deliberately NARROWER than the real engine (`createWorktree` in
+ * `worktree-create.ts`, which also takes the repo root and a prompt to derive
+ * a name from, and reports a result union rather than throwing). The caller
+ * curries the parts this module has no business knowing and converts a
+ * refusal into a throw, which is what lands here as `create-failed`; see the
+ * adapter in `server.ts`'s spawn handler.
+ *
+ * `created` is load-bearing rather than informational. The real engine is
+ * create-or-OPEN for an explicit name, so a path coming back here can be a
+ * worktree that was already on disk with somebody's uncommitted work in it,
+ * and this module's rollback deletes what it made with
+ * `worktree remove --force`. A seam that reported only the path would make
+ * those two indistinguishable, which is how a failed move came to delete a
+ * checkout it had merely opened. See {@link moveChangesToWorktree}.
+ *
+ * `branch` is optional and reporting-only. Removing a worktree does not
+ * delete the branch it was created on, so every rollback below leaves one
+ * behind; without a name for it the user is left with a branch they never
+ * asked for and nothing saying where it came from.
+ */
+export type CreateWorktree = (opts: {
+  name?: string;
+  base?: string;
+}) => Promise<{ path: string; created: boolean; branch?: string }>;
+
+export interface MoveChangesInput {
+  /** Checkout whose uncommitted work is being relocated. */
+  source: string;
+  /** Passed through to the creation engine. */
+  name?: string;
+  base?: string;
+  /** Defaults to `move`. */
+  untracked?: UntrackedMode;
+  createWorktree: CreateWorktree;
+  git?: GitRun;
+}
+
+/** Why a move refused or failed, for callers that branch on the reason. */
+export type MoveChangesFailure =
+  | "not-a-repo"
+  | "operation-in-progress"
+  | "nothing-to-move"
+  | "stash-failed"
+  | "create-failed"
+  | "apply-failed"
+  | "copy-failed";
+
+export interface MoveChangesOk {
+  ok: true;
+  worktreePath: string;
+  /**
+   * The checkout the work came OUT of: the repository ROOT, not the directory
+   * the request named. A stash empties the whole worktree whichever
+   * subdirectory it was run from, so naming the caller's cwd would attribute
+   * repo-wide work to one folder of it.
+   */
+  source: string;
+  /** Tracked files whose changes moved. */
+  moved: number;
+  untracked: { mode: UntrackedMode; files: string[] };
+  /**
+   * Set when the move succeeded but the now-redundant stash entry could not
+   * be dropped. Harmless leftover, surfaced so it can be cleaned up rather
+   * than discovered later as a mystery entry.
+   */
+  leftoverStash?: string;
+  /**
+   * Set when the changes landed as one worktree state instead of the staged
+   * and unstaged halves they left as. Nothing is lost — every edit is in the
+   * new checkout — but a `git add` the user had already done is not, so this
+   * is worth a line rather than a silent difference they find at commit time.
+   * Only ever set when there was a split to lose; see
+   * {@link carriedStagedContent}.
+   */
+  flattenedIndex?: boolean;
+}
+
+export interface MoveChangesError {
+  ok: false;
+  reason: MoveChangesFailure;
+  error: string;
+  /**
+   * The stash entry holding the user's work, when one exists and was
+   * deliberately left in place. Always reported, because it is the handle
+   * they need to get their changes back by hand.
+   */
+  stashSha?: string;
+  /** True when the source checkout was put back the way it was found. */
+  sourceRestored?: boolean;
+}
+
+export type MoveChangesResult = MoveChangesOk | MoveChangesError;
+
+/**
+ * In-progress operations that make relocating changes unsafe. Each is a state
+ * where the index carries git's own half-finished work, so stashing would
+ * capture that rather than (or as well as) the user's, and unwinding it is not
+ * something this function should be inventing.
+ *
+ * Resolved through `rev-parse --git-path` rather than by joining `.git/`,
+ * because in a linked worktree these live in that worktree's admin directory,
+ * not in the shared one.
+ */
+const OPERATION_MARKERS: readonly [string, string][] = [
+  ["MERGE_HEAD", "a merge"],
+  ["CHERRY_PICK_HEAD", "a cherry-pick"],
+  ["REVERT_HEAD", "a revert"],
+  ["rebase-merge", "a rebase"],
+  ["rebase-apply", "a rebase"],
+  ["BISECT_LOG", "a bisect"],
+];
+
+export async function readOperationInProgress(
+  checkout: string,
+  git: GitRun = runGit,
+): Promise<string | null> {
+  for (const [marker, label] of OPERATION_MARKERS) {
+    const res = await git(checkout, ["rev-parse", "--git-path", marker]);
+    if (res.exitCode !== 0) continue;
+    const path = res.stdout.trim();
+    if (!path) continue;
+    const resolved = path.startsWith("/") ? path : join(checkout, path);
+    if (existsSync(resolved)) return label;
+  }
+  return null;
+}
+
+export interface UncommittedState {
+  /** Tracked files with staged or unstaged changes. */
+  modified: number;
+  /** Untracked FILES, repo-relative. Never a directory; see below. */
+  untrackedPaths: string[];
+}
+
+/**
+ * Uncommitted work in a checkout, as paths rather than counts.
+ *
+ * `-z` rather than plain `--porcelain`: with NUL separators git emits paths
+ * verbatim, while the default format quotes and escapes anything unusual. A
+ * filename with a quote, a backslash, or a newline in it is rare but entirely
+ * legal, and this list drives file copies.
+ *
+ * `--untracked-files=all` because git's default collapses a wholly untracked
+ * directory into one `?? deep/` record. That is two problems in one: the
+ * count it feeds ("3 untracked files") is wrong by however many files are
+ * under there, and the copy it feeds gets a directory to recurse into rather
+ * than a list to enumerate — which sweeps up the .env and node_modules inside
+ * it, since a recursive copy has no idea git was excluding them. Expanded,
+ * every path here is a file git would actually move, ignored content in
+ * neither list.
+ *
+ * With ONE exception git will not expand for us: a nested checkout (a linked
+ * worktree, a submodule, a stray clone) is reported as a directory even under
+ * `-uall`, because git refuses to descend into another repository. Such an
+ * entry keeps its trailing slash, which is how the callers tell it apart.
+ * `.claude/worktrees/` is the case that matters most, since ccmux puts its own
+ * worktrees there, and it is handled where it belongs — the hosting repo
+ * excludes the directory, so this read never sees it
+ * (`ensureWorktreesExcluded` in `worktree-create.ts`). Every other one reaches
+ * the caller, where `copy` drops it rather than recursing into somebody else's
+ * repository; see {@link moveChangesToWorktree}.
+ *
+ * The two-record shape of a rename is handled explicitly. `R  new\0old\0` is
+ * ONE changed file described by two records, so counting records reports a
+ * single `git mv` as two.
+ */
+export async function readUncommitted(
+  checkout: string,
+  git: GitRun = runGit,
+): Promise<UncommittedState | null> {
+  const res = await git(checkout, [
+    "status",
+    "--porcelain",
+    "-z",
+    "--untracked-files=all",
+  ]);
+  if (res.exitCode !== 0) return null;
+
+  let modified = 0;
+  const untrackedPaths: string[] = [];
+  const records = res.stdout.split("\0");
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
+    if (!record) continue;
+    const status = record.slice(0, 2);
+    const path = record.slice(3);
+    // Ignored entries are not requested, so anything here is one or the other.
+    if (status === "??") {
+      if (path) untrackedPaths.push(path);
+      continue;
+    }
+    modified++;
+    // A rename or a copy spends a second record on the ORIGINAL path. It is
+    // never a change of its own, so it is consumed here rather than counted.
+    // Either half of the code can carry the letter (`RM` is a rename that was
+    // edited afterwards), and no other status uses R or C.
+    if (status.includes("R") || status.includes("C")) i++;
+  }
+  return { modified, untrackedPaths };
+}
+
+/**
+ * A shell command that drops the stash entry with this SHA.
+ *
+ * Not `git stash drop <sha>`: drop only accepts a `stash@{N}` reflog
+ * reference and answers "'<sha>' is not a stash reference". And not a bare
+ * `git stash drop` either, which takes whatever is on top — precisely the
+ * entry this is trying not to name, since the reason a sha is being reported
+ * at all is that the stack has moved. Looking the position up first is what
+ * makes the advice work.
+ *
+ * `git stash apply <sha>` DOES work, which is why the recovery lines that
+ * name a sha directly are fine as they are.
+ *
+ * The `[ -n "$ref" ]` guard is not defensive noise. A lookup that finds
+ * nothing leaves the substitution EMPTY, and `git stash drop` with no
+ * argument takes whatever is on top — and the entry being missing is exactly
+ * the situation that produced this advice in the first place, so the
+ * unguarded form destroys an unrelated entry precisely where it is printed.
+ *
+ * Lives here rather than with the CLI text so the module's own real-git tests
+ * can run the string and prove it.
+ */
+export function dropStashCommand(sha: string): string {
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) {
+    // Not a sha, so it does not go anywhere a shell would expand it. This
+    // string is printed for a person to paste, and nothing here can tell an
+    // odd value from a hostile one.
+    return `git stash list --format="%gd %H"   # then: git stash drop stash@{N}`;
+  }
+  return `ref=$(git stash list --format="%gd %H" | grep ${sha} | cut -d" " -f1); [ -n "$ref" ] && git stash drop "$ref"`;
+}
+
+/**
+ * Marks the stash entry as ours, for identification and for recovery.
+ *
+ * The nonce is what makes this an IDENTIFIER rather than a label. Every run
+ * of this function names its entry the same way, and a name is a substring of
+ * every longer name (`: foo` sits inside `: foo-bar`, and the unnamed marker
+ * sits inside all of them), so ownership decided from the text alone claims
+ * an entry the run never created. Four random bytes are plenty for the
+ * handful of moves that can overlap in one repository, and short enough that
+ * the message stays readable in `git stash list` — which is the other half of
+ * its job, since a stranded entry is found by eye.
+ *
+ * The name is collapsed to a single line first, because the confirmation
+ * below reads the message back through git's `%gs` — which strips trailing
+ * whitespace and stops at the first blank line. A name carrying either (a
+ * trailing space in `--worktree "my feature "` is an ordinary typo, and only
+ * the picker slugifies before it asks) would come back different from what
+ * was written, and the entry would fail to be recognized as our own.
+ */
+function stashMessage(nonce: string, name?: string): string {
+  const label = name?.replace(/\s+/g, " ").trim();
+  return `ccmux move-changes ${nonce}${label ? `: ${label}` : ""}`;
+}
+
+/**
+ * The SHA at the top of the stash stack, or null when the stack is empty.
+ *
+ * Read either side of the push, because a ref that MOVED is the only proof
+ * that the entry on top is the one this run made; see the module header.
+ *
+ * Exit 1 is git's answer for "no such ref" and the ONLY non-zero code that
+ * means an empty stack. Anything else is a question that could not be asked,
+ * and reading that as an empty stack makes a push that stashed the user's
+ * work look like a push that created nothing — which this function's caller
+ * reports as "nothing to move" while the changes sit in an entry nobody
+ * named. Hence `read` rather than a bare null.
+ */
+type StashRefRead = { read: true; sha: string | null } | { read: false };
+
+async function readStashRef(
+  checkout: string,
+  git: GitRun,
+): Promise<StashRefRead> {
+  const res = await git(checkout, [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    "refs/stash",
+  ]);
+  if (res.exitCode === 1) return { read: true, sha: null };
+  if (res.exitCode !== 0) return { read: false };
+  return { read: true, sha: res.stdout.trim() || null };
+}
+
+/**
+ * Whether our own entry could be found, and its SHA when it could.
+ *
+ * A read that FAILED is not the same answer as "not in the stack": an
+ * unreadable stack cannot rule out an entry holding the user's work, and the
+ * caller has to report those two differently.
+ */
+type StashLookup = { read: true; sha: string | null } | { read: false };
+
+/**
+ * Our stash entry's SHA, found by the nonce its message carries.
+ *
+ * The whole stack is searched rather than just the top, because it is shared
+ * by every worktree of the repo: a push by another agent between ours and
+ * this read leaves our entry one deeper, and refusing there would strand the
+ * user's work in the stash for a race that changed nothing about it.
+ *
+ * `%gs` is the reflog subject, which git writes as "On <branch>: <message>",
+ * so the marker is what a line ENDS with. Matched that way rather than by
+ * containment, which is what let a run named `foo` claim `foo-bar`'s entry.
+ */
+async function findStashByMarker(
+  checkout: string,
+  marker: string,
+  git: GitRun,
+): Promise<StashLookup> {
+  const res = await git(checkout, ["stash", "list", "--format=%H%x09%gs"]);
+  if (res.exitCode !== 0) return { read: false };
+  for (const line of res.stdout.split("\n")) {
+    const tab = line.indexOf("\t");
+    if (tab < 0) continue;
+    if (line.slice(tab + 1).endsWith(marker)) {
+      return { read: true, sha: line.slice(0, tab) };
+    }
+  }
+  return { read: true, sha: null };
+}
+
+/**
+ * The repository whose stash stack a checkout shares, as a lock key.
+ *
+ * The shared admin directory rather than the working tree: every linked
+ * worktree of a repo pushes onto ONE stack, so two moves running from two
+ * worktrees of the same repo are exactly the collision that has to be
+ * serialized, and their `--show-toplevel` paths differ. Resolved through
+ * `normalizePath` so two routes to one repo (a symlinked `/tmp` on macOS,
+ * a symlinked home) do not take two different locks over one stack.
+ */
+async function stashScopeKey(
+  source: string,
+  git: GitRun,
+): Promise<string | null> {
+  const res = await git(source, ["rev-parse", "--git-common-dir"]);
+  if (res.exitCode !== 0) return null;
+  const dir = res.stdout.trim();
+  if (!dir) return null;
+  return normalizePath(isAbsolute(dir) ? dir : join(source, dir));
+}
+
+/**
+ * Per-repository serialization of the WHOLE move transaction, from the status
+ * read to the drop.
+ *
+ * Every step in between reads or writes state the next move would read
+ * differently: a status that another move has already stashed away reports a
+ * clean tree, and a push that lands mid-transaction renumbers a stack the
+ * other run is still holding a handle into. Serializing is what lets each run
+ * reason about the stack as if it were alone with it.
+ *
+ * A SEPARATE map from `worktree-create.ts`'s `withRepoLock`, deliberately.
+ * This lock is held ACROSS the creation engine's call, so the two would
+ * deadlock the moment they shared a key, and keying them differently by
+ * coincidence (an admin dir is not a repo root) is not a property worth
+ * relying on. Nothing under the creation lock ever takes this one, so the
+ * nesting has no cycle to close.
+ */
+const moveLocks = new Map<string, Promise<unknown>>();
+
+async function withMoveLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = moveLocks.get(key) ?? Promise.resolve();
+  // Chained off the previous holder's settlement, not its value, so one
+  // failed move does not poison the queue behind it.
+  const run = previous.then(fn, fn);
+  // The SAME promise goes into the map and is compared against on the way
+  // out. Storing a derived one leaves the identity check below permanently
+  // false, so every repository this daemon ever moves from keeps an entry.
+  const queued = run.catch(() => undefined);
+  moveLocks.set(key, queued);
+  try {
+    return await run;
+  } finally {
+    if (moveLocks.get(key) === queued) moveLocks.delete(key);
+  }
+}
+
+/**
+ * Locate our stash entry's CURRENT position by SHA.
+ *
+ * Everything that touches the entry after creation goes through this, because
+ * the stack is shared repo-wide and shifts under concurrent pushes.
+ */
+async function findStashRef(
+  checkout: string,
+  sha: string,
+  git: GitRun,
+): Promise<string | null> {
+  const res = await git(checkout, ["stash", "list", "--format=%H%x09%gd"]);
+  if (res.exitCode !== 0) return null;
+  for (const line of res.stdout.split("\n")) {
+    const [entrySha, ref] = line.split("\t");
+    if (entrySha === sha && ref) return ref;
+  }
+  return null;
+}
+
+/**
+ * Apply a stash entry into `checkout`, keeping the staged/unstaged split when
+ * git will let us.
+ *
+ * `--index` is what preserves it. A plain apply merges both halves into one
+ * worktree state, so once the entry drops the staged snapshot is gone — for
+ * content the user deliberately `git add`ed that is lost work, not a
+ * cosmetic difference in what `git status` prints.
+ *
+ * `--index` is ATTEMPTED only when the target's index already matches HEAD,
+ * rather than tried and retried on failure. It refuses outright when the
+ * target has staged changes of its own, and a failed attempt is not free: for
+ * an entry made with `--include-untracked` it has already written the
+ * untracked files back by then, so the plain retry fails with "already
+ * exists" on a case that would have applied cleanly on the first try. Asking
+ * first costs one `git diff --cached`. The retry stays for every other way
+ * `--index` can fail, where the plain apply is no worse off than it would
+ * have been alone.
+ */
+async function applyStash(
+  checkout: string,
+  ref: string,
+  git: GitRun,
+): Promise<{ ok: boolean; flattened: boolean; stderr: string }> {
+  const staged = await git(checkout, ["diff", "--cached", "--quiet"]);
+  if (staged.exitCode === 0) {
+    const withIndex = await git(checkout, ["stash", "apply", "--index", ref]);
+    if (withIndex.exitCode === 0) {
+      return { ok: true, flattened: false, stderr: "" };
+    }
+  }
+  const plain = await git(checkout, ["stash", "apply", ref]);
+  return {
+    ok: plain.exitCode === 0,
+    flattened: plain.exitCode === 0,
+    stderr: plain.stderr,
+  };
+}
+
+/**
+ * Whether a stash entry carries staged content, i.e. whether flattening it
+ * actually loses anything.
+ *
+ * A stash's second parent is the index at push time, its first is HEAD. When
+ * those trees agree there was nothing staged, and a plain apply reproduces
+ * exactly what `--index` would have.
+ */
+async function carriedStagedContent(
+  checkout: string,
+  sha: string,
+  git: GitRun,
+): Promise<boolean> {
+  const res = await git(checkout, ["diff", "--quiet", `${sha}^`, `${sha}^2`]);
+  // 1 is "they differ"; anything else (128) is a question we could not ask,
+  // and guessing "yes" would put a warning on a move that lost nothing.
+  return res.exitCode === 1;
+}
+
+/**
+ * Copy untracked FILES from the source into the new worktree.
+ *
+ * Copying (rather than letting the stash carry them) is what makes `copy`
+ * safe: the source never stops having the files, so there is no window where
+ * they exist only inside a stash entry.
+ *
+ * One path per file, never a directory, which is the whole reason
+ * {@link readUncommitted} reads with `--untracked-files=all`. Handed git's
+ * collapsed `?? deep/` instead, this would recurse into it and copy the .env
+ * and the node_modules that git was deliberately excluding — content the move
+ * has no business relocating in either mode. Ignored files travel through the
+ * creation engine's file setup (`worktree.symlinkDirectories`,
+ * `.worktreeinclude`) or not at all.
+ *
+ * `recursive` stays on for `cp`'s benefit rather than for directories: it is
+ * what lets a single call handle whatever a path turns out to be.
+ *
+ * Asynchronous throughout. The daemon serves every session's events off this
+ * one loop, and a few thousand untracked files (a node_modules the repo does
+ * not ignore, a build directory) is enough for the synchronous form to hold
+ * it for half a second.
+ *
+ * Returns the paths it ACTUALLY copied, which is what the move reports. A file
+ * skipped below is not in the worktree, and a report naming it sends the user
+ * looking for work that never arrived.
+ */
+async function copyUntracked(
+  source: string,
+  destination: string,
+  paths: string[],
+): Promise<string[]> {
+  // Status output is sorted, so a directory's files arrive together and one
+  // mkdir covers the run of them.
+  let made: string | undefined;
+  const copied: string[] = [];
+  for (const rel of paths) {
+    const to = join(destination, rel);
+    const dir = dirname(to);
+    if (dir !== made) {
+      await mkdir(dir, { recursive: true });
+      made = dir;
+    }
+    try {
+      await cp(join(source, rel), to, { recursive: true });
+    } catch (err) {
+      // Gone since the status read: an agent working in that pane deleting
+      // its own scratch file is not a reason to fail the move.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      continue;
+    }
+    copied.push(rel);
+  }
+  return copied;
+}
+
+/**
+ * Move `source`'s uncommitted work into a new worktree, leaving the source
+ * without it (and, on any failure, exactly as it was found).
+ */
+export async function moveChangesToWorktree(
+  input: MoveChangesInput,
+): Promise<MoveChangesResult> {
+  const { source, git = runGit } = input;
+
+  // Resolved before the lock is taken, because it IS the lock's key. Doubles
+  // as the "is this a checkout at all" probe, which is why the refusal below
+  // is the not-a-repo one.
+  const scope = await stashScopeKey(source, git);
+  if (!scope) {
+    return {
+      ok: false,
+      reason: "not-a-repo",
+      error: `Not a git checkout: ${source}`,
+    };
+  }
+
+  return withMoveLock(scope, () => runMove(input));
+}
+
+/** The transaction itself. Only ever called under {@link withMoveLock}. */
+async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
+  const {
+    source,
+    name,
+    base,
+    untracked: mode = "move",
+    createWorktree,
+    git = runGit,
+  } = input;
+
+  // Everything below runs from the repository ROOT, not from the directory
+  // the caller named — which is routinely a subdirectory, since the picker
+  // passes a pane's cwd and the CLI its own pwd. Two reasons, both load
+  // bearing: `git status` reports paths relative to the root, so resolving
+  // them against a subdirectory names files that do not exist (the copy then
+  // copies nothing and calls it a success), and the stash itself can delete
+  // the subdirectory out from under the transaction when the last file in it
+  // goes. The root is also what the report names: a stash empties the whole
+  // worktree whichever folder of it the request came from.
+  const topLevel = await git(source, ["rev-parse", "--show-toplevel"]);
+  const root = topLevel.stdout.trim();
+  if (topLevel.exitCode !== 0 || !root) {
+    return {
+      ok: false,
+      reason: "not-a-repo",
+      error: `Not a git checkout: ${source}`,
+    };
+  }
+
+  const operation = await readOperationInProgress(root, git);
+  if (operation) {
+    return {
+      ok: false,
+      reason: "operation-in-progress",
+      error:
+        `Cannot move changes while ${operation} is in progress. ` +
+        `Finish or abort it first.`,
+    };
+  }
+
+  const state = await readUncommitted(root, git);
+  if (!state) {
+    return {
+      ok: false,
+      reason: "not-a-repo",
+      error: `Could not read the status of ${root}`,
+    };
+  }
+
+  // `leave` moves tracked changes only, so untracked files don't count toward
+  // "is there anything to move" for it.
+  const untrackedMoves = mode !== "leave";
+  // A nested checkout (a submodule, a stray clone) is the one thing `-uall`
+  // will not expand: git refuses to descend into another repository, so it
+  // arrives as a single `dir/` record. NEITHER mode relocates one. A copy would
+  // recurse in and take the nested repo's .git, its node_modules and its .env
+  // along with it, and `stash push --include-untracked` answers "Ignoring path
+  // dir/" and exits 0, leaving the directory exactly where it was. So this list
+  // is what either mode can honestly claim: the copy set for `copy`, and the
+  // report for `move`, whose stash arguments are unchanged — it still hands
+  // git the whole tree and lets git decline the part it will not take. Only
+  // `.claude/worktrees/` is covered upstream, by the hosting repo's exclude.
+  const untrackedFiles = state.untrackedPaths.filter(
+    (path) => !path.endsWith("/"),
+  );
+  const filesToCopy = mode === "copy" ? untrackedFiles : [];
+  const stashNeeded =
+    state.modified > 0 || (mode === "move" && state.untrackedPaths.length > 0);
+
+  if (!stashNeeded && filesToCopy.length === 0) {
+    return {
+      ok: false,
+      reason: "nothing-to-move",
+      error: untrackedMoves
+        ? `Nothing to move: ${root} has no uncommitted changes.`
+        : `Nothing to move: ${root} has no tracked changes, and untracked files are set to stay.`,
+    };
+  }
+
+  // The start point the worktree is cut from, decided HERE rather than left
+  // to the creation engine. Its default is the MAIN checkout's current branch
+  // (`resolveBase` in `worktree-create.ts`), which is the right answer for an
+  // ordinary spawn and the wrong one for a move: the source is routinely a
+  // linked worktree on a feature branch, and an edit to a file both histories
+  // have applies cleanly onto main — so the work lands on a history missing
+  // the commits it was written against, with nothing about it looking like a
+  // failure. What the changes belong on top of is the source's own HEAD.
+  //
+  // A SHA, never `--abbrev-ref`: a detached source answers with the literal
+  // string "HEAD", which the main checkout would then resolve to its own.
+  //
+  // Read before the push, so it names the commit the work was written against
+  // even if the source moves on while this runs.
+  let startPoint = base;
+  if (startPoint === undefined) {
+    const head = await git(root, ["rev-parse", "HEAD"]);
+    const sha = head.stdout.trim();
+    // An unborn HEAD has no commit to cut from, so the engine's default (and
+    // its own error reporting) stands.
+    if (head.exitCode === 0 && sha) startPoint = sha;
+  }
+
+  // --- Step 2: stash. Past here the source has been modified, so every
+  // failure below has to put it back. ---
+  const marker = stashMessage(randomBytes(4).toString("hex"), name);
+  let stashSha: string | undefined;
+  if (stashNeeded) {
+    const args = ["stash", "push", "--message", marker];
+    // Only `move` hands untracked files to the stash; `copy` duplicates them
+    // by hand afterwards and `leave` never touches them.
+    if (mode === "move") args.push("--include-untracked");
+    // Read either side of the push: only a ref that MOVED proves the entry on
+    // top belongs to this run.
+    const before = await readStashRef(root, git);
+    if (!before.read) {
+      // Refused BEFORE the push, which is the whole point of asking here:
+      // without a reading of the stack there is no way to prove afterwards
+      // which entry the push created, and the tree is still intact.
+      return {
+        ok: false,
+        reason: "stash-failed",
+        error:
+          `Could not read the stash stack in ${root}, so nothing was stashed and nothing ` +
+          `was moved. Your changes are untouched.`,
+      };
+    }
+    const pushed = await git(root, args);
+    const after = await readStashRef(root, git);
+    if (!after.read) {
+      // The push has already run, so the changes may be out of the tree with
+      // nothing here able to say where they went. Restoring blind would mean
+      // applying an entry this cannot identify, so it reports instead.
+      return {
+        ok: false,
+        reason: "stash-failed",
+        error:
+          `Could not tell whether the changes in ${root} were stashed: the stash stack could ` +
+          `not be read after the push. If they left the checkout they are in the stash; find ` +
+          `the '${marker}' entry with 'git stash list' and recover it with ` +
+          `'git stash pop stash@{N}'.`,
+        sourceRestored: false,
+      };
+    }
+    // A ref that MOVED is what proves this run created an entry at all; the
+    // nonce in the message is what says WHICH entry. Nothing is looked up
+    // when the ref stayed put, because then there is nothing of ours to find.
+    const movedRef = after.sha !== null && after.sha !== before.sha;
+    const found: StashLookup = movedRef
+      ? await findStashByMarker(root, marker, git)
+      : { read: true, sha: null };
+    const ours = found.read ? found.sha : null;
+    // A stack that could not be listed after the ref moved may well hold
+    // ours, and reporting an intact source there sends the user looking for
+    // changes that have already left it.
+    const workLeftTree = ours !== null || (movedRef && !found.read);
+
+    if (pushed.exitCode !== 0) {
+      // A failed push can still have created the entry: git writes
+      // `refs/stash` before it cleans the working tree, so a failure while
+      // removing untracked files leaves a complete entry behind a non-zero
+      // exit. Reporting no sha there would hide the only handle on work that
+      // is now half out of the tree.
+      return {
+        ok: false,
+        reason: "stash-failed",
+        error:
+          `Could not stash changes in ${root}: ${pushed.stderr.trim()}` +
+          (ours
+            ? ` A stash entry was created before it failed; your changes are in ${ours}.`
+            : ""),
+        ...(ours ? { stashSha: ours } : {}),
+        // An entry means work left the tree and nothing here put it back.
+        // Without one the push never got that far, and claiming an unrestored
+        // source would send the user hunting for changes still in front of
+        // them.
+        ...(workLeftTree ? { sourceRestored: false } : {}),
+      };
+    }
+
+    if (!movedRef) {
+      // Exit 0 and nothing created: "No local changes to save", because the
+      // tree went clean between the status read above and this push. The
+      // entry on top (if any) is somebody else's — a previous run of this
+      // function included, since they share this message — and adopting it
+      // would apply and then DROP their work.
+      return {
+        ok: false,
+        reason: "nothing-to-move",
+        error:
+          `Nothing to move: ${root} had no uncommitted changes left by the time they ` +
+          `were stashed.`,
+      };
+    }
+
+    // The stack moved but carries nothing of ours: either the push created
+    // nothing and somebody else's landed in the same moment, or the stack
+    // could not be listed to look. Both leave an entry this run cannot name,
+    // so it refuses rather than guessing, and above all does not act on
+    // whatever else is in there.
+    if (!ours) {
+      return {
+        ok: false,
+        reason: "stash-failed",
+        error:
+          `Stashed the changes in ${root}, but the entry holding them could not be ` +
+          `identified afterwards, so nothing further was done. The work is in the stash; ` +
+          `find the newest entry with 'git stash list' and recover it with ` +
+          `'git stash pop stash@{N}'.`,
+        // The stack moved, so changes have left a checkout and nothing here
+        // put them back: a refusal the user has to act on, not one to show
+        // for four seconds.
+        sourceRestored: false,
+      };
+    }
+    stashSha = ours;
+  }
+
+  /**
+   * Put the source back the way it was found. Used by every failure below.
+   *
+   * Goes through {@link applyStash} for the same reason the worktree apply
+   * does: a source whose staged and unstaged halves were merged back into one
+   * is not the state it was found in. The flattening is not reported here —
+   * the caller is already being told the move failed, and which half a
+   * restored edit sits in is not the headline.
+   */
+  const restoreSource = async (): Promise<boolean> => {
+    if (!stashSha) return true;
+    const ref = await findStashRef(root, stashSha, git);
+    return (await applyStash(root, ref ?? stashSha, git)).ok;
+  };
+
+  // --- Step 3: create the worktree. ---
+  let worktreePath: string;
+  let worktreeBranch: string | undefined;
+  try {
+    const created = await createWorktree({ name, base: startPoint });
+    worktreePath = created.path;
+    worktreeBranch = created.branch;
+    if (!created.created) {
+      // A worktree that was already there. The engine opens one happily for
+      // an explicit name, and for an ordinary spawn that is the right answer,
+      // but a move cannot use it: the rollback below force-removes the
+      // worktree, which would take a checkout this run did not make and
+      // whatever uncommitted work was sitting in it. Refusing costs a retry
+      // under another name; the alternative costs somebody their files.
+      const restored = await restoreSource();
+      return {
+        ok: false,
+        reason: "create-failed",
+        error:
+          `A worktree already exists at ${created.path}, and moving changes needs a fresh one ` +
+          `(pick another name, or leave the name empty). Nothing was moved.`,
+        stashSha,
+        sourceRestored: restored,
+      };
+    }
+  } catch (err) {
+    const restored = await restoreSource();
+    return {
+      ok: false,
+      reason: "create-failed",
+      error: `Could not create the worktree: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+      stashSha,
+      sourceRestored: restored,
+    };
+  }
+
+  /**
+   * Undo the creation. Best effort by design: the changes are what matter,
+   * and a leftover directory is a far smaller problem than a failed rollback
+   * masking the real error.
+   *
+   * Only ever reaches a worktree THIS run created: the branch above turns a
+   * merely-opened one into a `create-failed` before any of the callers below
+   * exist. That refusal is what makes an unconditional `--force` safe here.
+   */
+  const removeWorktree = async (): Promise<boolean> => {
+    const removed = await git(root, [
+      "worktree",
+      "remove",
+      "--force",
+      worktreePath,
+    ]);
+    return removed.exitCode === 0;
+  };
+
+  /**
+   * What the rollback actually left behind.
+   *
+   * Reported rather than asserted, because `worktree remove --force` is not
+   * guaranteed: a LOCKED worktree makes it exit 128 and stay exactly where it
+   * is, and a message claiming the removal is then a claim the user can check
+   * and find false. A removal that DID work still leaves the branch it was
+   * created on, so both halves name what survived: cleaning either up is the
+   * user's to do, and they can only do it if they are told what it is called.
+   */
+  const rollbackNote = (removed: boolean): string => {
+    const branch = worktreeBranch ? ` '${worktreeBranch}'` : "";
+    if (removed) {
+      return worktreeBranch
+        ? ` The worktree was removed, though its branch${branch} is still there.`
+        : ` The worktree was removed.`;
+    }
+    return (
+      ` The worktree at ${worktreePath} could not be removed and is still there` +
+      `${branch ? ` on branch${branch}` : ""}; clean it up with 'ccmux worktree prune'.`
+    );
+  };
+
+  // --- Step 4: apply into the new worktree. ---
+  let flattenedIndex = false;
+  if (stashSha) {
+    const ref = await findStashRef(root, stashSha, git);
+    const applied = await applyStash(worktreePath, ref ?? stashSha, git);
+    if (!applied.ok) {
+      const removed = await removeWorktree();
+      const restored = await restoreSource();
+      return {
+        ok: false,
+        reason: "apply-failed",
+        error:
+          `Could not apply the changes in the new worktree: ${applied.stderr.trim()}. ` +
+          `Your changes were kept in the stash.` +
+          rollbackNote(removed),
+        stashSha,
+        sourceRestored: restored,
+      };
+    }
+    // Worth mentioning only when there WAS a split to lose.
+    flattenedIndex =
+      applied.flattened && (await carriedStagedContent(root, stashSha, git));
+  }
+
+  // --- Step 5: untracked copies. ---
+  let copiedFiles: string[] = [];
+  if (filesToCopy.length > 0) {
+    try {
+      copiedFiles = await copyUntracked(root, worktreePath, filesToCopy);
+    } catch (err) {
+      const removed = await removeWorktree();
+      const restored = await restoreSource();
+      return {
+        ok: false,
+        reason: "copy-failed",
+        error:
+          `Could not copy untracked files into the worktree: ${
+            err instanceof Error ? err.message : String(err)
+          }.` + rollbackNote(removed),
+        stashSha,
+        sourceRestored: restored,
+      };
+    }
+  }
+
+  // --- Step 6: the commit point. The work is in the worktree, so the backup
+  // can go. A failure here is cosmetic and must not fail the move. ---
+  let leftoverStash: string | undefined;
+  if (stashSha) {
+    const ref = await findStashRef(root, stashSha, git);
+    const dropped = ref
+      ? await git(root, ["stash", "drop", ref])
+      : { exitCode: 1, stdout: "", stderr: "entry not found" };
+    if (dropped.exitCode !== 0) leftoverStash = stashSha;
+  }
+
+  return {
+    ok: true,
+    worktreePath,
+    source: root,
+    moved: state.modified,
+    untracked: {
+      // Neither mode reports a path it did not relocate. `copy` names what the
+      // copy actually wrote, so a file deleted between the status read and the
+      // copy is absent here as well as from the worktree; `move` drops the
+      // nested checkouts git declined to stash. Anything else names files the
+      // user would go looking for in a worktree that does not have them.
+      mode,
+      files: mode === "move" ? untrackedFiles : copiedFiles,
+    },
+    ...(leftoverStash ? { leftoverStash } : {}),
+    ...(flattenedIndex ? { flattenedIndex: true } : {}),
+  };
+}

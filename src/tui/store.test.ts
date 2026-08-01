@@ -15,7 +15,11 @@ mock.module("./utils/tmux", () => ({
   capturePane: capturePaneSpy,
 }));
 
-const { createTUIStore: _createTUIStore } = await import("./store");
+const {
+  createTUIStore: _createTUIStore,
+  NEW_SESSION_FIELDS,
+  namesAWorktree,
+} = await import("./store");
 
 function headerLabels(items: FlatItem[]): string[] {
   return items
@@ -2954,6 +2958,13 @@ describe("store", () => {
         // default; a worktree is something you ask for.
         destination: "here",
         prompt: "",
+        // Not a move: an ordinary new session starts fresh, and the
+        // untracked choice is inert until one is.
+        moveChanges: false,
+        untracked: "move",
+        // No name until one is typed: null is the DERIVED state, and the
+        // difference is what keeps an untouched dialog off create-or-open.
+        worktreeName: null,
         field: "agent",
       });
     });
@@ -3011,8 +3022,103 @@ describe("store", () => {
         placement: "split-h",
         destination: "worktree",
         prompt: "fix the tests",
+        moveChanges: false,
+        untracked: "move",
+        worktreeName: null,
         field: "prompt",
       });
+    });
+
+    it("opens in move-changes mode with the destination already locked", () => {
+      const store = createTUIStore();
+
+      store.actions.openNewSessionDialog({
+        cwd: "/repo",
+        agent: "claude",
+        moveChanges: true,
+      });
+
+      expect(store.state.newSession).toEqual({
+        cwd: "/repo",
+        agent: "claude",
+        placement: "window",
+        // The changes have nowhere to go but a new worktree, so the mode
+        // arrives with the destination already made rather than as a choice
+        // the user has to make a second time.
+        destination: "worktree",
+        prompt: "",
+        moveChanges: true,
+        untracked: "move",
+        worktreeName: null,
+        field: "agent",
+      });
+    });
+
+    it("skips the locked destination when tabbing in move-changes mode", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({
+        cwd: "/repo",
+        agent: "claude",
+        moveChanges: true,
+      });
+
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("placement");
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("prompt");
+      // Straight past `destination`, which cannot be changed here, to the
+      // name of the worktree the move is going into...
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("worktreeName");
+      // ...and then the untracked choice, which only exists here.
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("untracked");
+      store.actions.moveNewSessionField(1);
+      expect(store.state.newSession?.field).toBe("agent");
+      store.actions.moveNewSessionField(-1);
+      expect(store.state.newSession?.field).toBe("untracked");
+    });
+
+    it("never reaches the untracked field outside move-changes mode", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+
+      const seen = new Set<string>();
+      for (let i = 0; i < NEW_SESSION_FIELDS.length + 2; i++) {
+        seen.add(store.state.newSession!.field);
+        store.actions.moveNewSessionField(1);
+      }
+
+      expect(seen.has("untracked")).toBe(false);
+      expect(seen.has("destination")).toBe(true);
+    });
+
+    it("refuses to move the destination off the worktree in move-changes mode", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({
+        cwd: "/repo",
+        agent: "claude",
+        moveChanges: true,
+      });
+
+      // The destination is what makes the request a move; flipping it back
+      // would post a spawn that silently dropped the changes.
+      store.actions.setNewSessionDestination("here");
+
+      expect(store.state.newSession?.destination).toBe("worktree");
+    });
+
+    it("updates the untracked mode", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({
+        cwd: "/repo",
+        agent: "claude",
+        moveChanges: true,
+      });
+
+      store.actions.setNewSessionUntracked("leave");
+
+      expect(store.state.newSession?.untracked).toBe("leave");
     });
 
     it("ignores draft edits while the dialog is closed", () => {
@@ -3021,9 +3127,196 @@ describe("store", () => {
       store.actions.setNewSessionAgent("pi");
       store.actions.setNewSessionPlacement("split-v");
       store.actions.setNewSessionPrompt("hi");
+      store.actions.setNewSessionWorktreeName("nope");
       store.actions.moveNewSessionField(1);
 
       expect(store.state.newSession).toBeNull();
+    });
+
+    /**
+     * The worktree name (issue #83). Two states, and the difference is what
+     * the daemon does on a collision: a DERIVED name gets numbered past an
+     * existing worktree, an EXPLICIT one opens it. Null is derived.
+     */
+    describe("namesAWorktree", () => {
+      // One rule with three consumers (field presence here, the dialog's Name
+      // row, and App's height floor). They must agree: a floor computed for
+      // fewer rows than the dialog renders overlaps a row rather than
+      // clipping it.
+      it("is true for a worktree destination", () => {
+        expect(
+          namesAWorktree({ moveChanges: false, destination: "worktree" }),
+        ).toBe(true);
+      });
+
+      it("is true for a move, whose destination lock could come loose", () => {
+        expect(namesAWorktree({ moveChanges: true, destination: "here" })).toBe(
+          true,
+        );
+      });
+
+      it("is false for a plain session in the checkout it opened over", () => {
+        expect(
+          namesAWorktree({ moveChanges: false, destination: "here" }),
+        ).toBe(false);
+      });
+    });
+
+    describe("worktree name", () => {
+      /** A dialog with a worktree destination and a prompt to derive from. */
+      function worktreeDialog() {
+        const store = createTUIStore();
+        store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+        store.actions.setNewSessionDestination("worktree");
+        store.actions.setNewSessionPrompt("fix the flaky test");
+        return store;
+      }
+
+      it("reaches the name only once a worktree is the destination", () => {
+        const store = createTUIStore();
+        store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+
+        const walk = () => {
+          store.actions.setNewSessionField("agent");
+          const seen: string[] = [];
+          for (let i = 0; i < NEW_SESSION_FIELDS.length; i++) {
+            seen.push(store.state.newSession!.field);
+            store.actions.moveNewSessionField(1);
+          }
+          return seen;
+        };
+
+        // Nothing is being named, so the row would refuse every key.
+        expect(walk()).not.toContain("worktreeName");
+        store.actions.setNewSessionDestination("worktree");
+        // Directly after the destination: a name means nothing until there is
+        // a worktree to give it to.
+        expect(walk()).toEqual([
+          "agent",
+          "placement",
+          "prompt",
+          "destination",
+          "worktreeName",
+          "agent",
+        ]);
+      });
+
+      it("never focuses a field this draft does not have", () => {
+        // The option keys are scoped to the focused field, so focus parked on
+        // a row that is not rendered means `1`-`9` acting on something the
+        // user cannot see. Reachable by a click handler for a row that has
+        // since gone, and by any caller naming a field the mode does not have.
+        const store = createTUIStore();
+        store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+
+        // `untracked` belongs to move-changes mode; this dialog has no such
+        // row and no such choice.
+        store.actions.setNewSessionField("untracked");
+
+        expect(store.state.newSession?.field).toBe("agent");
+      });
+
+      it("stays derived while the prompt is typed", () => {
+        const store = worktreeDialog();
+
+        store.actions.setNewSessionPrompt("fix something else");
+
+        // Still the prompt's to name: nothing was typed into the field, so
+        // the request must not start carrying a name of its own.
+        expect(store.state.newSession?.worktreeName).toBeNull();
+      });
+
+      it("freezes the name once it is typed into", () => {
+        const store = worktreeDialog();
+
+        store.actions.setNewSessionWorktreeName("flaky-fix");
+        store.actions.setNewSessionPrompt("a completely different prompt");
+
+        expect(store.state.newSession?.worktreeName).toBe("flaky-fix");
+      });
+
+      it("returns to derived when the field is cleared", () => {
+        const store = worktreeDialog();
+        store.actions.setNewSessionWorktreeName("flaky-fix");
+
+        // An empty text input is the only way to spell "no name of my own".
+        store.actions.setNewSessionWorktreeName("");
+
+        expect(store.state.newSession?.worktreeName).toBeNull();
+      });
+
+      it("settles the typed name to its slug when focus leaves", () => {
+        const store = worktreeDialog();
+        store.actions.setNewSessionField("worktreeName");
+        store.actions.setNewSessionWorktreeName("Flaky Test Fix!");
+
+        store.actions.moveNewSessionField(1);
+
+        // The daemon slugifies whatever it is given; showing the same thing
+        // is what makes the row a preview rather than a guess.
+        expect(store.state.newSession?.worktreeName).toBe("flaky-test-fix");
+      });
+
+      it("leaves the name alone while the field still has focus", () => {
+        const store = worktreeDialog();
+        store.actions.setNewSessionField("worktreeName");
+        store.actions.setNewSessionWorktreeName("Flaky Test ");
+
+        // A click on the row it is already on is not a blur, and slugifying
+        // mid-word would eat the trailing space the next word needs.
+        store.actions.setNewSessionField("worktreeName");
+
+        expect(store.state.newSession?.worktreeName).toBe("Flaky Test ");
+      });
+
+      it("keeps a name it cannot slugify, rather than erasing it", () => {
+        const store = worktreeDialog();
+        store.actions.setNewSessionField("worktreeName");
+        store.actions.setNewSessionWorktreeName("修复!!!");
+
+        store.actions.moveNewSessionField(1);
+
+        // Nothing survives the slug rule, but the field is not empty and the
+        // user did not clear it. Erasing it back to the derived placeholder
+        // (the old behaviour) reads as "accepted, and renamed to that", and
+        // Enter would then quietly spawn under a name nobody typed. The text
+        // stays put; submitting refuses it out loud. See App.tsx.
+        expect(store.state.newSession?.worktreeName).toBe("修复!!!");
+      });
+
+      it("moves focus off the name when the destination leaves the worktree", () => {
+        const store = worktreeDialog();
+        store.actions.setNewSessionField("worktreeName");
+
+        store.actions.setNewSessionDestination("here");
+
+        // The row is gone; focus left on it would make the next Tab start
+        // from a field the list has never heard of.
+        expect(store.state.newSession?.field).toBe("destination");
+      });
+
+      it("keeps a typed name across a round trip through this checkout", () => {
+        const store = worktreeDialog();
+        store.actions.setNewSessionWorktreeName("flaky-fix");
+
+        store.actions.setNewSessionDestination("here");
+        store.actions.setNewSessionDestination("worktree");
+
+        expect(store.state.newSession?.worktreeName).toBe("flaky-fix");
+      });
+
+      it("gives a move-changes dialog the same field", () => {
+        const store = createTUIStore();
+        store.actions.openNewSessionDialog({
+          cwd: "/repo",
+          agent: "claude",
+          moveChanges: true,
+        });
+
+        store.actions.setNewSessionWorktreeName("rescue");
+
+        expect(store.state.newSession?.worktreeName).toBe("rescue");
+      });
     });
 
     it("restores the last spawned agent from persisted state", () => {

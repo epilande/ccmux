@@ -17,7 +17,12 @@ import {
 } from "@opentui/solid";
 import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../types/session";
-import { createTUIStore, TickContext, type NewSessionPlacement } from "./store";
+import {
+  createTUIStore,
+  namesAWorktree,
+  TickContext,
+  type NewSessionPlacement,
+} from "./store";
 import { killActionPath, restartActionPath } from "./utils/invoke-actions";
 import {
   formatReviewPrompt,
@@ -60,8 +65,19 @@ import {
   NewSessionDialog,
   DESTINATION_OPTIONS,
   PLACEMENT_OPTIONS,
+  UNTRACKED_OPTIONS,
+  newSessionFloorRows,
 } from "./components/NewSessionDialog";
-import { slugFromPrompt } from "../daemon/worktree-create";
+import { NoticeDialog } from "./components/NoticeDialog";
+import { slugFromPrompt, slugify } from "../daemon/worktree-create";
+import {
+  failureNeedsAcknowledgement,
+  moveNeedsAcknowledgement,
+  moveReportLines,
+  moveSummary,
+  stashRecoveryLines,
+  type MoveReport,
+} from "../lib/move-report";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { PruneDialog } from "./components/PruneDialog";
 import { HelpOverlay } from "./components/HelpOverlay";
@@ -143,6 +159,9 @@ const SPAWN_SPLIT: Record<NewSessionPlacement, "h" | "v" | false> = {
 
 export function App(props: AppProps) {
   const renderer = useRenderer();
+  /** The viewport, for the handful of key handlers that have to agree with
+   *  what a component decided it had room to draw. */
+  const appDims = useTerminalDimensions();
   // Probed once at launch (cheap `which`, no need to react to hunk being
   // installed mid-session): gates the footer hint and help row. `d` itself
   // re-probes live so a hunk installed after launch works without restart.
@@ -512,7 +531,8 @@ export function App(props: AppProps) {
       store.state.confirmMode ||
       store.state.previewFocused ||
       store.state.newSession !== null ||
-      store.state.prune !== null
+      store.state.prune !== null ||
+      store.state.notice !== null
     );
   }
 
@@ -529,6 +549,63 @@ export function App(props: AppProps) {
     activateItem(item);
   }
 
+  /**
+   * Whether the row whose menu is open has uncommitted work, once the daemon
+   * has said. Null while unknown, and KEYED BY SESSION so a previous row's
+   * answer can never gate a different row's menu.
+   *
+   * Asked lazily, per menu-open, rather than enriched onto every row: this is
+   * one `git status` on an explicit, human-paced action, so it costs nothing
+   * until someone asks and can never be stale. A dirty flag on the board
+   * would mean a git spawn per session per scan, which is the cost the PR
+   * resolver's cache and sweep exist to avoid.
+   */
+  const [menuDirty, setMenuDirty] = createSignal<{
+    sessionId: string;
+    dirty: boolean;
+  } | null>(null);
+
+  /**
+   * Ask whether a row's checkout is dirty, for the menu gate.
+   *
+   * The answer arrives after the menu is already on screen, so the item it
+   * gates is APPENDED LAST (see `sessionMenuItems`). Anywhere else and a row
+   * the user is already reaching for would slide down as this lands — the
+   * same hazard that moved Fork below Restart. There is deliberately no
+   * placeholder or "checking…" row in the meantime: the item is simply
+   * absent, so the menu never shows something that isn't actionable.
+   *
+   * The directory is named explicitly rather than left to the endpoint's
+   * default, even though the two rules agree today. This client is what will
+   * POST the move, and it decides the source directory here, from this
+   * snapshot of the row; the daemon would answer from its own pane cache,
+   * which can be a tick behind. Asking about a different checkout than the one
+   * the move will run in is how a gate ends up offering an action that then
+   * refuses — or hiding one that would have worked.
+   */
+  function refreshMenuDirty(session: EnrichedSession): void {
+    const sessionId = session.id;
+    setMenuDirty(null);
+    const url = new URL(`${getDaemonUrl()}/sessions/${sessionId}/dirty`);
+    url.searchParams.set("cwd", sessionCwd(session));
+    fetch(url, {
+      signal: AbortSignal.timeout(5_000),
+    })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const data = (await response.json()) as { dirty?: boolean };
+        // Only apply it if that row's menu is STILL the one open. A slow
+        // answer for a menu the user already dismissed (or reopened on
+        // another row) must not resurrect an item there.
+        if (store.state.contextMenu?.sessionId !== sessionId) return;
+        setMenuDirty({ sessionId, dirty: data.dirty === true });
+      })
+      .catch(() => {
+        // Unreachable daemon, timeout, malformed body: leave it unknown, so
+        // the item stays hidden rather than offering a move that can't run.
+      });
+  }
+
   function handleRowContextMenu(
     item: FlatItem,
     index: number,
@@ -539,11 +616,12 @@ export function App(props: AppProps) {
     }
     store.actions.setSelectedIndex(index);
     if (item.type === "session") {
-      store.actions.showContextMenu(
-        item.filteredSession.session.id,
-        event.x,
-        event.y,
-      );
+      const session = item.filteredSession.session;
+      store.actions.showContextMenu(session.id, event.x, event.y);
+      // Same condition both consumers gate on (`sessionMenuItems` and
+      // `sessionMenuReservedRows`): a background row has no move to offer, so
+      // asking would spend a `git status -uall` on an answer nobody reads.
+      if (session.trackingMode !== "background") refreshMenuDirty(session);
     } else {
       store.actions.showGroupContextMenu(item.groupKey, event.x, event.y);
     }
@@ -653,6 +731,29 @@ export function App(props: AppProps) {
     openNewSession({ cwd: sessionCwd(session), agent: session.agentType });
   }
 
+  /**
+   * "Move changes to worktree": open the new-session dialog over this row's
+   * checkout, in move-changes mode.
+   *
+   * The mode carries the rest of the prefill (destination locked to a new
+   * worktree, the untracked-files choice), so this stays what it always was:
+   * the row's cwd and agent, plus the one flag that says what the dialog is
+   * for. Name and prompt are left editable, which is the point of routing
+   * through the dialog rather than moving on the click.
+   */
+  function contextMenuMoveChanges() {
+    const cm = store.state.contextMenu;
+    if (!cm) return;
+    const session = store.state.sessions.find((s) => s.id === cm.sessionId);
+    store.actions.hideContextMenu();
+    if (!session) return;
+    openNewSession({
+      cwd: sessionCwd(session),
+      agent: session.agentType,
+      moveChanges: true,
+    });
+  }
+
   function groupContextMenuNewSession() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
@@ -725,6 +826,27 @@ export function App(props: AppProps) {
         ...reviewItem,
       ];
     }
+    // Only once the daemon has confirmed this row has uncommitted work.
+    // Absent while unknown, and absent when clean: an item that offers to
+    // move nothing, or that refuses on click, is the "reads as broken"
+    // outcome hide-don't-disable exists to avoid.
+    const dirty = menuDirty();
+    const moveChangesItem: ContextMenuItem[] =
+      session && dirty?.sessionId === session.id && dirty.dirty
+        ? [
+            {
+              // Must fit ContextMenu's fixed 22-col box on ONE line: the
+              // component computes its height as `items.length + 2`, so a
+              // label that wraps renders two rows and silently breaks the
+              // height (and therefore the clamping) for the whole menu. The
+              // full phrase lives in the dialog this opens.
+              label: "Move changes",
+              hint: "",
+              color: theme.peach,
+              action: contextMenuMoveChanges,
+            },
+          ]
+        : [];
     // Hidden rather than disabled when the agent or the row can't be forked:
     // an item that is only ever there for Claude rows with hooks installed
     // would otherwise read as broken on every other row.
@@ -764,7 +886,35 @@ export function App(props: AppProps) {
       // already hovering the old position.
       ...forkItem,
       ...reviewItem,
+      // ABSOLUTE LAST, and that position is the whole design. Unlike every
+      // item above it, this one arrives ASYNCHRONOUSLY: the menu is already
+      // on screen when the dirty answer lands, so anywhere else it would
+      // shove the items below it down under a cursor that is already moving.
+      // Last means the only thing that can change is empty space.
+      ...moveChangesItem,
     ];
+  }
+
+  /**
+   * Rows the row menu holds for the "Move changes" item that may still
+   * arrive. See `ContextMenu`'s `reservedRows`: this is what keeps a
+   * bottom-clamped menu from sliding up as the dirty answer lands.
+   *
+   * Held from the moment the menu opens until it closes, and released only
+   * once the item is actually IN the list — a menu that never gets the item
+   * keeps the row of air, because taking it back moves the menu just as
+   * surely as growing into it would.
+   */
+  function sessionMenuReservedRows(): number {
+    const cm = store.state.contextMenu;
+    const session = cm
+      ? store.state.sessions.find((s) => s.id === cm.sessionId)
+      : undefined;
+    // Background rows never offer the move, so they have nothing to hold.
+    if (!session || session.trackingMode === "background") return 0;
+    const dirty = menuDirty();
+    const shown = dirty?.sessionId === session.id && dirty.dirty;
+    return shown ? 0 : 1;
   }
 
   function groupMenuItems(): ContextMenuItem[] {
@@ -994,7 +1144,11 @@ export function App(props: AppProps) {
     return { cwd: pickerCwd() };
   }
 
-  function openNewSession(context: { cwd: string; agent?: string }): void {
+  function openNewSession(context: {
+    cwd: string;
+    agent?: string;
+    moveChanges?: boolean;
+  }): void {
     // Mirrors `reviewSession`: refuse at the point of intent rather than
     // opening a dialog with a blank Directory row whose Enter round-trips
     // to a 400 from the daemon.
@@ -1012,6 +1166,7 @@ export function App(props: AppProps) {
         store.state.lastSpawnAgent ??
         spawnableAgents()?.[0]?.name ??
         "claude",
+      moveChanges: context.moveChanges,
     });
   }
 
@@ -1041,6 +1196,18 @@ export function App(props: AppProps) {
   } | null {
     const draft = store.state.newSession;
     if (!draft) return null;
+    // Too short a terminal for the dialog to draw its fields at all: it says
+    // so instead, and the number keys must not act on choices that are not on
+    // screen. The same floor the component sizes itself against.
+    if (
+      appDims().height <
+      newSessionFloorRows({
+        moveChanges: draft.moveChanges,
+        namesAWorktree: namesAWorktree(draft),
+      })
+    ) {
+      return null;
+    }
     switch (draft.field) {
       case "agent":
         return {
@@ -1059,12 +1226,30 @@ export function App(props: AppProps) {
           },
         };
       case "destination":
+        // Locked in move-changes mode, where the field is not reachable by
+        // Tab either; the store refuses the write regardless.
+        if (draft.moveChanges) return null;
         return {
           options: DESTINATION_OPTIONS.map((option) => option.value),
           value: draft.destination,
           select: (value) => {
             const option = DESTINATION_OPTIONS.find((o) => o.value === value);
             if (option) store.actions.setNewSessionDestination(option.value);
+          },
+        };
+      case "untracked":
+        // Move-changes mode only, and paired with `destination`'s guard
+        // above: the store keeps focus off a field the draft does not have,
+        // and this keeps the number keys off it if focus ever gets there
+        // anyway. A key that silently changes an invisible choice is the
+        // failure worth two guards.
+        if (!draft.moveChanges) return null;
+        return {
+          options: UNTRACKED_OPTIONS.map((option) => option.value),
+          value: draft.untracked,
+          select: (value) => {
+            const option = UNTRACKED_OPTIONS.find((o) => o.value === value);
+            if (option) store.actions.setNewSessionUntracked(option.value);
           },
         };
       default:
@@ -1092,6 +1277,42 @@ export function App(props: AppProps) {
     if (value !== undefined) field.select(value);
   }
 
+  /**
+   * What to do once the current notice has been read — the picker's handover
+   * to a pane that already exists, held back so the message is not carried
+   * off screen by the exit it precedes. Null when the notice reports
+   * something that has no next step.
+   */
+  let afterNotice: (() => void) | null = null;
+
+  /** Acknowledge whatever the notice was reporting, then do what it was
+   *  holding up. */
+  function dismissNotice(): void {
+    const next = afterNotice;
+    afterNotice = null;
+    store.actions.dismissNotice();
+    next?.();
+  }
+
+  /**
+   * What `POST /spawn` answers with, success or failure.
+   *
+   * One shape for both, because the halves overlap: a spawn that failed AFTER
+   * relocating the changes carries the same `move` report a successful one
+   * does, and it is the only place that says the user's work has left their
+   * checkout. `stashSha`/`sourceRestored` describe a move that was refused
+   * before that point. Every field is optional — an older daemon answers
+   * without any of them (see the stale-daemon check in `reportMove`).
+   */
+  interface SpawnBody {
+    paneId?: string;
+    error?: string;
+    worktree?: { name?: string };
+    stashSha?: string;
+    sourceRestored?: boolean;
+    move?: MoveReport;
+  }
+
   async function submitNewSession(): Promise<void> {
     const draft = store.state.newSession;
     if (!draft || spawnInFlight) return;
@@ -1117,13 +1338,41 @@ export function App(props: AppProps) {
       );
       return;
     }
-    // The dialog has no name field, so the prompt is the only name it can
-    // offer. Refuse here rather than posting: the daemon's own refusal reads
-    // "pass one explicitly", which is advice for the CLI and not something
-    // this dialog can act on.
-    if (draft.destination === "worktree" && !slugFromPrompt(prompt)) {
+    // The name the request will carry, settled by the daemon's own slug rule
+    // so that what the row showed is what gets created. Empty means an
+    // untouched field: let the daemon derive one.
+    const worktreeName =
+      draft.destination === "worktree" && draft.worktreeName !== null
+        ? slugify(draft.worktreeName)
+        : "";
+    // A name was typed, and nothing survives the slug rule. Refused rather
+    // than derived: with a prompt present, deriving would spawn under a name
+    // the user did not type and did not ask for, and the field would still be
+    // showing theirs. The rule is named, because "why not" is the next
+    // question and the answer is not guessable from the refusal.
+    if (
+      draft.destination === "worktree" &&
+      draft.worktreeName !== null &&
+      draft.worktreeName.trim() !== "" &&
+      !worktreeName
+    ) {
       store.actions.showToast(
-        "Type a prompt to name the worktree, or use ccmux spawn --worktree <name>",
+        "A worktree name needs letters or numbers; clear the field to derive one",
+        4000,
+      );
+      return;
+    }
+    // With neither a name nor a prompt to derive one from there is nothing to
+    // create. Refused here rather than posted: the daemon's own refusal reads
+    // "pass one explicitly", which was CLI advice back when this dialog had
+    // no field to act on it with.
+    if (
+      draft.destination === "worktree" &&
+      !worktreeName &&
+      !slugFromPrompt(prompt)
+    ) {
+      store.actions.showToast(
+        "Name the worktree, or type a prompt to derive one from",
         4000,
       );
       return;
@@ -1137,7 +1386,7 @@ export function App(props: AppProps) {
     // is to put you in the new pane, so it jumps and gets out of the way.
     const detach = props.sidebar === true;
     spawnInFlight = true;
-    let spawned: { paneId?: string } | null = null;
+    let spawned: SpawnBody | null = null;
     try {
       const callerPane = await resolveSpawnPane();
       // A sidebar alone in its window has nothing to split but itself, and
@@ -1163,24 +1412,55 @@ export function App(props: AppProps) {
           callerPane: callerPane ?? undefined,
           prompt: prompt || undefined,
           detach,
-          // The daemon derives the name from the prompt when none is given,
-          // which is the same rule the row previews, so the two cannot drift.
-          worktree: draft.destination === "worktree" ? {} : undefined,
+          // A name is sent only when one was TYPED. Left out, the daemon
+          // derives it from the prompt by the same rule the row previews and
+          // numbers it past a collision; sent, it means that worktree
+          // specifically, and an existing one of that name is opened rather
+          // than sidestepped. Posting the preview as if it had been typed
+          // would silently swap the first behaviour for the second.
+          //
+          // In move-changes mode the same field carries the move: the daemon
+          // routes creation through it, so the worktree is made once, with
+          // the changes already in it.
+          worktree:
+            draft.destination === "worktree"
+              ? {
+                  ...(worktreeName ? { name: worktreeName } : {}),
+                  ...(draft.moveChanges
+                    ? { withChanges: true, untracked: draft.untracked }
+                    : {}),
+                }
+              : undefined,
         }),
       });
-      const body = (await response.json().catch(() => null)) as {
-        paneId?: string;
-        error?: string;
-      } | null;
+      const body = (await response
+        .json()
+        .catch(() => null)) as SpawnBody | null;
       if (response.ok) {
         spawned = body ?? {};
       } else {
-        // Leave the dialog open: every 400 here (agent can't take a prompt,
-        // cwd is gone) is something the user can fix in place.
-        store.actions.showToast(
-          `Spawn failed: ${body?.error ?? response.statusText}`,
-          4000,
-        );
+        // Leave the dialog open either way: every refusal here (agent can't
+        // take a prompt, cwd is gone, that worktree name is taken) is
+        // something the user can fix in the fields they are still looking at.
+        //
+        // What changes is how the message is delivered. A move can fail with
+        // the user's work parked in a stash, or after it has already been
+        // relocated, and those hand them something to do afterwards — a
+        // four-second toast that truncates a sha is the same as saying
+        // nothing. The daemon's own text leads in both cases: it is written
+        // to be actionable, and the fallback exists only for a body that
+        // never arrived.
+        const error = body?.error ?? response.statusText;
+        const what = draft.moveChanges ? "Move failed" : "Spawn failed";
+        if (body && failureNeedsAcknowledgement(body)) {
+          store.actions.showNotice(what, [
+            error,
+            ...stashRecoveryLines(body),
+            ...(body.move ? moveReportLines(body.move, draft.cwd) : []),
+          ]);
+        } else {
+          store.actions.showToast(`${what}: ${error}`, 4000);
+        }
       }
     } catch (err: unknown) {
       store.actions.showToast(`Spawn failed: ${errText(err)}`, 4000);
@@ -1192,6 +1472,9 @@ export function App(props: AppProps) {
       if (!spawned) spawnInFlight = false;
     }
     if (!spawned) return;
+    // Const so the closures below keep the narrowing; `spawned` is the flag
+    // the `finally` above writes.
+    const landed = spawned;
 
     // The pane EXISTS from here on, so nothing below may report a spawn
     // failure. Remembering the agent is best-effort for exactly that reason:
@@ -1203,14 +1486,73 @@ export function App(props: AppProps) {
       store.actions.closeNewSessionDialog();
       spawnInFlight = false;
     }
-    if (detach) {
-      store.actions.showToast(`Spawned ${agent.displayName}`);
+
+    /** Hand the board over to the new pane, which is what the picker is for. */
+    const enterPane = () => {
+      // The daemon already selected the new pane's window; tell the other
+      // boards so their active-row highlight doesn't lag a scan behind.
+      if (landed.paneId) notifyActivePane(landed.paneId);
+      if (!props.persistent) process.exit(0);
+    };
+
+    const notice = landedMoveNotice(draft, landed);
+    if (notice) {
+      // INTERPOSED, not instead of: the pane is real and the picker still
+      // hands over to it, but not before the one thing that outlives the
+      // spawn has been read. Exiting first would take the message with it.
+      store.actions.showNotice(notice.title, notice.lines);
+      if (!detach) afterNotice = enterPane;
       return;
     }
-    // The daemon already selected the new pane's window; tell the other
-    // boards so their active-row highlight doesn't lag a scan behind.
-    if (spawned.paneId) notifyActivePane(spawned.paneId);
-    if (!props.persistent) process.exit(0);
+    if (detach) {
+      // The daemon's name, not the row's preview: a derived name that
+      // collided came back numbered, and a toast repeating the preview would
+      // name a worktree the spawn did not land in.
+      const created = landed.worktree?.name;
+      // The sidebar never follows the pane, so this line is the only account
+      // of an operation that emptied a checkout.
+      const summary = landed.move ? ` · ${moveSummary(landed.move)}` : "";
+      store.actions.showToast(
+        created
+          ? `Spawned ${agent.displayName} in ${created}${summary}`
+          : `Spawned ${agent.displayName}${summary}`,
+      );
+      return;
+    }
+    enterPane();
+  }
+
+  /**
+   * What a LANDED spawn still owes the user, or null when it owes nothing.
+   *
+   * Two cases, and both outlive the spawn. A move can complete and still leave
+   * a stash entry to drop or a staged/unstaged split to rebuild; and a daemon
+   * predating the move drops the keys it does not know, answers a perfectly
+   * ordinary 200, and starts the agent in an empty worktree while the work
+   * sits untouched where it always was. The missing report is the only
+   * evidence there is for the second, which is why an absent `move` on a
+   * request that asked for one is a failure and not a shrug.
+   */
+  function landedMoveNotice(
+    draft: NonNullable<typeof store.state.newSession>,
+    body: SpawnBody,
+  ): { title: string; lines: string[] } | null {
+    if (draft.moveChanges && !body.move) {
+      return {
+        title: "Changes were not moved",
+        lines: [
+          `The ccmux daemon is an older build that cannot move changes, so yours were not moved: they are still in ${draft.cwd}.`,
+          "Restart it with `ccmux daemon restart` from this build, then move them again.",
+        ],
+      };
+    }
+    if (body.move && moveNeedsAcknowledgement(body.move)) {
+      return {
+        title: "Changes moved, with one thing left over",
+        lines: moveReportLines(body.move, draft.cwd),
+      };
+    }
+    return null;
   }
 
   function handleNewSessionKey(event: KeyEvent): void {
@@ -1236,11 +1578,11 @@ export function App(props: AppProps) {
       return;
     }
 
-    // The prompt input owns every remaining key while it has focus, so a
-    // prompt can contain `j`, `3`, or anything else a field shortcut would
-    // otherwise swallow. Field movement there is limited to the keys the
-    // input doesn't consume, exactly as in search mode.
-    if (draft.field === "prompt") {
+    // A text input owns every remaining key while it has focus, so a prompt
+    // (or a worktree name) can contain `j`, `3`, or anything else a field
+    // shortcut would otherwise swallow. Field movement there is limited to
+    // the keys the input doesn't consume, exactly as in search mode.
+    if (draft.field === "prompt" || draft.field === "worktreeName") {
       if (key === "down" || (key === "n" && event.ctrl)) {
         store.actions.moveNewSessionField(1);
         event.preventDefault();
@@ -1613,6 +1955,16 @@ export function App(props: AppProps) {
     if (visibility && !visibility.visible()) visibility.refresh();
 
     const key = event.name;
+
+    // First, and it swallows the key that dismissed it. This is raised over
+    // whatever was already on screen (including the new-session dialog, which
+    // stays open behind it), so a key that both dismissed the notice and
+    // reached the dialog would act on a message the user had not read yet.
+    if (store.state.notice) {
+      dismissNotice();
+      event.preventDefault();
+      return;
+    }
 
     if (store.state.showHelp) {
       if (key === "?" || key === "q" || key === "escape") {
@@ -2174,10 +2526,25 @@ export function App(props: AppProps) {
               onSelectAgent={store.actions.setNewSessionAgent}
               onSelectPlacement={store.actions.setNewSessionPlacement}
               onSelectDestination={store.actions.setNewSessionDestination}
+              onSelectUntracked={store.actions.setNewSessionUntracked}
               onPromptInput={store.actions.setNewSessionPrompt}
+              onWorktreeNameInput={store.actions.setNewSessionWorktreeName}
               onSubmit={() => void submitNewSession()}
               onCancel={store.actions.closeNewSessionDialog}
               showKeyHints={props.sidebar === true}
+            />
+          )}
+        </Show>
+
+        {/* Over the new-session dialog on purpose: the dialog is left open so
+            a refused move can be corrected in place, and this is the record of
+            what that refusal left behind. */}
+        <Show when={store.state.notice}>
+          {(notice: () => NonNullable<typeof store.state.notice>) => (
+            <NoticeDialog
+              title={notice().title}
+              lines={notice().lines}
+              onDismiss={dismissNotice}
             />
           )}
         </Show>
@@ -2198,6 +2565,7 @@ export function App(props: AppProps) {
               x={cm().x}
               y={cm().y}
               items={sessionMenuItems()}
+              reservedRows={sessionMenuReservedRows()}
               onClose={store.actions.hideContextMenu}
             />
           )}

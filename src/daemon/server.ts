@@ -35,7 +35,12 @@ import {
   type SpawnPlacement,
   type SpawnSplit,
 } from "./spawn-command";
-import { createWorktree, type WorktreeCreation } from "./worktree-create";
+import {
+  createWorktree,
+  ensureWorktreesExcluded,
+  existingWorktreeFor,
+  type WorktreeCreation,
+} from "./worktree-create";
 import { getAgents, type AgentDef } from "../lib/agents";
 import { listSpawnableAgents, spawnBinaryFor } from "../lib/spawnable-agents";
 import {
@@ -78,6 +83,12 @@ import {
   type WorktreeSession,
 } from "./worktree-prune";
 import { fetchPrune, normalizePath } from "./worktree-git";
+import {
+  moveChangesToWorktree,
+  readUncommitted,
+  type CreateWorktree,
+  type UntrackedMode,
+} from "./worktree-move-changes";
 import type {
   NotificationActionInput,
   NotificationActionResult,
@@ -85,6 +96,27 @@ import type {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * What a `withChanges` spawn relocated, echoed back on success.
+ *
+ * `moved` counts tracked files; `untracked` says which mode ran and which
+ * paths it covered. `leftoverStash` is the one thing a SUCCESSFUL move can
+ * still leave behind (the entry was applied but could not be dropped), and it
+ * is reported so it can be cleaned up rather than found later as a mystery.
+ * `flattenedIndex` says the staged/unstaged split could not be preserved.
+ *
+ * `source` names the checkout the work came out of. The caller cannot derive
+ * it: on a `--fork` spawn the source is the forked session's directory, which
+ * is resolved here and nowhere else.
+ */
+interface SpawnMoveReport {
+  moved: number;
+  source: string;
+  untracked: { mode: UntrackedMode; files: string[] };
+  leftoverStash?: string;
+  flattenedIndex?: boolean;
 }
 
 function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
@@ -903,6 +935,19 @@ export class DaemonServer {
       return await this.handleScreenSession(sessionId, url, corsHeaders);
     }
 
+    // BEFORE the catch-all GET below, which slices everything after
+    // `/sessions/` as the id and would read this path's id as
+    // `<id>/dirty`. Any future `GET /sessions/:id/<verb>` needs the same
+    // placement.
+    if (
+      path.startsWith("/sessions/") &&
+      path.endsWith("/dirty") &&
+      req.method === "GET"
+    ) {
+      const sessionId = path.slice("/sessions/".length, -"/dirty".length);
+      return await this.handleSessionDirty(sessionId, url, corsHeaders);
+    }
+
     if (path.startsWith("/sessions/") && req.method === "GET") {
       const sessionId = path.slice("/sessions/".length);
       return await this.handleGetSession(sessionId, corsHeaders);
@@ -1391,6 +1436,85 @@ export class DaemonServer {
     this.attentionTracker.markSeen(sessionId);
     this.sessionManager.markSeen(sessionId);
     return Response.json({ success: true }, { headers });
+  }
+
+  /**
+   * Uncommitted work in a session's checkout, for the picker's "Move changes
+   * to worktree" gate.
+   *
+   * Lazy and per-session on purpose. This is one `git status` on an explicit
+   * user action (opening a context menu), so it costs nothing until someone
+   * asks and can never be stale. The alternative, a dirty flag enriched onto
+   * every row, would mean a git spawn per session per scan — exactly the cost
+   * the PR resolver's cache and sweep exist to avoid.
+   *
+   * It deliberately reuses `readUncommitted`, the same reader the move itself
+   * uses, rather than `readDirtyState`. The two disagree in ways that matter
+   * here: `readDirtyState` reports an unreadable checkout as DIRTY (the safe
+   * direction for prune, which is destructive) and counts ignored files
+   * separately. A gate that said "dirty" where the move would answer
+   * "nothing to move" would offer an action that then refuses.
+   *
+   * Which DIRECTORY it answers about matters for the same reason. A pane that
+   * has `cd`ed somewhere else moves out of where it is now, not out of where
+   * the session started, so the default is the session's effective cwd — the
+   * pane's current path when there is one — exactly like every other
+   * cwd-derived fact on a row. A caller that has already decided which
+   * directory it will move from can name it with `?cwd=`, which is only
+   * checked for shape: this endpoint runs one `git status` and reads nothing
+   * out of it but counts, and a stricter rule (must equal the session's own
+   * paths) would 400 on a pane cache one tick behind the caller's.
+   */
+  private async handleSessionDirty(
+    sessionId: string,
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    const session = this.sessionManager.getSession(sessionId);
+    if (!session) {
+      return Response.json(
+        { error: "Session not found" },
+        { status: 404, headers },
+      );
+    }
+
+    const requested = url.searchParams.get("cwd");
+    if (requested !== null && !isAbsolute(requested)) {
+      return Response.json(
+        { error: `'cwd' must be an absolute path, got '${requested}'` },
+        { status: 400, headers },
+      );
+    }
+
+    const checkout =
+      requested ?? this.effectiveCwd(session, this.getPaneCache());
+    if (!checkout) {
+      return Response.json(
+        { error: "Session has no working directory" },
+        { status: 400, headers },
+      );
+    }
+
+    const state = await readUncommitted(checkout);
+    // Null means the cwd is not a readable git checkout. Reported as
+    // `repo: false` rather than as an error: "this row has nothing to move"
+    // is a perfectly ordinary answer to the question the menu is asking.
+    if (!state) {
+      return Response.json(
+        { repo: false, dirty: false, modified: 0, untracked: 0 },
+        { headers },
+      );
+    }
+
+    return Response.json(
+      {
+        repo: true,
+        dirty: state.modified + state.untrackedPaths.length > 0,
+        modified: state.modified,
+        untracked: state.untrackedPaths.length,
+      },
+      { headers },
+    );
   }
 
   private handleDeleteSession(
@@ -2625,6 +2749,7 @@ export class DaemonServer {
     // and a branch behind for the user to clean up.
     let spawnCwd = cwd;
     let worktreeInfo: WorktreeCreation | undefined;
+    let moveInfo: SpawnMoveReport | undefined;
     if (worktreeRequest.value) {
       const gitInfo = await this.getGitInfo(cwd);
       if (!gitInfo.mainRepoRoot) {
@@ -2633,41 +2758,184 @@ export class DaemonServer {
           { status: 400, headers },
         );
       }
-      const created = await createWorktree(gitInfo.mainRepoRoot, {
-        ...worktreeRequest.value,
-        prompt: prompt ?? undefined,
-      });
-      if (!created.ok) {
-        return Response.json(
-          { error: created.error },
-          { status: 400, headers },
-        );
+      const mainRepoRoot = gitInfo.mainRepoRoot;
+      const { withChanges, untracked, ...creation } = worktreeRequest.value;
+
+      // Here rather than only inside the creation engine, because ORDER
+      // matters: a move reads the source's status BEFORE it creates anything,
+      // so an exclude written during creation lands too late to keep this
+      // run's sibling worktrees out of the copy list and the counts. The
+      // engine calls it too, and it is idempotent, so this is a cheap
+      // `check-ignore` on the path that needs it earliest.
+      await ensureWorktreesExcluded(mainRepoRoot);
+
+      /**
+       * The creation engine, adapted to the move module's seam.
+       *
+       * Two conversions: the repo root and the name-deriving prompt are
+       * curried away (the move module knows neither), and a refusal becomes a
+       * throw, which is how that module classifies a `create-failed` — the
+       * arm that puts the stashed work back before returning.
+       *
+       * The full creation result is captured on the way past, because the
+       * response still owes the caller the branch it landed on and whether
+       * the worktree was made or merely opened. The seam carries the path and
+       * `created`, the latter because the move's rollback deletes what it
+       * made and must be able to tell a fresh worktree from an opened one.
+       */
+      const createForMove: CreateWorktree = async (opts) => {
+        const created = await createWorktree(mainRepoRoot, {
+          ...opts,
+          prompt: prompt ?? undefined,
+        });
+        if (!created.ok) throw new Error(created.error);
+        worktreeInfo = created.result;
+        return {
+          path: created.result.path,
+          created: created.result.created,
+          // Carried for the move's rollback messages: removing a worktree
+          // leaves its branch, and the user is the one who has to clean it up.
+          branch: created.result.branch,
+        };
+      };
+
+      if (withChanges) {
+        // Refused here rather than inside the move, because here nothing has
+        // happened yet: no stash, no worktree, no half-finished anything.
+        // The move itself refuses an opened worktree too (it has to — this
+        // check can lose a race with a concurrent spawn), but by then the
+        // user's changes have been through a stash and back.
+        if (creation.name !== undefined) {
+          const occupied = await existingWorktreeFor(
+            mainRepoRoot,
+            creation.name,
+          );
+          if (occupied) {
+            return Response.json(
+              {
+                error:
+                  `Worktree '${creation.name}' already exists at ${occupied}; moving changes needs a fresh worktree ` +
+                  `(pick another name, or leave the name empty to derive one from the prompt).`,
+                reason: "create-failed",
+              },
+              { status: 400, headers },
+            );
+          }
+        }
+        // Routed THROUGH the move, never beside it: the module owns the
+        // ordering that keeps the work recoverable (stash, create, apply,
+        // drop) and the rollback for every failure in it, so creating the
+        // worktree here as well would both duplicate the checkout and step
+        // outside those guarantees.
+        const moved = await moveChangesToWorktree({
+          source: cwd,
+          name: creation.name,
+          base: creation.base,
+          untracked,
+          createWorktree: createForMove,
+        });
+        if (!moved.ok) {
+          // Every move failure is a 400, including the ones that fail
+          // mid-git: the request was refused in full, nothing was spawned,
+          // and the module has already put the source back. `reason` and
+          // `stashSha` ride along because a stranded stash entry is the one
+          // thing the user may still have to clean up by hand, and a 5xx is
+          // the status callers report without the body.
+          return Response.json(
+            {
+              error: moved.error,
+              reason: moved.reason,
+              ...(moved.stashSha ? { stashSha: moved.stashSha } : {}),
+              ...(moved.sourceRestored !== undefined
+                ? { sourceRestored: moved.sourceRestored }
+                : {}),
+              // Deliberately no `worktree`: the module takes back whatever it
+              // created on every failure after creation, so echoing one here
+              // would name a directory that is no longer there.
+            },
+            { status: 400, headers },
+          );
+        }
+        spawnCwd = moved.worktreePath;
+        moveInfo = {
+          moved: moved.moved,
+          // The module's own answer, not the request's `cwd`: a stash empties
+          // the whole checkout, and the request routinely names a
+          // subdirectory of it (a pane's cwd, the CLI's pwd).
+          source: moved.source,
+          untracked: moved.untracked,
+          ...(moved.leftoverStash
+            ? { leftoverStash: moved.leftoverStash }
+            : {}),
+          ...(moved.flattenedIndex ? { flattenedIndex: true } : {}),
+        };
+      } else {
+        const created = await createWorktree(mainRepoRoot, {
+          ...creation,
+          prompt: prompt ?? undefined,
+        });
+        if (!created.ok) {
+          return Response.json(
+            { error: created.error },
+            { status: 400, headers },
+          );
+        }
+        worktreeInfo = created.result;
+        spawnCwd = created.result.path;
       }
-      worktreeInfo = created.result;
-      spawnCwd = created.result.path;
     }
 
     /**
-     * Decorate a failure that happens AFTER the worktree was created.
+     * Decorate a failure that happens AFTER the setup steps landed.
      *
-     * The worktree is deliberately not rolled back: create-or-open makes a
-     * retry correct, and unwinding would risk deleting a worktree that
-     * already existed. But that only helps if the user is told, otherwise
-     * they are left wondering whether to clean it up by hand.
+     * Neither the worktree nor the move is rolled back here. The worktree is
+     * left because create-or-open makes a retry correct and unwinding would
+     * risk deleting one that already existed; the move is left because the
+     * only thing that could undo it is putting the changes back, and by this
+     * point they are a real working tree in the new checkout, not a stash
+     * entry anybody can replay. Both are safe ONLY if the user is told, so
+     * every note below exists to name state they now own.
      *
-     * The retry advice splits by mode because only an explicit name is
-     * stable: a derived name that is already taken gets a numeric suffix, so
-     * re-running the same command would build a sibling rather than reuse
-     * what is already there.
+     * The move note comes first, and does not care whether the worktree was
+     * created or opened: "the spawn failed" reads as "nothing happened", and
+     * the one thing that definitely happened is that their uncommitted work
+     * is no longer where they left it.
+     *
+     * The retry advice splits three ways. After a move there is nothing left
+     * to move, so re-running the same command would refuse; the useful action
+     * is starting an agent in the worktree. Otherwise only an explicit name
+     * is stable, since a derived name that is already taken gets a numeric
+     * suffix and a re-run would build a sibling.
      */
-    const withWorktreeNote = (error: string): string => {
-      if (!worktreeInfo?.created) return error;
-      const retry =
-        worktreeRequest.value?.name === undefined
-          ? `re-running will create a numbered sibling, pass --worktree '${worktreeInfo.name}' to reuse this one`
-          : "re-running the same command will reuse it";
-      return `${error} (the worktree '${worktreeInfo.name}' was created at ${worktreeInfo.path} and left in place; ${retry})`;
+    const withSetupNotes = (error: string): string => {
+      const notes: string[] = [];
+      if (moveInfo) {
+        notes.push(
+          `your uncommitted changes were already moved out of ${moveInfo.source} to ${spawnCwd}`,
+        );
+      }
+      if (worktreeInfo?.created) {
+        const retry = moveInfo
+          ? `re-running has nothing left to move, so start an agent there with --cwd '${worktreeInfo.path}' instead`
+          : worktreeRequest.value?.name === undefined
+            ? `re-running will create a numbered sibling, pass --worktree '${worktreeInfo.name}' to reuse this one`
+            : "re-running the same command will reuse it";
+        notes.push(
+          `the worktree '${worktreeInfo.name}' was created at ${worktreeInfo.path} and left in place; ${retry}`,
+        );
+      }
+      return notes.length > 0 ? `${error} (${notes.join("; ")})` : error;
     };
+
+    /**
+     * The body for one of those failures. `move` rides along for the same
+     * reason it does on success: the counts are only knowable here, and a
+     * caller that has to explain a half-done spawn needs them most.
+     */
+    const setupFailure = (error: string): Record<string, unknown> => ({
+      error: withSetupNotes(error),
+      ...(moveInfo ? { move: moveInfo } : {}),
+    });
 
     // Create tmux pane
     const tmuxArgv = buildTmuxSpawnArgv({
@@ -2708,9 +2976,7 @@ export class DaemonServer {
       if (exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();
         return Response.json(
-          {
-            error: withWorktreeNote(`tmux ${tmuxCmd} failed: ${stderr.trim()}`),
-          },
+          setupFailure(`tmux ${tmuxCmd} failed: ${stderr.trim()}`),
           { status: 500, headers },
         );
       }
@@ -2734,11 +3000,7 @@ export class DaemonServer {
         const stderr = await new Response(sendProc.stderr).text();
         await killPane();
         return Response.json(
-          {
-            error: withWorktreeNote(
-              `Failed to send command to pane: ${stderr.trim()}`,
-            ),
-          },
+          setupFailure(`Failed to send command to pane: ${stderr.trim()}`),
           { status: 500, headers },
         );
       }
@@ -2788,8 +3050,18 @@ export class DaemonServer {
       // it did not name: the path, branch and base ref are decided here, and
       // `created` / `branchCreated` say which of the two the request made
       // rather than found, so a caller can report it without overclaiming.
+      //
+      // `move` reports what a `withChanges` spawn actually relocated, for the
+      // same reason: the counts are only knowable here, and `leftoverStash`
+      // is the one thing a SUCCESSFUL move can still leave behind.
       return Response.json(
-        { success: true, paneId, command, worktree: worktreeInfo },
+        {
+          success: true,
+          paneId,
+          command,
+          worktree: worktreeInfo,
+          move: moveInfo,
+        },
         { headers },
       );
     } catch (err: unknown) {
@@ -2798,11 +3070,7 @@ export class DaemonServer {
       // already be set, and `killPane` no-ops otherwise.
       await killPane();
       return Response.json(
-        {
-          error: withWorktreeNote(
-            `Failed to spawn session: ${errorMessage(err)}`,
-          ),
-        },
+        setupFailure(`Failed to spawn session: ${errorMessage(err)}`),
         { status: 500, headers },
       );
     }

@@ -1448,4 +1448,65 @@ describe("normalizeWorktreeRequest", () => {
     expect(badName.ok).toBe(false);
     if (!badName.ok) expect(badName.error).toContain("worktree.name");
   });
+
+  it("carries a move request and its untracked mode through", () => {
+    expect(
+      normalizeWorktreeRequest({
+        name: "fix-thing",
+        withChanges: true,
+        untracked: "copy",
+      }),
+    ).toEqual({
+      ok: true,
+      value: { name: "fix-thing", withChanges: true, untracked: "copy" },
+    });
+  });
+
+  it("leaves the mode absent so the module's own default applies", () => {
+    expect(normalizeWorktreeRequest({ withChanges: true })).toEqual({
+      ok: true,
+      value: { withChanges: true },
+    });
+  });
+
+  it("keeps a plain worktree request free of move fields", () => {
+    // `withChanges: false` is the same request as no field at all, and the
+    // difference matters: a `false` left on the object would fail the
+    // untracked pairing check below for callers that always send both.
+    expect(normalizeWorktreeRequest({ withChanges: false })).toEqual({
+      ok: true,
+      value: {},
+    });
+  });
+
+  it("rejects an untracked mode with nothing to move", () => {
+    const orphan = normalizeWorktreeRequest({ untracked: "leave" });
+    expect(orphan.ok).toBe(false);
+    if (!orphan.ok) {
+      expect(orphan.error).toContain("requires 'worktree.withChanges'");
+    }
+
+    const explicit = normalizeWorktreeRequest({
+      withChanges: false,
+      untracked: "move",
+    });
+    expect(explicit.ok).toBe(false);
+  });
+
+  it("rejects an untracked mode outside the three it knows", () => {
+    for (const value of ["MOVE", "delete", "", 3, true]) {
+      const bad = normalizeWorktreeRequest({
+        withChanges: true,
+        untracked: value,
+      });
+      expect([value, bad.ok]).toEqual([value, false]);
+      if (!bad.ok) expect(bad.error).toContain("move, copy, leave");
+    }
+  });
+
+  it("rejects a non-boolean withChanges", () => {
+    const bad = normalizeWorktreeRequest({ withChanges: "yes" });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error).toContain("worktree.withChanges");
+  });
 });
