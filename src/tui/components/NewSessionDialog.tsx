@@ -476,6 +476,30 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   };
 
   /**
+   * What the Name row shows in place of a typed name, before it is fitted to
+   * the columns it ends up with: the derived slug, or the sentence saying
+   * where the name is coming from instead.
+   *
+   * Split from `namePlaceholder` because the hint below is budgeted against
+   * this text and the fitting depends on the hint — asking for the fitted
+   * text first is the circle.
+   */
+  const namePlaceholderText = () => {
+    const slug = derivedSlug();
+    if (slug) return slug;
+    if (!derivedName()) return "";
+    // A fork with no branch to preview: the name is coming either way, so the
+    // row says where it comes from rather than offering a way out that would
+    // be a fiction (there is no prompt here to derive one from instead).
+    if (forking()) {
+      return stacked() ? "Source branch" : "Named after the source branch";
+    }
+    // Nothing to derive from yet. Both ways out are named, because the second
+    // one is new (issue #83) and the row is where it is discoverable.
+    return stacked() ? "Prompt or name" : "Type a prompt, or a name here";
+  };
+
+  /**
    * The suffix caveat, when it fits beside the name it applies to.
    *
    * The name is given the whole row first and the hint takes the leftovers,
@@ -483,6 +507,12 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    * and a caveat that squeezed the thing it is about would defeat it. The
    * short form is the fallback, and no hint at all is the last resort — at a
    * sidebar width every column belongs to the name.
+   *
+   * "The name" is whatever stands in the name's place, which on the no-slug
+   * path is the sentence explaining where the name comes from. Budgeting
+   * against the slug alone made that path the exception to the rule above: at
+   * 40 columns the caveat survived whole and the sentence it qualified was
+   * cut to a single character.
    */
   const nameHint = () => {
     if (!derivedName()) return "";
@@ -492,7 +522,8 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     // is — the daemon derives one from a branch this row could not read — and
     // the hint is then the only thing that says the field can be left alone.
     if (!slug && !forking()) return "";
-    const spare = contentWidth() - (slug ? displayWidth(slug) + 1 : 0);
+    const taken = displayWidth(namePlaceholderText());
+    const spare = contentWidth() - (taken ? taken + 1 : 0);
     if (spare >= displayWidth(NAME_HINT)) return NAME_HINT;
     if (spare >= displayWidth(NAME_HINT_SHORT)) return NAME_HINT_SHORT;
     return "";
@@ -511,30 +542,18 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    * makes the two states tell themselves apart: dim text is a preview the
    * prompt still owns, and typing replaces it with a name of your own.
    *
-   * Truncated from the middle, and truncated here rather than by the layout,
-   * because the input draws its placeholder in full past its own box. A slug
-   * clipped from the right leaves `fix-sidebar-…`, and every task that starts
-   * "fix sidebar" looks the same; the tail is what tells them apart.
+   * Truncated here rather than by the layout, because the input draws its
+   * placeholder in full past its own box.
    */
   const namePlaceholder = () => {
-    const slug = derivedSlug();
-    if (slug) return truncateMiddle(slug, nameRoom());
-    if (!derivedName()) return "";
-    // A fork with no branch to preview: the name is coming either way, so the
-    // row says where it comes from rather than offering a way out that would
-    // be a fiction (there is no prompt here to derive one from instead).
-    if (forking()) {
-      return truncateText(
-        stacked() ? "Source branch" : "Named after the source branch",
-        nameRoom(),
-      );
-    }
-    // Nothing to derive from yet. Both ways out are named, because the second
-    // one is new (issue #83) and the row is where it is discoverable.
-    return truncateText(
-      stacked() ? "Prompt or name" : "Type a prompt, or a name here",
-      nameRoom(),
-    );
+    const text = namePlaceholderText();
+    // From the middle only for a slug: clipped from the right it leaves
+    // `fix-sidebar-…`, and every task that starts "fix sidebar" looks the
+    // same — the tail is what tells them apart. The sentences have no such
+    // tail to save, and one cut in half would read as a glitch.
+    return derivedSlug()
+      ? truncateMiddle(text, nameRoom())
+      : truncateText(text, nameRoom());
   };
 
   const agents = createMemo(() => props.agents ?? []);

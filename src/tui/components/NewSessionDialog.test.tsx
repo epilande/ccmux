@@ -1155,6 +1155,49 @@ describe("NewSessionDialog fork mode", () => {
     expect(frame).not.toContain("Type a prompt");
   });
 
+  /** The Name row of a fork whose branch never reached the client, at a
+   *  given terminal width. The no-slug path: nothing to preview, so the row
+   *  is the sentence saying where the name comes from plus its caveat. */
+  const branchlessNameRow = async (width: number) => {
+    const frame = await renderDialog({
+      draft: forkDraft({
+        fork: { sessionId: "s1", label: "Claude", branch: null },
+      }),
+      width,
+    });
+    const row = frame.split("\n").find((line) => line.includes("Name"));
+    expect(row).toBeDefined();
+    return row!;
+  };
+
+  /*
+   * The module's rule for this row is that the name is given the whole row
+   * first and the hint takes the leftovers. On the derived-slug path it
+   * always held; on the no-slug path the hint was budgeted FIRST, so an
+   * 18-column caveat survived intact while the sentence it was a caveat
+   * ABOUT got cut down to a character or two.
+   */
+  it("keeps the whole sentence beside its hint on a wide surface", async () => {
+    const row = await branchlessNameRow(60);
+    expect(row).toContain("Named after the source branch");
+    expect(row).toContain("auto");
+  });
+
+  it("keeps the short form whole at a middling width", async () => {
+    const row = await branchlessNameRow(50);
+    expect(row).toContain("Source branch");
+    expect(row).toContain("auto");
+  });
+
+  it("keeps the short form whole at a narrow width", async () => {
+    // The width the inversion was worst at: the placeholder was one column.
+    const row = await branchlessNameRow(40);
+    expect(row).toContain("Source branch");
+    // The hint still survives in some form, since it is the only thing that
+    // says the field can be left alone.
+    expect(row).toContain("auto");
+  });
+
   it("shows a typed name instead of the derived preview", async () => {
     const frame = await renderDialog({
       draft: forkDraft({ worktreeName: "parking-retry" }),
