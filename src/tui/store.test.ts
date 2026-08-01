@@ -2969,6 +2969,7 @@ describe("store", () => {
         // this dialog was opened over a directory.
         fork: null,
         field: "agent",
+        agentDropdown: null,
       });
     });
 
@@ -3030,6 +3031,7 @@ describe("store", () => {
         worktreeName: null,
         fork: null,
         field: "prompt",
+        agentDropdown: null,
       });
     });
 
@@ -3056,6 +3058,7 @@ describe("store", () => {
         worktreeName: null,
         fork: null,
         field: "agent",
+        agentDropdown: null,
       });
     });
 
@@ -3163,6 +3166,7 @@ describe("store", () => {
           // Not `agent`: the fork continues the source's agent, so that row
           // does not exist and focus cannot start on it.
           field: "placement",
+          agentDropdown: null,
         });
       });
 

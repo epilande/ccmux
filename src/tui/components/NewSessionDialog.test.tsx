@@ -41,6 +41,7 @@ const draft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft => ({
   worktreeName: null,
   fork: null,
   field: "agent",
+  agentDropdown: null,
   ...overrides,
 });
 
@@ -64,6 +65,8 @@ async function renderDialog(props: {
         agentsError={props.agentsError}
         onFocusField={() => {}}
         onSelectAgent={() => {}}
+        onOpenAgentDropdown={() => {}}
+        onCloseAgentDropdown={() => {}}
         onSelectPlacement={() => {}}
         onSelectDestination={() => {}}
         onSelectUntracked={() => {}}
@@ -350,8 +353,21 @@ describe("NewSessionDialog", () => {
     expect(frame).toContain("/Users/dev/code/ccmux");
   });
 
-  it("numbers the agents so the number keys are discoverable", async () => {
+  it("collapses the agents to the held value until the dropdown opens", async () => {
     const frame = await renderDialog({
+      agents: [agent("claude"), agent("codex"), agent("pi")],
+    });
+    // The value, bracketed like every other held option, with the arrow as
+    // the affordance that a list is behind it.
+    expect(squish(frame)).toContain("[Claude▾]");
+    // The list itself is not on screen, so nothing below it moved.
+    expect(frame).not.toContain("2 Codex");
+    expect(frame).not.toContain("3 Pi");
+  });
+
+  it("numbers the agents in the open dropdown so the keys are discoverable", async () => {
+    const frame = await renderDialog({
+      draft: draft({ agentDropdown: 0 }),
       agents: [agent("claude"), agent("codex"), agent("pi")],
     });
     expect(frame).toContain("1 Claude");
@@ -359,9 +375,27 @@ describe("NewSessionDialog", () => {
     expect(frame).toContain("3 Pi");
   });
 
-  it("marks the drafted agent as selected", async () => {
+  it("draws the open dropdown over the rows below, not between them", async () => {
     const frame = await renderDialog({
-      draft: draft({ agent: "codex" }),
+      draft: draft({ agentDropdown: 0 }),
+      agents: [agent("claude"), agent("codex"), agent("pi")],
+    });
+    const lines = frame.split("\n");
+    // The overlay starts directly under the Agent row...
+    const agentRow = lines.findIndex((line) => line.includes("[Claude"));
+    const first = lines.findIndex((line) => line.includes("1 Claude"));
+    expect(agentRow).toBeGreaterThan(0);
+    expect(first).toBeGreaterThan(agentRow);
+    // ...SHARING rows with the fields beneath it: the first option lands on
+    // the Prompt row's line, which an in-flow list would have pushed down
+    // past it instead. The label gutter stays visible left of the overlay.
+    expect(lines[first]).toContain("Prompt");
+    expect(frame).toContain("Directory");
+  });
+
+  it("marks the drafted agent inside the open dropdown", async () => {
+    const frame = await renderDialog({
+      draft: draft({ agent: "codex", agentDropdown: 1 }),
       agents: [agent("claude"), agent("codex")],
     });
     expect(frame).toContain("> 2 Codex");
@@ -563,15 +597,15 @@ describe("NewSessionDialog", () => {
     expect(frame).toContain("~/code/ccmux");
   });
 
-  it("scrolls a long agent list to keep the selection visible", async () => {
+  it("windows the dropdown against the screen and keeps the highlight visible", async () => {
     const many = Array.from({ length: 9 }, (_, i) => agent(`agent${i}`));
     const frame = await renderDialog({
-      draft: draft({ agent: "agent8" }),
+      draft: draft({ agent: "agent8", agentDropdown: 8 }),
       agents: many,
       height: 14,
     });
-    // The window slid to the tail: the last agent is on screen with its
-    // absolute number, and the first one has scrolled off.
+    // The window slid to the tail: the highlighted agent is on screen with
+    // its absolute number, and the first one has scrolled off.
     expect(frame).toContain("9 Agent8");
     expect(frame).not.toContain("1 Agent0");
   });
@@ -582,6 +616,29 @@ describe("NewSessionDialog", () => {
     expect(frame).toContain("spawn");
     expect(frame).toContain("esc");
     expect(frame).toContain("cancel");
+    // Focus starts on the agent field, where the hint also teaches the
+    // dropdown's opener.
+    expect(frame).toContain("l open");
+  });
+
+  it("drops the opener hint once focus leaves the agent field", async () => {
+    const frame = await renderDialog({ draft: draft({ field: "placement" }) });
+    expect(frame).toContain("j/k or 1-9 pick");
+    expect(frame).not.toContain("l open");
+  });
+
+  it("swaps the hint row to the dropdown's keys while it is open", async () => {
+    const frame = await renderDialog({
+      draft: draft({ agentDropdown: 0 }),
+      agents: [agent("claude"), agent("codex")],
+    });
+    expect(frame).toContain("enter/space");
+    expect(frame).toContain("select");
+    expect(frame).toContain("j/k move");
+    expect(frame).toContain("esc cancel");
+    // The dialog's own keys are not in effect while the overlay owns them.
+    expect(frame).not.toContain("spawn");
+    expect(frame).not.toContain("tab field");
   });
 
   it("drops its own hint row where a footer already carries one", async () => {

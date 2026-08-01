@@ -1760,10 +1760,58 @@ export function App(props: AppProps) {
     return null;
   }
 
+  /**
+   * The agent dropdown overlay owns every key while it is open: it is modal
+   * within an already-modal dialog, so nothing here falls through to the
+   * field handling below. Escape closes it without touching the draft, which
+   * is why the dialog's own Escape (close the whole dialog) must not see it.
+   */
+  function handleAgentDropdownKey(event: KeyEvent, highlighted: number): void {
+    const key = event.name;
+    const agents = spawnableAgents() ?? [];
+    const count = agents.length;
+
+    // h/left mirror the l/right that opened it; like Escape they close
+    // without committing the highlight.
+    if (key === "escape" || key === "h" || key === "left" || count === 0) {
+      store.actions.closeNewSessionAgentDropdown();
+    } else if (
+      key === "return" ||
+      key === "enter" ||
+      // The keys that opened it confirm it: the standard combobox toggle,
+      // and what a hand still resting on space/l expects.
+      key === "space" ||
+      key === "l" ||
+      key === "right"
+    ) {
+      const chosen = agents[Math.min(highlighted, count - 1)];
+      if (chosen) store.actions.setNewSessionAgent(chosen.name);
+      store.actions.closeNewSessionAgentDropdown();
+    } else if (key === "j" || key === "down") {
+      store.actions.setNewSessionAgentDropdownIndex((highlighted + 1) % count);
+    } else if (key === "k" || key === "up") {
+      store.actions.setNewSessionAgentDropdownIndex(
+        (highlighted - 1 + count) % count,
+      );
+    } else if (key >= "1" && key <= "9") {
+      const chosen = agents[parseInt(key, 10) - 1];
+      if (chosen) {
+        store.actions.setNewSessionAgent(chosen.name);
+        store.actions.closeNewSessionAgentDropdown();
+      }
+    }
+    event.preventDefault();
+  }
+
   function handleNewSessionKey(event: KeyEvent): void {
     const draft = store.state.newSession;
     if (!draft) return;
     const key = event.name;
+
+    if (draft.agentDropdown !== null) {
+      handleAgentDropdownKey(event, draft.agentDropdown);
+      return;
+    }
 
     if (key === "escape") {
       store.actions.closeNewSessionDialog();
@@ -1804,6 +1852,22 @@ export function App(props: AppProps) {
       moveNewSessionOption(-1);
     } else if (key >= "1" && key <= "9") {
       pickNewSessionOption(parseInt(key, 10) - 1);
+    } else if (
+      (key === "space" || key === "l" || key === "right") &&
+      draft.field === "agent"
+    ) {
+      // Space or l/right, not Enter: Enter is "spawn" from every field, and
+      // the agent field is where focus STARTS, so taking it for the dropdown
+      // would put an overlay between the most common flow (open, Enter) and
+      // its spawn. This branch is unreachable from the text fields, which
+      // returned above with every printable key intact.
+      // `focusedOptionField` carries the fork and too-short-to-draw guards.
+      const field = focusedOptionField();
+      if (field && field.options.length > 0) {
+        store.actions.openNewSessionAgentDropdown(
+          Math.max(0, field.options.indexOf(field.value)),
+        );
+      }
     }
     // Everything else is swallowed: the dialog is modal, and letting `q`
     // through would quit the picker mid-edit.
@@ -2689,6 +2753,13 @@ export function App(props: AppProps) {
             persistent={props.persistent}
             groupBy={store.state.groupBy}
             newSessionMode={store.state.newSession !== null}
+            newSessionAgent={
+              store.state.newSession?.agentDropdown != null
+                ? "dropdown"
+                : store.state.newSession?.field === "agent"
+                  ? "focused"
+                  : undefined
+            }
             reviewable={reviewEnabled}
           />
         </Show>
@@ -2729,6 +2800,8 @@ export function App(props: AppProps) {
               agentsError={agentsError()}
               onFocusField={store.actions.setNewSessionField}
               onSelectAgent={store.actions.setNewSessionAgent}
+              onOpenAgentDropdown={store.actions.openNewSessionAgentDropdown}
+              onCloseAgentDropdown={store.actions.closeNewSessionAgentDropdown}
               onSelectPlacement={store.actions.setNewSessionPlacement}
               onSelectDestination={store.actions.setNewSessionDestination}
               onSelectUntracked={store.actions.setNewSessionUntracked}

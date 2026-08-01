@@ -242,6 +242,14 @@ export interface NewSessionDraft {
   fork: NewSessionFork | null;
   /** Which field the option/text keys currently apply to. */
   field: NewSessionField;
+  /**
+   * The agent dropdown overlay: the highlighted option's index while open,
+   * null while closed. View state rather than part of the request, but it
+   * lives in the draft beside `field` for the same reason focus does — the
+   * key handling is App's and the rendering is the dialog's, and this is the
+   * one place both already read.
+   */
+  agentDropdown: number | null;
 }
 
 interface TUIState {
@@ -1448,6 +1456,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           worktreeName: null,
           fork,
           field: newSessionFields({ moveChanges, destination, fork })[0]!,
+          agentDropdown: null,
         });
       });
     },
@@ -1490,12 +1499,34 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       batch(() => {
         settleWorktreeName(next);
         setState("newSession", "field", next);
+        // A click that moves focus elsewhere is also a dismissal: the keys
+        // the overlay was claiming belong to the newly focused field now.
+        if (next !== "agent") setState("newSession", "agentDropdown", null);
       });
     },
 
     setNewSessionAgent(agent: string) {
       if (!state.newSession) return;
       setState("newSession", "agent", agent);
+    },
+
+    /** Open the agent dropdown with `index` highlighted. The caller owns the
+     *  agent list, so the caller says where the highlight starts. */
+    openNewSessionAgentDropdown(index: number) {
+      const draft = state.newSession;
+      if (!draft || draft.fork) return;
+      setState("newSession", "agentDropdown", Math.max(0, index));
+    },
+
+    closeNewSessionAgentDropdown() {
+      if (!state.newSession) return;
+      setState("newSession", "agentDropdown", null);
+    },
+
+    setNewSessionAgentDropdownIndex(index: number) {
+      const draft = state.newSession;
+      if (!draft || draft.agentDropdown === null) return;
+      setState("newSession", "agentDropdown", Math.max(0, index));
     },
 
     setNewSessionPlacement(placement: NewSessionPlacement) {

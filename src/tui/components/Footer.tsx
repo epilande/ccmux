@@ -12,6 +12,13 @@ interface FooterProps {
   persistent?: boolean;
   groupBy?: GroupBy;
   newSessionMode?: boolean;
+  /**
+   * What the dialog's agent field is doing, because the keys change with it:
+   * `focused` (the collapsed field has focus, l opens the dropdown),
+   * `dropdown` (the overlay is open and owns every key), or undefined for
+   * any other field.
+   */
+  newSessionAgent?: "focused" | "dropdown";
   reviewable?: boolean;
 }
 
@@ -108,7 +115,11 @@ export const Footer: Component<FooterProps> = (props) => {
         </Match>
         <Match when={props.newSessionMode}>
           <text fg={theme.overlay}>
-            enter spawn · tab next field · j/k or 1-9 pick · esc cancel
+            {props.newSessionAgent === "dropdown"
+              ? "j/k move · enter/space select · esc cancel"
+              : props.newSessionAgent === "focused"
+                ? "enter spawn · tab next field · j/k or 1-9 pick · l open · esc cancel"
+                : "enter spawn · tab next field · j/k or 1-9 pick · esc cancel"}
           </text>
         </Match>
         <Match when={props.searchMode}>

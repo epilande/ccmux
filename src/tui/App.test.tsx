@@ -2604,7 +2604,7 @@ describe("App new session dialog", () => {
       const frame = setup.captureCharFrame();
       expect(frame).toContain("New session");
       expect(frame).toContain("/code/myapp");
-      expect(frame).toContain("> 2 Codex");
+      expect(frame).toContain("[Codex ▾]");
     } finally {
       restore();
     }
@@ -2640,7 +2640,7 @@ describe("App new session dialog", () => {
     const { restore } = withDaemon();
     try {
       await openDialog({ lastSpawnAgent: "codex" }, []);
-      expect(setup.captureCharFrame()).toContain("> 2 Codex");
+      expect(setup.captureCharFrame()).toContain("[Codex ▾]");
     } finally {
       restore();
     }
@@ -2651,7 +2651,7 @@ describe("App new session dialog", () => {
     try {
       // `gemini` was detected by pane scanning but is not on PATH.
       await openDialog({}, [session({ agentType: "gemini" })]);
-      expect(setup.captureCharFrame()).toContain("> 1 Claude");
+      expect(setup.captureCharFrame()).toContain("[Claude ▾]");
     } finally {
       restore();
     }
@@ -2696,7 +2696,8 @@ describe("App new session dialog", () => {
       await openDialog();
       setup.mockInput.pressKey("2");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("> 2 Codex");
+      // Direct-pick without opening the dropdown: the collapsed row updates.
+      expect(setup.captureCharFrame()).toContain("[Codex ▾]");
       setup.mockInput.pressEnter();
       await settle();
       expect(spawns[0]?.agent).toBe("codex");
@@ -2713,10 +2714,127 @@ describe("App new session dialog", () => {
       setup.mockInput.pressKey("k");
       await setup.renderOnce();
       // Already at the top: k is a no-op rather than a wrap to the bottom.
-      expect(setup.captureCharFrame()).toContain("> 1 Claude");
+      expect(setup.captureCharFrame()).toContain("[Claude ▾]");
       setup.mockInput.pressKey("j");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("> 2 Codex");
+      expect(setup.captureCharFrame()).toContain("[Codex ▾]");
+    } finally {
+      restore();
+    }
+  });
+
+  it("opens the agent dropdown on space, navigates, and confirms", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressKey(" ");
+      await setup.renderOnce();
+      // The list is on screen now, numbered as before.
+      expect(setup.captureCharFrame()).toContain("2 Codex");
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      // Enter confirms the highlight and closes the overlay, without
+      // spawning: the dropdown owns the key while it is open.
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(spawns).toHaveLength(0);
+      expect(setup.captureCharFrame()).toContain("[Codex ▾]");
+      // The next Enter is the dialog's again.
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(spawns[0]?.agent).toBe("codex");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("closes the agent dropdown on escape without touching the draft", async () => {
+    const { restore } = withDaemon();
+    try {
+      await openDialog();
+      setup.mockInput.pressKey(" ");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+      // The dialog survives (escape was the overlay's), the held agent is
+      // unchanged, and the list is gone.
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("New session");
+      expect(frame).toContain("[Claude ▾]");
+      expect(frame).not.toContain("2 Codex");
+    } finally {
+      restore();
+    }
+  });
+
+  it("confirms the highlighted agent with space while the dropdown is open", async () => {
+    // The key that opened it commits it: without this, the hand that pressed
+    // space to open presses it again and nothing happens.
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressKey(" ");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      setup.mockInput.pressKey(" ");
+      await setup.renderOnce();
+      // Committed and closed, without spawning.
+      expect(spawns).toHaveLength(0);
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("[Codex ▾]");
+      expect(frame).not.toContain("2 Codex");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("opens the agent dropdown on l and closes it on h, dropping the highlight", async () => {
+    const { restore } = withDaemon();
+    try {
+      await openDialog();
+      setup.mockInput.pressKey("l");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("2 Codex");
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      // h mirrors the l that opened it: closed without committing, so the
+      // held agent is still the one the dialog opened with.
+      setup.mockInput.pressKey("h");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("New session");
+      expect(frame).toContain("[Claude ▾]");
+      expect(frame).not.toContain("2 Codex");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps l as a plain character in the prompt field", async () => {
+    // The open keys belong to the AGENT field; a text field owns every
+    // printable key, so typing an l there must never raise the overlay.
+    const { restore } = withDaemon();
+    try {
+      await openDialog();
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("l");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("2 Codex");
+      // The l reached the input as text: the typed value replaced the
+      // placeholder rather than raising the overlay.
+      expect(frame).not.toContain("Optional first message");
     } finally {
       restore();
     }
@@ -3270,7 +3388,7 @@ describe("App new session dialog", () => {
       setup.mockInput.pressKey("n");
       await settle();
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("1 Claude");
+      expect(setup.captureCharFrame()).toContain("[Claude ▾]");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -3436,6 +3554,9 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
 
       expect(calls).toBe(2);
+      // The newcomer is visible where the list now lives: in the dropdown.
+      setup.mockInput.pressKey(" ");
+      await setup.renderOnce();
       expect(setup.captureCharFrame()).toContain("Codex");
     } finally {
       globalThis.fetch = originalFetch;

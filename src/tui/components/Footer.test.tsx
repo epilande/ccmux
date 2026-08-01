@@ -18,6 +18,7 @@ async function renderFooter(props: {
   persistent?: boolean;
   groupBy?: GroupBy;
   newSessionMode?: boolean;
+  newSessionAgent?: "focused" | "dropdown";
   reviewable?: boolean;
   width?: number;
 }) {
@@ -31,6 +32,7 @@ async function renderFooter(props: {
         persistent={props.persistent}
         groupBy={props.groupBy}
         newSessionMode={props.newSessionMode}
+        newSessionAgent={props.newSessionAgent}
         reviewable={props.reviewable}
       />
     ),
@@ -120,6 +122,28 @@ describe("Footer", () => {
     expect(frame).toContain("enter spawn");
     expect(frame).toContain("tab next field");
     expect(frame).toContain("esc cancel");
+  });
+
+  it("teaches the dropdown opener while the agent field is focused", async () => {
+    const frame = await renderFooter({
+      newSessionMode: true,
+      newSessionAgent: "focused",
+    });
+    expect(frame).toContain("l open");
+    expect(frame).toContain("enter spawn");
+  });
+
+  it("swaps to the dropdown's own keys while it is open", async () => {
+    const frame = await renderFooter({
+      newSessionMode: true,
+      newSessionAgent: "dropdown",
+    });
+    expect(frame).toContain("j/k move");
+    expect(frame).toContain("enter/space select");
+    expect(frame).toContain("esc cancel");
+    // The dialog's keys are not in effect, so their hints are gone.
+    expect(frame).not.toContain("spawn");
+    expect(frame).not.toContain("tab next field");
   });
 
   it("new-session mode takes priority over search mode", async () => {

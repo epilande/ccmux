@@ -390,6 +390,9 @@ interface NewSessionDialogProps {
   agentsError?: string | null;
   onFocusField: (field: NewSessionField) => void;
   onSelectAgent: (name: string) => void;
+  /** Open the agent dropdown with this option highlighted. */
+  onOpenAgentDropdown: (index: number) => void;
+  onCloseAgentDropdown: () => void;
   onSelectPlacement: (placement: NewSessionPlacement) => void;
   onSelectDestination: (destination: NewSessionDestination) => void;
   onSelectUntracked: (untracked: UntrackedMode) => void;
@@ -615,9 +618,12 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         moveChanges: moveChanges(),
         fork: forking() !== null,
         namesAWorktree: namesAWorktree(),
+        // One row: the field is a collapsed dropdown now, and only its ERROR
+        // still wraps to more. The list itself lives in an absolute overlay
+        // outside the budget entirely.
         agentRows: showAgentError()
           ? wrapText(agentErrorText(), contentWidth()).length
-          : Math.max(1, agents().length),
+          : 1,
         stacked: stacked(),
         keyHints: showKeyHints(),
       },
@@ -628,32 +634,64 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   /** Rows the agent field ended up with. */
   const agentRoom = () => plan().agentRows;
 
-  /** Where the visible slice of the agent list starts. Split from the slice
-   *  itself so the rows can derive their absolute number from it without the
-   *  slice having to carry a wrapper object per entry (see below). */
-  const agentWindowStart = createMemo(() => {
+  const dialogTop = () =>
+    Math.max(0, Math.floor((dims().height - plan().height) / 2));
+
+  /** The overlay is drawn only while its state says so — and never over a
+   *  dialog too short to have drawn the row it hangs from. */
+  const dropdownOpen = () =>
+    props.draft.agentDropdown !== null &&
+    !forking() &&
+    agents().length > 0 &&
+    !plan().tooShort;
+
+  const dropdownHighlight = () =>
+    Math.min(props.draft.agentDropdown ?? 0, agents().length - 1);
+
+  /** First row under the Agent row. Absolute children measure from the
+   *  dialog's CONTENT box (inside the border), so this counts the title and
+   *  the spacer when the plan kept it, and the border adds its own row. */
+  const dropdownTop = () => 2 + (plan().showTitleSpacer ? 1 : 0);
+
+  /** Option rows the terminal has room for below the anchor: the overlay is
+   *  outside the dialog's budget, so it clamps against the SCREEN. */
+  const dropdownRows = () => {
+    const below = dims().height - (dialogTop() + 1 + dropdownTop()) - 2;
+    return Math.max(1, Math.min(agents().length, below));
+  };
+
+  /** The visible slice, with each option's absolute index so a scrolled list
+   *  never renumbers the keys. */
+  const dropdownWindow = createMemo(() => {
     const list = agents();
-    return optionWindow(
+    const { start, end } = optionWindow(
       list.length,
-      selectedAgentIndex(),
-      Math.min(agentRoom(), list.length),
-    ).start;
+      dropdownHighlight(),
+      dropdownRows(),
+    );
+    return list.slice(start, end).map((option, i) => ({
+      option,
+      index: start + i,
+    }));
   });
 
-  /**
-   * The agent list is the only field that can grow past a screen; cap it at
-   * what every other row has left over, and scroll the rest.
-   *
-   * Returns the raw slice, NOT `{agent, index}` wrappers. `<For>` is keyed by
-   * reference, so freshly minted wrappers made every visible row tear down
-   * and rebuild on each j/k; the underlying agent objects are stable, so
-   * slicing them directly lets it reuse the rows and move only the marker.
-   */
-  const visibleAgents = createMemo(() => {
-    const list = agents();
-    const start = agentWindowStart();
-    return list.slice(start, start + Math.min(agentRoom(), list.length));
-  });
+  /** Commit the highlighted option and close, the hint row's click-side
+   *  twin of the Enter/space key path in `App.tsx`. */
+  const confirmDropdown = () => {
+    const chosen = agents()[dropdownHighlight()];
+    if (chosen) props.onSelectAgent(chosen.name);
+    props.onCloseAgentDropdown();
+  };
+
+  /** Marker and number cells (4), border and padding (4), and the widest
+   *  name; clamped so the overlay stays inside the dialog's right edge. */
+  const dropdownWidth = () => {
+    const widest = Math.max(
+      1,
+      ...agents().map((option) => displayWidth(option.displayName)),
+    );
+    return Math.min(width() - LABEL_WIDTH, widest + 8);
+  };
 
   /**
    * The agent error, pre-wrapped to the content column and capped at the rows
@@ -809,7 +847,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
          both odd-height, and the row they disagree by is the bottom border,
          which lands off screen exactly when the dialog is already as tall as
          the terminal. */
-      top={Math.max(0, Math.floor((dims().height - height()) / 2))}
+      top={dialogTop()}
       left={Math.max(0, Math.floor((dims().width - width()) / 2))}
       width={width()}
       height={height()}
@@ -881,39 +919,45 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                     </For>
                   }
                 >
-                  <For each={visibleAgents()}>
-                    {(agent, i) => {
-                      /** Absolute position, so the number key shown is the one
-                       *  that picks it even when the list has scrolled. */
-                      const number = () => agentWindowStart() + i() + 1;
-                      return (
-                        <box
-                          height={1}
-                          flexDirection="row"
-                          onMouseDown={(event) => {
-                            if (event.button !== MouseButton.LEFT) return;
-                            props.onFocusField("agent");
-                            props.onSelectAgent(agent.name);
-                          }}
-                        >
-                          <box width={2}>
-                            <text fg={theme.green}>
-                              {agent.name === props.draft.agent ? ">" : ""}
-                            </text>
-                          </box>
-                          {/* Only the first nine get a number key. */}
-                          <box width={2}>
-                            <text fg={theme.overlay}>
-                              {number() <= 9 ? `${number()}` : ""}
-                            </text>
-                          </box>
-                          <text fg={agentColorFor(agent.name)}>
-                            {agent.displayName}
-                          </text>
-                        </box>
-                      );
+                  {/* Collapsed to one row: the list itself is the overlay
+                    below, opened with space (or a click), so choosing an
+                    agent no longer pushes every other field down the
+                    dialog. The brackets mark the held value the way the
+                    option rows do; the arrow is the affordance that there
+                    is a list behind it. */}
+                  <box
+                    height={1}
+                    flexDirection="row"
+                    onMouseDown={(event) => {
+                      if (event.button !== MouseButton.LEFT) return;
+                      props.onFocusField("agent");
+                      props.onOpenAgentDropdown(selectedAgentIndex());
                     }}
-                  </For>
+                  >
+                    <box width={1}>
+                      <text fg={theme.green}>[</text>
+                    </box>
+                    <text
+                      fg={agentColorFor(
+                        selectedAgent()?.name ?? props.draft.agent,
+                      )}
+                    >
+                      {truncateText(
+                        selectedAgent()?.displayName ?? props.draft.agent,
+                        Math.max(1, contentWidth() - 4),
+                      )}
+                    </text>
+                    <box
+                      width={2}
+                      flexDirection="row"
+                      justifyContent="flex-end"
+                    >
+                      <text fg={theme.overlay}>▾</text>
+                    </box>
+                    <box width={1}>
+                      <text fg={theme.green}>]</text>
+                    </box>
+                  </box>
                 </Show>
               </Show>
             </box>
@@ -1178,27 +1222,45 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               flexShrink={0}
               marginRight={1}
               onMouseDown={(event) => {
-                if (event.button === MouseButton.LEFT) props.onSubmit();
+                if (event.button !== MouseButton.LEFT) return;
+                if (dropdownOpen()) confirmDropdown();
+                else props.onSubmit();
               }}
             >
               <text fg={theme.green}>
-                <strong>enter</strong>
+                <strong>{dropdownOpen() ? "enter/space" : "enter"}</strong>
               </text>
-              <box width={1} />
-              <text fg={theme.overlay}>spawn</text>
+              {/* The overlay's longer key text eats the gloss's columns at
+                the rail, the same trade the esc segment already makes. */}
+              <Show when={!dropdownOpen() || !stacked()}>
+                <box width={1} />
+                <text fg={theme.overlay}>
+                  {dropdownOpen() ? "select" : "spawn"}
+                </text>
+              </Show>
             </box>
             {/* The middle hint is the one that goes when there is no room for
-              it: the two it sits between are the dialog's only exits. */}
+              it: the two it sits between are the dialog's only exits. On the
+              agent field it also carries the dropdown's opener, folded in
+              (`j/k/1-9`) so the row still fits the dialog at full width. */}
             <Show when={!compact()}>
               <box flexDirection="row" marginRight={1}>
-                <text fg={theme.overlay}>· tab field · j/k or 1-9 pick</text>
+                <text fg={theme.overlay}>
+                  {dropdownOpen()
+                    ? "· j/k move"
+                    : props.draft.field === "agent"
+                      ? "· tab field · j/k/1-9 pick · l open"
+                      : "· tab field · j/k or 1-9 pick"}
+                </text>
               </box>
             </Show>
             <box
               flexDirection="row"
               flexShrink={0}
               onMouseDown={(event) => {
-                if (event.button === MouseButton.LEFT) props.onCancel();
+                if (event.button !== MouseButton.LEFT) return;
+                if (dropdownOpen()) props.onCloseAgentDropdown();
+                else props.onCancel();
               }}
             >
               <text fg={theme.overlay}>·</text>
@@ -1213,6 +1275,61 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 <text fg={theme.overlay}>cancel</text>
               </Show>
             </box>
+          </box>
+        </Show>
+
+        {/* The agent dropdown. Absolute and z-raised, so it floats OVER the
+          rows beneath the Agent row instead of pushing them down — the whole
+          point of collapsing the field. It hangs from the dialog's own
+          coordinates, windows itself against the SCREEN (it is outside the
+          row budget), and shows absolute numbers so a scrolled list never
+          renumbers the keys. */}
+        <Show when={dropdownOpen()}>
+          <box
+            position="absolute"
+            left={LABEL_WIDTH}
+            top={dropdownTop()}
+            width={dropdownWidth()}
+            height={dropdownWindow().length + 2}
+            zIndex={1}
+            backgroundColor={theme.surface}
+            borderStyle="single"
+            borderColor={theme.blue}
+            flexDirection="column"
+          >
+            <For each={dropdownWindow()}>
+              {({ option, index }) => (
+                <box
+                  height={1}
+                  flexDirection="row"
+                  flexShrink={0}
+                  paddingLeft={1}
+                  backgroundColor={
+                    index === dropdownHighlight() ? theme.border : theme.surface
+                  }
+                  onMouseDown={(event) => {
+                    if (event.button !== MouseButton.LEFT) return;
+                    props.onSelectAgent(option.name);
+                    props.onCloseAgentDropdown();
+                  }}
+                >
+                  <box width={2}>
+                    <text fg={theme.green}>
+                      {option.name === props.draft.agent ? ">" : ""}
+                    </text>
+                  </box>
+                  {/* Only the first nine get a number key. */}
+                  <box width={2}>
+                    <text fg={theme.overlay}>
+                      {index < 9 ? `${index + 1}` : ""}
+                    </text>
+                  </box>
+                  <text fg={agentColorFor(option.name)}>
+                    {option.displayName}
+                  </text>
+                </box>
+              )}
+            </For>
           </box>
         </Show>
       </Show>
