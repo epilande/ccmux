@@ -16,9 +16,11 @@ import { join } from "node:path";
 import {
   applyWorktreeFileSetup,
   createWorktree,
+  readCheckoutHead,
   resolveWorktreeIncludes,
   resolveBase,
   resolveWorktreeName,
+  slugForFork,
   slugFromPrompt,
   slugify,
   withRepoLock,
@@ -153,6 +155,65 @@ describe("resolveWorktreeName", () => {
     const out = resolveWorktreeName("!!!", undefined);
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.error).toContain("no usable characters");
+  });
+
+  // A fork has no prompt to derive from, so the caller derives the name and
+  // hands it over. It has to arrive marked derived, or a collision would open
+  // the existing worktree instead of numbering past it.
+  it("accepts a caller-derived name, marked derived", () => {
+    const out = resolveWorktreeName(undefined, undefined, "feat-foo-fork");
+    expect(out).toEqual({ ok: true, name: "feat-foo-fork", derived: true });
+  });
+
+  it("still prefers an explicit name over a caller-derived one", () => {
+    const out = resolveWorktreeName("Mine", undefined, "feat-foo-fork");
+    expect(out).toEqual({ ok: true, name: "mine", derived: false });
+  });
+});
+
+describe("slugForFork", () => {
+  // Slugified BEFORE the suffix, so a branch long enough to hit the cap
+  // cannot truncate the `-fork` that says what the worktree is.
+  it("suffixes a branch name", () => {
+    expect(slugForFork("feat/fork-worktree")).toBe("feat-fork-worktree-fork");
+    expect(slugForFork("a".repeat(80)).endsWith("-fork")).toBe(true);
+  });
+
+  it("returns nothing usable for a label with nothing in it", () => {
+    expect(slugForFork("!!!")).toBe("");
+  });
+});
+
+describe("readCheckoutHead", () => {
+  it("reports the branch a checkout is on", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["checkout", "-q", "-b", "feat/thing"]);
+
+    expect(await readCheckoutHead(repo)).toEqual({
+      ref: "feat/thing",
+      label: "feat/thing",
+    });
+  });
+
+  // A detached HEAD answers the literal "HEAD" to `--abbrev-ref`, which any
+  // other checkout would resolve to its OWN head, so the sha is what travels.
+  it("reports a sha for a detached HEAD", async () => {
+    const repo = await makeRepo();
+    const sha = await git(repo, ["rev-parse", "HEAD"]);
+    await git(repo, ["checkout", "-q", "--detach"]);
+
+    expect(await readCheckoutHead(repo)).toEqual({
+      ref: sha,
+      label: sha.slice(0, 12),
+    });
+  });
+
+  it("reports nothing for an unborn HEAD", async () => {
+    const empty = join(root, "unborn");
+    mkdirSync(empty, { recursive: true });
+    await git(root, ["init", "--initial-branch=main", empty]);
+
+    expect(await readCheckoutHead(empty)).toBeNull();
   });
 });
 
@@ -510,6 +571,22 @@ describe("createWorktree", () => {
     expect(
       await git(second.result.path, ["rev-parse", "--abbrev-ref", "HEAD"]),
     ).toBe("fix-the-flaky-2");
+  });
+
+  // The same rule for the name a fork derives: two forks of one branch are
+  // two conversations, and stacking the second onto the first's checkout is
+  // the outcome numbering exists to prevent.
+  it("numbers a caller-derived name that collides", async () => {
+    const repo = await makeRepo();
+
+    const first = await createWorktree(repo, { derivedName: "main-fork" });
+    const second = await createWorktree(repo, { derivedName: "main-fork" });
+
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(first.result.name).toBe("main-fork");
+    expect(second.result.name).toBe("main-fork-2");
+    expect(second.result.created).toBe(true);
   });
 
   it("gives three concurrent spawns of one prompt three worktrees", async () => {

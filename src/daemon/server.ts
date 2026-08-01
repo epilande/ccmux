@@ -39,6 +39,8 @@ import {
   createWorktree,
   ensureWorktreesExcluded,
   existingWorktreeFor,
+  readCheckoutHead,
+  slugForFork,
   type WorktreeCreation,
 } from "./worktree-create";
 import { getAgents, type AgentDef } from "../lib/agents";
@@ -2741,6 +2743,40 @@ export class DaemonServer {
       const mainRepoRoot = gitInfo.mainRepoRoot;
       const { withChanges, untracked, ...creation } = worktreeRequest.value;
 
+      // A FORK's destination takes both its name and its start point from the
+      // source checkout's HEAD, because neither default fits one:
+      //
+      // - There is no prompt to derive a name from (`resolveForkSource`
+      //   refuses `fork` with `prompt`), so a bare `worktree: {}` would
+      //   otherwise be refused outright for want of a name. `<branch>-fork`
+      //   is derived, not explicit: two forks of one branch are two
+      //   conversations, and the second must get its own checkout rather than
+      //   silently joining the first's.
+      // - `resolveBase` defaults to the MAIN checkout's branch, and a fork is
+      //   routinely taken from an agent sitting in a linked worktree on a
+      //   feature branch. Cutting from main would start the continued
+      //   conversation on history missing every commit it was written
+      //   against. Same reasoning as a move's, which resolves its own base
+      //   the same way (`worktree-move-changes.ts`).
+      //
+      // The base is only taken when the source shares this repository: a
+      // `{path}` fork accepts any destination, and another repo's branch is
+      // not a ref this one can cut from. The NAME is a label, so it travels
+      // either way.
+      let derivedName: string | undefined;
+      if (forkSource) {
+        const head = await readCheckoutHead(forkSource.session.cwd);
+        if (head) {
+          derivedName = slugForFork(head.label) || undefined;
+          if (creation.base === undefined) {
+            const sourceGit = await this.getGitInfo(forkSource.session.cwd);
+            if (sourceGit.mainRepoRoot === mainRepoRoot) {
+              creation.base = head.ref;
+            }
+          }
+        }
+      }
+
       // Here rather than only inside the creation engine, because ORDER
       // matters: a move reads the source's status BEFORE it creates anything,
       // so an exclude written during creation lands too late to keep this
@@ -2853,6 +2889,7 @@ export class DaemonServer {
         const created = await createWorktree(mainRepoRoot, {
           ...creation,
           prompt: prompt ?? undefined,
+          derivedName,
         });
         if (!created.ok) {
           return Response.json(

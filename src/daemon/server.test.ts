@@ -4454,6 +4454,20 @@ describe("POST /spawn", () => {
         );
       }
     }
+    /** git's trimmed stdout, for the assertions that read a fixture back. */
+    function gitOut(cwd: string, args: string[]): string {
+      return Bun.spawnSync(["git", "-C", cwd, ...args], {
+        env: fixtureEnv,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+        .stdout.toString()
+        .trim();
+    }
+    /** Whatever `git init` named it here; `init.defaultBranch` is the user's. */
+    function defaultBranch(repo: string): string {
+      return gitOut(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    }
     /** A one-commit repo, realpath'd so it compares equal to git's answer. */
     function fixtureRepo(): string {
       const repo = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-forkid-")));
@@ -4897,6 +4911,190 @@ describe("POST /spawn", () => {
           // came up in the source's directory would be a silent no-op.
           expect(argv[0]).toContain(path);
           expect(argv[1]?.[4]).toBe("forky --resume src-sid --fork-session");
+        } finally {
+          restore();
+          rmSync(repo, { recursive: true, force: true });
+        }
+      });
+
+      // A fork carries no prompt (`resolveForkSource` refuses one), so the
+      // source's branch is the only thing left to name the destination after.
+      it("derives the name from the source's branch", async () => {
+        const repo = fixtureRepo();
+        fixtureGit(repo, "checkout", "-q", "-b", "feat/fork-worktree");
+        const { manager, internals } = serverForAgents([forkAgent]);
+        const source = sourceIn(manager, repo);
+        const { restore } = withTmuxOnly();
+        try {
+          const res = await internals.handleRequest(
+            spawnRequest({ fork: source.id, worktree: {}, detach: true }),
+          );
+
+          expect(res.status).toBe(200);
+          const body = (await res.json()) as {
+            worktree: { name: string; branch: string; base?: string };
+          };
+          // Slash-bearing branches slugify like any other name.
+          expect(body.worktree.name).toBe("feat-fork-worktree-fork");
+          expect(body.worktree.branch).toBe("feat-fork-worktree-fork");
+        } finally {
+          restore();
+          rmSync(repo, { recursive: true, force: true });
+        }
+      });
+
+      // Derived, so a second fork of one branch gets its own checkout rather
+      // than joining the first fork's.
+      it("numbers a second fork of the same branch", async () => {
+        const repo = fixtureRepo();
+        const { manager, internals } = serverForAgents([forkAgent]);
+        const source = sourceIn(manager, repo);
+        const { restore } = withTmuxOnly();
+        try {
+          const first = await internals.handleRequest(
+            spawnRequest({ fork: source.id, worktree: {}, detach: true }),
+          );
+          const second = await internals.handleRequest(
+            spawnRequest({ fork: source.id, worktree: {}, detach: true }),
+          );
+
+          expect(first.status).toBe(200);
+          expect(second.status).toBe(200);
+          const names = await Promise.all(
+            [first, second].map(async (res) => {
+              const body = (await res.json()) as { worktree: { name: string } };
+              return body.worktree.name;
+            }),
+          );
+          expect(names[0]).toBe(`${defaultBranch(repo)}-fork`);
+          expect(names[1]).toBe(`${defaultBranch(repo)}-fork-2`);
+        } finally {
+          restore();
+          rmSync(repo, { recursive: true, force: true });
+        }
+      });
+
+      // An explicit name is a request for THAT worktree, on a fork as on any
+      // other spawn: the second one opens the first, it does not number past.
+      it("keeps create-or-open for an explicit name", async () => {
+        const repo = fixtureRepo();
+        const { manager, internals } = serverForAgents([forkAgent]);
+        const source = sourceIn(manager, repo);
+        const { restore } = withTmuxOnly();
+        try {
+          await internals.handleRequest(
+            spawnRequest({
+              fork: source.id,
+              worktree: { name: "forked" },
+              detach: true,
+            }),
+          );
+          const again = await internals.handleRequest(
+            spawnRequest({
+              fork: source.id,
+              worktree: { name: "forked" },
+              detach: true,
+            }),
+          );
+
+          expect(again.status).toBe(200);
+          const body = (await again.json()) as {
+            worktree: { name: string; created: boolean };
+          };
+          expect(body.worktree).toMatchObject({
+            name: "forked",
+            created: false,
+          });
+        } finally {
+          restore();
+          rmSync(repo, { recursive: true, force: true });
+        }
+      });
+
+      // The commits the conversation was written against live on the SOURCE's
+      // branch. `resolveBase`'s default is the main checkout's, which for a
+      // fork out of a linked worktree is a different history entirely.
+      it("cuts the branch from the source checkout, not the main one", async () => {
+        const repo = fixtureRepo();
+        const linked = join(repo, "trees", "feature");
+        fixtureGit(repo, "worktree", "add", "-q", "-b", "feature", linked);
+        fixtureGit(linked, "commit", "-q", "--allow-empty", "-m", "only-here");
+        const expected = gitOut(linked, ["rev-parse", "HEAD"]);
+        const { manager, internals } = serverForAgents([forkAgent]);
+        const source = sourceIn(manager, linked);
+        const { restore } = withTmuxOnly();
+        try {
+          const res = await internals.handleRequest(
+            spawnRequest({ fork: source.id, worktree: {}, detach: true }),
+          );
+
+          expect(res.status).toBe(200);
+          const body = (await res.json()) as {
+            worktree: { name: string; path: string; base?: string };
+          };
+          expect(body.worktree.name).toBe("feature-fork");
+          expect(body.worktree.base).toBe("feature");
+          expect(gitOut(body.worktree.path, ["rev-parse", "HEAD"])).toBe(
+            expected,
+          );
+        } finally {
+          restore();
+          rmSync(repo, { recursive: true, force: true });
+        }
+      });
+
+      it("still lets an explicit base win", async () => {
+        const repo = fixtureRepo();
+        const trunk = defaultBranch(repo);
+        const expected = gitOut(repo, ["rev-parse", "HEAD"]);
+        fixtureGit(repo, "checkout", "-q", "-b", "feature");
+        fixtureGit(repo, "commit", "-q", "--allow-empty", "-m", "later");
+        const { manager, internals } = serverForAgents([forkAgent]);
+        const source = sourceIn(manager, repo);
+        const { restore } = withTmuxOnly();
+        try {
+          const res = await internals.handleRequest(
+            spawnRequest({
+              fork: source.id,
+              worktree: { base: trunk },
+              detach: true,
+            }),
+          );
+
+          expect(res.status).toBe(200);
+          const body = (await res.json()) as {
+            worktree: { path: string; base?: string };
+          };
+          expect(body.worktree.base).toBe(trunk);
+          expect(gitOut(body.worktree.path, ["rev-parse", "HEAD"])).toBe(
+            expected,
+          );
+        } finally {
+          restore();
+          rmSync(repo, { recursive: true, force: true });
+        }
+      });
+
+      // A detached source answers the literal "HEAD" to `--abbrev-ref`, which
+      // the main checkout would resolve to its own head.
+      it("uses the sha when the source is on a detached HEAD", async () => {
+        const repo = fixtureRepo();
+        const sha = gitOut(repo, ["rev-parse", "HEAD"]);
+        fixtureGit(repo, "checkout", "-q", "--detach");
+        const { manager, internals } = serverForAgents([forkAgent]);
+        const source = sourceIn(manager, repo);
+        const { restore } = withTmuxOnly();
+        try {
+          const res = await internals.handleRequest(
+            spawnRequest({ fork: source.id, worktree: {}, detach: true }),
+          );
+
+          expect(res.status).toBe(200);
+          const body = (await res.json()) as {
+            worktree: { name: string; base?: string };
+          };
+          expect(body.worktree.name).toBe(`${sha.slice(0, 12)}-fork`);
+          expect(body.worktree.base).toBe(sha);
         } finally {
           restore();
           rmSync(repo, { recursive: true, force: true });

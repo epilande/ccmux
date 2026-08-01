@@ -133,12 +133,64 @@ export function slugFromPrompt(prompt: string): string {
 }
 
 /**
+ * The `-fork` name a fork's worktree derives, or "" when the label yields
+ * nothing usable.
+ *
+ * The label is slugified BEFORE the suffix is added rather than after, so a
+ * branch long enough to hit the cap loses its own tail instead of the `-fork`
+ * that says what the worktree is.
+ */
+export function slugForFork(label: string): string {
+  const slug = slugify(label);
+  return slug ? `${slug}-fork` : "";
+}
+
+/**
+ * What a checkout's HEAD is, for a caller that needs both to cut from it and
+ * to name something after it.
+ *
+ * `ref` is what git is asked to branch from and `label` what a human reads,
+ * and they differ only when HEAD is detached: `--abbrev-ref` answers the
+ * literal string "HEAD" there, which ANOTHER checkout of the repo would
+ * resolve to its own head, so the ref has to be the sha. The label is that
+ * sha abbreviated, since a 40-character directory name is nobody's idea of a
+ * worktree.
+ *
+ * A branch name is used as-is, not resolved to a sha: refs are shared by
+ * every worktree of a repository, so it means the same commit from the main
+ * checkout, and it reports far better than a sha does.
+ */
+export interface CheckoutHead {
+  ref: string;
+  label: string;
+}
+
+/** Null for an unborn HEAD or anything that is not a checkout at all. */
+export async function readCheckoutHead(
+  checkout: string,
+  git: GitRun = runGit,
+): Promise<CheckoutHead | null> {
+  const branch = await git(checkout, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const name = branch.stdout.trim();
+  if (branch.exitCode !== 0 || !name) return null;
+  if (name !== "HEAD") return { ref: name, label: name };
+
+  const head = await git(checkout, ["rev-parse", "HEAD"]);
+  const sha = head.stdout.trim();
+  if (head.exitCode !== 0 || !sha) return null;
+  return { ref: sha, label: sha.slice(0, 12) };
+}
+
+/**
  * The name a request resolves to, or an error explaining why it cannot.
  *
  * An explicit name always wins. A prompt-derived name is the convenience
- * path. Neither is an error rather than a generated placeholder: an
- * arbitrary name would be a directory and a branch the user did not choose
- * and cannot guess later.
+ * path, and `derivedName` is the same convenience for a caller that has to do
+ * the deriving itself: a fork carries no prompt (`POST /spawn` refuses the
+ * combination), so its destination is named after the source's branch by the
+ * route that knows what it forked. None of the three is an error rather than
+ * a generated placeholder: an arbitrary name would be a directory and a
+ * branch the user did not choose and cannot guess later.
  *
  * `derived` travels with the name because the two are not interchangeable
  * downstream: an explicit name is a request for THAT worktree, while a
@@ -149,6 +201,7 @@ export function slugFromPrompt(prompt: string): string {
 export function resolveWorktreeName(
   name: string | undefined,
   prompt: string | undefined,
+  derivedName?: string,
 ): { ok: true; name: string; derived: boolean } | { ok: false; error: string } {
   if (name !== undefined && name.trim() !== "") {
     const slug = slugify(name);
@@ -162,6 +215,10 @@ export function resolveWorktreeName(
   }
   if (prompt !== undefined && prompt.trim() !== "") {
     const slug = slugFromPrompt(prompt);
+    if (slug) return { ok: true, name: slug, derived: true };
+  }
+  if (derivedName !== undefined && derivedName.trim() !== "") {
+    const slug = slugify(derivedName);
     if (slug) return { ok: true, name: slug, derived: true };
   }
   return {
@@ -549,7 +606,13 @@ async function firstFreeDerivedName(
  */
 export async function createWorktree(
   mainRepoRoot: string,
-  request: { name?: string; base?: string; prompt?: string },
+  request: {
+    name?: string;
+    base?: string;
+    prompt?: string;
+    /** A name the CALLER derived, carrying the same collision semantics. */
+    derivedName?: string;
+  },
   options: CreateWorktreeOptions = {},
 ): Promise<
   { ok: true; result: WorktreeCreation } | { ok: false; error: string }
@@ -557,7 +620,11 @@ export async function createWorktree(
   const git = options.git ?? runGit;
   const fileSetup = options.applyFileSetup ?? applyWorktreeFileSetup;
 
-  const named = resolveWorktreeName(request.name, request.prompt);
+  const named = resolveWorktreeName(
+    request.name,
+    request.prompt,
+    request.derivedName,
+  );
   if (!named.ok) return named;
 
   return withRepoLock(mainRepoRoot, async () => {
