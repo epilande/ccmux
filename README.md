@@ -276,6 +276,7 @@ ccmux spawn --worktree fix-flicker                           # Spawn into a name
 ccmux spawn --worktree --base develop --prompt "fix flicker" # Branch the new worktree from develop
 ccmux spawn --worktree fix-flicker --with-changes            # Move this checkout's uncommitted work into it
 ccmux spawn --worktree fix-flicker --with-changes --untracked copy # Untracked files land in both
+ccmux spawn --fork <id> --worktree                           # Fork into a fresh worktree off the source's branch
 ```
 
 Split directions use tmux's own vocabulary: `h` puts the new pane beside the
@@ -386,6 +387,14 @@ The fork starts in the source's directory by default, because that is where a
 side-by-side fork belongs. It is a default, not a limit: `--cwd` elsewhere is
 honored, since the fork resumes the source's transcript by path rather than by
 looking a session id up under the current directory.
+
+`--worktree` goes one further and creates the destination, so the two sessions
+edit their own checkouts instead of one. The worktree is named after the branch
+the source is on (`<branch>-fork`, numbered `-2`, `-3` if that name is taken)
+and cut from it, so the fork continues on the history its conversation was
+written against. Name it yourself with `--worktree <name>` or pick the ref with
+`--base`. `--with-changes` is refused on a fork: the original session is still
+running in the checkout those changes would be moved out of.
 
 Fork needs two things, and the picker hides the action when either is missing:
 the agent has to declare how it forks (`forkCommand`), and ccmux has to know
