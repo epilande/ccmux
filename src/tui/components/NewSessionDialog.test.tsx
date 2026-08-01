@@ -39,6 +39,7 @@ const draft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft => ({
   moveChanges: false,
   untracked: "move",
   worktreeName: null,
+  fork: null,
   field: "agent",
   ...overrides,
 });
