@@ -172,11 +172,58 @@ describe("resolveWorktreeName", () => {
 });
 
 describe("slugForFork", () => {
-  // Slugified BEFORE the suffix, so a branch long enough to hit the cap
-  // cannot truncate the `-fork` that says what the worktree is.
   it("suffixes a branch name", () => {
     expect(slugForFork("feat/fork-worktree")).toBe("feat-fork-worktree-fork");
-    expect(slugForFork("a".repeat(80)).endsWith("-fork")).toBe(true);
+  });
+
+  /**
+   * The lengths that used to lie. The suffix is budgeted INSIDE the cap
+   * rather than appended past it, because the name is handed to
+   * `resolveWorktreeName`, which slugifies again: anything the suffix pushed
+   * over the cap was cut off there. A 36-character branch lost part of the
+   * `-fork` that says what the worktree is, and a 39-character one lost all
+   * of it and derived its own branch's name, which numbering then turned
+   * into `<branch>-2`.
+   */
+  const boundaries = [35, 36, 39, 40, 80];
+
+  it("keeps the whole suffix at every length", () => {
+    for (const length of boundaries) {
+      const name = slugForFork("a".repeat(length));
+      expect(name.endsWith("-fork")).toBe(true);
+      expect(name.length).toBeLessThanOrEqual(40);
+    }
+  });
+
+  // Through the resolver, because that is where the collision happened: a
+  // name equal to the source branch's is one `firstFreeDerivedName` finds
+  // taken, so the fork landed on `<branch>-2`.
+  it("never resolves to the source's own name", () => {
+    for (const length of boundaries) {
+      const branch = "a".repeat(length);
+      const resolved = resolveWorktreeName(
+        undefined,
+        undefined,
+        slugForFork(branch),
+      );
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) return;
+      expect(resolved.name).not.toBe(slugify(branch));
+    }
+  });
+
+  // What makes both of the above true end to end: the property only holds if
+  // the re-slugify every caller's name goes through leaves this alone.
+  it("survives the re-slugify resolveWorktreeName does", () => {
+    for (const length of boundaries) {
+      const name = slugForFork("a".repeat(length));
+      expect(slugify(name)).toBe(name);
+      expect(resolveWorktreeName(undefined, undefined, name)).toEqual({
+        ok: true,
+        name,
+        derived: true,
+      });
+    }
   });
 
   it("returns nothing usable for a label with nothing in it", () => {
@@ -587,6 +634,27 @@ describe("createWorktree", () => {
     expect(first.result.name).toBe("main-fork");
     expect(second.result.name).toBe("main-fork-2");
     expect(second.result.created).toBe(true);
+  });
+
+  // The boundary that mattered in practice: a long branch's `-fork` used to
+  // be trimmed back off inside `resolveWorktreeName`, and at 39 characters
+  // that left the fork asking for the SOURCE branch's own name. Numbering
+  // then handed it `<branch>-2`, a worktree whose name says nothing about
+  // what it is and which the dialog's preview never showed.
+  it("keeps a long branch's -fork through creation", async () => {
+    const repo = await makeRepo();
+    const branch = "a".repeat(39);
+    await git(repo, ["checkout", "-q", "-b", branch]);
+
+    const out = await createWorktree(repo, {
+      derivedName: slugForFork(branch),
+    });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.result.name.endsWith("-fork")).toBe(true);
+    expect(out.result.name).not.toBe(branch);
+    expect(out.result.branch).toBe(out.result.name);
   });
 
   it("gives three concurrent spawns of one prompt three worktrees", async () => {

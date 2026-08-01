@@ -4943,6 +4943,37 @@ describe("POST /spawn", () => {
         }
       });
 
+      // The name is derived in two places — here and in the dialog's preview
+      // — and the cap is where they used to disagree: appending `-fork` past
+      // the 40-character cap left `resolveWorktreeName` to trim it back off,
+      // so a branch this long forked into a worktree called after ITSELF,
+      // which numbering then made `<branch>-2`.
+      it("keeps the -fork suffix on a long branch", async () => {
+        const repo = fixtureRepo();
+        const branch = "long-branch-name-that-runs-right-past-cap";
+        expect(branch.length).toBeGreaterThan(39);
+        fixtureGit(repo, "checkout", "-q", "-b", branch);
+        const { manager, internals } = serverForAgents([forkAgent]);
+        const source = sourceIn(manager, repo);
+        const { restore } = withTmuxOnly();
+        try {
+          const res = await internals.handleRequest(
+            spawnRequest({ fork: source.id, worktree: {}, detach: true }),
+          );
+
+          expect(res.status).toBe(200);
+          const body = (await res.json()) as {
+            worktree: { name: string; branch: string };
+          };
+          expect(body.worktree.name.endsWith("-fork")).toBe(true);
+          expect(body.worktree.name).not.toBe(branch);
+          expect(body.worktree.branch).toBe(body.worktree.name);
+        } finally {
+          restore();
+          rmSync(repo, { recursive: true, force: true });
+        }
+      });
+
       // Derived, so a second fork of one branch gets its own checkout rather
       // than joining the first fork's.
       it("numbers a second fork of the same branch", async () => {

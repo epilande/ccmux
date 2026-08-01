@@ -132,17 +132,28 @@ export function slugFromPrompt(prompt: string): string {
   return slugify(words.join("-"));
 }
 
+/** What a fork's derived worktree name ends in, and what it must never lose. */
+const FORK_SUFFIX = "-fork";
+
 /**
  * The `-fork` name a fork's worktree derives, or "" when the label yields
  * nothing usable.
  *
- * The label is slugified BEFORE the suffix is added rather than after, so a
- * branch long enough to hit the cap loses its own tail instead of the `-fork`
- * that says what the worktree is.
+ * The suffix is BUDGETED inside the cap rather than appended past it: the
+ * label's own tail is cut to make room, so the result is never longer than a
+ * slug and always ends in `-fork`. That is a property callers depend on, not
+ * a nicety. `resolveWorktreeName` slugifies whatever name it is handed, so a
+ * result over the cap was trimmed there instead — a long branch losing part
+ * of the suffix, and one exactly at the cap losing all of it and deriving its
+ * own branch's name, which numbering then turned into `<branch>-2`. Budgeting
+ * here makes that re-slugify a no-op, so what the dialog previews and what
+ * the worktree is called are the same string.
  */
 export function slugForFork(label: string): string {
-  const slug = slugify(label);
-  return slug ? `${slug}-fork` : "";
+  const slug = slugify(label)
+    .slice(0, SLUG_MAX_CHARS - FORK_SUFFIX.length)
+    .replace(/-+$/g, "");
+  return slug ? `${slug}${FORK_SUFFIX}` : "";
 }
 
 /**
