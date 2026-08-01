@@ -21,6 +21,8 @@ import {
   createTUIStore,
   namesAWorktree,
   TickContext,
+  type NewSessionDraft,
+  type NewSessionFork,
   type NewSessionPlacement,
 } from "./store";
 import { killActionPath, restartActionPath } from "./utils/invoke-actions";
@@ -420,6 +422,29 @@ export function App(props: AppProps) {
   }
 
   /**
+   * Whether this row can be forked into a worktree of its own (issue #70).
+   *
+   * Everything the plain fork needs, plus a repository for the worktree to
+   * hang off: `mainRepoRoot` is what the daemon would resolve too, so a row
+   * without one has nowhere to put a linked checkout. Checked here rather
+   * than left to the daemon's refusal because this is a MENU ITEM — hiding
+   * what cannot work is the same rule the plain Fork item follows, and an
+   * item that only ever answers with an error reads as broken.
+   */
+  function canForkIntoWorktree(
+    session:
+      | {
+          agentType: string;
+          nativeSessionId?: string;
+          trackingMode?: string;
+          mainRepoRoot?: string | null;
+        }
+      | undefined,
+  ): boolean {
+    return canForkSession(session) && Boolean(session?.mainRepoRoot);
+  }
+
+  /**
    * Why this row can't be forked, for the key path. The menu hides the item
    * instead, but a keybinding has no way to hide itself and the help overlay
    * advertises `F` on every row, so silence reads as a broken key.
@@ -720,6 +745,47 @@ export function App(props: AppProps) {
     if (session) void forkSession(session);
   }
 
+  /**
+   * "Fork into worktree": continue this session in a checkout of its own,
+   * through the dialog rather than on the click.
+   *
+   * The dialog is what makes this different from `F`: a fork beside the
+   * original needs no decisions, but a fork into a worktree has a name — and
+   * the name is what tells two forks of one branch apart later. Everything
+   * else the request needs comes off the row, since a fork's agent and
+   * directory are the source's.
+   */
+  function contextMenuForkIntoWorktree() {
+    const cm = store.state.contextMenu;
+    if (!cm) return;
+    const session = store.state.sessions.find((s) => s.id === cm.sessionId);
+    store.actions.hideContextMenu();
+    if (!session || !canForkIntoWorktree(session)) return;
+    openNewSession({
+      cwd: sessionCwd(session),
+      agent: session.agentType,
+      fork: {
+        sessionId: session.id,
+        // The agent and the branch: between them they say which of a
+        // directory's sessions this is, and the branch is also what the
+        // derived name is built from, so the preview below it is explained
+        // rather than merely displayed.
+        label: session.gitBranch
+          ? `${session.agentType} · ${session.gitBranch}`
+          : session.agentType,
+        // A detached checkout reports the literal string "HEAD" here, which
+        // is a branch column's honest answer and a naming rule's nonsense:
+        // the daemon names a fork of one after the sha (`readCheckoutHead`),
+        // so previewing `head-fork` promises a name nobody gets. Worse, the
+        // preview is typeable — sent as an EXPLICIT name it would make the
+        // second detached fork open the first one's checkout. Null instead,
+        // which is the row's existing "a name is coming, just not one this
+        // client can show" state. The label above keeps saying HEAD.
+        branch: session.gitBranch === "HEAD" ? null : session.gitBranch,
+      },
+    });
+  }
+
   function contextMenuNewSession() {
     const cm = store.state.contextMenu;
     if (!cm) return;
@@ -858,6 +924,21 @@ export function App(props: AppProps) {
             color: theme.blue,
             action: contextMenuFork,
           },
+          // Directly under its one-shot sibling, and only where there is a
+          // repository to make a worktree in. Same 22-column, one-line rule
+          // as every other label here: at exactly 18 columns this one has no
+          // room to grow, and a wrap would silently break the whole menu's
+          // height.
+          ...(canForkIntoWorktree(session)
+            ? [
+                {
+                  label: "Fork into worktree",
+                  hint: "",
+                  color: theme.blue,
+                  action: contextMenuForkIntoWorktree,
+                },
+              ]
+            : []),
         ]
       : [];
     return [
@@ -1148,6 +1229,7 @@ export function App(props: AppProps) {
     cwd: string;
     agent?: string;
     moveChanges?: boolean;
+    fork?: NewSessionFork;
   }): void {
     // Mirrors `reviewSession`: refuse at the point of intent rather than
     // opening a dialog with a blank Directory row whose Enter round-trips
@@ -1167,6 +1249,7 @@ export function App(props: AppProps) {
         spawnableAgents()?.[0]?.name ??
         "claude",
       moveChanges: context.moveChanges,
+      fork: context.fork,
     });
   }
 
@@ -1178,6 +1261,11 @@ export function App(props: AppProps) {
     const list = spawnableAgents();
     const draft = store.state.newSession;
     if (!list || list.length === 0 || !draft) return;
+    // Except in fork mode, where the agent is the SOURCE's and the request
+    // never carries one. Reconciling there would rewrite the draft to name a
+    // different agent than the session actually running — invisibly, since
+    // the mode has no agent row.
+    if (draft.fork) return;
     if (list.some((agent) => agent.name === draft.agent)) return;
     store.actions.setNewSessionAgent(list[0]!.name);
   });
@@ -1203,6 +1291,7 @@ export function App(props: AppProps) {
       appDims().height <
       newSessionFloorRows({
         moveChanges: draft.moveChanges,
+        fork: draft.fork !== null,
         namesAWorktree: namesAWorktree(draft),
       })
     ) {
@@ -1210,6 +1299,11 @@ export function App(props: AppProps) {
     }
     switch (draft.field) {
       case "agent":
+        // Fork mode has no agent row: the fork continues the source's. Paired
+        // with the store keeping focus off the field, for the same reason
+        // `untracked` below carries two guards — a number key that changed an
+        // invisible choice is the failure worth guarding twice.
+        if (draft.fork) return null;
         return {
           options: (spawnableAgents() ?? []).map((agent) => agent.name),
           value: draft.agent,
@@ -1226,9 +1320,9 @@ export function App(props: AppProps) {
           },
         };
       case "destination":
-        // Locked in move-changes mode, where the field is not reachable by
-        // Tab either; the store refuses the write regardless.
-        if (draft.moveChanges) return null;
+        // Locked in move-changes and fork mode, where the field is not
+        // reachable by Tab either; the store refuses the write regardless.
+        if (draft.moveChanges || draft.fork) return null;
         return {
           options: DESTINATION_OPTIONS.map((option) => option.value),
           value: draft.destination,
@@ -1313,9 +1407,137 @@ export function App(props: AppProps) {
     move?: MoveReport;
   }
 
+  /**
+   * The name a worktree-bound draft will travel under, or "" for an untouched
+   * field. Settled by the daemon's own slug rule so that what the row showed
+   * is what gets created.
+   *
+   * Empty is not "no name": it is the DERIVED state, which the daemon numbers
+   * past a collision instead of opening what is already there. Only a typed
+   * name travels.
+   */
+  function draftWorktreeName(draft: NewSessionDraft): string {
+    return draft.worktreeName !== null ? slugify(draft.worktreeName) : "";
+  }
+
+  /**
+   * A name was typed and nothing survives the slug rule (punctuation, a
+   * non-Latin script). Refused rather than derived: the field would still be
+   * showing the user's text while the worktree got a name they never chose.
+   * The rule is named, because "why not" is the next question and the answer
+   * is not guessable from the refusal.
+   */
+  function refuseUnslugifiableName(draft: NewSessionDraft): boolean {
+    if (draft.worktreeName === null || draft.worktreeName.trim() === "") {
+      return false;
+    }
+    if (draftWorktreeName(draft)) return false;
+    store.actions.showToast(
+      "A worktree name needs letters or numbers; clear the field to derive one",
+      4000,
+    );
+    return true;
+  }
+
+  /**
+   * Continue the dialog's source session in a worktree of its own (issue
+   * #70): the `F` key's fork, with a destination and a name.
+   *
+   * Split from the spawn path rather than folded into it, because almost none
+   * of that path applies: there is no agent to resolve, no prompt to check
+   * against one, no cwd (the daemon reads the source's), and no last-agent to
+   * remember. What it shares is the DIALOG — the same placement semantics and
+   * the same derived-vs-explicit name — and the same one-at-a-time guard the
+   * key path uses, since both open a pane off one conversation.
+   */
+  async function submitForkIntoWorktree(draft: NewSessionDraft): Promise<void> {
+    const fork = draft.fork;
+    if (!fork) return;
+    if (refuseUnslugifiableName(draft)) return;
+    // Placement carries a `%N` from OUR tmux server; see `submitNewSession`.
+    if (!ensureSameServer()) return;
+    if (forkInFlight) {
+      store.actions.showToast("Fork already in progress");
+      return;
+    }
+    forkInFlight = true;
+    const worktreeName = draftWorktreeName(draft);
+    try {
+      const callerPane = await resolveSpawnPane();
+      let split = SPAWN_SPLIT[draft.placement];
+      if (split !== false && callerPane === null && props.sidebar) {
+        split = false;
+        store.actions.showToast("No pane to split here; opened a window");
+      }
+      const response = await fetch(`${getDaemonUrl()}/spawn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fork: fork.sessionId,
+          // `callerPane`, not `target`: same reasoning as the ordinary spawn's
+          // — the picker means "my session/pane", and an explicit target
+          // renumbers the windows after it.
+          split,
+          callerPane: callerPane ?? undefined,
+          // The jump below is this component's own exit path; letting the
+          // daemon switch too would race it.
+          detach: true,
+          // Always present, even empty: the object is what asks for a worktree
+          // at all. Named only when one was typed — left out, the daemon
+          // derives `<branch>-fork` from the source checkout's own HEAD and
+          // numbers it past a collision, which is what an untouched row asked
+          // for. Sent, it means that worktree specifically, and an existing
+          // one of that name is opened rather than sidestepped.
+          worktree: worktreeName ? { name: worktreeName } : {},
+        }),
+        signal: AbortSignal.timeout(FORK_TIMEOUT_MS),
+      });
+      const body = (await response
+        .json()
+        .catch(() => null)) as SpawnBody | null;
+      if (!response.ok || !body?.paneId) {
+        // The dialog stays open: every refusal here (that name is taken, the
+        // source is gone) is something to fix in the field still on screen.
+        store.actions.showToast(
+          `Fork failed: ${body?.error ?? response.statusText}`,
+          4000,
+        );
+        return;
+      }
+      store.actions.closeNewSessionDialog();
+      // The daemon's name, not the row's preview: a derived name that collided
+      // came back numbered.
+      const created = body.worktree?.name;
+      if (props.sidebar) {
+        // The dialog's own convention, which an ordinary spawn from the rail
+        // already follows: the sidebar is a board you watch, not a place you
+        // launch from and leave. The toast is then the only account there is
+        // of where the fork landed, so it says so even unnamed.
+        store.actions.showToast(
+          created ? `Forked into ${created}` : "Forked into a new worktree",
+        );
+        return;
+      }
+      if (created) store.actions.showToast(`Forked into ${created}`);
+      selectPane(body.paneId);
+    } catch (err: unknown) {
+      store.actions.showToast(`Fork failed: ${errText(err)}`, 4000);
+    } finally {
+      // In `finally`: a throw between the guard and the response would
+      // otherwise latch the key for the rest of the picker's life.
+      forkInFlight = false;
+    }
+  }
+
   async function submitNewSession(): Promise<void> {
     const draft = store.state.newSession;
-    if (!draft || spawnInFlight) return;
+    if (!draft) return;
+    // Fork mode shares the dialog and almost nothing else; see above.
+    if (draft.fork) {
+      await submitForkIntoWorktree(draft);
+      return;
+    }
+    if (spawnInFlight) return;
 
     const list = spawnableAgents();
     if (list === null) {
@@ -1338,28 +1560,11 @@ export function App(props: AppProps) {
       );
       return;
     }
-    // The name the request will carry, settled by the daemon's own slug rule
-    // so that what the row showed is what gets created. Empty means an
-    // untouched field: let the daemon derive one.
+    // The name the request will carry. Empty means an untouched field: let
+    // the daemon derive one.
     const worktreeName =
-      draft.destination === "worktree" && draft.worktreeName !== null
-        ? slugify(draft.worktreeName)
-        : "";
-    // A name was typed, and nothing survives the slug rule. Refused rather
-    // than derived: with a prompt present, deriving would spawn under a name
-    // the user did not type and did not ask for, and the field would still be
-    // showing theirs. The rule is named, because "why not" is the next
-    // question and the answer is not guessable from the refusal.
-    if (
-      draft.destination === "worktree" &&
-      draft.worktreeName !== null &&
-      draft.worktreeName.trim() !== "" &&
-      !worktreeName
-    ) {
-      store.actions.showToast(
-        "A worktree name needs letters or numbers; clear the field to derive one",
-        4000,
-      );
+      draft.destination === "worktree" ? draftWorktreeName(draft) : "";
+    if (draft.destination === "worktree" && refuseUnslugifiableName(draft)) {
       return;
     }
     // With neither a name nor a prompt to derive one from there is nothing to

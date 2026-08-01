@@ -276,6 +276,7 @@ ccmux spawn --worktree fix-flicker                           # Spawn into a name
 ccmux spawn --worktree --base develop --prompt "fix flicker" # Branch the new worktree from develop
 ccmux spawn --worktree fix-flicker --with-changes            # Move this checkout's uncommitted work into it
 ccmux spawn --worktree fix-flicker --with-changes --untracked copy # Untracked files land in both
+ccmux spawn --fork <id> --worktree                           # Fork into a fresh worktree off the source's branch
 ```
 
 Split directions use tmux's own vocabulary: `h` puts the new pane beside the
@@ -386,6 +387,24 @@ The fork starts in the source's directory by default, because that is where a
 side-by-side fork belongs. It is a default, not a limit: `--cwd` elsewhere is
 honored, since the fork resumes the source's transcript by path rather than by
 looking a session id up under the current directory.
+
+`--worktree` goes one further and creates the destination, so the two sessions
+edit their own checkouts instead of one. The worktree is named after the branch
+the source is on (`<branch>-fork`, numbered `-2`, `-3` if that name is taken)
+and cut from it, so the fork continues on the history its conversation was
+written against. Name it yourself with `--worktree <name>` or pick the ref with
+`--base`. `--with-changes` is refused on a fork: the original session is still
+running in the checkout those changes would be moved out of.
+
+**Fork into worktree**, directly under **Fork** in the same context menu, is
+the picker's version of that. It routes through the new-session dialog rather
+than acting on the click, because this is the fork that has a decision in it: a
+fork beside the original needs none, but one in a checkout of its own has a
+name, and the name is what tells two forks of a branch apart a week later. The
+**Name** row previews the `<branch>-fork` the daemon would derive and takes one
+of your own instead; a **Source** row names the conversation being continued.
+Everything else comes off the row. The item appears only where a worktree can
+go, which means a forkable row whose checkout is in a git repository.
 
 Fork needs two things, and the picker hides the action when either is missing:
 the agent has to declare how it forks (`forkCommand`), and ccmux has to know
@@ -505,7 +524,9 @@ Choosing the worktree adds a **Name** row showing the name it would create, deri
 
 Opened from **Move changes**, the same dialog runs in move mode: the title says so, **Where** is locked to the new worktree (there is nowhere else the changes can go), the same editable **Name** row is there, and an **Untracked** field appears — <kbd>1</kbd> move, <kbd>2</kbd> copy to both, <kbd>3</kbd> leave here. <kbd>Tab</kbd> skips the locked field. See [Moving Uncommitted Changes](#moving-uncommitted-changes).
 
-In a pane too short for every row, the dialog drops what it can spare before anything you act on — the key hints first, then the move note, then the blank line, then the option lists become scrolling windows, and the directory row last; below the height its fields need, it says how many rows it wants instead of drawing over itself, and the number keys go quiet while it does.
+Opened from **Fork into worktree** it runs in fork mode: the title says so, a **Source** row names the conversation being continued, and the **Agent** and **Prompt** rows are gone — a fork continues the source's agent and its history, so there is nothing to pick and no first message to write. **Where** is locked to the new worktree, and the **Name** row previews `<branch>-fork`. Where no name can be derived (the source is on a detached HEAD, or on a branch with nothing in it to slugify) the row asks you to type one instead of promising an automatic name. See [Forking Sessions](#forking-sessions).
+
+In a pane too short for every row, the dialog drops what it can spare before anything you act on — the key hints first, then the mode note (a move's, or a fork's **Source** row), then the blank line, then the option lists become scrolling windows, and the directory row last; below the height its fields need, it says how many rows it wants instead of drawing over itself, and the number keys go quiet while it does.
 
 The working directory is derived, not typed: a session row uses that session's directory, a group header uses the group's, and no selection falls back to where the picker was launched. The picker jumps to the new pane, and a one-shot picker then closes while a `--persistent` board stays open; the sidebar spawns into the window's main area without stealing focus.
 

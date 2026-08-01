@@ -174,11 +174,11 @@ export function createSpawnCommand(): Command {
     .option("--detach", "Don't switch to the new pane after spawning")
     .option(
       "--worktree [name]",
-      "Spawn into a git worktree at <repo>/.claude/worktrees/<name>, creating it if needed (name derived from --prompt when omitted)",
+      "Spawn into a git worktree at <repo>/.claude/worktrees/<name>, creating it if needed (name derived from --prompt, or from the forked session's branch, when omitted)",
     )
     .option(
       "--base <ref>",
-      "Branch the new worktree from this ref (default: the repository's current branch)",
+      "Branch the new worktree from this ref (default: the repository's current branch, or the forked session's)",
     )
     .option(
       "--with-changes",
@@ -228,6 +228,18 @@ export function createSpawnCommand(): Command {
         }
         if (options.untracked !== undefined && !options.withChanges) {
           console.error("--untracked requires --with-changes");
+          process.exit(1);
+        }
+        // A move empties the checkout it takes the changes from, and a fork
+        // leaves the original session running in that same checkout. The
+        // daemon refuses this too (the picker can express it), but the same
+        // placement rule applies: nothing should start on a command line that
+        // cannot be honored.
+        if (options.withChanges && options.fork) {
+          console.error(
+            "--with-changes cannot be used with --fork: the session being forked keeps " +
+              "running in that checkout, so moving its changes would empty it out from under it",
+          );
           process.exit(1);
         }
 
@@ -314,6 +326,24 @@ export function createSpawnCommand(): Command {
             .json()
             .catch(() => null)) as SpawnErrorResponse | null;
           console.error(data?.error ?? `Spawn failed: HTTP ${response.status}`);
+          // A daemon predating fork-into-a-worktree still carries the refusal
+          // that said the combination was unverified, and printed on its own
+          // it reads as "this feature does not exist" rather than "the
+          // process answering you is old". Matched on the sentence unique to
+          // that refusal, so an ordinary fork failure is left to speak for
+          // itself. Same treatment `--with-changes` gets below, for the same
+          // class of mismatch between a new CLI and an old daemon.
+          if (
+            options.fork &&
+            options.worktree !== undefined &&
+            data?.error?.includes("into a new worktree yet")
+          ) {
+            console.error(
+              `The running ccmux daemon is an older build that could not fork into a new ` +
+                `worktree; the feature is in this CLI. Restart it with 'ccmux daemon restart' ` +
+                `and try again.`,
+            );
+          }
           // A refused move can leave a stash entry behind, and the sha is
           // the handle for getting the work back by hand. Same lines the
           // picker raises for the same body; see `src/lib/move-report.ts`.

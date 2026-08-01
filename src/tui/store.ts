@@ -113,44 +113,83 @@ export const NEW_SESSION_FIELDS: readonly NewSessionField[] = [
 ];
 
 /**
+ * The session a fork-mode dialog continues (issue #70).
+ *
+ * Everything a fork needs beyond the destination comes from the source, so
+ * the draft carries an identifier to POST and just enough about the source to
+ * describe it: the dialog cannot go back and ask the session list, which SSE
+ * re-sorts (and can drop rows from) while a dialog is open.
+ */
+export interface NewSessionFork {
+  /** The daemon session id the fork continues. */
+  sessionId: string;
+  /** What the note row calls the source. */
+  label: string;
+  /**
+   * The source checkout's branch, when the row carries one.
+   *
+   * A preview, not the request: the daemon derives `<branch>-fork` from the
+   * checkout's own HEAD, so null here means "the daemon will name it after a
+   * branch this client never saw", not "there is no name".
+   */
+  branch: string | null;
+}
+
+/**
+ * What mode a draft is in, for the consumers that branch on it. Every one of
+ * them takes the whole shape rather than the flag it happens to care about:
+ * `NewSessionDraft` satisfies it, and a mode added later fails to compile at
+ * each site until it says what it means there.
+ */
+export interface NewSessionShape {
+  moveChanges: boolean;
+  destination: NewSessionDestination;
+  fork: NewSessionFork | null;
+}
+
+/**
  * Whether this draft's spawn makes a worktree, which is the one rule three
  * different consumers have to agree on: whether the Name field exists at all
  * (below), whether the dialog renders its row, and how many rows `App.tsx`
  * budgets for the height floor. A consumer that disagreed would not clip the
  * row it did not expect — it would draw it over its neighbour.
  *
- * Both disjuncts, though the store locks a move's destination to `worktree`:
- * the name row is what a move names its worktree with, and a lock that ever
- * came loose must not take the field with it.
+ * All three disjuncts, though the store locks a move's and a fork's
+ * destination to `worktree`: the name row is what those modes name their
+ * worktree with, and a lock that ever came loose must not take the field with
+ * it.
  */
-export function namesAWorktree(draft: {
-  moveChanges: boolean;
-  destination: NewSessionDestination;
-}): boolean {
-  return draft.destination === "worktree" || draft.moveChanges;
+export function namesAWorktree(draft: NewSessionShape): boolean {
+  return (
+    draft.destination === "worktree" || draft.moveChanges || draft.fork !== null
+  );
 }
 
 /**
  * The fields a given draft actually has, in focus order.
  *
- * Three of them are conditional. Move-changes mode locks the destination (a
+ * Most of them are conditional. Move-changes mode locks the destination (a
  * move has nowhere to go but a new worktree, so offering "here" would be a
  * choice that cannot be taken) and adds the untracked-files choice; an
- * ordinary new session has neither. The name belongs to whichever of the two
- * is making a worktree, and to neither when the session starts in the
- * checkout it was opened over. A field that cannot be acted on must not be
- * reachable by Tab either — focusing a row whose keys do nothing is exactly
- * the "reads as broken" outcome the picker hides items to avoid.
+ * ordinary new session has neither. Fork mode locks the destination for the
+ * same reason and drops two more: a fork continues the SOURCE's agent and the
+ * source's conversation, so neither an agent nor an opening prompt is a
+ * choice it has. The name belongs to whichever mode is making a worktree, and
+ * to none of them when the session starts in the checkout it was opened over.
+ * A field that cannot be acted on must not be reachable by Tab either —
+ * focusing a row whose keys do nothing is exactly the "reads as broken"
+ * outcome the picker hides items to avoid.
  *
  * The full list stays the source of truth for the DIALOG'S HEIGHT: every
  * field declares a row count, and a hidden one declares zero.
  */
-export function newSessionFields(draft: {
-  moveChanges: boolean;
-  destination: NewSessionDestination;
-}): readonly NewSessionField[] {
+export function newSessionFields(
+  draft: NewSessionShape,
+): readonly NewSessionField[] {
+  const forking = draft.fork !== null;
   return NEW_SESSION_FIELDS.filter((field) => {
-    if (field === "destination") return !draft.moveChanges;
+    if (field === "agent" || field === "prompt") return !forking;
+    if (field === "destination") return !draft.moveChanges && !forking;
     if (field === "untracked") return draft.moveChanges;
     if (field === "worktreeName") return namesAWorktree(draft);
     return true;
@@ -192,6 +231,15 @@ export interface NewSessionDraft {
    * for. Typing here freezes the name; clearing the field returns to derived.
    */
   worktreeName: string | null;
+  /**
+   * The session this dialog forks into a new worktree, or null for a spawn
+   * that starts something new (issue #70).
+   *
+   * The whole mode hangs off one nullable field rather than a boolean beside
+   * an id, because the two can never disagree that way: there is no fork mode
+   * without a session to fork, and no session to fork outside fork mode.
+   */
+  fork: NewSessionFork | null;
   /** Which field the option/text keys currently apply to. */
   field: NewSessionField;
 }
@@ -1371,8 +1419,16 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       /** Open in move-changes mode: destination locked to a new worktree,
        *  with the untracked-files choice. */
       moveChanges?: boolean;
+      /** Open in fork mode: continue this session in a worktree of its own,
+       *  destination locked, agent and prompt gone. */
+      fork?: NewSessionFork;
     }) {
       const moveChanges = init.moveChanges === true;
+      const fork = init.fork ?? null;
+      // Both modes exist to put something somewhere new; only an ordinary
+      // spawn defaults to the directory it was opened over.
+      const destination: NewSessionDestination =
+        moveChanges || fork ? "worktree" : "here";
       batch(() => {
         setState("contextMenu", null);
         setState("groupContextMenu", null);
@@ -1380,21 +1436,18 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           cwd: init.cwd,
           agent: init.agent,
           placement: "window",
-          // A move has nowhere to go but a new worktree; anything else is the
-          // ordinary spawn, which defaults to the directory it was opened over.
-          destination: moveChanges ? "worktree" : "here",
+          destination,
           prompt: "",
           moveChanges,
           // Agents create new files constantly, so leaving them behind would
           // strand exactly the work being relocated. Same default as the CLI.
           untracked: "move",
           // Derived until typed in: the dialog opens with no prompt, so there
-          // is nothing to name a worktree after yet.
+          // is nothing to name a worktree after yet. A fork derives from the
+          // source's branch instead, which the daemon reads for itself.
           worktreeName: null,
-          field: newSessionFields({
-            moveChanges,
-            destination: moveChanges ? "worktree" : "here",
-          })[0]!,
+          fork,
+          field: newSessionFields({ moveChanges, destination, fork })[0]!,
         });
       });
     },
@@ -1453,11 +1506,12 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     setNewSessionDestination(destination: NewSessionDestination) {
       const draft = state.newSession;
       if (!draft) return;
-      // Locked in move-changes mode, and enforced here rather than only in the
-      // dialog: the destination is what makes the request a move at all, so
-      // any path that could flip it back to `here` would post a spawn that
-      // silently dropped the changes it was opened to relocate.
-      if (draft.moveChanges) return;
+      // Locked in both modes, and enforced here rather than only in the
+      // dialog: the destination is what makes the request a move (or a fork
+      // into a worktree) at all, so any path that could flip it back to `here`
+      // would post a spawn that silently dropped the changes it was opened to
+      // relocate, or a bare fork into the checkout the source already has.
+      if (draft.moveChanges || draft.fork) return;
       batch(() => {
         setState("newSession", "destination", destination);
         // The name field goes with the worktree. Focus cannot be left on a

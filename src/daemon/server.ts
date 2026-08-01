@@ -39,6 +39,8 @@ import {
   createWorktree,
   ensureWorktreesExcluded,
   existingWorktreeFor,
+  readCheckoutHead,
+  slugForFork,
   type WorktreeCreation,
 } from "./worktree-create";
 import { getAgents, type AgentDef } from "../lib/agents";
@@ -2600,21 +2602,21 @@ export class DaemonServer {
         { status: 400, headers },
       );
     }
-    // Fork-into-a-new-worktree is a destination CREATION, not just a
-    // different cwd, and nobody has run the combination against a live agent
-    // yet. Resuming by transcript path removed the resume-scoping wall this
-    // refusal used to cite, so what is left is an unshipped feature rather
-    // than a technical impossibility: it is tracked separately, with its own
-    // surface and its own live check. Refused BEFORE the worktree is created,
-    // so a rejected request leaves no directory and no branch behind.
-    if (forkSource && worktreeRequest.value) {
+    // Moving changes and forking are compatible intentions and an
+    // incompatible pair of operations: the move EMPTIES the checkout it takes
+    // the work from (a stash push, with deliberately no reset behind it), and
+    // a fork's whole premise is that the original session keeps running in
+    // that checkout. The agent would find its files gone mid-conversation.
+    // Refused before the stash and before the worktree, so a rejected request
+    // leaves nothing to put back.
+    if (forkSource && worktreeRequest.value?.withChanges) {
       return Response.json(
         {
           error:
-            `Cannot fork ${forkSource.session.agentType} into a new worktree yet: ` +
-            `that combination has not been verified against a live agent. ` +
-            `Spawn a fresh session into the worktree, or fork into an existing ` +
-            `directory with 'cwd'.`,
+            `Cannot fork ${forkSource.session.agentType} with 'worktree.withChanges': ` +
+            `moving the changes empties the checkout they come from, and the session being forked ` +
+            `is still running in ${forkSource.session.cwd}. Fork into the worktree without it, or ` +
+            `move the changes with an ordinary spawn.`,
         },
         { status: 400, headers },
       );
@@ -2761,6 +2763,63 @@ export class DaemonServer {
       const mainRepoRoot = gitInfo.mainRepoRoot;
       const { withChanges, untracked, ...creation } = worktreeRequest.value;
 
+      // A FORK's destination takes both its name and its start point from the
+      // source checkout's HEAD, because neither default fits one:
+      //
+      // - There is no prompt to derive a name from (`resolveForkSource`
+      //   refuses `fork` with `prompt`), so a bare `worktree: {}` would
+      //   otherwise be refused outright for want of a name. `<branch>-fork`
+      //   is derived, not explicit: two forks of one branch are two
+      //   conversations, and the second must get its own checkout rather than
+      //   silently joining the first's.
+      // - `resolveBase` defaults to the MAIN checkout's branch, and a fork is
+      //   routinely taken from an agent sitting in a linked worktree on a
+      //   feature branch. Cutting from main would start the continued
+      //   conversation on history missing every commit it was written
+      //   against. Same reasoning as a move's, which resolves its own base
+      //   the same way (`worktree-move-changes.ts`).
+      //
+      // The base is only taken when the source shares this repository: a
+      // `{path}` fork accepts any destination, and another repo's branch is
+      // not a ref this one can cut from. The NAME is a label, so it travels
+      // either way.
+      let derivedName: string | undefined;
+      if (forkSource) {
+        const head = await readCheckoutHead(forkSource.session.cwd);
+        if (head) {
+          derivedName = slugForFork(head.label) || undefined;
+          if (creation.base === undefined) {
+            const sourceGit = await this.getGitInfo(forkSource.session.cwd);
+            if (sourceGit.mainRepoRoot === mainRepoRoot) {
+              creation.base = head.ref;
+            }
+          }
+        }
+        // Refused here rather than left to `resolveWorktreeName`, whose
+        // generic answer offers a name "or a prompt to derive it from" and
+        // sends half of a fork's users after something the route refuses
+        // (`resolveForkSource` rejects `fork` with `prompt`). Only when the
+        // request brought no name of its own: an explicit one needs nothing
+        // derived, and the two ways of arriving here — a branch that
+        // slugifies to nothing, and a HEAD that reads as null — are both
+        // cured by typing one.
+        if (
+          derivedName === undefined &&
+          (creation.name === undefined || creation.name.trim() === "")
+        ) {
+          return Response.json(
+            {
+              error:
+                `Cannot derive a worktree name from the fork's source checkout ` +
+                `(${forkSource.session.cwd}): its branch name has nothing usable in it, or it ` +
+                `has no commits yet. Name the worktree yourself: pass '--worktree <name>', or ` +
+                `type a name in the dialog's Name row.`,
+            },
+            { status: 400, headers },
+          );
+        }
+      }
+
       // Here rather than only inside the creation engine, because ORDER
       // matters: a move reads the source's status BEFORE it creates anything,
       // so an exclude written during creation lands too late to keep this
@@ -2873,6 +2932,7 @@ export class DaemonServer {
         const created = await createWorktree(mainRepoRoot, {
           ...creation,
           prompt: prompt ?? undefined,
+          derivedName,
         });
         if (!created.ok) {
           return Response.json(

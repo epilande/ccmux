@@ -16,9 +16,11 @@ import { join } from "node:path";
 import {
   applyWorktreeFileSetup,
   createWorktree,
+  readCheckoutHead,
   resolveWorktreeIncludes,
   resolveBase,
   resolveWorktreeName,
+  slugForFork,
   slugFromPrompt,
   slugify,
   withRepoLock,
@@ -153,6 +155,112 @@ describe("resolveWorktreeName", () => {
     const out = resolveWorktreeName("!!!", undefined);
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.error).toContain("no usable characters");
+  });
+
+  // A fork has no prompt to derive from, so the caller derives the name and
+  // hands it over. It has to arrive marked derived, or a collision would open
+  // the existing worktree instead of numbering past it.
+  it("accepts a caller-derived name, marked derived", () => {
+    const out = resolveWorktreeName(undefined, undefined, "feat-foo-fork");
+    expect(out).toEqual({ ok: true, name: "feat-foo-fork", derived: true });
+  });
+
+  it("still prefers an explicit name over a caller-derived one", () => {
+    const out = resolveWorktreeName("Mine", undefined, "feat-foo-fork");
+    expect(out).toEqual({ ok: true, name: "mine", derived: false });
+  });
+});
+
+describe("slugForFork", () => {
+  it("suffixes a branch name", () => {
+    expect(slugForFork("feat/fork-worktree")).toBe("feat-fork-worktree-fork");
+  });
+
+  /**
+   * The lengths that used to lie. The suffix is budgeted INSIDE the cap
+   * rather than appended past it, because the name is handed to
+   * `resolveWorktreeName`, which slugifies again: anything the suffix pushed
+   * over the cap was cut off there. A 36-character branch lost part of the
+   * `-fork` that says what the worktree is, and a 39-character one lost all
+   * of it and derived its own branch's name, which numbering then turned
+   * into `<branch>-2`.
+   */
+  const boundaries = [35, 36, 39, 40, 80];
+
+  it("keeps the whole suffix at every length", () => {
+    for (const length of boundaries) {
+      const name = slugForFork("a".repeat(length));
+      expect(name.endsWith("-fork")).toBe(true);
+      expect(name.length).toBeLessThanOrEqual(40);
+    }
+  });
+
+  // Through the resolver, because that is where the collision happened: a
+  // name equal to the source branch's is one `firstFreeDerivedName` finds
+  // taken, so the fork landed on `<branch>-2`.
+  it("never resolves to the source's own name", () => {
+    for (const length of boundaries) {
+      const branch = "a".repeat(length);
+      const resolved = resolveWorktreeName(
+        undefined,
+        undefined,
+        slugForFork(branch),
+      );
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) return;
+      expect(resolved.name).not.toBe(slugify(branch));
+    }
+  });
+
+  // What makes both of the above true end to end: the property only holds if
+  // the re-slugify every caller's name goes through leaves this alone.
+  it("survives the re-slugify resolveWorktreeName does", () => {
+    for (const length of boundaries) {
+      const name = slugForFork("a".repeat(length));
+      expect(slugify(name)).toBe(name);
+      expect(resolveWorktreeName(undefined, undefined, name)).toEqual({
+        ok: true,
+        name,
+        derived: true,
+      });
+    }
+  });
+
+  it("returns nothing usable for a label with nothing in it", () => {
+    expect(slugForFork("!!!")).toBe("");
+  });
+});
+
+describe("readCheckoutHead", () => {
+  it("reports the branch a checkout is on", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["checkout", "-q", "-b", "feat/thing"]);
+
+    expect(await readCheckoutHead(repo)).toEqual({
+      ref: "feat/thing",
+      label: "feat/thing",
+    });
+  });
+
+  // A detached HEAD answers the literal "HEAD" to `--abbrev-ref`, which any
+  // other checkout would resolve to its OWN head, so the sha is what travels.
+  it("reports a sha for a detached HEAD", async () => {
+    const repo = await makeRepo();
+    const sha = await git(repo, ["rev-parse", "HEAD"]);
+    await git(repo, ["checkout", "-q", "--detach"]);
+
+    expect(await readCheckoutHead(repo)).toEqual({
+      ref: sha,
+      label: sha.slice(0, 12),
+    });
+  });
+
+  it("reports nothing for an unborn HEAD", async () => {
+    const empty = join(root, "unborn");
+    mkdirSync(empty, { recursive: true });
+    await git(root, ["init", "--initial-branch=main", empty]);
+
+    expect(await readCheckoutHead(empty)).toBeNull();
   });
 });
 
@@ -510,6 +618,43 @@ describe("createWorktree", () => {
     expect(
       await git(second.result.path, ["rev-parse", "--abbrev-ref", "HEAD"]),
     ).toBe("fix-the-flaky-2");
+  });
+
+  // The same rule for the name a fork derives: two forks of one branch are
+  // two conversations, and stacking the second onto the first's checkout is
+  // the outcome numbering exists to prevent.
+  it("numbers a caller-derived name that collides", async () => {
+    const repo = await makeRepo();
+
+    const first = await createWorktree(repo, { derivedName: "main-fork" });
+    const second = await createWorktree(repo, { derivedName: "main-fork" });
+
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(first.result.name).toBe("main-fork");
+    expect(second.result.name).toBe("main-fork-2");
+    expect(second.result.created).toBe(true);
+  });
+
+  // The boundary that mattered in practice: a long branch's `-fork` used to
+  // be trimmed back off inside `resolveWorktreeName`, and at 39 characters
+  // that left the fork asking for the SOURCE branch's own name. Numbering
+  // then handed it `<branch>-2`, a worktree whose name says nothing about
+  // what it is and which the dialog's preview never showed.
+  it("keeps a long branch's -fork through creation", async () => {
+    const repo = await makeRepo();
+    const branch = "a".repeat(39);
+    await git(repo, ["checkout", "-q", "-b", branch]);
+
+    const out = await createWorktree(repo, {
+      derivedName: slugForFork(branch),
+    });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.result.name.endsWith("-fork")).toBe(true);
+    expect(out.result.name).not.toBe(branch);
+    expect(out.result.branch).toBe(out.result.name);
   });
 
   it("gives three concurrent spawns of one prompt three worktrees", async () => {
