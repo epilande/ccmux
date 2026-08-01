@@ -1,4 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  spyOn,
+} from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "fs";
+import { tmpdir } from "os";
 import { join } from "path";
 import * as preferences from "./preferences";
 import {
@@ -17,6 +27,23 @@ const ORIGINAL_ENV = {
   CCMUX_TMUX_SOCKET: process.env.CCMUX_TMUX_SOCKET,
   TMUX_TMPDIR: process.env.TMUX_TMPDIR,
 };
+
+const uid = process.getuid?.() ?? 0;
+
+/**
+ * A symlinked TMUX_TMPDIR proves the label math realpaths the socket dir the
+ * way tmux reports `#{socket_path}`, without depending on whether the host's
+ * /tmp is itself a symlink (macOS) or a real directory (Linux CI).
+ */
+const realTmpBase = realpathSync(mkdtempSync(join(tmpdir(), "ccmux-socket-")));
+const linkedTmpBase = `${realTmpBase}-link`;
+symlinkSync(realTmpBase, linkedTmpBase);
+mkdirSync(join(realTmpBase, `tmux-${uid}`));
+
+afterAll(() => {
+  rmSync(linkedTmpBase, { force: true });
+  rmSync(realTmpBase, { recursive: true, force: true });
+});
 
 /**
  * `getPreferencesSync` reads the developer's real `~/.config/ccmux/ccmux.json`,
@@ -153,9 +180,9 @@ describe("tmuxSocketPath", () => {
   });
 
   it("resolves a label the way tmux does, under $TMUX_TMPDIR", () => {
-    const uid = process.getuid?.() ?? 0;
+    process.env.TMUX_TMPDIR = linkedTmpBase;
     expect(tmuxSocketPath({ kind: "label", value: "work" })).toBe(
-      join("/private/tmp", `tmux-${uid}`, "work"),
+      join(realTmpBase, `tmux-${uid}`, "work"),
     );
   });
 
@@ -181,9 +208,9 @@ describe("attemptedTmuxSocketPath", () => {
   });
 
   it("falls back to tmux's default socket with nothing to go on", () => {
-    const uid = process.getuid?.() ?? 0;
+    process.env.TMUX_TMPDIR = linkedTmpBase;
     expect(attemptedTmuxSocketPath()).toBe(
-      join("/private/tmp", `tmux-${uid}`, "default"),
+      join(realTmpBase, `tmux-${uid}`, "default"),
     );
   });
 });

@@ -1,5 +1,4 @@
 import { describe, expect, it, afterEach, beforeEach, spyOn } from "bun:test";
-import { join } from "path";
 import * as preferences from "./preferences";
 import { markDaemonProcess, resetTmuxSocketCache } from "./tmux-socket";
 import { currentTmuxSocket, isSameTmuxServer } from "./tmux-server";
@@ -45,11 +44,8 @@ describe("currentTmuxSocket", () => {
 
   it("returns the override's socket when outside tmux with one configured", () => {
     delete process.env.TMUX;
-    process.env.CCMUX_TMUX_SOCKET = "work";
-    const uid = process.getuid?.() ?? 0;
-    expect(currentTmuxSocket()).toBe(
-      join("/private/tmp", `tmux-${uid}`, "work"),
-    );
+    process.env.CCMUX_TMUX_SOCKET = "/tmp/work.sock";
+    expect(currentTmuxSocket()).toBe("/tmp/work.sock");
   });
 
   it("still reports the ambient socket for a client inside tmux", () => {
