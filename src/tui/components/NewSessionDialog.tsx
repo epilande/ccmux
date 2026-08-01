@@ -11,7 +11,7 @@ import {
   type NewSessionPlacement,
 } from "../store";
 import type { UntrackedMode } from "../../daemon/worktree-move-changes";
-import { slugFromPrompt } from "../../daemon/worktree-create";
+import { slugForFork, slugFromPrompt } from "../../daemon/worktree-create";
 import {
   displayWidth,
   shortenCwd,
@@ -161,6 +161,9 @@ export function wrapText(text: string, width: number): string[] {
  *  detail: one row per field it renders. */
 export interface DialogShape {
   moveChanges: boolean;
+  /** Continuing a session rather than starting one, which drops the agent
+   *  and prompt rows and locks the destination. */
+  fork: boolean;
   /** The name row is shown, i.e. this spawn is making a worktree. */
   namesAWorktree: boolean;
   /** Rows the agent field would like: its list length, or its error's. */
@@ -186,14 +189,17 @@ type FieldRows = Record<NewSessionField, number>;
  */
 function floorFieldRows(shape: {
   moveChanges: boolean;
+  fork: boolean;
   namesAWorktree: boolean;
 }): FieldRows {
   return {
-    agent: 1,
+    // Neither survives a fork: it continues the source's agent, and it
+    // continues a conversation rather than opening one with a first message.
+    agent: shape.fork ? 0 : 1,
     placement: 1,
-    prompt: 1,
-    // Present either way: a locked one-row restatement in move mode, the
-    // choice otherwise.
+    prompt: shape.fork ? 0 : 1,
+    // Present in every mode: a locked one-row restatement where the
+    // destination is fixed (a move, a fork), the choice otherwise.
     destination: 1,
     worktreeName: shape.namesAWorktree ? 1 : 0,
     untracked: shape.moveChanges ? 1 : 0,
@@ -215,6 +221,7 @@ const sumFieldRows = (rows: FieldRows): number =>
  */
 export function newSessionFloorRows(shape: {
   moveChanges: boolean;
+  fork: boolean;
   namesAWorktree: boolean;
 }): number {
   // Border (2) + title, then the fields.
@@ -230,7 +237,10 @@ export interface DialogRowPlan {
   height: number;
   showTitleSpacer: boolean;
   showDirectory: boolean;
-  showMoveNote: boolean;
+  /** The one-line footnote a mode adds under the directory: what a move costs
+   *  the checkout named above it, or which session a fork continues. One flag
+   *  because it is one row, given up at one point in the order below. */
+  showModeNote: boolean;
   showKeyHints: boolean;
   agentRows: number;
   /** Rows each option field gets. Fewer than its options means a window that
@@ -268,7 +278,7 @@ export function planDialogRows(
       height: Math.min(height, 3),
       showTitleSpacer: false,
       showDirectory: false,
-      showMoveNote: false,
+      showModeNote: false,
       showKeyHints: false,
       agentRows: 0,
       placementRows: 0,
@@ -282,14 +292,18 @@ export function planDialogRows(
     height: 0,
     showTitleSpacer: true,
     showDirectory: true,
-    showMoveNote: shape.moveChanges,
+    showModeNote: shape.moveChanges || shape.fork,
     showKeyHints: shape.keyHints,
-    agentRows: Math.max(1, shape.agentRows),
+    // A fork has no agent row at all, so it asks for none rather than for the
+    // one row `Math.max` would floor an empty list at.
+    agentRows: shape.fork ? 0 : Math.max(1, shape.agentRows),
     placementRows: shape.stacked ? PLACEMENT_OPTIONS.length : 1,
-    // Locked in move-changes mode, where it is one derived row with no
-    // options to stack.
+    // Locked wherever the destination is fixed, where it is one derived row
+    // with no options to stack.
     destinationRows:
-      shape.moveChanges || !shape.stacked ? 1 : DESTINATION_OPTIONS.length,
+      shape.moveChanges || shape.fork || !shape.stacked
+        ? 1
+        : DESTINATION_OPTIONS.length,
     untrackedRows: !shape.moveChanges
       ? 0
       : shape.stacked
@@ -311,7 +325,7 @@ export function planDialogRows(
     3 + // border and title
     (plan.showTitleSpacer ? 1 : 0) +
     (plan.showDirectory ? 1 : 0) +
-    (plan.showMoveNote ? 1 : 0) +
+    (plan.showModeNote ? 1 : 0) +
     (plan.showKeyHints ? KEY_HINT_ROWS : 0) +
     sumFieldRows(fieldRows());
 
@@ -326,7 +340,7 @@ export function planDialogRows(
   // whole of some other list.
   shrink(total() - height, (n) => (plan.agentRows -= n), plan.agentRows - 1);
   if (total() > height && plan.showKeyHints) plan.showKeyHints = false;
-  if (total() > height && plan.showMoveNote) plan.showMoveNote = false;
+  if (total() > height && plan.showModeNote) plan.showModeNote = false;
   if (total() > height && plan.showTitleSpacer) plan.showTitleSpacer = false;
   // Bottom-up through the stacked options, so the rows nearest the bottom
   // border are the first to become windows.
@@ -431,17 +445,35 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    *  untracked-files choice. */
   const moveChanges = () => props.draft.moveChanges;
 
+  /** Continuing an existing session rather than starting a new one: no agent
+   *  and no prompt to choose, and the worktree is where the fork lands. */
+  const forking = () => props.draft.fork;
+
   /** Whether this spawn is making a worktree at all, which is what the name
-   *  row exists for. Move-changes mode always is; see `newSessionFields`. */
+   *  row exists for. Move-changes and fork mode always are; see
+   *  `newSessionFields`. */
   const namesAWorktree = () => draftNamesAWorktree(props.draft);
 
-  /** The name is the prompt's to give until someone types over it. */
+  /** The name is the prompt's (or the source branch's) to give until someone
+   *  types over it. */
   const derivedName = () => props.draft.worktreeName === null;
 
-  /** What a derived name currently resolves to, or "" with nothing to derive
-   *  it from. Empty for an explicit name, which needs no preview. */
-  const derivedSlug = () =>
-    derivedName() ? slugFromPrompt(props.draft.prompt) : "";
+  /**
+   * What a derived name currently resolves to, or "" with nothing to derive
+   * it from. Empty for an explicit name, which needs no preview.
+   *
+   * A fork derives from the SOURCE'S BRANCH, by the daemon's own
+   * `<branch>-fork` rule, rather than from a prompt it does not have. Empty
+   * where the branch never reached the client: the daemon reads the
+   * checkout's HEAD for itself, so there is a name coming — just not one this
+   * row can show. See `nameHint`, which is what says so.
+   */
+  const derivedSlug = () => {
+    if (!derivedName()) return "";
+    const fork = forking();
+    if (!fork) return slugFromPrompt(props.draft.prompt);
+    return fork.branch ? slugForFork(fork.branch) : "";
+  };
 
   /**
    * The suffix caveat, when it fits beside the name it applies to.
@@ -453,9 +485,14 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    * sidebar width every column belongs to the name.
    */
   const nameHint = () => {
+    if (!derivedName()) return "";
     const slug = derivedSlug();
-    if (!slug) return "";
-    const spare = contentWidth() - displayWidth(slug) - 1;
+    // No preview and nothing to derive one from: an ordinary spawn is not
+    // going to be given a name at all, so there is no rule to caveat. A fork
+    // is — the daemon derives one from a branch this row could not read — and
+    // the hint is then the only thing that says the field can be left alone.
+    if (!slug && !forking()) return "";
+    const spare = contentWidth() - (slug ? displayWidth(slug) + 1 : 0);
     if (spare >= displayWidth(NAME_HINT)) return NAME_HINT;
     if (spare >= displayWidth(NAME_HINT_SHORT)) return NAME_HINT_SHORT;
     return "";
@@ -483,6 +520,15 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     const slug = derivedSlug();
     if (slug) return truncateMiddle(slug, nameRoom());
     if (!derivedName()) return "";
+    // A fork with no branch to preview: the name is coming either way, so the
+    // row says where it comes from rather than offering a way out that would
+    // be a fiction (there is no prompt here to derive one from instead).
+    if (forking()) {
+      return truncateText(
+        stacked() ? "Source branch" : "Named after the source branch",
+        nameRoom(),
+      );
+    }
     // Nothing to derive from yet. Both ways out are named, because the second
     // one is new (issue #83) and the row is where it is discoverable.
     return truncateText(
@@ -523,6 +569,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     planDialogRows(
       {
         moveChanges: moveChanges(),
+        fork: forking() !== null,
         namesAWorktree: namesAWorktree(),
         agentRows: showAgentError()
           ? wrapText(agentErrorText(), contentWidth()).length
@@ -659,12 +706,27 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const lockedDestinationLabel = () =>
     truncateText(stacked() ? "Worktree" : "New worktree", contentWidth());
 
-  /** What the move does to the directory named on the row above. */
-  const moveNote = () =>
-    truncateText(
-      stacked() ? "Moved out" : "Moved out of this checkout",
-      contentWidth(),
-    );
+  /** What the mode's footnote says, and what to label it. A move reports what
+   *  it costs the directory named directly above; a fork names the session it
+   *  continues, which is the one thing that row cannot say. */
+  const modeNote = (): { label: string; text: string; color: string } => {
+    const fork = forking();
+    if (fork) {
+      return {
+        label: "Source",
+        text: truncateText(fork.label, contentWidth()),
+        color: theme.blue,
+      };
+    }
+    return {
+      label: "Changes",
+      text: truncateText(
+        stacked() ? "Moved out" : "Moved out of this checkout",
+        contentWidth(),
+      ),
+      color: theme.peach,
+    };
+  };
 
   /** Says whether this agent can take a prompt at all, which is per-agent
    *  and not otherwise discoverable. Shortened on a narrow surface, where
@@ -689,6 +751,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const tooShortLabel = () => {
     const needed = newSessionFloorRows({
       moveChanges: moveChanges(),
+      fork: forking() !== null,
       namesAWorktree: namesAWorktree(),
     });
     return truncateText(`Needs ${needed} rows to show`, contentWidth());
@@ -726,12 +789,14 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         <box height={1}>
           <text fg={theme.text}>
             {/* The title is the mode indicator: it is the one row the eye
-              lands on first, and "Move changes" is what makes this dialog
-              different from every other time it opens. */}
+              lands on first, and "Move changes" (or "Fork") is what makes this
+              dialog different from every other time it opens. */}
             <strong>
-              {moveChanges()
-                ? truncateText("Move changes to worktree", width() - 4)
-                : "New session"}
+              {forking()
+                ? truncateText("Fork into worktree", width() - 4)
+                : moveChanges()
+                  ? truncateText("Move changes to worktree", width() - 4)
+                  : "New session"}
             </strong>
           </text>
         </box>
@@ -739,72 +804,77 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           <box height={1} />
         </Show>
 
-        <box flexDirection="row">
-          <FieldLabel field="agent" text="Agent" />
-          <box flexDirection="column" flexGrow={1}>
-            <Show
-              when={props.agents !== null}
-              fallback={
-                <box height={1}>
-                  <text fg={theme.overlay}>
-                    {truncateText("Loading agents...", contentWidth())}
-                  </text>
-                </box>
-              }
-            >
+        {/* A fork continues the source's agent, so there is nothing to pick.
+          Hidden rather than locked: unlike the destination, no part of the
+          request is clearer for restating it. */}
+        <Show when={!forking()}>
+          <box flexDirection="row">
+            <FieldLabel field="agent" text="Agent" />
+            <box flexDirection="column" flexGrow={1}>
               <Show
-                when={agents().length > 0}
+                when={props.agents !== null}
                 fallback={
-                  /* One row per pre-wrapped line, which is the same count the
+                  <box height={1}>
+                    <text fg={theme.overlay}>
+                      {truncateText("Loading agents...", contentWidth())}
+                    </text>
+                  </box>
+                }
+              >
+                <Show
+                  when={agents().length > 0}
+                  fallback={
+                    /* One row per pre-wrapped line, which is the same count the
                    height was budgeted from. Left to the renderer instead,
                    a long message wrapped past its single budgeted row and
                    pushed the dialog's last rows outside the border. */
-                  <For each={agentErrorLines()}>
-                    {(line) => (
-                      <box height={1}>
-                        <text fg={theme.red}>{line}</text>
-                      </box>
-                    )}
+                    <For each={agentErrorLines()}>
+                      {(line) => (
+                        <box height={1}>
+                          <text fg={theme.red}>{line}</text>
+                        </box>
+                      )}
+                    </For>
+                  }
+                >
+                  <For each={visibleAgents()}>
+                    {(agent, i) => {
+                      /** Absolute position, so the number key shown is the one
+                       *  that picks it even when the list has scrolled. */
+                      const number = () => agentWindowStart() + i() + 1;
+                      return (
+                        <box
+                          height={1}
+                          flexDirection="row"
+                          onMouseDown={(event) => {
+                            if (event.button !== MouseButton.LEFT) return;
+                            props.onFocusField("agent");
+                            props.onSelectAgent(agent.name);
+                          }}
+                        >
+                          <box width={2}>
+                            <text fg={theme.green}>
+                              {agent.name === props.draft.agent ? ">" : ""}
+                            </text>
+                          </box>
+                          {/* Only the first nine get a number key. */}
+                          <box width={2}>
+                            <text fg={theme.overlay}>
+                              {number() <= 9 ? `${number()}` : ""}
+                            </text>
+                          </box>
+                          <text fg={agentColorFor(agent.name)}>
+                            {agent.displayName}
+                          </text>
+                        </box>
+                      );
+                    }}
                   </For>
-                }
-              >
-                <For each={visibleAgents()}>
-                  {(agent, i) => {
-                    /** Absolute position, so the number key shown is the one
-                     *  that picks it even when the list has scrolled. */
-                    const number = () => agentWindowStart() + i() + 1;
-                    return (
-                      <box
-                        height={1}
-                        flexDirection="row"
-                        onMouseDown={(event) => {
-                          if (event.button !== MouseButton.LEFT) return;
-                          props.onFocusField("agent");
-                          props.onSelectAgent(agent.name);
-                        }}
-                      >
-                        <box width={2}>
-                          <text fg={theme.green}>
-                            {agent.name === props.draft.agent ? ">" : ""}
-                          </text>
-                        </box>
-                        {/* Only the first nine get a number key. */}
-                        <box width={2}>
-                          <text fg={theme.overlay}>
-                            {number() <= 9 ? `${number()}` : ""}
-                          </text>
-                        </box>
-                        <text fg={agentColorFor(agent.name)}>
-                          {agent.displayName}
-                        </text>
-                      </box>
-                    );
-                  }}
-                </For>
+                </Show>
               </Show>
-            </Show>
+            </box>
           </box>
-        </box>
+        </Show>
 
         <box flexDirection="row">
           <FieldLabel field="placement" text="Placement" />
@@ -862,28 +932,32 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           </box>
         </box>
 
-        <box flexDirection="row" height={1}>
-          <FieldLabel field="prompt" text="Prompt" />
-          <input
-            value={props.draft.prompt}
-            onInput={props.onPromptInput}
-            focused={props.draft.field === "prompt"}
-            placeholder={promptPlaceholder()}
-            placeholderColor={theme.overlay}
-            textColor={theme.text}
-            cursorColor={theme.blue}
-            backgroundColor="transparent"
-            focusedBackgroundColor="transparent"
-            flexGrow={1}
-          />
-        </box>
+        {/* A fork continues a conversation; there is no first message to
+          open it with. */}
+        <Show when={!forking()}>
+          <box flexDirection="row" height={1}>
+            <FieldLabel field="prompt" text="Prompt" />
+            <input
+              value={props.draft.prompt}
+              onInput={props.onPromptInput}
+              focused={props.draft.field === "prompt"}
+              placeholder={promptPlaceholder()}
+              placeholderColor={theme.overlay}
+              textColor={theme.text}
+              cursorColor={theme.blue}
+              backgroundColor="transparent"
+              focusedBackgroundColor="transparent"
+              flexGrow={1}
+            />
+          </box>
+        </Show>
 
-        <Show when={moveChanges()}>
+        <Show when={moveChanges() || forking()}>
           {/* Locked, so it is drawn like Directory rather than as a field: no
             focus marker and no number keys, because a row that looks
-            selectable but refuses every key reads as broken. The changes have
-            nowhere to go but a new worktree, so there is no second choice to
-            offer. */}
+            selectable but refuses every key reads as broken. The changes (or
+            the fork) have nowhere to go but a new worktree, so there is no
+            second choice to offer. */}
           <box flexDirection="row" height={1}>
             <box width={LABEL_WIDTH} paddingLeft={1}>
               <text fg={theme.overlay}>Where</text>
@@ -892,7 +966,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           </box>
         </Show>
 
-        <Show when={!moveChanges()}>
+        <Show when={!moveChanges() && !forking()}>
           <box flexDirection="row">
             <FieldLabel field="destination" text="Where" />
             <box
@@ -1038,15 +1112,17 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           </box>
         </Show>
 
-        <Show when={plan().showMoveNote}>
-          {/* The title says a move is happening; this says what it costs the
-            directory named directly above, which is the part someone can
-            still back out of at this point. */}
+        <Show when={plan().showModeNote}>
+          {/* The title says WHAT is happening; this says what it happens to.
+            For a move that is what it costs the directory named directly
+            above, which is the part someone can still back out of at this
+            point; for a fork it is which session is being continued, since
+            the directory alone can hold several. */}
           <box flexDirection="row" height={1}>
             <box width={LABEL_WIDTH} paddingLeft={1}>
-              <text fg={theme.overlay}>Changes</text>
+              <text fg={theme.overlay}>{modeNote().label}</text>
             </box>
-            <text fg={theme.peach}>{moveNote()}</text>
+            <text fg={modeNote().color}>{modeNote().text}</text>
           </box>
         </Show>
 

@@ -175,6 +175,7 @@ describe("planDialogRows", () => {
   /** The move-changes dialog on a sidebar rail: the tallest shape there is. */
   const stackedMove = {
     moveChanges: true,
+    fork: false,
     namesAWorktree: true,
     agentRows: 1,
     stacked: true,
@@ -185,7 +186,7 @@ describe("planDialogRows", () => {
     const plan = planDialogRows(stackedMove, 40);
     expect(plan.tooShort).toBe(false);
     expect(plan.showKeyHints).toBe(true);
-    expect(plan.showMoveNote).toBe(true);
+    expect(plan.showModeNote).toBe(true);
     expect(plan.showDirectory).toBe(true);
     expect(plan.untrackedRows).toBe(3);
     // Nothing is padded out to fill the screen: the dialog is its content.
@@ -200,7 +201,7 @@ describe("planDialogRows", () => {
       const plan = planDialogRows(stackedMove, height);
       return {
         hints: plan.showKeyHints,
-        note: plan.showMoveNote,
+        note: plan.showModeNote,
         spacer: plan.showTitleSpacer,
         untracked: plan.untrackedRows,
         placement: plan.placementRows,
@@ -230,7 +231,7 @@ describe("planDialogRows", () => {
     const plan = planDialogRows({ ...stackedMove, agentRows: 9 }, 20);
     expect(plan.agentRows).toBeLessThan(9);
     expect(plan.showKeyHints).toBe(true);
-    expect(plan.showMoveNote).toBe(true);
+    expect(plan.showModeNote).toBe(true);
   });
 
   it("refuses to draw a dialog shorter than its own fields", () => {
@@ -239,6 +240,7 @@ describe("planDialogRows", () => {
     // An ordinary spawn into this checkout has two fewer rows to find.
     const plain = {
       moveChanges: false,
+      fork: false,
       namesAWorktree: false,
       agentRows: 1,
       stacked: false,
@@ -1059,5 +1061,171 @@ describe("NewSessionDialog move-changes mode", () => {
 
     expectFrameIntegrity(frame);
     expect(squish(frame)).toContain("Movedoutofthischeckout");
+  });
+});
+
+/**
+ * Fork mode (issue #70): the same dialog, opened over a SESSION to continue
+ * it in a worktree of its own. The agent and the conversation come from the
+ * source, so what is left to choose is where the pane goes and what the
+ * worktree is called.
+ */
+describe("NewSessionDialog fork mode", () => {
+  const forkDraft = (
+    overrides: Partial<NewSessionDraft> = {},
+  ): NewSessionDraft =>
+    draft({
+      destination: "worktree",
+      field: "placement",
+      fork: {
+        sessionId: "s1",
+        label: "Claude · feat/parking",
+        branch: "feat/parking",
+      },
+      ...overrides,
+    });
+
+  it("says what it is doing, and names what it is forking", async () => {
+    const frame = await renderDialog({ draft: forkDraft() });
+
+    expect(frame).toContain("Fork into worktree");
+    expect(frame).not.toContain("New session");
+    // The source row, read together with the Directory above it: between them
+    // they say which conversation is being continued and from where.
+    expect(frame).toContain("Source");
+    expect(frame).toContain("Claude · feat/parking");
+    expect(frame).toContain("/Users/dev/code/ccmux");
+  });
+
+  it("drops the agent and prompt rows", async () => {
+    const frame = await renderDialog({
+      draft: forkDraft(),
+      agents: [agent("claude"), agent("codex")],
+    });
+
+    // Neither is a choice a fork has: the agent is the source's, and the
+    // conversation continues rather than starting from a first message.
+    expect(frame).not.toContain("Agent");
+    expect(frame).not.toContain("Prompt");
+    expect(frame).not.toContain("Codex");
+    // What is left is still there.
+    expect(frame).toContain("Placement");
+    expect(frame).toContain("Name");
+  });
+
+  it("locks the destination and offers no untracked choice", async () => {
+    const frame = await renderDialog({ draft: forkDraft() });
+
+    expect(frame).toContain("Where");
+    expect(frame).toContain("New worktree");
+    expect(frame).not.toContain("This checkout");
+    expect(frame).not.toContain("[New worktree");
+    // Moving changes out from under a session that is still running in the
+    // checkout is refused by the daemon; the mode never offers it.
+    expect(frame).not.toContain("Untracked");
+  });
+
+  it("previews the name the daemon will derive from the source branch", async () => {
+    const frame = await renderDialog({ draft: forkDraft() });
+
+    const nameRow = frame.split("\n").find((line) => line.includes("Name"));
+    expect(nameRow).toContain("feat-parking-fork");
+    // The same caveat every derived name carries: this is a rule's preview,
+    // and a second fork of the branch gets numbered rather than joining.
+    expect(nameRow).toContain("auto");
+  });
+
+  it("stands on the hint alone when the branch never reached the client", async () => {
+    // `gitBranch` is null on a row the daemon has not resolved one for. The
+    // daemon still derives a name (it reads the checkout's own HEAD), so the
+    // row must not imply that leaving the field empty leaves it unnamed.
+    const frame = await renderDialog({
+      draft: forkDraft({
+        fork: { sessionId: "s1", label: "Claude", branch: null },
+      }),
+    });
+
+    const nameRow = frame.split("\n").find((line) => line.includes("Name"));
+    expect(nameRow).toContain("auto");
+    // And nothing about a prompt, which this mode does not have.
+    expect(frame).not.toContain("Type a prompt");
+  });
+
+  it("shows a typed name instead of the derived preview", async () => {
+    const frame = await renderDialog({
+      draft: forkDraft({ worktreeName: "parking-retry" }),
+    });
+
+    const nameRow = frame.split("\n").find((line) => line.includes("Name"));
+    expect(nameRow).toContain("parking-retry");
+    expect(nameRow).not.toContain("feat-parking-fork");
+  });
+
+  it("keeps every row inside the border, in order", async () => {
+    const frame = await renderDialog({
+      draft: forkDraft(),
+      showKeyHints: true,
+    });
+
+    expectFrameIntegrity(frame);
+    const lines = frame.split("\n");
+    const rowOf = (text: string) =>
+      lines.findIndex((line) => line.includes(text));
+    // A height that under-counts does not clip: it draws two rows over each
+    // other, so the ordering chain is what catches it.
+    const order = [
+      "Fork into worktree",
+      "Placement",
+      "Where",
+      "Name",
+      "Directory",
+      "Source",
+      "esc",
+      "└",
+    ];
+    let previous = -1;
+    for (const text of order) {
+      const row = rowOf(text);
+      expect([text, row]).toEqual([text, expect.any(Number)]);
+      expect(row).toBeGreaterThan(previous);
+      previous = row;
+    }
+  });
+
+  it("stays inside its border on a sidebar-width surface", async () => {
+    const frame = await renderDialog({
+      draft: forkDraft(),
+      width: 34,
+      height: 30,
+      showKeyHints: true,
+    });
+
+    expectFrameIntegrity(frame);
+    const lines = frame.split("\n");
+    const widest = Math.max(...lines.map((line) => line.trimEnd().length));
+    expect(widest).toBeLessThanOrEqual(34);
+  });
+
+  it("fits in a terminal too short for any other mode", async () => {
+    // Three fewer field rows than an ordinary spawn, so the floor is lower —
+    // and the budget has to know that, or the mode reports a floor it clears.
+    expect(
+      newSessionFloorRows({
+        moveChanges: false,
+        namesAWorktree: true,
+        fork: true,
+      }),
+    ).toBe(6);
+
+    const frame = await renderDialog({
+      draft: forkDraft(),
+      width: 60,
+      height: 6,
+      showKeyHints: false,
+    });
+
+    expectFrameIntegrity(frame);
+    expect(frame).not.toContain("Needs");
+    expect(frame).toContain("Name");
   });
 });

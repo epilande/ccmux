@@ -1203,6 +1203,7 @@ export function App(props: AppProps) {
       appDims().height <
       newSessionFloorRows({
         moveChanges: draft.moveChanges,
+        fork: draft.fork !== null,
         namesAWorktree: namesAWorktree(draft),
       })
     ) {
