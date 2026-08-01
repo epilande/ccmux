@@ -174,11 +174,11 @@ export function createSpawnCommand(): Command {
     .option("--detach", "Don't switch to the new pane after spawning")
     .option(
       "--worktree [name]",
-      "Spawn into a git worktree at <repo>/.claude/worktrees/<name>, creating it if needed (name derived from --prompt when omitted)",
+      "Spawn into a git worktree at <repo>/.claude/worktrees/<name>, creating it if needed (name derived from --prompt, or from the forked session's branch, when omitted)",
     )
     .option(
       "--base <ref>",
-      "Branch the new worktree from this ref (default: the repository's current branch)",
+      "Branch the new worktree from this ref (default: the repository's current branch, or the forked session's)",
     )
     .option(
       "--with-changes",
@@ -228,6 +228,18 @@ export function createSpawnCommand(): Command {
         }
         if (options.untracked !== undefined && !options.withChanges) {
           console.error("--untracked requires --with-changes");
+          process.exit(1);
+        }
+        // A move empties the checkout it takes the changes from, and a fork
+        // leaves the original session running in that same checkout. The
+        // daemon refuses this too (the picker can express it), but the same
+        // placement rule applies: nothing should start on a command line that
+        // cannot be honored.
+        if (options.withChanges && options.fork) {
+          console.error(
+            "--with-changes cannot be used with --fork: the session being forked keeps " +
+              "running in that checkout, so moving its changes would empty it out from under it",
+          );
           process.exit(1);
         }
 

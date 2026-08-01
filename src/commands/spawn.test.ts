@@ -978,6 +978,27 @@ describe("ccmux spawn --worktree reporting", () => {
     expect(out).toContain("Reusing worktree wt on branch wt");
   });
 
+  // A fork's destination is reported exactly like any other spawn's: the
+  // creation lines first, then the line naming what landed in it.
+  it("reports the worktree a fork was placed in", async () => {
+    const out = await reportFor(
+      {
+        name: "main-fork",
+        path: "/repo/.claude/worktrees/main-fork",
+        branch: "main-fork",
+        created: true,
+        branchCreated: true,
+        base: "main",
+      },
+      ["--fork", "abc-123", "--worktree"],
+    );
+
+    expect(out).toContain(
+      "Created worktree main-fork on new branch main-fork from main: /repo/.claude/worktrees/main-fork",
+    );
+    expect(out).toContain("Forked abc-123 into pane %9");
+  });
+
   // An existing worktree is already on its branch, so `--base` had nothing to
   // cut. Reporting the reuse without a word about it leaves the user believing
   // their agent started from the ref they named.
@@ -1035,6 +1056,60 @@ describe("ccmux spawn --fork", () => {
     } finally {
       restoreEnv();
       restore();
+    }
+  });
+
+  it("sends a worktree destination alongside the fork", async () => {
+    // The CLI sends the flag and nothing else: the daemon names the worktree
+    // after the source's branch and cuts it from there, and the absent cwd is
+    // what puts it in the source's repository.
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture();
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn(["--fork", "abc-123", "--worktree"]);
+      expect(bodies[0]?.worktree).toStrictEqual({});
+      expect(bodies[0]?.cwd).toBeUndefined();
+      await runSpawn([
+        "--fork",
+        "abc-123",
+        "--worktree",
+        "mine",
+        "--base",
+        "v2",
+      ]);
+      expect(bodies[1]?.worktree).toStrictEqual({ name: "mine", base: "v2" });
+    } finally {
+      restoreEnv();
+      restore();
+    }
+  });
+
+  // Refused here as well as daemon-side, and for the same reason: a fork
+  // leaves the original session running in the checkout a move would empty.
+  // Client-side so it costs nothing and starts nothing.
+  it("refuses --with-changes with a fork, without starting a daemon", async () => {
+    const errors: string[] = [];
+    console.error = (line: string) => errors.push(line);
+    ensureDaemonCalls = 0;
+    const restoreFetch = withNoFetch();
+
+    try {
+      const code = await runSpawnExpectingExit([
+        "--fork",
+        "abc-123",
+        "--worktree",
+        "--with-changes",
+      ]);
+
+      expect(code).toBe(1);
+      expect(errors.join("\n")).toContain("--with-changes cannot be used with");
+      expect(ensureDaemonCalls).toBe(0);
+    } finally {
+      restoreFetch();
     }
   });
 
