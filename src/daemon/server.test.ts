@@ -5134,6 +5134,10 @@ describe("POST /spawn", () => {
           expect(gitOut(repo, ["status", "--porcelain"])).toContain(
             "dirty.txt",
           );
+          // Untouched means untouched: the move's very first step is a stash,
+          // so an empty stack is what says the refusal landed before it and
+          // not somewhere in the middle with a rollback behind it.
+          expect(gitOut(repo, ["stash", "list"])).toBe("");
         } finally {
           restore();
           rmSync(repo, { recursive: true, force: true });
@@ -5419,6 +5423,57 @@ describe("POST /spawn", () => {
             rmSync(repo, { recursive: true, force: true });
           }
         });
+      });
+
+      /**
+       * The worktree is created BEFORE the pane, and a failure after that
+       * point is not rolled back. "Spawn failed" reads as "nothing happened",
+       * so the checkout and branch the user now owns have to be named in the
+       * error itself — there is nowhere else for them to appear.
+       */
+      it("names the worktree it left behind when tmux fails", async () => {
+        const repo = fixtureRepo();
+        fixtureGit(repo, "checkout", "-q", "-b", "feature");
+        const { manager, internals } = serverForAgents([forkAgent]);
+        const source = sourceIn(manager, repo);
+        const original = Bun.spawn;
+        Bun.spawn = ((spawned: string[], opts?: unknown) => {
+          if (spawned[0] !== "tmux") {
+            return (original as (a: string[], b?: unknown) => unknown)(
+              spawned,
+              opts,
+            );
+          }
+          return {
+            exited: Promise.resolve(1),
+            stdout: new Blob([""]).stream(),
+            stderr: new Blob([
+              "no server running on /tmp/tmux-0/default",
+            ]).stream(),
+          };
+        }) as unknown as typeof Bun.spawn;
+        try {
+          const res = await internals.handleRequest(
+            spawnRequest({ fork: source.id, worktree: {}, detach: true }),
+          );
+
+          expect(res.status).toBe(500);
+          const { error } = (await res.json()) as { error: string };
+          expect(error).toContain("tmux new-window failed");
+          const path = join(repo, ".claude", "worktrees", "feature-fork");
+          expect(error).toContain(path);
+          expect(error).toContain("left in place");
+          // A DERIVED name, so re-running numbers a sibling rather than
+          // reusing this one. The advice has to say which flag pins it.
+          expect(error).toContain("--worktree 'feature-fork'");
+          // And it really is there, which is what makes the note worth
+          // printing rather than a description of a directory that was
+          // cleaned up on the way out.
+          expect(existsSync(join(path, ".git"))).toBe(true);
+        } finally {
+          Bun.spawn = original;
+          rmSync(repo, { recursive: true, force: true });
+        }
       });
 
       // A detached source answers the literal "HEAD" to `--abbrev-ref`, which
