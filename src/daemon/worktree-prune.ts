@@ -18,6 +18,7 @@ import { existsSync, renameSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import type { SessionStatus } from "../types/session";
+import { tmuxArgv } from "../lib/tmux-exec";
 import {
   builtinStateFiles,
   cleanStateEntries,
@@ -857,7 +858,7 @@ function defaultKill(pid: number, signal: NodeJS.Signals | 0): void {
 
 async function tmuxOk(args: string[]): Promise<boolean> {
   try {
-    const proc = Bun.spawn(["tmux", ...args], {
+    const proc = Bun.spawn(tmuxArgv(...args), {
       stdout: "ignore",
       stderr: "ignore",
     });
@@ -876,7 +877,7 @@ async function tmuxOk(args: string[]): Promise<boolean> {
  */
 async function paneExists(paneId: string): Promise<boolean> {
   try {
-    const proc = Bun.spawn(["tmux", "list-panes", "-a", "-F", "#{pane_id}"], {
+    const proc = Bun.spawn(tmuxArgv("list-panes", "-a", "-F", "#{pane_id}"), {
       stdout: "pipe",
       stderr: "ignore",
     });

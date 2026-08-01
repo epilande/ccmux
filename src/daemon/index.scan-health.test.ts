@@ -38,7 +38,10 @@ import { PaneDiscoveryError } from "./pane-discovery";
  */
 type DaemonInternals = {
   scanHealth: ScanHealth;
-  server: { broadcastDaemonHealth: () => void };
+  server: {
+    broadcastDaemonHealth: () => void;
+    notePaneScanFailure: (message: string) => void;
+  };
   recordScanFailure(error: unknown): void;
   recordScanSuccess(): void;
 };
@@ -47,6 +50,7 @@ describe("Daemon scan-health wiring", () => {
   let daemon: Daemon;
   let internals: DaemonInternals;
   let broadcasts: number;
+  let paneScanFailures: string[];
   let errorSpy: ReturnType<typeof spyOn<Console, "error">>;
   let logSpy: ReturnType<typeof spyOn<Console, "log">>;
 
@@ -60,9 +64,13 @@ describe("Daemon scan-health wiring", () => {
     // exercised by scan-health.test.ts.
     internals.scanHealth = new ScanHealth({ threshold: 3 });
     broadcasts = 0;
+    paneScanFailures = [];
     internals.server = {
       broadcastDaemonHealth: () => {
         broadcasts += 1;
+      },
+      notePaneScanFailure: (message: string) => {
+        paneScanFailures.push(message);
       },
     };
     errorSpy = spyOn(console, "error").mockImplementation(() => {});
@@ -104,6 +112,15 @@ describe("Daemon scan-health wiring", () => {
       degraded: true,
       reason: "tmux gone",
     });
+    // Every pane failure invalidates the server's cached socket, degraded or
+    // not, so `/server-info` re-probes and can report an unreachable server.
+    expect(paneScanFailures).toEqual(["tmux gone", "tmux gone", "tmux gone"]);
+  });
+
+  it("does not touch the socket cache for a non-pane scan failure", () => {
+    internals.recordScanFailure(new ProcessDiscoveryError("ps spawn failed"));
+    internals.recordScanFailure(new Error("reconcile blew up"));
+    expect(paneScanFailures).toEqual([]);
   });
 
   it("suppresses 'Scan skipped' and does not re-broadcast while already degraded", () => {

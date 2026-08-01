@@ -1,3 +1,5 @@
+import { tmuxArgv } from "../lib/tmux-exec";
+
 /**
  * Create a detached tmux session for ccmux invocations.
  * Returns the pane id of the new session's only pane, or null on failure.
@@ -8,8 +10,7 @@ export async function createDetachedTmuxSession(
 ): Promise<{ paneId: string } | null> {
   try {
     const proc = Bun.spawn(
-      [
-        "tmux",
+      tmuxArgv(
         "new-session",
         "-d",
         "-s",
@@ -19,7 +20,7 @@ export async function createDetachedTmuxSession(
         "-P",
         "-F",
         "#{pane_id}",
-      ],
+      ),
       { stdout: "pipe", stderr: "pipe" },
     );
     const output = await new Response(proc.stdout).text();
@@ -42,7 +43,7 @@ export async function createDetachedTmuxSession(
  */
 export async function sweepOrphanInvokeSessions(): Promise<number> {
   try {
-    const list = Bun.spawn(["tmux", "list-sessions", "-F", "#{session_name}"], {
+    const list = Bun.spawn(tmuxArgv("list-sessions", "-F", "#{session_name}"), {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -65,7 +66,7 @@ export async function sweepOrphanInvokeSessions(): Promise<number> {
  */
 export async function killTmuxSession(sessionName: string): Promise<void> {
   try {
-    const proc = Bun.spawn(["tmux", "kill-session", "-t", sessionName], {
+    const proc = Bun.spawn(tmuxArgv("kill-session", "-t", sessionName), {
       stdout: "pipe",
       stderr: "pipe",
     });

@@ -4,6 +4,7 @@ import {
   SIDEBAR_PANE_TITLE,
 } from "../../lib/config";
 import { PANE_FIELD_SEP } from "../../lib/tmux-format";
+import { tmuxArgv, tmuxShellPrefix } from "../../lib/tmux-exec";
 import { theme } from "../theme";
 
 /**
@@ -18,7 +19,7 @@ export async function capturePane(
   lines: number = 50,
 ): Promise<string> {
   const proc = Bun.spawn(
-    ["tmux", "capture-pane", "-e", "-t", paneId, "-p", `-S-${lines}`],
+    tmuxArgv("capture-pane", "-e", "-t", paneId, "-p", `-S-${lines}`),
     {
       stdout: "pipe",
       // Failure shows in the exit code below; don't allocate an unread pipe.
@@ -40,7 +41,7 @@ export async function capturePane(
 
 export async function switchToPane(target: string): Promise<boolean> {
   try {
-    const proc = Bun.spawn(["tmux", "switch-client", "-t", target], {
+    const proc = Bun.spawn(tmuxArgv("switch-client", "-t", target), {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -72,7 +73,7 @@ async function tmuxSendKeys(
   target: string,
   ...args: string[]
 ): Promise<boolean> {
-  const proc = Bun.spawn(["tmux", "send-keys", "-t", target, ...args], {
+  const proc = Bun.spawn(tmuxArgv("send-keys", "-t", target, ...args), {
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -118,7 +119,7 @@ let flashTimer: Timer | null = null;
 let flashingPaneId: string | null = null;
 
 function resetPaneStyle(paneId: string): void {
-  Bun.spawn(["tmux", "set-option", "-p", "-u", "-t", paneId, "window-style"], {
+  Bun.spawn(tmuxArgv("set-option", "-p", "-u", "-t", paneId, "window-style"), {
     stdout: "ignore",
     stderr: "ignore",
   });
@@ -146,7 +147,7 @@ export function flashPane(paneId: string): void {
   flashingPaneId = paneId;
 
   Bun.spawn(
-    ["tmux", "set-option", "-p", "-t", paneId, "window-style", flashBg()],
+    tmuxArgv("set-option", "-p", "-t", paneId, "window-style", flashBg()),
     { stdout: "ignore", stderr: "ignore" },
   );
 
@@ -165,23 +166,24 @@ export function flashPane(paneId: string): void {
  */
 export function flashPaneDetached(paneId: string): void {
   Bun.spawn(
-    ["tmux", "set-option", "-p", "-t", paneId, "window-style", flashBg()],
+    tmuxArgv("set-option", "-p", "-t", paneId, "window-style", flashBg()),
     { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
   );
+  // The nested `tmux` runs from tmux's own process context, which does not
+  // carry this process's environment, so it needs the socket spelled out.
   Bun.spawn(
-    [
-      "tmux",
+    tmuxArgv(
       "run-shell",
       "-b",
-      `sleep ${FLASH_DURATION_MS / 1000} && tmux set-option -p -u -t '${paneId}' window-style`,
-    ],
+      `sleep ${FLASH_DURATION_MS / 1000} && ${tmuxShellPrefix()} set-option -p -u -t '${paneId}' window-style`,
+    ),
     { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
   );
 }
 
 export async function selectPane(paneId: string): Promise<boolean> {
   try {
-    const proc = Bun.spawn(["tmux", "select-pane", "-t", paneId], {
+    const proc = Bun.spawn(tmuxArgv("select-pane", "-t", paneId), {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -303,13 +305,12 @@ async function openDedupedCommandWindow(
   }
   try {
     const list = Bun.spawn(
-      [
-        "tmux",
+      tmuxArgv(
         "list-windows",
         "-a",
         "-F",
         ["#{window_id}", "#{window_name}"].join(PANE_FIELD_SEP),
-      ],
+      ),
       { stdout: "pipe", stderr: "ignore" },
     );
     const listOut = await new Response(list.stdout).text();
@@ -318,7 +319,7 @@ async function openDedupedCommandWindow(
         ? parseWindowIdByName(listOut, windowName)
         : null;
     if (existing) {
-      const switchProc = Bun.spawn(["tmux", "switch-client", "-t", existing], {
+      const switchProc = Bun.spawn(tmuxArgv("switch-client", "-t", existing), {
         stdout: "ignore",
         stderr: "ignore",
       });
@@ -327,8 +328,7 @@ async function openDedupedCommandWindow(
     }
 
     const spawn = Bun.spawn(
-      [
-        "tmux",
+      tmuxArgv(
         "new-window",
         "-n",
         windowName,
@@ -338,7 +338,7 @@ async function openDedupedCommandWindow(
         "-F",
         "#{pane_id}",
         command,
-      ],
+      ),
       { stdout: "pipe", stderr: "pipe" },
     );
     if ((await spawn.exited) !== 0) {
@@ -349,7 +349,7 @@ async function openDedupedCommandWindow(
 
     // new-window already selects within its session; switch-client covers
     // the popup / other-session contexts (same approach as switchToPane).
-    await Bun.spawn(["tmux", "switch-client", "-t", paneId], {
+    await Bun.spawn(tmuxArgv("switch-client", "-t", paneId), {
       stdout: "ignore",
       stderr: "ignore",
     }).exited;
@@ -416,12 +416,11 @@ export async function findRestorePane(): Promise<string | null> {
 
   try {
     const proc = Bun.spawn(
-      [
-        "tmux",
+      tmuxArgv(
         "list-panes",
         "-F",
         ["#{pane_id}", "#{pane_title}", "#{pane_active}"].join(PANE_FIELD_SEP),
-      ],
+      ),
       { stdout: "pipe", stderr: "ignore" },
     );
     const output = await new Response(proc.stdout).text();
@@ -491,8 +490,7 @@ export async function resolveLaunchPane(
   const selfPane = process.env.TMUX_PANE ?? null;
   try {
     const proc = Bun.spawn(
-      [
-        "tmux",
+      tmuxArgv(
         "list-panes",
         // Target our OWN window when we have a pane. Bare `list-panes`
         // resolves the session's CURRENT window, which is not necessarily
@@ -502,7 +500,7 @@ export async function resolveLaunchPane(
         ...(selfPane ? ["-t", selfPane] : []),
         "-F",
         ["#{pane_id}", "#{pane_title}", "#{pane_active}"].join(PANE_FIELD_SEP),
-      ],
+      ),
       { stdout: "pipe", stderr: "ignore" },
     );
     const output = await new Response(proc.stdout).text();
@@ -522,7 +520,7 @@ export async function isPaneInCurrentWindow(paneId: string): Promise<boolean> {
     const selfPane = process.env.TMUX_PANE;
     if (!selfPane) return false;
 
-    const proc = Bun.spawn(["tmux", "list-panes", "-F", "#{pane_id}"], {
+    const proc = Bun.spawn(tmuxArgv("list-panes", "-F", "#{pane_id}"), {
       stdout: "pipe",
       stderr: "pipe",
     });

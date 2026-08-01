@@ -583,6 +583,7 @@ ccmux config list
 | `searchTranscript`           | `true`, `false`                                                              | `true`             | Search live Claude/Codex transcripts (full history + assistant text) via the daemon                                                |
 | `persistent`                 | `true`, `false`                                                              | `false`            | Keep picker open after switching sessions (dashboard mode)                                                                         |
 | `reviewHandback`             | `confirm`, `auto`, `fill`                                                    | `confirm`          | After a hunk review, confirm delivery, send immediately, or fill the agent composer without submitting                             |
+| `tmuxSocket`                 | socket path (`/...`) or label                                                | unset              | tmux server to track (daemon restart required; see [Non-default tmux Server](#-non-default-tmux-server))                           |
 | `sidebar.width`              | `10`–`80`                                                                    | `30`               | Sidebar pane width in columns                                                                                                      |
 | `sidebar.position`           | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                                                                                      |
 
@@ -870,6 +871,37 @@ Each `terminalRules` entry must define exactly one matcher:
 Rules are evaluated top-to-bottom, and the first match wins. This lets you express broad "working" prompts and more specific multi-line waiting prompts without detector-specific logic.
 
 </details>
+
+## 🔌 Non-default tmux Server
+
+By default every tmux call resolves ambiently: `$TMUX` when ccmux runs inside tmux, tmux's default socket otherwise. That breaks when your agents live on a named server (`tmux -L work`) but the daemon was auto-started from a plain login shell, which lands it on the default socket. It scans a server with no panes on it, finds nothing, and the board sits empty.
+
+Name the server explicitly, by config or environment:
+
+```bash
+ccmux config set tmuxSocket work           # a label -> tmux -L work
+ccmux config set tmuxSocket /tmp/my.sock   # a path  -> tmux -S /tmp/my.sock
+ccmux daemon restart
+
+export CCMUX_TMUX_SOCKET=work              # same thing, per shell (wins over the config key)
+```
+
+There is also a convenience flag for an explicitly started daemon:
+
+```bash
+ccmux daemon start -b --label work
+ccmux daemon start -b --socket /tmp/my.sock
+ccmux daemon status                        # prints the socket the running daemon tracks
+```
+
+A leading `/` means a socket path, anything else a label. Environment and config are the primary interface because the daemon is usually auto-started for you (it inherits your environment, so both reach it); the flag only applies to a `ccmux daemon start` you run yourself.
+
+Inside tmux, the client half of ccmux ignores the setting and uses the server you are attached to. You are physically on that server, so pointing the picker's pane actions at another one would be nonsense. The daemon always honors it, which is the point.
+
+> [!NOTE]
+> ccmux tracks exactly one tmux server. Pane ids (`%3`) are unique only within a server, and the daemon's marker directory and log watchers are process-global, so running two daemons against two servers is unsupported.
+
+When the configured server cannot be reached, the picker, the sidebar, and `ccmux show` say so and name the socket (`tmux server unreachable at /private/tmp/tmux-501/work`) instead of reporting an empty session list.
 
 ## 🌐 Remote / SSH
 

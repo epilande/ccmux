@@ -37,6 +37,8 @@ import { HookManager } from "./hook-manager";
 import type { AgentDef } from "../lib/agents";
 import { getAgents } from "../lib/agents";
 import { getPreferences, type Preferences } from "../lib/preferences";
+import { tmuxCaptureSync } from "../lib/tmux-exec";
+import { markDaemonProcess } from "../lib/tmux-socket";
 import { VersionResolver, parseShellTokens } from "./version-resolver";
 import { readClaudeHistory } from "./adapters/claude/history";
 import {
@@ -155,25 +157,6 @@ async function activateHostTerminal(): Promise<void> {
     });
   } catch {
     // best-effort; the jump itself already happened
-  }
-}
-
-/**
- * Runs a tmux command synchronously and returns its stdout, or null on
- * failure. Synchronous (unlike the daemon's other tmux queries) because the
- * "osc" backend's probe and termname sniff run inside synchronous delivery
- * code; both are cheap, infrequent reads.
- */
-function runTmuxCapture(tmuxPath: string, args: string[]): string | null {
-  try {
-    const result = Bun.spawnSync([tmuxPath, ...args], {
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    if (!result.success) return null;
-    return result.stdout.toString();
-  } catch {
-    return null;
   }
 }
 
@@ -432,7 +415,7 @@ export class Daemon {
       // "osc" backend wiring: pane tty to write to, tmux runner for its
       // allow-passthrough probe and termname sniff.
       getPaneTty: (paneId: string) => this.paneCache.get(paneId)?.tty ?? null,
-      runTmuxCapture: (args: string[]) => runTmuxCapture(tmuxPath, args),
+      runTmuxCapture: (args: string[]) => tmuxCaptureSync(args, tmuxPath),
       // `notify-delivery.ts` constructs at most one of these per daemon run,
       // lazily on the first "dbus" delivery (only relevant on Linux with the
       // dbus backend resolved); `dbus-next` itself is loaded even later,
@@ -708,6 +691,14 @@ export class Daemon {
         `Daemon degraded: ${transition.reason} (${SCAN_DEGRADED_THRESHOLD} consecutive scan failures); serving cached state until scans recover`,
       );
       this.server.broadcastDaemonHealth();
+    }
+
+    if (error instanceof PaneDiscoveryError) {
+      // Drop the server's cached socket and remember why: tmux may have
+      // restarted onto a different one, and an unreachable server is what
+      // `/server-info` needs to report instead of letting clients render an
+      // empty board with no explanation.
+      this.server.notePaneScanFailure(error.message);
     }
 
     if (isDiscovery) {
@@ -1467,6 +1458,10 @@ export async function startDaemon(): Promise<void> {
   // never chdir the test runner. Daemon spawns must resolve via PATH or pass
   // an explicit cwd, never rely on inherited cwd.
   process.chdir("/");
+  // Before anything can spawn tmux: the daemon honors a configured socket
+  // override unconditionally, including over the `$TMUX` it inherited from
+  // whichever shell auto-started it. That inheritance is issue #95 itself.
+  markDaemonProcess();
   redirectStdioToLogFile();
   const daemon = new Daemon();
   await daemon.start();

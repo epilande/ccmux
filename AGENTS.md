@@ -36,7 +36,7 @@ tmux new-session -d -s ccmux-verify -x 200 -y 50
 
 # 2. Launch the TUI and let it render (use the same default tmux server
 #    so the ccmux daemon can see real sessions; an isolated `-L` socket
-#    would render an empty list)
+#    would render an empty list unless you point a daemon at it too, see below)
 tmux send-keys -t ccmux-verify 'ccmux picker' Enter   # or 'ccmux sidebar'
 sleep 3
 tmux capture-pane -t ccmux-verify -p | head -40
@@ -51,6 +51,16 @@ tmux kill-session -t ccmux-verify
 ```
 
 Verify the specific area you changed: column alignment, active indicator (`▎`), agent colors, row collapse vs subtitle, sidebar layout, etc. If you can't reach the path you changed (e.g., needs a session in a specific state that doesn't currently exist), say so explicitly rather than claiming success.
+
+**Fully isolated runs.** `CCMUX_TMUX_SOCKET` picks the tmux server a daemon tracks, so a test daemon can own its own server instead of sharing the developer's. Give it a distinct `CCMUX_PORT` as well (the daemon rewrites global tmux hooks, and two on one port fight over the same marker dir):
+
+```bash
+tmux -L ccmux-verify new-session -d -x 200 -y 50
+CCMUX_TMUX_SOCKET=ccmux-verify CCMUX_PORT=2270 ccmux daemon start -b
+# ... drive agents on -L ccmux-verify, then:
+CCMUX_TMUX_SOCKET=ccmux-verify CCMUX_PORT=2270 ccmux daemon stop
+tmux -L ccmux-verify kill-server
+```
 
 ### Do Not
 

@@ -2,6 +2,8 @@ import type { TmuxPane } from "../types/session";
 import type { ProcessTree } from "./process-tree";
 import { DaemonPerf } from "./perf";
 import { PANE_FIELD_SEP } from "../lib/tmux-format";
+import { tmuxArgv } from "../lib/tmux-exec";
+import { attemptedTmuxSocketPath } from "../lib/tmux-socket";
 
 /**
  * Thrown by {@link listTmuxPanesOrThrow} when `tmux list-panes` itself fails
@@ -42,8 +44,7 @@ export async function listTmuxPanesOrThrow(): Promise<TmuxPane[]> {
   try {
     DaemonPerf.incSubprocessSpawn("tmux-list-panes");
     const proc = Bun.spawn(
-      [
-        "tmux",
+      tmuxArgv(
         "list-panes",
         "-a",
         "-F",
@@ -71,7 +72,7 @@ export async function listTmuxPanesOrThrow(): Promise<TmuxPane[]> {
           "#{pane_current_command}",
           "#{pane_current_path}",
         ].join(PANE_FIELD_SEP),
-      ],
+      ),
       {
         stdout: "pipe",
         stderr: "pipe",
@@ -92,8 +93,11 @@ export async function listTmuxPanesOrThrow(): Promise<TmuxPane[]> {
 
   if (exitCode !== 0) {
     if (TMUX_NO_SERVER_RE.test(stderr)) return [];
+    // Name the server: with a socket override in play, "exited 1" alone leaves
+    // the user unable to tell a broken tmux from a misaimed one.
     throw new PaneDiscoveryError(
-      `tmux list-panes exited ${exitCode}: ${stderr.trim() || "(no stderr)"}`,
+      `tmux list-panes on ${attemptedTmuxSocketPath()} exited ${exitCode}: ` +
+        `${stderr.trim() || "(no stderr)"}`,
     );
   }
 
@@ -124,11 +128,12 @@ export async function listTmuxPanesOrThrow(): Promise<TmuxPane[]> {
     const startTime = parseInt(startTimeStr, 10);
     const windowActivity = parseInt(windowActivityStr, 10);
 
-    // Single-server invariant: `list-panes -a` (no `-L`/`-S`) yields `%N` ids
-    // from the one server this daemon's env points at. `%N` collides across
-    // servers, so consumers refuse a cross-server target by comparing the socket
-    // from `GET /server-info` (src/lib/tmux-server.ts). Server-qualified ids are
-    // a non-goal until multi-server support.
+    // Single-server invariant: `list-panes -a` yields `%N` ids from the one
+    // server this daemon targets (its configured socket override, else the one
+    // its env points at). `%N` collides across servers, so consumers refuse a
+    // cross-server target by comparing the socket from `GET /server-info`
+    // (src/lib/tmux-server.ts). Server-qualified ids are a non-goal until
+    // multi-server support.
     if (!isNaN(panePid) && paneId) {
       panes.push({
         paneId,

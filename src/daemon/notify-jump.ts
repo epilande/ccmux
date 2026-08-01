@@ -8,6 +8,7 @@
  */
 
 import type { SpawnFn } from "../lib/notify";
+import { tmuxArgvFor } from "../lib/tmux-exec";
 
 export interface JumpTarget {
   /** True for paneless background-agent sessions (route to the popup). */
@@ -52,7 +53,14 @@ export async function performJump(
     if (target.background || !target.pane) {
       if (!deps.ccmuxPath) return;
       deps.spawn(
-        [deps.tmuxPath, "display-popup", "-c", clientTty, "-E", deps.ccmuxPath],
+        tmuxArgvFor(
+          deps.tmuxPath,
+          "display-popup",
+          "-c",
+          clientTty,
+          "-E",
+          deps.ccmuxPath,
+        ),
         { stdout: "ignore", stderr: "ignore" },
       );
       await deps.activateTerminal?.();
@@ -60,7 +68,14 @@ export async function performJump(
     }
 
     deps.spawn(
-      [deps.tmuxPath, "switch-client", "-c", clientTty, "-t", target.pane],
+      tmuxArgvFor(
+        deps.tmuxPath,
+        "switch-client",
+        "-c",
+        clientTty,
+        "-t",
+        target.pane,
+      ),
       { stdout: "ignore", stderr: "ignore" },
     );
     await deps.activateTerminal?.();

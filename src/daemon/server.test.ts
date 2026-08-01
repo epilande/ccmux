@@ -149,6 +149,7 @@ type ServerInternals = {
   invocationManager: InvocationManager;
   handleRequest(req: Request): Promise<Response>;
   getServerSocketPath(): Promise<string | null>;
+  notePaneScanFailure(message: string): void;
   broadcastEvent(event: SSEEvent): void;
   sseClients: Map<
     string,
@@ -2999,7 +3000,9 @@ describe("getServerSocketPath and /server-info", () => {
    * down" then "up"). Counts invocations so caching (a resolved path must not
    * re-spawn) is observable.
    */
-  function withSpawnQueue(outcomes: Array<{ code: number; out: string }>) {
+  function withSpawnQueue(
+    outcomes: Array<{ code: number; out: string; err?: string }>,
+  ) {
     const original = Bun.spawn;
     const state = { calls: 0 };
     const queue = [...outcomes];
@@ -3009,7 +3012,7 @@ describe("getServerSocketPath and /server-info", () => {
       return {
         exited: Promise.resolve(next.code),
         stdout: new Blob([next.out]).stream(),
-        stderr: new Blob([""]).stream(),
+        stderr: new Blob([next.err ?? ""]).stream(),
       };
     }) as unknown as typeof Bun.spawn;
     return { state, restore: () => (Bun.spawn = original) };
@@ -3034,6 +3037,78 @@ describe("getServerSocketPath and /server-info", () => {
       // (3) cached hit returns the same value WITHOUT re-spawning.
       expect(await internals.getServerSocketPath()).toBe("/tmp/some-sock");
       expect(state.calls).toBe(2);
+    } finally {
+      restore();
+    }
+  });
+
+  it("drops the cached socket after a failed pane scan and re-probes", async () => {
+    const { internals } = createServer();
+    const { state, restore } = withSpawnQueue([
+      { code: 0, out: "/tmp/first-sock\n" },
+      { code: 0, out: "/tmp/second-sock\n" },
+    ]);
+    try {
+      expect(await internals.getServerSocketPath()).toBe("/tmp/first-sock");
+      expect(state.calls).toBe(1);
+
+      // tmux restarted onto a different socket; the scan loop noticed. Without
+      // invalidation every client would keep comparing against the dead one and
+      // refuse every pane as "a different server".
+      internals.notePaneScanFailure("tmux list-panes exited 1");
+      expect(await internals.getServerSocketPath()).toBe("/tmp/second-sock");
+      expect(state.calls).toBe(2);
+    } finally {
+      restore();
+    }
+  });
+
+  it("reports socketError on GET /server-info when the probe fails, and clears it once tmux is back", async () => {
+    const { internals } = createServer();
+    const { restore } = withSpawnQueue([
+      { code: 1, out: "", err: "no server running on /tmp/tmux-501/work\n" },
+      { code: 0, out: "/tmp/tmux-501/work\n" },
+    ]);
+    try {
+      const failed = (await (
+        await internals.handleRequest(
+          new Request("http://localhost/server-info"),
+        )
+      ).json()) as {
+        socketPath: string | null;
+        socketError: { attemptedSocket: string | null; message: string } | null;
+      };
+      expect(failed.socketPath).toBe(null);
+      expect(failed.socketError?.message).toBe(
+        "no server running on /tmp/tmux-501/work",
+      );
+      // Named so a client can say WHICH server it could not reach.
+      expect(failed.socketError?.attemptedSocket).toBeTruthy();
+
+      const recovered = (await (
+        await internals.handleRequest(
+          new Request("http://localhost/server-info"),
+        )
+      ).json()) as {
+        socketPath: string | null;
+        socketError: { attemptedSocket: string | null; message: string } | null;
+      };
+      expect(recovered.socketPath).toBe("/tmp/tmux-501/work");
+      expect(recovered.socketError).toBe(null);
+    } finally {
+      restore();
+    }
+  });
+
+  it("serves socketError: null on a healthy daemon", async () => {
+    const { internals } = createServer();
+    const { restore } = withSpawnQueue([{ code: 0, out: "/tmp/ok-sock\n" }]);
+    try {
+      const res = await internals.handleRequest(
+        new Request("http://localhost/server-info"),
+      );
+      const data = (await res.json()) as { socketError: unknown };
+      expect(data.socketError).toBe(null);
     } finally {
       restore();
     }

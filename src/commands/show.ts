@@ -9,7 +9,8 @@ import {
 } from "../lib/icons";
 import { formatRelativeTime } from "../lib/format";
 import { getPreferences } from "../lib/preferences";
-import type { EnrichedSession } from "../types";
+import type { EnrichedSession, TmuxSocketError } from "../types";
+import { socketErrorMessage } from "../lib/tmux-socket";
 
 function formatSession(session: EnrichedSession, style: IconStyle): string {
   const icon = getStatusIcon(session.status, session.attentionType, style);
@@ -23,6 +24,27 @@ function formatSession(session: EnrichedSession, style: IconStyle): string {
 
   const prefix = icon ? `${icon} ` : "";
   return `${prefix}${session.project} - ${session.status}${attention}${attn}${pane} - ${time}`;
+}
+
+/**
+ * What an empty list actually means. With no reachable tmux server there are no
+ * panes to find, so "No active sessions" would be reporting a configuration
+ * problem as an absence of agents. Same line the TUI renders.
+ */
+async function emptyMessage(): Promise<string> {
+  try {
+    const response = await fetch(`${getDaemonUrl()}/server-info`);
+    if (response.ok) {
+      // A daemon predating the field omits it, which reads as "no error".
+      const { socketError } = (await response.json()) as {
+        socketError?: TmuxSocketError | null;
+      };
+      if (socketError) return socketErrorMessage(socketError.attemptedSocket);
+    }
+  } catch {
+    // Fall through to the plain empty message.
+  }
+  return "No active sessions";
 }
 
 export function createShowCommand(): Command {
@@ -60,7 +82,7 @@ export function createShowCommand(): Command {
         }
 
         if (sessions.length === 0) {
-          console.log("No active sessions");
+          console.log(await emptyMessage());
           return;
         }
 

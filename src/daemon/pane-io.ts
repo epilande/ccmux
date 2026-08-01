@@ -1,4 +1,5 @@
 import { DaemonPerf } from "./perf";
+import { tmuxArgv } from "../lib/tmux-exec";
 
 export async function capturePane(
   paneId: string,
@@ -9,7 +10,7 @@ export async function capturePane(
   const captureStartNs = DaemonPerf.paneCaptureStart();
   try {
     const proc = Bun.spawn(
-      ["tmux", "capture-pane", "-t", paneId, "-p", `-S-${lines}`],
+      tmuxArgv("capture-pane", "-t", paneId, "-p", `-S-${lines}`),
       {
         stdout: "pipe",
         stderr: "pipe",
@@ -36,15 +37,14 @@ export async function getPaneCurrentCommand(
 ): Promise<string | null> {
   try {
     const proc = Bun.spawn(
-      [
-        "tmux",
+      tmuxArgv(
         "display-message",
         "-p",
         "-t",
         paneId,
         "-F",
         "#{pane_current_command}",
-      ],
+      ),
       { stdout: "pipe", stderr: "pipe" },
     );
     const output = (await new Response(proc.stdout).text()).trim();
@@ -73,15 +73,14 @@ export async function resolvePaneLocation(
 ): Promise<{ windowId: string; sessionId: string } | null> {
   try {
     const proc = Bun.spawn(
-      [
-        "tmux",
+      tmuxArgv(
         "display-message",
         "-p",
         "-t",
         paneId,
         "-F",
         "#{window_id} #{session_id}",
-      ],
+      ),
       { stdout: "pipe", stderr: "pipe" },
     );
     const output = (await new Response(proc.stdout).text()).trim();
@@ -108,7 +107,7 @@ export async function sendLiteralToPane(
 ): Promise<boolean> {
   try {
     const literal = Bun.spawn(
-      ["tmux", "send-keys", "-t", paneId, "-l", "--", text],
+      tmuxArgv("send-keys", "-t", paneId, "-l", "--", text),
       { stdout: "pipe", stderr: "pipe" },
     );
     const literalExit = await literal.exited;
@@ -119,7 +118,7 @@ export async function sendLiteralToPane(
       // text and the Enter into a single paste, which leaves the text in the
       // composer and never submits.
       await new Promise((resolve) => setTimeout(resolve, 150));
-      const enter = Bun.spawn(["tmux", "send-keys", "-t", paneId, "Enter"], {
+      const enter = Bun.spawn(tmuxArgv("send-keys", "-t", paneId, "Enter"), {
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -157,7 +156,7 @@ export async function sendPromptToPane(
   // The paneId is %<digits> in tmux, which is always safe in a buffer name.
   const bufferName = `ccmux-invoke${paneId.replace(/[^A-Za-z0-9]/g, "_")}`;
   try {
-    const load = Bun.spawn(["tmux", "load-buffer", "-b", bufferName, "-"], {
+    const load = Bun.spawn(tmuxArgv("load-buffer", "-b", bufferName, "-"), {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -168,7 +167,7 @@ export async function sendPromptToPane(
     if (loadExit !== 0) return false;
 
     const paste = Bun.spawn(
-      ["tmux", "paste-buffer", "-p", "-b", bufferName, "-d", "-t", paneId],
+      tmuxArgv("paste-buffer", "-p", "-b", bufferName, "-d", "-t", paneId),
       { stdout: "pipe", stderr: "pipe" },
     );
     const pasteExit = await paste.exited;
@@ -178,7 +177,7 @@ export async function sendPromptToPane(
       // Same 150ms gap as sendLiteralToPane: gives the TUI a tick to
       // commit the paste before we send the submit.
       await new Promise((resolve) => setTimeout(resolve, 150));
-      const enter = Bun.spawn(["tmux", "send-keys", "-t", paneId, "Enter"], {
+      const enter = Bun.spawn(tmuxArgv("send-keys", "-t", paneId, "Enter"), {
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -201,7 +200,7 @@ export async function sendKeyToPane(
   key: string,
 ): Promise<boolean> {
   try {
-    const proc = Bun.spawn(["tmux", "send-keys", "-t", paneId, key], {
+    const proc = Bun.spawn(tmuxArgv("send-keys", "-t", paneId, key), {
       stdout: "pipe",
       stderr: "pipe",
     });

@@ -10,10 +10,12 @@
  *   reuses the same client for background-session click targets
  *   (`display-popup -c`) and for resolving the frontmost-terminal bundle id.
  *
- * Dependency-free (bare `Bun.spawn`, no injection) to match the rest of this
- * file's sibling `tmux-server.ts` and the daemon's `pane-io.ts`; tests stub
- * `Bun.spawn` globally instead.
+ * No dependency injection (bare `Bun.spawn`, argv from the shared builder) to
+ * match this file's sibling `tmux-server.ts` and the daemon's `pane-io.ts`;
+ * tests stub `Bun.spawn` globally instead.
  */
+
+import { tmuxArgv } from "./tmux-exec";
 
 /**
  * The pid of the tmux client attached to the current session context (i.e.
@@ -23,7 +25,7 @@
  */
 export async function getActiveTmuxClientPid(): Promise<number | null> {
   try {
-    const proc = Bun.spawn(["tmux", "display-message", "-p", "#{client_pid}"], {
+    const proc = Bun.spawn(tmuxArgv("display-message", "-p", "#{client_pid}"), {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -57,7 +59,7 @@ export async function getActiveTmuxClientPid(): Promise<number | null> {
  */
 export async function resolveCurrentTmuxClientTty(): Promise<string | null> {
   try {
-    const proc = Bun.spawn(["tmux", "display-message", "-p", "#{client_tty}"], {
+    const proc = Bun.spawn(tmuxArgv("display-message", "-p", "#{client_tty}"), {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -86,7 +88,7 @@ export async function listTmuxClientTtys(
 ): Promise<string[] | null> {
   try {
     const proc = Bun.spawn(
-      ["tmux", "list-clients", "-t", sessionId, "-F", "#{client_tty}"],
+      tmuxArgv("list-clients", "-t", sessionId, "-F", "#{client_tty}"),
       { stdout: "pipe", stderr: "pipe" },
     );
     const output = await new Response(proc.stdout).text();
@@ -110,7 +112,7 @@ export async function listTmuxClientTtys(
 export async function resolveActiveTmuxClientTty(): Promise<string | null> {
   try {
     const proc = Bun.spawn(
-      ["tmux", "list-clients", "-F", "#{client_activity} #{client_tty}"],
+      tmuxArgv("list-clients", "-F", "#{client_activity} #{client_tty}"),
       { stdout: "pipe", stderr: "pipe" },
     );
     const output = await new Response(proc.stdout).text();
