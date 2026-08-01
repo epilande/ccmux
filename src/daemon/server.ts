@@ -2600,26 +2600,6 @@ export class DaemonServer {
         { status: 400, headers },
       );
     }
-    // Fork-into-a-new-worktree is a destination CREATION, not just a
-    // different cwd, and nobody has run the combination against a live agent
-    // yet. Resuming by transcript path removed the resume-scoping wall this
-    // refusal used to cite, so what is left is an unshipped feature rather
-    // than a technical impossibility: it is tracked separately, with its own
-    // surface and its own live check. Refused BEFORE the worktree is created,
-    // so a rejected request leaves no directory and no branch behind.
-    if (forkSource && worktreeRequest.value) {
-      return Response.json(
-        {
-          error:
-            `Cannot fork ${forkSource.session.agentType} into a new worktree yet: ` +
-            `that combination has not been verified against a live agent. ` +
-            `Spawn a fresh session into the worktree, or fork into an existing ` +
-            `directory with 'cwd'.`,
-        },
-        { status: 400, headers },
-      );
-    }
-
     // Resolve agent definition (custom agents from config are also valid)
     const agent = this.getAgentByType(agentName);
     if (!agent) {
