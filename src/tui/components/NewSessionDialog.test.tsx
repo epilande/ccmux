@@ -1372,8 +1372,9 @@ describe("NewSessionDialog fork mode", () => {
   });
 
   it("fits in a terminal too short for any other mode", async () => {
-    // Three fewer field rows than an ordinary spawn, so the floor is lower —
-    // and the budget has to know that, or the mode reports a floor it clears.
+    // Two fewer field rows than a worktree spawn (5 to 3, so a floor of 6
+    // rather than 8) and three fewer than a move — and the budget has to know
+    // that, or the mode reports a floor it already clears.
     expect(
       newSessionFloorRows({
         moveChanges: false,
