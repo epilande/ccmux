@@ -357,9 +357,9 @@ describe("NewSessionDialog", () => {
     const frame = await renderDialog({
       agents: [agent("claude"), agent("codex"), agent("pi")],
     });
-    // The value, bracketed like every other held option, with the arrow as
-    // the affordance that a list is behind it.
-    expect(squish(frame)).toContain("[Claude▾]");
+    // The held value on its background pill, with the arrow as the
+    // affordance that a list is behind it.
+    expect(squish(frame)).toContain("Claude▾");
     // The list itself is not on screen, so nothing below it moved.
     expect(frame).not.toContain("2 Codex");
     expect(frame).not.toContain("3 Pi");
@@ -382,7 +382,7 @@ describe("NewSessionDialog", () => {
     });
     const lines = frame.split("\n");
     // The overlay starts directly under the Agent row...
-    const agentRow = lines.findIndex((line) => line.includes("[Claude"));
+    const agentRow = lines.findIndex((line) => line.includes("Claude ▾"));
     const first = lines.findIndex((line) => line.includes("1 Claude"));
     expect(agentRow).toBeGreaterThan(0);
     expect(first).toBeGreaterThan(agentRow);

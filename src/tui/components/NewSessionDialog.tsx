@@ -922,40 +922,46 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                   {/* Collapsed to one row: the list itself is the overlay
                     below, opened with space (or a click), so choosing an
                     agent no longer pushes every other field down the
-                    dialog. The brackets mark the held value the way the
-                    option rows do; the arrow is the affordance that there
-                    is a list behind it. */}
-                  <box
-                    height={1}
-                    flexDirection="row"
-                    onMouseDown={(event) => {
-                      if (event.button !== MouseButton.LEFT) return;
-                      props.onFocusField("agent");
-                      props.onOpenAgentDropdown(selectedAgentIndex());
-                    }}
-                  >
-                    <box width={1}>
-                      <text fg={theme.green}>[</text>
-                    </box>
-                    <text
-                      fg={agentColorFor(
-                        selectedAgent()?.name ?? props.draft.agent,
-                      )}
-                    >
-                      {truncateText(
-                        selectedAgent()?.displayName ?? props.draft.agent,
-                        Math.max(1, contentWidth() - 4),
-                      )}
-                    </text>
+                    dialog. Drawn as a background pill — the raised colour
+                    the overlay's highlight row uses — so it reads as a
+                    control rather than as text; the arrow is the affordance
+                    that there is a list behind it. The focused field gets
+                    the hotter of the two raised tokens, the same pairing
+                    the context menu uses for its hover. */}
+                  <box height={1} flexDirection="row">
                     <box
-                      width={2}
+                      height={1}
                       flexDirection="row"
-                      justifyContent="flex-end"
+                      paddingLeft={1}
+                      paddingRight={1}
+                      backgroundColor={
+                        props.draft.field === "agent"
+                          ? theme.border
+                          : theme.surface
+                      }
+                      onMouseDown={(event) => {
+                        if (event.button !== MouseButton.LEFT) return;
+                        props.onFocusField("agent");
+                        props.onOpenAgentDropdown(selectedAgentIndex());
+                      }}
                     >
-                      <text fg={theme.overlay}>▾</text>
-                    </box>
-                    <box width={1}>
-                      <text fg={theme.green}>]</text>
+                      <text
+                        fg={agentColorFor(
+                          selectedAgent()?.name ?? props.draft.agent,
+                        )}
+                      >
+                        {truncateText(
+                          selectedAgent()?.displayName ?? props.draft.agent,
+                          Math.max(1, contentWidth() - 4),
+                        )}
+                      </text>
+                      <box
+                        width={2}
+                        flexDirection="row"
+                        justifyContent="flex-end"
+                      >
+                        <text fg={theme.overlay}>▾</text>
+                      </box>
                     </box>
                   </box>
                 </Show>
