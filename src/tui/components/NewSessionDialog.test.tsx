@@ -1198,6 +1198,40 @@ describe("NewSessionDialog fork mode", () => {
     expect(row).toContain("auto");
   });
 
+  /** A branch with a name, but not one a directory can be called: nothing in
+   *  it survives slugifying, so `<branch>-fork` derives to "". */
+  const unslugifiableFork = {
+    sessionId: "s1",
+    label: "Claude · 機能/検索",
+    branch: "機能/検索",
+  };
+
+  it("asks for a name when the source branch slugifies to nothing", async () => {
+    // The daemon refuses this fork rather than inventing a name for it, and
+    // says to type one in this row. A row promising `auto` walks the user
+    // into that refusal by doing exactly what it suggested.
+    const frame = await renderDialog({
+      draft: forkDraft({ fork: unslugifiableFork }),
+    });
+
+    const nameRow = frame.split("\n").find((line) => line.includes("Name"));
+    expect(nameRow).toContain("Type a name");
+    // Neither promise survives: there is no automatic name to caveat, and
+    // none is coming from the source branch either.
+    expect(nameRow).not.toContain("auto");
+    expect(nameRow).not.toContain("Named after the source branch");
+  });
+
+  it("still takes a typed name for an unslugifiable source branch", async () => {
+    const frame = await renderDialog({
+      draft: forkDraft({ fork: unslugifiableFork, worktreeName: "search" }),
+    });
+
+    const nameRow = frame.split("\n").find((line) => line.includes("Name"));
+    expect(nameRow).toContain("search");
+    expect(nameRow).not.toContain("Type a name");
+  });
+
   it("shows a typed name instead of the derived preview", async () => {
     const frame = await renderDialog({
       draft: forkDraft({ worktreeName: "parking-retry" }),

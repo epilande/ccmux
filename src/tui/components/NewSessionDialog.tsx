@@ -476,6 +476,22 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   };
 
   /**
+   * A fork whose source branch HAS a name, but not one a directory can be
+   * called: nothing in it survives slugifying (a non-Latin branch), so
+   * `<branch>-fork` derives to nothing.
+   *
+   * The distinction the rows below turn on. An unknown branch still gets a
+   * name — the daemon reads the checkout's own HEAD — but a known one that
+   * slugifies away gets none, and the daemon refuses the fork and says to
+   * type one here. Promising `auto` on that path walks the user into the
+   * refusal by doing what the row suggested.
+   */
+  const forkNeedsAName = () => {
+    const fork = forking();
+    return fork !== null && fork.branch !== null && !slugForFork(fork.branch);
+  };
+
+  /**
    * What the Name row shows in place of a typed name, before it is fitted to
    * the columns it ends up with: the derived slug, or the sentence saying
    * where the name is coming from instead.
@@ -488,10 +504,17 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     const slug = derivedSlug();
     if (slug) return slug;
     if (!derivedName()) return "";
-    // A fork with no branch to preview: the name is coming either way, so the
-    // row says where it comes from rather than offering a way out that would
-    // be a fiction (there is no prompt here to derive one from instead).
     if (forking()) {
+      // A branch that slugifies to nothing: the fork has no name coming, and
+      // the daemon's own refusal says to type one in this row. So the row
+      // asks, in the same words, rather than being the thing that caused it.
+      if (forkNeedsAName()) {
+        return stacked() ? "Type a name" : "Type a name for the worktree";
+      }
+      // No branch to preview, but the name is coming either way (the daemon
+      // reads the checkout's HEAD), so the row says where it comes from
+      // rather than offering a way out that would be a fiction — there is no
+      // prompt here to derive one from instead.
       return stacked() ? "Source branch" : "Named after the source branch";
     }
     // Nothing to derive from yet. Both ways out are named, because the second
@@ -517,11 +540,13 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const nameHint = () => {
     if (!derivedName()) return "";
     const slug = derivedSlug();
-    // No preview and nothing to derive one from: an ordinary spawn is not
-    // going to be given a name at all, so there is no rule to caveat. A fork
-    // is — the daemon derives one from a branch this row could not read — and
-    // the hint is then the only thing that says the field can be left alone.
-    if (!slug && !forking()) return "";
+    // No preview and no rule that will produce one: an ordinary spawn is not
+    // going to be given a name at all, and a fork whose branch slugifies away
+    // gets none either. Nothing to caveat, so nothing is said. A fork with a
+    // branch it merely could not READ is the case that keeps its hint: the
+    // daemon derives one, and this is the only thing that says the field can
+    // be left alone.
+    if (!slug && (!forking() || forkNeedsAName())) return "";
     const taken = displayWidth(namePlaceholderText());
     const spare = contentWidth() - (taken ? taken + 1 : 0);
     if (spare >= displayWidth(NAME_HINT)) return NAME_HINT;
