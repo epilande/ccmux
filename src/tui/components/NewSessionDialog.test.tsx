@@ -250,6 +250,90 @@ describe("planDialogRows", () => {
     expect(planDialogRows(plain, 7).tooShort).toBe(false);
     expect(planDialogRows(plain, 6).tooShort).toBe(true);
   });
+
+  /**
+   * Fork mode's own budget. The shape reaches this function from one call
+   * site and the component reads every count back out of it, so a fork's
+   * rows were only ever asserted through a rendered frame — where an extra
+   * blank row is invisible until it is the row that overlaps the border.
+   * These pin the numbers directly.
+   */
+  describe("in fork mode", () => {
+    /** A fork on an ordinary terminal. `agentRows` is what an equivalent
+     *  spawn's agent list would ask for, and a fork owes it nothing. */
+    const wideFork = {
+      moveChanges: false,
+      fork: true,
+      namesAWorktree: true,
+      agentRows: 3,
+      stacked: false,
+      keyHints: true,
+    };
+
+    it("spends its rows on three fields, an agent list on none", () => {
+      expect(planDialogRows(wideFork, 40)).toEqual({
+        tooShort: false,
+        // Border and title (3), the spacer, the directory, the Source note,
+        // the two hint rows, and one row each for Placement, Where and Name.
+        height: 11,
+        showTitleSpacer: true,
+        showDirectory: true,
+        // The Source row: which conversation this continues.
+        showModeNote: true,
+        showKeyHints: true,
+        // Not `Math.max(1, …)`: a fork has no agent row to floor at one, and
+        // a row budgeted here that nothing renders is a blank line the rest
+        // of the dialog is pushed down by.
+        agentRows: 0,
+        placementRows: 1,
+        destinationRows: 1,
+        untrackedRows: 0,
+      });
+    });
+
+    it("keeps the destination locked to one row on a stacked rail", () => {
+      // Placement stacks because it is a real choice; Where does not,
+      // because in this mode it is a restatement with nothing to pick.
+      expect(planDialogRows({ ...wideFork, stacked: true }, 40)).toEqual({
+        tooShort: false,
+        height: 13,
+        showTitleSpacer: true,
+        showDirectory: true,
+        showModeNote: true,
+        showKeyHints: true,
+        agentRows: 0,
+        placementRows: 3,
+        destinationRows: 1,
+        untrackedRows: 0,
+      });
+    });
+
+    it("gives up everything optional at its floor and still fits", () => {
+      expect(planDialogRows(wideFork, 6)).toEqual({
+        tooShort: false,
+        height: 6,
+        showTitleSpacer: false,
+        showDirectory: false,
+        showModeNote: false,
+        showKeyHints: false,
+        // Still zero on the way down: the agent list is the first thing the
+        // plan shrinks, and it cannot shrink what was never asked for.
+        agentRows: 0,
+        placementRows: 1,
+        destinationRows: 1,
+        untrackedRows: 0,
+      });
+      expect(planDialogRows(wideFork, 5).tooShort).toBe(true);
+    });
+
+    it("asks for two fewer field rows than the same spawn would", () => {
+      // Agent and Prompt, the two a fork does not have. The floor is a
+      // border, a title and one row per field, so the gap IS those two rows.
+      const shape = { moveChanges: false, namesAWorktree: true };
+      expect(newSessionFloorRows({ ...shape, fork: true })).toBe(6);
+      expect(newSessionFloorRows({ ...shape, fork: false })).toBe(8);
+    });
+  });
 });
 
 describe("NewSessionDialog", () => {
