@@ -32,6 +32,9 @@ const MAX_WIDTH = 65;
 const MIN_WIDTH = 24;
 /** The blank spacer plus the key-hint row, when the dialog draws its own. */
 const KEY_HINT_ROWS = 2;
+/** The button row with its leading and trailing blanks — one droppable
+ *  unit, so the air goes with the buttons. */
+const BUTTON_ROWS = 3;
 /** Content width below which the pills switch to their short labels and the
  *  key-hint line drops its middle segment. MAX_WIDTH is sized to leave
  *  exactly this much. */
@@ -201,6 +204,8 @@ export interface DialogRowPlan {
    *  the directory row) — pure air, all on or all off, never before the
    *  first row or after the last. */
   showFieldSpacers: boolean;
+  /** The confirm/Cancel button row (and its leading blank) under the form. */
+  showButtons: boolean;
   showDirectory: boolean;
   /** The one-line footnote a mode adds under the directory: what a move costs
    *  the checkout named above it, or which session a fork continues. One flag
@@ -215,7 +220,8 @@ export interface DialogRowPlan {
  *
  * Order matters and is the whole design: the blank rows between the fields
  * go first (pure air, and all at once — per-gap dropping would read as a
- * layout bug), then the agent field's error shrinks back towards one row,
+ * layout bug), then the button row (a duplicate of enter/esc), then the
+ * agent field's error shrinks back towards one row,
  * then the key hints (the picker repeats them in its footer anyway), then
  * the move note, then the blank row under the title, then the directory.
  * Nothing a user has to ACT on is dropped while anything decorative is
@@ -239,6 +245,7 @@ export function planDialogRows(
       height: Math.min(height, 3),
       showTitleSpacer: false,
       showFieldSpacers: false,
+      showButtons: false,
       showDirectory: false,
       showModeNote: false,
       showKeyHints: false,
@@ -251,6 +258,7 @@ export function planDialogRows(
     height: 0,
     showTitleSpacer: true,
     showFieldSpacers: true,
+    showButtons: true,
     showDirectory: true,
     showModeNote: shape.moveChanges || shape.fork,
     showKeyHints: shape.keyHints,
@@ -282,10 +290,15 @@ export function planDialogRows(
     (plan.showDirectory ? 1 : 0) +
     (plan.showModeNote ? 1 : 0) +
     (plan.showKeyHints ? KEY_HINT_ROWS : 0) +
+    (plan.showButtons ? BUTTON_ROWS : 0) +
     fieldGaps() +
     sumFieldRows(fieldRows());
 
   if (total() > height) plan.showFieldSpacers = false;
+  // The buttons next: they duplicate enter/esc exactly — keys that always
+  // work, and that the hint row both teaches and (clickably) provides — so
+  // they are the cheapest functional loss after pure air.
+  if (total() > height && plan.showButtons) plan.showButtons = false;
   // The agent error next, since its tail is already summarised by an
   // ellipsis and shrinks without losing anything actionable.
   const over = total() - height;
@@ -789,6 +802,11 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     };
   };
 
+  /** What the confirm button DOES, in the mode's own verb — the same word
+   *  the title leads with. */
+  const confirmVerb = () =>
+    forking() ? "Fork" : moveChanges() ? "Move" : "Spawn";
+
   /** Says whether this agent can take a prompt at all, which is per-agent
    *  and not otherwise discoverable. Shortened on a narrow surface, where
    *  the full sentence would run past the border. */
@@ -1047,6 +1065,57 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
             <box width={1 + CONTROL_GAP} />
             <text fg={modeNote().color}>{modeNote().text}</text>
           </box>
+        </Show>
+
+        <Show when={plan().showButtons}>
+          <box height={1} />
+          {/* Confirm and Cancel, aligned with the controls: pure duplicates
+            of Enter and Escape (the same paths, all the same guards), so
+            they are click affordances only and deliberately NOT Tab stops.
+            While a dropdown is open they follow the hint row's click
+            contract: confirm commits the highlight, Cancel closes the
+            overlay. */}
+          <box flexDirection="row" height={1}>
+            {/* Right-aligned in the macOS order — quiet Cancel left, the
+              primary rightmost, ending flush at the content edge the pills'
+              carets end on. The growing spacer means no per-width indent
+              cases; the rail simply has less room to breathe. */}
+            <box flexGrow={1} />
+            <box
+              height={1}
+              flexDirection="row"
+              flexShrink={0}
+              paddingLeft={1}
+              paddingRight={1}
+              backgroundColor={theme.surface}
+              onMouseDown={(event) => {
+                if (event.button !== MouseButton.LEFT) return;
+                if (dropdownOpen()) props.onCloseDropdown();
+                else props.onCancel();
+              }}
+            >
+              <text fg={theme.text}>Cancel</text>
+            </box>
+            <box width={2} />
+            <box
+              height={1}
+              flexDirection="row"
+              flexShrink={0}
+              paddingLeft={1}
+              paddingRight={1}
+              backgroundColor={theme.mauve}
+              onMouseDown={(event) => {
+                if (event.button !== MouseButton.LEFT) return;
+                if (dropdownOpen()) confirmDropdown();
+                else props.onSubmit();
+              }}
+            >
+              <text fg={theme.base}>
+                <strong>{confirmVerb()}</strong>
+              </text>
+            </box>
+          </box>
+          <box height={1} />
         </Show>
 
         <Show when={plan().showKeyHints}>

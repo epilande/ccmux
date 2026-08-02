@@ -2773,6 +2773,45 @@ describe("App new session dialog", () => {
     }
   });
 
+  it("spawns from the confirm button's click", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      const lines = setup.captureCharFrame().split("\n");
+      const row = lines.findIndex(
+        (line) => line.includes("Spawn") && line.includes("Cancel"),
+      );
+      expect(row).toBeGreaterThan(0);
+      // Located by label, not position: the button row moves with the plan.
+      await setup.mockMouse.click(lines[row]!.indexOf("Spawn") + 1, row);
+      await settle();
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]?.agent).toBe("claude");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("closes the dialog from the Cancel button without spawning", async () => {
+    const { spawns, restore } = withDaemon();
+    try {
+      await openDialog();
+      const lines = setup.captureCharFrame().split("\n");
+      const row = lines.findIndex(
+        (line) => line.includes("Spawn") && line.includes("Cancel"),
+      );
+      expect(row).toBeGreaterThan(0);
+      await setup.mockMouse.click(lines[row]!.indexOf("Cancel") + 1, row);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("New session");
+      expect(spawns).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
   it("confirms the highlighted agent with space while the dropdown is open", async () => {
     // The key that opened it commits it: without this, the hand that pressed
     // space to open presses it again and nothing happens.
@@ -3808,7 +3847,9 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
 
       // Labelled, so the session row behind the dialog cannot satisfy it.
-      expect(setup.captureCharFrame()).toContain("Directory   ~/dotfiles-notes");
+      expect(setup.captureCharFrame()).toContain(
+        "Directory   ~/dotfiles-notes",
+      );
     } finally {
       restore();
     }
@@ -4549,7 +4590,11 @@ describe("App move-changes reporting", () => {
 
       expect(spawns).toHaveLength(0);
       const frame = squish(setup.captureCharFrame());
-      expect(frame).toContain("lettersornumbers");
+      // The toast wraps, and the taller dialog's title row now sits between
+      // its two lines in row order, so each wrapped line is asserted whole
+      // rather than the phrase across the break.
+      expect(frame).toContain("needslettersor");
+      expect(frame).toContain("numbers;clearthefield");
       // Still on the dialog, with the typed name where it was left.
       expect(frame).toContain("Movechangestoworktree");
     } finally {
@@ -5087,8 +5132,12 @@ describe("App fork into worktree", () => {
 
       // Refused out loud rather than silently derived: the field would still
       // be showing the user's text while the worktree got another name.
+      // (Per wrapped toast line; the dialog's title row interleaves in row
+      // order — see the move-mode variant of this test.)
       expect(spawns).toHaveLength(0);
-      expect(squish(setup.captureCharFrame())).toContain("lettersornumbers");
+      const refused = squish(setup.captureCharFrame());
+      expect(refused).toContain("needslettersor");
+      expect(refused).toContain("numbers;clearthefield");
     } finally {
       restore();
     }

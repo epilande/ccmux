@@ -186,26 +186,30 @@ describe("planDialogRows", () => {
     const plan = planDialogRows(move, 40);
     expect(plan.tooShort).toBe(false);
     expect(plan.showFieldSpacers).toBe(true);
+    expect(plan.showButtons).toBe(true);
     expect(plan.showKeyHints).toBe(true);
     expect(plan.showModeNote).toBe(true);
     expect(plan.showDirectory).toBe(true);
     // Nothing is padded out to fill the screen: the dialog is its content —
     // border and title (3), the spacer, six one-row fields with the six
     // blank rows airing the stack (directory included), the directory, the
-    // Changes note, and the two hint rows.
-    expect(plan.height).toBe(20);
+    // Changes note, the button row with its two blanks, and the two hint
+    // rows.
+    expect(plan.height).toBe(23);
   });
 
   it("gives up rows in an order that keeps the actionable ones", () => {
     // Each step is the same dialog one row shorter, so the sequence IS the
     // priority list: the field spacers (all at once — pure air), then the
-    // hints, then the move note, then the blank under the title, then the
-    // directory. The fields never enter it: each is one row in every mode,
-    // with its list in an overlay outside the budget.
+    // buttons (a duplicate of enter/esc), then the hints, then the move
+    // note, then the blank under the title, then the directory. The fields
+    // never enter it: each is one row in every mode, with its list in an
+    // overlay outside the budget.
     const given = (height: number) => {
       const plan = planDialogRows(move, height);
       return {
         fieldSpacers: plan.showFieldSpacers,
+        buttons: plan.showButtons,
         hints: plan.showKeyHints,
         note: plan.showModeNote,
         spacer: plan.showTitleSpacer,
@@ -213,9 +217,11 @@ describe("planDialogRows", () => {
         tooShort: plan.tooShort,
       };
     };
-    expect(given(20).fieldSpacers).toBe(true);
-    expect(given(19).fieldSpacers).toBe(false);
-    expect(given(19).hints).toBe(true);
+    expect(given(23).fieldSpacers).toBe(true);
+    expect(given(22).fieldSpacers).toBe(false);
+    expect(given(22).buttons).toBe(true);
+    expect(given(16).buttons).toBe(false);
+    expect(given(16).hints).toBe(true);
     expect(given(13).hints).toBe(false);
     expect(given(13).note).toBe(true);
     expect(given(11).note).toBe(false);
@@ -234,6 +240,7 @@ describe("planDialogRows", () => {
     // spacers go first.
     const plan = planDialogRows({ ...move, agentRows: 9 }, 20);
     expect(plan.showFieldSpacers).toBe(false);
+    expect(plan.showButtons).toBe(false);
     expect(plan.agentRows).toBeLessThan(9);
     expect(plan.showKeyHints).toBe(true);
     expect(plan.showModeNote).toBe(true);
@@ -277,11 +284,13 @@ describe("planDialogRows", () => {
       expect(planDialogRows(wideFork, 40)).toEqual({
         tooShort: false,
         // Border and title (3), the spacer, the directory, the Source note,
-        // the two hint rows, one row each for Placement, Where and Name, and
-        // the three blank rows airing that four-block stack.
-        height: 14,
+        // the button row with its two blanks, the two hint rows, one row
+        // each for Placement, Where and Name, and the three blank rows
+        // airing that four-block stack.
+        height: 17,
         showTitleSpacer: true,
         showFieldSpacers: true,
+        showButtons: true,
         showDirectory: true,
         // The Source row: which conversation this continues.
         showModeNote: true,
@@ -299,6 +308,7 @@ describe("planDialogRows", () => {
         height: 6,
         showTitleSpacer: false,
         showFieldSpacers: false,
+        showButtons: false,
         showDirectory: false,
         showModeNote: false,
         showKeyHints: false,
@@ -647,6 +657,36 @@ describe("NewSessionDialog", () => {
     // Focus starts on the agent field, where the hint also teaches the
     // dropdown's opener.
     expect(frame).toContain("space open");
+  });
+
+  it("offers Cancel and confirm buttons, primary rightmost, in the mode's verb", async () => {
+    const spawn = await renderDialog({});
+    const lines = spawn.split("\n");
+    const row = lines.findIndex(
+      (line) => line.includes("Spawn") && line.includes("Cancel"),
+    );
+    expect(row).toBeGreaterThan(0);
+    // The macOS order: the quiet Cancel to the left, the primary action in
+    // the rightmost position the right-aligned row leads the eye to.
+    expect(lines[row]!.indexOf("Cancel")).toBeLessThan(
+      lines[row]!.indexOf("Spawn"),
+    );
+    setup.renderer.destroy();
+
+    // The move mode confirms in its own verb, the same word its title leads
+    // with. (Only the button row carries a capitalized Cancel.)
+    const move = await renderDialog({ draft: moveDraft() });
+    const moveRow = move
+      .split("\n")
+      .find((line) => line.includes("Cancel") && /\bMove\b/.test(line));
+    expect(moveRow).toBeDefined();
+  });
+
+  it("gives the buttons up at heights that can still afford the hints", async () => {
+    const frame = await renderDialog({ height: 12 });
+    expect(frame).not.toContain("Cancel");
+    // The hint row survives: it teaches more than the buttons duplicate.
+    expect(frame).toContain("esc");
   });
 
   it("keeps the opener hint on every option field, dropping it on text", async () => {
@@ -1269,6 +1309,15 @@ describe("NewSessionDialog fork mode", () => {
       },
       ...overrides,
     });
+
+  it("confirms with Fork on its button", async () => {
+    const frame = await renderDialog({ draft: forkDraft() });
+    // Only the button row carries a capitalized Cancel; its confirm twin
+    // speaks this mode's verb.
+    const row = frame.split("\n").find((line) => line.includes("Cancel"));
+    expect(row).toBeDefined();
+    expect(row).toContain("Fork");
+  });
 
   it("says what it is doing, and names what it is forking", async () => {
     const frame = await renderDialog({ draft: forkDraft() });
