@@ -2604,7 +2604,7 @@ describe("App new session dialog", () => {
       const frame = setup.captureCharFrame();
       expect(frame).toContain("New session");
       expect(frame).toContain("/code/myapp");
-      expect(frame).toContain("Codex ▾");
+      expect(frame).toMatch(/Codex\s+▾/);
     } finally {
       restore();
     }
@@ -2640,7 +2640,7 @@ describe("App new session dialog", () => {
     const { restore } = withDaemon();
     try {
       await openDialog({ lastSpawnAgent: "codex" }, []);
-      expect(setup.captureCharFrame()).toContain("Codex ▾");
+      expect(setup.captureCharFrame()).toMatch(/Codex\s+▾/);
     } finally {
       restore();
     }
@@ -2651,7 +2651,7 @@ describe("App new session dialog", () => {
     try {
       // `gemini` was detected by pane scanning but is not on PATH.
       await openDialog({}, [session({ agentType: "gemini" })]);
-      expect(setup.captureCharFrame()).toContain("Claude ▾");
+      expect(setup.captureCharFrame()).toMatch(/Claude\s+▾/);
     } finally {
       restore();
     }
@@ -2697,7 +2697,7 @@ describe("App new session dialog", () => {
       setup.mockInput.pressKey("2");
       await setup.renderOnce();
       // Direct-pick without opening the dropdown: the collapsed row updates.
-      expect(setup.captureCharFrame()).toContain("Codex ▾");
+      expect(setup.captureCharFrame()).toMatch(/Codex\s+▾/);
       setup.mockInput.pressEnter();
       await settle();
       expect(spawns[0]?.agent).toBe("codex");
@@ -2714,10 +2714,10 @@ describe("App new session dialog", () => {
       setup.mockInput.pressKey("k");
       await setup.renderOnce();
       // Already at the top: k is a no-op rather than a wrap to the bottom.
-      expect(setup.captureCharFrame()).toContain("Claude ▾");
+      expect(setup.captureCharFrame()).toMatch(/Claude\s+▾/);
       setup.mockInput.pressKey("j");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("Codex ▾");
+      expect(setup.captureCharFrame()).toMatch(/Codex\s+▾/);
     } finally {
       restore();
     }
@@ -2740,7 +2740,7 @@ describe("App new session dialog", () => {
       await settle();
       await setup.renderOnce();
       expect(spawns).toHaveLength(0);
-      expect(setup.captureCharFrame()).toContain("Codex ▾");
+      expect(setup.captureCharFrame()).toMatch(/Codex\s+▾/);
       // The next Enter is the dialog's again.
       setup.mockInput.pressEnter();
       await settle();
@@ -2766,7 +2766,7 @@ describe("App new session dialog", () => {
       // unchanged, and the list is gone.
       const frame = setup.captureCharFrame();
       expect(frame).toContain("New session");
-      expect(frame).toContain("Claude ▾");
+      expect(frame).toMatch(/Claude\s+▾/);
       expect(frame).not.toContain("2 Codex");
     } finally {
       restore();
@@ -2789,7 +2789,7 @@ describe("App new session dialog", () => {
       // Committed and closed, without spawning.
       expect(spawns).toHaveLength(0);
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Codex ▾");
+      expect(frame).toMatch(/Codex\s+▾/);
       expect(frame).not.toContain("2 Codex");
     } finally {
       restoreExit();
@@ -2815,7 +2815,7 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
       // Confirmed into the pill without spawning...
       expect(spawns).toHaveLength(0);
-      expect(setup.captureCharFrame()).toContain("Split right ▾");
+      expect(setup.captureCharFrame()).toMatch(/Split right\s+▾/);
       // ...and a reopened list cancels with h without moving the value.
       setup.mockInput.pressKey("l");
       await setup.renderOnce();
@@ -2824,7 +2824,7 @@ describe("App new session dialog", () => {
       setup.mockInput.pressKey("h");
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Split right ▾");
+      expect(frame).toMatch(/Split right\s+▾/);
       expect(frame).not.toContain("New window");
     } finally {
       restoreExit();
@@ -2847,7 +2847,7 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
       expect(frame).toContain("New session");
-      expect(frame).toContain("Claude ▾");
+      expect(frame).toMatch(/Claude\s+▾/);
       expect(frame).not.toContain("2 Codex");
     } finally {
       restore();
@@ -2884,7 +2884,7 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
       setup.mockInput.pressKey("2");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("Split right ▾");
+      expect(setup.captureCharFrame()).toMatch(/Split right\s+▾/);
       setup.mockInput.pressEnter();
       await settle();
       expect(spawns[0]?.split).toBe("h");
@@ -3161,7 +3161,7 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
       setup.mockInput.pressKey("3");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("Split down ▾");
+      expect(setup.captureCharFrame()).toMatch(/Split down\s+▾/);
       setup.mockInput.pressEnter();
       await settle();
       expect(spawns[0]?.split).toBe("v");
@@ -3423,7 +3423,7 @@ describe("App new session dialog", () => {
       setup.mockInput.pressKey("n");
       await settle();
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("Claude ▾");
+      expect(setup.captureCharFrame()).toMatch(/Claude\s+▾/);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -3779,8 +3779,8 @@ describe("App new session dialog", () => {
       // The member's own cwd, not either repo root. Spelled out with the
       // field label so a row behind the dialog cannot satisfy it.
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Directory /code/work/api/src");
-      expect(frame).not.toContain("Directory /code/oss/api");
+      expect(frame).toContain("Directory   /code/work/api/src");
+      expect(frame).not.toContain("Directory   /code/oss/api");
     } finally {
       restore();
     }
@@ -3808,7 +3808,7 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
 
       // Labelled, so the session row behind the dialog cannot satisfy it.
-      expect(setup.captureCharFrame()).toContain("Directory ~/dotfiles-notes");
+      expect(setup.captureCharFrame()).toContain("Directory   ~/dotfiles-notes");
     } finally {
       restore();
     }
@@ -4235,7 +4235,7 @@ describe("App move-changes menu gate", () => {
         expect(frame).toContain("Where");
         expect(frame).not.toContain("This checkout");
         expect(frame).toContain("Untracked");
-        expect(frame).toContain("Move ▾");
+        expect(frame).toMatch(/Move\s+▾/);
       } finally {
         restore();
       }
@@ -4261,7 +4261,7 @@ describe("App move-changes menu gate", () => {
         await setup.renderOnce();
         setup.mockInput.pressKey("3");
         await setup.renderOnce();
-        expect(setup.captureCharFrame()).toContain("Leave here ▾");
+        expect(setup.captureCharFrame()).toMatch(/Leave here\s+▾/);
 
         setup.mockInput.pressEnter();
         await settle();

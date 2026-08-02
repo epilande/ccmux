@@ -185,23 +185,27 @@ describe("planDialogRows", () => {
   it("spends everything it has when the rows are there", () => {
     const plan = planDialogRows(move, 40);
     expect(plan.tooShort).toBe(false);
+    expect(plan.showFieldSpacers).toBe(true);
     expect(plan.showKeyHints).toBe(true);
     expect(plan.showModeNote).toBe(true);
     expect(plan.showDirectory).toBe(true);
     // Nothing is padded out to fill the screen: the dialog is its content —
-    // border and title (3), the spacer, six one-row fields, the directory,
-    // the Changes note, and the two hint rows.
-    expect(plan.height).toBe(14);
+    // border and title (3), the spacer, six one-row fields with the six
+    // blank rows airing the stack (directory included), the directory, the
+    // Changes note, and the two hint rows.
+    expect(plan.height).toBe(20);
   });
 
   it("gives up rows in an order that keeps the actionable ones", () => {
     // Each step is the same dialog one row shorter, so the sequence IS the
-    // priority list: hints, then the move note, then the blank under the
-    // title, then the directory. The fields never enter it: each is one row
-    // in every mode, with its list in an overlay outside the budget.
+    // priority list: the field spacers (all at once — pure air), then the
+    // hints, then the move note, then the blank under the title, then the
+    // directory. The fields never enter it: each is one row in every mode,
+    // with its list in an overlay outside the budget.
     const given = (height: number) => {
       const plan = planDialogRows(move, height);
       return {
+        fieldSpacers: plan.showFieldSpacers,
         hints: plan.showKeyHints,
         note: plan.showModeNote,
         spacer: plan.showTitleSpacer,
@@ -209,6 +213,9 @@ describe("planDialogRows", () => {
         tooShort: plan.tooShort,
       };
     };
+    expect(given(20).fieldSpacers).toBe(true);
+    expect(given(19).fieldSpacers).toBe(false);
+    expect(given(19).hints).toBe(true);
     expect(given(13).hints).toBe(false);
     expect(given(13).note).toBe(true);
     expect(given(11).note).toBe(false);
@@ -220,11 +227,13 @@ describe("planDialogRows", () => {
     expect(given(9).tooShort).toBe(false);
   });
 
-  it("shrinks the agent error back before anything else", () => {
+  it("shrinks the agent error back after the spacers, before the rest", () => {
     // The one thing that can still want more than a row is the agent
     // field's ERROR, and its tail is already summarised by an ellipsis, so
-    // it gives up rows without losing anything actionable.
+    // it gives up rows without losing anything actionable — but the pure-air
+    // spacers go first.
     const plan = planDialogRows({ ...move, agentRows: 9 }, 20);
+    expect(plan.showFieldSpacers).toBe(false);
     expect(plan.agentRows).toBeLessThan(9);
     expect(plan.showKeyHints).toBe(true);
     expect(plan.showModeNote).toBe(true);
@@ -268,9 +277,11 @@ describe("planDialogRows", () => {
       expect(planDialogRows(wideFork, 40)).toEqual({
         tooShort: false,
         // Border and title (3), the spacer, the directory, the Source note,
-        // the two hint rows, and one row each for Placement, Where and Name.
-        height: 11,
+        // the two hint rows, one row each for Placement, Where and Name, and
+        // the three blank rows airing that four-block stack.
+        height: 14,
         showTitleSpacer: true,
+        showFieldSpacers: true,
         showDirectory: true,
         // The Source row: which conversation this continues.
         showModeNote: true,
@@ -287,6 +298,7 @@ describe("planDialogRows", () => {
         tooShort: false,
         height: 6,
         showTitleSpacer: false,
+        showFieldSpacers: false,
         showDirectory: false,
         showModeNote: false,
         showKeyHints: false,
@@ -350,15 +362,52 @@ describe("NewSessionDialog", () => {
     });
     const lines = frame.split("\n");
     // The overlay starts directly under the Agent row...
-    const agentRow = lines.findIndex((line) => line.includes("Claude ▾"));
+    const agentRow = lines.findIndex((line) => /Claude\s+▾/.test(line));
     const first = lines.findIndex((line) => line.includes("1 Claude"));
     expect(agentRow).toBeGreaterThan(0);
     expect(first).toBeGreaterThan(agentRow);
     // ...SHARING rows with the fields beneath it: the first option lands on
-    // the Prompt row's line, which an in-flow list would have pushed down
-    // past it instead. The label gutter stays visible left of the overlay.
-    expect(lines[first]).toContain("Prompt");
+    // the Placement row's line (its top border in the gap between), which an
+    // in-flow list would have pushed down past it instead. The label gutter
+    // stays visible left of the overlay.
+    expect(lines[first]).toContain("Placement");
     expect(frame).toContain("Directory");
+  });
+
+  it("airs the stack with a blank row between fields when the height affords it", async () => {
+    const spacious = await renderDialog({});
+    let lines = spacious.split("\n");
+    const rowOf = (text: string) =>
+      lines.findIndex((line) => line.includes(text));
+    expect(rowOf("Placement")).toBe(rowOf("Agent") + 2);
+    expect(rowOf("Prompt")).toBe(rowOf("Placement") + 2);
+    expect(rowOf("Directory")).toBe(rowOf("Where") + 2);
+    setup.renderer.destroy();
+
+    // Tight, the air is the first thing given up: the stack closes back to
+    // adjacent rows before anything actionable moves.
+    const tight = await renderDialog({ height: 12 });
+    lines = tight.split("\n");
+    expect(rowOf("Placement")).toBe(rowOf("Agent") + 1);
+    expect(rowOf("Directory")).toBe(rowOf("Where") + 1);
+  });
+
+  it("anchors the overlay under its own pill with the spacers on", async () => {
+    const frame = await renderDialog({
+      draft: draft({ dropdown: { field: "placement" as const, index: 0 } }),
+    });
+    const lines = frame.split("\n");
+    const pill = lines.findIndex((line) => line.includes("Placement"));
+    const first = lines.findIndex((line) => /> 1 New window/.test(line));
+    // The overlay's top border sits in the gap row under the pill, so the
+    // first option is exactly two rows below it — an anchor that ignored
+    // the spacers would land the list a row high, over its own field.
+    expect(pill).toBeGreaterThan(0);
+    expect(first).toBe(pill + 2);
+    // And it opens at the control's left edge: the border one column left
+    // of the pill's value, exactly where the pill's own padding starts.
+    const valueColumn = lines[pill]!.indexOf("New window");
+    expect(lines[pill + 1]!.indexOf("┌")).toBe(valueColumn - 1);
   });
 
   it("marks the drafted agent inside the open dropdown", async () => {
@@ -377,7 +426,7 @@ describe("NewSessionDialog", () => {
     const collapsed = await renderDialog({
       draft: draft({ placement: "split-h" }),
     });
-    expect(collapsed).toContain("Split right ▾");
+    expect(collapsed).toMatch(/Split right\s+▾/);
     expect(collapsed).not.toContain("New window");
     setup.renderer.destroy();
 
@@ -394,7 +443,7 @@ describe("NewSessionDialog", () => {
 
   it("abbreviates the placement pill when the row is short of room", async () => {
     const frame = await renderDialog({ width: 60 });
-    expect(frame).toContain("Window ▾");
+    expect(frame).toMatch(/Window\s+▾/);
     expect(frame).not.toContain("New window");
   });
 
@@ -660,7 +709,7 @@ describe("NewSessionDialog destination", () => {
   it("holds this checkout by default and offers both in its dropdown", async () => {
     const collapsed = await renderDialog({});
     expect(collapsed).toContain("Where");
-    expect(collapsed).toContain("This checkout ▾");
+    expect(collapsed).toMatch(/This checkout\s+▾/);
     expect(collapsed).not.toContain("New worktree");
     setup.renderer.destroy();
 
@@ -681,7 +730,7 @@ describe("NewSessionDialog destination", () => {
     });
 
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("New worktree ▾");
+    expect(frame).toMatch(/New worktree\s+▾/);
     expect(frame).not.toContain("New worktree: fix-bug");
     expect(frame).toContain("Name");
     expect(frame).toContain("fix-bug");
@@ -784,7 +833,7 @@ describe("NewSessionDialog worktree name", () => {
       height: 30,
     });
 
-    expect(nameRow(frame)).toContain("fix-sid…flicker");
+    expect(nameRow(frame)).toContain("fix-si…icker");
   });
 
   it("says a derived name may come back numbered", async () => {
@@ -809,7 +858,7 @@ describe("NewSessionDialog worktree name", () => {
     });
 
     // The name keeps the row; the caveat about it is what goes.
-    expect(nameRow(frame)).toContain("fix-the…ckering");
+    expect(nameRow(frame)).toContain("fix-th…ering");
     expect(frame).not.toContain("auto");
   });
 
@@ -954,7 +1003,7 @@ describe("NewSessionDialog move-changes mode", () => {
   it("holds the untracked default and offers the rest in its dropdown", async () => {
     const collapsed = await renderDialog({ draft: moveDraft() });
     expect(collapsed).toContain("Untracked");
-    expect(collapsed).toContain("Move ▾");
+    expect(collapsed).toMatch(/Move\s+▾/);
     expect(collapsed).not.toContain("Copy to both");
     setup.renderer.destroy();
 
@@ -976,7 +1025,7 @@ describe("NewSessionDialog move-changes mode", () => {
       }),
     });
 
-    expect(frame).toContain("Leave here ▾");
+    expect(frame).toMatch(/Leave here\s+▾/);
     expect(frame).toContain("> 3 Leave here");
     expect(frame).not.toContain("> 1 Move");
   });
@@ -1053,7 +1102,7 @@ describe("NewSessionDialog move-changes mode", () => {
     });
 
     expectFrameIntegrity(frame);
-    expect(frame).toContain("Move ▾");
+    expect(frame).toMatch(/Move\s+▾/);
     const lines = frame.split("\n");
     const widest = Math.max(...lines.map((line) => line.trimEnd().length));
     expect(widest).toBeLessThanOrEqual(34);

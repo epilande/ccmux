@@ -39,6 +39,14 @@ const COMPACT_CONTENT_WIDTH = 49;
 /** The sidebar's 30-column rail, where even the short labels are fitted
  *  word by word and the esc hint gives up its gloss. */
 const NARROW_CONTENT_WIDTH = 33;
+/** Columns the text inputs' full-width shell spends on its own padding —
+ *  the same run the pills paint, so every control shares one shape. */
+const INPUT_SHELL_PADDING = 2;
+/** Air between the label column and the controls' left edge. Every consumer
+ *  of the control column reads it: the rows insert it, `contentWidth` (and
+ *  with it every truncation budget) subtracts it, the derived rows' spacer
+ *  adds it, and the overlay anchors past it. */
+const CONTROL_GAP = 1;
 
 /**
  * What a derived name row says about itself.
@@ -189,6 +197,10 @@ export interface DialogRowPlan {
   tooShort: boolean;
   height: number;
   showTitleSpacer: boolean;
+  /** A blank row between every adjacent pair in the field stack (fields plus
+   *  the directory row) — pure air, all on or all off, never before the
+   *  first row or after the last. */
+  showFieldSpacers: boolean;
   showDirectory: boolean;
   /** The one-line footnote a mode adds under the directory: what a move costs
    *  the checkout named above it, or which session a fork continues. One flag
@@ -201,13 +213,14 @@ export interface DialogRowPlan {
 /**
  * Fit the dialog into `height`, giving up rows in a fixed order.
  *
- * Order matters and is the whole design: the agent field's error shrinks
- * back towards one row first, then the key hints go (the picker repeats them
- * in its footer anyway), then the move note, then the blank row under the
- * title, then the directory. Nothing a user has to ACT on is dropped while
- * anything decorative is still on screen. The option fields never enter this
- * order at all: each is a one-row pill whose list opens in an overlay
- * OUTSIDE the budget.
+ * Order matters and is the whole design: the blank rows between the fields
+ * go first (pure air, and all at once — per-gap dropping would read as a
+ * layout bug), then the agent field's error shrinks back towards one row,
+ * then the key hints (the picker repeats them in its footer anyway), then
+ * the move note, then the blank row under the title, then the directory.
+ * Nothing a user has to ACT on is dropped while anything decorative is
+ * still on screen. The option fields never enter this order at all: each is
+ * a one-row pill whose list opens in an overlay OUTSIDE the budget.
  *
  * Under-counting here does not clip: OpenTUI draws children past their
  * parent's height, so the rows that do not fit land on top of the ones that
@@ -225,6 +238,7 @@ export function planDialogRows(
       // Border, the title, and the one line explaining itself.
       height: Math.min(height, 3),
       showTitleSpacer: false,
+      showFieldSpacers: false,
       showDirectory: false,
       showModeNote: false,
       showKeyHints: false,
@@ -236,6 +250,7 @@ export function planDialogRows(
     tooShort: false,
     height: 0,
     showTitleSpacer: true,
+    showFieldSpacers: true,
     showDirectory: true,
     showModeNote: shape.moveChanges || shape.fork,
     showKeyHints: shape.keyHints,
@@ -251,15 +266,27 @@ export function planDialogRows(
     agent: plan.agentRows,
   });
 
+  /** Gaps in the field stack: one between each adjacent pair of BLOCKS (a
+   *  multi-row agent error is one block), the directory row included. */
+  const fieldGaps = (): number => {
+    if (!plan.showFieldSpacers) return 0;
+    const blocks =
+      Object.values(floorFieldRows(shape)).filter((rows) => rows > 0).length +
+      (plan.showDirectory ? 1 : 0);
+    return Math.max(0, blocks - 1);
+  };
+
   const total = (): number =>
     3 + // border and title
     (plan.showTitleSpacer ? 1 : 0) +
     (plan.showDirectory ? 1 : 0) +
     (plan.showModeNote ? 1 : 0) +
     (plan.showKeyHints ? KEY_HINT_ROWS : 0) +
+    fieldGaps() +
     sumFieldRows(fieldRows());
 
-  // The agent error first, since its tail is already summarised by an
+  if (total() > height) plan.showFieldSpacers = false;
+  // The agent error next, since its tail is already summarised by an
   // ellipsis and shrinks without losing anything actionable.
   const over = total() - height;
   if (over > 0 && plan.agentRows > 1) {
@@ -308,7 +335,8 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
 
   const width = () =>
     Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dims().width - 4));
-  const contentWidth = () => Math.max(1, width() - LABEL_WIDTH - 4);
+  const contentWidth = () =>
+    Math.max(1, width() - LABEL_WIDTH - CONTROL_GAP - 4);
   const compact = () => contentWidth() < COMPACT_CONTENT_WIDTH;
   const narrow = () => contentWidth() < NARROW_CONTENT_WIDTH;
 
@@ -441,17 +469,24 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     // daemon derives one, and this is the only thing that says the field can
     // be left alone.
     if (!slug && (!forking() || forkNeedsAName())) return "";
-    const taken = displayWidth(namePlaceholderText());
-    const spare = contentWidth() - (taken ? taken + 1 : 0);
+    // The name spends its own columns plus the input shell's padding.
+    const taken = displayWidth(namePlaceholderText()) + INPUT_SHELL_PADDING;
+    const spare = contentWidth() - (taken + 1);
     if (spare >= displayWidth(NAME_HINT)) return NAME_HINT;
     if (spare >= displayWidth(NAME_HINT_SHORT)) return NAME_HINT_SHORT;
     return "";
   };
 
-  /** Columns the name itself gets, once the hint has taken its own. */
+  /** Columns the name itself gets, once the hint and the input shell's
+   *  padding have taken theirs. */
   const nameRoom = () => {
     const hint = nameHint();
-    return Math.max(1, contentWidth() - (hint ? displayWidth(hint) + 1 : 0));
+    return Math.max(
+      1,
+      contentWidth() -
+        INPUT_SHELL_PADDING -
+        (hint ? displayWidth(hint) + 1 : 0),
+    );
   };
 
   /**
@@ -571,15 +606,17 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   /**
    * Content-box row `field`'s own row starts on: the title (row zero — the
    * border adds its own row when this becomes screen rows), the spacer, then
-   * a prefix-sum of the same per-field counts the plan settled. The Where
-   * row is `destination`'s in every mode, locked or not.
+   * a prefix-sum of the same per-field counts the plan settled — each block
+   * above carrying its trailing gap when the plan kept the field spacers.
+   * The Where row is `destination`'s in every mode, locked or not.
    */
   const fieldRowTop = (field: NewSessionField): number => {
     const rows = { ...floorFieldRows(shape()), agent: plan().agentRows };
+    const gap = plan().showFieldSpacers ? 1 : 0;
     let top = 1 + (plan().showTitleSpacer ? 1 : 0);
     for (const before of NEW_SESSION_FIELDS) {
       if (before === field) break;
-      top += rows[before];
+      if (rows[before] > 0) top += rows[before] + gap;
     }
     return top;
   };
@@ -671,6 +708,15 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     );
   };
 
+  /** The blank row between adjacent field-stack rows, when the plan can
+   *  afford them. Placed BEFORE every stack row except the first, so the
+   *  rendered gaps always match the plan's `fieldGaps` count. */
+  const FieldGap: Component = () => (
+    <Show when={plan().showFieldSpacers}>
+      <box height={1} />
+    </Show>
+  );
+
   /**
    * An option field's whole row: its label plus the pill holding its current
    * value, everything read through the shared accessor so the row can never
@@ -688,6 +734,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     return (
       <box flexDirection="row" height={1}>
         <FieldLabel field={rowProps.field} text={rowProps.label} />
+        <box width={CONTROL_GAP} />
         <DropdownTrigger
           value={optionLabel(held() ?? { label: "", compactLabel: "" })}
           color={
@@ -757,7 +804,10 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     }
     // The input draws its placeholder in full, past its own box, so the
     // fit has to be enforced here rather than left to the layout.
-    return truncateText(text, contentWidth());
+    return truncateText(
+      text,
+      Math.max(1, contentWidth() - INPUT_SHELL_PADDING),
+    );
   };
 
   /** The whole dialog, when there is room for one row and it has to say why
@@ -823,6 +873,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
             fallback={
               <box flexDirection="row">
                 <FieldLabel field="agent" text="Agent" />
+                <box width={CONTROL_GAP} />
                 <box flexDirection="column" flexGrow={1}>
                   <Show
                     when={props.agents !== null}
@@ -855,29 +906,49 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           </Show>
         </Show>
 
+        <Show when={!forking()}>
+          <FieldGap />
+        </Show>
         <OptionRow field="placement" label="Placement" />
 
         {/* A fork continues a conversation; there is no first message to
           open it with. */}
         <Show when={!forking()}>
+          <FieldGap />
           <box flexDirection="row" height={1}>
             <FieldLabel field="prompt" text="Prompt" />
-            <input
-              value={props.draft.prompt}
-              onInput={props.onPromptInput}
-              focused={props.draft.field === "prompt"}
-              placeholder={promptPlaceholder()}
-              placeholderColor={theme.overlay}
-              textColor={theme.text}
-              cursorColor={theme.blue}
-              backgroundColor="transparent"
-              focusedBackgroundColor="transparent"
+            <box width={CONTROL_GAP} />
+            {/* The same full-width run the pills paint, so every control
+              shares one shape and one right edge; the input itself stays
+              transparent over it (its own background prop does not paint). */}
+            <box
+              height={1}
+              flexDirection="row"
               flexGrow={1}
-            />
+              paddingLeft={1}
+              paddingRight={1}
+              backgroundColor={
+                props.draft.field === "prompt" ? theme.border : theme.surface
+              }
+            >
+              <input
+                value={props.draft.prompt}
+                onInput={props.onPromptInput}
+                focused={props.draft.field === "prompt"}
+                placeholder={promptPlaceholder()}
+                placeholderColor={theme.overlay}
+                textColor={theme.text}
+                cursorColor={theme.blue}
+                backgroundColor="transparent"
+                focusedBackgroundColor="transparent"
+                flexGrow={1}
+              />
+            </box>
           </box>
         </Show>
 
         <Show when={moveChanges() || forking()}>
+          <FieldGap />
           {/* Locked, so it is drawn like Directory rather than as a field: no
             focus marker and no number keys, because a row that looks
             selectable but refuses every key reads as broken. The changes (or
@@ -887,11 +958,13 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
             <box width={LABEL_WIDTH} paddingLeft={1}>
               <text fg={theme.overlay}>Where</text>
             </box>
+            <box width={1 + CONTROL_GAP} />
             <text fg={theme.green}>{lockedDestinationLabel()}</text>
           </box>
         </Show>
 
         <Show when={!moveChanges() && !forking()}>
+          <FieldGap />
           {/* Just the choice. The name the worktree option would create used
             to be appended here and truncated against what the row had left,
             which at this dialog's width meant committing to `fix-sidebar-…`
@@ -901,23 +974,40 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         </Show>
 
         <Show when={namesAWorktree()}>
+          <FieldGap />
           {/* A row of its own, which is the point: the name was a suffix on the
             row above, truncated against whatever that row had left. Here it
             gets the width, and the keyboard. */}
           <box flexDirection="row" height={1}>
             <FieldLabel field="worktreeName" text="Name" />
-            <input
-              value={props.draft.worktreeName ?? ""}
-              onInput={props.onWorktreeNameInput}
-              focused={props.draft.field === "worktreeName"}
-              placeholder={namePlaceholder()}
-              placeholderColor={theme.overlay}
-              textColor={theme.text}
-              cursorColor={theme.blue}
-              backgroundColor="transparent"
-              focusedBackgroundColor="transparent"
+            <box width={CONTROL_GAP} />
+            {/* The pills' run; see the Prompt row. The hint stays OUTSIDE
+              the control, an annotation rather than part of the value. */}
+            <box
+              height={1}
+              flexDirection="row"
               flexGrow={1}
-            />
+              paddingLeft={1}
+              paddingRight={1}
+              backgroundColor={
+                props.draft.field === "worktreeName"
+                  ? theme.border
+                  : theme.surface
+              }
+            >
+              <input
+                value={props.draft.worktreeName ?? ""}
+                onInput={props.onWorktreeNameInput}
+                focused={props.draft.field === "worktreeName"}
+                placeholder={namePlaceholder()}
+                placeholderColor={theme.overlay}
+                textColor={theme.text}
+                cursorColor={theme.blue}
+                backgroundColor="transparent"
+                focusedBackgroundColor="transparent"
+                flexGrow={1}
+              />
+            </box>
             <Show when={nameHint()}>
               <box flexShrink={0} marginLeft={1}>
                 <text fg={theme.overlay}>{nameHint()}</text>
@@ -927,16 +1017,19 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         </Show>
 
         <Show when={moveChanges()}>
+          <FieldGap />
           <OptionRow field="untracked" label="Untracked" />
         </Show>
 
         <Show when={plan().showDirectory}>
+          <FieldGap />
           <box flexDirection="row" height={1}>
             {/* Not a field: derived, never focused, so it only pads past the
               marker column to stay aligned with the labels above. */}
             <box width={LABEL_WIDTH} paddingLeft={1}>
               <text fg={theme.overlay}>Directory</text>
             </box>
+            <box width={1 + CONTROL_GAP} />
             <text fg={theme.subtext}>{cwdLabel()}</text>
           </box>
         </Show>
@@ -951,6 +1044,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
             <box width={LABEL_WIDTH} paddingLeft={1}>
               <text fg={theme.overlay}>{modeNote().label}</text>
             </box>
+            <box width={1 + CONTROL_GAP} />
             <text fg={modeNote().color}>{modeNote().text}</text>
           </box>
         </Show>
@@ -1023,9 +1117,12 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               highlight={overlayHighlight()}
               selected={resolved().selectedIndex}
               top={fieldRowTop(resolved().field) + 1}
-              left={LABEL_WIDTH}
+              /* Absolute children measure from inside the BORDER, not the
+                padding box, so the dialog's own paddingLeft is part of the
+                offset to the control's left edge. */
+              left={1 + LABEL_WIDTH + CONTROL_GAP}
               maxRows={dropdownMaxRows(resolved().field)}
-              maxWidth={width() - LABEL_WIDTH}
+              maxWidth={width() - LABEL_WIDTH - CONTROL_GAP - 2}
               onSelect={(index) =>
                 props.onSelectOption(resolved().field, index)
               }

@@ -49,21 +49,22 @@ interface DropdownTriggerProps {
   /** Whether this pill's field has focus, which picks the hotter of the two
    *  raised tokens — the same pairing the context menu uses for hover. */
   focused: boolean;
-  /** Columns the label may spend before it is truncated. */
+  /** Columns the label may spend before it is truncated: the control's run
+   *  less its padding, the caret, and one column of air — so a long value
+   *  can never push the caret. */
   maxWidth: number;
   onOpen: () => void;
 }
 
-/** The collapsed pill: the held value on a raised background, with the
- *  arrow as the affordance that a list is behind it. Hugs its content in
- *  row and column parents alike, so the background never paints a stripe
- *  across the rest of the row. */
+/** The collapsed control: the held value on a raised background that fills
+ *  the whole value column, with the arrow pinned at its right edge as the
+ *  affordance that a list is behind it. Full-width rather than
+ *  content-hugging, so the form keeps one uniform right edge. */
 export const DropdownTrigger: Component<DropdownTriggerProps> = (props) => (
   <box
     height={1}
     flexDirection="row"
-    alignSelf="flex-start"
-    flexShrink={0}
+    flexGrow={1}
     paddingLeft={1}
     paddingRight={1}
     backgroundColor={props.focused ? theme.border : theme.surface}
@@ -74,7 +75,8 @@ export const DropdownTrigger: Component<DropdownTriggerProps> = (props) => (
     <text fg={props.color ?? theme.text}>
       {truncateText(props.value, Math.max(1, props.maxWidth))}
     </text>
-    <box width={2} flexDirection="row" justifyContent="flex-end">
+    <box flexGrow={1} />
+    <box width={1}>
       <text fg={theme.overlay}>▾</text>
     </box>
   </box>
@@ -140,7 +142,10 @@ export const DropdownOverlay: Component<DropdownOverlayProps> = (props) => {
       zIndex={1}
       backgroundColor={theme.surface}
       borderStyle="single"
-      borderColor={theme.blue}
+      /* The muted chrome token the dialog frame and the context menu use:
+        the raised fill is what says "floating layer", and an accent border
+        here would out-shout the accent's real jobs (focus, selection). */
+      borderColor={theme.border}
       flexDirection="column"
     >
       {/* `<For>` keys rows by option IDENTITY: the slice above is fresh per
