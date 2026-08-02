@@ -2797,6 +2797,41 @@ describe("App new session dialog", () => {
     }
   });
 
+  it("drives a placement dropdown with the same keys as the agent's", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("l");
+      await setup.renderOnce();
+      // The list is up, numbered, with the held value marked.
+      expect(setup.captureCharFrame()).toContain("> 1 New window");
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      // Confirmed into the pill without spawning...
+      expect(spawns).toHaveLength(0);
+      expect(setup.captureCharFrame()).toContain("Split right ▾");
+      // ...and a reopened list cancels with h without moving the value.
+      setup.mockInput.pressKey("l");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("h");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Split right ▾");
+      expect(frame).not.toContain("New window");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
   it("opens the agent dropdown on l and closes it on h, dropping the highlight", async () => {
     const { restore } = withDaemon();
     try {
@@ -2849,7 +2884,7 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
       setup.mockInput.pressKey("2");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("[Split right]");
+      expect(setup.captureCharFrame()).toContain("Split right ▾");
       setup.mockInput.pressEnter();
       await settle();
       expect(spawns[0]?.split).toBe("h");
@@ -3126,7 +3161,7 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
       setup.mockInput.pressKey("3");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("[Split down]");
+      expect(setup.captureCharFrame()).toContain("Split down ▾");
       setup.mockInput.pressEnter();
       await settle();
       expect(spawns[0]?.split).toBe("v");
@@ -4200,7 +4235,7 @@ describe("App move-changes menu gate", () => {
         expect(frame).toContain("Where");
         expect(frame).not.toContain("This checkout");
         expect(frame).toContain("Untracked");
-        expect(frame).toContain("[Move]");
+        expect(frame).toContain("Move ▾");
       } finally {
         restore();
       }
@@ -4226,7 +4261,7 @@ describe("App move-changes menu gate", () => {
         await setup.renderOnce();
         setup.mockInput.pressKey("3");
         await setup.renderOnce();
-        expect(setup.captureCharFrame()).toContain("[Leave here]");
+        expect(setup.captureCharFrame()).toContain("Leave here ▾");
 
         setup.mockInput.pressEnter();
         await settle();

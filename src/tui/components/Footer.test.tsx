@@ -18,7 +18,7 @@ async function renderFooter(props: {
   persistent?: boolean;
   groupBy?: GroupBy;
   newSessionMode?: boolean;
-  newSessionAgent?: "focused" | "dropdown";
+  newSessionOption?: "focused" | "dropdown";
   reviewable?: boolean;
   width?: number;
 }) {
@@ -32,7 +32,7 @@ async function renderFooter(props: {
         persistent={props.persistent}
         groupBy={props.groupBy}
         newSessionMode={props.newSessionMode}
-        newSessionAgent={props.newSessionAgent}
+        newSessionOption={props.newSessionOption}
         reviewable={props.reviewable}
       />
     ),
@@ -120,23 +120,23 @@ describe("Footer", () => {
   it("shows the new-session hints in newSessionMode", async () => {
     const frame = await renderFooter({ newSessionMode: true });
     expect(frame).toContain("enter spawn");
-    expect(frame).toContain("tab next field");
+    expect(frame).toContain("tab field");
     expect(frame).toContain("esc cancel");
   });
 
-  it("teaches the dropdown opener while the agent field is focused", async () => {
+  it("teaches the dropdown opener while an option field is focused", async () => {
     const frame = await renderFooter({
       newSessionMode: true,
-      newSessionAgent: "focused",
+      newSessionOption: "focused",
     });
-    expect(frame).toContain("l open");
+    expect(frame).toContain("space open");
     expect(frame).toContain("enter spawn");
   });
 
   it("swaps to the dropdown's own keys while it is open", async () => {
     const frame = await renderFooter({
       newSessionMode: true,
-      newSessionAgent: "dropdown",
+      newSessionOption: "dropdown",
     });
     expect(frame).toContain("j/k move");
     expect(frame).toContain("enter/space select");

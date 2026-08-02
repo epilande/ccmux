@@ -30,6 +30,11 @@ import type {
 import { DEFAULT_PROMPT_DISPLAY } from "../lib/preferences";
 import { setUIState, type UIState } from "../lib/state";
 import { getDaemonUrl } from "../lib/config";
+import {
+  DESTINATION_OPTIONS,
+  PLACEMENT_OPTIONS,
+  UNTRACKED_OPTIONS,
+} from "./new-session-options";
 import type { TranscriptMatch } from "../daemon/transcript-search";
 import type { UntrackedMode } from "../daemon/worktree-move-changes";
 // The daemon's own slug rule, imported rather than mirrored: a name the
@@ -243,13 +248,15 @@ export interface NewSessionDraft {
   /** Which field the option/text keys currently apply to. */
   field: NewSessionField;
   /**
-   * The agent dropdown overlay: the highlighted option's index while open,
-   * null while closed. View state rather than part of the request, but it
-   * lives in the draft beside `field` for the same reason focus does — the
-   * key handling is App's and the rendering is the dialog's, and this is the
-   * one place both already read.
+   * The open dropdown overlay: which option field's list is up and the
+   * highlighted option's index, or null while none is. One record rather
+   * than one flag per field, so two dropdowns can never be open at once.
+   * View state rather than part of the request, but it lives in the draft
+   * beside `field` for the same reason focus does — the key handling is
+   * App's and the rendering is the dialog's, and this is the one place both
+   * already read.
    */
-  agentDropdown: number | null;
+  dropdown: { field: NewSessionField; index: number } | null;
 }
 
 interface TUIState {
@@ -1176,6 +1183,59 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     setState("newSession", "worktreeName", slug);
   }
 
+  /**
+   * Commit an option field's value from its string form — the one write path
+   * every dropdown consumer funnels into. Fixed fields are looked up in
+   * their own tables rather than cast, so only a real option gets through;
+   * the agent takes any name, since its list is the caller's (`GET /agents`)
+   * and the reconcile effect owns snapping a stale one.
+   */
+  function applyNewSessionOption(field: NewSessionField, value: string): void {
+    const draft = state.newSession;
+    if (!draft) return;
+    switch (field) {
+      case "agent":
+        setState("newSession", "agent", value);
+        return;
+      case "placement": {
+        const option = PLACEMENT_OPTIONS.find((o) => o.value === value);
+        if (option) setState("newSession", "placement", option.value);
+        return;
+      }
+      case "destination": {
+        const option = DESTINATION_OPTIONS.find((o) => o.value === value);
+        if (!option) return;
+        // Locked in move-changes and fork mode, and enforced here rather
+        // than only in the dialog: the destination is what makes the request
+        // a move (or a fork into a worktree) at all, so any path that could
+        // flip it back to `here` would post a spawn that silently dropped
+        // the changes it was opened to relocate, or a bare fork into the
+        // checkout the source already has.
+        if (draft.moveChanges || draft.fork) return;
+        batch(() => {
+          setState("newSession", "destination", option.value);
+          // The name field goes with the worktree. Focus cannot be left on a
+          // row that no longer exists, or the next Tab would start from a
+          // field the list has never heard of. The typed name itself is
+          // KEPT: coming back to the worktree destination should find it as
+          // it was left.
+          if (
+            option.value !== "worktree" &&
+            state.newSession?.field === "worktreeName"
+          ) {
+            setState("newSession", "field", "destination");
+          }
+        });
+        return;
+      }
+      case "untracked": {
+        const option = UNTRACKED_OPTIONS.find((o) => o.value === value);
+        if (option) setState("newSession", "untracked", option.value);
+        return;
+      }
+    }
+  }
+
   const actions = {
     setSessions(sessions: EnrichedSession[]) {
       // Preserve client-synthesized subprocess invoke rows. They live only
@@ -1456,7 +1516,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           worktreeName: null,
           fork,
           field: newSessionFields({ moveChanges, destination, fork })[0]!,
-          agentDropdown: null,
+          dropdown: null,
         });
       });
     },
@@ -1501,61 +1561,49 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         setState("newSession", "field", next);
         // A click that moves focus elsewhere is also a dismissal: the keys
         // the overlay was claiming belong to the newly focused field now.
-        if (next !== "agent") setState("newSession", "agentDropdown", null);
+        if (state.newSession?.dropdown?.field !== next) {
+          setState("newSession", "dropdown", null);
+        }
       });
     },
 
     setNewSessionAgent(agent: string) {
-      if (!state.newSession) return;
-      setState("newSession", "agent", agent);
+      applyNewSessionOption("agent", agent);
     },
 
-    /** Open the agent dropdown with `index` highlighted. The caller owns the
-     *  agent list, so the caller says where the highlight starts. */
-    openNewSessionAgentDropdown(index: number) {
+    /** The dropdown consumers' write path; see `applyNewSessionOption`. */
+    setNewSessionOption: applyNewSessionOption,
+
+    /**
+     * Open `field`'s dropdown with `index` highlighted, replacing whichever
+     * one was open — the record is single, so two can never be up at once.
+     * The caller owns the option list, so the caller says where the
+     * highlight starts. Refused for a field this draft does not have, the
+     * same rule that keeps focus off one.
+     */
+    openNewSessionDropdown(field: NewSessionField, index: number) {
       const draft = state.newSession;
-      if (!draft || draft.fork) return;
-      setState("newSession", "agentDropdown", Math.max(0, index));
+      if (!draft || !newSessionFields(draft).includes(field)) return;
+      setState("newSession", "dropdown", { field, index: Math.max(0, index) });
     },
 
-    closeNewSessionAgentDropdown() {
+    closeNewSessionDropdown() {
       if (!state.newSession) return;
-      setState("newSession", "agentDropdown", null);
+      setState("newSession", "dropdown", null);
     },
 
-    setNewSessionAgentDropdownIndex(index: number) {
+    setNewSessionDropdownIndex(index: number) {
       const draft = state.newSession;
-      if (!draft || draft.agentDropdown === null) return;
-      setState("newSession", "agentDropdown", Math.max(0, index));
+      if (!draft || draft.dropdown === null) return;
+      setState("newSession", "dropdown", "index", Math.max(0, index));
     },
 
     setNewSessionPlacement(placement: NewSessionPlacement) {
-      if (!state.newSession) return;
-      setState("newSession", "placement", placement);
+      applyNewSessionOption("placement", placement);
     },
 
     setNewSessionDestination(destination: NewSessionDestination) {
-      const draft = state.newSession;
-      if (!draft) return;
-      // Locked in both modes, and enforced here rather than only in the
-      // dialog: the destination is what makes the request a move (or a fork
-      // into a worktree) at all, so any path that could flip it back to `here`
-      // would post a spawn that silently dropped the changes it was opened to
-      // relocate, or a bare fork into the checkout the source already has.
-      if (draft.moveChanges || draft.fork) return;
-      batch(() => {
-        setState("newSession", "destination", destination);
-        // The name field goes with the worktree. Focus cannot be left on a
-        // row that no longer exists, or the next Tab would start from a field
-        // the list has never heard of. The typed name itself is KEPT: coming
-        // back to the worktree destination should find it as it was left.
-        if (
-          destination !== "worktree" &&
-          state.newSession?.field === "worktreeName"
-        ) {
-          setState("newSession", "field", "destination");
-        }
-      });
+      applyNewSessionOption("destination", destination);
     },
 
     setNewSessionPrompt(prompt: string) {
@@ -1564,8 +1612,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     setNewSessionUntracked(untracked: UntrackedMode) {
-      if (!state.newSession) return;
-      setState("newSession", "untracked", untracked);
+      applyNewSessionOption("untracked", untracked);
     },
 
     /**

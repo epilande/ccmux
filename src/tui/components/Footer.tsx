@@ -13,12 +13,12 @@ interface FooterProps {
   groupBy?: GroupBy;
   newSessionMode?: boolean;
   /**
-   * What the dialog's agent field is doing, because the keys change with it:
-   * `focused` (the collapsed field has focus, l opens the dropdown),
-   * `dropdown` (the overlay is open and owns every key), or undefined for
-   * any other field.
+   * What the dialog's focused option field is doing, because the keys change
+   * with it: `focused` (a collapsed pill has focus, space opens its dropdown),
+   * `dropdown` (an overlay is open and owns every key), or undefined for a
+   * text field.
    */
-  newSessionAgent?: "focused" | "dropdown";
+  newSessionOption?: "focused" | "dropdown";
   reviewable?: boolean;
 }
 
@@ -61,6 +61,36 @@ export function fitHints(segments: HintSegment[], width: number): string {
     kept.splice(victim, 1);
   }
   return render();
+}
+
+/**
+ * The new-session dialog's key hints, authored once for both surfaces: the
+ * Footer joins them into one line, and the dialog renders the same segments
+ * with its own width-drop rules and click targets. First and last are always
+ * the two exits (confirm and esc), which is what the dialog's structure
+ * leans on. Wording is sized to the DIALOG's 61-column hint row — "tab
+ * field" and "1-9 pick", not the longer forms — since the footer has columns
+ * to spare and the dialog does not. j/k (cycle a collapsed pill, move the
+ * open list) is taught by the dropdown state's own line instead.
+ */
+export function newSessionHintSegments(
+  state: "text" | "focused" | "dropdown",
+): { key: string; gloss: string }[] {
+  if (state === "dropdown") {
+    return [
+      { key: "enter/space", gloss: "select" },
+      { key: "j/k", gloss: "move" },
+      { key: "esc", gloss: "cancel" },
+    ];
+  }
+  return [
+    { key: "enter", gloss: "spawn" },
+    { key: "tab", gloss: "field" },
+    { key: "1-9", gloss: "pick" },
+    // The opener, taught only where an option field is holding the keys.
+    ...(state === "focused" ? [{ key: "space", gloss: "open" }] : []),
+    { key: "esc", gloss: "cancel" },
+  ];
 }
 
 /** The default (no-mode) hints, in display order. */
@@ -115,11 +145,9 @@ export const Footer: Component<FooterProps> = (props) => {
         </Match>
         <Match when={props.newSessionMode}>
           <text fg={theme.overlay}>
-            {props.newSessionAgent === "dropdown"
-              ? "j/k move · enter/space select · esc cancel"
-              : props.newSessionAgent === "focused"
-                ? "enter spawn · tab next field · j/k or 1-9 pick · l open · esc cancel"
-                : "enter spawn · tab next field · j/k or 1-9 pick · esc cancel"}
+            {newSessionHintSegments(props.newSessionOption ?? "text")
+              .map((segment) => `${segment.key} ${segment.gloss}`)
+              .join(HINT_SEPARATOR)}
           </text>
         </Match>
         <Match when={props.searchMode}>

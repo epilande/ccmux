@@ -22,6 +22,7 @@ import {
   namesAWorktree,
   TickContext,
   type NewSessionDraft,
+  type NewSessionField,
   type NewSessionFork,
   type NewSessionPlacement,
 } from "./store";
@@ -65,11 +66,9 @@ import { GroupPreview } from "./components/GroupPreview";
 import { ConfirmationDialog } from "./components/ConfirmationDialog";
 import {
   NewSessionDialog,
-  DESTINATION_OPTIONS,
-  PLACEMENT_OPTIONS,
-  UNTRACKED_OPTIONS,
   newSessionFloorRows,
 } from "./components/NewSessionDialog";
+import { newSessionOptions } from "./new-session-options";
 import { NoticeDialog } from "./components/NoticeDialog";
 import { slugFromPrompt, slugify } from "../daemon/worktree-create";
 import {
@@ -1271,104 +1270,74 @@ export function App(props: AppProps) {
   });
 
   /**
-   * The choices j/k and the number keys apply to, for whichever field has
-   * focus: its options, the one currently held, and how to select another.
-   * Null for a field with no options (the prompt, which owns its own keys).
-   * Every option field goes through this one path, so the worktree
-   * destination field (#69) needs only its own case here.
+   * The shared option accessor (`newSessionOptions`) with this surface's own
+   * context filled in: the draft, the fetched agent list, and the same
+   * height floor the dialog sizes itself against — below it the fields are
+   * not on screen, and a number key must not act on choices nobody can see.
    */
-  function focusedOptionField(): {
-    options: string[];
-    value: string;
-    select: (value: string) => void;
-  } | null {
+  function optionFieldFor(
+    field: NewSessionField,
+  ): ReturnType<typeof newSessionOptions> {
     const draft = store.state.newSession;
     if (!draft) return null;
-    // Too short a terminal for the dialog to draw its fields at all: it says
-    // so instead, and the number keys must not act on choices that are not on
-    // screen. The same floor the component sizes itself against.
-    if (
-      appDims().height <
-      newSessionFloorRows({
-        moveChanges: draft.moveChanges,
-        fork: draft.fork !== null,
-        namesAWorktree: namesAWorktree(draft),
-      })
-    ) {
-      return null;
-    }
-    switch (draft.field) {
-      case "agent":
-        // Fork mode has no agent row: the fork continues the source's. Paired
-        // with the store keeping focus off the field, for the same reason
-        // `untracked` below carries two guards — a number key that changed an
-        // invisible choice is the failure worth guarding twice.
-        if (draft.fork) return null;
-        return {
-          options: (spawnableAgents() ?? []).map((agent) => agent.name),
-          value: draft.agent,
-          select: store.actions.setNewSessionAgent,
-        };
-      case "placement":
-        return {
-          options: PLACEMENT_OPTIONS.map((option) => option.value),
-          value: draft.placement,
-          // Looked up rather than cast: only a real option gets through.
-          select: (value) => {
-            const option = PLACEMENT_OPTIONS.find((o) => o.value === value);
-            if (option) store.actions.setNewSessionPlacement(option.value);
-          },
-        };
-      case "destination":
-        // Locked in move-changes and fork mode, where the field is not
-        // reachable by Tab either; the store refuses the write regardless.
-        if (draft.moveChanges || draft.fork) return null;
-        return {
-          options: DESTINATION_OPTIONS.map((option) => option.value),
-          value: draft.destination,
-          select: (value) => {
-            const option = DESTINATION_OPTIONS.find((o) => o.value === value);
-            if (option) store.actions.setNewSessionDestination(option.value);
-          },
-        };
-      case "untracked":
-        // Move-changes mode only, and paired with `destination`'s guard
-        // above: the store keeps focus off a field the draft does not have,
-        // and this keeps the number keys off it if focus ever gets there
-        // anyway. A key that silently changes an invisible choice is the
-        // failure worth two guards.
-        if (!draft.moveChanges) return null;
-        return {
-          options: UNTRACKED_OPTIONS.map((option) => option.value),
-          value: draft.untracked,
-          select: (value) => {
-            const option = UNTRACKED_OPTIONS.find((o) => o.value === value);
-            if (option) store.actions.setNewSessionUntracked(option.value);
-          },
-        };
-      default:
-        return null;
-    }
+    return newSessionOptions(field, {
+      draft,
+      agents: spawnableAgents(),
+      tooShort:
+        appDims().height <
+        newSessionFloorRows({
+          moveChanges: draft.moveChanges,
+          fork: draft.fork !== null,
+          namesAWorktree: namesAWorktree(draft),
+        }),
+    });
+  }
+
+  /** `optionFieldFor` at the focused field, which is what the collapsed-mode
+   *  keys act on. */
+  function focusedOptionField(): ReturnType<typeof optionFieldFor> {
+    const draft = store.state.newSession;
+    return draft ? optionFieldFor(draft.field) : null;
+  }
+
+  /** Which key set the dialog is listening to, for the Footer's hint line —
+   *  the same accessor the keys read, so the copy can never promise a key
+   *  the routing would refuse. */
+  const newSessionOptionMode = createMemo<"focused" | "dropdown" | undefined>(
+    () => {
+      const draft = store.state.newSession;
+      if (!draft) return undefined;
+      if (draft.dropdown) return "dropdown";
+      return focusedOptionField() ? "focused" : undefined;
+    },
+  );
+
+  /**
+   * Commit `field`'s option at `index` and close its dropdown: the ONE write
+   * path — the confirm keys, both 1-9 arms, the overlay's row clicks, and
+   * the hint row's confirm all funnel here. An index off the list commits
+   * nothing and leaves any open dropdown up, so a `9` in a three-option list
+   * stays a no-op.
+   */
+  function commitDropdown(field: NewSessionField, index: number): void {
+    const resolved = optionFieldFor(field);
+    const option = resolved?.options[index];
+    if (!option) return;
+    store.actions.setNewSessionOption(field, option.value);
+    store.actions.closeNewSessionDropdown();
   }
 
   /** Clamped, not wrapping: in a three-item list, `k` teleporting to the
    *  bottom reads as a misfire rather than a nicety. */
   function moveNewSessionOption(delta: number): void {
-    const field = focusedOptionField();
-    if (!field || field.options.length === 0) return;
-    const current = Math.max(0, field.options.indexOf(field.value));
+    const draft = store.state.newSession;
+    const resolved = focusedOptionField();
+    if (!draft || !resolved) return;
     const next = Math.min(
-      Math.max(current + delta, 0),
-      field.options.length - 1,
+      Math.max(resolved.selectedIndex + delta, 0),
+      resolved.options.length - 1,
     );
-    field.select(field.options[next]!);
-  }
-
-  function pickNewSessionOption(index: number): void {
-    const field = focusedOptionField();
-    if (!field) return;
-    const value = field.options[index];
-    if (value !== undefined) field.select(value);
+    commitDropdown(draft.field, next);
   }
 
   /**
@@ -1761,20 +1730,31 @@ export function App(props: AppProps) {
   }
 
   /**
-   * The agent dropdown overlay owns every key while it is open: it is modal
+   * The open dropdown overlay owns every key while it is up: it is modal
    * within an already-modal dialog, so nothing here falls through to the
    * field handling below. Escape closes it without touching the draft, which
    * is why the dialog's own Escape (close the whole dialog) must not see it.
    */
-  function handleAgentDropdownKey(event: KeyEvent, highlighted: number): void {
+  function handleDropdownKey(
+    event: KeyEvent,
+    open: { field: NewSessionField; index: number },
+  ): void {
     const key = event.name;
-    const agents = spawnableAgents() ?? [];
-    const count = agents.length;
+    const field = optionFieldFor(open.field);
 
+    // A field with nothing to offer (or one the terminal has shrunk out
+    // from under) closes on any key rather than acting invisibly.
+    if (!field || field.options.length === 0) {
+      store.actions.closeNewSessionDropdown();
+      event.preventDefault();
+      return;
+    }
+
+    const count = field.options.length;
     // h/left mirror the l/right that opened it; like Escape they close
     // without committing the highlight.
-    if (key === "escape" || key === "h" || key === "left" || count === 0) {
-      store.actions.closeNewSessionAgentDropdown();
+    if (key === "escape" || key === "h" || key === "left") {
+      store.actions.closeNewSessionDropdown();
     } else if (
       key === "return" ||
       key === "enter" ||
@@ -1784,21 +1764,15 @@ export function App(props: AppProps) {
       key === "l" ||
       key === "right"
     ) {
-      const chosen = agents[Math.min(highlighted, count - 1)];
-      if (chosen) store.actions.setNewSessionAgent(chosen.name);
-      store.actions.closeNewSessionAgentDropdown();
+      commitDropdown(open.field, Math.min(open.index, count - 1));
     } else if (key === "j" || key === "down") {
-      store.actions.setNewSessionAgentDropdownIndex((highlighted + 1) % count);
+      store.actions.setNewSessionDropdownIndex((open.index + 1) % count);
     } else if (key === "k" || key === "up") {
-      store.actions.setNewSessionAgentDropdownIndex(
-        (highlighted - 1 + count) % count,
+      store.actions.setNewSessionDropdownIndex(
+        (open.index - 1 + count) % count,
       );
     } else if (key >= "1" && key <= "9") {
-      const chosen = agents[parseInt(key, 10) - 1];
-      if (chosen) {
-        store.actions.setNewSessionAgent(chosen.name);
-        store.actions.closeNewSessionAgentDropdown();
-      }
+      commitDropdown(open.field, parseInt(key, 10) - 1);
     }
     event.preventDefault();
   }
@@ -1808,8 +1782,8 @@ export function App(props: AppProps) {
     if (!draft) return;
     const key = event.name;
 
-    if (draft.agentDropdown !== null) {
-      handleAgentDropdownKey(event, draft.agentDropdown);
+    if (draft.dropdown !== null) {
+      handleDropdownKey(event, draft.dropdown);
       return;
     }
 
@@ -1851,22 +1825,17 @@ export function App(props: AppProps) {
     } else if (key === "k" || key === "up") {
       moveNewSessionOption(-1);
     } else if (key >= "1" && key <= "9") {
-      pickNewSessionOption(parseInt(key, 10) - 1);
-    } else if (
-      (key === "space" || key === "l" || key === "right") &&
-      draft.field === "agent"
-    ) {
+      commitDropdown(draft.field, parseInt(key, 10) - 1);
+    } else if (key === "space" || key === "l" || key === "right") {
       // Space or l/right, not Enter: Enter is "spawn" from every field, and
-      // the agent field is where focus STARTS, so taking it for the dropdown
-      // would put an overlay between the most common flow (open, Enter) and
-      // its spawn. This branch is unreachable from the text fields, which
-      // returned above with every printable key intact.
-      // `focusedOptionField` carries the fork and too-short-to-draw guards.
+      // an option field is often where focus sits, so taking it for the
+      // dropdown would put an overlay between the most common flow (open,
+      // Enter) and its spawn. This branch is unreachable from the text
+      // fields, which returned above with every printable key intact.
+      // `focusedOptionField` carries the mode and too-short-to-draw guards.
       const field = focusedOptionField();
       if (field && field.options.length > 0) {
-        store.actions.openNewSessionAgentDropdown(
-          Math.max(0, field.options.indexOf(field.value)),
-        );
+        store.actions.openNewSessionDropdown(draft.field, field.selectedIndex);
       }
     }
     // Everything else is swallowed: the dialog is modal, and letting `q`
@@ -2753,13 +2722,7 @@ export function App(props: AppProps) {
             persistent={props.persistent}
             groupBy={store.state.groupBy}
             newSessionMode={store.state.newSession !== null}
-            newSessionAgent={
-              store.state.newSession?.agentDropdown != null
-                ? "dropdown"
-                : store.state.newSession?.field === "agent"
-                  ? "focused"
-                  : undefined
-            }
+            newSessionOption={newSessionOptionMode()}
             reviewable={reviewEnabled}
           />
         </Show>
@@ -2799,12 +2762,9 @@ export function App(props: AppProps) {
               agents={spawnableAgents()}
               agentsError={agentsError()}
               onFocusField={store.actions.setNewSessionField}
-              onSelectAgent={store.actions.setNewSessionAgent}
-              onOpenAgentDropdown={store.actions.openNewSessionAgentDropdown}
-              onCloseAgentDropdown={store.actions.closeNewSessionAgentDropdown}
-              onSelectPlacement={store.actions.setNewSessionPlacement}
-              onSelectDestination={store.actions.setNewSessionDestination}
-              onSelectUntracked={store.actions.setNewSessionUntracked}
+              onOpenDropdown={store.actions.openNewSessionDropdown}
+              onCloseDropdown={store.actions.closeNewSessionDropdown}
+              onSelectOption={commitDropdown}
               onPromptInput={store.actions.setNewSessionPrompt}
               onWorktreeNameInput={store.actions.setNewSessionWorktreeName}
               onSubmit={() => void submitNewSession()}
