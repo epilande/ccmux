@@ -67,6 +67,10 @@ function context(
         Object.assign(session.state, patch);
         return true;
       },
+      setLogPath: (_id: string, logPath: string | null) => {
+        session.state.logPath = logPath;
+        return true;
+      },
     } as unknown as HookManagerContext["sessionManager"],
     getLogWatcher: () => undefined,
     getLogWatchers: () => [],
@@ -170,5 +174,80 @@ describe("AntigravityHookAdapter", () => {
     );
     expect(session.nativeSessionId).toBeUndefined();
     expect(session.state.status).toBeUndefined();
+  });
+
+  it("sets logPath from the marker's transcript_path when the file exists", async () => {
+    const session: FakeSession = {
+      id: "session-1",
+      agentType: "antigravity",
+      trackingMode: "pane",
+      tmuxPane: "%1",
+      state: {},
+    };
+    const transcriptPath = join(root, "transcript-plain.jsonl");
+    writeFileSync(transcriptPath, "{}\n");
+    await adapter.onMarkerAdded(
+      marker({ state: "working", transcript_path: transcriptPath }),
+      context(session, [pane("%1", 111, "/dev/ttys001")]),
+    );
+    expect(session.state.logPath).toBe(transcriptPath);
+  });
+
+  it("prefers a sibling transcript_full.jsonl over transcript.jsonl", async () => {
+    const session: FakeSession = {
+      id: "session-1",
+      agentType: "antigravity",
+      trackingMode: "pane",
+      tmuxPane: "%1",
+      state: {},
+    };
+    const logsDir = join(root, "logs");
+    mkdirSync(logsDir, { recursive: true });
+    const plainPath = join(logsDir, "transcript.jsonl");
+    const fullPath = join(logsDir, "transcript_full.jsonl");
+    writeFileSync(plainPath, "{}\n");
+    writeFileSync(fullPath, "{}\n");
+    await adapter.onMarkerAdded(
+      marker({ state: "working", transcript_path: plainPath }),
+      context(session, [pane("%1", 111, "/dev/ttys001")]),
+    );
+    expect(session.state.logPath).toBe(fullPath);
+  });
+
+  it("falls back to transcript.jsonl when no sibling _full file exists", async () => {
+    const session: FakeSession = {
+      id: "session-1",
+      agentType: "antigravity",
+      trackingMode: "pane",
+      tmuxPane: "%1",
+      state: {},
+    };
+    const logsDir = join(root, "logs-no-full");
+    mkdirSync(logsDir, { recursive: true });
+    const plainPath = join(logsDir, "transcript.jsonl");
+    writeFileSync(plainPath, "{}\n");
+    await adapter.onMarkerAdded(
+      marker({ state: "working", transcript_path: plainPath }),
+      context(session, [pane("%1", 111, "/dev/ttys001")]),
+    );
+    expect(session.state.logPath).toBe(plainPath);
+  });
+
+  it("does not set logPath when transcript_path points to a missing file", async () => {
+    const session: FakeSession = {
+      id: "session-1",
+      agentType: "antigravity",
+      trackingMode: "pane",
+      tmuxPane: "%1",
+      state: {},
+    };
+    await adapter.onMarkerAdded(
+      marker({
+        state: "working",
+        transcript_path: join(root, "vanished.jsonl"),
+      }),
+      context(session, [pane("%1", 111, "/dev/ttys001")]),
+    );
+    expect(session.state.logPath).toBeUndefined();
   });
 });

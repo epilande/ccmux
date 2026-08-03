@@ -355,6 +355,7 @@ describe("CursorHookAdapter", () => {
       nativeSessionId?: string;
       status?: string;
       lastPrompt?: string | null;
+      logPath?: string | null;
     }
 
     function buildCtx(
@@ -374,6 +375,12 @@ describe("CursorHookAdapter", () => {
             const s = sessions.find((x) => x.id === id);
             if (!s) return false;
             Object.assign(s, state);
+            return true;
+          },
+          setLogPath: (id: string, path: string | null) => {
+            const s = sessions.find((x) => x.id === id);
+            if (!s) return false;
+            s.logPath = path;
             return true;
           },
         } as never,
@@ -481,6 +488,56 @@ describe("CursorHookAdapter", () => {
       );
 
       expect(claudeSession.nativeSessionId).toBeUndefined();
+    });
+
+    it("sets logPath from the marker's transcript_path when the file exists", async () => {
+      const session: FakeSession = {
+        id: "cursor-pane-4",
+        agentType: "cursor",
+        trackingMode: "pane",
+        tmuxPane: "%9",
+      };
+      const ctx = buildCtx([session], new Map([[555, { paneId: "%9" }]]));
+      const transcriptPath = join(tempRoot, "cursor-session.jsonl");
+      writeFileSync(transcriptPath, "{}\n");
+
+      await adapter.onMarkerAdded(
+        {
+          agent_type: "cursor",
+          pid: 555,
+          session_id: "cursor-sid-4",
+          state: "working",
+          timestamp: 1,
+          transcript_path: transcriptPath,
+        },
+        ctx,
+      );
+
+      expect(session.logPath).toBe(transcriptPath);
+    });
+
+    it("does not set logPath when transcript_path points to a missing file", async () => {
+      const session: FakeSession = {
+        id: "cursor-pane-5",
+        agentType: "cursor",
+        trackingMode: "pane",
+        tmuxPane: "%10",
+      };
+      const ctx = buildCtx([session], new Map([[556, { paneId: "%10" }]]));
+
+      await adapter.onMarkerAdded(
+        {
+          agent_type: "cursor",
+          pid: 556,
+          session_id: "cursor-sid-5",
+          state: "working",
+          timestamp: 1,
+          transcript_path: join(tempRoot, "vanished.jsonl"),
+        },
+        ctx,
+      );
+
+      expect(session.logPath).toBeUndefined();
     });
   });
 });

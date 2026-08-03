@@ -258,6 +258,14 @@ export class CursorHookAdapter implements HookAdapter {
       return;
     }
     ctx.sessionManager.updateSession(session.id, stateFromCursorMarker(marker));
+    // Cursor has no registered LogAdapter, so this only makes the transcript
+    // path visible to consumers that check for one themselves (fork's
+    // {path} template, ccmux show); it does not add a cascade log source
+    // (that's keyed on a registered adapter, not mere logPath presence).
+    // Existence-checked because the marker's value is unparsed input.
+    if (marker.transcript_path && existsSync(marker.transcript_path)) {
+      ctx.sessionManager.setLogPath(session.id, marker.transcript_path);
+    }
   }
 
   async onMarkerRemoved(
