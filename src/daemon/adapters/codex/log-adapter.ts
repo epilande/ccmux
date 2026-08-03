@@ -15,6 +15,7 @@ import {
   type CodexEntry,
   type CodexSessionMetaPayload,
   type CodexEventPayload,
+  type CodexResponseItemPayload,
 } from "./parse";
 
 // Derived from CODEX_DIR so rollout discovery honors `$CODEX_HOME`, like the
@@ -57,6 +58,36 @@ function applyEventMsg(
   }
 }
 
+/**
+ * Tool OUTPUT items are the only in-log proof that a permission wait
+ * resolved: Codex fires no hook on approval (manual or via its automatic
+ * approval reviewer), and outputs are flushed only after the gated tool
+ * ran. Without this flip, the marker-written `waiting` echoes through the
+ * store-fed `prev` with a fresh timestamp every parse and pins the session
+ * at waiting until end of turn. Request items and token_count are
+ * deliberately NOT resolution evidence — they can flush while the prompt
+ * is still up. A NEWER PermissionRequest still wins in the cascade: its
+ * marker timestamp out-freshens this entry's lastActivityAt.
+ */
+function applyResponseItem(
+  state: SessionState,
+  payload: CodexResponseItemPayload,
+): SessionState {
+  if (state.status !== "waiting") return state;
+  if (
+    payload?.type !== "function_call_output" &&
+    payload?.type !== "custom_tool_call_output"
+  ) {
+    return state;
+  }
+  return {
+    ...state,
+    status: "working",
+    attentionType: null,
+    pendingTool: null,
+  };
+}
+
 function applyEntries(prev: SessionState, entries: CodexEntry[]): SessionState {
   let state = prev;
   for (const entry of entries) {
@@ -65,6 +96,8 @@ function applyEntries(prev: SessionState, entries: CodexEntry[]): SessionState {
       state = applySessionMeta(state, entry.payload);
     } else if (entry.type === "event_msg") {
       state = applyEventMsg(state, entry.payload, entry.timestamp);
+    } else if (entry.type === "response_item") {
+      state = applyResponseItem(state, entry.payload);
     }
   }
   return state;
@@ -92,8 +125,9 @@ function createInitialCodexState(): SessionState {
  * from `event_msg` payloads of type `task_started` / `task_complete` /
  * `turn_aborted`. `lastPrompt` comes from `user_message` events.
  *
- * Codex has no permission-asked event in the log; permission/waiting state
- * is layered on by the reconciler's terminal-rule overlay (Option Y).
+ * Codex has no permission-ASKED event in the log (waiting comes from the
+ * `PermissionRequest` hook marker), but tool OUTPUT items serve as the
+ * permission-RESOLVED signal via `applyResponseItem`.
  */
 export class CodexLogAdapter implements LogAdapter {
   readonly agentType = "codex";

@@ -11,9 +11,10 @@
  *
  * Codex writes one JSON object per line. The first line is always a
  * `session_meta` entry; subsequent lines are `event_msg`, `response_item`,
- * or `turn_context`. Only `session_meta` and `event_msg` carry signals
- * relevant to session state; the others are kept for `lastActivityAt`
- * tracking only.
+ * or `turn_context`. `session_meta` and `event_msg` carry most session-state
+ * signals; `response_item` contributes only the tool-output permission-resolved
+ * flip (see `applyResponseItem` in `log-adapter.ts`); `turn_context` is kept
+ * for `lastActivityAt` tracking only.
  */
 export type CodexEntry =
   | {
@@ -22,8 +23,22 @@ export type CodexEntry =
       payload: CodexSessionMetaPayload;
     }
   | { type: "event_msg"; timestamp: string; payload: CodexEventPayload }
-  | { type: "response_item"; timestamp: string; payload: unknown }
+  | {
+      type: "response_item";
+      timestamp: string;
+      payload: CodexResponseItemPayload;
+    }
   | { type: "turn_context"; timestamp: string; payload: unknown };
+
+/**
+ * Minimal `response_item.payload` shape. Only `type` is consumed: the two
+ * `*_output` variants are the adapter's proof that a permission-gated tool
+ * actually executed (outputs are flushed only after execution, unlike the
+ * call/request items, which can land while the approval prompt is still up).
+ */
+export interface CodexResponseItemPayload {
+  type?: string;
+}
 
 export interface CodexSessionMetaPayload {
   id: string;

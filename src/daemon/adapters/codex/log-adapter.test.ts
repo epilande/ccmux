@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, appendFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { CodexLogAdapter } from "./log-adapter";
+import type { SessionState } from "../../../types/session";
 import {
   jsonl,
   codexSessionMeta as sessionMeta,
@@ -364,6 +365,143 @@ describe("CodexLogAdapter", () => {
       const { state } = await adapter.deriveFullState(logPath);
       expect(state.attentionType).toBeNull();
       expect(state.pendingTool).toBeNull();
+    });
+  });
+
+  describe("permission-wait resolution via response_item outputs", () => {
+    // These simulate the marker-written waiting state the reconciler feeds
+    // back in as `prev` — the log adapter never sets attentionType/
+    // pendingTool itself (see above), only clears them.
+    function waitingPrev(): SessionState {
+      return {
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash",
+        inPlanMode: false,
+      };
+    }
+
+    it("flips waiting to working on a function_call_output entry", async () => {
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      appendFileSync(
+        logPath,
+        jsonl(
+          responseItem("2026-04-01T12:00:05Z", {
+            type: "function_call_output",
+            call_id: "call-1",
+          }),
+        ),
+      );
+
+      const { state, hasNewEntries } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        waitingPrev(),
+      );
+
+      expect(hasNewEntries).toBe(true);
+      expect(state.status).toBe("working");
+      expect(state.attentionType).toBeNull();
+      expect(state.pendingTool).toBeNull();
+    });
+
+    it("flips waiting to working on a custom_tool_call_output entry", async () => {
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      appendFileSync(
+        logPath,
+        jsonl(
+          responseItem("2026-04-01T12:00:05Z", {
+            type: "custom_tool_call_output",
+            call_id: "call-1",
+          }),
+        ),
+      );
+
+      const { state, hasNewEntries } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        waitingPrev(),
+      );
+
+      expect(hasNewEntries).toBe(true);
+      expect(state.status).toBe("working");
+      expect(state.attentionType).toBeNull();
+      expect(state.pendingTool).toBeNull();
+    });
+
+    it("leaves waiting alone on request-side response_item types (they can flush before the prompt resolves)", async () => {
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      appendFileSync(
+        logPath,
+        jsonl(responseItem("2026-04-01T12:00:05Z", { type: "reasoning" })),
+      );
+
+      const { state } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        waitingPrev(),
+      );
+
+      expect(state.status).toBe("waiting");
+    });
+
+    it("is a no-op on a non-waiting prev status", async () => {
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      appendFileSync(
+        logPath,
+        jsonl(
+          responseItem("2026-04-01T12:00:05Z", {
+            type: "function_call_output",
+            call_id: "call-1",
+          }),
+        ),
+      );
+
+      const workingPrev: SessionState = {
+        status: "working",
+        attentionType: null,
+        pendingTool: null,
+        inPlanMode: false,
+      };
+
+      const { state } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        workingPrev,
+      );
+
+      expect(state.status).toBe("working");
+    });
+
+    it("full-derivation ordering: task_started, function_call request, function_call_output, task_complete settles to idle", async () => {
+      writeFileSync(
+        logPath,
+        jsonl(
+          sessionMeta(),
+          eventMsg("2026-04-01T12:00:01Z", { type: "task_started" }),
+          responseItem("2026-04-01T12:00:02Z", {
+            type: "function_call",
+            call_id: "call-1",
+            name: "shell",
+          }),
+          responseItem("2026-04-01T12:00:03Z", {
+            type: "function_call_output",
+            call_id: "call-1",
+          }),
+          eventMsg("2026-04-01T12:00:04Z", { type: "task_complete" }),
+        ),
+      );
+
+      const { state } = await adapter.deriveFullState(logPath);
+      expect(state.status).toBe("idle");
     });
   });
 });
