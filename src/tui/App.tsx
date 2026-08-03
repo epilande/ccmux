@@ -58,7 +58,7 @@ import {
 } from "./utils/perf";
 import { Header } from "./components/Header";
 import { Footer } from "./components/Footer";
-import { SessionList } from "./components/SessionList";
+import { type RowAnchor, SessionList } from "./components/SessionList";
 import { SearchInput } from "./components/SearchInput";
 import { Preview } from "./components/Preview";
 import { Toast } from "./components/Toast";
@@ -657,16 +657,115 @@ export function App(props: AppProps) {
       return;
     }
     store.actions.setSelectedIndex(index);
+    openRowMenu(item, event.x, event.y, null);
+  }
+
+  /**
+   * Open the menu `item` owns at a screen position, with `highlight` as the
+   * item the keyboard starts on.
+   *
+   * Shared by the pointer and the `m` key so the two can only ever differ in
+   * where the menu is anchored and whether a row starts lit. Everything that
+   * makes a menu what it is — which menu, and the dirty question that gates
+   * "Move changes" — happens once, here.
+   */
+  function openRowMenu(
+    item: FlatItem,
+    x: number,
+    y: number,
+    highlight: number | null,
+  ): void {
     if (item.type === "session") {
       const session = item.filteredSession.session;
-      store.actions.showContextMenu(session.id, event.x, event.y);
+      store.actions.showContextMenu(session.id, x, y, highlight);
       // Same condition both consumers gate on (`sessionMenuItems` and
       // `sessionMenuReservedRows`): a background row has no move to offer, so
       // asking would spend a `git status -uall` on an answer nobody reads.
       if (session.trackingMode !== "background") refreshMenuDirty(session);
     } else {
-      store.actions.showGroupContextMenu(item.groupKey, event.x, event.y);
+      store.actions.showGroupContextMenu(item.groupKey, x, y, highlight);
     }
+  }
+
+  /** How the list answers where a row is on screen; see `SessionList`'s
+   *  `onRowAnchor`. Undefined until the list has rows to draw. */
+  let rowAnchor: RowAnchor | undefined;
+
+  /**
+   * The `m` key: open the selected row's menu, or close the one that is open.
+   *
+   * A toggle rather than a second way in, because `m` is also the key the
+   * menu itself closes on — pressing it twice has to land somewhere sensible,
+   * and reopening the menu you just dismissed is not it.
+   *
+   * The anchor comes from the list rather than from the row: only the list
+   * knows where its rows currently are, and a menu that opened at a fixed
+   * corner would leave the user to work out which row it belonged to.
+   */
+  function toggleRowMenu(): void {
+    // Every overlay in this predicate already returns before the key switch
+    // reaches `m`, so this is the second lock on the same door — kept because
+    // the FIRST one is an ordering, and the comment on `modalOverlayOpen`
+    // exists because an ordering is exactly what two overlays have already
+    // been left out of. A menu opened under a dialog would be unreachable:
+    // the dialog's key branch runs first, so nothing could dismiss it.
+    if (modalOverlayOpen()) return;
+    if (store.state.contextMenu || store.state.groupContextMenu) {
+      store.actions.hideContextMenu();
+      store.actions.hideGroupContextMenu();
+      return;
+    }
+    const item = store.selectedFlatItem();
+    if (!item) return;
+    const anchor = rowAnchor?.(store.selectedIndex());
+    // No anchor means no drawn list to anchor in, which is also a list with
+    // nothing selected — so there is nothing to open a menu about.
+    if (!anchor) return;
+    // The first item lit: `m` is a keyboard action, and Enter has to have
+    // somewhere to land the moment the menu appears.
+    openRowMenu(item, anchor.x, anchor.y, 0);
+  }
+
+  /**
+   * Keys while a row menu is open.
+   *
+   * Only the ones the menu itself answers to are taken; everything else
+   * closes the menu and falls through to its ordinary meaning, which is what
+   * this surface has always done with a menu on screen (a keypress means
+   * attention has moved on). Returning true here means the key was the
+   * menu's and the caller must stop.
+   */
+  function handleContextMenuKey(event: KeyEvent): boolean {
+    const key = event.name;
+    const items = store.state.contextMenu
+      ? sessionMenuItems()
+      : groupMenuItems();
+    if (key === "j" || key === "down") {
+      store.actions.moveMenuHighlight(1, items.length);
+      return true;
+    }
+    if (key === "k" || key === "up") {
+      store.actions.moveMenuHighlight(-1, items.length);
+      return true;
+    }
+    if (key === "return" || key === "enter") {
+      const menu = store.state.contextMenu ?? store.state.groupContextMenu;
+      const highlighted = menu?.index;
+      // Nothing lit (a menu the pointer opened) means Enter has no target.
+      // Closing would be a guess at what was meant; the menu stays.
+      if (highlighted !== null && highlighted !== undefined) {
+        // The item's own action closes the menu — every one of them does, and
+        // doing it here as well would hide a menu the action meant to keep.
+        items[highlighted]?.action();
+      }
+      return true;
+    }
+    if (key === "escape" || key === "m") {
+      store.actions.hideContextMenu();
+      store.actions.hideGroupContextMenu();
+      return true;
+    }
+    return false;
   }
 
   function contextMenuAttach() {
@@ -2221,12 +2320,16 @@ export function App(props: AppProps) {
     }
 
     if (store.state.contextMenu || store.state.groupContextMenu) {
-      store.actions.hideContextMenu();
-      store.actions.hideGroupContextMenu();
-      if (key === "escape") {
+      // The menu answers to its own keys first (j/k, enter, esc, m). Anything
+      // else dismisses it and goes on to mean what it always means — a
+      // keypress that is not the menu's is attention moving elsewhere, and
+      // making the menu modal would strand a user who opened it by accident.
+      if (handleContextMenuKey(event)) {
         event.preventDefault();
         return;
       }
+      store.actions.hideContextMenu();
+      store.actions.hideGroupContextMenu();
     }
 
     if (store.state.searchMode) {
@@ -2418,6 +2521,14 @@ export function App(props: AppProps) {
         // Scoped to the selected row's repo when there is one, so `W` on a
         // group behaves like the group menu's item; global otherwise.
         store.actions.showPrune(selectedRepoRoot());
+        event.preventDefault();
+        break;
+
+      case "m":
+        // The keyboard's way into the right-click menus. Reached only with no
+        // menu already open — the block above owns `m` while one is, so the
+        // two halves of the toggle are never both live.
+        toggleRowMenu();
         event.preventDefault();
         break;
 
@@ -2656,6 +2767,7 @@ export function App(props: AppProps) {
             loading={!initialDataReceived()}
             onActivate={handleRowActivate}
             onContextMenu={handleRowContextMenu}
+            onRowAnchor={(resolve) => (rowAnchor = resolve)}
           />
           <Show when={!props.sidebar && store.state.showPreview}>
             <Show
@@ -2778,6 +2890,7 @@ export function App(props: AppProps) {
               y={cm().y}
               items={sessionMenuItems()}
               reservedRows={sessionMenuReservedRows()}
+              highlight={cm().index}
               onClose={store.actions.hideContextMenu}
             />
           )}
@@ -2789,6 +2902,7 @@ export function App(props: AppProps) {
               x={cm().x}
               y={cm().y}
               items={groupMenuItems()}
+              highlight={cm().index}
               onClose={store.actions.hideGroupContextMenu}
             />
           )}

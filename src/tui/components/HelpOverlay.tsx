@@ -9,7 +9,7 @@ const MAX_WIDTH = COL_WIDTH * 2 + COL_GAP + 4 + 2; // cols + padding(2+2) + bord
 
 type Group = { section: string; items: { key: string; desc: string }[] };
 
-const leftGroups = (sidebar?: boolean, reviewable?: boolean): Group[] => [
+const leftGroups = (reviewable?: boolean): Group[] => [
   {
     section: "Navigation",
     items: [
@@ -22,6 +22,7 @@ const leftGroups = (sidebar?: boolean, reviewable?: boolean): Group[] => [
     section: "Actions",
     items: [
       { key: "Enter", desc: "Switch to session" },
+      { key: "m", desc: "Row menu (j/k, Enter)" },
       { key: "n", desc: "New session" },
       { key: "/", desc: "Search" },
       { key: "f", desc: "Toggle hide idle" },
@@ -35,16 +36,20 @@ const leftGroups = (sidebar?: boolean, reviewable?: boolean): Group[] => [
       ...(reviewable ? [{ key: "d", desc: "Review diff (hunk)" }] : []),
     ],
   },
-  {
-    section: "Other",
-    items: [
-      { key: "?", desc: "Help" },
-      { key: sidebar ? "q" : "q / Esc", desc: "Quit" },
-    ],
-  },
 ];
 
-const rightGroups: Group[] = [
+/**
+ * `sidebar` reaches this column because "Other" lives here now.
+ *
+ * It moved off the left one when the row-menu key was added: Actions had
+ * grown to thirteen rows against the right column's nine, and at the 30-row
+ * terminal the overflow test pins, the left column had no room left. Moving
+ * the two shortest rows across buys four (two items, a heading and the blank
+ * above it) and evens the two columns out at the same time. Overflow here is
+ * silent — the scrollbox just scrolls the tail out of frame — so this is the
+ * kind of thing only that test notices.
+ */
+const rightGroups = (sidebar?: boolean): Group[] => [
   {
     section: "Preview",
     items: [
@@ -62,6 +67,13 @@ const rightGroups: Group[] = [
       { key: "J / K", desc: "Move group down / up" },
       { key: "< / >", desc: "Move to top / bottom" },
       { key: "- / =", desc: "Collapse / expand all" },
+    ],
+  },
+  {
+    section: "Other",
+    items: [
+      { key: "?", desc: "Help" },
+      { key: sidebar ? "q" : "q / Esc", desc: "Quit" },
     ],
   },
 ];
@@ -89,6 +101,16 @@ const renderColumn = (columnGroups: Group[]): JSX.Element => (
   </box>
 );
 
+/**
+ * The rail's version: one column, key above description, because a 30-column
+ * sidebar has no room for the two-column grid.
+ *
+ * There is no blank row BETWEEN items, only between sections. It used to have
+ * one, which put every entry three rows apart and ran the list off the bottom
+ * of a full-height rail — silently, since the scrollbox simply scrolls. The
+ * alternating mauve key and dim description are what separate one entry from
+ * the next; the air was costing a third of the overlay to say the same thing.
+ */
 const renderCompactColumn = (columnGroups: Group[]): JSX.Element => (
   <box flexDirection="column">
     {columnGroups.map((group, gi) => (
@@ -99,9 +121,8 @@ const renderCompactColumn = (columnGroups: Group[]): JSX.Element => (
             <strong>{group.section}</strong>
           </text>
         </box>
-        {group.items.map((item, ii) => (
+        {group.items.map((item) => (
           <>
-            {ii > 0 && <box height={1} />}
             <box height={1}>
               <text fg={theme.mauve}>{item.key}</text>
             </box>
@@ -148,10 +169,10 @@ interface HelpOverlayProps {
 export const HelpOverlay: Component<HelpOverlayProps> = (props) => {
   const filteredRightGroups = () =>
     props.sidebar
-      ? rightGroups.filter((g) => g.section !== "Preview")
-      : rightGroups;
+      ? rightGroups(props.sidebar).filter((g) => g.section !== "Preview")
+      : rightGroups(props.sidebar);
 
-  const groups = leftGroups(props.sidebar, props.reviewable);
+  const groups = leftGroups(props.reviewable);
 
   if (props.sidebar) {
     const allGroups = [...groups, ...filteredRightGroups()];

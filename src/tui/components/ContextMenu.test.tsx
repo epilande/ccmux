@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, mock } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { MouseButtons } from "@opentui/core/testing";
+import { RGBA } from "@opentui/core";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { expectFrameIntegrity } from "./test-helpers";
 import { theme } from "../theme";
@@ -33,6 +34,7 @@ async function renderMenu(
     onClose?: ReturnType<typeof mock>;
     size?: { width: number; height: number };
     reservedRows?: number;
+    highlight?: number | null;
   } = {},
 ) {
   const items = opts.items ?? itemSpies(["Attach", "Kill", "Restart"]);
@@ -45,6 +47,7 @@ async function renderMenu(
         y={opts.y ?? 2}
         items={items}
         reservedRows={opts.reservedRows}
+        highlight={opts.highlight}
         onClose={onClose}
       />
     ),
@@ -52,6 +55,27 @@ async function renderMenu(
   );
   await setup.renderOnce();
   return { frame: setup.captureCharFrame(), items, onClose };
+}
+
+/**
+ * Which item rows are drawn on the raised background.
+ *
+ * `captureCharFrame` is text-only and the highlight IS the background, so the
+ * only way to prove it reaches the screen is to read the spans. Returns
+ * labels rather than row numbers so a menu that grows an item does not
+ * silently change what the assertion means.
+ */
+function raisedLabels(items: ContextMenuItem[]): string[] {
+  const raised = RGBA.fromHex(theme.border).toInts().join(",");
+  const lit: string[] = [];
+  for (const line of setup.captureSpans().lines) {
+    for (const span of line.spans) {
+      if (span.bg.toInts().join(",") !== raised) continue;
+      const item = items.find((i) => span.text.includes(i.label));
+      if (item && !lit.includes(item.label)) lit.push(item.label);
+    }
+  }
+  return lit;
 }
 
 /** The box's own rows, border included, from a captured frame. */
@@ -125,6 +149,62 @@ describe("ContextMenu", () => {
     });
     expect(frame).toContain("Attach");
     expect(frame).toContain("Restart");
+  });
+});
+
+/**
+ * The keyboard highlight (the `m` key's menus). The menu draws it; which item
+ * is lit, and what moves it, belong to `App.tsx` and the store — so these
+ * cover the rendering half only: that a highlight arrives on screen at all,
+ * on the right row, and that it cannot be told apart from the pointer's.
+ */
+describe("ContextMenu keyboard highlight", () => {
+  it("raises the highlighted row", async () => {
+    const { items } = await renderMenu({ highlight: 1 });
+    expect(raisedLabels(items)).toEqual(["Kill"]);
+  });
+
+  it("raises nothing for a menu the pointer opened", async () => {
+    // Null is how a right-click opens: the pointer highlights on hover, and a
+    // row lit under a pointer that is elsewhere would promise a pending key.
+    const { items } = await renderMenu({ highlight: null });
+    expect(raisedLabels(items)).toEqual([]);
+    const { items: none } = await renderMenu();
+    expect(raisedLabels(none)).toEqual([]);
+  });
+
+  it("uses the same affordance the pointer does", async () => {
+    // Hovering row 2 with no keyboard highlight, and highlighting row 2 with
+    // no pointer, have to be indistinguishable — two different "current" rows
+    // in one 22-column box would be a puzzle rather than a hint.
+    const { items } = await renderMenu();
+    const row = locate(setup.captureCharFrame(), "Kill")!.row;
+    await setup.mockMouse.moveTo(10, row);
+    await setup.renderOnce();
+    expect(raisedLabels(items)).toEqual(["Kill"]);
+  });
+
+  it("follows the pointer while it is over a row", async () => {
+    // Both at once: the hand wins, because it is the one still moving.
+    const { items } = await renderMenu({ highlight: 0 });
+    expect(raisedLabels(items)).toEqual(["Attach"]);
+    const row = locate(setup.captureCharFrame(), "Restart")!.row;
+    await setup.mockMouse.moveTo(10, row);
+    await setup.renderOnce();
+    expect(raisedLabels(items)).toEqual(["Restart"]);
+  });
+
+  it("falls back to the keyboard's row when the pointer leaves", async () => {
+    const { items } = await renderMenu({ highlight: 0 });
+    const row = locate(setup.captureCharFrame(), "Restart")!.row;
+    await setup.mockMouse.moveTo(10, row);
+    await setup.renderOnce();
+    expect(raisedLabels(items)).toEqual(["Restart"]);
+    // Off the menu entirely: the keyboard's row is still where Enter would
+    // land, so it has to come back rather than leaving the menu blank.
+    await setup.mockMouse.moveTo(45, 12);
+    await setup.renderOnce();
+    expect(raisedLabels(items)).toEqual(["Attach"]);
   });
 });
 

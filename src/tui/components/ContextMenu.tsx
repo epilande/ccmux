@@ -30,6 +30,16 @@ interface ContextMenuProps {
    * down by the row it was holding, which is the same shift a beat later.
    */
   reservedRows?: number;
+  /**
+   * The keyboard-highlighted item, or null for none.
+   *
+   * Drawn with the same raised background the pointer paints on hover rather
+   * than a second affordance: it means the same thing (this is the row an
+   * action would land on), and two different-looking "current" rows in one
+   * 22-column box would be a puzzle. The pointer still wins while it is over
+   * a row, so a menu being driven by both at once follows the hand.
+   */
+  highlight?: number | null;
   onClose: () => void;
 }
 
@@ -55,6 +65,10 @@ function fittedLabel(label: string, hint: string): string {
 export const ContextMenu: Component<ContextMenuProps> = (props) => {
   const dims = useTerminalDimensions();
   const [hovered, setHovered] = createSignal<number | null>(null);
+
+  /** The row an action would land on: the pointer's while it is over one,
+   *  otherwise the keyboard's. */
+  const active = () => hovered() ?? props.highlight ?? null;
 
   /** One row per item plus the border. True by construction: every item row
    *  is pinned to a single row below. */
@@ -96,7 +110,7 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
             flexShrink={0}
             paddingLeft={1}
             paddingRight={1}
-            backgroundColor={hovered() === i() ? theme.border : theme.surface}
+            backgroundColor={active() === i() ? theme.border : theme.surface}
             onMouseOver={() => setHovered(i())}
             onMouseOut={() => setHovered((h) => (h === i() ? null : h))}
             onMouseDown={(event) => {

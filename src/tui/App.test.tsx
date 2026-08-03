@@ -5329,3 +5329,285 @@ describe("App fork into worktree", () => {
     }
   });
 });
+
+/**
+ * The row menu from the keyboard (`m`). The menus themselves were reachable
+ * only by right-click, which on a surface whose whole point is a keyboard
+ * left several actions ("Move changes", "Open agent view") with no key at all.
+ */
+describe("App row menu (m)", () => {
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  /** Answers the menu's own fetches: the dirty gate behind "Move changes",
+   *  and `/agents` for the dialog one of these tests opens. */
+  function withDaemon() {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      // Clean, so the async item never arrives and the item list is stable.
+      if (href.includes("/dirty")) return Response.json({ dirty: false });
+      if (href.endsWith("/agents")) {
+        return Response.json({
+          agents: [
+            {
+              name: "claude",
+              displayName: "Claude",
+              shortCode: "CC",
+              supportsPrompt: true,
+            },
+          ],
+        });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+    return { restore: () => (globalThis.fetch = original) };
+  }
+
+  async function renderRows(props: Record<string, unknown> = {}) {
+    await renderApp(120, 24, { groupBy: "none", persistent: true, ...props });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "s1",
+          project: "alpha",
+          cwd: "/code/alpha",
+          tmuxPane: "%1",
+        }),
+        mockEnrichedSession({
+          id: "s2",
+          project: "beta",
+          cwd: "/code/beta",
+          tmuxPane: "%2",
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+  }
+
+  const press = async (key: string) => {
+    setup.mockInput.pressKey(key);
+    await settle();
+    await setup.renderOnce();
+  };
+
+  /** The frame line a piece of text is on, or -1. */
+  const lineOf = (text: string) =>
+    setup
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes(text));
+
+  it("opens the selected row's menu anchored on that row", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      // Row 2, so the anchor cannot pass by landing on the list's first line
+      // whatever the arithmetic did.
+      await press("j");
+      const row = lineOf("code/beta");
+      expect(row).toBeGreaterThan(0);
+
+      await press("m");
+      expect(setup.captureCharFrame()).toContain("Attach");
+      // The menu's own top border, on the row it belongs to: a menu that
+      // opened at a fixed corner would leave the user to work out which row
+      // it came from.
+      expect(lineOf("┌")).toBe(row);
+      // Indented rather than flush, so the row is still identifiable under it.
+      expect(lineOf("code/alpha")).toBeGreaterThan(-1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("opens the group menu on a group header", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderApp(120, 24, { groupBy: "project", persistent: true });
+      sseCallbacks!.onInit(
+        [mockEnrichedSession({ id: "s1", project: "alpha", cwd: "/a" })],
+        null,
+      );
+      await setup.renderOnce();
+      // Up from the session row onto its header.
+      await press("k");
+      await press("m");
+
+      const frame = setup.captureCharFrame();
+      // The group menu's own items, and none of the row menu's.
+      expect(frame).toContain("Pin to top");
+      expect(frame).toContain("Kill group");
+      expect(frame).not.toContain("Attach");
+    } finally {
+      restore();
+    }
+  });
+
+  it("closes the menu it opened when pressed again", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      expect(setup.captureCharFrame()).toContain("Attach");
+
+      await press("m");
+      // Not reopened on the next row, and not left up: `m` is one key for
+      // both halves, so pressing it twice has to land back where it started.
+      expect(setup.captureCharFrame()).not.toContain("Attach");
+    } finally {
+      restore();
+    }
+  });
+
+  it("closes the menu on escape", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      expect(setup.captureCharFrame()).toContain("Attach");
+
+      setup.mockInput.pressEscape();
+      // A lone ESC byte is only unambiguous once the parser has waited out
+      // the sequence it could have started; every escape test here does this.
+      await settle(20);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Attach");
+    } finally {
+      restore();
+    }
+  });
+
+  it("does nothing while a modal overlay owns the screen", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      // The help overlay, which is modal for keys.
+      await press("?");
+      expect(setup.captureCharFrame()).toContain("Keyboard Shortcuts");
+
+      await press("m");
+      // No menu, and the overlay is untouched: `m` is a row action, and a
+      // menu opened under an overlay would be unreachable anyway.
+      expect(setup.captureCharFrame()).not.toContain("Attach       enter");
+      expect(setup.captureCharFrame()).toContain("Keyboard Shortcuts");
+    } finally {
+      restore();
+    }
+  });
+
+  it("does nothing while the new-session dialog is open", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("n");
+      expect(setup.captureCharFrame()).toContain("New session");
+
+      await press("m");
+      expect(setup.captureCharFrame()).not.toContain("Attach");
+      // And the draft survives, rather than the key reaching past the dialog.
+      expect(setup.captureCharFrame()).toContain("New session");
+    } finally {
+      restore();
+    }
+  });
+
+  it("runs the highlighted item on enter", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      // Opened on the first item, so Enter has somewhere to land immediately.
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      // Attach: the menu's first item, and the same thing Enter on the row
+      // itself would have done.
+      expect(switchToPaneSpy).toHaveBeenCalledWith("%1");
+      expect(setup.captureCharFrame()).not.toContain("Attach       enter");
+    } finally {
+      restore();
+    }
+  });
+
+  it("moves the highlight with j/k and runs what it lands on", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      // Down to "New session here", back up, and down again: the last one is
+      // what proves k moved anything at all.
+      await press("j");
+      await press("k");
+      await press("j");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      // The item's own dialog, not the row's attach.
+      expect(setup.captureCharFrame()).toContain("New session");
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("clamps the highlight at the top of the menu", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      // Already on the first item. Wrapping here would put the highlight on
+      // the LAST one, which in this menu is a destructive action.
+      await press("k");
+      await press("k");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      expect(switchToPaneSpy).toHaveBeenCalledWith("%1");
+    } finally {
+      restore();
+    }
+  });
+
+  it("leaves a mouse-opened menu alone on enter", async () => {
+    // A right-click highlights nothing (the pointer does that on hover), so
+    // Enter has no target. Guessing at one would be worse than doing nothing.
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Attach");
+
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+      expect(setup.captureCharFrame()).toContain("Attach");
+    } finally {
+      restore();
+    }
+  });
+
+  it("dismisses the menu and acts on any other key", async () => {
+    // The behaviour a menu on screen has always had: a key that is not the
+    // menu's means attention has moved on, so it closes and the key means
+    // what it always means. Making it modal would strand a mis-press.
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      expect(setup.captureCharFrame()).toContain("Attach");
+
+      await press("?");
+      expect(setup.captureCharFrame()).not.toContain("Attach       enter");
+      expect(setup.captureCharFrame()).toContain("Keyboard Shortcuts");
+    } finally {
+      restore();
+    }
+  });
+});

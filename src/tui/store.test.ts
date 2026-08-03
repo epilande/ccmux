@@ -312,6 +312,7 @@ describe("store", () => {
         sessionId: "s1",
         x: 12,
         y: 34,
+        index: null,
       });
     });
 
@@ -332,6 +333,7 @@ describe("store", () => {
         sessionId: "s2",
         x: 9,
         y: 8,
+        index: null,
       });
     });
 
@@ -344,6 +346,7 @@ describe("store", () => {
         sessionId: "s1",
         x: 1,
         y: 2,
+        index: null,
       });
       expect(store.state.groupContextMenu).toBeNull();
     });
@@ -363,6 +366,7 @@ describe("store", () => {
         groupKey: "ccmux",
         x: 12,
         y: 34,
+        index: null,
       });
     });
 
@@ -383,6 +387,7 @@ describe("store", () => {
         groupKey: "gk",
         x: 3,
         y: 4,
+        index: null,
       });
       expect(store.state.contextMenu).toBeNull();
     });

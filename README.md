@@ -39,7 +39,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 📝 **Diff Review**: Press <kbd>d</kbd> to review a session's working-tree diff with [hunk](https://github.com/modem-dev/hunk), right in the pane
 - 🤖 **Background Agents & Subagents**: Claude Code background agents get rows too; running subagents show as `agents` with a live list in the preview
 - 🔁 **Session Control**: Spawn, kill, and restart sessions from the TUI; `ccmux invoke` for scripted one-shot agent turns
-- ⌨️ **Keyboard-First, Mouse-Friendly**: Vim keys and number jumps, plus click-to-switch and right-click context actions
+- ⌨️ **Keyboard-First, Mouse-Friendly**: Vim keys and number jumps, a row menu on <kbd>m</kbd>, plus click-to-switch and right-click context actions
 
 ## 📦 Installation
 
@@ -143,7 +143,7 @@ https://github.com/user-attachments/assets/7e0d42b3-4e7b-43b8-8d06-72a2d69dd694
 
 ### Diff Review with Hunk
 
-[hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's working-tree diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the right-click context menu. If the working tree has no changes, ccmux reports that instead of opening an empty review.
+[hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's working-tree diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the row menu (<kbd>m</kbd>, or right-click). If the working tree has no changes, ccmux reports that instead of opening an empty review.
 
 To send review feedback back to the agent:
 
@@ -478,6 +478,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Jump to first/last    | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd>                                            | Go to top / bottom                                                                                                     |
 | Jump to session       | <kbd>1</kbd>–<kbd>9</kbd>                                                          | Switch directly to session N                                                                                           |
 | Switch to session     | <kbd>Enter</kbd>                                                                   | Switch tmux to the selected pane                                                                                       |
+| Row menu              | <kbd>m</kbd>                                                                       | Open the selected row's (or group header's) context menu; <kbd>j</kbd>/<kbd>k</kbd> to move, <kbd>Enter</kbd> to run   |
 | New session           | <kbd>n</kbd>                                                                       | Open the new-session dialog (agent, placement, prompt, worktree + name; directory derived from the selected row)       |
 | Search                | <kbd>/</kbd>                                                                       | Enter fuzzy search mode                                                                                                |
 | Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel                                                                                            |
@@ -504,7 +505,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 <details>
 <summary><strong>New session dialog keys</strong></summary>
 
-Opened with <kbd>n</kbd>, or from the right-click menu on a session row or a group header. Every field has a default, so <kbd>n</kbd> <kbd>Enter</kbd> spawns straight away.
+Opened with <kbd>n</kbd>, or from the row menu (<kbd>m</kbd>, or right-click) on a session row or a group header. Every field has a default, so <kbd>n</kbd> <kbd>Enter</kbd> spawns straight away.
 
 | Action              | Key                                                        |
 | :------------------ | :--------------------------------------------------------- |

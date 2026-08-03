@@ -323,8 +323,31 @@ interface TUIState {
   activePaneId: string | null;
   activeSessionId: string | null;
   toastMessage: string | null;
-  contextMenu: { sessionId: string; x: number; y: number } | null;
-  groupContextMenu: { groupKey: string; x: number; y: number } | null;
+  /**
+   * The open row menu, or null. `index` is the keyboard-highlighted item, and
+   * null is the state a MOUSE-opened menu starts in: the pointer does its own
+   * highlighting on hover, and a row lit up under a pointer that is elsewhere
+   * would be claiming a key press is pending when none is. `m` opens with the
+   * first item lit instead, because a keyboard menu whose Enter did nothing
+   * until an arrow key was pressed is a dead end.
+   *
+   * It lives ON the menu record rather than beside it, the same way the
+   * new-session dialog's `dropdown` carries its own highlight: a highlight
+   * that outlived its menu, or belonged to the other one, is not a state
+   * either surface can be in.
+   */
+  contextMenu: {
+    sessionId: string;
+    x: number;
+    y: number;
+    index: number | null;
+  } | null;
+  groupContextMenu: {
+    groupKey: string;
+    x: number;
+    y: number;
+    index: number | null;
+  } | null;
   /** Open new-session dialog, or null when it is closed. */
   newSession: NewSessionDraft | null;
   /** Agent last spawned from the dialog, the default when the selected row
@@ -1480,8 +1503,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("confirmSessionIds", []);
     },
 
-    showContextMenu(sessionId: string, x: number, y: number) {
-      setState("contextMenu", { sessionId, x, y });
+    /** `index` is the item the keyboard starts on; null for a mouse-opened
+     *  menu, which is highlighted by the pointer instead. */
+    showContextMenu(
+      sessionId: string,
+      x: number,
+      y: number,
+      index: number | null = null,
+    ) {
+      setState("contextMenu", { sessionId, x, y, index });
       setState("groupContextMenu", null);
     },
 
@@ -1489,13 +1519,49 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("contextMenu", null);
     },
 
-    showGroupContextMenu(groupKey: string, x: number, y: number) {
-      setState("groupContextMenu", { groupKey, x, y });
+    showGroupContextMenu(
+      groupKey: string,
+      x: number,
+      y: number,
+      index: number | null = null,
+    ) {
+      setState("groupContextMenu", { groupKey, x, y, index });
       setState("contextMenu", null);
     },
 
     hideGroupContextMenu() {
       setState("groupContextMenu", null);
+    },
+
+    /**
+     * Move the open menu's highlight by `delta` within `count` items.
+     *
+     * Clamped rather than wrapping, like the new-session dropdown: in a
+     * six-item menu, `k` teleporting to Kill at the bottom reads as a misfire
+     * — and here the bottom item is usually the destructive one. From no
+     * highlight at all (a menu the pointer opened) the first press lands on
+     * the end the movement came from, so `j` starts at the top and `k` at the
+     * bottom rather than both starting in the same place.
+     *
+     * `count` is the caller's, because the item lists are built in `App.tsx`
+     * out of per-row gating (a background row's menu, the async "Move
+     * changes") that the store has no view of.
+     */
+    moveMenuHighlight(delta: number, count: number) {
+      if (count <= 0) return;
+      const menu = state.contextMenu ?? state.groupContextMenu;
+      if (!menu) return;
+      const next =
+        menu.index === null
+          ? delta > 0
+            ? 0
+            : count - 1
+          : Math.min(Math.max(menu.index + delta, 0), count - 1);
+      setState(
+        state.contextMenu ? "contextMenu" : "groupContextMenu",
+        "index",
+        next,
+      );
     },
 
     /**
