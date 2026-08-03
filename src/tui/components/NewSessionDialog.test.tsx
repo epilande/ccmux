@@ -326,6 +326,22 @@ describe("planDialogRows", () => {
       expect(newSessionFloorRows({ ...shape, fork: true })).toBe(6);
       expect(newSessionFloorRows({ ...shape, fork: false })).toBe(8);
     });
+
+    /** How a fork actually opens: continuing in the source's own checkout,
+     *  where there is no worktree to name. */
+    const forkHere = { ...wideFork, namesAWorktree: false };
+
+    it("drops the name row's budget with the name row", () => {
+      // One field fewer than the worktree variant above, and one row of air
+      // with it. A count left at the worktree's would not clip the surplus —
+      // it would draw the border over the last field.
+      expect(planDialogRows(forkHere, 40)).toEqual({
+        ...planDialogRows(wideFork, 40),
+        height: 15,
+      });
+      expect(planDialogRows(forkHere, 5).tooShort).toBe(false);
+      expect(planDialogRows(forkHere, 4).tooShort).toBe(true);
+    });
   });
 });
 
@@ -1291,24 +1307,41 @@ describe("NewSessionDialog move-changes mode", () => {
 
 /**
  * Fork mode (issue #70): the same dialog, opened over a SESSION to continue
- * it in a worktree of its own. The agent and the conversation come from the
- * source, so what is left to choose is where the pane goes and what the
- * worktree is called.
+ * it. The agent and the conversation come from the source, so what is left to
+ * choose is where the pane goes, whether the fork continues in the source's
+ * checkout or in a worktree of its own, and what that worktree is called.
  */
 describe("NewSessionDialog fork mode", () => {
+  const FORK = {
+    sessionId: "s1",
+    label: "Claude · feat/parking",
+    branch: "feat/parking",
+    canWorktree: true,
+    pane: "%5",
+  };
+
+  /** The worktree destination, which is the one with a name to show. The
+   *  in-place default is `forkHereDraft` below. */
   const forkDraft = (
     overrides: Partial<NewSessionDraft> = {},
   ): NewSessionDraft =>
     draft({
       destination: "worktree",
       field: "placement",
-      fork: {
-        sessionId: "s1",
-        label: "Claude · feat/parking",
-        branch: "feat/parking",
-      },
+      fork: FORK,
       ...overrides,
     });
+
+  /** How the dialog actually opens: continuing in the source's own checkout,
+   *  which is the old one-shot `F` with a dialog in front of it. */
+  const forkHereDraft = (
+    overrides: Partial<NewSessionDraft> = {},
+  ): NewSessionDraft =>
+    forkDraft({ destination: "here", placement: "split-h", ...overrides });
+
+  /** The Where row, whichever form it takes. */
+  const whereRow = (frame: string) =>
+    frame.split("\n").find((line) => line.includes("Where"));
 
   it("confirms with Fork on its button", async () => {
     const frame = await renderDialog({ draft: forkDraft() });
@@ -1322,7 +1355,10 @@ describe("NewSessionDialog fork mode", () => {
   it("says what it is doing, and names what it is forking", async () => {
     const frame = await renderDialog({ draft: forkDraft() });
 
-    expect(frame).toContain("Fork into worktree");
+    // The title names the MODE, not the destination: the destination is a row
+    // of its own now, and a title that contradicted it would be worse than one
+    // that says less.
+    expect(frame).toContain("Fork session");
     expect(frame).not.toContain("New session");
     // The source row, read together with the Directory above it: between them
     // they say which conversation is being continued and from where.
@@ -1347,16 +1383,39 @@ describe("NewSessionDialog fork mode", () => {
     expect(frame).toContain("Name");
   });
 
-  it("locks the destination and offers no untracked choice", async () => {
+  it("offers the destination as a choice, and no untracked one", async () => {
     const frame = await renderDialog({ draft: forkDraft() });
 
-    expect(frame).toContain("Where");
-    expect(frame).toContain("New worktree");
-    expect(frame).not.toContain("This checkout");
-    expect(frame).not.toContain("[New worktree");
+    // A real dropdown, not the locked restatement a move gets: `▾` is what
+    // says the row has a list behind it.
+    expect(whereRow(frame)).toContain("New worktree");
+    expect(whereRow(frame)).toContain("▾");
     // Moving changes out from under a session that is still running in the
     // checkout is refused by the daemon; the mode never offers it.
     expect(frame).not.toContain("Untracked");
+  });
+
+  it("opens on the source's own checkout, with nothing to name", async () => {
+    const frame = await renderDialog({ draft: forkHereDraft() });
+
+    expect(whereRow(frame)).toContain("This checkout");
+    expect(whereRow(frame)).toContain("▾");
+    // No worktree is being made, so there is nothing to call one.
+    expect(frame).not.toContain("Name");
+    expectFrameIntegrity(frame);
+  });
+
+  it("locks the destination for a source outside a repository", async () => {
+    // Drawn like Directory rather than as a field: there is no repository for
+    // a linked checkout to hang off, so the choice would only ever be refused.
+    const frame = await renderDialog({
+      draft: forkHereDraft({ fork: { ...FORK, canWorktree: false } }),
+    });
+
+    expect(whereRow(frame)).toContain("This checkout");
+    expect(whereRow(frame)).not.toContain("▾");
+    expect(frame).not.toContain("New worktree");
+    expectFrameIntegrity(frame);
   });
 
   it("previews the name the daemon will derive from the source branch", async () => {
@@ -1375,7 +1434,7 @@ describe("NewSessionDialog fork mode", () => {
     // row must not imply that leaving the field empty leaves it unnamed.
     const frame = await renderDialog({
       draft: forkDraft({
-        fork: { sessionId: "s1", label: "Claude", branch: null },
+        fork: { ...FORK, label: "Claude", branch: null },
       }),
     });
 
@@ -1395,7 +1454,7 @@ describe("NewSessionDialog fork mode", () => {
   const branchlessNameRow = async (width: number) => {
     const frame = await renderDialog({
       draft: forkDraft({
-        fork: { sessionId: "s1", label: "Claude", branch: null },
+        fork: { ...FORK, label: "Claude", branch: null },
       }),
       width,
     });
@@ -1435,7 +1494,7 @@ describe("NewSessionDialog fork mode", () => {
   /** A branch with a name, but not one a directory can be called: nothing in
    *  it survives slugifying, so `<branch>-fork` derives to "". */
   const unslugifiableFork = {
-    sessionId: "s1",
+    ...FORK,
     label: "Claude · 機能/検索",
     branch: "機能/検索",
   };
@@ -1489,7 +1548,7 @@ describe("NewSessionDialog fork mode", () => {
     // A height that under-counts does not clip: it draws two rows over each
     // other, so the ordering chain is what catches it.
     const order = [
-      "Fork into worktree",
+      "Fork session",
       "Placement",
       "Where",
       "Name",
@@ -1543,5 +1602,31 @@ describe("NewSessionDialog fork mode", () => {
     expectFrameIntegrity(frame);
     expect(frame).not.toContain("Needs");
     expect(frame).toContain("Name");
+  });
+
+  it("gives up the name row's height with the name row", async () => {
+    // The shortest mode there is: a fork staying in the source's checkout has
+    // two fields and nothing to name. A floor that still counted the Name row
+    // would report five rows it does not need — and a floor SHORT of what is
+    // drawn is worse, since the extra row lands on its neighbour instead of
+    // clipping.
+    expect(
+      newSessionFloorRows({
+        moveChanges: false,
+        namesAWorktree: false,
+        fork: true,
+      }),
+    ).toBe(5);
+
+    const frame = await renderDialog({
+      draft: forkHereDraft(),
+      width: 60,
+      height: 5,
+      showKeyHints: false,
+    });
+
+    expectFrameIntegrity(frame);
+    expect(frame).not.toContain("Needs");
+    expect(frame).toContain("Where");
   });
 });

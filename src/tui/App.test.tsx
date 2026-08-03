@@ -2227,13 +2227,40 @@ describe("App fork (F / context menu)", () => {
     await setup.renderOnce();
   }
 
-  it("forks the selected session beside its own pane", async () => {
+  /** `F`, then Enter on the dialog it opens: the whole default path. */
+  async function forkFromKey() {
+    setup.mockInput.pressKey("F");
+    await settle();
+    await setup.renderOnce();
+    setup.mockInput.pressEnter();
+    await settle();
+    await setup.renderOnce();
+  }
+
+  it("asks before forking, rather than forking on the keystroke", async () => {
+    // `F` used to post a fork immediately. It opens the dialog now, because a
+    // fork has a destination to choose — and nothing is sent by opening one.
     const { bodies, restore } = captureSpawn();
     try {
       await renderWithSession();
       setup.mockInput.pressKey("F");
       await settle();
       await setup.renderOnce();
+
+      expect(setup.captureCharFrame()).toContain("Fork session");
+      expect(bodies).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("forks the selected session beside its own pane on Enter", async () => {
+    // An untouched dialog is the one-shot `F` this replaced, byte for byte:
+    // the source's own checkout, a split off the source's own pane.
+    const { bodies, restore } = captureSpawn();
+    try {
+      await renderWithSession();
+      await forkFromKey();
       expect(bodies).toHaveLength(1);
       expect(bodies[0]).toMatchObject({
         fork: "s1",
@@ -2245,6 +2272,9 @@ describe("App fork (F / context menu)", () => {
       // No agent or cwd: the daemon reads both off the session being forked.
       expect(bodies[0]?.agent).toBeUndefined();
       expect(bodies[0]?.cwd).toBeUndefined();
+      // And no worktree asked for: the object is what asks for one at all, so
+      // a fork staying put must not send even an empty one.
+      expect(bodies[0]?.worktree).toBeUndefined();
     } finally {
       restore();
     }
@@ -2263,6 +2293,9 @@ describe("App fork (F / context menu)", () => {
       await renderWithSession();
       // CSI 27 ; 2 ; 70 ~  =  modifyOtherKeys form of shift+F.
       setup.renderer.stdin.emit("data", Buffer.from("\x1b[27;2;70~"));
+      await settle();
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
       await settle();
       await setup.renderOnce();
       expect(bodies).toHaveLength(1);
@@ -2303,9 +2336,7 @@ describe("App fork (F / context menu)", () => {
     const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
       await renderWithSession({ persistent: false });
-      setup.mockInput.pressKey("F");
-      await settle();
-      await setup.renderOnce();
+      await forkFromKey();
       expect(switchToPaneSpy).toHaveBeenCalledWith("%99");
       expect(exitSpy).toHaveBeenCalled();
     } finally {
@@ -2314,8 +2345,10 @@ describe("App fork (F / context menu)", () => {
     }
   });
 
-  it("drops a second press while a fork is in flight", async () => {
-    // One conversation, one fork: a double press must not open two panes.
+  it("drops a second submit while a fork is in flight", async () => {
+    // One conversation, one fork: a double Enter must not open two panes. The
+    // dialog is still up while the request is out (it closes only on a landed
+    // fork), so the second one really does reach the submit path.
     const bodies: Record<string, unknown>[] = [];
     const original = globalThis.fetch;
     globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
@@ -2328,10 +2361,18 @@ describe("App fork (F / context menu)", () => {
     try {
       await renderWithSession();
       setup.mockInput.pressKey("F");
+      await settle();
       await setup.renderOnce();
-      setup.mockInput.pressKey("F");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
       await setup.renderOnce();
       expect(bodies).toHaveLength(1);
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("Fork already in progress"),
+      );
     } finally {
       globalThis.fetch = original;
     }
@@ -2345,9 +2386,7 @@ describe("App fork (F / context menu)", () => {
     });
     try {
       await renderWithSession();
-      setup.mockInput.pressKey("F");
-      await settle();
-      await setup.renderOnce();
+      await forkFromKey();
       const frame = squish(setup.captureCharFrame());
       expect(frame).toContain(squish("Fork failed:"));
       expect(frame).toContain(squish("does not support forking"));
@@ -2364,6 +2403,8 @@ describe("App fork (F / context menu)", () => {
       await settle();
       await setup.renderOnce();
       expect(bodies).toHaveLength(0);
+      // Not even the dialog: an unforkable row has nothing to choose about.
+      expect(setup.captureCharFrame()).not.toContain("Fork session");
     } finally {
       restore();
     }
@@ -2378,6 +2419,7 @@ describe("App fork (F / context menu)", () => {
       await settle();
       await setup.renderOnce();
       expect(bodies).toHaveLength(0);
+      expect(setup.captureCharFrame()).not.toContain("Fork session");
     } finally {
       restore();
     }
@@ -2471,7 +2513,10 @@ describe("App fork (F / context menu)", () => {
     }
   });
 
-  it("forks from the context menu item", async () => {
+  it("opens the same dialog from the context menu item", async () => {
+    // One item, one flow: the menu used to carry a second "Fork into worktree"
+    // beside this one, and the destination row inside the dialog is where that
+    // choice lives now.
     const { bodies, restore } = captureSpawn();
     try {
       await renderWithSession();
@@ -2487,6 +2532,12 @@ describe("App fork (F / context menu)", () => {
         .findIndex((line) => line.includes("Fork"));
       expect(menuRow).toBeGreaterThan(0);
       await setup.mockMouse.click(7, menuRow, MouseButtons.LEFT);
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Fork session");
+      expect(bodies).toHaveLength(0);
+
+      setup.mockInput.pressEnter();
       await settle();
       await setup.renderOnce();
       expect(bodies).toHaveLength(1);
@@ -4861,9 +4912,10 @@ describe("App move-changes reporting", () => {
 });
 
 /**
- * "Fork into worktree" (issue #70): the row menu's second fork, which routes
- * through the new-session dialog so the worktree can be named before the
- * conversation is continued in it. `F` stays the one-shot beside the source.
+ * A fork's DESTINATION (issue #70): the one Fork item opens the new-session
+ * dialog, and the dialog is where the fork is told to continue in the source's
+ * own checkout or in a worktree of its own — named, before the conversation is
+ * continued in it.
  */
 describe("App fork into worktree", () => {
   type ForkBody = {
@@ -4947,8 +4999,8 @@ describe("App fork into worktree", () => {
     await setup.renderOnce();
   }
 
-  /** Open the menu and click the item, by label rather than by row: the
-   *  menu's order is deliberately not stable. */
+  /** Open the menu and click Fork, by label rather than by row: the menu's
+   *  order is deliberately not stable. */
   async function openForkDialog(
     sessionOverrides: Record<string, unknown> = {},
     props: Record<string, unknown> = {},
@@ -4957,40 +5009,81 @@ describe("App fork into worktree", () => {
     const row = setup
       .captureCharFrame()
       .split("\n")
-      .findIndex((line) => line.includes("Fork into"));
+      .findIndex((line) => /Fork\s+F/.test(line));
     expect(row).toBeGreaterThan(0);
     await setup.mockMouse.click(7, row, MouseButtons.LEFT);
     await settle();
     await setup.renderOnce();
   }
 
-  it("offers it under the plain Fork on a forkable row in a repo", async () => {
+  /**
+   * Open the dialog and move the destination to the worktree: Tab from
+   * Placement to Where, then the option key for the second choice. Driven
+   * through the real keys rather than a store poke, because the number keys
+   * are scoped to the FOCUSED field and that scoping is half the behaviour.
+   */
+  async function openWorktreeFork(
+    sessionOverrides: Record<string, unknown> = {},
+    props: Record<string, unknown> = {},
+  ) {
+    await openForkDialog(sessionOverrides, props);
+    setup.mockInput.pressTab();
+    await setup.renderOnce();
+    setup.mockInput.pressKey("2");
+    await setup.renderOnce();
+  }
+
+  it("carries one Fork item, not a second one for the worktree", async () => {
     const { restore } = withForkDaemon();
     try {
       await openMenu();
       const lines = setup.captureCharFrame().split("\n");
-      const plain = lines.findIndex((line) => /Fork\s+F/.test(line));
-      const intoWorktree = lines.findIndex((line) =>
-        line.includes("Fork into"),
+      expect(lines.findIndex((line) => /Fork\s+F/.test(line))).toBeGreaterThan(
+        0,
       );
-      expect(plain).toBeGreaterThan(0);
-      // Directly under, so the one-shot stays where fingers already find it.
-      expect(intoWorktree).toBe(plain + 1);
+      // The destination is a row inside the dialog now; two menu items for
+      // one action was the thing this replaced.
+      expect(lines.filter((line) => line.includes("Fork"))).toHaveLength(1);
     } finally {
       restore();
     }
   });
 
-  it("hides it for a row that is not in a git repo", async () => {
-    // A worktree needs a repository to hang off. Hidden rather than offered
-    // and refused, which is the same rule the plain Fork item follows.
+  it("still offers Fork for a row that is not in a git repo", async () => {
+    // The worktree needs a repository to hang off; the FORK does not. The
+    // item used to be gated on the repo because the only dialog it opened was
+    // the worktree one — now the dialog opens with its destination locked.
     const { restore } = withForkDaemon();
     try {
       await openMenu({ mainRepoRoot: null });
-      const frame = setup.captureCharFrame();
-      // The plain fork still works there, which is what makes this specific.
-      expect(frame).toContain("Fork");
-      expect(frame).not.toContain("Fork into");
+      expect(setup.captureCharFrame()).toContain("Fork");
+    } finally {
+      restore();
+    }
+  });
+
+  it("locks the destination when the source is not in a git repo", async () => {
+    const { spawns, restore } = withForkDaemon();
+    try {
+      await openForkDialog({ mainRepoRoot: null });
+      const whereRow = setup
+        .captureCharFrame()
+        .split("\n")
+        .find((line) => line.includes("Where"));
+      expect(whereRow).toContain("This checkout");
+      // No list behind it: a row that looks selectable and refuses every key
+      // reads as broken.
+      expect(whereRow).not.toContain("▾");
+
+      // And the key that would have moved it does nothing.
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]?.worktree).toBeUndefined();
     } finally {
       restore();
     }
@@ -5008,20 +5101,37 @@ describe("App fork into worktree", () => {
     }
   });
 
-  it("opens the dialog over the source, with the name it would derive", async () => {
+  it("opens the dialog over the source, in its own checkout", async () => {
     const { spawns, restore } = withForkDaemon();
     try {
       await openForkDialog();
       const frame = setup.captureCharFrame();
 
-      expect(frame).toContain("Fork into worktree");
+      expect(frame).toContain("Fork session");
       // The source session and the checkout it sits in.
       expect(frame).toContain("Source");
       expect(frame).toContain("feat/parking");
       expect(frame).toContain("/code/myapp");
+      // Nothing about a worktree until one is asked for: no name is derived
+      // for a fork that is staying where it is.
+      expect(frame).toContain("This checkout");
+      expect(frame).not.toContain("feat-parking-fork");
+      // Nothing is sent by opening a dialog.
+      expect(spawns).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("previews the derived name once the worktree is the destination", async () => {
+    const { spawns, restore } = withForkDaemon();
+    try {
+      await openWorktreeFork();
+      const frame = setup.captureCharFrame();
+
+      expect(frame).toContain("New worktree");
       // The daemon's own <branch>-fork rule, previewed.
       expect(frame).toContain("feat-parking-fork");
-      // Nothing is sent by opening a dialog.
       expect(spawns).toHaveLength(0);
     } finally {
       restore();
@@ -5031,17 +5141,19 @@ describe("App fork into worktree", () => {
   it("omits the name entirely when the field was never touched", async () => {
     const { spawns, restore } = withForkDaemon();
     try {
-      await openForkDialog();
+      await openWorktreeFork();
       setup.mockInput.pressEnter();
       await settle();
 
       expect(spawns).toHaveLength(1);
       expect(spawns[0]).toMatchObject({
         fork: "s1",
-        // A new window in the caller's session, and the picker owns the jump.
-        split: false,
+        // A split of the CALLER's pane, not the source's: a fork that has left
+        // the source's checkout is no longer that pane's sibling.
+        split: "h",
         detach: true,
       });
+      expect(spawns[0]?.target).toBeUndefined();
       // The worktree is asked for, but NOT named: an untouched row is the
       // derived state, which the daemon numbers past a collision. Posting the
       // preview as an explicit name would open whatever answers to that slug.
@@ -5058,8 +5170,8 @@ describe("App fork into worktree", () => {
   it("sends a typed name explicitly, slugified as the row showed it", async () => {
     const { spawns, restore } = withForkDaemon();
     try {
-      await openForkDialog();
-      // Placement -> Name: the only two fields this mode has.
+      await openWorktreeFork();
+      // Where -> Name, the row the worktree destination just added.
       setup.mockInput.pressTab();
       await setup.renderOnce();
       await setup.mockInput.typeText("Parking Retry");
@@ -5086,7 +5198,7 @@ describe("App fork into worktree", () => {
       await setup.renderOnce();
 
       expect(spawns).toHaveLength(0);
-      expect(setup.captureCharFrame()).not.toContain("Fork into worktree");
+      expect(setup.captureCharFrame()).not.toContain("Fork session");
     } finally {
       restore();
     }
@@ -5105,14 +5217,14 @@ describe("App fork into worktree", () => {
       ),
     );
     try {
-      await openForkDialog();
+      await openWorktreeFork();
       setup.mockInput.pressEnter();
       await settle();
       await setup.renderOnce();
 
       const frame = squish(setup.captureCharFrame());
       expect(frame).toContain("alreadyexists");
-      expect(frame).toContain("Forkintoworktree");
+      expect(frame).toContain("Forksession");
     } finally {
       restore();
     }
@@ -5121,7 +5233,7 @@ describe("App fork into worktree", () => {
   it("refuses a name with nothing left after slugifying", async () => {
     const { spawns, restore } = withForkDaemon();
     try {
-      await openForkDialog();
+      await openWorktreeFork();
       setup.mockInput.pressTab();
       await setup.renderOnce();
       await setup.mockInput.typeText("!!!");
@@ -5168,7 +5280,7 @@ describe("App fork into worktree", () => {
       }),
     );
     try {
-      await openForkDialog({}, { sidebar: true, persistent: true });
+      await openWorktreeFork({}, { sidebar: true, persistent: true });
       setup.mockInput.pressEnter();
       await settle();
       await setup.renderOnce();
@@ -5190,9 +5302,9 @@ describe("App fork into worktree", () => {
     // checkout instead of getting one of its own.
     const { restore } = withForkDaemon();
     try {
-      await openForkDialog({ gitBranch: "HEAD" });
+      await openWorktreeFork({ gitBranch: "HEAD" });
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Fork into worktree");
+      expect(frame).toContain("Fork session");
       // The Source row still says HEAD, verbatim, the way the picker's own
       // branch column does. It is the derived NAME that has to stay quiet.
       expect(frame).toContain("HEAD");
@@ -5207,9 +5319,9 @@ describe("App fork into worktree", () => {
     // name coming even when the row carries no branch to preview.
     const { restore } = withForkDaemon();
     try {
-      await openForkDialog({ gitBranch: null });
+      await openWorktreeFork({ gitBranch: null });
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Fork into worktree");
+      expect(frame).toContain("Fork session");
       expect(frame).toContain("auto");
       expect(frame).not.toContain("Type a prompt");
     } finally {

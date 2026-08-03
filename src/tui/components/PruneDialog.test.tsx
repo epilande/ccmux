@@ -80,7 +80,7 @@ describe("PruneDialog", () => {
       skipped: [],
     });
 
-    expect(frame).toContain("Prune Worktrees");
+    expect(frame).toContain("Prune worktrees");
     expect(frame).toContain("repo/feature");
     expect(frame).toContain("PR #68 merged");
     expect(frame).toContain("repo/old");

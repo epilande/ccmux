@@ -3181,17 +3181,21 @@ describe("store", () => {
     /**
      * Fork mode (issue #70). The dialog opens over a session rather than a
      * directory: the agent and the conversation come from the source, so the
-     * only things left to choose are where the pane goes and what the
-     * worktree is called.
+     * only things left to choose are where the pane goes, whether the fork
+     * continues here or in a worktree, and what that worktree is called.
      */
     describe("fork mode", () => {
       const FORK = {
         sessionId: "s1",
         label: "Claude · feat/parking",
         branch: "feat/parking",
+        canWorktree: true,
+        pane: "%5",
       };
+      /** A source outside any repository: nowhere to put a worktree. */
+      const FORK_NO_REPO = { ...FORK, canWorktree: false };
 
-      it("opens over the source session with the destination locked", () => {
+      it("opens over the source session, continuing in its own checkout", () => {
         const store = createTUIStore();
 
         store.actions.openNewSessionDialog({
@@ -3203,10 +3207,12 @@ describe("store", () => {
         expect(store.state.newSession).toEqual({
           cwd: "/repo",
           agent: "claude",
-          placement: "window",
-          // A fork into a worktree has nowhere else to go, exactly as a move
-          // does: the mode arrives with the destination already made.
-          destination: "worktree",
+          // Beside the conversation it continues, which is what the one-shot
+          // `F` key did before this dialog existed.
+          placement: "split-h",
+          // Untouched, this is the old instant fork exactly: same directory,
+          // no worktree asked for. The worktree is the OTHER choice.
+          destination: "here",
           prompt: "",
           moveChanges: false,
           untracked: "move",
@@ -3219,39 +3225,55 @@ describe("store", () => {
         });
       });
 
-      it("offers only placement and the name", () => {
+      it("offers placement and the destination, and no name until one is needed", () => {
         const store = createTUIStore();
         store.actions.openNewSessionDialog({
           cwd: "/repo",
           agent: "claude",
           fork: FORK,
         });
+
+        const walk = () => {
+          const seen: string[] = [];
+          for (let i = 0; i < NEW_SESSION_FIELDS.length + 1; i++) {
+            seen.push(store.state.newSession!.field);
+            store.actions.moveNewSessionField(1);
+          }
+          return new Set(seen);
+        };
+
+        // Agent, prompt and untracked all belong to a spawn that starts
+        // something new; a fork starts nothing. A fork staying in the source's
+        // checkout has no worktree to name either.
+        expect(walk()).toEqual(new Set(["placement", "destination"]));
+
+        store.actions.setNewSessionDestination("worktree");
+        expect(walk()).toEqual(
+          new Set(["placement", "destination", "worktreeName"]),
+        );
+      });
+
+      it("locks the destination for a source outside a repository", () => {
+        const store = createTUIStore();
+        store.actions.openNewSessionDialog({
+          cwd: "/tmp/scratch",
+          agent: "claude",
+          fork: FORK_NO_REPO,
+        });
+
+        // Offered, it would be a choice that can only ever be refused: there
+        // is no repository for a linked checkout to hang off.
+        store.actions.setNewSessionDestination("worktree");
+        expect(store.state.newSession?.destination).toBe("here");
 
         const seen: string[] = [];
         for (let i = 0; i < NEW_SESSION_FIELDS.length + 1; i++) {
           seen.push(store.state.newSession!.field);
           store.actions.moveNewSessionField(1);
         }
-
-        // Agent, prompt and untracked all belong to a spawn that starts
-        // something new; a fork starts nothing. The destination is locked, so
-        // Tab skips it the same way a move's does.
-        expect(new Set(seen)).toEqual(new Set(["placement", "worktreeName"]));
-      });
-
-      it("refuses to move the destination off the worktree", () => {
-        const store = createTUIStore();
-        store.actions.openNewSessionDialog({
-          cwd: "/repo",
-          agent: "claude",
-          fork: FORK,
-        });
-
-        // The destination is what makes this a fork INTO a worktree; flipping
-        // it back would post the plain fork the `F` key already sends.
-        store.actions.setNewSessionDestination("here");
-
-        expect(store.state.newSession?.destination).toBe("worktree");
+        // And Tab skips it, the way it skips a move's lock: a row whose keys
+        // do nothing reads as broken.
+        expect(new Set(seen)).toEqual(new Set(["placement"]));
       });
 
       it("names the worktree like every other worktree destination", () => {
@@ -3261,6 +3283,7 @@ describe("store", () => {
           agent: "claude",
           fork: FORK,
         });
+        store.actions.setNewSessionDestination("worktree");
         store.actions.setNewSessionField("worktreeName");
         store.actions.setNewSessionWorktreeName("Parking Fork!");
 
@@ -3321,14 +3344,22 @@ describe("store", () => {
         ).toBe(true);
       });
 
-      it("is true for a fork, whose lock could come loose the same way", () => {
+      it("is false for a fork continuing in the source's own checkout", () => {
+        // A fork is not a worktree mode: it CHOOSES one, like an ordinary
+        // spawn, so the destination is the whole answer here.
         expect(
           namesAWorktree({
             moveChanges: false,
             destination: "here",
-            fork: { sessionId: "s1", label: "Claude", branch: null },
+            fork: {
+              sessionId: "s1",
+              label: "Claude",
+              branch: null,
+              canWorktree: true,
+              pane: "%5",
+            },
           }),
-        ).toBe(true);
+        ).toBe(false);
       });
 
       it("is false for a plain session in the checkout it opened over", () => {

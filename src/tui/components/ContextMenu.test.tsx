@@ -80,18 +80,18 @@ describe("ContextMenu", () => {
   it("renders the hint next to each item", async () => {
     const { frame } = await renderMenu({
       items: [
-        { label: "Pin to Top", hint: "<", color: theme.blue, action: () => {} },
+        { label: "Pin to top", hint: "<", color: theme.blue, action: () => {} },
         {
-          label: "Pin to Bottom",
+          label: "Pin to bottom",
           hint: ">",
           color: theme.blue,
           action: () => {},
         },
       ],
     });
-    expect(frame).toContain("Pin to Top");
+    expect(frame).toContain("Pin to top");
     expect(frame).toContain("<");
-    expect(frame).toContain("Pin to Bottom");
+    expect(frame).toContain("Pin to bottom");
     expect(frame).toContain(">");
   });
 
@@ -157,7 +157,7 @@ describe("ContextMenu sizing", () => {
     const items: ContextMenuItem[] = [
       { label: "New session here", hint: "n", color: theme.text, action() {} },
       { label: "Attach agent", hint: "enter", color: theme.text, action() {} },
-      { label: "Prune Worktrees", hint: "W", color: theme.text, action() {} },
+      { label: "Prune worktrees", hint: "W", color: theme.text, action() {} },
       { label: "Open agent view", hint: "", color: theme.text, action() {} },
     ];
     const { frame } = await renderMenu({ items });

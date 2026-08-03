@@ -138,6 +138,23 @@ export interface NewSessionFork {
    * branch this client never saw", not "there is no name".
    */
   branch: string | null;
+  /**
+   * Whether a worktree is one of the destinations this fork can be given.
+   *
+   * Answered when the dialog opens, from the source's `mainRepoRoot`: a
+   * session outside a repository has nowhere to hang a linked checkout. False
+   * locks the destination to the source's own directory rather than offering
+   * a choice that would only ever be refused.
+   */
+  canWorktree: boolean;
+  /**
+   * The source's own pane, or null for a row that has none right now.
+   *
+   * Only the in-place destination uses it, and only for a split: a fork that
+   * continues in the same directory belongs beside the conversation it came
+   * from, not beside whichever pane the picker happens to be in.
+   */
+  pane: string | null;
 }
 
 /**
@@ -159,15 +176,14 @@ export interface NewSessionShape {
  * budgets for the height floor. A consumer that disagreed would not clip the
  * row it did not expect — it would draw it over its neighbour.
  *
- * All three disjuncts, though the store locks a move's and a fork's
- * destination to `worktree`: the name row is what those modes name their
- * worktree with, and a lock that ever came loose must not take the field with
- * it.
+ * Both disjuncts, though the store locks a move's destination to `worktree`:
+ * the name row is what that mode names its worktree with, and a lock that ever
+ * came loose must not take the field with it. A FORK is not on that list — it
+ * chooses its destination like an ordinary spawn does (issue #99 follow-up),
+ * so a fork continuing in the source's own checkout names nothing.
  */
 export function namesAWorktree(draft: NewSessionShape): boolean {
-  return (
-    draft.destination === "worktree" || draft.moveChanges || draft.fork !== null
-  );
+  return draft.destination === "worktree" || draft.moveChanges;
 }
 
 /**
@@ -176,14 +192,16 @@ export function namesAWorktree(draft: NewSessionShape): boolean {
  * Most of them are conditional. Move-changes mode locks the destination (a
  * move has nowhere to go but a new worktree, so offering "here" would be a
  * choice that cannot be taken) and adds the untracked-files choice; an
- * ordinary new session has neither. Fork mode locks the destination for the
- * same reason and drops two more: a fork continues the SOURCE's agent and the
- * source's conversation, so neither an agent nor an opening prompt is a
- * choice it has. The name belongs to whichever mode is making a worktree, and
- * to none of them when the session starts in the checkout it was opened over.
- * A field that cannot be acted on must not be reachable by Tab either —
- * focusing a row whose keys do nothing is exactly the "reads as broken"
- * outcome the picker hides items to avoid.
+ * ordinary new session has neither. Fork mode drops two: a fork continues the
+ * SOURCE's agent and the source's conversation, so neither an agent nor an
+ * opening prompt is a choice it has. It KEEPS the destination — continuing
+ * beside the original and continuing in a worktree of its own are the two
+ * things a fork can mean — except where the source sits outside a repository,
+ * which leaves nowhere for the second to go. The name belongs to whichever
+ * draft is making a worktree, and to none of them when the session starts in
+ * the checkout it was opened over. A field that cannot be acted on must not be
+ * reachable by Tab either — focusing a row whose keys do nothing is exactly
+ * the "reads as broken" outcome the picker hides items to avoid.
  *
  * The full list stays the source of truth for the DIALOG'S HEIGHT: every
  * field declares a row count, and a hidden one declares zero.
@@ -194,7 +212,11 @@ export function newSessionFields(
   const forking = draft.fork !== null;
   return NEW_SESSION_FIELDS.filter((field) => {
     if (field === "agent" || field === "prompt") return !forking;
-    if (field === "destination") return !draft.moveChanges && !forking;
+    if (field === "destination") {
+      return (
+        !draft.moveChanges && (draft.fork === null || draft.fork.canWorktree)
+      );
+    }
     if (field === "untracked") return draft.moveChanges;
     if (field === "worktreeName") return namesAWorktree(draft);
     return true;
@@ -1205,13 +1227,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       case "destination": {
         const option = DESTINATION_OPTIONS.find((o) => o.value === value);
         if (!option) return;
-        // Locked in move-changes and fork mode, and enforced here rather
-        // than only in the dialog: the destination is what makes the request
-        // a move (or a fork into a worktree) at all, so any path that could
-        // flip it back to `here` would post a spawn that silently dropped
-        // the changes it was opened to relocate, or a bare fork into the
-        // checkout the source already has.
-        if (draft.moveChanges || draft.fork) return;
+        // Locked in move-changes mode, and enforced here rather than only in
+        // the dialog: the destination is what makes the request a move at
+        // all, so any path that could flip it back to `here` would post a
+        // spawn that silently dropped the changes it was opened to relocate.
+        // A fork chooses freely, unless its source has no repository to hang
+        // a worktree off — there the lock is the other way round.
+        if (draft.moveChanges) return;
+        if (draft.fork && !draft.fork.canWorktree) return;
         batch(() => {
           setState("newSession", "destination", option.value);
           // The name field goes with the worktree. Focus cannot be left on a
@@ -1487,23 +1510,29 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       /** Open in move-changes mode: destination locked to a new worktree,
        *  with the untracked-files choice. */
       moveChanges?: boolean;
-      /** Open in fork mode: continue this session in a worktree of its own,
-       *  destination locked, agent and prompt gone. */
+      /** Open in fork mode: continue this session, here or in a worktree of
+       *  its own, with the agent and prompt gone. */
       fork?: NewSessionFork;
     }) {
       const moveChanges = init.moveChanges === true;
       const fork = init.fork ?? null;
-      // Both modes exist to put something somewhere new; only an ordinary
-      // spawn defaults to the directory it was opened over.
-      const destination: NewSessionDestination =
-        moveChanges || fork ? "worktree" : "here";
+      // A move exists to put the changes somewhere new; everything else
+      // defaults to the directory it was opened over, a fork included — the
+      // key that opens it used to fork in place with no dialog at all, and
+      // Enter on an untouched dialog still does exactly that.
+      const destination: NewSessionDestination = moveChanges
+        ? "worktree"
+        : "here";
       batch(() => {
         setState("contextMenu", null);
         setState("groupContextMenu", null);
         setState("newSession", {
           cwd: init.cwd,
           agent: init.agent,
-          placement: "window",
+          // A fork belongs beside the conversation it continues, which is what
+          // the one-shot `F` always did; anything else starts in a window of
+          // its own.
+          placement: fork ? "split-h" : "window",
           destination,
           prompt: "",
           moveChanges,

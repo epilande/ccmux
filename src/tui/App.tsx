@@ -421,14 +421,15 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Whether this row can be forked into a worktree of its own (issue #70).
+   * Whether this row's fork can be given a worktree of its own (issue #70).
    *
-   * Everything the plain fork needs, plus a repository for the worktree to
+   * Everything the fork itself needs, plus a repository for the worktree to
    * hang off: `mainRepoRoot` is what the daemon would resolve too, so a row
    * without one has nowhere to put a linked checkout. Checked here rather
-   * than left to the daemon's refusal because this is a MENU ITEM — hiding
-   * what cannot work is the same rule the plain Fork item follows, and an
-   * item that only ever answers with an error reads as broken.
+   * than left to the daemon's refusal, but only where the CHOICE is offered:
+   * the Fork item and the `F` key are gated on `canForkSession` alone, and a
+   * source outside a repository simply opens the dialog with its destination
+   * locked to the checkout it is already in.
    */
   function canForkIntoWorktree(
     session:
@@ -474,66 +475,83 @@ export function App(props: AppProps) {
   const FORK_TIMEOUT_MS = 15_000;
 
   /**
-   * Fork a session into a pane beside its own: same agent, same directory,
-   * conversation continued from the source's history, original untouched.
+   * Open the new-session dialog in fork mode over `session`: continue this
+   * conversation, either beside the original or in a worktree of its own.
    *
-   * The picker only chooses the DESTINATION here (`split` + `target` /
-   * `callerPane`); how to continue the conversation is the daemon's
-   * `forkCommand` template. No cwd is sent, which the daemon reads as "the
-   * source's directory" — a product choice (a fork sits beside its original),
-   * not a constraint: the daemon accepts an explicit cwd for a fork.
+   * The single entry point for both the `F` key and the row menu's Fork item.
+   * `F` used to post a fork on the keystroke and the menu carried a second
+   * item for the worktree variant; one item that always asks is fewer things
+   * to learn, and the destination is the only decision a fork has.
+   *
+   * Everything else the request needs comes off the row, since a fork's agent
+   * and directory are the source's — the dialog only carries enough of the
+   * source to describe it, because the session list re-sorts under SSE while
+   * a dialog is open.
    */
-  async function forkSession(session: EnrichedSession) {
-    if (!canForkSession(session)) return;
-    if (forkInFlight) {
-      // Say so rather than dropping it silently, which is indistinguishable
-      // from a dead key.
-      store.actions.showToast("Fork already in progress");
-      return;
+  function openForkDialog(session: EnrichedSession): void {
+    openNewSession({
+      cwd: sessionCwd(session),
+      agent: session.agentType,
+      fork: {
+        sessionId: session.id,
+        // The agent and the branch: between them they say which of a
+        // directory's sessions this is, and the branch is also what a derived
+        // worktree name is built from, so that preview is explained rather
+        // than merely displayed.
+        label: session.gitBranch
+          ? `${session.agentType} · ${session.gitBranch}`
+          : session.agentType,
+        // A detached checkout reports the literal string "HEAD" here, which
+        // is a branch column's honest answer and a naming rule's nonsense:
+        // the daemon names a fork of one after the sha (`readCheckoutHead`),
+        // so previewing `head-fork` promises a name nobody gets. Worse, the
+        // preview is typeable — sent as an EXPLICIT name it would make the
+        // second detached fork open the first one's checkout. Null instead,
+        // which is the row's existing "a name is coming, just not one this
+        // client can show" state. The label above keeps saying HEAD.
+        branch: session.gitBranch === "HEAD" ? null : session.gitBranch,
+        canWorktree: canForkIntoWorktree(session),
+        pane: session.tmuxPane ?? null,
+      },
+    });
+  }
+
+  /**
+   * Where a fork's new pane goes, in the daemon's own terms.
+   *
+   * The two destinations differ, and the difference is the point. A fork that
+   * stays in the source's checkout is a sibling of THAT conversation, so a
+   * split is taken out of the source's own pane (`target`) — which is what the
+   * one-shot `F` always did. A fork into a worktree has left that context
+   * behind, so it follows the ordinary spawn rule and splits the CALLER's pane
+   * instead; an explicit `target` there would insert a window mid-session and
+   * renumber everything after it.
+   *
+   * Falling back to `callerPane` also covers a source with no pane to sit
+   * beside: with no placement at all the daemon runs a bare `new-window`, and
+   * having no client of its own tmux picks its MRU session — so the window
+   * lands somewhere unrelated and the jump afterwards drags the user there.
+   */
+  async function forkPlacement(
+    draft: NewSessionDraft,
+    fork: NewSessionFork,
+  ): Promise<{
+    split: "h" | "v" | false;
+    target?: string;
+    callerPane?: string;
+  }> {
+    let split = SPAWN_SPLIT[draft.placement];
+    if (draft.destination !== "worktree" && split !== false && fork.pane) {
+      return { split, target: fork.pane };
     }
-    forkInFlight = true;
-    try {
-      // Beside the source when it has a pane to sit beside. Otherwise a new
-      // window in the CALLER's session: sending no placement at all leaves
-      // the daemon running a bare `new-window`, and since the daemon has no
-      // client, tmux picks its own MRU session — so the window lands
-      // somewhere unrelated and the jump below then drags the user there.
-      const target = session.tmuxPane ?? undefined;
-      const callerPane = target ? undefined : await resolveSpawnPane();
-      const response = await fetch(`${getDaemonUrl()}/spawn`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fork: session.id,
-          split: target ? "h" : false,
-          target,
-          callerPane: callerPane ?? undefined,
-          // The jump below is this component's own exit path (it flashes the
-          // pane and closes a one-shot picker); letting the daemon switch too
-          // would race it.
-          detach: true,
-        }),
-        signal: AbortSignal.timeout(FORK_TIMEOUT_MS),
-      });
-      const data = (await response.json().catch(() => null)) as {
-        paneId?: string;
-        error?: string;
-      } | null;
-      if (!response.ok || !data?.paneId) {
-        store.actions.showToast(
-          `Fork failed: ${data?.error ?? response.statusText}`,
-        );
-        return;
-      }
-      selectPane(data.paneId);
-    } catch (err: unknown) {
-      store.actions.showToast(`Fork failed: ${errText(err)}`);
-    } finally {
-      // In `finally`, not on each exit path: a throw between the guard and
-      // the response (an aborted fetch, a rejected json parse) used to leave
-      // the latch set forever.
-      forkInFlight = false;
+    const callerPane = await resolveSpawnPane();
+    // A sidebar alone in its window has nothing to split but itself, and the
+    // daemon's placement-less `split-window` would halve the rail.
+    if (split !== false && callerPane === null && props.sidebar) {
+      split = false;
+      store.actions.showToast("No pane to split here; opened a window");
     }
+    return { split, callerPane: callerPane ?? undefined };
   }
 
   /**
@@ -741,48 +759,7 @@ export function App(props: AppProps) {
     if (!cm) return;
     const session = store.state.sessions.find((s) => s.id === cm.sessionId);
     store.actions.hideContextMenu();
-    if (session) void forkSession(session);
-  }
-
-  /**
-   * "Fork into worktree": continue this session in a checkout of its own,
-   * through the dialog rather than on the click.
-   *
-   * The dialog is what makes this different from `F`: a fork beside the
-   * original needs no decisions, but a fork into a worktree has a name — and
-   * the name is what tells two forks of one branch apart later. Everything
-   * else the request needs comes off the row, since a fork's agent and
-   * directory are the source's.
-   */
-  function contextMenuForkIntoWorktree() {
-    const cm = store.state.contextMenu;
-    if (!cm) return;
-    const session = store.state.sessions.find((s) => s.id === cm.sessionId);
-    store.actions.hideContextMenu();
-    if (!session || !canForkIntoWorktree(session)) return;
-    openNewSession({
-      cwd: sessionCwd(session),
-      agent: session.agentType,
-      fork: {
-        sessionId: session.id,
-        // The agent and the branch: between them they say which of a
-        // directory's sessions this is, and the branch is also what the
-        // derived name is built from, so the preview below it is explained
-        // rather than merely displayed.
-        label: session.gitBranch
-          ? `${session.agentType} · ${session.gitBranch}`
-          : session.agentType,
-        // A detached checkout reports the literal string "HEAD" here, which
-        // is a branch column's honest answer and a naming rule's nonsense:
-        // the daemon names a fork of one after the sha (`readCheckoutHead`),
-        // so previewing `head-fork` promises a name nobody gets. Worse, the
-        // preview is typeable — sent as an EXPLICIT name it would make the
-        // second detached fork open the first one's checkout. Null instead,
-        // which is the row's existing "a name is coming, just not one this
-        // client can show" state. The label above keeps saying HEAD.
-        branch: session.gitBranch === "HEAD" ? null : session.gitBranch,
-      },
-    });
+    if (session && canForkSession(session)) openForkDialog(session);
   }
 
   function contextMenuNewSession() {
@@ -907,37 +884,24 @@ export function App(props: AppProps) {
               // full phrase lives in the dialog this opens.
               label: "Move changes",
               hint: "",
-              color: theme.peach,
+              color: theme.text,
               action: contextMenuMoveChanges,
             },
           ]
         : [];
     // Hidden rather than disabled when the agent or the row can't be forked:
     // an item that is only ever there for Claude rows with hooks installed
-    // would otherwise read as broken on every other row.
+    // would otherwise read as broken on every other row. Where the fork can
+    // GO is the dialog's question, not this item's — a row outside a
+    // repository still forks, just with nowhere to put a worktree.
     const forkItem: ContextMenuItem[] = canForkSession(session)
       ? [
           {
             label: "Fork",
             hint: "F",
-            color: theme.blue,
+            color: theme.text,
             action: contextMenuFork,
           },
-          // Directly under its one-shot sibling, and only where there is a
-          // repository to make a worktree in. Same 22-column, one-line rule
-          // as every other label here: at exactly 18 columns this one has no
-          // room to grow, and a wrap would silently break the whole menu's
-          // height.
-          ...(canForkIntoWorktree(session)
-            ? [
-                {
-                  label: "Fork into worktree",
-                  hint: "",
-                  color: theme.blue,
-                  action: contextMenuForkIntoWorktree,
-                },
-              ]
-            : []),
         ]
       : [];
     return [
@@ -957,7 +921,7 @@ export function App(props: AppProps) {
       {
         label: "Restart",
         hint: "r",
-        color: theme.peach,
+        color: theme.text,
         action: () => contextMenuConfirm("restart"),
       },
       // Last of the always-present actions on purpose. This item appears and
@@ -1014,25 +978,25 @@ export function App(props: AppProps) {
         action: groupContextMenuNewSession,
       },
       {
-        label: "Pin to Top",
+        label: "Pin to top",
         hint: "<",
-        color: theme.blue,
+        color: theme.text,
         action: () => groupContextMenuPin("top"),
       },
       {
-        label: "Pin to Bottom",
+        label: "Pin to bottom",
         hint: ">",
-        color: theme.blue,
+        color: theme.text,
         action: () => groupContextMenuPin("bottom"),
       },
       {
-        label: "Prune Worktrees",
+        label: "Prune worktrees",
         hint: "W",
-        color: theme.peach,
+        color: theme.text,
         action: groupContextMenuPrune,
       },
       {
-        label: "Kill Group",
+        label: "Kill group",
         hint: "X",
         color: theme.red,
         action: groupContextMenuKill,
@@ -1232,8 +1196,11 @@ export function App(props: AppProps) {
   }): void {
     // Mirrors `reviewSession`: refuse at the point of intent rather than
     // opening a dialog with a blank Directory row whose Enter round-trips
-    // to a 400 from the daemon.
-    if (!context.cwd) {
+    // to a 400 from the daemon. A FORK is exempt: it sends no cwd at all (the
+    // daemon reads the source's), so a row whose directory never reached this
+    // client is still perfectly forkable, and refusing would break the `F`
+    // key on it for the sake of one blank row.
+    if (!context.cwd && !context.fork) {
       store.actions.showToast("Can't start here: no working directory");
       return;
     }
@@ -1409,55 +1376,58 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Continue the dialog's source session in a worktree of its own (issue
-   * #70): the `F` key's fork, with a destination and a name.
+   * Continue the dialog's source session (issue #70): the same conversation,
+   * in the checkout it is already in or in a worktree of its own.
    *
    * Split from the spawn path rather than folded into it, because almost none
    * of that path applies: there is no agent to resolve, no prompt to check
    * against one, no cwd (the daemon reads the source's), and no last-agent to
    * remember. What it shares is the DIALOG — the same placement semantics and
-   * the same derived-vs-explicit name — and the same one-at-a-time guard the
-   * key path uses, since both open a pane off one conversation.
+   * the same derived-vs-explicit name.
+   *
+   * The one-at-a-time guard is the whole reason a landed fork is not simply
+   * left to the daemon: one conversation must not become two panes because
+   * Enter was pressed twice.
    */
-  async function submitForkIntoWorktree(draft: NewSessionDraft): Promise<void> {
+  async function submitFork(draft: NewSessionDraft): Promise<void> {
     const fork = draft.fork;
     if (!fork) return;
-    if (refuseUnslugifiableName(draft)) return;
+    const toWorktree = draft.destination === "worktree";
+    if (toWorktree && refuseUnslugifiableName(draft)) return;
     // Placement carries a `%N` from OUR tmux server; see `submitNewSession`.
     if (!ensureSameServer()) return;
     if (forkInFlight) {
+      // Say so rather than dropping it silently, which is indistinguishable
+      // from a dead key.
       store.actions.showToast("Fork already in progress");
       return;
     }
     forkInFlight = true;
     const worktreeName = draftWorktreeName(draft);
     try {
-      const callerPane = await resolveSpawnPane();
-      let split = SPAWN_SPLIT[draft.placement];
-      if (split !== false && callerPane === null && props.sidebar) {
-        split = false;
-        store.actions.showToast("No pane to split here; opened a window");
-      }
+      const placement = await forkPlacement(draft, fork);
       const response = await fetch(`${getDaemonUrl()}/spawn`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           fork: fork.sessionId,
-          // `callerPane`, not `target`: same reasoning as the ordinary spawn's
-          // — the picker means "my session/pane", and an explicit target
-          // renumbers the windows after it.
-          split,
-          callerPane: callerPane ?? undefined,
+          ...placement,
           // The jump below is this component's own exit path; letting the
           // daemon switch too would race it.
           detach: true,
-          // Always present, even empty: the object is what asks for a worktree
-          // at all. Named only when one was typed — left out, the daemon
-          // derives `<branch>-fork` from the source checkout's own HEAD and
-          // numbers it past a collision, which is what an untouched row asked
-          // for. Sent, it means that worktree specifically, and an existing
-          // one of that name is opened rather than sidestepped.
-          worktree: worktreeName ? { name: worktreeName } : {},
+          // Present even when empty, and absent entirely otherwise: the object
+          // is what asks for a worktree at all, so a fork staying in the
+          // source's checkout must not send one. Named only when one was
+          // typed — left out, the daemon derives `<branch>-fork` from the
+          // source checkout's own HEAD and numbers it past a collision, which
+          // is what an untouched row asked for. Sent, it means that worktree
+          // specifically, and an existing one of that name is opened rather
+          // than sidestepped.
+          worktree: toWorktree
+            ? worktreeName
+              ? { name: worktreeName }
+              : {}
+            : undefined,
         }),
         signal: AbortSignal.timeout(FORK_TIMEOUT_MS),
       });
@@ -1483,7 +1453,11 @@ export function App(props: AppProps) {
         // launch from and leave. The toast is then the only account there is
         // of where the fork landed, so it says so even unnamed.
         store.actions.showToast(
-          created ? `Forked into ${created}` : "Forked into a new worktree",
+          created
+            ? `Forked into ${created}`
+            : toWorktree
+              ? "Forked into a new worktree"
+              : "Forked in this checkout",
         );
         return;
       }
@@ -1503,7 +1477,7 @@ export function App(props: AppProps) {
     if (!draft) return;
     // Fork mode shares the dialog and almost nothing else; see above.
     if (draft.fork) {
-      await submitForkIntoWorktree(draft);
+      await submitFork(draft);
       return;
     }
     if (spawnInFlight) return;
@@ -2492,7 +2466,7 @@ export function App(props: AppProps) {
           // that can't be forked, say why. The help overlay lists `F`
           // unconditionally, so silence there reads as a broken key.
           if (sessionToFork) {
-            if (canForkSession(sessionToFork)) void forkSession(sessionToFork);
+            if (canForkSession(sessionToFork)) openForkDialog(sessionToFork);
             else store.actions.showToast(forkRefusalReason(sessionToFork));
           }
         } else {
