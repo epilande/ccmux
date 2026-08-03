@@ -278,13 +278,51 @@ describe("ContextMenu sizing", () => {
  * A menu that has been DRAWN must never move.
  *
  * One of its items arrives asynchronously (the row menu's "Move changes",
- * gated on a `git status` the daemon runs after the menu is up). Appending it
- * last keeps everything above it still — but only where the menu grows
- * downward. Clamped against the bottom edge it grows UPWARD instead, so every
- * row slides one line up as the answer lands, under a pointer that is already
- * travelling: the click aimed at Fork lands on Kill.
+ * gated on a `git status` the daemon runs after the menu is up). The reserved
+ * row keeps the box still at a viewport edge; freezing the list on first hover
+ * keeps the individual pointer targets still when that item lands mid-list.
  */
 describe("ContextMenu with an item still to come", () => {
+  it("keeps pointer targets fixed once the pointer enters a row", async () => {
+    const base = itemSpies(["Attach", "Restart", "Kill"]);
+    const late = itemSpies(["Move changes"])[0]!;
+    const [items, setItems] = createSignal<ContextMenuItem[]>(base);
+    const [reserved, setReserved] = createSignal(1);
+
+    setup = await testRender(
+      () => (
+        <ContextMenu
+          x={5}
+          y={2}
+          items={items()}
+          reservedRows={reserved()}
+          onClose={() => {}}
+        />
+      ),
+      { width: 60, height: 15 },
+    );
+    await setup.renderOnce();
+
+    const restart = locate(setup.captureCharFrame(), "Restart")!;
+    await setup.mockMouse.moveTo(restart.col, restart.row);
+    await setup.renderOnce();
+
+    // The async answer inserts a row above the one the pointer is aiming at.
+    // A pointer menu freezes at first hover, so the screen coordinate keeps
+    // meaning Restart rather than silently becoming Move changes.
+    setItems([base[0]!, late, base[1]!, base[2]!]);
+    setReserved(0);
+    await setup.renderOnce();
+
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("Move changes");
+    expect(locate(frame, "Restart")?.row).toBe(restart.row);
+
+    await setup.mockMouse.click(restart.col, restart.row, MouseButtons.LEFT);
+    expect(base[1]!.action).toHaveBeenCalledTimes(1);
+    expect(late.action).not.toHaveBeenCalled();
+  });
+
   it("holds its position at the bottom edge when the item arrives", async () => {
     const base = itemSpies(["Attach", "New session", "Kill", "Restart"]);
     const late = itemSpies(["Move changes"])[0]!;

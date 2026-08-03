@@ -469,6 +469,13 @@ export function App(props: AppProps) {
    * open two panes off one conversation. */
   let forkInFlight = false;
 
+  /**
+   * Identity of the latest new-session dialog opened by this App instance.
+   * A fork request can outlive the dialog that submitted it; its completion
+   * must not close a replacement the user opened while the request was out.
+   */
+  let newSessionDialogSequence = 0;
+
   /** Ceiling on a fork request. Without one, a daemon that accepts the
    * connection and never answers latches `forkInFlight` for the rest of the
    * picker's life, and `F` silently stops working. */
@@ -1042,12 +1049,11 @@ export function App(props: AppProps) {
     // Two of these come and go under an open menu. "Move changes" appears
     // when the dirty check answers, and Fork disappears on an SSE update that
     // drops `nativeSessionId`. Neither is last any more, so each shifts the
-    // rows below it, and the highlight is stored as an item ID rather than a
-    // row number precisely so that shift cannot move it onto a neighbour (see
-    // `contextMenu.highlight`). What is still true is that a MOUSE click is
-    // dispatched to the row under the pointer by the renderer, never through
-    // a remembered index, so a shift can misdraw the hover for an instant but
-    // can never fire the wrong item.
+    // rows below it. The keyboard highlight is stored as an item ID so it
+    // follows the same action through that shift; once the pointer enters a
+    // row, ContextMenu freezes the rendered list instead, because a pointer
+    // addresses a screen coordinate and must never find a different action
+    // there on mouse-down.
     return [
       {
         id: "attach",
@@ -1351,7 +1357,12 @@ export function App(props: AppProps) {
       store.actions.showToast("Can't start here: no working directory");
       return;
     }
-    ensureSpawnableAgents();
+    // Fork mode inherits its agent from the source session and neither draws
+    // nor submits the Agent field. Keep the per-open refresh for every mode
+    // that actually offers that field, but do not pay for preferences/PATH
+    // resolution on a fork dialog that cannot consume the answer.
+    if (!context.fork) ensureSpawnableAgents();
+    newSessionDialogSequence += 1;
     store.actions.openNewSessionDialog({
       cwd: context.cwd,
       // The row's own agent, else whatever was spawned last (persisted, so
@@ -1550,6 +1561,7 @@ export function App(props: AppProps) {
       return;
     }
     forkInFlight = true;
+    const dialogSequence = newSessionDialogSequence;
     const worktreeName = draftWorktreeName(draft);
     try {
       const placement = await forkPlacement(draft, fork);
@@ -1590,7 +1602,15 @@ export function App(props: AppProps) {
         );
         return;
       }
-      store.actions.closeNewSessionDialog();
+      // The request may have outlived its dialog. Close only the surface that
+      // submitted it, never a new draft opened after Escape while this await
+      // was pending.
+      if (
+        newSessionDialogSequence === dialogSequence &&
+        store.state.newSession !== null
+      ) {
+        store.actions.closeNewSessionDialog();
+      }
       // The daemon's name, not the row's preview: a derived name that collided
       // came back numbered.
       const created = body.worktree?.name;

@@ -2254,6 +2254,44 @@ describe("App fork (F / context menu)", () => {
     }
   });
 
+  it("does not fetch spawnable agents for a fork-only dialog", async () => {
+    let agentRequests = 0;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.endsWith("/agents")) {
+        agentRequests += 1;
+        return Response.json({ agents: [] });
+      }
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: null });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+
+    try {
+      await renderWithSession();
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+
+      expect(setup.captureCharFrame()).toContain("Fork session");
+      expect(agentRequests).toBe(0);
+
+      // Ordinary new-session dialogs still refresh on every open so a
+      // long-lived picker can discover agents installed since startup.
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+      expect(agentRequests).toBe(1);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("forks the selected session beside its own pane on Enter", async () => {
     // An untouched dialog is the one-shot `F` this replaced, byte for byte:
     // the source's own checkout, a split off the source's own pane.
@@ -2373,6 +2411,68 @@ describe("App fork (F / context menu)", () => {
       expect(squish(setup.captureCharFrame())).toContain(
         squish("Fork already in progress"),
       );
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("does not close a replacement dialog when an older fork completes", async () => {
+    let finishFork!: (response: Response) => void;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: null });
+      }
+      if (href.endsWith("/agents")) {
+        return Response.json({
+          agents: [
+            {
+              name: "claude",
+              displayName: "Claude",
+              shortCode: "CC",
+              supportsPrompt: true,
+            },
+          ],
+        });
+      }
+      if (href.endsWith("/spawn")) {
+        return new Promise<Response>((resolve) => {
+          finishFork = resolve;
+        });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+
+    try {
+      await renderWithSession();
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      // Dismiss the submitted fork and start drafting an unrelated session
+      // while its daemon request is still pending.
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.mockInput.typeText("keep this prompt");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("keep this prompt");
+
+      finishFork(Response.json({ success: true, paneId: "%99" }));
+      await settle();
+      await setup.renderOnce();
+
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("New session");
+      expect(frame).toContain("keep this prompt");
     } finally {
       globalThis.fetch = original;
     }
@@ -4124,10 +4224,10 @@ describe("App move-changes menu gate", () => {
     // this pins what is still guaranteed: the menu box does not move, and
     // neither does anything above the insertion point.
     //
-    // What protects the two rows that DO move is that neither the pointer nor
-    // the keyboard addresses an item by position — clicks are dispatched to
-    // the row under the cursor, and the keyboard highlight is an item id (see
-    // "keeps the highlight on its own item" below).
+    // No item has been hovered in this test, so the menu is still allowed to
+    // react. Once a pointer enters a row, ContextMenu freezes the item list;
+    // the keyboard path stays reactive because its highlight is an item id
+    // (see the next two tests).
     const dirty = heldDirty();
     try {
       await openMenuOnRow();
@@ -4149,6 +4249,35 @@ describe("App move-changes menu gate", () => {
         const expected = row.row < inserted ? row.row : row.row + 1;
         expect(`${row.label}@${now?.row}`).toBe(`${row.label}@${expected}`);
       }
+    } finally {
+      dirty.restore();
+    }
+  });
+
+  it("keeps the action under the pointer fixed when the item lands", async () => {
+    const dirty = heldDirty();
+    try {
+      await openMenuOnRow();
+      const restart = menuRows().find((row) => row.label === "Restart")!;
+
+      // Begin aiming at Restart before the dirty answer inserts its row above
+      // it. From this point on, the pointer's screen coordinates are a user
+      // choice and the rendered item list must not move underneath them.
+      await setup.mockMouse.moveTo(7, restart.row);
+      await setup.renderOnce();
+
+      dirty.land();
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Move changes");
+      expect(menuRows().find((row) => row.label === "Restart")?.row).toBe(
+        restart.row,
+      );
+
+      await setup.mockMouse.click(7, restart.row, MouseButtons.LEFT);
+      await settle();
+      await setup.renderOnce();
+      expect(squish(setup.captureCharFrame())).toContain("RestartSession?");
     } finally {
       dirty.restore();
     }

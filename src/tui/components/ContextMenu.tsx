@@ -29,11 +29,10 @@ interface ContextMenuProps {
   /**
    * Rows to keep clear beneath the items for one that may still arrive.
    *
-   * The row menu's "Move changes" is appended once a `git status` comes back,
-   * which is after the menu is on screen. Appending it last means nothing
-   * above it moves — but only where the menu grows downward. Against the
-   * bottom edge the clamp pins the BOTTOM instead, so a menu that grew would
-   * slide every row up a line under a pointer already travelling towards one.
+   * The row menu's "Move changes" arrives once a `git status` comes back,
+   * which is after the menu is on screen. Against the bottom edge the clamp
+   * pins the BOTTOM, so a menu that grew would slide every row up a line under
+   * a pointer already travelling towards one.
    *
    * Reserved for the menu's whole life, not just until the answer lands: a
    * reservation released because the item is not coming drops the menu back
@@ -77,16 +76,35 @@ function fittedLabel(label: string, hint: string): string {
 
 export const ContextMenu: Component<ContextMenuProps> = (props) => {
   const dims = useTerminalDimensions();
-  const [hovered, setHovered] = createSignal<number | null>(null);
+  const [hovered, setHovered] = createSignal<string | null>(null);
+  /**
+   * Freeze the rows once the pointer enters one of them.
+   *
+   * The list is allowed to mutate while a keyboard-opened menu is live: its
+   * highlight is an item ID, so Enter still follows the item the user chose.
+   * A pointer addresses screen coordinates instead. Once it has begun aiming
+   * at a row, inserting or removing an item would put another action under
+   * the same coordinate. Snapshot both the items and the reserved height at
+   * the first hover so every pointer target stays where the user saw it. Item
+   * actions still re-check current application state before acting.
+   */
+  const [pointerSnapshot, setPointerSnapshot] = createSignal<{
+    items: ContextMenuItem[];
+    reservedRows: number;
+  } | null>(null);
+
+  const renderedItems = () => pointerSnapshot()?.items ?? props.items;
+  const renderedReservedRows = () =>
+    pointerSnapshot()?.reservedRows ?? props.reservedRows ?? 0;
 
   /** Whether this row is the one an action would land on: the pointer's
    *  while it is over any row, otherwise the keyboard's. */
-  const isActive = (item: ContextMenuItem, index: number): boolean =>
-    hovered() === null ? props.highlight === item.id : hovered() === index;
+  const isActive = (item: ContextMenuItem): boolean =>
+    hovered() === null ? props.highlight === item.id : hovered() === item.id;
 
   /** One row per item plus the border. True by construction: every item row
    *  is pinned to a single row below. */
-  const menuHeight = () => props.items.length + 2;
+  const menuHeight = () => renderedItems().length + 2;
 
   const clampedX = () => {
     const max = Math.max(0, dims().width - MENU_WIDTH);
@@ -95,7 +113,7 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
   /** The height to keep on screen: what is drawn, plus what is being held
    *  for an item still to come. */
   const reservedHeight = () =>
-    menuHeight() + Math.max(0, props.reservedRows ?? 0);
+    menuHeight() + Math.max(0, renderedReservedRows());
 
   const clampedY = () => {
     // Clamped against the RESERVED height, positioned at the drawn one: the
@@ -116,17 +134,28 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
       borderColor={theme.border}
       flexDirection="column"
     >
-      <For each={props.items}>
-        {(item, i) => (
+      <For each={renderedItems()}>
+        {(item) => (
           <box
             flexDirection="row"
             height={1}
             flexShrink={0}
             paddingLeft={1}
             paddingRight={1}
-            backgroundColor={isActive(item, i()) ? theme.border : theme.surface}
-            onMouseOver={() => setHovered(i())}
-            onMouseOut={() => setHovered((h) => (h === i() ? null : h))}
+            backgroundColor={isActive(item) ? theme.border : theme.surface}
+            onMouseOver={() => {
+              setPointerSnapshot(
+                (snapshot) =>
+                  snapshot ?? {
+                    items: props.items,
+                    reservedRows: props.reservedRows ?? 0,
+                  },
+              );
+              setHovered(item.id);
+            }}
+            onMouseOut={() =>
+              setHovered((current) => (current === item.id ? null : current))
+            }
             onMouseDown={(event) => {
               if (event.button === MouseButton.LEFT) item.action();
               else if (event.button === MouseButton.RIGHT) props.onClose();
