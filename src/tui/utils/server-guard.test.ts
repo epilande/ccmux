@@ -1,11 +1,37 @@
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, beforeEach, spyOn } from "bun:test";
+import * as preferences from "../../lib/preferences";
+import { resetTmuxSocketCache } from "../../lib/tmux-socket";
 import { isSameServerCached, setDaemonSocketPath } from "./server-guard";
 
-const ORIGINAL_TMUX = process.env.TMUX;
+const ORIGINAL_ENV = {
+  TMUX: process.env.TMUX,
+  CCMUX_TMUX_SOCKET: process.env.CCMUX_TMUX_SOCKET,
+};
+
+/**
+ * The guard now knows its own server from a configured socket override too, so
+ * the developer's real env/config would decide these cases. Stub both (spyOn,
+ * not mock.module, which leaks across files).
+ */
+let prefsSpy: ReturnType<
+  typeof spyOn<typeof preferences, "getPreferencesSync">
+>;
+
+beforeEach(() => {
+  prefsSpy = spyOn(preferences, "getPreferencesSync").mockImplementation(
+    () => ({}),
+  );
+  delete process.env.CCMUX_TMUX_SOCKET;
+  resetTmuxSocketCache();
+});
 
 afterEach(() => {
-  if (ORIGINAL_TMUX === undefined) delete process.env.TMUX;
-  else process.env.TMUX = ORIGINAL_TMUX;
+  prefsSpy.mockRestore();
+  resetTmuxSocketCache();
+  for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   // Module-global cache: restore fail-open for every other test file.
   setDaemonSocketPath(null);
 });
@@ -29,10 +55,22 @@ describe("server-guard", () => {
     expect(isSameServerCached()).toBe(true);
   });
 
-  it("fails open when this process is not inside tmux", () => {
+  it("fails open when this process has no server of its own (no $TMUX, no override)", () => {
     delete process.env.TMUX;
     setDaemonSocketPath("/tmp/tmux-test/other");
     expect(isSameServerCached()).toBe(true);
+  });
+
+  /**
+   * Outside tmux a configured override IS this process's server, so the
+   * comparison has two known sockets and the refusal is provable.
+   */
+  it("refuses a mismatch against a configured socket override", () => {
+    delete process.env.TMUX;
+    process.env.CCMUX_TMUX_SOCKET = "/tmp/tmux-test/mine";
+    resetTmuxSocketCache();
+    setDaemonSocketPath("/tmp/tmux-test/other");
+    expect(isSameServerCached()).toBe(false);
   });
 
   it("re-learning an unknown socket returns to fail-open", () => {

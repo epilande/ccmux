@@ -25,7 +25,10 @@ import type { TmuxSocketError } from "../types";
  * both a foreground daemon and a `-b` one read (the backgrounded child
  * inherits this environment; a flag on this process would not reach it).
  * `--socket` is resolved to an absolute path because the env encoding reads a
- * leading "/" as "this is a path, not a label".
+ * leading "/" as "this is a path, not a label". It resolves against
+ * `CCMUX_CALLER_PWD` (the real invocation directory `bin/ccmux` preserves
+ * before cd'ing into the package root), so a relative path means what the user
+ * typed rather than something inside the ccmux install.
  */
 function applySocketFlags(options: { socket?: string; label?: string }): void {
   if (options.socket && options.label) {
@@ -41,7 +44,10 @@ function applySocketFlags(options: { socket?: string; label?: string }): void {
     return;
   }
   if (options.socket) {
-    process.env.CCMUX_TMUX_SOCKET = resolve(options.socket);
+    process.env.CCMUX_TMUX_SOCKET = resolve(
+      process.env.CCMUX_CALLER_PWD ?? process.cwd(),
+      options.socket,
+    );
   }
 }
 

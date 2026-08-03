@@ -36,11 +36,15 @@ export type TmuxSocketOverride =
  * Read one configured value. A leading "/" makes it a socket path, anything
  * else a label, matching how the value is documented and how `--socket` is
  * normalized to an absolute path before it becomes `CCMUX_TMUX_SOCKET`.
+ *
+ * Takes `unknown` because the config source is hand-edited JSON: a `tmuxSocket`
+ * that parses fine but is not a string (`42`, `[]`) must read as unconfigured.
+ * Throwing here would escape through `tmuxArgv` into every ccmux surface at
+ * once, since every tmux call builds its argv through it.
  */
-export function parseTmuxSocketValue(
-  raw: string | null | undefined,
-): TmuxSocketOverride | null {
-  const value = raw?.trim();
+export function parseTmuxSocketValue(raw: unknown): TmuxSocketOverride | null {
+  if (typeof raw !== "string") return null;
+  const value = raw.trim();
   if (!value) return null;
   return value.startsWith("/")
     ? { kind: "path", value }

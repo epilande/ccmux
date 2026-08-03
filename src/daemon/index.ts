@@ -61,7 +61,7 @@ import {
 import { ScanHealth } from "./scan-health";
 import {
   listTmuxPanes,
-  listTmuxPanesOrThrow,
+  scanTmuxPanesOrThrow,
   PaneDiscoveryError,
   normalizeTty,
   findPaneHostingPid,
@@ -579,11 +579,13 @@ export class Daemon {
       // cycle) instead of reading as "every pane vanished". A genuine
       // no-server condition still yields []. Hysteresis in cleanup is the
       // backstop for anything that slips through.
-      const [processes, panes, processTree] = await Promise.all([
+      const [processes, paneScan, processTree] = await Promise.all([
         discoverAgentProcessesOrThrow(this.agents),
-        listTmuxPanesOrThrow(),
+        scanTmuxPanesOrThrow(),
         ProcessTree.build(),
       ]);
+      const panes = paneScan.panes;
+      if (paneScan.noServer) this.recordNoTmuxServer(paneScan.noServer);
 
       // Update pane cache for API response enrichment
       this.paneCache.clear();
@@ -671,6 +673,20 @@ export class Daemon {
       console.log("Daemon recovered: scans succeeding again");
       this.server.broadcastDaemonHealth();
     }
+  }
+
+  /**
+   * A scan that reached no tmux server at all. Deliberately NOT a scan failure:
+   * the cycle ran to completion on an empty pane list, so the health tracker
+   * stays clean (no degraded flip, no per-scan `Scan skipped` line) and the
+   * mutations run — a server that went away is exactly when dead sessions need
+   * reaping. What it does invalidate is the server's cached socket: a tmux that
+   * dies AFTER `/server-info` resolved its path never throws, so without this
+   * the daemon serves the dead socket with no diagnostic forever. Kept separate
+   * from `scan()` so the wiring is unit-testable without driving a full scan.
+   */
+  private recordNoTmuxServer(message: string): void {
+    this.server.notePaneScanFailure(message);
   }
 
   /**

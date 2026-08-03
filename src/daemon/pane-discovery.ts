@@ -6,7 +6,7 @@ import { tmuxArgv } from "../lib/tmux-exec";
 import { attemptedTmuxSocketPath } from "../lib/tmux-socket";
 
 /**
- * Thrown by {@link listTmuxPanesOrThrow} when `tmux list-panes` itself fails
+ * Thrown by {@link scanTmuxPanesOrThrow} when `tmux list-panes` itself fails
  * (spawn threw, or non-zero exit that is not the genuine "no server running"
  * condition). The tmux-side analogue of `ProcessDiscoveryError`.
  */
@@ -25,19 +25,35 @@ export class PaneDiscoveryError extends Error {
 const TMUX_NO_SERVER_RE = /no server running|error connecting to/;
 
 /**
+ * One pane listing: the panes, plus tmux's own words when there was no server
+ * to list them from.
+ *
+ * `noServer` is a REASON, not an alternative outcome. "No server running" is a
+ * legitimately-empty scan, so `panes` is `[]` and callers proceed exactly as
+ * they would for a server with no panes — reaping dead sessions depends on
+ * that. It is carried out separately only because a server that dies AFTER the
+ * daemon resolved its socket never throws, so nothing else tells `/server-info`
+ * the socket it is serving is dead.
+ */
+export type PaneScan = {
+  panes: TmuxPane[];
+  noServer: string | null;
+};
+
+/**
  * List all tmux panes.
  *
  * THROWS {@link PaneDiscoveryError} on a hard `tmux` failure (spawn threw, or
  * a non-zero exit whose stderr is not the "no server running" condition). A
- * genuinely-empty result (no tmux server) still returns `[]`. The scan loop
- * uses this variant so a transient tmux hiccup skips the cycle rather than
- * being read as "every pane vanished", which would let cleanup unbind or
- * remove every pane-bound session in one pass (this exact gap; the two-scan
- * hysteresis is the backstop, this is the observation-layer guard). Callers
- * that prefer fail-soft behavior use
+ * genuinely-empty result (no tmux server) still returns no panes, reported as
+ * a {@link PaneScan} with `noServer` set. The scan loop uses this variant so a
+ * transient tmux hiccup skips the cycle rather than being read as "every pane
+ * vanished", which would let cleanup unbind or remove every pane-bound session
+ * in one pass (this exact gap; the two-scan hysteresis is the backstop, this
+ * is the observation-layer guard). Callers that prefer fail-soft behavior use
  * {@link listTmuxPanes}.
  */
-export async function listTmuxPanesOrThrow(): Promise<TmuxPane[]> {
+export async function scanTmuxPanesOrThrow(): Promise<PaneScan> {
   let output: string;
   let stderr: string;
   let exitCode: number;
@@ -92,7 +108,9 @@ export async function listTmuxPanesOrThrow(): Promise<TmuxPane[]> {
   }
 
   if (exitCode !== 0) {
-    if (TMUX_NO_SERVER_RE.test(stderr)) return [];
+    if (TMUX_NO_SERVER_RE.test(stderr)) {
+      return { panes: [], noServer: stderr.trim() || "no server running" };
+    }
     // Name the server: with a socket override in play, "exited 1" alone leaves
     // the user unable to tell a broken tmux from a misaimed one.
     throw new PaneDiscoveryError(
@@ -102,7 +120,7 @@ export async function listTmuxPanesOrThrow(): Promise<TmuxPane[]> {
   }
 
   if (!output.trim()) {
-    return [];
+    return { panes: [], noServer: null };
   }
 
   const panes: TmuxPane[] = [];
@@ -152,17 +170,17 @@ export async function listTmuxPanesOrThrow(): Promise<TmuxPane[]> {
     }
   }
 
-  return panes;
+  return { panes, noServer: null };
 }
 
 /**
  * Fail-soft pane listing: any discovery failure reads as "no panes".
  * Appropriate for one-shot CLI paths and boot fallbacks; the scan loop must
- * use {@link listTmuxPanesOrThrow} instead (see its doc for why).
+ * use {@link scanTmuxPanesOrThrow} instead (see its doc for why).
  */
 export async function listTmuxPanes(): Promise<TmuxPane[]> {
   try {
-    return await listTmuxPanesOrThrow();
+    return (await scanTmuxPanesOrThrow()).panes;
   } catch {
     return [];
   }

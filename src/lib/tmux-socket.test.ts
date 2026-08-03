@@ -106,6 +106,18 @@ describe("parseTmuxSocketValue", () => {
       value: "work",
     });
   });
+
+  /**
+   * ccmux.json is hand-edited, so a `tmuxSocket` that is valid JSON but not a
+   * string is reachable. Throwing here would escape through `tmuxArgv` into
+   * every surface at once, so it reads as unconfigured instead.
+   */
+  it("treats a non-string value as unconfigured", () => {
+    expect(parseTmuxSocketValue(42)).toBe(null);
+    expect(parseTmuxSocketValue(false)).toBe(null);
+    expect(parseTmuxSocketValue([])).toBe(null);
+    expect(parseTmuxSocketValue({})).toBe(null);
+  });
 });
 
 describe("resolveTmuxSocketOverride precedence", () => {
@@ -128,6 +140,13 @@ describe("resolveTmuxSocketOverride precedence", () => {
       kind: "label",
       value: "from-env",
     });
+  });
+
+  it("ignores a non-string tmuxSocket in the config file", () => {
+    withPrefs({ tmuxSocket: 42 } as unknown as preferences.Preferences);
+    expect(resolveTmuxSocketOverride()).toBe(null);
+    withPrefs({ tmuxSocket: {} } as unknown as preferences.Preferences);
+    expect(resolveTmuxSocketOverride()).toBe(null);
   });
 
   it("ignores an empty env var rather than reading it as a value", () => {

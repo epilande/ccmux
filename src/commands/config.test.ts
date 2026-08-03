@@ -370,6 +370,56 @@ describe("config set notifications.*", () => {
   });
 });
 
+describe("KNOWN_KEYS.tmuxSocket", () => {
+  const spec = KNOWN_KEYS.tmuxSocket!;
+
+  it("validate accepts a label and a socket path", () => {
+    expect(spec.validate("work")).toBe(true);
+    expect(spec.validate("/tmp/tmux-501/work")).toBe(true);
+  });
+
+  it("validate rejects empty and whitespace-only values", () => {
+    expect(spec.validate("")).toBe(false);
+    expect(spec.validate("   ")).toBe(false);
+  });
+
+  it("parse trims, matching how the value is read back", () => {
+    expect(spec.parse("  work  ")).toBe("work");
+  });
+
+  it("sets the key and prints the daemon-restart note", async () => {
+    store = {};
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runConfigSet("tmuxSocket", "work");
+
+      expect(exit).toBeNull();
+      expect(store.tmuxSocket).toBe("work");
+      expect(
+        logSpy.mock.calls.some((c) => String(c[0]).includes("daemon restart")),
+      ).toBe(true);
+    } finally {
+      restoreExit();
+      logSpy.mockRestore();
+    }
+  });
+
+  it("rejects a blank value rather than storing it", async () => {
+    store = {};
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const exit = await runConfigSet("tmuxSocket", "   ");
+      expect(exit?.code).toBe(1);
+      expect(store.tmuxSocket).toBeUndefined();
+    } finally {
+      restoreExit();
+      errorSpy.mockRestore();
+    }
+  });
+});
+
 describe("KNOWN_KEYS.reviewHandback", () => {
   const spec = KNOWN_KEYS.reviewHandback!;
 

@@ -44,6 +44,7 @@ type DaemonInternals = {
   };
   recordScanFailure(error: unknown): void;
   recordScanSuccess(): void;
+  recordNoTmuxServer(message: string): void;
 };
 
 describe("Daemon scan-health wiring", () => {
@@ -121,6 +122,28 @@ describe("Daemon scan-health wiring", () => {
     internals.recordScanFailure(new ProcessDiscoveryError("ps spawn failed"));
     internals.recordScanFailure(new Error("reconcile blew up"));
     expect(paneScanFailures).toEqual([]);
+  });
+
+  it("invalidates the socket cache when a scan reaches no tmux server", () => {
+    internals.recordNoTmuxServer("no server running on /tmp/tmux-501/work");
+
+    expect(paneScanFailures).toEqual([
+      "no server running on /tmp/tmux-501/work",
+    ]);
+  });
+
+  it("never counts a missing tmux server as a scan failure", () => {
+    // A server that dies mid-life is reported every scan for as long as it
+    // stays down. That must not degrade the daemon (the scan itself completed
+    // on an empty pane list) nor emit the per-scan `Scan skipped` spam.
+    for (let i = 0; i < 10; i++) {
+      internals.recordNoTmuxServer("no server running on /tmp/tmux-501/work");
+    }
+
+    expect(paneScanFailures).toHaveLength(10);
+    expect(internals.scanHealth.snapshot()).toEqual({ degraded: false });
+    expect(broadcasts).toBe(0);
+    expect(errorLines()).toEqual([]);
   });
 
   it("suppresses 'Scan skipped' and does not re-broadcast while already degraded", () => {

@@ -68,6 +68,7 @@ tmux -L ccmux-verify kill-server
 - Do not modify the SSE event protocol without updating both `src/daemon/server.ts` and `src/tui/utils/sse.ts`
 - Do not add built-in agents without defining `terminalRules` for pane-tracked detection
 - Do not register new `HookAdapter`s in `src/commands/setup.ts` and `src/daemon/index.ts` separately. Add them to `createBuiltinHookAdapters()` in `src/daemon/adapters/index.ts` — both call sites go through it
+- Do not spawn `tmux` directly. Build the argv with `tmuxArgv`/`tmuxArgvFor` from `src/lib/tmux-exec.ts`, or `tmuxShellPrefix()` for a nested invocation inside a format-expanded shell body (`run-shell`, a hook) — a configured socket override reaches every call site through them and nowhere else
 
 ## Commands
 
