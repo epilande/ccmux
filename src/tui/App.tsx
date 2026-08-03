@@ -624,10 +624,9 @@ export function App(props: AppProps) {
   /**
    * Ask whether a row's checkout is dirty, for the menu gate.
    *
-   * The answer arrives after the menu is already on screen, so the item it
-   * gates is APPENDED LAST (see `sessionMenuItems`). Anywhere else and a row
-   * the user is already reaching for would slide down as this lands — the
-   * same hazard that moved Fork below Restart. There is deliberately no
+   * The answer arrives after the menu is already on screen, so the menu
+   * reserves its height and freezes its pointer targets on first hover (see
+   * `sessionMenuItems` and `ContextMenu`). There is deliberately no
    * placeholder or "checking…" row in the meantime: the item is simply
    * absent, so the menu never shows something that isn't actionable.
    *
@@ -639,7 +638,10 @@ export function App(props: AppProps) {
    * the move will run in is how a gate ends up offering an action that then
    * refuses — or hiding one that would have worked.
    */
-  function refreshMenuDirty(session: EnrichedSession): void {
+  function refreshMenuDirty(
+    session: EnrichedSession,
+    openGeneration: number,
+  ): void {
     const sessionId = session.id;
     setMenuDirty(null);
     const url = new URL(`${getDaemonUrl()}/sessions/${sessionId}/dirty`);
@@ -650,10 +652,15 @@ export function App(props: AppProps) {
       .then(async (response) => {
         if (!response.ok) return;
         const data = (await response.json()) as { dirty?: boolean };
-        // Only apply it if that row's menu is STILL the one open. A slow
-        // answer for a menu the user already dismissed (or reopened on
-        // another row) must not resurrect an item there.
-        if (store.state.contextMenu?.sessionId !== sessionId) return;
+        // Only apply it if this PARTICULAR opening of that row's menu is
+        // still live. Session identity alone is not enough: close/reopen on
+        // the same row can leave the earlier request racing the new one.
+        if (
+          store.state.contextMenu?.sessionId !== sessionId ||
+          menuOpenGeneration() !== openGeneration
+        ) {
+          return;
+        }
         setMenuDirty({ sessionId, dirty: data.dirty === true });
       })
       .catch(() => {
@@ -694,14 +701,17 @@ export function App(props: AppProps) {
     y: number,
     focusFirst: boolean,
   ): void {
-    setMenuOpenGeneration((generation) => generation + 1);
+    const openGeneration = menuOpenGeneration() + 1;
+    setMenuOpenGeneration(openGeneration);
     if (item.type === "session") {
       const session = item.filteredSession.session;
       store.actions.showContextMenu(session.id, x, y);
       // Same condition both consumers gate on (`sessionMenuItems` and
       // `sessionMenuReservedRows`): a background row has no move to offer, so
       // asking would spend a `git status -uall` on an answer nobody reads.
-      if (session.trackingMode !== "background") refreshMenuDirty(session);
+      if (session.trackingMode !== "background") {
+        refreshMenuDirty(session, openGeneration);
+      }
     } else {
       store.actions.showGroupContextMenu(item.groupKey, x, y);
     }

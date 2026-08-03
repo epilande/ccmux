@@ -4467,6 +4467,51 @@ describe("App move-changes menu gate", () => {
     }
   });
 
+  it("ignores a dirty answer from an earlier opening of the same row", async () => {
+    const releases: Array<(response: Response) => void> = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      if (String(url).includes("/dirty")) {
+        return new Promise<Response>((resolve) => releases.push(resolve));
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch;
+
+    try {
+      await openMenuOnRow();
+      expect(releases).toHaveLength(1);
+
+      // `m` closes the pointer-opened menu, then opens the same row again.
+      // Both requests therefore carry the same session id; only the menu's
+      // opening generation can tell their answers apart.
+      setup.mockInput.pressKey("m");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("m");
+      await setup.renderOnce();
+      expect(releases).toHaveLength(2);
+
+      releases[1]!({
+        ok: true,
+        json: async () => ({ dirty: true }),
+      } as Response);
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Move changes");
+
+      // The first opening's older, contradictory answer must not overwrite
+      // the result belonging to the menu that is actually on screen.
+      releases[0]!({
+        ok: true,
+        json: async () => ({ dirty: false }),
+      } as Response);
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Move changes");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("never gates one row's menu with another row's answer", async () => {
     // A slow answer for a dismissed menu must not resurrect the item
     // somewhere else.

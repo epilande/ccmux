@@ -175,8 +175,11 @@ describe("ContextMenu keyboard highlight", () => {
     // row lit under a pointer that is elsewhere would promise a pending key.
     const { items } = await renderMenu({ highlight: null });
     expect(raisedLabels(items)).toEqual([]);
-    const { items: none } = await renderMenu();
-    expect(raisedLabels(none)).toEqual([]);
+  });
+
+  it("raises nothing when the highlight is omitted", async () => {
+    const { items } = await renderMenu();
+    expect(raisedLabels(items)).toEqual([]);
   });
 
   it("uses the same affordance the pointer does", async () => {
