@@ -657,34 +657,50 @@ export function App(props: AppProps) {
       return;
     }
     store.actions.setSelectedIndex(index);
-    openRowMenu(item, event.x, event.y, null);
+    openRowMenu(item, event.x, event.y, false);
   }
 
   /**
-   * Open the menu `item` owns at a screen position, with `highlight` as the
-   * item the keyboard starts on.
+   * Open the menu `item` owns at a screen position, lighting its first item
+   * when `focusFirst` (the keyboard's way in; the pointer highlights by
+   * hovering instead).
    *
    * Shared by the pointer and the `m` key so the two can only ever differ in
    * where the menu is anchored and whether a row starts lit. Everything that
    * makes a menu what it is — which menu, and the dirty question that gates
    * "Move changes" — happens once, here.
+   *
+   * The first item is resolved AFTER the menu is open, because the item lists
+   * are built from the open menu's own state: there is no list to take a
+   * first item from until the state names which row the menu belongs to.
    */
   function openRowMenu(
     item: FlatItem,
     x: number,
     y: number,
-    highlight: number | null,
+    focusFirst: boolean,
   ): void {
     if (item.type === "session") {
       const session = item.filteredSession.session;
-      store.actions.showContextMenu(session.id, x, y, highlight);
+      store.actions.showContextMenu(session.id, x, y);
       // Same condition both consumers gate on (`sessionMenuItems` and
       // `sessionMenuReservedRows`): a background row has no move to offer, so
       // asking would spend a `git status -uall` on an answer nobody reads.
       if (session.trackingMode !== "background") refreshMenuDirty(session);
     } else {
-      store.actions.showGroupContextMenu(item.groupKey, x, y, highlight);
+      store.actions.showGroupContextMenu(item.groupKey, x, y);
     }
+    if (!focusFirst) return;
+    const first = menuItems()[0];
+    if (first) store.actions.setMenuHighlight(first.id);
+  }
+
+  /** The open menu's items, whichever menu that is, in the order they are
+   *  drawn — the one list the keys, the highlight and the render all read. */
+  function menuItems(): ContextMenuItem[] {
+    if (store.state.contextMenu) return sessionMenuItems();
+    if (store.state.groupContextMenu) return groupMenuItems();
+    return [];
   }
 
   /** How the list answers where a row is on screen; see `SessionList`'s
@@ -723,7 +739,7 @@ export function App(props: AppProps) {
     if (!anchor) return;
     // The first item lit: `m` is a keyboard action, and Enter has to have
     // somewhere to land the moment the menu appears.
-    openRowMenu(item, anchor.x, anchor.y, 0);
+    openRowMenu(item, anchor.x, anchor.y, true);
   }
 
   /**
@@ -737,27 +753,30 @@ export function App(props: AppProps) {
    */
   function handleContextMenuKey(event: KeyEvent): boolean {
     const key = event.name;
-    const items = store.state.contextMenu
-      ? sessionMenuItems()
-      : groupMenuItems();
+    const items = menuItems();
     if (key === "j" || key === "down") {
-      store.actions.moveMenuHighlight(1, items.length);
+      store.actions.moveMenuHighlight(
+        1,
+        items.map((i) => i.id),
+      );
       return true;
     }
     if (key === "k" || key === "up") {
-      store.actions.moveMenuHighlight(-1, items.length);
+      store.actions.moveMenuHighlight(
+        -1,
+        items.map((i) => i.id),
+      );
       return true;
     }
     if (key === "return" || key === "enter") {
       const menu = store.state.contextMenu ?? store.state.groupContextMenu;
-      const highlighted = menu?.index;
-      // Nothing lit (a menu the pointer opened) means Enter has no target.
-      // Closing would be a guess at what was meant; the menu stays.
-      if (highlighted !== null && highlighted !== undefined) {
-        // The item's own action closes the menu — every one of them does, and
-        // doing it here as well would hide a menu the action meant to keep.
-        items[highlighted]?.action();
-      }
+      // Nothing lit (a menu the pointer opened), or an item that has since
+      // left the list, means Enter has no target. Closing, or falling back to
+      // whatever now sits in that row, would be a guess at what was meant.
+      const highlighted = items.find((i) => i.id === menu?.highlight);
+      // The item's own action closes the menu — every one of them does, and
+      // doing it here as well would hide a menu the action meant to keep.
+      highlighted?.action();
       return true;
     }
     if (key === "escape" || key === "m") {
@@ -930,6 +949,7 @@ export function App(props: AppProps) {
     const reviewItem: ContextMenuItem[] = reviewEnabled
       ? [
           {
+            id: "review",
             label: "Review diff",
             hint: "d",
             color: theme.text,
@@ -938,33 +958,41 @@ export function App(props: AppProps) {
         ]
       : [];
     const newSessionItem: ContextMenuItem = {
-      label: "New session here",
+      id: "new-session",
+      label: "New session",
       hint: "n",
       color: theme.text,
       action: contextMenuNewSession,
     };
+    const killItem: ContextMenuItem = {
+      id: "kill",
+      label: "Kill",
+      hint: "x",
+      color: theme.red,
+      action: () => contextMenuConfirm("kill"),
+    };
     if (session?.trackingMode === "background") {
       return [
         {
+          id: "attach-agent",
           label: "Attach agent",
           hint: "enter",
           color: theme.green,
           action: contextMenuAttachAgent,
         },
         {
+          id: "agent-view",
           label: "Open agent view",
           hint: "",
           color: theme.text,
           action: contextMenuOpenAgentView,
         },
         newSessionItem,
-        {
-          label: "Kill",
-          hint: "x",
-          color: theme.red,
-          action: () => contextMenuConfirm("kill"),
-        },
         ...reviewItem,
+        // Last here too: the destructive action is the one that must never
+        // slide under a pointer (or a highlight) reaching for something else,
+        // and the bottom is the only position nothing can be appended below.
+        killItem,
       ];
     }
     // Only once the daemon has confirmed this row has uncommitted work.
@@ -976,6 +1004,7 @@ export function App(props: AppProps) {
       session && dirty?.sessionId === session.id && dirty.dirty
         ? [
             {
+              id: "move-changes",
               // Must fit ContextMenu's fixed 22-col box on ONE line: the
               // component computes its height as `items.length + 2`, so a
               // label that wraps renders two rows and silently breaks the
@@ -996,6 +1025,7 @@ export function App(props: AppProps) {
     const forkItem: ContextMenuItem[] = canForkSession(session)
       ? [
           {
+            id: "fork",
             label: "Fork",
             hint: "F",
             color: theme.text,
@@ -1003,38 +1033,41 @@ export function App(props: AppProps) {
           },
         ]
       : [];
+    // Ordered by what the actions DO, not by when they arrive: the things
+    // that start something (attach, spawn, fork), then the things that read
+    // (review), then the ones that move work about, and the two that end a
+    // session last — Kill at the bottom, where a destructive action is
+    // hardest to hit by accident.
+    //
+    // Two of these come and go under an open menu. "Move changes" appears
+    // when the dirty check answers, and Fork disappears on an SSE update that
+    // drops `nativeSessionId`. Neither is last any more, so each shifts the
+    // rows below it, and the highlight is stored as an item ID rather than a
+    // row number precisely so that shift cannot move it onto a neighbour (see
+    // `contextMenu.highlight`). What is still true is that a MOUSE click is
+    // dispatched to the row under the pointer by the renderer, never through
+    // a remembered index, so a shift can misdraw the hover for an instant but
+    // can never fire the wrong item.
     return [
       {
+        id: "attach",
         label: "Attach",
         hint: "enter",
         color: theme.green,
         action: contextMenuAttach,
       },
       newSessionItem,
+      ...forkItem,
+      ...reviewItem,
+      ...moveChangesItem,
       {
-        label: "Kill",
-        hint: "x",
-        color: theme.red,
-        action: () => contextMenuConfirm("kill"),
-      },
-      {
+        id: "restart",
         label: "Restart",
         hint: "r",
         color: theme.text,
         action: () => contextMenuConfirm("restart"),
       },
-      // Last of the always-present actions on purpose. This item appears and
-      // disappears reactively (an SSE update that drops `nativeSessionId`
-      // removes it), and anything above Kill would slide Kill under a cursor
-      // already hovering the old position.
-      ...forkItem,
-      ...reviewItem,
-      // ABSOLUTE LAST, and that position is the whole design. Unlike every
-      // item above it, this one arrives ASYNCHRONOUSLY: the menu is already
-      // on screen when the dirty answer lands, so anywhere else it would
-      // shove the items below it down under a cursor that is already moving.
-      // Last means the only thing that can change is empty space.
-      ...moveChangesItem,
+      killItem,
     ];
   }
 
@@ -1042,6 +1075,12 @@ export function App(props: AppProps) {
    * Rows the row menu holds for the "Move changes" item that may still
    * arrive. See `ContextMenu`'s `reservedRows`: this is what keeps a
    * bottom-clamped menu from sliding up as the dirty answer lands.
+   *
+   * About the BOX, not the item's own position, which is why it still reads
+   * the same way now that the item lands mid-list rather than at the end: the
+   * menu grows by one row whichever slot the row goes into, and a menu
+   * clamped against the bottom edge grows upward — moving every row it
+   * already had.
    *
    * Held from the moment the menu opens until it closes, and released only
    * once the item is actually IN the list — a menu that never gets the item
@@ -1065,36 +1104,45 @@ export function App(props: AppProps) {
     const isCollapsed = cm ? store.collapsedGroups().has(cm.groupKey) : false;
     return [
       {
+        // One id for both labels: it is one action whose name reflects the
+        // group's current state, and a highlight must not drop off it because
+        // the group collapsed underneath.
+        id: "collapse",
         label: isCollapsed ? "Expand" : "Collapse",
         hint: "space",
         color: theme.text,
         action: groupContextMenuToggleCollapse,
       },
       {
-        label: "New session here",
+        id: "new-session",
+        label: "New session",
         hint: "n",
         color: theme.text,
         action: groupContextMenuNewSession,
       },
       {
+        id: "pin-top",
         label: "Pin to top",
         hint: "<",
         color: theme.text,
         action: () => groupContextMenuPin("top"),
       },
       {
+        id: "pin-bottom",
         label: "Pin to bottom",
         hint: ">",
         color: theme.text,
         action: () => groupContextMenuPin("bottom"),
       },
       {
+        id: "prune",
         label: "Prune worktrees",
         hint: "W",
         color: theme.text,
         action: groupContextMenuPrune,
       },
       {
+        id: "kill-group",
         label: "Kill group",
         hint: "X",
         color: theme.red,
@@ -2890,7 +2938,7 @@ export function App(props: AppProps) {
               y={cm().y}
               items={sessionMenuItems()}
               reservedRows={sessionMenuReservedRows()}
-              highlight={cm().index}
+              highlight={cm().highlight}
               onClose={store.actions.hideContextMenu}
             />
           )}
@@ -2902,7 +2950,7 @@ export function App(props: AppProps) {
               x={cm().x}
               y={cm().y}
               items={groupMenuItems()}
-              highlight={cm().index}
+              highlight={cm().highlight}
               onClose={store.actions.hideGroupContextMenu}
             />
           )}

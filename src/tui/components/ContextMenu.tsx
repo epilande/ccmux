@@ -6,6 +6,16 @@ import { truncateText } from "../utils/format";
 import { theme } from "../theme";
 
 export interface ContextMenuItem {
+  /**
+   * Stable identity, independent of where the item sits today.
+   *
+   * The keyboard highlight is stored as one of these rather than as a row
+   * number because the list mutates while the menu is open — see
+   * `contextMenu.highlight` in the store. Labels would nearly work and are
+   * exactly the wrong thing to key on: they are copy, and renaming one would
+   * quietly move the highlight.
+   */
+  id: string;
   label: string;
   hint: string;
   color: string;
@@ -31,15 +41,18 @@ interface ContextMenuProps {
    */
   reservedRows?: number;
   /**
-   * The keyboard-highlighted item, or null for none.
+   * The keyboard-highlighted item's `id`, or null for none.
    *
    * Drawn with the same raised background the pointer paints on hover rather
    * than a second affordance: it means the same thing (this is the row an
    * action would land on), and two different-looking "current" rows in one
    * 22-column box would be a puzzle. The pointer still wins while it is over
    * a row, so a menu being driven by both at once follows the hand.
+   *
+   * An id whose item is not in `items` lights nothing, which is what happens
+   * when the highlighted item disappears from under an open menu.
    */
-  highlight?: number | null;
+  highlight?: string | null;
   onClose: () => void;
 }
 
@@ -66,9 +79,10 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
   const dims = useTerminalDimensions();
   const [hovered, setHovered] = createSignal<number | null>(null);
 
-  /** The row an action would land on: the pointer's while it is over one,
-   *  otherwise the keyboard's. */
-  const active = () => hovered() ?? props.highlight ?? null;
+  /** Whether this row is the one an action would land on: the pointer's
+   *  while it is over any row, otherwise the keyboard's. */
+  const isActive = (item: ContextMenuItem, index: number): boolean =>
+    hovered() === null ? props.highlight === item.id : hovered() === index;
 
   /** One row per item plus the border. True by construction: every item row
    *  is pinned to a single row below. */
@@ -110,7 +124,7 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
             flexShrink={0}
             paddingLeft={1}
             paddingRight={1}
-            backgroundColor={active() === i() ? theme.border : theme.surface}
+            backgroundColor={isActive(item, i()) ? theme.border : theme.surface}
             onMouseOver={() => setHovered(i())}
             onMouseOut={() => setHovered((h) => (h === i() ? null : h))}
             onMouseDown={(event) => {

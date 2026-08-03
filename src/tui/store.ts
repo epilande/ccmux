@@ -324,12 +324,21 @@ interface TUIState {
   activeSessionId: string | null;
   toastMessage: string | null;
   /**
-   * The open row menu, or null. `index` is the keyboard-highlighted item, and
-   * null is the state a MOUSE-opened menu starts in: the pointer does its own
-   * highlighting on hover, and a row lit up under a pointer that is elsewhere
-   * would be claiming a key press is pending when none is. `m` opens with the
-   * first item lit instead, because a keyboard menu whose Enter did nothing
-   * until an arrow key was pressed is a dead end.
+   * The open row menu, or null. `highlight` is the keyboard-highlighted item,
+   * and null is the state a MOUSE-opened menu starts in: the pointer does its
+   * own highlighting on hover, and a row lit up under a pointer that is
+   * elsewhere would be claiming a key press is pending when none is. `m` opens
+   * with the first item lit instead, because a keyboard menu whose Enter did
+   * nothing until an arrow key was pressed is a dead end.
+   *
+   * An item ID rather than a position, because the list MUTATES under an open
+   * menu: "Move changes" arrives when the dirty check answers, and Fork can
+   * vanish on an SSE update that drops `nativeSessionId`. By position, an
+   * insertion above the highlight silently moves it onto a different item, and
+   * the Enter that follows runs something the user never lit. By identity the
+   * highlight stays on the item it was put on, and an item that disappears
+   * takes its highlight with it — Enter then does nothing, which is the right
+   * answer for a row that is no longer there.
    *
    * It lives ON the menu record rather than beside it, the same way the
    * new-session dialog's `dropdown` carries its own highlight: a highlight
@@ -340,13 +349,13 @@ interface TUIState {
     sessionId: string;
     x: number;
     y: number;
-    index: number | null;
+    highlight: string | null;
   } | null;
   groupContextMenu: {
     groupKey: string;
     x: number;
     y: number;
-    index: number | null;
+    highlight: string | null;
   } | null;
   /** Open new-session dialog, or null when it is closed. */
   newSession: NewSessionDraft | null;
@@ -1503,15 +1512,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("confirmSessionIds", []);
     },
 
-    /** `index` is the item the keyboard starts on; null for a mouse-opened
-     *  menu, which is highlighted by the pointer instead. */
+    /** `highlight` is the item the keyboard starts on; null for a
+     *  mouse-opened menu, which is highlighted by the pointer instead. */
     showContextMenu(
       sessionId: string,
       x: number,
       y: number,
-      index: number | null = null,
+      highlight: string | null = null,
     ) {
-      setState("contextMenu", { sessionId, x, y, index });
+      setState("contextMenu", { sessionId, x, y, highlight });
       setState("groupContextMenu", null);
     },
 
@@ -1523,9 +1532,9 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       groupKey: string,
       x: number,
       y: number,
-      index: number | null = null,
+      highlight: string | null = null,
     ) {
-      setState("groupContextMenu", { groupKey, x, y, index });
+      setState("groupContextMenu", { groupKey, x, y, highlight });
       setState("contextMenu", null);
     },
 
@@ -1533,34 +1542,50 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("groupContextMenu", null);
     },
 
+    /** Light a specific item of whichever menu is open, or nothing. */
+    setMenuHighlight(id: string | null) {
+      if (!state.contextMenu && !state.groupContextMenu) return;
+      setState(
+        state.contextMenu ? "contextMenu" : "groupContextMenu",
+        "highlight",
+        id,
+      );
+    },
+
     /**
-     * Move the open menu's highlight by `delta` within `count` items.
+     * Move the open menu's highlight by `delta` through `ids`, the open
+     * menu's items in the order they are drawn.
      *
      * Clamped rather than wrapping, like the new-session dropdown: in a
-     * six-item menu, `k` teleporting to Kill at the bottom reads as a misfire
-     * — and here the bottom item is usually the destructive one. From no
-     * highlight at all (a menu the pointer opened) the first press lands on
-     * the end the movement came from, so `j` starts at the top and `k` at the
-     * bottom rather than both starting in the same place.
+     * seven-item menu, `k` teleporting to Kill at the bottom reads as a
+     * misfire — and here the bottom item is the destructive one. From no
+     * highlight at all the first press lands on the end the movement came
+     * from, so `j` starts at the top and `k` at the bottom rather than both
+     * starting in the same place. A highlight whose item is GONE (the list
+     * mutated under the menu) is the same case: there is no position to move
+     * from, so the movement starts over rather than resolving against the
+     * index that item used to have.
      *
-     * `count` is the caller's, because the item lists are built in `App.tsx`
+     * `ids` is the caller's, because the item lists are built in `App.tsx`
      * out of per-row gating (a background row's menu, the async "Move
      * changes") that the store has no view of.
      */
-    moveMenuHighlight(delta: number, count: number) {
-      if (count <= 0) return;
+    moveMenuHighlight(delta: number, ids: readonly string[]) {
+      if (ids.length === 0) return;
       const menu = state.contextMenu ?? state.groupContextMenu;
       if (!menu) return;
+      const current =
+        menu.highlight === null ? -1 : ids.indexOf(menu.highlight);
       const next =
-        menu.index === null
+        current === -1
           ? delta > 0
             ? 0
-            : count - 1
-          : Math.min(Math.max(menu.index + delta, 0), count - 1);
+            : ids.length - 1
+          : Math.min(Math.max(current + delta, 0), ids.length - 1);
       setState(
         state.contextMenu ? "contextMenu" : "groupContextMenu",
-        "index",
-        next,
+        "highlight",
+        ids[next]!,
       );
     },
 

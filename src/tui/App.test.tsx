@@ -3688,7 +3688,7 @@ describe("App new session dialog", () => {
     }
   });
 
-  it("offers New session here on a session row's context menu", async () => {
+  it("offers New session on a session row's context menu", async () => {
     const { restore } = withDaemon();
     try {
       await renderApp(120, 24, { groupBy: "none" });
@@ -3696,7 +3696,7 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
       await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("New session here");
+      expect(setup.captureCharFrame()).toContain("New session");
     } finally {
       restore();
     }
@@ -3736,14 +3736,16 @@ describe("App new session dialog", () => {
 
       const frame = setup.captureCharFrame();
       expect(frame).toContain("New session");
-      expect(frame).not.toContain("New session here");
+      // Menu-only labels, since the dialog's own title is now the same words
+      // the menu item carries: "New session" no longer tells them apart.
       expect(frame).not.toContain("Attach");
+      expect(frame).not.toContain("Restart");
     } finally {
       restore();
     }
   });
 
-  /** Right-click the group header on row 1 and click its "New session here"
+  /** Right-click the group header on row 1 and click its "New session"
    *  item, located by label so a menu reshuffle can't fire a different
    *  action. Returns the frame with the dialog open. */
   async function openGroupMenuNewSession(): Promise<string> {
@@ -3752,7 +3754,7 @@ describe("App new session dialog", () => {
     const menuRow = setup
       .captureCharFrame()
       .split("\n")
-      .findIndex((line) => line.includes("New session here"));
+      .findIndex((line) => line.includes("New session"));
     expect(menuRow).toBeGreaterThan(0);
     await setup.mockMouse.click(7, menuRow, MouseButtons.LEFT);
     await settle();
@@ -3906,7 +3908,7 @@ describe("App new session dialog", () => {
     }
   });
 
-  it("offers New session here on a group header's context menu", async () => {
+  it("offers New session on a group header's context menu", async () => {
     const { restore } = withDaemon();
     try {
       await renderApp(120, 24, { groupBy: "project" });
@@ -3915,7 +3917,7 @@ describe("App new session dialog", () => {
       // Row 1 is the group header under the default grouping.
       await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("New session here");
+      expect(setup.captureCharFrame()).toContain("New session");
     } finally {
       restore();
     }
@@ -3975,16 +3977,13 @@ describe("App move-changes menu gate", () => {
 
   /** Rows of the open menu, by the labels visible in the frame. */
   function menuRows(): { label: string; row: number }[] {
-    // "Review diff" matters most: it is the only row BELOW where an
-    // out-of-place item would be inserted, so leaving it out would make the
-    // no-shift assertion blind to the exact regression it guards.
     const labels = [
       "Attach",
       "New session",
-      "Kill",
-      "Restart",
       "Review diff",
       "Move changes",
+      "Restart",
+      "Kill",
     ];
     return setup
       .captureCharFrame()
@@ -3993,6 +3992,34 @@ describe("App move-changes menu gate", () => {
         const label = labels.find((l) => line.includes(l));
         return label ? [{ label, row }] : [];
       });
+  }
+
+  /** The menu box's own top border row. */
+  const menuTop = () =>
+    setup
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes("┌"));
+
+  /** Hold the dirty answer open so the "before" frame is genuinely without
+   *  the item; a mock that resolves immediately settles during the render
+   *  await and the test proves nothing. */
+  function heldDirty() {
+    let release!: (r: Response) => void;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      if (String(url).includes("/dirty")) {
+        return new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch;
+    return {
+      land: () =>
+        release({ ok: true, json: async () => ({ dirty: true }) } as Response),
+      restore: () => (globalThis.fetch = original),
+    };
   }
 
   it("asks the daemon only when the menu opens", async () => {
@@ -4090,45 +4117,88 @@ describe("App move-changes menu gate", () => {
     }
   });
 
-  it("does not move any row already on screen when the item lands", async () => {
-    // THE invariant, and the reason the item is appended last. The answer
-    // arrives after the menu is drawn, so an item inserted anywhere else
-    // would shove the rows below it down under a cursor mid-travel. Asserts
-    // POSITIONS rather than timing, so it outlives whatever the latency is.
+  it("does not move the rows above it when the item lands", async () => {
+    // The item used to be appended LAST so that nothing could move at all.
+    // It sits above Restart and Kill now (destructive actions belong at the
+    // bottom), so those two do shift down by exactly the row it takes, and
+    // this pins what is still guaranteed: the menu box does not move, and
+    // neither does anything above the insertion point.
     //
-    // The answer is held open deliberately: a mock that resolves immediately
-    // settles during the render await, so the "before" frame would already
-    // contain the item and the test would prove nothing.
-    let release!: (r: Response) => void;
-    const original = globalThis.fetch;
-    globalThis.fetch = (async (url: string | URL) => {
-      if (String(url).includes("/dirty")) {
-        return new Promise<Response>((resolve) => {
-          release = resolve;
-        });
-      }
-      return { ok: true, json: async () => ({}) } as Response;
-    }) as unknown as typeof fetch;
-
+    // What protects the two rows that DO move is that neither the pointer nor
+    // the keyboard addresses an item by position — clicks are dispatched to
+    // the row under the cursor, and the keyboard highlight is an item id (see
+    // "keeps the highlight on its own item" below).
+    const dirty = heldDirty();
     try {
       await openMenuOnRow();
+      const top = menuTop();
       const before = menuRows();
       expect(before.length).toBeGreaterThan(2);
       expect(before.some((r) => r.label === "Move changes")).toBe(false);
 
-      release({ ok: true, json: async () => ({ dirty: true }) } as Response);
+      dirty.land();
       await settle();
       await setup.renderOnce();
       const after = menuRows();
       expect(after.some((r) => r.label === "Move changes")).toBe(true);
+      expect(menuTop()).toBe(top);
 
-      // Every row that existed before is still at exactly the same y.
+      const inserted = after.find((r) => r.label === "Move changes")!.row;
       for (const row of before) {
-        const moved = after.find((r) => r.label === row.label);
-        expect(`${row.label}@${moved?.row}`).toBe(`${row.label}@${row.row}`);
+        const now = after.find((r) => r.label === row.label);
+        const expected = row.row < inserted ? row.row : row.row + 1;
+        expect(`${row.label}@${now?.row}`).toBe(`${row.label}@${expected}`);
       }
     } finally {
-      globalThis.fetch = original;
+      dirty.restore();
+    }
+  });
+
+  it("keeps the highlight on its own item when the item lands", async () => {
+    // The hazard the id-keyed highlight exists for. Restart sits directly
+    // below where "Move changes" is inserted, so by row number the highlight
+    // would end up on the new item and Enter would run a move the user never
+    // chose — on a checkout they were about to restart.
+    const dirty = heldDirty();
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      // Through the keyboard, which is the path that remembers a highlight.
+      setup.mockInput.pressKey("m");
+      await settle();
+      await setup.renderOnce();
+      // Attach -> New session -> Review diff -> Restart. (No Fork: the row is
+      // not forkable here.)
+      for (const _ of [0, 1, 2]) {
+        setup.mockInput.pressKey("j");
+        await setup.renderOnce();
+      }
+
+      dirty.land();
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Move changes");
+
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      const frame = squish(setup.captureCharFrame());
+      // Restart's confirmation, not the move dialog.
+      expect(frame).toContain("RestartSession?");
+      expect(frame).not.toContain("Movechangestoworktree");
+    } finally {
+      dirty.restore();
     }
   });
 
@@ -4179,10 +4249,14 @@ describe("App move-changes menu gate", () => {
       expect(frame.split("\n").findIndex((line) => line.includes("┌"))).toBe(
         topBefore,
       );
+      // The box held still, so everything above the insertion did too; the
+      // two rows below it move down by the one row it takes.
       const after = menuRows();
+      const inserted = after.find((r) => r.label === "Move changes")!.row;
       for (const row of before) {
         const moved = after.find((r) => r.label === row.label);
-        expect(`${row.label}@${moved?.row}`).toBe(`${row.label}@${row.row}`);
+        const expected = row.row < inserted ? row.row : row.row + 1;
+        expect(`${row.label}@${moved?.row}`).toBe(`${row.label}@${expected}`);
       }
     } finally {
       globalThis.fetch = original;
@@ -5536,7 +5610,7 @@ describe("App row menu (m)", () => {
     try {
       await renderRows();
       await press("m");
-      // Down to "New session here", back up, and down again: the last one is
+      // Down to "New session", back up, and down again: the last one is
       // what proves k moved anything at all.
       await press("j");
       await press("k");
@@ -5606,6 +5680,75 @@ describe("App row menu (m)", () => {
       await press("?");
       expect(setup.captureCharFrame()).not.toContain("Attach       enter");
       expect(setup.captureCharFrame()).toContain("Keyboard Shortcuts");
+    } finally {
+      restore();
+    }
+  });
+
+  /** Row of each label in the open menu, in the order the frame draws them. */
+  const orderOf = (labels: string[]) => {
+    const lines = setup.captureCharFrame().split("\n");
+    return labels.map((label) => ({
+      label,
+      row: lines.findIndex((line) => line.includes(label)),
+    }));
+  };
+
+  it("puts the destructive action last on a session row", async () => {
+    // The order is what the actions DO: start something, read something,
+    // move work about, then the two that end a session — with Kill at the
+    // bottom, the hardest row to hit by accident and the one nothing can be
+    // appended below.
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      const rows = orderOf([
+        "Attach",
+        "New session",
+        "Review diff",
+        "Restart",
+        "Kill",
+      ]);
+      for (const row of rows)
+        expect(`${row.label}@${row.row}`).not.toContain("@-1");
+      const ordered = [...rows].sort((a, b) => a.row - b.row);
+      expect(ordered.map((r) => r.label)).toEqual(rows.map((r) => r.label));
+    } finally {
+      restore();
+    }
+  });
+
+  it("puts the destructive action last on a background row too", async () => {
+    // A different menu (launch actions instead of attach/restart), same rule.
+    const { restore } = withDaemon();
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "bg1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: null,
+            trackingMode: "background",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      await press("m");
+
+      const rows = orderOf([
+        "Attach agent",
+        "Open agent view",
+        "New session",
+        "Kill",
+      ]);
+      for (const row of rows)
+        expect(`${row.label}@${row.row}`).not.toContain("@-1");
+      const ordered = [...rows].sort((a, b) => a.row - b.row);
+      expect(ordered.map((r) => r.label)).toEqual(rows.map((r) => r.label));
     } finally {
       restore();
     }

@@ -312,7 +312,7 @@ describe("store", () => {
         sessionId: "s1",
         x: 12,
         y: 34,
-        index: null,
+        highlight: null,
       });
     });
 
@@ -333,7 +333,7 @@ describe("store", () => {
         sessionId: "s2",
         x: 9,
         y: 8,
-        index: null,
+        highlight: null,
       });
     });
 
@@ -346,9 +346,123 @@ describe("store", () => {
         sessionId: "s1",
         x: 1,
         y: 2,
-        index: null,
+        highlight: null,
       });
       expect(store.state.groupContextMenu).toBeNull();
+    });
+  });
+
+  /**
+   * The keyboard highlight (`m`). Stored as an item ID rather than a row
+   * number because the menu's list mutates while it is open: "Move changes"
+   * arrives when the dirty check answers, and Fork disappears on an SSE
+   * update that drops `nativeSessionId`.
+   */
+  describe("menu highlight", () => {
+    /** The row menu's items, in order, as `App.tsx` builds them for a clean
+     *  forkable row — before the dirty answer lands. */
+    const CLEAN = [
+      "attach",
+      "new-session",
+      "fork",
+      "review",
+      "restart",
+      "kill",
+    ];
+    /** The same menu once the answer says the checkout is dirty: one item
+     *  INSERTED above the last two. */
+    const DIRTY = [
+      "attach",
+      "new-session",
+      "fork",
+      "review",
+      "move-changes",
+      "restart",
+      "kill",
+    ];
+
+    it("starts on nothing and steps from the top", () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.showContextMenu("s1", 1, 2);
+      expect(store.state.contextMenu?.highlight).toBeNull();
+
+      store.actions.moveMenuHighlight(1, CLEAN);
+      expect(store.state.contextMenu?.highlight).toBe("attach");
+    });
+
+    it("steps from the bottom when the first move is upward", () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.showContextMenu("s1", 1, 2);
+
+      store.actions.moveMenuHighlight(-1, CLEAN);
+      expect(store.state.contextMenu?.highlight).toBe("kill");
+    });
+
+    it("clamps at both ends rather than wrapping", () => {
+      // The bottom item is the destructive one, so `k` at the top wrapping
+      // onto Kill is not a nicety, it is a hazard.
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.showContextMenu("s1", 1, 2, "attach");
+
+      store.actions.moveMenuHighlight(-1, CLEAN);
+      expect(store.state.contextMenu?.highlight).toBe("attach");
+
+      store.actions.setMenuHighlight("kill");
+      store.actions.moveMenuHighlight(1, CLEAN);
+      expect(store.state.contextMenu?.highlight).toBe("kill");
+    });
+
+    it("stays on its item when one is inserted above it", () => {
+      // The case identity exists for: the user lights Restart, the dirty
+      // answer lands, and "Move changes" appears ABOVE it. By row number the
+      // highlight would now be on "Move changes" and the next Enter would run
+      // it — an action nobody chose, on the checkout they were about to
+      // restart.
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.showContextMenu("s1", 1, 2, "restart");
+
+      expect(store.state.contextMenu?.highlight).toBe("restart");
+      // The list grows under the open menu; the highlight is untouched.
+      store.actions.moveMenuHighlight(1, DIRTY);
+      expect(store.state.contextMenu?.highlight).toBe("kill");
+    });
+
+    it("starts over when its item leaves the list", () => {
+      // Fork disappears on an SSE update that drops `nativeSessionId`. There
+      // is no position left to move from, so the next press starts at the end
+      // it came from rather than resolving against the row Fork used to hold.
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.showContextMenu("s1", 1, 2, "fork");
+
+      const withoutFork = CLEAN.filter((id) => id !== "fork");
+      store.actions.moveMenuHighlight(1, withoutFork);
+      expect(store.state.contextMenu?.highlight).toBe("attach");
+    });
+
+    it("moves the group menu's highlight when that is the open one", () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.showGroupContextMenu("ccmux", 1, 2, "collapse");
+
+      store.actions.moveMenuHighlight(1, ["collapse", "new-session"]);
+      expect(store.state.groupContextMenu?.highlight).toBe("new-session");
+      expect(store.state.contextMenu).toBeNull();
+    });
+
+    it("ignores movement and lighting while no menu is open", () => {
+      const store = createTUIStore({ groupBy: "none" });
+
+      store.actions.moveMenuHighlight(1, CLEAN);
+      store.actions.setMenuHighlight("kill");
+      expect(store.state.contextMenu).toBeNull();
+      expect(store.state.groupContextMenu).toBeNull();
+    });
+
+    it("ignores movement through an empty list", () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.showContextMenu("s1", 1, 2, "attach");
+
+      store.actions.moveMenuHighlight(1, []);
+      expect(store.state.contextMenu?.highlight).toBe("attach");
     });
   });
 
@@ -366,7 +480,7 @@ describe("store", () => {
         groupKey: "ccmux",
         x: 12,
         y: 34,
-        index: null,
+        highlight: null,
       });
     });
 
@@ -387,7 +501,7 @@ describe("store", () => {
         groupKey: "gk",
         x: 3,
         y: 4,
-        index: null,
+        highlight: null,
       });
       expect(store.state.contextMenu).toBeNull();
     });

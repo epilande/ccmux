@@ -14,10 +14,15 @@ afterEach(() => {
   setup?.renderer.destroy();
 });
 
+/** Ids derived from the labels, so a test can name the item it means
+ *  ("kill") rather than the row it happens to be in. */
+const idFor = (label: string) => label.toLowerCase().replace(/\s+/g, "-");
+
 function itemSpies(labels: string[]) {
   return labels.map(
     (label) =>
       ({
+        id: idFor(label),
         label,
         hint: label[0]!.toLowerCase(),
         color: theme.text,
@@ -34,7 +39,7 @@ async function renderMenu(
     onClose?: ReturnType<typeof mock>;
     size?: { width: number; height: number };
     reservedRows?: number;
-    highlight?: number | null;
+    highlight?: string | null;
   } = {},
 ) {
   const items = opts.items ?? itemSpies(["Attach", "Kill", "Restart"]);
@@ -104,8 +109,9 @@ describe("ContextMenu", () => {
   it("renders the hint next to each item", async () => {
     const { frame } = await renderMenu({
       items: [
-        { label: "Pin to top", hint: "<", color: theme.blue, action: () => {} },
+        { id: "pin-top", label: "Pin to top", hint: "<", color: theme.blue, action: () => {} },
         {
+          id: "pin-bottom",
           label: "Pin to bottom",
           hint: ">",
           color: theme.blue,
@@ -160,7 +166,7 @@ describe("ContextMenu", () => {
  */
 describe("ContextMenu keyboard highlight", () => {
   it("raises the highlighted row", async () => {
-    const { items } = await renderMenu({ highlight: 1 });
+    const { items } = await renderMenu({ highlight: "kill" });
     expect(raisedLabels(items)).toEqual(["Kill"]);
   });
 
@@ -186,7 +192,7 @@ describe("ContextMenu keyboard highlight", () => {
 
   it("follows the pointer while it is over a row", async () => {
     // Both at once: the hand wins, because it is the one still moving.
-    const { items } = await renderMenu({ highlight: 0 });
+    const { items } = await renderMenu({ highlight: "attach" });
     expect(raisedLabels(items)).toEqual(["Attach"]);
     const row = locate(setup.captureCharFrame(), "Restart")!.row;
     await setup.mockMouse.moveTo(10, row);
@@ -195,7 +201,7 @@ describe("ContextMenu keyboard highlight", () => {
   });
 
   it("falls back to the keyboard's row when the pointer leaves", async () => {
-    const { items } = await renderMenu({ highlight: 0 });
+    const { items } = await renderMenu({ highlight: "attach" });
     const row = locate(setup.captureCharFrame(), "Restart")!.row;
     await setup.mockMouse.moveTo(10, row);
     await setup.renderOnce();
@@ -235,10 +241,10 @@ describe("ContextMenu sizing", () => {
   it("leaves the labels that fit alone", async () => {
     // The longest labels the app actually authors, each with its hint.
     const items: ContextMenuItem[] = [
-      { label: "New session here", hint: "n", color: theme.text, action() {} },
-      { label: "Attach agent", hint: "enter", color: theme.text, action() {} },
-      { label: "Prune worktrees", hint: "W", color: theme.text, action() {} },
-      { label: "Open agent view", hint: "", color: theme.text, action() {} },
+      { id: "new-session", label: "New session", hint: "n", color: theme.text, action() {} },
+      { id: "attach-agent", label: "Attach agent", hint: "enter", color: theme.text, action() {} },
+      { id: "prune", label: "Prune worktrees", hint: "W", color: theme.text, action() {} },
+      { id: "agent-view", label: "Open agent view", hint: "", color: theme.text, action() {} },
     ];
     const { frame } = await renderMenu({ items });
 
