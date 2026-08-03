@@ -31,6 +31,11 @@ import type {
 import { DEFAULT_PROMPT_DISPLAY } from "../lib/preferences";
 import { setUIState, type UIState } from "../lib/state";
 import { getDaemonUrl } from "../lib/config";
+import {
+  DESTINATION_OPTIONS,
+  PLACEMENT_OPTIONS,
+  UNTRACKED_OPTIONS,
+} from "./new-session-options";
 import type { TranscriptMatch } from "../daemon/transcript-search";
 import type { UntrackedMode } from "../daemon/worktree-move-changes";
 // The daemon's own slug rule, imported rather than mirrored: a name the
@@ -134,6 +139,23 @@ export interface NewSessionFork {
    * branch this client never saw", not "there is no name".
    */
   branch: string | null;
+  /**
+   * Whether a worktree is one of the destinations this fork can be given.
+   *
+   * Answered when the dialog opens, from the source's `mainRepoRoot`: a
+   * session outside a repository has nowhere to hang a linked checkout. False
+   * locks the destination to the source's own directory rather than offering
+   * a choice that would only ever be refused.
+   */
+  canWorktree: boolean;
+  /**
+   * The source's own pane, or null for a row that has none right now.
+   *
+   * Only the in-place destination uses it, and only for a split: a fork that
+   * continues in the same directory belongs beside the conversation it came
+   * from, not beside whichever pane the picker happens to be in.
+   */
+  pane: string | null;
 }
 
 /**
@@ -155,15 +177,14 @@ export interface NewSessionShape {
  * budgets for the height floor. A consumer that disagreed would not clip the
  * row it did not expect — it would draw it over its neighbour.
  *
- * All three disjuncts, though the store locks a move's and a fork's
- * destination to `worktree`: the name row is what those modes name their
- * worktree with, and a lock that ever came loose must not take the field with
- * it.
+ * Both disjuncts, though the store locks a move's destination to `worktree`:
+ * the name row is what that mode names its worktree with, and a lock that ever
+ * came loose must not take the field with it. A FORK is not on that list — it
+ * chooses its destination like an ordinary spawn does (issue #99 follow-up),
+ * so a fork continuing in the source's own checkout names nothing.
  */
 export function namesAWorktree(draft: NewSessionShape): boolean {
-  return (
-    draft.destination === "worktree" || draft.moveChanges || draft.fork !== null
-  );
+  return draft.destination === "worktree" || draft.moveChanges;
 }
 
 /**
@@ -172,14 +193,16 @@ export function namesAWorktree(draft: NewSessionShape): boolean {
  * Most of them are conditional. Move-changes mode locks the destination (a
  * move has nowhere to go but a new worktree, so offering "here" would be a
  * choice that cannot be taken) and adds the untracked-files choice; an
- * ordinary new session has neither. Fork mode locks the destination for the
- * same reason and drops two more: a fork continues the SOURCE's agent and the
- * source's conversation, so neither an agent nor an opening prompt is a
- * choice it has. The name belongs to whichever mode is making a worktree, and
- * to none of them when the session starts in the checkout it was opened over.
- * A field that cannot be acted on must not be reachable by Tab either —
- * focusing a row whose keys do nothing is exactly the "reads as broken"
- * outcome the picker hides items to avoid.
+ * ordinary new session has neither. Fork mode drops two: a fork continues the
+ * SOURCE's agent and the source's conversation, so neither an agent nor an
+ * opening prompt is a choice it has. It KEEPS the destination — continuing
+ * beside the original and continuing in a worktree of its own are the two
+ * things a fork can mean — except where the source sits outside a repository,
+ * which leaves nowhere for the second to go. The name belongs to whichever
+ * draft is making a worktree, and to none of them when the session starts in
+ * the checkout it was opened over. A field that cannot be acted on must not be
+ * reachable by Tab either — focusing a row whose keys do nothing is exactly
+ * the "reads as broken" outcome the picker hides items to avoid.
  *
  * The full list stays the source of truth for the DIALOG'S HEIGHT: every
  * field declares a row count, and a hidden one declares zero.
@@ -190,7 +213,11 @@ export function newSessionFields(
   const forking = draft.fork !== null;
   return NEW_SESSION_FIELDS.filter((field) => {
     if (field === "agent" || field === "prompt") return !forking;
-    if (field === "destination") return !draft.moveChanges && !forking;
+    if (field === "destination") {
+      return (
+        !draft.moveChanges && (draft.fork === null || draft.fork.canWorktree)
+      );
+    }
     if (field === "untracked") return draft.moveChanges;
     if (field === "worktreeName") return namesAWorktree(draft);
     return true;
@@ -243,6 +270,16 @@ export interface NewSessionDraft {
   fork: NewSessionFork | null;
   /** Which field the option/text keys currently apply to. */
   field: NewSessionField;
+  /**
+   * The open dropdown overlay: which option field's list is up and the
+   * highlighted option's index, or null while none is. One record rather
+   * than one flag per field, so two dropdowns can never be open at once.
+   * View state rather than part of the request, but it lives in the draft
+   * beside `field` for the same reason focus does — the key handling is
+   * App's and the rendering is the dialog's, and this is the one place both
+   * already read.
+   */
+  dropdown: { field: NewSessionField; index: number } | null;
 }
 
 interface TUIState {
@@ -294,8 +331,40 @@ interface TUIState {
   activePaneId: string | null;
   activeSessionId: string | null;
   toastMessage: string | null;
-  contextMenu: { sessionId: string; x: number; y: number } | null;
-  groupContextMenu: { groupKey: string; x: number; y: number } | null;
+  /**
+   * The open row menu, or null. `highlight` is the keyboard-highlighted item,
+   * and null is the state a MOUSE-opened menu starts in: the pointer does its
+   * own highlighting on hover, and a row lit up under a pointer that is
+   * elsewhere would be claiming a key press is pending when none is. `m` opens
+   * with the first item lit instead, because a keyboard menu whose Enter did
+   * nothing until an arrow key was pressed is a dead end.
+   *
+   * An item ID rather than a position, because the list MUTATES under an open
+   * menu: "Move changes" arrives when the dirty check answers, and Fork can
+   * vanish on an SSE update that drops `nativeSessionId`. By position, an
+   * insertion above the highlight silently moves it onto a different item, and
+   * the Enter that follows runs something the user never lit. By identity the
+   * highlight stays on the item it was put on, and an item that disappears
+   * takes its highlight with it — Enter then does nothing, which is the right
+   * answer for a row that is no longer there.
+   *
+   * It lives ON the menu record rather than beside it, the same way the
+   * new-session dialog's `dropdown` carries its own highlight: a highlight
+   * that outlived its menu, or belonged to the other one, is not a state
+   * either surface can be in.
+   */
+  contextMenu: {
+    sessionId: string;
+    x: number;
+    y: number;
+    highlight: string | null;
+  } | null;
+  groupContextMenu: {
+    groupKey: string;
+    x: number;
+    y: number;
+    highlight: string | null;
+  } | null;
   /** Open new-session dialog, or null when it is closed. */
   newSession: NewSessionDraft | null;
   /** Agent last spawned from the dialog, the default when the selected row
@@ -1177,6 +1246,60 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     setState("newSession", "worktreeName", slug);
   }
 
+  /**
+   * Commit an option field's value from its string form — the one write path
+   * every dropdown consumer funnels into. Fixed fields are looked up in
+   * their own tables rather than cast, so only a real option gets through;
+   * the agent takes any name, since its list is the caller's (`GET /agents`)
+   * and the reconcile effect owns snapping a stale one.
+   */
+  function applyNewSessionOption(field: NewSessionField, value: string): void {
+    const draft = state.newSession;
+    if (!draft) return;
+    switch (field) {
+      case "agent":
+        setState("newSession", "agent", value);
+        return;
+      case "placement": {
+        const option = PLACEMENT_OPTIONS.find((o) => o.value === value);
+        if (option) setState("newSession", "placement", option.value);
+        return;
+      }
+      case "destination": {
+        const option = DESTINATION_OPTIONS.find((o) => o.value === value);
+        if (!option) return;
+        // Locked in move-changes mode, and enforced here rather than only in
+        // the dialog: the destination is what makes the request a move at
+        // all, so any path that could flip it back to `here` would post a
+        // spawn that silently dropped the changes it was opened to relocate.
+        // A fork chooses freely, unless its source has no repository to hang
+        // a worktree off — there the lock is the other way round.
+        if (draft.moveChanges) return;
+        if (draft.fork && !draft.fork.canWorktree) return;
+        batch(() => {
+          setState("newSession", "destination", option.value);
+          // The name field goes with the worktree. Focus cannot be left on a
+          // row that no longer exists, or the next Tab would start from a
+          // field the list has never heard of. The typed name itself is
+          // KEPT: coming back to the worktree destination should find it as
+          // it was left.
+          if (
+            option.value !== "worktree" &&
+            state.newSession?.field === "worktreeName"
+          ) {
+            setState("newSession", "field", "destination");
+          }
+        });
+        return;
+      }
+      case "untracked": {
+        const option = UNTRACKED_OPTIONS.find((o) => o.value === value);
+        if (option) setState("newSession", "untracked", option.value);
+        return;
+      }
+    }
+  }
+
   const actions = {
     setSessions(sessions: EnrichedSession[]) {
       // Preserve client-synthesized subprocess invoke rows. They live only
@@ -1402,8 +1525,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("confirmSessionIds", []);
     },
 
-    showContextMenu(sessionId: string, x: number, y: number) {
-      setState("contextMenu", { sessionId, x, y });
+    /** `highlight` is the item the keyboard starts on; null for a
+     *  mouse-opened menu, which is highlighted by the pointer instead. */
+    showContextMenu(
+      sessionId: string,
+      x: number,
+      y: number,
+      highlight: string | null = null,
+    ) {
+      setState("contextMenu", { sessionId, x, y, highlight });
       setState("groupContextMenu", null);
     },
 
@@ -1411,13 +1541,65 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("contextMenu", null);
     },
 
-    showGroupContextMenu(groupKey: string, x: number, y: number) {
-      setState("groupContextMenu", { groupKey, x, y });
+    showGroupContextMenu(
+      groupKey: string,
+      x: number,
+      y: number,
+      highlight: string | null = null,
+    ) {
+      setState("groupContextMenu", { groupKey, x, y, highlight });
       setState("contextMenu", null);
     },
 
     hideGroupContextMenu() {
       setState("groupContextMenu", null);
+    },
+
+    /** Light a specific item of whichever menu is open, or nothing. */
+    setMenuHighlight(id: string | null) {
+      if (!state.contextMenu && !state.groupContextMenu) return;
+      setState(
+        state.contextMenu ? "contextMenu" : "groupContextMenu",
+        "highlight",
+        id,
+      );
+    },
+
+    /**
+     * Move the open menu's highlight by `delta` through `ids`, the open
+     * menu's items in the order they are drawn.
+     *
+     * Clamped rather than wrapping, like the new-session dropdown: in a
+     * seven-item menu, `k` teleporting to Kill at the bottom reads as a
+     * misfire — and here the bottom item is the destructive one. From no
+     * highlight at all the first press lands on the end the movement came
+     * from, so `j` starts at the top and `k` at the bottom rather than both
+     * starting in the same place. A highlight whose item is GONE (the list
+     * mutated under the menu) is the same case: there is no position to move
+     * from, so the movement starts over rather than resolving against the
+     * index that item used to have.
+     *
+     * `ids` is the caller's, because the item lists are built in `App.tsx`
+     * out of per-row gating (a background row's menu, the async "Move
+     * changes") that the store has no view of.
+     */
+    moveMenuHighlight(delta: number, ids: readonly string[]) {
+      if (ids.length === 0) return;
+      const menu = state.contextMenu ?? state.groupContextMenu;
+      if (!menu) return;
+      const current =
+        menu.highlight === null ? -1 : ids.indexOf(menu.highlight);
+      const next =
+        current === -1
+          ? delta > 0
+            ? 0
+            : ids.length - 1
+          : Math.min(Math.max(current + delta, 0), ids.length - 1);
+      setState(
+        state.contextMenu ? "contextMenu" : "groupContextMenu",
+        "highlight",
+        ids[next]!,
+      );
     },
 
     /**
@@ -1432,23 +1614,29 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       /** Open in move-changes mode: destination locked to a new worktree,
        *  with the untracked-files choice. */
       moveChanges?: boolean;
-      /** Open in fork mode: continue this session in a worktree of its own,
-       *  destination locked, agent and prompt gone. */
+      /** Open in fork mode: continue this session, here or in a worktree of
+       *  its own, with the agent and prompt gone. */
       fork?: NewSessionFork;
     }) {
       const moveChanges = init.moveChanges === true;
       const fork = init.fork ?? null;
-      // Both modes exist to put something somewhere new; only an ordinary
-      // spawn defaults to the directory it was opened over.
-      const destination: NewSessionDestination =
-        moveChanges || fork ? "worktree" : "here";
+      // A move exists to put the changes somewhere new; everything else
+      // defaults to the directory it was opened over, a fork included — the
+      // key that opens it used to fork in place with no dialog at all, and
+      // Enter on an untouched dialog still does exactly that.
+      const destination: NewSessionDestination = moveChanges
+        ? "worktree"
+        : "here";
       batch(() => {
         setState("contextMenu", null);
         setState("groupContextMenu", null);
         setState("newSession", {
           cwd: init.cwd,
           agent: init.agent,
-          placement: "window",
+          // A fork belongs beside the conversation it continues, which is what
+          // the one-shot `F` always did; anything else starts in a window of
+          // its own.
+          placement: fork ? "split-h" : "window",
           destination,
           prompt: "",
           moveChanges,
@@ -1461,6 +1649,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           worktreeName: null,
           fork,
           field: newSessionFields({ moveChanges, destination, fork })[0]!,
+          dropdown: null,
         });
       });
     },
@@ -1503,41 +1692,51 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       batch(() => {
         settleWorktreeName(next);
         setState("newSession", "field", next);
+        // A click that moves focus elsewhere is also a dismissal: the keys
+        // the overlay was claiming belong to the newly focused field now.
+        if (state.newSession?.dropdown?.field !== next) {
+          setState("newSession", "dropdown", null);
+        }
       });
     },
 
     setNewSessionAgent(agent: string) {
+      applyNewSessionOption("agent", agent);
+    },
+
+    /** The dropdown consumers' write path; see `applyNewSessionOption`. */
+    setNewSessionOption: applyNewSessionOption,
+
+    /**
+     * Open `field`'s dropdown with `index` highlighted, replacing whichever
+     * one was open — the record is single, so two can never be up at once.
+     * The caller owns the option list, so the caller says where the
+     * highlight starts. Refused for a field this draft does not have, the
+     * same rule that keeps focus off one.
+     */
+    openNewSessionDropdown(field: NewSessionField, index: number) {
+      const draft = state.newSession;
+      if (!draft || !newSessionFields(draft).includes(field)) return;
+      setState("newSession", "dropdown", { field, index: Math.max(0, index) });
+    },
+
+    closeNewSessionDropdown() {
       if (!state.newSession) return;
-      setState("newSession", "agent", agent);
+      setState("newSession", "dropdown", null);
+    },
+
+    setNewSessionDropdownIndex(index: number) {
+      const draft = state.newSession;
+      if (!draft || draft.dropdown === null) return;
+      setState("newSession", "dropdown", "index", Math.max(0, index));
     },
 
     setNewSessionPlacement(placement: NewSessionPlacement) {
-      if (!state.newSession) return;
-      setState("newSession", "placement", placement);
+      applyNewSessionOption("placement", placement);
     },
 
     setNewSessionDestination(destination: NewSessionDestination) {
-      const draft = state.newSession;
-      if (!draft) return;
-      // Locked in both modes, and enforced here rather than only in the
-      // dialog: the destination is what makes the request a move (or a fork
-      // into a worktree) at all, so any path that could flip it back to `here`
-      // would post a spawn that silently dropped the changes it was opened to
-      // relocate, or a bare fork into the checkout the source already has.
-      if (draft.moveChanges || draft.fork) return;
-      batch(() => {
-        setState("newSession", "destination", destination);
-        // The name field goes with the worktree. Focus cannot be left on a
-        // row that no longer exists, or the next Tab would start from a field
-        // the list has never heard of. The typed name itself is KEPT: coming
-        // back to the worktree destination should find it as it was left.
-        if (
-          destination !== "worktree" &&
-          state.newSession?.field === "worktreeName"
-        ) {
-          setState("newSession", "field", "destination");
-        }
-      });
+      applyNewSessionOption("destination", destination);
     },
 
     setNewSessionPrompt(prompt: string) {
@@ -1546,8 +1745,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     setNewSessionUntracked(untracked: UntrackedMode) {
-      if (!state.newSession) return;
-      setState("newSession", "untracked", untracked);
+      applyNewSessionOption("untracked", untracked);
     },
 
     /**

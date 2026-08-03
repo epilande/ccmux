@@ -12,6 +12,13 @@ interface FooterProps {
   persistent?: boolean;
   groupBy?: GroupBy;
   newSessionMode?: boolean;
+  /**
+   * What the dialog's focused option field is doing, because the keys change
+   * with it: `focused` (a collapsed pill has focus, space opens its dropdown),
+   * `dropdown` (an overlay is open and owns every key), or undefined for a
+   * text field.
+   */
+  newSessionOption?: "focused" | "dropdown";
   reviewable?: boolean;
 }
 
@@ -56,6 +63,36 @@ export function fitHints(segments: HintSegment[], width: number): string {
   return render();
 }
 
+/**
+ * The new-session dialog's key hints, authored once for both surfaces: the
+ * Footer joins them into one line, and the dialog renders the same segments
+ * with its own width-drop rules and click targets. First and last are always
+ * the two exits (confirm and esc), which is what the dialog's structure
+ * leans on. Wording is sized to the DIALOG's 61-column hint row — "tab
+ * field" and "1-9 pick", not the longer forms — since the footer has columns
+ * to spare and the dialog does not. j/k (cycle a collapsed pill, move the
+ * open list) is taught by the dropdown state's own line instead.
+ */
+export function newSessionHintSegments(
+  state: "text" | "focused" | "dropdown",
+): { key: string; gloss: string }[] {
+  if (state === "dropdown") {
+    return [
+      { key: "enter/space", gloss: "select" },
+      { key: "j/k", gloss: "move" },
+      { key: "esc", gloss: "cancel" },
+    ];
+  }
+  return [
+    { key: "enter", gloss: "spawn" },
+    { key: "tab", gloss: "field" },
+    { key: "1-9", gloss: "pick" },
+    // The opener, taught only where an option field is holding the keys.
+    ...(state === "focused" ? [{ key: "space", gloss: "open" }] : []),
+    { key: "esc", gloss: "cancel" },
+  ];
+}
+
 /** The default (no-mode) hints, in display order. */
 export function defaultHints(props: {
   persistent?: boolean;
@@ -63,18 +100,34 @@ export function defaultHints(props: {
   reviewable?: boolean;
 }): HintSegment[] {
   return [
-    // Ranks, loosely: view toggles (1) go before actions on the selected
-    // session (2), which go before navigation (3-4), which goes before the
-    // two ways out (5-6). `q quit` outranks even `? help` so the last hint
-    // standing is how to leave.
+    // Ranks, loosely: the hints something ELSE also teaches (1) go before the
+    // ones this line is the only home for (2), which go before navigation
+    // (3-4), which goes before the two ways out (5-6). `q quit` outranks even
+    // `? help` so the last hint standing is how to leave.
+    //
+    // Rank 1 is what a narrow terminal can afford to forget, and `r`/`x` sit
+    // there because the row menu (`m`) now names Restart and Kill on the row
+    // itself, hint and all. The footer taught them when it was the only thing
+    // that did; a second, discoverable home is what buys the columns back.
+    //
+    // Ties drop RIGHTMOST first (see `fitHints`), so within rank 1 the order
+    // is kill, restart, preview, group — the two menu-backed actions before
+    // the two view toggles, which have no home but this line and `?`. That
+    // falls out of display order rather than being stated, so a reshuffle of
+    // this array is a reshuffle of the drop order too.
     { text: "j/k nav", rank: 3 },
     { text: `enter ${props.persistent ? "switch" : "select"}`, rank: 4 },
     { text: "n new", rank: 3 },
     { text: "/ search", rank: 2 },
     { text: `b group:${props.groupBy ?? DEFAULT_GROUP_BY}`, rank: 1 },
     { text: "P preview", rank: 1 },
-    { text: "r restart", rank: 2 },
-    { text: "x kill", rank: 2 },
+    { text: "r restart", rank: 1 },
+    { text: "x kill", rank: 1 },
+    // Stays at 2 even though the row menu carries it too: this is the only
+    // place the review integration is ADVERTISED, and it is already
+    // conditional on hunk being installed, so the columns it costs are only
+    // ever spent on someone who can use it. Restart and Kill need no such
+    // advertisement — they are the two actions every session list has.
     ...(props.reviewable ? [{ text: "d review", rank: 2 }] : []),
     { text: "? help", rank: 5 },
     { text: "q quit", rank: 6 },
@@ -108,7 +161,9 @@ export const Footer: Component<FooterProps> = (props) => {
         </Match>
         <Match when={props.newSessionMode}>
           <text fg={theme.overlay}>
-            enter spawn · tab next field · j/k or 1-9 pick · esc cancel
+            {newSessionHintSegments(props.newSessionOption ?? "text")
+              .map((segment) => `${segment.key} ${segment.gloss}`)
+              .join(HINT_SEPARATOR)}
           </text>
         </Match>
         <Match when={props.searchMode}>

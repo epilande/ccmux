@@ -3,10 +3,10 @@ import { testRender } from "@opentui/solid";
 import {
   NewSessionDialog,
   newSessionFloorRows,
-  optionWindow,
   planDialogRows,
   wrapText,
 } from "./NewSessionDialog";
+import { optionWindow } from "./DropdownField";
 import { expectFrameIntegrity, squish } from "./test-helpers";
 import { displayWidth } from "../utils/format";
 import type { SpawnableAgent } from "../../lib/spawnable-agents";
@@ -41,6 +41,7 @@ const draft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft => ({
   worktreeName: null,
   fork: null,
   field: "agent",
+  dropdown: null,
   ...overrides,
 });
 
@@ -63,10 +64,9 @@ async function renderDialog(props: {
         agents={props.agents === undefined ? [agent("claude")] : props.agents}
         agentsError={props.agentsError}
         onFocusField={() => {}}
-        onSelectAgent={() => {}}
-        onSelectPlacement={() => {}}
-        onSelectDestination={() => {}}
-        onSelectUntracked={() => {}}
+        onOpenDropdown={() => {}}
+        onCloseDropdown={() => {}}
+        onSelectOption={() => {}}
         onPromptInput={() => {}}
         onWorktreeNameInput={() => {}}
         onSubmit={() => {}}
@@ -172,52 +172,60 @@ describe("wrapText", () => {
 });
 
 describe("planDialogRows", () => {
-  /** The move-changes dialog on a sidebar rail: the tallest shape there is. */
-  const stackedMove = {
+  /** The move-changes dialog: the mode with the most fields, all one row
+   *  each now that every option list lives in an overlay. */
+  const move = {
     moveChanges: true,
     fork: false,
     namesAWorktree: true,
     agentRows: 1,
-    stacked: true,
     keyHints: true,
   };
 
   it("spends everything it has when the rows are there", () => {
-    const plan = planDialogRows(stackedMove, 40);
+    const plan = planDialogRows(move, 40);
     expect(plan.tooShort).toBe(false);
+    expect(plan.showFieldSpacers).toBe(true);
+    expect(plan.showButtons).toBe(true);
     expect(plan.showKeyHints).toBe(true);
     expect(plan.showModeNote).toBe(true);
     expect(plan.showDirectory).toBe(true);
-    expect(plan.untrackedRows).toBe(3);
-    // Nothing is padded out to fill the screen: the dialog is its content.
-    expect(plan.height).toBe(18);
+    // Nothing is padded out to fill the screen: the dialog is its content —
+    // border and title (3), the spacer, six one-row fields with the six
+    // blank rows airing the stack (directory included), the directory, the
+    // Changes note, the button row with its two blanks, and the two hint
+    // rows.
+    expect(plan.height).toBe(23);
   });
 
   it("gives up rows in an order that keeps the actionable ones", () => {
     // Each step is the same dialog one row shorter, so the sequence IS the
-    // priority list: hints, then the move note, then the blank under the
-    // title, then the stacked options collapse, then the directory.
+    // priority list: the field spacers (all at once — pure air), then the
+    // buttons (a duplicate of enter/esc), then the hints, then the move
+    // note, then the blank under the title, then the directory. The fields
+    // never enter it: each is one row in every mode, with its list in an
+    // overlay outside the budget.
     const given = (height: number) => {
-      const plan = planDialogRows(stackedMove, height);
+      const plan = planDialogRows(move, height);
       return {
+        fieldSpacers: plan.showFieldSpacers,
+        buttons: plan.showButtons,
         hints: plan.showKeyHints,
         note: plan.showModeNote,
         spacer: plan.showTitleSpacer,
-        untracked: plan.untrackedRows,
-        placement: plan.placementRows,
         directory: plan.showDirectory,
         tooShort: plan.tooShort,
       };
     };
-    expect(given(16).hints).toBe(false);
-    expect(given(16).note).toBe(true);
-    expect(given(15).note).toBe(false);
-    expect(given(14).spacer).toBe(false);
-    // Now the options, bottom-up, and never below one row each.
-    expect(given(13).untracked).toBe(2);
-    expect(given(12).untracked).toBe(1);
-    expect(given(11).placement).toBe(2);
-    expect(given(10).placement).toBe(1);
+    expect(given(23).fieldSpacers).toBe(true);
+    expect(given(22).fieldSpacers).toBe(false);
+    expect(given(22).buttons).toBe(true);
+    expect(given(16).buttons).toBe(false);
+    expect(given(16).hints).toBe(true);
+    expect(given(13).hints).toBe(false);
+    expect(given(13).note).toBe(true);
+    expect(given(11).note).toBe(false);
+    expect(given(10).spacer).toBe(false);
     expect(given(10).directory).toBe(true);
     // The last thing to go, because in this mode it names the checkout being
     // emptied.
@@ -225,25 +233,28 @@ describe("planDialogRows", () => {
     expect(given(9).tooShort).toBe(false);
   });
 
-  it("shrinks the agent list before anything else", () => {
-    // It is the only field whose natural size is somebody else's list, and
-    // it already scrolls, so it gives up rows without losing anything.
-    const plan = planDialogRows({ ...stackedMove, agentRows: 9 }, 20);
+  it("shrinks the agent error back after the spacers, before the rest", () => {
+    // The one thing that can still want more than a row is the agent
+    // field's ERROR, and its tail is already summarised by an ellipsis, so
+    // it gives up rows without losing anything actionable — but the pure-air
+    // spacers go first.
+    const plan = planDialogRows({ ...move, agentRows: 9 }, 20);
+    expect(plan.showFieldSpacers).toBe(false);
+    expect(plan.showButtons).toBe(false);
     expect(plan.agentRows).toBeLessThan(9);
     expect(plan.showKeyHints).toBe(true);
     expect(plan.showModeNote).toBe(true);
   });
 
   it("refuses to draw a dialog shorter than its own fields", () => {
-    expect(planDialogRows(stackedMove, 8).tooShort).toBe(true);
-    expect(planDialogRows(stackedMove, 8).height).toBe(3);
+    expect(planDialogRows(move, 8).tooShort).toBe(true);
+    expect(planDialogRows(move, 8).height).toBe(3);
     // An ordinary spawn into this checkout has two fewer rows to find.
     const plain = {
       moveChanges: false,
       fork: false,
       namesAWorktree: false,
       agentRows: 1,
-      stacked: false,
       keyHints: false,
     };
     expect(newSessionFloorRows(plain)).toBe(7);
@@ -260,23 +271,26 @@ describe("planDialogRows", () => {
    */
   describe("in fork mode", () => {
     /** A fork on an ordinary terminal. `agentRows` is what an equivalent
-     *  spawn's agent list would ask for, and a fork owes it nothing. */
+     *  spawn's agent error would ask for, and a fork owes it nothing. */
     const wideFork = {
       moveChanges: false,
       fork: true,
       namesAWorktree: true,
       agentRows: 3,
-      stacked: false,
       keyHints: true,
     };
 
-    it("spends its rows on three fields, an agent list on none", () => {
+    it("spends its rows on three fields, an agent row on none", () => {
       expect(planDialogRows(wideFork, 40)).toEqual({
         tooShort: false,
         // Border and title (3), the spacer, the directory, the Source note,
-        // the two hint rows, and one row each for Placement, Where and Name.
-        height: 11,
+        // the button row with its two blanks, the two hint rows, one row
+        // each for Placement, Where and Name, and the three blank rows
+        // airing that four-block stack.
+        height: 17,
         showTitleSpacer: true,
+        showFieldSpacers: true,
+        showButtons: true,
         showDirectory: true,
         // The Source row: which conversation this continues.
         showModeNote: true,
@@ -285,26 +299,6 @@ describe("planDialogRows", () => {
         // a row budgeted here that nothing renders is a blank line the rest
         // of the dialog is pushed down by.
         agentRows: 0,
-        placementRows: 1,
-        destinationRows: 1,
-        untrackedRows: 0,
-      });
-    });
-
-    it("keeps the destination locked to one row on a stacked rail", () => {
-      // Placement stacks because it is a real choice; Where does not,
-      // because in this mode it is a restatement with nothing to pick.
-      expect(planDialogRows({ ...wideFork, stacked: true }, 40)).toEqual({
-        tooShort: false,
-        height: 13,
-        showTitleSpacer: true,
-        showDirectory: true,
-        showModeNote: true,
-        showKeyHints: true,
-        agentRows: 0,
-        placementRows: 3,
-        destinationRows: 1,
-        untrackedRows: 0,
       });
     });
 
@@ -313,15 +307,14 @@ describe("planDialogRows", () => {
         tooShort: false,
         height: 6,
         showTitleSpacer: false,
+        showFieldSpacers: false,
+        showButtons: false,
         showDirectory: false,
         showModeNote: false,
         showKeyHints: false,
-        // Still zero on the way down: the agent list is the first thing the
-        // plan shrinks, and it cannot shrink what was never asked for.
+        // Still zero on the way down: the plan cannot shrink what was never
+        // asked for.
         agentRows: 0,
-        placementRows: 1,
-        destinationRows: 1,
-        untrackedRows: 0,
       });
       expect(planDialogRows(wideFork, 5).tooShort).toBe(true);
     });
@@ -332,6 +325,22 @@ describe("planDialogRows", () => {
       const shape = { moveChanges: false, namesAWorktree: true };
       expect(newSessionFloorRows({ ...shape, fork: true })).toBe(6);
       expect(newSessionFloorRows({ ...shape, fork: false })).toBe(8);
+    });
+
+    /** How a fork actually opens: continuing in the source's own checkout,
+     *  where there is no worktree to name. */
+    const forkHere = { ...wideFork, namesAWorktree: false };
+
+    it("drops the name row's budget with the name row", () => {
+      // One field fewer than the worktree variant above, and one row of air
+      // with it. A count left at the worktree's would not clip the surplus —
+      // it would draw the border over the last field.
+      expect(planDialogRows(forkHere, 40)).toEqual({
+        ...planDialogRows(wideFork, 40),
+        height: 15,
+      });
+      expect(planDialogRows(forkHere, 5).tooShort).toBe(false);
+      expect(planDialogRows(forkHere, 4).tooShort).toBe(true);
     });
   });
 });
@@ -350,8 +359,21 @@ describe("NewSessionDialog", () => {
     expect(frame).toContain("/Users/dev/code/ccmux");
   });
 
-  it("numbers the agents so the number keys are discoverable", async () => {
+  it("collapses the agents to the held value until the dropdown opens", async () => {
     const frame = await renderDialog({
+      agents: [agent("claude"), agent("codex"), agent("pi")],
+    });
+    // The held value on its background pill, with the arrow as the
+    // affordance that a list is behind it.
+    expect(squish(frame)).toContain("Claude▾");
+    // The list itself is not on screen, so nothing below it moved.
+    expect(frame).not.toContain("2 Codex");
+    expect(frame).not.toContain("3 Pi");
+  });
+
+  it("numbers the agents in the open dropdown so the keys are discoverable", async () => {
+    const frame = await renderDialog({
+      draft: draft({ dropdown: { field: "agent" as const, index: 0 } }),
       agents: [agent("claude"), agent("codex"), agent("pi")],
     });
     expect(frame).toContain("1 Claude");
@@ -359,44 +381,114 @@ describe("NewSessionDialog", () => {
     expect(frame).toContain("3 Pi");
   });
 
-  it("marks the drafted agent as selected", async () => {
+  it("draws the open dropdown over the rows below, not between them", async () => {
     const frame = await renderDialog({
-      draft: draft({ agent: "codex" }),
+      draft: draft({ dropdown: { field: "agent" as const, index: 0 } }),
+      agents: [agent("claude"), agent("codex"), agent("pi")],
+    });
+    const lines = frame.split("\n");
+    // The overlay starts directly under the Agent row...
+    const agentRow = lines.findIndex((line) => /Claude\s+▾/.test(line));
+    const first = lines.findIndex((line) => line.includes("1 Claude"));
+    expect(agentRow).toBeGreaterThan(0);
+    expect(first).toBeGreaterThan(agentRow);
+    // ...SHARING rows with the fields beneath it: the first option lands on
+    // the Placement row's line (its top border in the gap between), which an
+    // in-flow list would have pushed down past it instead. The label gutter
+    // stays visible left of the overlay.
+    expect(lines[first]).toContain("Placement");
+    expect(frame).toContain("Directory");
+  });
+
+  it("airs the stack with a blank row between fields when the height affords it", async () => {
+    const spacious = await renderDialog({});
+    let lines = spacious.split("\n");
+    const rowOf = (text: string) =>
+      lines.findIndex((line) => line.includes(text));
+    expect(rowOf("Placement")).toBe(rowOf("Agent") + 2);
+    expect(rowOf("Prompt")).toBe(rowOf("Placement") + 2);
+    expect(rowOf("Directory")).toBe(rowOf("Where") + 2);
+    setup.renderer.destroy();
+
+    // Tight, the air is the first thing given up: the stack closes back to
+    // adjacent rows before anything actionable moves.
+    const tight = await renderDialog({ height: 12 });
+    lines = tight.split("\n");
+    expect(rowOf("Placement")).toBe(rowOf("Agent") + 1);
+    expect(rowOf("Directory")).toBe(rowOf("Where") + 1);
+  });
+
+  it("anchors the overlay under its own pill with the spacers on", async () => {
+    const frame = await renderDialog({
+      draft: draft({ dropdown: { field: "placement" as const, index: 0 } }),
+    });
+    const lines = frame.split("\n");
+    const pill = lines.findIndex((line) => line.includes("Placement"));
+    const first = lines.findIndex((line) => /> 1 New window/.test(line));
+    // The overlay's top border sits in the gap row under the pill, so the
+    // first option is exactly two rows below it — an anchor that ignored
+    // the spacers would land the list a row high, over its own field.
+    expect(pill).toBeGreaterThan(0);
+    expect(first).toBe(pill + 2);
+    // And it opens at the control's left edge: the border one column left
+    // of the pill's value, exactly where the pill's own padding starts.
+    const valueColumn = lines[pill]!.indexOf("New window");
+    expect(lines[pill + 1]!.indexOf("┌")).toBe(valueColumn - 1);
+  });
+
+  it("marks the drafted agent inside the open dropdown", async () => {
+    const frame = await renderDialog({
+      draft: draft({
+        agent: "codex",
+        dropdown: { field: "agent" as const, index: 1 },
+      }),
       agents: [agent("claude"), agent("codex")],
     });
     expect(frame).toContain("> 2 Codex");
     expect(frame).not.toContain("> 1 Claude");
   });
 
-  it("offers all three placements and brackets the chosen one", async () => {
-    const frame = await renderDialog({
+  it("holds the placement on its pill and offers the rest in its dropdown", async () => {
+    const collapsed = await renderDialog({
       draft: draft({ placement: "split-h" }),
     });
-    expect(frame).toContain("New window");
-    expect(frame).toContain("[Split right]");
-    expect(frame).toContain("Split down");
-    expect(frame).not.toContain("[New window]");
+    expect(collapsed).toMatch(/Split right\s+▾/);
+    expect(collapsed).not.toContain("New window");
+    setup.renderer.destroy();
+
+    const open = await renderDialog({
+      draft: draft({
+        placement: "split-h",
+        dropdown: { field: "placement" as const, index: 1 },
+      }),
+    });
+    expect(open).toContain("1 New window");
+    expect(open).toContain("> 2 Split right");
+    expect(open).toContain("3 Split down");
   });
 
-  it("abbreviates the placements when the row is short of room", async () => {
+  it("abbreviates the placement pill when the row is short of room", async () => {
     const frame = await renderDialog({ width: 60 });
-    expect(frame).toContain("[Window]");
-    expect(frame).toContain("Right");
-    expect(frame).toContain("Down");
-    expect(frame).not.toContain("Split right");
+    expect(frame).toMatch(/Window\s+▾/);
+    expect(frame).not.toContain("New window");
   });
 
   it("keeps the placements distinguishable at the real sidebar rail", async () => {
-    // A 30-column rail leaves 8 columns for the label, which truncated
-    // `New window`/`Split right`/`Split down` to `New`/`Split`/`Split` —
-    // two of three indistinguishable, with number keys that still worked.
-    const frame = await renderDialog({ width: 30, height: 30 });
+    // A 30-column rail leaves the overlay too few columns for the full
+    // labels, which truncated `Split right`/`Split down` into two rows both
+    // starting `Split` — indistinguishable, with number keys that still
+    // worked. The overlay falls back to the short labels instead.
+    const frame = await renderDialog({
+      draft: draft({ dropdown: { field: "placement" as const, index: 0 } }),
+      width: 30,
+      height: 30,
+    });
     expect(frame).toContain("Window");
     expect(frame).toContain("Right");
     expect(frame).toContain("Down");
     const lines = frame.split("\n");
     expect(lines.filter((l) => l.includes("Split")).length).toBe(0);
-    // And nothing runs past the dialog's own border.
+    // And nothing runs past the terminal's own edge.
     const widest = Math.max(...lines.map((l) => l.trimEnd().length));
     expect(widest).toBeLessThanOrEqual(30);
   });
@@ -421,19 +513,15 @@ describe("NewSessionDialog", () => {
     expect(onPrompt).not.toContain(">Placement");
   });
 
-  it("stacks the placements on a sidebar-width surface", async () => {
-    // At a 34-column rail the row cannot hold three options at any label
-    // length, and clipping would hide two of the three choices.
+  it("keeps the pills inside the border on a sidebar-width surface", async () => {
+    // At a 34-column rail the full label still fits the pill; what must not
+    // happen is any row running past the dialog's border.
     const frame = await renderDialog({ width: 34, height: 30 });
     const lines = frame.split("\n");
-    const placement = lines.filter((line) => line.includes("New window"));
-    expect(placement).toHaveLength(1);
-    expect(placement[0]).toContain("[New window]");
-    expect(lines.some((line) => line.includes("Split right"))).toBe(true);
-    expect(lines.some((line) => line.includes("Split down"))).toBe(true);
-    // Nothing runs past the dialog's own border.
+    expect(lines.filter((line) => line.includes("New window"))).toHaveLength(1);
     const widest = Math.max(...lines.map((line) => line.trimEnd().length));
     expect(widest).toBeLessThanOrEqual(34);
+    expectFrameIntegrity(frame);
   });
 
   it("shows the typed prompt", async () => {
@@ -495,11 +583,8 @@ describe("NewSessionDialog", () => {
     expect(squish(frame)).toContain(squish(error));
     // And so did every row budgeted below it, down to the last one.
     expect(frame).toContain("New window");
-    expect(frame).toContain("Split right");
-    expect(frame).toContain("Split down");
     expect(frame).toContain("Where");
     expect(frame).toContain("Here");
-    expect(frame).toContain("Worktree");
     expect(frame).toContain("Directory");
     expect(frame).toContain("enter");
   });
@@ -532,7 +617,7 @@ describe("NewSessionDialog", () => {
     }
     // And the fields budgeted below the (now correctly counted) rows survive.
     expect(frame).toContain("New window");
-    expect(frame).toContain("Split down");
+    expect(frame).toContain("Here");
     expect(frame).toContain("Directory");
   });
 
@@ -548,7 +633,7 @@ describe("NewSessionDialog", () => {
 
     expectFrameIntegrity(frame);
     expect(frame).toContain("…");
-    expect(frame).toContain("Split down");
+    expect(frame).toContain("New window");
     expect(frame).toContain("Directory");
     expect(
       frame.split("\n").filter((l) => l.includes("│")).length,
@@ -563,15 +648,18 @@ describe("NewSessionDialog", () => {
     expect(frame).toContain("~/code/ccmux");
   });
 
-  it("scrolls a long agent list to keep the selection visible", async () => {
+  it("windows the dropdown against the screen and keeps the highlight visible", async () => {
     const many = Array.from({ length: 9 }, (_, i) => agent(`agent${i}`));
     const frame = await renderDialog({
-      draft: draft({ agent: "agent8" }),
+      draft: draft({
+        agent: "agent8",
+        dropdown: { field: "agent" as const, index: 8 },
+      }),
       agents: many,
       height: 14,
     });
-    // The window slid to the tail: the last agent is on screen with its
-    // absolute number, and the first one has scrolled off.
+    // The window slid to the tail: the highlighted agent is on screen with
+    // its absolute number, and the first one has scrolled off.
     expect(frame).toContain("9 Agent8");
     expect(frame).not.toContain("1 Agent0");
   });
@@ -582,6 +670,67 @@ describe("NewSessionDialog", () => {
     expect(frame).toContain("spawn");
     expect(frame).toContain("esc");
     expect(frame).toContain("cancel");
+    // Focus starts on the agent field, where the hint also teaches the
+    // dropdown's opener.
+    expect(frame).toContain("space open");
+  });
+
+  it("offers Cancel and confirm buttons, primary rightmost, in the mode's verb", async () => {
+    const spawn = await renderDialog({});
+    const lines = spawn.split("\n");
+    const row = lines.findIndex(
+      (line) => line.includes("Spawn") && line.includes("Cancel"),
+    );
+    expect(row).toBeGreaterThan(0);
+    // The macOS order: the quiet Cancel to the left, the primary action in
+    // the rightmost position the right-aligned row leads the eye to.
+    expect(lines[row]!.indexOf("Cancel")).toBeLessThan(
+      lines[row]!.indexOf("Spawn"),
+    );
+    setup.renderer.destroy();
+
+    // The move mode confirms in its own verb, the same word its title leads
+    // with. (Only the button row carries a capitalized Cancel.)
+    const move = await renderDialog({ draft: moveDraft() });
+    const moveRow = move
+      .split("\n")
+      .find((line) => line.includes("Cancel") && /\bMove\b/.test(line));
+    expect(moveRow).toBeDefined();
+  });
+
+  it("gives the buttons up at heights that can still afford the hints", async () => {
+    const frame = await renderDialog({ height: 12 });
+    expect(frame).not.toContain("Cancel");
+    // The hint row survives: it teaches more than the buttons duplicate.
+    expect(frame).toContain("esc");
+  });
+
+  it("keeps the opener hint on every option field, dropping it on text", async () => {
+    // Placement is a pill now too, so the opener stays taught there...
+    const onPlacement = await renderDialog({
+      draft: draft({ field: "placement" }),
+    });
+    expect(onPlacement).toContain("space open");
+    setup.renderer.destroy();
+
+    // ...and only a text field, which owns its printable keys, drops it.
+    const onPrompt = await renderDialog({ draft: draft({ field: "prompt" }) });
+    expect(onPrompt).toContain("1-9 pick");
+    expect(onPrompt).not.toContain("space open");
+  });
+
+  it("swaps the hint row to the dropdown's keys while it is open", async () => {
+    const frame = await renderDialog({
+      draft: draft({ dropdown: { field: "agent" as const, index: 0 } }),
+      agents: [agent("claude"), agent("codex")],
+    });
+    expect(frame).toContain("enter/space");
+    expect(frame).toContain("select");
+    expect(frame).toContain("j/k move");
+    expect(frame).toContain("esc cancel");
+    // The dialog's own keys are not in effect while the overlay owns them.
+    expect(frame).not.toContain("spawn");
+    expect(frame).not.toContain("tab field");
   });
 
   it("drops its own hint row where a footer already carries one", async () => {
@@ -613,13 +762,18 @@ describe("NewSessionDialog", () => {
  * checked separately below.
  */
 describe("NewSessionDialog destination", () => {
-  it("offers both destinations, with this checkout selected by default", async () => {
-    await renderDialog({});
+  it("holds this checkout by default and offers both in its dropdown", async () => {
+    const collapsed = await renderDialog({});
+    expect(collapsed).toContain("Where");
+    expect(collapsed).toMatch(/This checkout\s+▾/);
+    expect(collapsed).not.toContain("New worktree");
+    setup.renderer.destroy();
 
-    const frame = setup.captureCharFrame();
-    expect(frame).toContain("Where");
-    expect(frame).toContain("[This checkout]");
-    expect(frame).toContain("New worktree");
+    const open = await renderDialog({
+      draft: draft({ dropdown: { field: "destination" as const, index: 0 } }),
+    });
+    expect(open).toContain("> 1 This checkout");
+    expect(open).toContain("2 New worktree");
   });
 
   /**
@@ -632,7 +786,7 @@ describe("NewSessionDialog destination", () => {
     });
 
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("[New worktree]");
+    expect(frame).toMatch(/New worktree\s+▾/);
     expect(frame).not.toContain("New worktree: fix-bug");
     expect(frame).toContain("Name");
     expect(frame).toContain("fix-bug");
@@ -640,11 +794,15 @@ describe("NewSessionDialog destination", () => {
 
   /**
    * The destination shares its label rule with Placement, so a sidebar-width
-   * surface has to keep BOTH choices readable and on their own rows — the
-   * same failure the placements had, where two options rendered identically.
+   * overlay has to keep BOTH choices readable — the same failure the
+   * placements had, where two options rendered identically.
    */
-  it("stacks and abbreviates the destinations on a sidebar-width surface", async () => {
-    const frame = await renderDialog({ width: 34, height: 30 });
+  it("abbreviates the destinations in a sidebar-width overlay", async () => {
+    const frame = await renderDialog({
+      draft: draft({ dropdown: { field: "destination" as const, index: 0 } }),
+      width: 34,
+      height: 30,
+    });
 
     // The capitalized short labels, which only the abbreviated forms carry
     // (`This checkout` / `New worktree` spell theirs differently), on rows of
@@ -731,7 +889,7 @@ describe("NewSessionDialog worktree name", () => {
       height: 30,
     });
 
-    expect(nameRow(frame)).toContain("fix-sid…flicker");
+    expect(nameRow(frame)).toContain("fix-si…icker");
   });
 
   it("says a derived name may come back numbered", async () => {
@@ -756,7 +914,7 @@ describe("NewSessionDialog worktree name", () => {
     });
 
     // The name keeps the row; the caveat about it is what goes.
-    expect(nameRow(frame)).toContain("fix-the…ckering");
+    expect(nameRow(frame)).toContain("fix-th…ering");
     expect(frame).not.toContain("auto");
   });
 
@@ -898,22 +1056,34 @@ describe("NewSessionDialog move-changes mode", () => {
     expect(frame).toContain("Type a prompt, or a name here");
   });
 
-  it("offers the untracked choices, moving them by default", async () => {
-    const frame = await renderDialog({ draft: moveDraft() });
+  it("holds the untracked default and offers the rest in its dropdown", async () => {
+    const collapsed = await renderDialog({ draft: moveDraft() });
+    expect(collapsed).toContain("Untracked");
+    expect(collapsed).toMatch(/Move\s+▾/);
+    expect(collapsed).not.toContain("Copy to both");
+    setup.renderer.destroy();
 
-    expect(frame).toContain("Untracked");
-    expect(frame).toContain("[Move]");
-    expect(frame).toContain("Copy to both");
-    expect(frame).toContain("Leave here");
+    const open = await renderDialog({
+      draft: moveDraft({
+        dropdown: { field: "untracked" as const, index: 0 },
+      }),
+    });
+    expect(open).toContain("> 1 Move");
+    expect(open).toContain("2 Copy to both");
+    expect(open).toContain("3 Leave here");
   });
 
-  it("marks the selected untracked mode", async () => {
+  it("marks the selected untracked mode in its dropdown", async () => {
     const frame = await renderDialog({
-      draft: moveDraft({ untracked: "leave" }),
+      draft: moveDraft({
+        untracked: "leave",
+        dropdown: { field: "untracked" as const, index: 2 },
+      }),
     });
 
-    expect(frame).toContain("[Leave here]");
-    expect(frame).not.toContain("[Move]");
+    expect(frame).toMatch(/Leave here\s+▾/);
+    expect(frame).toContain("> 3 Leave here");
+    expect(frame).not.toContain("> 1 Move");
   });
 
   it("hides the untracked field outside move-changes mode", async () => {
@@ -988,14 +1158,29 @@ describe("NewSessionDialog move-changes mode", () => {
     });
 
     expectFrameIntegrity(frame);
-    // Stacked, so each untracked choice gets its own row rather than three
-    // clipped ones sharing a line.
+    expect(frame).toMatch(/Move\s+▾/);
+    const lines = frame.split("\n");
+    const widest = Math.max(...lines.map((line) => line.trimEnd().length));
+    expect(widest).toBeLessThanOrEqual(34);
+  });
+
+  it("keeps the untracked choices distinguishable in a rail-width overlay", async () => {
+    // Each choice on a row of its own, with the abbreviated labels where the
+    // full ones would not fit the overlay's columns.
+    const frame = await renderDialog({
+      draft: moveDraft({
+        dropdown: { field: "untracked" as const, index: 0 },
+      }),
+      width: 34,
+      height: 30,
+    });
+
     const lines = frame.split("\n");
     const rowOf = (text: string) =>
       lines.findIndex((line) => line.includes(text));
     expect(rowOf("Move")).toBeGreaterThanOrEqual(0);
-    expect(rowOf("Copy")).not.toBe(rowOf("Move"));
-    expect(rowOf("Leave")).not.toBe(rowOf("Copy"));
+    expect(rowOf("Copy")).toBeGreaterThan(rowOf("Move"));
+    expect(rowOf("Leave")).toBeGreaterThan(rowOf("Copy"));
     const widest = Math.max(...lines.map((line) => line.trimEnd().length));
     expect(widest).toBeLessThanOrEqual(34);
   });
@@ -1069,28 +1254,6 @@ describe("NewSessionDialog move-changes mode", () => {
       expectFrameIntegrity(frame);
     });
 
-    it("windows a stacked option field rather than drawing off the bottom", async () => {
-      // Below the point where every option can have a row, the field becomes
-      // a window over its own list — the same shape the agent list has always
-      // had — with the selection inside it and each option still showing the
-      // number that picks it.
-      const frame = await renderDialog({
-        draft: moveDraft({ untracked: "leave" }),
-        width: 30,
-        height: 12,
-        showKeyHints: true,
-      });
-
-      const lines = frame.split("\n");
-      const first = lines.findIndex((line) => line.includes("Untracked"));
-      expect(first).toBeGreaterThan(0);
-      const shown = lines.slice(first).join("\n");
-      // The selected one is what the window keeps, with its own number.
-      expect(shown).toContain("[Leave");
-      expect(shown).toContain("3");
-      expectFrameIntegrity(frame);
-    });
-
     it("says what it needs when even the fields will not fit", async () => {
       // Six rows cannot hold a six-field dialog. Drawing it anyway puts rows
       // over each other and the border off screen; this says so in one row
@@ -1106,30 +1269,24 @@ describe("NewSessionDialog move-changes mode", () => {
       expectFrameIntegrity(frame, 3);
     });
 
-    it("shows every option its number key can select", async () => {
-      // One row short is the quiet failure: the third untracked choice is off
-      // the bottom while `3` still selects it, so the dialog acts on a choice
-      // that was never on screen.
+    it("windows an overlay taller than the screen, keeping the highlight", async () => {
+      // The last field's dropdown opens with almost no rows below it: the
+      // overlay windows itself against the screen and scrolls to the
+      // highlight rather than drawing off the bottom.
       const frame = await renderDialog({
-        draft: moveDraft(),
+        draft: moveDraft({
+          untracked: "leave",
+          dropdown: { field: "untracked" as const, index: 2 },
+        }),
         width: 30,
         height: 17,
         showKeyHints: true,
       });
 
-      const lines = frame.split("\n");
-      // From the Untracked label down, so the title ("Move changes to…")
-      // cannot stand in for the option it names.
-      const first = lines.findIndex((line) => line.includes("Untracked"));
-      expect(first).toBeGreaterThan(0);
-      const optionRows = lines.slice(first);
-      for (const [index, label] of ["Move", "Copy", "Leave"].entries()) {
-        const row = optionRows.findIndex((line) => line.includes(label));
-        expect([label, row]).not.toEqual([label, -1]);
-        // The number beside it is the key that picks it.
-        expect(optionRows[row]).toContain(`${index + 1}`);
-      }
-      expectFrameIntegrity(frame);
+      // The highlighted choice is on screen with its absolute number (the
+      // pill above it repeats the label, so the number is the anchor). The
+      // rail width leaves the overlay the short labels.
+      expect(frame).toContain("3 Leave");
     });
   });
 
@@ -1150,29 +1307,58 @@ describe("NewSessionDialog move-changes mode", () => {
 
 /**
  * Fork mode (issue #70): the same dialog, opened over a SESSION to continue
- * it in a worktree of its own. The agent and the conversation come from the
- * source, so what is left to choose is where the pane goes and what the
- * worktree is called.
+ * it. The agent and the conversation come from the source, so what is left to
+ * choose is where the pane goes, whether the fork continues in the source's
+ * checkout or in a worktree of its own, and what that worktree is called.
  */
 describe("NewSessionDialog fork mode", () => {
+  const FORK = {
+    sessionId: "s1",
+    label: "Claude · feat/parking",
+    branch: "feat/parking",
+    canWorktree: true,
+    pane: "%5",
+  };
+
+  /** The worktree destination, which is the one with a name to show. The
+   *  in-place default is `forkHereDraft` below. */
   const forkDraft = (
     overrides: Partial<NewSessionDraft> = {},
   ): NewSessionDraft =>
     draft({
       destination: "worktree",
       field: "placement",
-      fork: {
-        sessionId: "s1",
-        label: "Claude · feat/parking",
-        branch: "feat/parking",
-      },
+      fork: FORK,
       ...overrides,
     });
+
+  /** How the dialog actually opens: continuing in the source's own checkout,
+   *  which is the old one-shot `F` with a dialog in front of it. */
+  const forkHereDraft = (
+    overrides: Partial<NewSessionDraft> = {},
+  ): NewSessionDraft =>
+    forkDraft({ destination: "here", placement: "split-h", ...overrides });
+
+  /** The Where row, whichever form it takes. */
+  const whereRow = (frame: string) =>
+    frame.split("\n").find((line) => line.includes("Where"));
+
+  it("confirms with Fork on its button", async () => {
+    const frame = await renderDialog({ draft: forkDraft() });
+    // Only the button row carries a capitalized Cancel; its confirm twin
+    // speaks this mode's verb.
+    const row = frame.split("\n").find((line) => line.includes("Cancel"));
+    expect(row).toBeDefined();
+    expect(row).toContain("Fork");
+  });
 
   it("says what it is doing, and names what it is forking", async () => {
     const frame = await renderDialog({ draft: forkDraft() });
 
-    expect(frame).toContain("Fork into worktree");
+    // The title names the MODE, not the destination: the destination is a row
+    // of its own now, and a title that contradicted it would be worse than one
+    // that says less.
+    expect(frame).toContain("Fork session");
     expect(frame).not.toContain("New session");
     // The source row, read together with the Directory above it: between them
     // they say which conversation is being continued and from where.
@@ -1197,16 +1383,39 @@ describe("NewSessionDialog fork mode", () => {
     expect(frame).toContain("Name");
   });
 
-  it("locks the destination and offers no untracked choice", async () => {
+  it("offers the destination as a choice, and no untracked one", async () => {
     const frame = await renderDialog({ draft: forkDraft() });
 
-    expect(frame).toContain("Where");
-    expect(frame).toContain("New worktree");
-    expect(frame).not.toContain("This checkout");
-    expect(frame).not.toContain("[New worktree");
+    // A real dropdown, not the locked restatement a move gets: `▾` is what
+    // says the row has a list behind it.
+    expect(whereRow(frame)).toContain("New worktree");
+    expect(whereRow(frame)).toContain("▾");
     // Moving changes out from under a session that is still running in the
     // checkout is refused by the daemon; the mode never offers it.
     expect(frame).not.toContain("Untracked");
+  });
+
+  it("opens on the source's own checkout, with nothing to name", async () => {
+    const frame = await renderDialog({ draft: forkHereDraft() });
+
+    expect(whereRow(frame)).toContain("This checkout");
+    expect(whereRow(frame)).toContain("▾");
+    // No worktree is being made, so there is nothing to call one.
+    expect(frame).not.toContain("Name");
+    expectFrameIntegrity(frame);
+  });
+
+  it("locks the destination for a source outside a repository", async () => {
+    // Drawn like Directory rather than as a field: there is no repository for
+    // a linked checkout to hang off, so the choice would only ever be refused.
+    const frame = await renderDialog({
+      draft: forkHereDraft({ fork: { ...FORK, canWorktree: false } }),
+    });
+
+    expect(whereRow(frame)).toContain("This checkout");
+    expect(whereRow(frame)).not.toContain("▾");
+    expect(frame).not.toContain("New worktree");
+    expectFrameIntegrity(frame);
   });
 
   it("previews the name the daemon will derive from the source branch", async () => {
@@ -1225,7 +1434,7 @@ describe("NewSessionDialog fork mode", () => {
     // row must not imply that leaving the field empty leaves it unnamed.
     const frame = await renderDialog({
       draft: forkDraft({
-        fork: { sessionId: "s1", label: "Claude", branch: null },
+        fork: { ...FORK, label: "Claude", branch: null },
       }),
     });
 
@@ -1245,7 +1454,7 @@ describe("NewSessionDialog fork mode", () => {
   const branchlessNameRow = async (width: number) => {
     const frame = await renderDialog({
       draft: forkDraft({
-        fork: { sessionId: "s1", label: "Claude", branch: null },
+        fork: { ...FORK, label: "Claude", branch: null },
       }),
       width,
     });
@@ -1285,7 +1494,7 @@ describe("NewSessionDialog fork mode", () => {
   /** A branch with a name, but not one a directory can be called: nothing in
    *  it survives slugifying, so `<branch>-fork` derives to "". */
   const unslugifiableFork = {
-    sessionId: "s1",
+    ...FORK,
     label: "Claude · 機能/検索",
     branch: "機能/検索",
   };
@@ -1339,7 +1548,7 @@ describe("NewSessionDialog fork mode", () => {
     // A height that under-counts does not clip: it draws two rows over each
     // other, so the ordering chain is what catches it.
     const order = [
-      "Fork into worktree",
+      "Fork session",
       "Placement",
       "Where",
       "Name",
@@ -1393,5 +1602,31 @@ describe("NewSessionDialog fork mode", () => {
     expectFrameIntegrity(frame);
     expect(frame).not.toContain("Needs");
     expect(frame).toContain("Name");
+  });
+
+  it("gives up the name row's height with the name row", async () => {
+    // The shortest mode there is: a fork staying in the source's checkout has
+    // two fields and nothing to name. A floor that still counted the Name row
+    // would report five rows it does not need — and a floor SHORT of what is
+    // drawn is worse, since the extra row lands on its neighbour instead of
+    // clipping.
+    expect(
+      newSessionFloorRows({
+        moveChanges: false,
+        namesAWorktree: false,
+        fork: true,
+      }),
+    ).toBe(5);
+
+    const frame = await renderDialog({
+      draft: forkHereDraft(),
+      width: 60,
+      height: 5,
+      showKeyHints: false,
+    });
+
+    expectFrameIntegrity(frame);
+    expect(frame).not.toContain("Needs");
+    expect(frame).toContain("Where");
   });
 });

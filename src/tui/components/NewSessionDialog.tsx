@@ -5,12 +5,11 @@ import { MouseButton } from "@opentui/core";
 import type { SpawnableAgent } from "../../lib/spawnable-agents";
 import {
   namesAWorktree as draftNamesAWorktree,
-  type NewSessionDestination,
+  NEW_SESSION_FIELDS,
   type NewSessionDraft,
   type NewSessionField,
-  type NewSessionPlacement,
 } from "../store";
-import type { UntrackedMode } from "../../daemon/worktree-move-changes";
+import { DESTINATION_OPTIONS, newSessionOptions } from "../new-session-options";
 import { slugForFork, slugFromPrompt } from "../../daemon/worktree-create";
 import {
   displayWidth,
@@ -20,70 +19,37 @@ import {
   truncateText,
 } from "../utils/format";
 import { agentColorFor } from "./SessionItem";
+import { DropdownOverlay, DropdownTrigger } from "./DropdownField";
+import { newSessionHintSegments } from "./Footer";
 import { theme } from "../theme";
 
 /** Width of the label gutter: focus marker (1) + "Placement" (9, the
  *  longest label) + one column of air before the content. */
 const LABEL_WIDTH = 11;
-/** Wide enough for the placement row's full labels; see COMPACT_CONTENT_WIDTH. */
+/** Wide enough for the key-hint row's full middle segment; see
+ *  COMPACT_CONTENT_WIDTH. */
 const MAX_WIDTH = 65;
 const MIN_WIDTH = 24;
 /** The blank spacer plus the key-hint row, when the dialog draws its own. */
 const KEY_HINT_ROWS = 2;
-/** Content width the placement row's full labels need (number, brackets,
- *  and gaps included). Below it the row switches to the short labels and
- *  the key-hint line drops its middle segment. MAX_WIDTH is sized to leave
+/** The button row with its leading and trailing blanks — one droppable
+ *  unit, so the air goes with the buttons. */
+const BUTTON_ROWS = 3;
+/** Content width below which the pills switch to their short labels and the
+ *  key-hint line drops its middle segment. MAX_WIDTH is sized to leave
  *  exactly this much. */
 const COMPACT_CONTENT_WIDTH = 49;
-/** Content width the placement row needs even with the short labels. Below
- *  it the options stack vertically, which is the sidebar's 30-column rail:
- *  clipping the row would hide two of the three choices entirely. */
-const STACKED_CONTENT_WIDTH = 33;
-
-interface PlacementOption {
-  value: NewSessionPlacement;
-  label: string;
-  compactLabel: string;
-}
-
-/** Placement choices, in the order their number keys select them. */
-export const PLACEMENT_OPTIONS: readonly PlacementOption[] = [
-  { value: "window", label: "New window", compactLabel: "Window" },
-  { value: "split-h", label: "Split right", compactLabel: "Right" },
-  { value: "split-v", label: "Split down", compactLabel: "Down" },
-];
-
-interface DestinationOption {
-  value: NewSessionDestination;
-  label: string;
-  compactLabel: string;
-}
-
-/** Destination choices, in the order their number keys select them. */
-export const DESTINATION_OPTIONS: readonly DestinationOption[] = [
-  { value: "here", label: "This checkout", compactLabel: "Here" },
-  { value: "worktree", label: "New worktree", compactLabel: "Worktree" },
-];
-
-interface UntrackedOption {
-  value: UntrackedMode;
-  label: string;
-  compactLabel: string;
-}
-
-/**
- * What a move does with files git is not tracking yet, in the order their
- * number keys select them.
- *
- * The full labels name the DESTINATION rather than repeating the verb,
- * because "Copy" alone leaves the question this field exists to answer (does
- * the source keep them?) unanswered.
- */
-export const UNTRACKED_OPTIONS: readonly UntrackedOption[] = [
-  { value: "move", label: "Move", compactLabel: "Move" },
-  { value: "copy", label: "Copy to both", compactLabel: "Copy" },
-  { value: "leave", label: "Leave here", compactLabel: "Leave" },
-];
+/** The sidebar's 30-column rail, where even the short labels are fitted
+ *  word by word and the esc hint gives up its gloss. */
+const NARROW_CONTENT_WIDTH = 33;
+/** Columns the text inputs' full-width shell spends on its own padding —
+ *  the same run the pills paint, so every control shares one shape. */
+const INPUT_SHELL_PADDING = 2;
+/** Air between the label column and the controls' left edge. Every consumer
+ *  of the control column reads it: the rows insert it, `contentWidth` (and
+ *  with it every truncation budget) subtracts it, the derived rows' spacer
+ *  adds it, and the overlay anchors past it. */
+const CONTROL_GAP = 1;
 
 /**
  * What a derived name row says about itself.
@@ -166,11 +132,10 @@ export interface DialogShape {
   fork: boolean;
   /** The name row is shown, i.e. this spawn is making a worktree. */
   namesAWorktree: boolean;
-  /** Rows the agent field would like: its list length, or its error's. */
+  /** Rows the agent field would like: one for its dropdown pill, or its
+   *  error's wrapped lines. The only field that can want more than one row —
+   *  every option list lives in an overlay outside the budget. */
   agentRows: number;
-  /** Options stack vertically (a narrow surface), so a field can want more
-   *  than one row. */
-  stacked: boolean;
   keyHints: boolean;
 }
 
@@ -212,8 +177,7 @@ const sumFieldRows = (rows: FieldRows): number =>
 /**
  * The shortest the dialog can be drawn and still be a dialog: a border, its
  * title, and one row for every field it has. Everything else — the hints, the
- * move note, the directory, the spacer, the stacked options' extra rows — can
- * be given up before this point.
+ * move note, the directory, the spacer — can be given up before this point.
  *
  * Shared with `App.tsx`, which gates the option keys on it: below this height
  * the fields are not on screen, and a `2` that changed an invisible choice
@@ -236,6 +200,12 @@ export interface DialogRowPlan {
   tooShort: boolean;
   height: number;
   showTitleSpacer: boolean;
+  /** A blank row between every adjacent pair in the field stack (fields plus
+   *  the directory row) — pure air, all on or all off, never before the
+   *  first row or after the last. */
+  showFieldSpacers: boolean;
+  /** The confirm/Cancel button row (and its leading blank) under the form. */
+  showButtons: boolean;
   showDirectory: boolean;
   /** The one-line footnote a mode adds under the directory: what a move costs
    *  the checkout named above it, or which session a fork continues. One flag
@@ -243,23 +213,20 @@ export interface DialogRowPlan {
   showModeNote: boolean;
   showKeyHints: boolean;
   agentRows: number;
-  /** Rows each option field gets. Fewer than its options means a window that
-   *  scrolls to keep the selection visible. */
-  placementRows: number;
-  destinationRows: number;
-  untrackedRows: number;
 }
 
 /**
  * Fit the dialog into `height`, giving up rows in a fixed order.
  *
- * Order matters and is the whole design: the key hints go first (the picker
- * repeats them in its footer anyway), then the move note, then the blank row
- * under the title, then the stacked options collapse to a scrolling window,
- * then the directory. Nothing a user has to ACT on is dropped while anything
- * decorative is still on screen, and no option ever becomes unreachable — a
- * windowed list still shows each option's own number and scrolls to whichever
- * one a number key picks.
+ * Order matters and is the whole design: the blank rows between the fields
+ * go first (pure air, and all at once — per-gap dropping would read as a
+ * layout bug), then the button row (a duplicate of enter/esc), then the
+ * agent field's error shrinks back towards one row,
+ * then the key hints (the picker repeats them in its footer anyway), then
+ * the move note, then the blank row under the title, then the directory.
+ * Nothing a user has to ACT on is dropped while anything decorative is
+ * still on screen. The option fields never enter this order at all: each is
+ * a one-row pill whose list opens in an overlay OUTSIDE the budget.
  *
  * Under-counting here does not clip: OpenTUI draws children past their
  * parent's height, so the rows that do not fit land on top of the ones that
@@ -277,13 +244,12 @@ export function planDialogRows(
       // Border, the title, and the one line explaining itself.
       height: Math.min(height, 3),
       showTitleSpacer: false,
+      showFieldSpacers: false,
+      showButtons: false,
       showDirectory: false,
       showModeNote: false,
       showKeyHints: false,
       agentRows: 0,
-      placementRows: 0,
-      destinationRows: 0,
-      untrackedRows: 0,
     };
   }
 
@@ -291,35 +257,32 @@ export function planDialogRows(
     tooShort: false,
     height: 0,
     showTitleSpacer: true,
+    showFieldSpacers: true,
+    showButtons: true,
     showDirectory: true,
     showModeNote: shape.moveChanges || shape.fork,
     showKeyHints: shape.keyHints,
     // A fork has no agent row at all, so it asks for none rather than for the
     // one row `Math.max` would floor an empty list at.
     agentRows: shape.fork ? 0 : Math.max(1, shape.agentRows),
-    placementRows: shape.stacked ? PLACEMENT_OPTIONS.length : 1,
-    // Locked wherever the destination is fixed, where it is one derived row
-    // with no options to stack.
-    destinationRows:
-      shape.moveChanges || shape.fork || !shape.stacked
-        ? 1
-        : DESTINATION_OPTIONS.length,
-    untrackedRows: !shape.moveChanges
-      ? 0
-      : shape.stacked
-        ? UNTRACKED_OPTIONS.length
-        : 1,
   };
 
   /** What the fields currently want, as the plan gives their rows away. The
-   *  floor's presence rules, with the magnitudes the plan has settled on. */
+   *  floor's presence rules, with the magnitude the plan has settled on. */
   const fieldRows = (): FieldRows => ({
     ...floorFieldRows(shape),
     agent: plan.agentRows,
-    placement: plan.placementRows,
-    destination: plan.destinationRows,
-    untracked: plan.untrackedRows,
   });
+
+  /** Gaps in the field stack: one between each adjacent pair of BLOCKS (a
+   *  multi-row agent error is one block), the directory row included. */
+  const fieldGaps = (): number => {
+    if (!plan.showFieldSpacers) return 0;
+    const blocks =
+      Object.values(floorFieldRows(shape)).filter((rows) => rows > 0).length +
+      (plan.showDirectory ? 1 : 0);
+    return Math.max(0, blocks - 1);
+  };
 
   const total = (): number =>
     3 + // border and title
@@ -327,38 +290,24 @@ export function planDialogRows(
     (plan.showDirectory ? 1 : 0) +
     (plan.showModeNote ? 1 : 0) +
     (plan.showKeyHints ? KEY_HINT_ROWS : 0) +
+    (plan.showButtons ? BUTTON_ROWS : 0) +
+    fieldGaps() +
     sumFieldRows(fieldRows());
 
-  /** Give up rows until it fits, or until this step has nothing left. */
-  const shrink = (over: number, take: (n: number) => void, has: number) => {
-    if (over <= 0 || has <= 0) return;
-    take(Math.min(over, has));
-  };
-
-  // The agent list first, since it is already a scrolling window and shrinks
-  // without losing anything: it is the one field whose "natural" size is the
-  // whole of some other list.
-  shrink(total() - height, (n) => (plan.agentRows -= n), plan.agentRows - 1);
+  if (total() > height) plan.showFieldSpacers = false;
+  // The buttons next: they duplicate enter/esc exactly — keys that always
+  // work, and that the hint row both teaches and (clickably) provides — so
+  // they are the cheapest functional loss after pure air.
+  if (total() > height && plan.showButtons) plan.showButtons = false;
+  // The agent error next, since its tail is already summarised by an
+  // ellipsis and shrinks without losing anything actionable.
+  const over = total() - height;
+  if (over > 0 && plan.agentRows > 1) {
+    plan.agentRows -= Math.min(over, plan.agentRows - 1);
+  }
   if (total() > height && plan.showKeyHints) plan.showKeyHints = false;
   if (total() > height && plan.showModeNote) plan.showModeNote = false;
   if (total() > height && plan.showTitleSpacer) plan.showTitleSpacer = false;
-  // Bottom-up through the stacked options, so the rows nearest the bottom
-  // border are the first to become windows.
-  shrink(
-    total() - height,
-    (n) => (plan.untrackedRows -= n),
-    Math.max(0, plan.untrackedRows - 1),
-  );
-  shrink(
-    total() - height,
-    (n) => (plan.destinationRows -= n),
-    Math.max(0, plan.destinationRows - 1),
-  );
-  shrink(
-    total() - height,
-    (n) => (plan.placementRows -= n),
-    Math.max(0, plan.placementRows - 1),
-  );
   // Last, because in move-changes mode this row names the checkout being
   // emptied, which is the one fact the title does not carry.
   if (total() > height && plan.showDirectory) plan.showDirectory = false;
@@ -367,32 +316,18 @@ export function planDialogRows(
   return plan;
 }
 
-/**
- * Slice of a longer option list to show, keeping the selection visible and
- * centered where it can be. Exported for its own tests: an off-by-one here
- * hides the row the user is on.
- */
-export function optionWindow(
-  total: number,
-  selected: number,
-  size: number,
-): { start: number; end: number } {
-  if (size >= total || size <= 0) return { start: 0, end: total };
-  const half = Math.floor(size / 2);
-  const start = Math.min(Math.max(selected - half, 0), total - size);
-  return { start, end: start + size };
-}
-
 interface NewSessionDialogProps {
   draft: NewSessionDraft;
   /** Spawnable agents, or null while `GET /agents` is still in flight. */
   agents: SpawnableAgent[] | null;
   agentsError?: string | null;
   onFocusField: (field: NewSessionField) => void;
-  onSelectAgent: (name: string) => void;
-  onSelectPlacement: (placement: NewSessionPlacement) => void;
-  onSelectDestination: (destination: NewSessionDestination) => void;
-  onSelectUntracked: (untracked: UntrackedMode) => void;
+  /** Open `field`'s dropdown with this option highlighted. */
+  onOpenDropdown: (field: NewSessionField, index: number) => void;
+  onCloseDropdown: () => void;
+  /** Commit `field`'s option at `index` and close its dropdown — the one
+   *  write path (`commitDropdown` in App.tsx) every click site funnels to. */
+  onSelectOption: (field: NewSessionField, index: number) => void;
   onPromptInput: (prompt: string) => void;
   /** A keystroke in the name field. Empty means "back to derived". */
   onWorktreeNameInput: (name: string) => void;
@@ -413,28 +348,28 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
 
   const width = () =>
     Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dims().width - 4));
-  const contentWidth = () => Math.max(1, width() - LABEL_WIDTH - 4);
+  const contentWidth = () =>
+    Math.max(1, width() - LABEL_WIDTH - CONTROL_GAP - 4);
   const compact = () => contentWidth() < COMPACT_CONTENT_WIDTH;
-  const stacked = () => contentWidth() < STACKED_CONTENT_WIDTH;
+  const narrow = () => contentWidth() < NARROW_CONTENT_WIDTH;
 
   /**
-   * The label to draw for a numbered option, shared by Placement and Where.
+   * The label an option shows, in the pills and in the overlay rows alike.
    *
-   * Stacking gives each option its own row, but a row is not unlimited: at
-   * the sidebar's real 30-column rail the dialog is 26 wide and the label
-   * column is 8, which renders `New window` / `Split right` / `Split down`
-   * as `New` / `Split` / `Split` — two of the three indistinguishable, and
-   * `This checkout` / `New worktree` the same way. The full label is
-   * therefore used only when it actually fits, and the short label (which
-   * exists for exactly this) is the fallback in both layouts.
+   * A narrow surface cannot truncate its way out: at the sidebar's real
+   * 30-column rail, cutting `Split right` / `Split down` to the columns
+   * available renders two rows both starting `Split` — indistinguishable,
+   * with number keys that still work. The full label is therefore used only
+   * when it actually fits, and the short label (which exists for exactly
+   * this) is the fallback.
    */
   const optionLabel = (option: {
     label: string;
     compactLabel: string;
   }): string => {
-    // The row also spends a 2-wide number cell and two 1-wide bracket cells.
+    // What a row spends beside the label: the marker and number cells.
     const room = contentWidth() - 4;
-    if (!stacked()) return compact() ? option.compactLabel : option.label;
+    if (!narrow()) return compact() ? option.compactLabel : option.label;
     return option.label.length <= room ? option.label : option.compactLabel;
   };
 
@@ -446,8 +381,15 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const moveChanges = () => props.draft.moveChanges;
 
   /** Continuing an existing session rather than starting a new one: no agent
-   *  and no prompt to choose, and the worktree is where the fork lands. */
+   *  and no prompt to choose, and a destination that says where it continues. */
   const forking = () => props.draft.fork;
+
+  /** Whether the Where row is a statement rather than a choice: a move has
+   *  nowhere to go but a new worktree, and a fork whose source is outside a
+   *  repository has nowhere to put one. Both are drawn like Directory, since a
+   *  row that looks selectable but refuses every key reads as broken. */
+  const destinationLocked = () =>
+    moveChanges() || (forking() !== null && !forking()!.canWorktree);
 
   /** Whether this spawn is making a worktree at all, which is what the name
    *  row exists for. Move-changes and fork mode always are; see
@@ -509,17 +451,17 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
       // the daemon's own refusal says to type one in this row. So the row
       // asks, in the same words, rather than being the thing that caused it.
       if (forkNeedsAName()) {
-        return stacked() ? "Type a name" : "Type a name for the worktree";
+        return narrow() ? "Type a name" : "Type a name for the worktree";
       }
       // No branch to preview, but the name is coming either way (the daemon
       // reads the checkout's HEAD), so the row says where it comes from
       // rather than offering a way out that would be a fiction — there is no
       // prompt here to derive one from instead.
-      return stacked() ? "Source branch" : "Named after the source branch";
+      return narrow() ? "Source branch" : "Named after the source branch";
     }
     // Nothing to derive from yet. Both ways out are named, because the second
     // one is new (issue #83) and the row is where it is discoverable.
-    return stacked() ? "Prompt or name" : "Type a prompt, or a name here";
+    return narrow() ? "Prompt or name" : "Type a prompt, or a name here";
   };
 
   /**
@@ -547,17 +489,24 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     // daemon derives one, and this is the only thing that says the field can
     // be left alone.
     if (!slug && (!forking() || forkNeedsAName())) return "";
-    const taken = displayWidth(namePlaceholderText());
-    const spare = contentWidth() - (taken ? taken + 1 : 0);
+    // The name spends its own columns plus the input shell's padding.
+    const taken = displayWidth(namePlaceholderText()) + INPUT_SHELL_PADDING;
+    const spare = contentWidth() - (taken + 1);
     if (spare >= displayWidth(NAME_HINT)) return NAME_HINT;
     if (spare >= displayWidth(NAME_HINT_SHORT)) return NAME_HINT_SHORT;
     return "";
   };
 
-  /** Columns the name itself gets, once the hint has taken its own. */
+  /** Columns the name itself gets, once the hint and the input shell's
+   *  padding have taken theirs. */
   const nameRoom = () => {
     const hint = nameHint();
-    return Math.max(1, contentWidth() - (hint ? displayWidth(hint) + 1 : 0));
+    return Math.max(
+      1,
+      contentWidth() -
+        INPUT_SHELL_PADDING -
+        (hint ? displayWidth(hint) + 1 : 0),
+    );
   };
 
   /**
@@ -582,12 +531,11 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   };
 
   const agents = createMemo(() => props.agents ?? []);
-  const selectedAgentIndex = createMemo(() => {
-    const index = agents().findIndex((a) => a.name === props.draft.agent);
-    return index >= 0 ? index : 0;
-  });
+
+  /** The drafted agent's record, for the prompt placeholder's
+   *  `supportsPrompt`; null until the list carries it. */
   const selectedAgent = createMemo(
-    () => agents()[selectedAgentIndex()] ?? null,
+    () => agents().find((agent) => agent.name === props.draft.agent) ?? null,
   );
 
   /** The agent field carries an error instead of a list: the daemon answered
@@ -599,61 +547,131 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    *  would otherwise render an empty red row that says nothing at all. */
   const agentErrorText = () => props.agentsError || "No agents found on PATH";
 
+  /** The draft's mode, in the flat form the row budget takes. One memo,
+   *  because the plan, the floor, and the anchor math below all read it. */
+  const shape = createMemo(() => ({
+    moveChanges: moveChanges(),
+    fork: forking() !== null,
+    namesAWorktree: namesAWorktree(),
+  }));
+
   /**
    * How the dialog spends the rows the terminal has: which optional rows it
    * can afford, and how many each field gets. Every count below is read from
    * here rather than computed twice, because a row rendered that the budget
    * did not know about does not clip — it draws over its neighbour.
-   *
-   * The agent field's natural size is the whole agent list, which is the one
-   * thing here that can be arbitrarily long; the plan shrinks it first and
-   * scrolls the rest.
    */
   const plan = createMemo(() =>
     planDialogRows(
       {
-        moveChanges: moveChanges(),
-        fork: forking() !== null,
-        namesAWorktree: namesAWorktree(),
+        ...shape(),
+        // One row: the field is a collapsed dropdown, and only its ERROR
+        // still wraps to more. The list itself lives in an absolute overlay
+        // outside the budget entirely.
         agentRows: showAgentError()
           ? wrapText(agentErrorText(), contentWidth()).length
-          : Math.max(1, agents().length),
-        stacked: stacked(),
+          : 1,
         keyHints: showKeyHints(),
       },
       dims().height,
     ),
   );
 
-  /** Rows the agent field ended up with. */
-  const agentRoom = () => plan().agentRows;
+  const dialogTop = () =>
+    Math.max(0, Math.floor((dims().height - plan().height) / 2));
 
-  /** Where the visible slice of the agent list starts. Split from the slice
-   *  itself so the rows can derive their absolute number from it without the
-   *  slice having to carry a wrapper object per entry (see below). */
-  const agentWindowStart = createMemo(() => {
-    const list = agents();
-    return optionWindow(
-      list.length,
-      selectedAgentIndex(),
-      Math.min(agentRoom(), list.length),
-    ).start;
-  });
+  /** `newSessionOptions` with this dialog's own context filled in: the same
+   *  accessor the key routing in App.tsx reads, so the pills, the overlay,
+   *  and the keys can never disagree about what a field offers. */
+  const optionsFor = (field: NewSessionField) =>
+    newSessionOptions(field, {
+      draft: props.draft,
+      agents: props.agents,
+      tooShort: plan().tooShort,
+    });
 
   /**
-   * The agent list is the only field that can grow past a screen; cap it at
-   * what every other row has left over, and scroll the rest.
-   *
-   * Returns the raw slice, NOT `{agent, index}` wrappers. `<For>` is keyed by
-   * reference, so freshly minted wrappers made every visible row tear down
-   * and rebuild on each j/k; the underlying agent objects are stable, so
-   * slicing them directly lets it reuse the rows and move only the marker.
+   * The open overlay's options, fitted to the width rules and decorated with
+   * the agents' brand colours, or null while no dropdown is up. A memo so
+   * the row objects keep their IDENTITY across highlight moves: the
+   * overlay's `<For>` keys by reference, and fresh wrappers per j/k tear
+   * down and rebuild every visible row.
    */
-  const visibleAgents = createMemo(() => {
-    const list = agents();
-    const start = agentWindowStart();
-    return list.slice(start, start + Math.min(agentRoom(), list.length));
+  const overlayOptions = createMemo(() => {
+    const open = props.draft.dropdown;
+    if (!open || plan().tooShort) return null;
+    const resolved = optionsFor(open.field);
+    if (!resolved || resolved.options.length === 0) return null;
+    return {
+      field: open.field,
+      selectedIndex: resolved.selectedIndex,
+      options: resolved.options.map((option) => ({
+        label: optionLabel(option),
+        color: open.field === "agent" ? agentColorFor(option.value) : undefined,
+      })),
+    };
   });
+
+  /** The dropdown that is up, if a valid one is; the hint row and the
+   *  overlay both key off this. */
+  const dropdownOpen = () => overlayOptions() !== null;
+
+  const overlayHighlight = () => {
+    const open = props.draft.dropdown;
+    const resolved = overlayOptions();
+    if (!open || !resolved) return 0;
+    return Math.min(open.index, resolved.options.length - 1);
+  };
+
+  /**
+   * Content-box row `field`'s own row starts on: the title (row zero — the
+   * border adds its own row when this becomes screen rows), the spacer, then
+   * a prefix-sum of the same per-field counts the plan settled — each block
+   * above carrying its trailing gap when the plan kept the field spacers.
+   * The Where row is `destination`'s in every mode, locked or not.
+   */
+  const fieldRowTop = (field: NewSessionField): number => {
+    const rows = { ...floorFieldRows(shape()), agent: plan().agentRows };
+    const gap = plan().showFieldSpacers ? 1 : 0;
+    let top = 1 + (plan().showTitleSpacer ? 1 : 0);
+    for (const before of NEW_SESSION_FIELDS) {
+      if (before === field) break;
+      if (rows[before] > 0) top += rows[before] + gap;
+    }
+    return top;
+  };
+
+  /** Option rows the screen has room for under `field`: the overlay is
+   *  outside the dialog's budget, so it clamps against the SCREEN. */
+  const dropdownMaxRows = (field: NewSessionField): number => {
+    const anchor = dialogTop() + 1 + fieldRowTop(field) + 1;
+    return Math.max(1, dims().height - anchor - 2);
+  };
+
+  /** Commit the highlighted option, the hint row's click-side twin of the
+   *  Enter/space key path in `App.tsx`. */
+  const confirmDropdown = () => {
+    const resolved = overlayOptions();
+    if (resolved) props.onSelectOption(resolved.field, overlayHighlight());
+  };
+
+  /** The shared hint copy, for whichever key set is live right now. */
+  const hintSegments = () =>
+    newSessionHintSegments(
+      dropdownOpen()
+        ? "dropdown"
+        : optionsFor(props.draft.field)
+          ? "focused"
+          : "text",
+    );
+
+  /** Everything between the two exits, as the one dim run a compact width
+   *  gives up whole. */
+  const middleHint = () =>
+    hintSegments()
+      .slice(1, -1)
+      .map((segment) => `· ${segment.key} ${segment.gloss}`)
+      .join(" ");
 
   /**
    * The agent error, pre-wrapped to the content column and capped at the rows
@@ -666,7 +684,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    */
   const agentErrorLines = createMemo(() => {
     const lines = wrapText(agentErrorText(), contentWidth());
-    const room = agentRoom();
+    const room = plan().agentRows;
     if (lines.length <= room) return lines;
     // Say that it was cut, rather than ending mid-sentence: the last visible
     // row carries as much of the remainder as fits, with an ellipsis.
@@ -681,42 +699,13 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const height = () => plan().height;
 
   /**
-   * A numbered option list, windowed to the rows the plan gave it.
-   *
-   * Only ever a window when the terminal is too short for the whole list, and
-   * the selection is always inside it, so the row a number key picks scrolls
-   * into view rather than acting off screen. The number drawn is the option's
-   * ABSOLUTE position, exactly as the agent list does it, so a scrolled list
-   * never renumbers the keys.
-   */
-  function optionSlice<T>(
-    options: readonly T[],
-    selected: number,
-    rows: number,
-  ): { option: T; number: number }[] {
-    // Side by side on one row, every option is already visible; the window is
-    // only ever needed where each option has a row of its own.
-    if (!stacked()) {
-      return options.map((option, i) => ({ option, number: i + 1 }));
-    }
-    const { start, end } = optionWindow(
-      options.length,
-      selected,
-      Math.min(rows, options.length),
-    );
-    return options
-      .slice(start, end)
-      .map((option, i) => ({ option, number: start + i + 1 }));
-  }
-
-  /**
    * A field's label cell, carrying a one-character focus marker.
    *
    * Colour alone is not enough here: the number keys are scoped to the
    * FOCUSED field, so a viewer who can't tell which label is highlighted
    * can press `2` believing they are on Agent, get "Split right", and spawn
    * with no confirmation step. The selections themselves already use
-   * colour-safe markers (`>` and `[brackets]`); this closes the last one.
+   * colour-safe markers (`>` and the pills); this closes the last one.
    *
    * Marker (1) plus label cell (the rest of the gutter) is exactly the
    * width the content column is measured against, so nothing reflows.
@@ -739,16 +728,74 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     );
   };
 
+  /** The blank row between adjacent field-stack rows, when the plan can
+   *  afford them. Placed BEFORE every stack row except the first, so the
+   *  rendered gaps always match the plan's `fieldGaps` count. */
+  const FieldGap: Component = () => (
+    <Show when={plan().showFieldSpacers}>
+      <box height={1} />
+    </Show>
+  );
+
+  /**
+   * An option field's whole row: its label plus the pill holding its current
+   * value, everything read through the shared accessor so the row can never
+   * disagree with the keys about what is held. Clicking the pill focuses the
+   * field and opens its dropdown at the held option.
+   */
+  const OptionRow: Component<{ field: NewSessionField; label: string }> = (
+    rowProps,
+  ) => {
+    const resolved = () => optionsFor(rowProps.field);
+    const held = () => {
+      const field = resolved();
+      return field ? field.options[field.selectedIndex] : undefined;
+    };
+    return (
+      <box flexDirection="row" height={1}>
+        <FieldLabel field={rowProps.field} text={rowProps.label} />
+        <box width={CONTROL_GAP} />
+        <DropdownTrigger
+          value={optionLabel(held() ?? { label: "", compactLabel: "" })}
+          color={
+            rowProps.field === "agent"
+              ? agentColorFor(held()?.value ?? props.draft.agent)
+              : undefined
+          }
+          focused={props.draft.field === rowProps.field}
+          maxWidth={contentWidth() - 4}
+          onOpen={() => {
+            props.onFocusField(rowProps.field);
+            props.onOpenDropdown(
+              rowProps.field,
+              resolved()?.selectedIndex ?? 0,
+            );
+          }}
+        />
+      </box>
+    );
+  };
+
   const cwdLabel = () =>
     truncateText(shortenCwd(props.draft.cwd), contentWidth());
 
   /**
-   * The locked destination row's text. Only where the changes are going: the
-   * name they will go under is the Name row's, in both modes, so that the one
-   * editable field is in the same place wherever it is reached from.
+   * The locked destination row's text. Only where the session is going: the
+   * name a worktree will go under is the Name row's, so that the one editable
+   * field is in the same place wherever it is reached from.
+   *
+   * The two locks say opposite things — a move has to make a worktree, a fork
+   * outside a repository cannot — and the words are the dropdown's own, so the
+   * locked row and the choice it stands in for never read as different fields.
    */
-  const lockedDestinationLabel = () =>
-    truncateText(stacked() ? "Worktree" : "New worktree", contentWidth());
+  const lockedDestinationLabel = () => {
+    const [here, worktree] = DESTINATION_OPTIONS;
+    const option = moveChanges() ? worktree! : here!;
+    return truncateText(
+      narrow() ? option.compactLabel : option.label,
+      contentWidth(),
+    );
+  };
 
   /** What the mode's footnote says, and what to label it. A move reports what
    *  it costs the directory named directly above; a fork names the session it
@@ -765,12 +812,17 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     return {
       label: "Changes",
       text: truncateText(
-        stacked() ? "Moved out" : "Moved out of this checkout",
+        narrow() ? "Moved out" : "Moved out of this checkout",
         contentWidth(),
       ),
       color: theme.peach,
     };
   };
+
+  /** What the confirm button DOES, in the mode's own verb — the same word
+   *  the title leads with. */
+  const confirmVerb = () =>
+    forking() ? "Fork" : moveChanges() ? "Move" : "Spawn";
 
   /** Says whether this agent can take a prompt at all, which is per-agent
    *  and not otherwise discoverable. Shortened on a narrow surface, where
@@ -779,25 +831,24 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     const agent = selectedAgent();
     let text: string;
     if (agent && !agent.supportsPrompt) {
-      text = stacked()
+      text = narrow()
         ? "no prompt support"
         : `${agent.displayName} can't start with a prompt`;
     } else {
-      text = stacked() ? "Optional prompt..." : "Optional first message...";
+      text = narrow() ? "Optional prompt..." : "Optional first message...";
     }
     // The input draws its placeholder in full, past its own box, so the
     // fit has to be enforced here rather than left to the layout.
-    return truncateText(text, contentWidth());
+    return truncateText(
+      text,
+      Math.max(1, contentWidth() - INPUT_SHELL_PADDING),
+    );
   };
 
   /** The whole dialog, when there is room for one row and it has to say why
    *  the rest is missing. */
   const tooShortLabel = () => {
-    const needed = newSessionFloorRows({
-      moveChanges: moveChanges(),
-      fork: forking() !== null,
-      namesAWorktree: namesAWorktree(),
-    });
+    const needed = newSessionFloorRows(shape());
     return truncateText(`Needs ${needed} rows to show`, contentWidth());
   };
 
@@ -809,7 +860,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
          both odd-height, and the row they disagree by is the bottom border,
          which lands off screen exactly when the dialog is already as tall as
          the terminal. */
-      top={Math.max(0, Math.floor((dims().height - height()) / 2))}
+      top={dialogTop()}
       left={Math.max(0, Math.floor((dims().width - width()) / 2))}
       width={width()}
       height={height()}
@@ -837,7 +888,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               dialog different from every other time it opens. */}
             <strong>
               {forking()
-                ? truncateText("Fork into worktree", width() - 4)
+                ? "Fork session"
                 : moveChanges()
                   ? truncateText("Move changes to worktree", width() - 4)
                   : "New session"}
@@ -852,26 +903,28 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           Hidden rather than locked: unlike the destination, no part of the
           request is clearer for restating it. */}
         <Show when={!forking()}>
-          <box flexDirection="row">
-            <FieldLabel field="agent" text="Agent" />
-            <box flexDirection="column" flexGrow={1}>
-              <Show
-                when={props.agents !== null}
-                fallback={
-                  <box height={1}>
-                    <text fg={theme.overlay}>
-                      {truncateText("Loading agents...", contentWidth())}
-                    </text>
-                  </box>
-                }
-              >
-                <Show
-                  when={agents().length > 0}
-                  fallback={
-                    /* One row per pre-wrapped line, which is the same count the
-                   height was budgeted from. Left to the renderer instead,
-                   a long message wrapped past its single budgeted row and
-                   pushed the dialog's last rows outside the border. */
+          <Show
+            when={props.agents !== null && agents().length > 0}
+            fallback={
+              <box flexDirection="row">
+                <FieldLabel field="agent" text="Agent" />
+                <box width={CONTROL_GAP} />
+                <box flexDirection="column" flexGrow={1}>
+                  <Show
+                    when={props.agents !== null}
+                    fallback={
+                      <box height={1}>
+                        <text fg={theme.overlay}>
+                          {truncateText("Loading agents...", contentWidth())}
+                        </text>
+                      </box>
+                    }
+                  >
+                    {/* One row per pre-wrapped line, which is the same count
+                      the height was budgeted from. Left to the renderer
+                      instead, a long message wrapped past its single budgeted
+                      row and pushed the dialog's last rows outside the
+                      border. */}
                     <For each={agentErrorLines()}>
                       {(line) => (
                         <box height={1}>
@@ -879,213 +932,118 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                         </box>
                       )}
                     </For>
-                  }
-                >
-                  <For each={visibleAgents()}>
-                    {(agent, i) => {
-                      /** Absolute position, so the number key shown is the one
-                       *  that picks it even when the list has scrolled. */
-                      const number = () => agentWindowStart() + i() + 1;
-                      return (
-                        <box
-                          height={1}
-                          flexDirection="row"
-                          onMouseDown={(event) => {
-                            if (event.button !== MouseButton.LEFT) return;
-                            props.onFocusField("agent");
-                            props.onSelectAgent(agent.name);
-                          }}
-                        >
-                          <box width={2}>
-                            <text fg={theme.green}>
-                              {agent.name === props.draft.agent ? ">" : ""}
-                            </text>
-                          </box>
-                          {/* Only the first nine get a number key. */}
-                          <box width={2}>
-                            <text fg={theme.overlay}>
-                              {number() <= 9 ? `${number()}` : ""}
-                            </text>
-                          </box>
-                          <text fg={agentColorFor(agent.name)}>
-                            {agent.displayName}
-                          </text>
-                        </box>
-                      );
-                    }}
-                  </For>
-                </Show>
-              </Show>
-            </box>
-          </box>
+                  </Show>
+                </box>
+              </box>
+            }
+          >
+            <OptionRow field="agent" label="Agent" />
+          </Show>
         </Show>
 
-        <box flexDirection="row">
-          <FieldLabel field="placement" text="Placement" />
-          <box
-            flexDirection={stacked() ? "column" : "row"}
-            flexGrow={1}
-            onMouseDown={() => props.onFocusField("placement")}
-          >
-            <For
-              each={optionSlice(
-                PLACEMENT_OPTIONS,
-                PLACEMENT_OPTIONS.findIndex(
-                  (o) => o.value === props.draft.placement,
-                ),
-                plan().placementRows,
-              )}
-            >
-              {({ option, number }) => {
-                const selected = () => option.value === props.draft.placement;
-                return (
-                  <box
-                    height={1}
-                    flexDirection="row"
-                    flexShrink={0}
-                    marginRight={stacked() ? 0 : 2}
-                    onMouseDown={(event) => {
-                      if (event.button !== MouseButton.LEFT) return;
-                      props.onFocusField("placement");
-                      props.onSelectPlacement(option.value);
-                    }}
-                  >
-                    {/* Spacing comes from box widths and margins, never from
-                      padded strings: a `<text>` is measured on its trimmed
-                      content, so trailing spaces collapse under flex. */}
-                    <box width={2}>
-                      <text fg={theme.overlay}>{`${number}`}</text>
-                    </box>
-                    {/* Brackets, not colour alone: the placements have no
-                      selection gutter of their own. Each bracket gets a
-                      fixed-width box so choosing an option never reflows the
-                      row, and so the marker survives a colourless terminal. */}
-                    <box width={1}>
-                      <text fg={theme.green}>{selected() ? "[" : ""}</text>
-                    </box>
-                    <text fg={selected() ? theme.green : theme.subtext}>
-                      {optionLabel(option)}
-                    </text>
-                    <box width={1}>
-                      <text fg={theme.green}>{selected() ? "]" : ""}</text>
-                    </box>
-                  </box>
-                );
-              }}
-            </For>
-          </box>
-        </box>
+        <Show when={!forking()}>
+          <FieldGap />
+        </Show>
+        <OptionRow field="placement" label="Placement" />
 
         {/* A fork continues a conversation; there is no first message to
           open it with. */}
         <Show when={!forking()}>
+          <FieldGap />
           <box flexDirection="row" height={1}>
             <FieldLabel field="prompt" text="Prompt" />
-            <input
-              value={props.draft.prompt}
-              onInput={props.onPromptInput}
-              focused={props.draft.field === "prompt"}
-              placeholder={promptPlaceholder()}
-              placeholderColor={theme.overlay}
-              textColor={theme.text}
-              cursorColor={theme.blue}
-              backgroundColor="transparent"
-              focusedBackgroundColor="transparent"
+            <box width={CONTROL_GAP} />
+            {/* The same full-width run the pills paint, so every control
+              shares one shape and one right edge; the input itself stays
+              transparent over it (its own background prop does not paint). */}
+            <box
+              height={1}
+              flexDirection="row"
               flexGrow={1}
-            />
+              paddingLeft={1}
+              paddingRight={1}
+              backgroundColor={
+                props.draft.field === "prompt" ? theme.border : theme.surface
+              }
+            >
+              <input
+                value={props.draft.prompt}
+                onInput={props.onPromptInput}
+                focused={props.draft.field === "prompt"}
+                placeholder={promptPlaceholder()}
+                placeholderColor={theme.overlay}
+                textColor={theme.text}
+                cursorColor={theme.blue}
+                backgroundColor="transparent"
+                focusedBackgroundColor="transparent"
+                flexGrow={1}
+              />
+            </box>
           </box>
         </Show>
 
-        <Show when={moveChanges() || forking()}>
+        <Show when={destinationLocked()}>
+          <FieldGap />
           {/* Locked, so it is drawn like Directory rather than as a field: no
             focus marker and no number keys, because a row that looks
-            selectable but refuses every key reads as broken. The changes (or
-            the fork) have nowhere to go but a new worktree, so there is no
-            second choice to offer. */}
+            selectable but refuses every key reads as broken. The changes have
+            nowhere to go but a new worktree, and a fork of a session outside a
+            repository has nowhere to put one — either way there is no second
+            choice to offer. */}
           <box flexDirection="row" height={1}>
             <box width={LABEL_WIDTH} paddingLeft={1}>
               <text fg={theme.overlay}>Where</text>
             </box>
+            <box width={1 + CONTROL_GAP} />
             <text fg={theme.green}>{lockedDestinationLabel()}</text>
           </box>
         </Show>
 
-        <Show when={!moveChanges() && !forking()}>
-          <box flexDirection="row">
-            <FieldLabel field="destination" text="Where" />
-            <box
-              flexDirection={stacked() ? "column" : "row"}
-              flexGrow={1}
-              onMouseDown={() => props.onFocusField("destination")}
-            >
-              <For
-                each={optionSlice(
-                  DESTINATION_OPTIONS,
-                  DESTINATION_OPTIONS.findIndex(
-                    (o) => o.value === props.draft.destination,
-                  ),
-                  plan().destinationRows,
-                )}
-              >
-                {({ option, number }) => {
-                  const selected = () =>
-                    option.value === props.draft.destination;
-                  /* Just the choice. The name the worktree option would create
-                   used to be appended here and truncated against what the row
-                   had left, which at this dialog's width meant committing to
-                   `fix-sidebar-…` (issue #83). Selecting it opens a row of its
-                   own below, where the name is both legible and editable. */
-                  const label = () => optionLabel(option);
-                  return (
-                    <box
-                      height={1}
-                      flexDirection="row"
-                      flexShrink={0}
-                      marginRight={stacked() ? 0 : 2}
-                      onMouseDown={(event) => {
-                        if (event.button !== MouseButton.LEFT) return;
-                        props.onFocusField("destination");
-                        props.onSelectDestination(option.value);
-                      }}
-                    >
-                      <box width={2}>
-                        <text fg={theme.overlay}>{`${number}`}</text>
-                      </box>
-                      <box width={1}>
-                        <text fg={theme.green}>{selected() ? "[" : ""}</text>
-                      </box>
-                      <text fg={selected() ? theme.green : theme.subtext}>
-                        {label()}
-                      </text>
-                      <box width={1}>
-                        <text fg={theme.green}>{selected() ? "]" : ""}</text>
-                      </box>
-                    </box>
-                  );
-                }}
-              </For>
-            </box>
-          </box>
+        <Show when={!destinationLocked()}>
+          <FieldGap />
+          {/* Just the choice. The name the worktree option would create used
+            to be appended here and truncated against what the row had left,
+            which at this dialog's width meant committing to `fix-sidebar-…`
+            (issue #83). Selecting it opens a row of its own below, where the
+            name is both legible and editable. */}
+          <OptionRow field="destination" label="Where" />
         </Show>
 
         <Show when={namesAWorktree()}>
+          <FieldGap />
           {/* A row of its own, which is the point: the name was a suffix on the
             row above, truncated against whatever that row had left. Here it
             gets the width, and the keyboard. */}
           <box flexDirection="row" height={1}>
             <FieldLabel field="worktreeName" text="Name" />
-            <input
-              value={props.draft.worktreeName ?? ""}
-              onInput={props.onWorktreeNameInput}
-              focused={props.draft.field === "worktreeName"}
-              placeholder={namePlaceholder()}
-              placeholderColor={theme.overlay}
-              textColor={theme.text}
-              cursorColor={theme.blue}
-              backgroundColor="transparent"
-              focusedBackgroundColor="transparent"
+            <box width={CONTROL_GAP} />
+            {/* The pills' run; see the Prompt row. The hint stays OUTSIDE
+              the control, an annotation rather than part of the value. */}
+            <box
+              height={1}
+              flexDirection="row"
               flexGrow={1}
-            />
+              paddingLeft={1}
+              paddingRight={1}
+              backgroundColor={
+                props.draft.field === "worktreeName"
+                  ? theme.border
+                  : theme.surface
+              }
+            >
+              <input
+                value={props.draft.worktreeName ?? ""}
+                onInput={props.onWorktreeNameInput}
+                focused={props.draft.field === "worktreeName"}
+                placeholder={namePlaceholder()}
+                placeholderColor={theme.overlay}
+                textColor={theme.text}
+                cursorColor={theme.blue}
+                backgroundColor="transparent"
+                focusedBackgroundColor="transparent"
+                flexGrow={1}
+              />
+            </box>
             <Show when={nameHint()}>
               <box flexShrink={0} marginLeft={1}>
                 <text fg={theme.overlay}>{nameHint()}</text>
@@ -1095,63 +1053,19 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         </Show>
 
         <Show when={moveChanges()}>
-          <box flexDirection="row">
-            <FieldLabel field="untracked" text="Untracked" />
-            <box
-              flexDirection={stacked() ? "column" : "row"}
-              flexGrow={1}
-              onMouseDown={() => props.onFocusField("untracked")}
-            >
-              <For
-                each={optionSlice(
-                  UNTRACKED_OPTIONS,
-                  UNTRACKED_OPTIONS.findIndex(
-                    (o) => o.value === props.draft.untracked,
-                  ),
-                  plan().untrackedRows,
-                )}
-              >
-                {({ option, number }) => {
-                  const selected = () => option.value === props.draft.untracked;
-                  return (
-                    <box
-                      height={1}
-                      flexDirection="row"
-                      flexShrink={0}
-                      marginRight={stacked() ? 0 : 2}
-                      onMouseDown={(event) => {
-                        if (event.button !== MouseButton.LEFT) return;
-                        props.onFocusField("untracked");
-                        props.onSelectUntracked(option.value);
-                      }}
-                    >
-                      <box width={2}>
-                        <text fg={theme.overlay}>{`${number}`}</text>
-                      </box>
-                      <box width={1}>
-                        <text fg={theme.green}>{selected() ? "[" : ""}</text>
-                      </box>
-                      <text fg={selected() ? theme.green : theme.subtext}>
-                        {optionLabel(option)}
-                      </text>
-                      <box width={1}>
-                        <text fg={theme.green}>{selected() ? "]" : ""}</text>
-                      </box>
-                    </box>
-                  );
-                }}
-              </For>
-            </box>
-          </box>
+          <FieldGap />
+          <OptionRow field="untracked" label="Untracked" />
         </Show>
 
         <Show when={plan().showDirectory}>
+          <FieldGap />
           <box flexDirection="row" height={1}>
             {/* Not a field: derived, never focused, so it only pads past the
               marker column to stay aligned with the labels above. */}
             <box width={LABEL_WIDTH} paddingLeft={1}>
               <text fg={theme.overlay}>Directory</text>
             </box>
+            <box width={1 + CONTROL_GAP} />
             <text fg={theme.subtext}>{cwdLabel()}</text>
           </box>
         </Show>
@@ -1166,39 +1080,103 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
             <box width={LABEL_WIDTH} paddingLeft={1}>
               <text fg={theme.overlay}>{modeNote().label}</text>
             </box>
+            <box width={1 + CONTROL_GAP} />
             <text fg={modeNote().color}>{modeNote().text}</text>
           </box>
         </Show>
 
+        <Show when={plan().showButtons}>
+          <box height={1} />
+          {/* Confirm and Cancel, aligned with the controls: pure duplicates
+            of Enter and Escape (the same paths, all the same guards), so
+            they are click affordances only and deliberately NOT Tab stops.
+            While a dropdown is open they follow the hint row's click
+            contract: confirm commits the highlight, Cancel closes the
+            overlay. */}
+          <box flexDirection="row" height={1}>
+            {/* Right-aligned in the macOS order — quiet Cancel left, the
+              primary rightmost, ending flush at the content edge the pills'
+              carets end on. The growing spacer means no per-width indent
+              cases; the rail simply has less room to breathe. */}
+            <box flexGrow={1} />
+            <box
+              height={1}
+              flexDirection="row"
+              flexShrink={0}
+              paddingLeft={1}
+              paddingRight={1}
+              backgroundColor={theme.surface}
+              onMouseDown={(event) => {
+                if (event.button !== MouseButton.LEFT) return;
+                if (dropdownOpen()) props.onCloseDropdown();
+                else props.onCancel();
+              }}
+            >
+              <text fg={theme.text}>Cancel</text>
+            </box>
+            <box width={2} />
+            <box
+              height={1}
+              flexDirection="row"
+              flexShrink={0}
+              paddingLeft={1}
+              paddingRight={1}
+              backgroundColor={theme.mauve}
+              onMouseDown={(event) => {
+                if (event.button !== MouseButton.LEFT) return;
+                if (dropdownOpen()) confirmDropdown();
+                else props.onSubmit();
+              }}
+            >
+              <text fg={theme.base}>
+                <strong>{confirmVerb()}</strong>
+              </text>
+            </box>
+          </box>
+          <box height={1} />
+        </Show>
+
         <Show when={plan().showKeyHints}>
           <box height={1} />
+          {/* The same segments the Footer joins into one line
+            (`newSessionHintSegments`); here the first and last are the
+            clickable exits and the middle is what a narrow surface gives
+            up. */}
           <box flexDirection="row" height={1}>
             <box
               flexDirection="row"
               flexShrink={0}
               marginRight={1}
               onMouseDown={(event) => {
-                if (event.button === MouseButton.LEFT) props.onSubmit();
+                if (event.button !== MouseButton.LEFT) return;
+                if (dropdownOpen()) confirmDropdown();
+                else props.onSubmit();
               }}
             >
               <text fg={theme.green}>
-                <strong>enter</strong>
+                <strong>{hintSegments()[0]!.key}</strong>
               </text>
-              <box width={1} />
-              <text fg={theme.overlay}>spawn</text>
+              {/* The overlay's longer key text eats the gloss's columns at
+                the rail, the same trade the esc segment already makes. */}
+              <Show when={!dropdownOpen() || !narrow()}>
+                <box width={1} />
+                <text fg={theme.overlay}>{hintSegments()[0]!.gloss}</text>
+              </Show>
             </box>
-            {/* The middle hint is the one that goes when there is no room for
-              it: the two it sits between are the dialog's only exits. */}
+            {/* The middle hint is the one that goes when there is no room
+              for it: the two it sits between are the dialog's only exits. */}
             <Show when={!compact()}>
               <box flexDirection="row" marginRight={1}>
-                <text fg={theme.overlay}>· tab field · j/k or 1-9 pick</text>
+                <text fg={theme.overlay}>{middleHint()}</text>
               </box>
             </Show>
             <box
               flexDirection="row"
               flexShrink={0}
               onMouseDown={(event) => {
-                if (event.button === MouseButton.LEFT) props.onCancel();
+                if (event.button !== MouseButton.LEFT) return;
+                if (dropdownOpen()) props.onCloseDropdown();
+                else props.onCancel();
               }}
             >
               <text fg={theme.overlay}>·</text>
@@ -1208,12 +1186,35 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               </text>
               {/* At the real 30-column rail even this two-hint line overruns
                 the border; Esc needs no gloss, so its word is what goes. */}
-              <Show when={!stacked()}>
+              <Show when={!narrow()}>
                 <box width={1} />
                 <text fg={theme.overlay}>cancel</text>
               </Show>
             </box>
           </box>
+        </Show>
+
+        {/* The one open dropdown, anchored under whichever field it belongs
+          to — a single late child of the dialog box, for the sibling
+          z-sorting reason `DropdownField.tsx` explains. */}
+        <Show when={overlayOptions()}>
+          {(resolved: () => NonNullable<ReturnType<typeof overlayOptions>>) => (
+            <DropdownOverlay
+              options={resolved().options}
+              highlight={overlayHighlight()}
+              selected={resolved().selectedIndex}
+              top={fieldRowTop(resolved().field) + 1}
+              /* Absolute children measure from inside the BORDER, not the
+                padding box, so the dialog's own paddingLeft is part of the
+                offset to the control's left edge. */
+              left={1 + LABEL_WIDTH + CONTROL_GAP}
+              maxRows={dropdownMaxRows(resolved().field)}
+              maxWidth={width() - LABEL_WIDTH - CONTROL_GAP - 2}
+              onSelect={(index) =>
+                props.onSelectOption(resolved().field, index)
+              }
+            />
+          )}
         </Show>
       </Show>
     </box>

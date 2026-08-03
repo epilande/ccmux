@@ -2227,13 +2227,78 @@ describe("App fork (F / context menu)", () => {
     await setup.renderOnce();
   }
 
-  it("forks the selected session beside its own pane", async () => {
+  /** `F`, then Enter on the dialog it opens: the whole default path. */
+  async function forkFromKey() {
+    setup.mockInput.pressKey("F");
+    await settle();
+    await setup.renderOnce();
+    setup.mockInput.pressEnter();
+    await settle();
+    await setup.renderOnce();
+  }
+
+  it("asks before forking, rather than forking on the keystroke", async () => {
+    // `F` used to post a fork immediately. It opens the dialog now, because a
+    // fork has a destination to choose — and nothing is sent by opening one.
     const { bodies, restore } = captureSpawn();
     try {
       await renderWithSession();
       setup.mockInput.pressKey("F");
       await settle();
       await setup.renderOnce();
+
+      expect(setup.captureCharFrame()).toContain("Fork session");
+      expect(bodies).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not fetch spawnable agents for a fork-only dialog", async () => {
+    let agentRequests = 0;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.endsWith("/agents")) {
+        agentRequests += 1;
+        return Response.json({ agents: [] });
+      }
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: null });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+
+    try {
+      await renderWithSession();
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+
+      expect(setup.captureCharFrame()).toContain("Fork session");
+      expect(agentRequests).toBe(0);
+
+      // Ordinary new-session dialogs still refresh on every open so a
+      // long-lived picker can discover agents installed since startup.
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+      expect(agentRequests).toBe(1);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("forks the selected session beside its own pane on Enter", async () => {
+    // An untouched dialog is the one-shot `F` this replaced, byte for byte:
+    // the source's own checkout, a split off the source's own pane.
+    const { bodies, restore } = captureSpawn();
+    try {
+      await renderWithSession();
+      await forkFromKey();
       expect(bodies).toHaveLength(1);
       expect(bodies[0]).toMatchObject({
         fork: "s1",
@@ -2245,6 +2310,9 @@ describe("App fork (F / context menu)", () => {
       // No agent or cwd: the daemon reads both off the session being forked.
       expect(bodies[0]?.agent).toBeUndefined();
       expect(bodies[0]?.cwd).toBeUndefined();
+      // And no worktree asked for: the object is what asks for one at all, so
+      // a fork staying put must not send even an empty one.
+      expect(bodies[0]?.worktree).toBeUndefined();
     } finally {
       restore();
     }
@@ -2263,6 +2331,9 @@ describe("App fork (F / context menu)", () => {
       await renderWithSession();
       // CSI 27 ; 2 ; 70 ~  =  modifyOtherKeys form of shift+F.
       setup.renderer.stdin.emit("data", Buffer.from("\x1b[27;2;70~"));
+      await settle();
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
       await settle();
       await setup.renderOnce();
       expect(bodies).toHaveLength(1);
@@ -2303,9 +2374,7 @@ describe("App fork (F / context menu)", () => {
     const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
       await renderWithSession({ persistent: false });
-      setup.mockInput.pressKey("F");
-      await settle();
-      await setup.renderOnce();
+      await forkFromKey();
       expect(switchToPaneSpy).toHaveBeenCalledWith("%99");
       expect(exitSpy).toHaveBeenCalled();
     } finally {
@@ -2314,8 +2383,10 @@ describe("App fork (F / context menu)", () => {
     }
   });
 
-  it("drops a second press while a fork is in flight", async () => {
-    // One conversation, one fork: a double press must not open two panes.
+  it("drops a second submit while a fork is in flight", async () => {
+    // One conversation, one fork: a double Enter must not open two panes. The
+    // dialog is still up while the request is out (it closes only on a landed
+    // fork), so the second one really does reach the submit path.
     const bodies: Record<string, unknown>[] = [];
     const original = globalThis.fetch;
     globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
@@ -2328,10 +2399,81 @@ describe("App fork (F / context menu)", () => {
     try {
       await renderWithSession();
       setup.mockInput.pressKey("F");
+      await settle();
       await setup.renderOnce();
-      setup.mockInput.pressKey("F");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
       await setup.renderOnce();
       expect(bodies).toHaveLength(1);
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("Fork already in progress"),
+      );
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("does not close a replacement dialog when an older fork completes", async () => {
+    let finishFork!: (response: Response) => void;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/server-info")) {
+        return Response.json({ socketPath: null });
+      }
+      if (href.endsWith("/agents")) {
+        return Response.json({
+          agents: [
+            {
+              name: "claude",
+              displayName: "Claude",
+              shortCode: "CC",
+              supportsPrompt: true,
+            },
+          ],
+        });
+      }
+      if (href.endsWith("/spawn")) {
+        return new Promise<Response>((resolve) => {
+          finishFork = resolve;
+        });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+
+    try {
+      await renderWithSession();
+      setup.mockInput.pressKey("F");
+      await settle();
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+
+      // Dismiss the submitted fork and start drafting an unrelated session
+      // while its daemon request is still pending.
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("n");
+      await settle();
+      await setup.renderOnce();
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.mockInput.typeText("keep this prompt");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("keep this prompt");
+
+      finishFork(Response.json({ success: true, paneId: "%99" }));
+      await settle();
+      await setup.renderOnce();
+
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("New session");
+      expect(frame).toContain("keep this prompt");
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
     } finally {
       globalThis.fetch = original;
     }
@@ -2345,9 +2487,7 @@ describe("App fork (F / context menu)", () => {
     });
     try {
       await renderWithSession();
-      setup.mockInput.pressKey("F");
-      await settle();
-      await setup.renderOnce();
+      await forkFromKey();
       const frame = squish(setup.captureCharFrame());
       expect(frame).toContain(squish("Fork failed:"));
       expect(frame).toContain(squish("does not support forking"));
@@ -2364,6 +2504,8 @@ describe("App fork (F / context menu)", () => {
       await settle();
       await setup.renderOnce();
       expect(bodies).toHaveLength(0);
+      // Not even the dialog: an unforkable row has nothing to choose about.
+      expect(setup.captureCharFrame()).not.toContain("Fork session");
     } finally {
       restore();
     }
@@ -2378,6 +2520,7 @@ describe("App fork (F / context menu)", () => {
       await settle();
       await setup.renderOnce();
       expect(bodies).toHaveLength(0);
+      expect(setup.captureCharFrame()).not.toContain("Fork session");
     } finally {
       restore();
     }
@@ -2471,7 +2614,10 @@ describe("App fork (F / context menu)", () => {
     }
   });
 
-  it("forks from the context menu item", async () => {
+  it("opens the same dialog from the context menu item", async () => {
+    // One item, one flow: the menu used to carry a second "Fork into worktree"
+    // beside this one, and the destination row inside the dialog is where that
+    // choice lives now.
     const { bodies, restore } = captureSpawn();
     try {
       await renderWithSession();
@@ -2487,6 +2633,12 @@ describe("App fork (F / context menu)", () => {
         .findIndex((line) => line.includes("Fork"));
       expect(menuRow).toBeGreaterThan(0);
       await setup.mockMouse.click(7, menuRow, MouseButtons.LEFT);
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Fork session");
+      expect(bodies).toHaveLength(0);
+
+      setup.mockInput.pressEnter();
       await settle();
       await setup.renderOnce();
       expect(bodies).toHaveLength(1);
@@ -2604,7 +2756,7 @@ describe("App new session dialog", () => {
       const frame = setup.captureCharFrame();
       expect(frame).toContain("New session");
       expect(frame).toContain("/code/myapp");
-      expect(frame).toContain("> 2 Codex");
+      expect(frame).toMatch(/Codex\s+▾/);
     } finally {
       restore();
     }
@@ -2640,7 +2792,7 @@ describe("App new session dialog", () => {
     const { restore } = withDaemon();
     try {
       await openDialog({ lastSpawnAgent: "codex" }, []);
-      expect(setup.captureCharFrame()).toContain("> 2 Codex");
+      expect(setup.captureCharFrame()).toMatch(/Codex\s+▾/);
     } finally {
       restore();
     }
@@ -2651,7 +2803,7 @@ describe("App new session dialog", () => {
     try {
       // `gemini` was detected by pane scanning but is not on PATH.
       await openDialog({}, [session({ agentType: "gemini" })]);
-      expect(setup.captureCharFrame()).toContain("> 1 Claude");
+      expect(setup.captureCharFrame()).toMatch(/Claude\s+▾/);
     } finally {
       restore();
     }
@@ -2696,7 +2848,8 @@ describe("App new session dialog", () => {
       await openDialog();
       setup.mockInput.pressKey("2");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("> 2 Codex");
+      // Direct-pick without opening the dropdown: the collapsed row updates.
+      expect(setup.captureCharFrame()).toMatch(/Codex\s+▾/);
       setup.mockInput.pressEnter();
       await settle();
       expect(spawns[0]?.agent).toBe("codex");
@@ -2713,10 +2866,201 @@ describe("App new session dialog", () => {
       setup.mockInput.pressKey("k");
       await setup.renderOnce();
       // Already at the top: k is a no-op rather than a wrap to the bottom.
-      expect(setup.captureCharFrame()).toContain("> 1 Claude");
+      expect(setup.captureCharFrame()).toMatch(/Claude\s+▾/);
       setup.mockInput.pressKey("j");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("> 2 Codex");
+      expect(setup.captureCharFrame()).toMatch(/Codex\s+▾/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("opens the agent dropdown on space, navigates, and confirms", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressKey(" ");
+      await setup.renderOnce();
+      // The list is on screen now, numbered as before.
+      expect(setup.captureCharFrame()).toContain("2 Codex");
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      // Enter confirms the highlight and closes the overlay, without
+      // spawning: the dropdown owns the key while it is open.
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(spawns).toHaveLength(0);
+      expect(setup.captureCharFrame()).toMatch(/Codex\s+▾/);
+      // The next Enter is the dialog's again.
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(spawns[0]?.agent).toBe("codex");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("closes the agent dropdown on escape without touching the draft", async () => {
+    const { restore } = withDaemon();
+    try {
+      await openDialog();
+      setup.mockInput.pressKey(" ");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      setup.mockInput.pressEscape();
+      await settle(20);
+      await setup.renderOnce();
+      // The dialog survives (escape was the overlay's), the held agent is
+      // unchanged, and the list is gone.
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("New session");
+      expect(frame).toMatch(/Claude\s+▾/);
+      expect(frame).not.toContain("2 Codex");
+    } finally {
+      restore();
+    }
+  });
+
+  it("spawns from the confirm button's click", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      const lines = setup.captureCharFrame().split("\n");
+      const row = lines.findIndex(
+        (line) => line.includes("Spawn") && line.includes("Cancel"),
+      );
+      expect(row).toBeGreaterThan(0);
+      // Located by label, not position: the button row moves with the plan.
+      await setup.mockMouse.click(lines[row]!.indexOf("Spawn") + 1, row);
+      await settle();
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]?.agent).toBe("claude");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("closes the dialog from the Cancel button without spawning", async () => {
+    const { spawns, restore } = withDaemon();
+    try {
+      await openDialog();
+      const lines = setup.captureCharFrame().split("\n");
+      const row = lines.findIndex(
+        (line) => line.includes("Spawn") && line.includes("Cancel"),
+      );
+      expect(row).toBeGreaterThan(0);
+      await setup.mockMouse.click(lines[row]!.indexOf("Cancel") + 1, row);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("New session");
+      expect(spawns).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("confirms the highlighted agent with space while the dropdown is open", async () => {
+    // The key that opened it commits it: without this, the hand that pressed
+    // space to open presses it again and nothing happens.
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressKey(" ");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      setup.mockInput.pressKey(" ");
+      await setup.renderOnce();
+      // Committed and closed, without spawning.
+      expect(spawns).toHaveLength(0);
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Codex\s+▾/);
+      expect(frame).not.toContain("2 Codex");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("drives a placement dropdown with the same keys as the agent's", async () => {
+    const { spawns, restore } = withDaemon();
+    const { restore: restoreExit } = withExitSpy();
+    try {
+      await openDialog();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("l");
+      await setup.renderOnce();
+      // The list is up, numbered, with the held value marked.
+      expect(setup.captureCharFrame()).toContain("> 1 New window");
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      // Confirmed into the pill without spawning...
+      expect(spawns).toHaveLength(0);
+      expect(setup.captureCharFrame()).toMatch(/Split right\s+▾/);
+      // ...and a reopened list cancels with h without moving the value.
+      setup.mockInput.pressKey("l");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("h");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Split right\s+▾/);
+      expect(frame).not.toContain("New window");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("opens the agent dropdown on l and closes it on h, dropping the highlight", async () => {
+    const { restore } = withDaemon();
+    try {
+      await openDialog();
+      setup.mockInput.pressKey("l");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("2 Codex");
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      // h mirrors the l that opened it: closed without committing, so the
+      // held agent is still the one the dialog opened with.
+      setup.mockInput.pressKey("h");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("New session");
+      expect(frame).toMatch(/Claude\s+▾/);
+      expect(frame).not.toContain("2 Codex");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps l as a plain character in the prompt field", async () => {
+    // The open keys belong to the AGENT field; a text field owns every
+    // printable key, so typing an l there must never raise the overlay.
+    const { restore } = withDaemon();
+    try {
+      await openDialog();
+      setup.mockInput.pressTab();
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("l");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("2 Codex");
+      // The l reached the input as text: the typed value replaced the
+      // placeholder rather than raising the overlay.
+      expect(frame).not.toContain("Optional first message");
     } finally {
       restore();
     }
@@ -2731,7 +3075,7 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
       setup.mockInput.pressKey("2");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("[Split right]");
+      expect(setup.captureCharFrame()).toMatch(/Split right\s+▾/);
       setup.mockInput.pressEnter();
       await settle();
       expect(spawns[0]?.split).toBe("h");
@@ -3008,7 +3352,7 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
       setup.mockInput.pressKey("3");
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("[Split down]");
+      expect(setup.captureCharFrame()).toMatch(/Split down\s+▾/);
       setup.mockInput.pressEnter();
       await settle();
       expect(spawns[0]?.split).toBe("v");
@@ -3270,7 +3614,7 @@ describe("App new session dialog", () => {
       setup.mockInput.pressKey("n");
       await settle();
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("1 Claude");
+      expect(setup.captureCharFrame()).toMatch(/Claude\s+▾/);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -3436,13 +3780,16 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
 
       expect(calls).toBe(2);
+      // The newcomer is visible where the list now lives: in the dropdown.
+      setup.mockInput.pressKey(" ");
+      await setup.renderOnce();
       expect(setup.captureCharFrame()).toContain("Codex");
     } finally {
       globalThis.fetch = originalFetch;
     }
   });
 
-  it("offers New session here on a session row's context menu", async () => {
+  it("offers New session on a session row's context menu", async () => {
     const { restore } = withDaemon();
     try {
       await renderApp(120, 24, { groupBy: "none" });
@@ -3450,7 +3797,7 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
       await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("New session here");
+      expect(setup.captureCharFrame()).toContain("New session");
     } finally {
       restore();
     }
@@ -3490,14 +3837,16 @@ describe("App new session dialog", () => {
 
       const frame = setup.captureCharFrame();
       expect(frame).toContain("New session");
-      expect(frame).not.toContain("New session here");
+      // Menu-only labels, since the dialog's own title is now the same words
+      // the menu item carries: "New session" no longer tells them apart.
       expect(frame).not.toContain("Attach");
+      expect(frame).not.toContain("Restart");
     } finally {
       restore();
     }
   });
 
-  /** Right-click the group header on row 1 and click its "New session here"
+  /** Right-click the group header on row 1 and click its "New session"
    *  item, located by label so a menu reshuffle can't fire a different
    *  action. Returns the frame with the dialog open. */
   async function openGroupMenuNewSession(): Promise<string> {
@@ -3506,7 +3855,7 @@ describe("App new session dialog", () => {
     const menuRow = setup
       .captureCharFrame()
       .split("\n")
-      .findIndex((line) => line.includes("New session here"));
+      .findIndex((line) => line.includes("New session"));
     expect(menuRow).toBeGreaterThan(0);
     await setup.mockMouse.click(7, menuRow, MouseButtons.LEFT);
     await settle();
@@ -3623,8 +3972,8 @@ describe("App new session dialog", () => {
       // The member's own cwd, not either repo root. Spelled out with the
       // field label so a row behind the dialog cannot satisfy it.
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Directory /code/work/api/src");
-      expect(frame).not.toContain("Directory /code/oss/api");
+      expect(frame).toContain("Directory   /code/work/api/src");
+      expect(frame).not.toContain("Directory   /code/oss/api");
     } finally {
       restore();
     }
@@ -3652,13 +4001,15 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
 
       // Labelled, so the session row behind the dialog cannot satisfy it.
-      expect(setup.captureCharFrame()).toContain("Directory ~/dotfiles-notes");
+      expect(setup.captureCharFrame()).toContain(
+        "Directory   ~/dotfiles-notes",
+      );
     } finally {
       restore();
     }
   });
 
-  it("offers New session here on a group header's context menu", async () => {
+  it("offers New session on a group header's context menu", async () => {
     const { restore } = withDaemon();
     try {
       await renderApp(120, 24, { groupBy: "project" });
@@ -3667,7 +4018,7 @@ describe("App new session dialog", () => {
       // Row 1 is the group header under the default grouping.
       await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("New session here");
+      expect(setup.captureCharFrame()).toContain("New session");
     } finally {
       restore();
     }
@@ -3727,16 +4078,13 @@ describe("App move-changes menu gate", () => {
 
   /** Rows of the open menu, by the labels visible in the frame. */
   function menuRows(): { label: string; row: number }[] {
-    // "Review diff" matters most: it is the only row BELOW where an
-    // out-of-place item would be inserted, so leaving it out would make the
-    // no-shift assertion blind to the exact regression it guards.
     const labels = [
       "Attach",
       "New session",
-      "Kill",
-      "Restart",
       "Review diff",
       "Move changes",
+      "Restart",
+      "Kill",
     ];
     return setup
       .captureCharFrame()
@@ -3745,6 +4093,34 @@ describe("App move-changes menu gate", () => {
         const label = labels.find((l) => line.includes(l));
         return label ? [{ label, row }] : [];
       });
+  }
+
+  /** The menu box's own top border row. */
+  const menuTop = () =>
+    setup
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes("┌"));
+
+  /** Hold the dirty answer open so the "before" frame is genuinely without
+   *  the item; a mock that resolves immediately settles during the render
+   *  await and the test proves nothing. */
+  function heldDirty() {
+    let release!: (r: Response) => void;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      if (String(url).includes("/dirty")) {
+        return new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch;
+    return {
+      land: () =>
+        release({ ok: true, json: async () => ({ dirty: true }) } as Response),
+      restore: () => (globalThis.fetch = original),
+    };
   }
 
   it("asks the daemon only when the menu opens", async () => {
@@ -3842,45 +4218,191 @@ describe("App move-changes menu gate", () => {
     }
   });
 
-  it("does not move any row already on screen when the item lands", async () => {
-    // THE invariant, and the reason the item is appended last. The answer
-    // arrives after the menu is drawn, so an item inserted anywhere else
-    // would shove the rows below it down under a cursor mid-travel. Asserts
-    // POSITIONS rather than timing, so it outlives whatever the latency is.
+  it("does not move the rows above it when the item lands", async () => {
+    // The item used to be appended LAST so that nothing could move at all.
+    // It sits above Restart and Kill now (destructive actions belong at the
+    // bottom), so those two do shift down by exactly the row it takes, and
+    // this pins what is still guaranteed: the menu box does not move, and
+    // neither does anything above the insertion point.
     //
-    // The answer is held open deliberately: a mock that resolves immediately
-    // settles during the render await, so the "before" frame would already
-    // contain the item and the test would prove nothing.
-    let release!: (r: Response) => void;
-    const original = globalThis.fetch;
-    globalThis.fetch = (async (url: string | URL) => {
-      if (String(url).includes("/dirty")) {
-        return new Promise<Response>((resolve) => {
-          release = resolve;
-        });
-      }
-      return { ok: true, json: async () => ({}) } as Response;
-    }) as unknown as typeof fetch;
-
+    // No item has been hovered in this test, so the menu is still allowed to
+    // react. Once a pointer enters a row, ContextMenu freezes the item list;
+    // the keyboard path stays reactive because its highlight is an item id
+    // (see the next two tests).
+    const dirty = heldDirty();
     try {
       await openMenuOnRow();
+      const top = menuTop();
       const before = menuRows();
       expect(before.length).toBeGreaterThan(2);
       expect(before.some((r) => r.label === "Move changes")).toBe(false);
 
-      release({ ok: true, json: async () => ({ dirty: true }) } as Response);
+      dirty.land();
       await settle();
       await setup.renderOnce();
       const after = menuRows();
       expect(after.some((r) => r.label === "Move changes")).toBe(true);
+      expect(menuTop()).toBe(top);
 
-      // Every row that existed before is still at exactly the same y.
+      const inserted = after.find((r) => r.label === "Move changes")!.row;
       for (const row of before) {
-        const moved = after.find((r) => r.label === row.label);
-        expect(`${row.label}@${moved?.row}`).toBe(`${row.label}@${row.row}`);
+        const now = after.find((r) => r.label === row.label);
+        const expected = row.row < inserted ? row.row : row.row + 1;
+        expect(`${row.label}@${now?.row}`).toBe(`${row.label}@${expected}`);
       }
     } finally {
-      globalThis.fetch = original;
+      dirty.restore();
+    }
+  });
+
+  it("keeps the action under the pointer fixed when the item lands", async () => {
+    const dirty = heldDirty();
+    try {
+      await openMenuOnRow();
+      const restart = menuRows().find((row) => row.label === "Restart")!;
+
+      // Begin aiming at Restart before the dirty answer inserts its row above
+      // it. From this point on, the pointer's screen coordinates are a user
+      // choice and the rendered item list must not move underneath them.
+      await setup.mockMouse.moveTo(7, restart.row);
+      await setup.renderOnce();
+
+      dirty.land();
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Move changes");
+      expect(menuRows().find((row) => row.label === "Restart")?.row).toBe(
+        restart.row,
+      );
+
+      await setup.mockMouse.click(7, restart.row, MouseButtons.LEFT);
+      await settle();
+      await setup.renderOnce();
+      expect(squish(setup.captureCharFrame())).toContain("RestartSession?");
+    } finally {
+      dirty.restore();
+    }
+  });
+
+  it("drops a hovered row's snapshot when right-click opens another menu", async () => {
+    const { restore } = captureDirty("never");
+    try {
+      await renderApp(120, 30, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        Array.from({ length: 12 }, (_, index) =>
+          mockEnrichedSession({
+            id: `s${index}`,
+            project: `p${index}`,
+            cwd: `/code/p${index}`,
+            tmuxPane: index === 11 ? null : `%${index}`,
+            trackingMode: index === 11 ? "background" : "pane",
+          }),
+        ),
+        null,
+      );
+      await setup.renderOnce();
+
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      const restart = menuRows().find((row) => row.label === "Restart")!;
+      await setup.mockMouse.moveTo(7, restart.row);
+      await setup.renderOnce();
+
+      // The twelfth row is below the first menu, so this reaches the list and
+      // replaces the still-mounted ContextMenu without dismissing it first.
+      await setup.mockMouse.click(5, 12, MouseButtons.RIGHT);
+      await setup.renderOnce();
+
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Attach agent");
+      expect(frame).toContain("Open agent view");
+      expect(frame).not.toContain("Restart");
+    } finally {
+      restore();
+    }
+  });
+
+  it("returns a pointer-frozen menu to its live items for keyboard input", async () => {
+    const dirty = heldDirty();
+    try {
+      await openMenuOnRow();
+      const restart = menuRows().find((row) => row.label === "Restart")!;
+
+      // Freeze the pointer's list, then leave it before the async item lands.
+      await setup.mockMouse.moveTo(7, restart.row);
+      await setup.renderOnce();
+      await setup.mockMouse.moveTo(0, 0);
+      await setup.renderOnce();
+      dirty.land();
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Move changes");
+
+      // The first keyboard move takes ownership and must reveal the live list
+      // that App is navigating. Three more steps land on Move changes.
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Move changes");
+      for (const _ of [0, 1, 2]) {
+        setup.mockInput.pressKey("j");
+        await setup.renderOnce();
+      }
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(squish(setup.captureCharFrame())).toContain(
+        "Movechangestoworktree",
+      );
+    } finally {
+      dirty.restore();
+    }
+  });
+
+  it("keeps the highlight on its own item when the item lands", async () => {
+    // The hazard the id-keyed highlight exists for. Restart sits directly
+    // below where "Move changes" is inserted, so by row number the highlight
+    // would end up on the new item and Enter would run a move the user never
+    // chose — on a checkout they were about to restart.
+    const dirty = heldDirty();
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      // Through the keyboard, which is the path that remembers a highlight.
+      setup.mockInput.pressKey("m");
+      await settle();
+      await setup.renderOnce();
+      // Attach -> New session -> Review diff -> Restart. (No Fork: the row is
+      // not forkable here.)
+      for (const _ of [0, 1, 2]) {
+        setup.mockInput.pressKey("j");
+        await setup.renderOnce();
+      }
+
+      dirty.land();
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Move changes");
+
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      const frame = squish(setup.captureCharFrame());
+      // Restart's confirmation, not the move dialog.
+      expect(frame).toContain("RestartSession?");
+      expect(frame).not.toContain("Movechangestoworktree");
+    } finally {
+      dirty.restore();
     }
   });
 
@@ -3931,11 +4453,60 @@ describe("App move-changes menu gate", () => {
       expect(frame.split("\n").findIndex((line) => line.includes("┌"))).toBe(
         topBefore,
       );
+      // The box held still, so everything above the insertion did too; the
+      // two rows below it move down by the one row it takes.
       const after = menuRows();
+      const inserted = after.find((r) => r.label === "Move changes")!.row;
       for (const row of before) {
         const moved = after.find((r) => r.label === row.label);
-        expect(`${row.label}@${moved?.row}`).toBe(`${row.label}@${row.row}`);
+        const expected = row.row < inserted ? row.row : row.row + 1;
+        expect(`${row.label}@${moved?.row}`).toBe(`${row.label}@${expected}`);
       }
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("ignores a dirty answer from an earlier opening of the same row", async () => {
+    const releases: Array<(response: Response) => void> = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      if (String(url).includes("/dirty")) {
+        return new Promise<Response>((resolve) => releases.push(resolve));
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as unknown as typeof fetch;
+
+    try {
+      await openMenuOnRow();
+      expect(releases).toHaveLength(1);
+
+      // `m` closes the pointer-opened menu, then opens the same row again.
+      // Both requests therefore carry the same session id; only the menu's
+      // opening generation can tell their answers apart.
+      setup.mockInput.pressKey("m");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("m");
+      await setup.renderOnce();
+      expect(releases).toHaveLength(2);
+
+      releases[1]!({
+        ok: true,
+        json: async () => ({ dirty: true }),
+      } as Response);
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Move changes");
+
+      // The first opening's older, contradictory answer must not overwrite
+      // the result belonging to the menu that is actually on screen.
+      releases[0]!({
+        ok: true,
+        json: async () => ({ dirty: false }),
+      } as Response);
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Move changes");
     } finally {
       globalThis.fetch = original;
     }
@@ -4079,7 +4650,7 @@ describe("App move-changes menu gate", () => {
         expect(frame).toContain("Where");
         expect(frame).not.toContain("This checkout");
         expect(frame).toContain("Untracked");
-        expect(frame).toContain("[Move]");
+        expect(frame).toMatch(/Move\s+▾/);
       } finally {
         restore();
       }
@@ -4105,7 +4676,7 @@ describe("App move-changes menu gate", () => {
         await setup.renderOnce();
         setup.mockInput.pressKey("3");
         await setup.renderOnce();
-        expect(setup.captureCharFrame()).toContain("[Leave here]");
+        expect(setup.captureCharFrame()).toMatch(/Leave here\s+▾/);
 
         setup.mockInput.pressEnter();
         await settle();
@@ -4393,7 +4964,11 @@ describe("App move-changes reporting", () => {
 
       expect(spawns).toHaveLength(0);
       const frame = squish(setup.captureCharFrame());
-      expect(frame).toContain("lettersornumbers");
+      // The toast wraps, and the taller dialog's title row now sits between
+      // its two lines in row order, so each wrapped line is asserted whole
+      // rather than the phrase across the break.
+      expect(frame).toContain("needslettersor");
+      expect(frame).toContain("numbers;clearthefield");
       // Still on the dialog, with the typed name where it was left.
       expect(frame).toContain("Movechangestoworktree");
     } finally {
@@ -4660,9 +5235,10 @@ describe("App move-changes reporting", () => {
 });
 
 /**
- * "Fork into worktree" (issue #70): the row menu's second fork, which routes
- * through the new-session dialog so the worktree can be named before the
- * conversation is continued in it. `F` stays the one-shot beside the source.
+ * A fork's DESTINATION (issue #70): the one Fork item opens the new-session
+ * dialog, and the dialog is where the fork is told to continue in the source's
+ * own checkout or in a worktree of its own — named, before the conversation is
+ * continued in it.
  */
 describe("App fork into worktree", () => {
   type ForkBody = {
@@ -4746,8 +5322,8 @@ describe("App fork into worktree", () => {
     await setup.renderOnce();
   }
 
-  /** Open the menu and click the item, by label rather than by row: the
-   *  menu's order is deliberately not stable. */
+  /** Open the menu and click Fork, by label rather than by row: the menu's
+   *  order is deliberately not stable. */
   async function openForkDialog(
     sessionOverrides: Record<string, unknown> = {},
     props: Record<string, unknown> = {},
@@ -4756,40 +5332,81 @@ describe("App fork into worktree", () => {
     const row = setup
       .captureCharFrame()
       .split("\n")
-      .findIndex((line) => line.includes("Fork into"));
+      .findIndex((line) => /Fork\s+F/.test(line));
     expect(row).toBeGreaterThan(0);
     await setup.mockMouse.click(7, row, MouseButtons.LEFT);
     await settle();
     await setup.renderOnce();
   }
 
-  it("offers it under the plain Fork on a forkable row in a repo", async () => {
+  /**
+   * Open the dialog and move the destination to the worktree: Tab from
+   * Placement to Where, then the option key for the second choice. Driven
+   * through the real keys rather than a store poke, because the number keys
+   * are scoped to the FOCUSED field and that scoping is half the behaviour.
+   */
+  async function openWorktreeFork(
+    sessionOverrides: Record<string, unknown> = {},
+    props: Record<string, unknown> = {},
+  ) {
+    await openForkDialog(sessionOverrides, props);
+    setup.mockInput.pressTab();
+    await setup.renderOnce();
+    setup.mockInput.pressKey("2");
+    await setup.renderOnce();
+  }
+
+  it("carries one Fork item, not a second one for the worktree", async () => {
     const { restore } = withForkDaemon();
     try {
       await openMenu();
       const lines = setup.captureCharFrame().split("\n");
-      const plain = lines.findIndex((line) => /Fork\s+F/.test(line));
-      const intoWorktree = lines.findIndex((line) =>
-        line.includes("Fork into"),
+      expect(lines.findIndex((line) => /Fork\s+F/.test(line))).toBeGreaterThan(
+        0,
       );
-      expect(plain).toBeGreaterThan(0);
-      // Directly under, so the one-shot stays where fingers already find it.
-      expect(intoWorktree).toBe(plain + 1);
+      // The destination is a row inside the dialog now; two menu items for
+      // one action was the thing this replaced.
+      expect(lines.filter((line) => line.includes("Fork"))).toHaveLength(1);
     } finally {
       restore();
     }
   });
 
-  it("hides it for a row that is not in a git repo", async () => {
-    // A worktree needs a repository to hang off. Hidden rather than offered
-    // and refused, which is the same rule the plain Fork item follows.
+  it("still offers Fork for a row that is not in a git repo", async () => {
+    // The worktree needs a repository to hang off; the FORK does not. The
+    // item used to be gated on the repo because the only dialog it opened was
+    // the worktree one — now the dialog opens with its destination locked.
     const { restore } = withForkDaemon();
     try {
       await openMenu({ mainRepoRoot: null });
-      const frame = setup.captureCharFrame();
-      // The plain fork still works there, which is what makes this specific.
-      expect(frame).toContain("Fork");
-      expect(frame).not.toContain("Fork into");
+      expect(setup.captureCharFrame()).toContain("Fork");
+    } finally {
+      restore();
+    }
+  });
+
+  it("locks the destination when the source is not in a git repo", async () => {
+    const { spawns, restore } = withForkDaemon();
+    try {
+      await openForkDialog({ mainRepoRoot: null });
+      const whereRow = setup
+        .captureCharFrame()
+        .split("\n")
+        .find((line) => line.includes("Where"));
+      expect(whereRow).toContain("This checkout");
+      // No list behind it: a row that looks selectable and refuses every key
+      // reads as broken.
+      expect(whereRow).not.toContain("▾");
+
+      // And the key that would have moved it does nothing.
+      setup.mockInput.pressTab();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("2");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]?.worktree).toBeUndefined();
     } finally {
       restore();
     }
@@ -4807,20 +5424,37 @@ describe("App fork into worktree", () => {
     }
   });
 
-  it("opens the dialog over the source, with the name it would derive", async () => {
+  it("opens the dialog over the source, in its own checkout", async () => {
     const { spawns, restore } = withForkDaemon();
     try {
       await openForkDialog();
       const frame = setup.captureCharFrame();
 
-      expect(frame).toContain("Fork into worktree");
+      expect(frame).toContain("Fork session");
       // The source session and the checkout it sits in.
       expect(frame).toContain("Source");
       expect(frame).toContain("feat/parking");
       expect(frame).toContain("/code/myapp");
+      // Nothing about a worktree until one is asked for: no name is derived
+      // for a fork that is staying where it is.
+      expect(frame).toContain("This checkout");
+      expect(frame).not.toContain("feat-parking-fork");
+      // Nothing is sent by opening a dialog.
+      expect(spawns).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it("previews the derived name once the worktree is the destination", async () => {
+    const { spawns, restore } = withForkDaemon();
+    try {
+      await openWorktreeFork();
+      const frame = setup.captureCharFrame();
+
+      expect(frame).toContain("New worktree");
       // The daemon's own <branch>-fork rule, previewed.
       expect(frame).toContain("feat-parking-fork");
-      // Nothing is sent by opening a dialog.
       expect(spawns).toHaveLength(0);
     } finally {
       restore();
@@ -4830,17 +5464,19 @@ describe("App fork into worktree", () => {
   it("omits the name entirely when the field was never touched", async () => {
     const { spawns, restore } = withForkDaemon();
     try {
-      await openForkDialog();
+      await openWorktreeFork();
       setup.mockInput.pressEnter();
       await settle();
 
       expect(spawns).toHaveLength(1);
       expect(spawns[0]).toMatchObject({
         fork: "s1",
-        // A new window in the caller's session, and the picker owns the jump.
-        split: false,
+        // A split of the CALLER's pane, not the source's: a fork that has left
+        // the source's checkout is no longer that pane's sibling.
+        split: "h",
         detach: true,
       });
+      expect(spawns[0]?.target).toBeUndefined();
       // The worktree is asked for, but NOT named: an untouched row is the
       // derived state, which the daemon numbers past a collision. Posting the
       // preview as an explicit name would open whatever answers to that slug.
@@ -4857,8 +5493,8 @@ describe("App fork into worktree", () => {
   it("sends a typed name explicitly, slugified as the row showed it", async () => {
     const { spawns, restore } = withForkDaemon();
     try {
-      await openForkDialog();
-      // Placement -> Name: the only two fields this mode has.
+      await openWorktreeFork();
+      // Where -> Name, the row the worktree destination just added.
       setup.mockInput.pressTab();
       await setup.renderOnce();
       await setup.mockInput.typeText("Parking Retry");
@@ -4885,7 +5521,7 @@ describe("App fork into worktree", () => {
       await setup.renderOnce();
 
       expect(spawns).toHaveLength(0);
-      expect(setup.captureCharFrame()).not.toContain("Fork into worktree");
+      expect(setup.captureCharFrame()).not.toContain("Fork session");
     } finally {
       restore();
     }
@@ -4904,14 +5540,14 @@ describe("App fork into worktree", () => {
       ),
     );
     try {
-      await openForkDialog();
+      await openWorktreeFork();
       setup.mockInput.pressEnter();
       await settle();
       await setup.renderOnce();
 
       const frame = squish(setup.captureCharFrame());
       expect(frame).toContain("alreadyexists");
-      expect(frame).toContain("Forkintoworktree");
+      expect(frame).toContain("Forksession");
     } finally {
       restore();
     }
@@ -4920,7 +5556,7 @@ describe("App fork into worktree", () => {
   it("refuses a name with nothing left after slugifying", async () => {
     const { spawns, restore } = withForkDaemon();
     try {
-      await openForkDialog();
+      await openWorktreeFork();
       setup.mockInput.pressTab();
       await setup.renderOnce();
       await setup.mockInput.typeText("!!!");
@@ -4931,8 +5567,12 @@ describe("App fork into worktree", () => {
 
       // Refused out loud rather than silently derived: the field would still
       // be showing the user's text while the worktree got another name.
+      // (Per wrapped toast line; the dialog's title row interleaves in row
+      // order — see the move-mode variant of this test.)
       expect(spawns).toHaveLength(0);
-      expect(squish(setup.captureCharFrame())).toContain("lettersornumbers");
+      const refused = squish(setup.captureCharFrame());
+      expect(refused).toContain("needslettersor");
+      expect(refused).toContain("numbers;clearthefield");
     } finally {
       restore();
     }
@@ -4963,7 +5603,7 @@ describe("App fork into worktree", () => {
       }),
     );
     try {
-      await openForkDialog({}, { sidebar: true, persistent: true });
+      await openWorktreeFork({}, { sidebar: true, persistent: true });
       setup.mockInput.pressEnter();
       await settle();
       await setup.renderOnce();
@@ -4985,9 +5625,9 @@ describe("App fork into worktree", () => {
     // checkout instead of getting one of its own.
     const { restore } = withForkDaemon();
     try {
-      await openForkDialog({ gitBranch: "HEAD" });
+      await openWorktreeFork({ gitBranch: "HEAD" });
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Fork into worktree");
+      expect(frame).toContain("Fork session");
       // The Source row still says HEAD, verbatim, the way the picker's own
       // branch column does. It is the derived NAME that has to stay quiet.
       expect(frame).toContain("HEAD");
@@ -5002,11 +5642,362 @@ describe("App fork into worktree", () => {
     // name coming even when the row carries no branch to preview.
     const { restore } = withForkDaemon();
     try {
-      await openForkDialog({ gitBranch: null });
+      await openWorktreeFork({ gitBranch: null });
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Fork into worktree");
+      expect(frame).toContain("Fork session");
       expect(frame).toContain("auto");
       expect(frame).not.toContain("Type a prompt");
+    } finally {
+      restore();
+    }
+  });
+});
+
+/**
+ * The row menu from the keyboard (`m`). The menus themselves were reachable
+ * only by right-click, which on a surface whose whole point is a keyboard
+ * left several actions ("Move changes", "Open agent view") with no key at all.
+ */
+describe("App row menu (m)", () => {
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  /** Answers the menu's own fetches: the dirty gate behind "Move changes",
+   *  and `/agents` for the dialog one of these tests opens. */
+  function withDaemon() {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      // Clean, so the async item never arrives and the item list is stable.
+      if (href.includes("/dirty")) return Response.json({ dirty: false });
+      if (href.endsWith("/agents")) {
+        return Response.json({
+          agents: [
+            {
+              name: "claude",
+              displayName: "Claude",
+              shortCode: "CC",
+              supportsPrompt: true,
+            },
+          ],
+        });
+      }
+      return Response.json({});
+    }) as unknown as typeof fetch;
+    return { restore: () => (globalThis.fetch = original) };
+  }
+
+  async function renderRows(props: Record<string, unknown> = {}) {
+    await renderApp(120, 24, { groupBy: "none", persistent: true, ...props });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "s1",
+          project: "alpha",
+          cwd: "/code/alpha",
+          tmuxPane: "%1",
+        }),
+        mockEnrichedSession({
+          id: "s2",
+          project: "beta",
+          cwd: "/code/beta",
+          tmuxPane: "%2",
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+  }
+
+  const press = async (key: string) => {
+    setup.mockInput.pressKey(key);
+    await settle();
+    await setup.renderOnce();
+  };
+
+  /** The frame line a piece of text is on, or -1. */
+  const lineOf = (text: string) =>
+    setup
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes(text));
+
+  it("opens the selected row's menu anchored on that row", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      // Row 2, so the anchor cannot pass by landing on the list's first line
+      // whatever the arithmetic did.
+      await press("j");
+      const row = lineOf("code/beta");
+      expect(row).toBeGreaterThan(0);
+
+      await press("m");
+      expect(setup.captureCharFrame()).toContain("Attach");
+      // The menu's own top border, on the row it belongs to: a menu that
+      // opened at a fixed corner would leave the user to work out which row
+      // it came from.
+      expect(lineOf("┌")).toBe(row);
+      // Indented rather than flush, so the row is still identifiable under it.
+      expect(lineOf("code/alpha")).toBeGreaterThan(-1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("opens the group menu on a group header", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderApp(120, 24, { groupBy: "project", persistent: true });
+      sseCallbacks!.onInit(
+        [mockEnrichedSession({ id: "s1", project: "alpha", cwd: "/a" })],
+        null,
+      );
+      await setup.renderOnce();
+      // Up from the session row onto its header.
+      await press("k");
+      await press("m");
+
+      const frame = setup.captureCharFrame();
+      // The group menu's own items, and none of the row menu's.
+      expect(frame).toContain("Pin to top");
+      expect(frame).toContain("Kill group");
+      expect(frame).not.toContain("Attach");
+    } finally {
+      restore();
+    }
+  });
+
+  it("closes the menu it opened when pressed again", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      expect(setup.captureCharFrame()).toContain("Attach");
+
+      await press("m");
+      // Not reopened on the next row, and not left up: `m` is one key for
+      // both halves, so pressing it twice has to land back where it started.
+      expect(setup.captureCharFrame()).not.toContain("Attach");
+    } finally {
+      restore();
+    }
+  });
+
+  it("closes the menu on escape", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      expect(setup.captureCharFrame()).toContain("Attach");
+
+      setup.mockInput.pressEscape();
+      // A lone ESC byte is only unambiguous once the parser has waited out
+      // the sequence it could have started; every escape test here does this.
+      await settle(20);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Attach");
+    } finally {
+      restore();
+    }
+  });
+
+  it("does nothing while a modal overlay owns the screen", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      // The help overlay, which is modal for keys.
+      await press("?");
+      expect(setup.captureCharFrame()).toContain("Keyboard Shortcuts");
+
+      await press("m");
+      // No menu, and the overlay is untouched: `m` is a row action, and a
+      // menu opened under an overlay would be unreachable anyway.
+      expect(setup.captureCharFrame()).not.toContain("Attach       enter");
+      expect(setup.captureCharFrame()).toContain("Keyboard Shortcuts");
+    } finally {
+      restore();
+    }
+  });
+
+  it("does nothing while the new-session dialog is open", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("n");
+      expect(setup.captureCharFrame()).toContain("New session");
+
+      await press("m");
+      expect(setup.captureCharFrame()).not.toContain("Attach");
+      // And the draft survives, rather than the key reaching past the dialog.
+      expect(setup.captureCharFrame()).toContain("New session");
+    } finally {
+      restore();
+    }
+  });
+
+  it("runs the highlighted item on enter", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      // Opened on the first item, so Enter has somewhere to land immediately.
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      // Attach: the menu's first item, and the same thing Enter on the row
+      // itself would have done.
+      expect(switchToPaneSpy).toHaveBeenCalledWith("%1");
+      expect(setup.captureCharFrame()).not.toContain("Attach       enter");
+    } finally {
+      restore();
+    }
+  });
+
+  it("moves the highlight with j/k and runs what it lands on", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      // Down to "New session", back up, and down again: the last one is
+      // what proves k moved anything at all.
+      await press("j");
+      await press("k");
+      await press("j");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      // The item's own dialog, not the row's attach.
+      expect(setup.captureCharFrame()).toContain("New session");
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("clamps the highlight at the top of the menu", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      // Already on the first item. Wrapping here would put the highlight on
+      // the LAST one, which in this menu is a destructive action.
+      await press("k");
+      await press("k");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      expect(switchToPaneSpy).toHaveBeenCalledWith("%1");
+    } finally {
+      restore();
+    }
+  });
+
+  it("leaves a mouse-opened menu alone on enter", async () => {
+    // A right-click highlights nothing (the pointer does that on hover), so
+    // Enter has no target. Guessing at one would be worse than doing nothing.
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Attach");
+
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+      expect(setup.captureCharFrame()).toContain("Attach");
+    } finally {
+      restore();
+    }
+  });
+
+  it("dismisses the menu and acts on any other key", async () => {
+    // The behaviour a menu on screen has always had: a key that is not the
+    // menu's means attention has moved on, so it closes and the key means
+    // what it always means. Making it modal would strand a mis-press.
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      expect(setup.captureCharFrame()).toContain("Attach");
+
+      await press("?");
+      expect(setup.captureCharFrame()).not.toContain("Attach       enter");
+      expect(setup.captureCharFrame()).toContain("Keyboard Shortcuts");
+    } finally {
+      restore();
+    }
+  });
+
+  /** Row of each label in the open menu, in the order the frame draws them. */
+  const orderOf = (labels: string[]) => {
+    const lines = setup.captureCharFrame().split("\n");
+    return labels.map((label) => ({
+      label,
+      row: lines.findIndex((line) => line.includes(label)),
+    }));
+  };
+
+  it("puts the destructive action last on a session row", async () => {
+    // The order is what the actions DO: start something, read something,
+    // move work about, then the two that end a session — with Kill at the
+    // bottom, the hardest row to hit by accident and the one nothing can be
+    // appended below.
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      const rows = orderOf([
+        "Attach",
+        "New session",
+        "Review diff",
+        "Restart",
+        "Kill",
+      ]);
+      for (const row of rows)
+        expect(`${row.label}@${row.row}`).not.toContain("@-1");
+      const ordered = [...rows].sort((a, b) => a.row - b.row);
+      expect(ordered.map((r) => r.label)).toEqual(rows.map((r) => r.label));
+    } finally {
+      restore();
+    }
+  });
+
+  it("puts the destructive action last on a background row too", async () => {
+    // A different menu (launch actions instead of attach/restart), same rule.
+    const { restore } = withDaemon();
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "bg1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: null,
+            trackingMode: "background",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      await press("m");
+
+      const rows = orderOf([
+        "Attach agent",
+        "Open agent view",
+        "New session",
+        "Kill",
+      ]);
+      for (const row of rows)
+        expect(`${row.label}@${row.row}`).not.toContain("@-1");
+      const ordered = [...rows].sort((a, b) => a.row - b.row);
+      expect(ordered.map((r) => r.label)).toEqual(rows.map((r) => r.label));
     } finally {
       restore();
     }
