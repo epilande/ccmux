@@ -2969,6 +2969,7 @@ describe("store", () => {
         // this dialog was opened over a directory.
         fork: null,
         field: "agent",
+        dropdown: null,
       });
     });
 
@@ -3030,7 +3031,57 @@ describe("store", () => {
         worktreeName: null,
         fork: null,
         field: "prompt",
+        dropdown: null,
       });
+    });
+
+    it("keeps at most one dropdown open", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+
+      store.actions.openNewSessionDropdown("agent", 2);
+      expect(store.state.newSession?.dropdown).toEqual({
+        field: "agent",
+        index: 2,
+      });
+      // Opening another replaces it: the record is single by construction.
+      store.actions.openNewSessionDropdown("placement", 1);
+      expect(store.state.newSession?.dropdown).toEqual({
+        field: "placement",
+        index: 1,
+      });
+      store.actions.setNewSessionDropdownIndex(2);
+      expect(store.state.newSession?.dropdown?.index).toBe(2);
+      store.actions.closeNewSessionDropdown();
+      expect(store.state.newSession?.dropdown).toBeNull();
+    });
+
+    it("refuses a dropdown for a field the draft does not have", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({
+        cwd: "/repo",
+        agent: "claude",
+        moveChanges: true,
+      });
+
+      // The destination is locked in a move: no field, so no dropdown.
+      store.actions.openNewSessionDropdown("destination", 0);
+      expect(store.state.newSession?.dropdown).toBeNull();
+      // The untracked choice is this mode's own field.
+      store.actions.openNewSessionDropdown("untracked", 1);
+      expect(store.state.newSession?.dropdown).toEqual({
+        field: "untracked",
+        index: 1,
+      });
+    });
+
+    it("closes the dropdown when focus moves to another field", () => {
+      const store = createTUIStore();
+      store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+
+      store.actions.openNewSessionDropdown("agent", 0);
+      store.actions.setNewSessionField("prompt");
+      expect(store.state.newSession?.dropdown).toBeNull();
     });
 
     it("opens in move-changes mode with the destination already locked", () => {
@@ -3056,6 +3107,7 @@ describe("store", () => {
         worktreeName: null,
         fork: null,
         field: "agent",
+        dropdown: null,
       });
     });
 
@@ -3163,6 +3215,7 @@ describe("store", () => {
           // Not `agent`: the fork continues the source's agent, so that row
           // does not exist and focus cannot start on it.
           field: "placement",
+          dropdown: null,
         });
       });
 
