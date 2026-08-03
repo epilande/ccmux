@@ -32,9 +32,12 @@ export type CodexEntry =
 
 /**
  * Minimal `response_item.payload` shape. Only `type` is consumed: the two
- * `*_output` variants are the adapter's proof that a permission-gated tool
- * actually executed (outputs are flushed only after execution, unlike the
- * call/request items, which can land while the approval prompt is still up).
+ * `*_output` variants are the adapter's evidence that a permission-gated
+ * tool executed (outputs are flushed only after execution, unlike the
+ * call/request items, which can land while the approval prompt is still
+ * up). `call_id` is present in the rollout but deliberately unused; the
+ * PermissionRequest hook payload has no counterpart to correlate against
+ * (see `applyResponseItem` in `log-adapter.ts`).
  */
 export interface CodexResponseItemPayload {
   type?: string;

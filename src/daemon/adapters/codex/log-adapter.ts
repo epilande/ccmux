@@ -59,24 +59,67 @@ function applyEventMsg(
 }
 
 /**
- * Tool OUTPUT items are the only in-log proof that a permission wait
+ * Slack for the stale-output gate below. `statusChangedAt` is stamped by
+ * the daemon when the marker's `waiting` won a cascade, which lands
+ * milliseconds to a second AFTER the hook observed the request, and the
+ * rollout's entry timestamps come from Codex's own clock. A genuine
+ * resolving output from an instant auto-approval could therefore carry an
+ * entry timestamp slightly older than the stamp; the slack keeps such
+ * outputs flipping (fail open, today's behavior) at the cost of not
+ * gating stale entries inside the window. Truly stale outputs belong to a
+ * PRIOR call, separated from the wait by at least a model round-trip, so
+ * they sit well outside 2s in practice.
+ */
+const STALE_OUTPUT_SLACK_MS = 2000;
+
+/**
+ * Tool OUTPUT items are the only in-log signal that a permission wait
  * resolved: Codex fires no hook on approval (manual or via its automatic
  * approval reviewer), and outputs are flushed only after the gated tool
  * ran. Without this flip, the marker-written `waiting` echoes through the
  * store-fed `prev` with a fresh timestamp every parse and pins the session
  * at waiting until end of turn. Request items and token_count are
- * deliberately NOT resolution evidence — they can flush while the prompt
- * is still up. A NEWER PermissionRequest still wins in the cascade: its
+ * deliberately NOT resolution evidence (they can flush while the prompt
+ * is still up). A NEWER PermissionRequest still wins in the cascade: its
  * marker timestamp out-freshens this entry's lastActivityAt.
+ *
+ * The recency gate: an output whose entry timestamp predates the wait's
+ * establishment (`prev.statusChangedAt`, minus slack) is a buffered
+ * leftover from a PRIOR call, not resolution evidence, and must not flip.
+ * The cascade alone is not enough protection here: it restores `waiting`
+ * at the next tick, but the transient store write is enough to destroy
+ * the delivered desktop notification. The notifier retracts the banner
+ * the moment status leaves `waiting`, the restore lands inside the 60s
+ * renotify cooldown, and the consumed status edge never re-fires, so the
+ * banner is permanently lost while the prompt is still up. Missing or
+ * malformed timestamps fail open (flip as before).
+ *
+ * The flip is otherwise deliberately uncorrelated with the call that
+ * established the wait, because no correlation key exists: the
+ * PermissionRequest payload carries no call_id (verified on codex-cli
+ * 0.146.0; it has session/turn ids, tool_name, and tool_input only), and
+ * command-string matching is ambiguous in Codex's standard
+ * sandbox-fail-then-escalate flow, which reuses the identical command
+ * across the ungated attempt and the gated retry. The one known gap: an
+ * unrelated PARALLEL tool's output flushing mid-wait is genuinely newer
+ * than the wait and still clears it early.
  */
 function applyResponseItem(
   state: SessionState,
   payload: CodexResponseItemPayload,
+  timestamp: string,
+  waitEstablishedAtMs: number | null,
 ): SessionState {
   if (state.status !== "waiting") return state;
   if (
     payload?.type !== "function_call_output" &&
     payload?.type !== "custom_tool_call_output"
+  ) {
+    return state;
+  }
+  if (
+    waitEstablishedAtMs !== null &&
+    Date.parse(timestamp) < waitEstablishedAtMs - STALE_OUTPUT_SLACK_MS
   ) {
     return state;
   }
@@ -89,6 +132,14 @@ function applyResponseItem(
 }
 
 function applyEntries(prev: SessionState, entries: CodexEntry[]): SessionState {
+  // Captured once per batch: the wait the store fed in was established at
+  // prev.statusChangedAt, and every entry in this batch gates against that
+  // same moment. NaN (malformed stamp) disables the gate via the always-
+  // false comparison in applyResponseItem.
+  const waitEstablishedAtMs =
+    prev.status === "waiting" && prev.statusChangedAt
+      ? Date.parse(prev.statusChangedAt)
+      : null;
   let state = prev;
   for (const entry of entries) {
     state = { ...state, lastActivityAt: entry.timestamp };
@@ -97,7 +148,12 @@ function applyEntries(prev: SessionState, entries: CodexEntry[]): SessionState {
     } else if (entry.type === "event_msg") {
       state = applyEventMsg(state, entry.payload, entry.timestamp);
     } else if (entry.type === "response_item") {
-      state = applyResponseItem(state, entry.payload);
+      state = applyResponseItem(
+        state,
+        entry.payload,
+        entry.timestamp,
+        waitEstablishedAtMs,
+      );
     }
   }
   return state;

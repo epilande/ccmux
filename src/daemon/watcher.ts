@@ -36,6 +36,7 @@ function sessionToState(session: Session): SessionState {
     attentionType: session.attentionType,
     pendingTool: session.pendingTool,
     inPlanMode: session.inPlanMode,
+    statusChangedAt: session.statusChangedAt ?? undefined,
     cwd: session.cwd,
     project: session.project,
     lastActivityAt: session.lastActivityAt ?? undefined,

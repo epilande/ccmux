@@ -371,13 +371,17 @@ describe("CodexLogAdapter", () => {
   describe("permission-wait resolution via response_item outputs", () => {
     // These simulate the marker-written waiting state the reconciler feeds
     // back in as `prev` — the log adapter never sets attentionType/
-    // pendingTool itself (see above), only clears them.
-    function waitingPrev(): SessionState {
+    // pendingTool itself (see above), only clears them. `statusChangedAt`
+    // is the store's stamp of when the wait was established, which the
+    // stale-output gate compares entry timestamps against; omitting it
+    // (the default) exercises the fail-open compat path.
+    function waitingPrev(statusChangedAt?: string): SessionState {
       return {
         status: "waiting",
         attentionType: "permission",
         pendingTool: "Bash",
         inPlanMode: false,
+        ...(statusChangedAt ? { statusChangedAt } : {}),
       };
     }
 
@@ -476,6 +480,88 @@ describe("CodexLogAdapter", () => {
         logPath,
         seeded.newOffset,
         workingPrev,
+      );
+
+      expect(state.status).toBe("working");
+    });
+
+    it("leaves waiting intact when the output predates the wait (stale buffered entry)", async () => {
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      // Output flushed at 12:00:05, but the wait was established at
+      // 12:00:15: this is a buffered leftover from a PRIOR call that the
+      // watcher delivered late, not resolution evidence. Without the gate
+      // this flip would retract the delivered permission banner, and the
+      // cascade's later correction lands inside the notifier's renotify
+      // cooldown, permanently losing it.
+      appendFileSync(
+        logPath,
+        jsonl(
+          responseItem("2026-04-01T12:00:05Z", {
+            type: "custom_tool_call_output",
+            call_id: "call-stale",
+          }),
+        ),
+      );
+
+      const { state } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        waitingPrev("2026-04-01T12:00:15Z"),
+      );
+
+      expect(state.status).toBe("waiting");
+      expect(state.attentionType).toBe("permission");
+      expect(state.pendingTool).toBe("Bash");
+    });
+
+    it("flips on an output newer than the wait establishment", async () => {
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      appendFileSync(
+        logPath,
+        jsonl(
+          responseItem("2026-04-01T12:00:20Z", {
+            type: "function_call_output",
+            call_id: "call-1",
+          }),
+        ),
+      );
+
+      const { state } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        waitingPrev("2026-04-01T12:00:15Z"),
+      );
+
+      expect(state.status).toBe("working");
+      expect(state.attentionType).toBeNull();
+    });
+
+    it("flips on an output slightly older than the wait stamp (inside the slack window)", async () => {
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      // The daemon stamps statusChangedAt after the hook observed the
+      // request, so a genuine resolving output from an instant
+      // auto-approval can predate the stamp by clock/stamp lag. Inside
+      // the slack the gate must fail open and flip.
+      appendFileSync(
+        logPath,
+        jsonl(
+          responseItem("2026-04-01T12:00:14.500Z", {
+            type: "function_call_output",
+            call_id: "call-1",
+          }),
+        ),
+      );
+
+      const { state } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        waitingPrev("2026-04-01T12:00:15Z"),
       );
 
       expect(state.status).toBe("working");

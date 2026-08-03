@@ -214,6 +214,12 @@ export interface SessionState {
   inPlanMode: boolean;
   cwd?: string;
   project?: string;
+  /** Store-stamped time the session's status last changed, fed INTO log
+   * adapters via `sessionToState` as read-only context (the Codex adapter
+   * reads it as the wait-establishment time for its stale-output gate).
+   * Never applied on the way back: `updateSession` ignores it and stamps
+   * its own on every status change. */
+  statusChangedAt?: string;
   /** Last activity timestamp from log entries (for stale detection) */
   lastActivityAt?: string;
   /** Last user input timestamp (for stable sorting) */
