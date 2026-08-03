@@ -100,18 +100,34 @@ export function defaultHints(props: {
   reviewable?: boolean;
 }): HintSegment[] {
   return [
-    // Ranks, loosely: view toggles (1) go before actions on the selected
-    // session (2), which go before navigation (3-4), which goes before the
-    // two ways out (5-6). `q quit` outranks even `? help` so the last hint
-    // standing is how to leave.
+    // Ranks, loosely: the hints something ELSE also teaches (1) go before the
+    // ones this line is the only home for (2), which go before navigation
+    // (3-4), which goes before the two ways out (5-6). `q quit` outranks even
+    // `? help` so the last hint standing is how to leave.
+    //
+    // Rank 1 is what a narrow terminal can afford to forget, and `r`/`x` sit
+    // there because the row menu (`m`) now names Restart and Kill on the row
+    // itself, hint and all. The footer taught them when it was the only thing
+    // that did; a second, discoverable home is what buys the columns back.
+    //
+    // Ties drop RIGHTMOST first (see `fitHints`), so within rank 1 the order
+    // is kill, restart, preview, group — the two menu-backed actions before
+    // the two view toggles, which have no home but this line and `?`. That
+    // falls out of display order rather than being stated, so a reshuffle of
+    // this array is a reshuffle of the drop order too.
     { text: "j/k nav", rank: 3 },
     { text: `enter ${props.persistent ? "switch" : "select"}`, rank: 4 },
     { text: "n new", rank: 3 },
     { text: "/ search", rank: 2 },
     { text: `b group:${props.groupBy ?? DEFAULT_GROUP_BY}`, rank: 1 },
     { text: "P preview", rank: 1 },
-    { text: "r restart", rank: 2 },
-    { text: "x kill", rank: 2 },
+    { text: "r restart", rank: 1 },
+    { text: "x kill", rank: 1 },
+    // Stays at 2 even though the row menu carries it too: this is the only
+    // place the review integration is ADVERTISED, and it is already
+    // conditional on hunk being installed, so the columns it costs are only
+    // ever spent on someone who can use it. Restart and Kill need no such
+    // advertisement — they are the two actions every session list has.
     ...(props.reviewable ? [{ text: "d review", rank: 2 }] : []),
     { text: "? help", rank: 5 },
     { text: "q quit", rank: 6 },

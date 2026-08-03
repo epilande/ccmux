@@ -9,7 +9,7 @@ import {
   type NewSessionDraft,
   type NewSessionField,
 } from "../store";
-import { newSessionOptions } from "../new-session-options";
+import { DESTINATION_OPTIONS, newSessionOptions } from "../new-session-options";
 import { slugForFork, slugFromPrompt } from "../../daemon/worktree-create";
 import {
   displayWidth,
@@ -381,8 +381,15 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const moveChanges = () => props.draft.moveChanges;
 
   /** Continuing an existing session rather than starting a new one: no agent
-   *  and no prompt to choose, and the worktree is where the fork lands. */
+   *  and no prompt to choose, and a destination that says where it continues. */
   const forking = () => props.draft.fork;
+
+  /** Whether the Where row is a statement rather than a choice: a move has
+   *  nowhere to go but a new worktree, and a fork whose source is outside a
+   *  repository has nowhere to put one. Both are drawn like Directory, since a
+   *  row that looks selectable but refuses every key reads as broken. */
+  const destinationLocked = () =>
+    moveChanges() || (forking() !== null && !forking()!.canWorktree);
 
   /** Whether this spawn is making a worktree at all, which is what the name
    *  row exists for. Move-changes and fork mode always are; see
@@ -773,12 +780,22 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     truncateText(shortenCwd(props.draft.cwd), contentWidth());
 
   /**
-   * The locked destination row's text. Only where the changes are going: the
-   * name they will go under is the Name row's, in both modes, so that the one
-   * editable field is in the same place wherever it is reached from.
+   * The locked destination row's text. Only where the session is going: the
+   * name a worktree will go under is the Name row's, so that the one editable
+   * field is in the same place wherever it is reached from.
+   *
+   * The two locks say opposite things — a move has to make a worktree, a fork
+   * outside a repository cannot — and the words are the dropdown's own, so the
+   * locked row and the choice it stands in for never read as different fields.
    */
-  const lockedDestinationLabel = () =>
-    truncateText(narrow() ? "Worktree" : "New worktree", contentWidth());
+  const lockedDestinationLabel = () => {
+    const [here, worktree] = DESTINATION_OPTIONS;
+    const option = moveChanges() ? worktree! : here!;
+    return truncateText(
+      narrow() ? option.compactLabel : option.label,
+      contentWidth(),
+    );
+  };
 
   /** What the mode's footnote says, and what to label it. A move reports what
    *  it costs the directory named directly above; a fork names the session it
@@ -871,7 +888,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               dialog different from every other time it opens. */}
             <strong>
               {forking()
-                ? truncateText("Fork into worktree", width() - 4)
+                ? "Fork session"
                 : moveChanges()
                   ? truncateText("Move changes to worktree", width() - 4)
                   : "New session"}
@@ -965,13 +982,14 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           </box>
         </Show>
 
-        <Show when={moveChanges() || forking()}>
+        <Show when={destinationLocked()}>
           <FieldGap />
           {/* Locked, so it is drawn like Directory rather than as a field: no
             focus marker and no number keys, because a row that looks
-            selectable but refuses every key reads as broken. The changes (or
-            the fork) have nowhere to go but a new worktree, so there is no
-            second choice to offer. */}
+            selectable but refuses every key reads as broken. The changes have
+            nowhere to go but a new worktree, and a fork of a session outside a
+            repository has nowhere to put one — either way there is no second
+            choice to offer. */}
           <box flexDirection="row" height={1}>
             <box width={LABEL_WIDTH} paddingLeft={1}>
               <text fg={theme.overlay}>Where</text>
@@ -981,7 +999,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           </box>
         </Show>
 
-        <Show when={!moveChanges() && !forking()}>
+        <Show when={!destinationLocked()}>
           <FieldGap />
           {/* Just the choice. The name the worktree option would create used
             to be appended here and truncated against what the row had left,
