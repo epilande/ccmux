@@ -39,7 +39,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 📝 **Diff Review**: Press <kbd>d</kbd> to review a session's working-tree diff with [hunk](https://github.com/modem-dev/hunk), right in the pane
 - 🤖 **Background Agents & Subagents**: Claude Code background agents get rows too; running subagents show as `agents` with a live list in the preview
 - 🔁 **Session Control**: Spawn, kill, and restart sessions from the TUI; `ccmux invoke` for scripted one-shot agent turns
-- ⌨️ **Keyboard-First, Mouse-Friendly**: Vim keys and number jumps, a row menu on <kbd>m</kbd>, plus click-to-switch and right-click context actions
+- ⌨️ **Keyboard-First, Mouse-Friendly**: Vim keys and number jumps, plus click-to-switch and right-click context actions
 
 ## 📦 Installation
 

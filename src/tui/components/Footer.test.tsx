@@ -217,9 +217,43 @@ describe("fitHints", () => {
       expect(line).toContain("? help");
       expect(line).toContain("q quit");
     }
-    // The view toggles are the first to go.
+    // The view toggles are among the first to go.
     const tight = fitHints(hints(), 60);
     expect(tight).not.toContain("P preview");
+  });
+
+  it("gives up the hints the row menu also teaches first", () => {
+    // `r` and `x` are named on the row itself by the `m` menu, so the footer
+    // stops teaching them before it gives up a mode with no other home
+    // (`/ search`) or the only advertisement the review integration has
+    // (`d review`). Widths, not ranks, because the rank scale is an
+    // implementation detail and the drop ORDER is the behaviour.
+    const dropped = (width: number) =>
+      hints()
+        .map((segment) => segment.text)
+        .filter((text) => !fitHints(hints(), width).includes(text));
+
+    // The first column the line has to give up takes Kill with it, and the
+    // next takes Restart. (Listed in display order, which is what the helper
+    // reads them off in — Restart sits left of Kill on the line.)
+    expect(dropped(118)).toEqual(["x kill"]);
+    expect(dropped(106)).toEqual(["r restart", "x kill"]);
+    // Both gone while everything they were ranked against is still there.
+    const line = fitHints(hints(), 106);
+    expect(line).toContain("/ search");
+    expect(line).toContain("d review");
+    expect(line).toContain("P preview");
+    expect(line).toContain("b group:project");
+  });
+
+  it("keeps the two view toggles longer than the two menu-backed actions", () => {
+    // The tie-break inside rank 1 is positional, so this is the assertion
+    // that would catch a reshuffle of `defaultHints` silently reversing it.
+    const line = fitHints(hints(), 100);
+    expect(line).not.toContain("x kill");
+    expect(line).not.toContain("r restart");
+    expect(line).toContain("P preview");
+    expect(line).toContain("b group:project");
   });
 
   it("drops whole hints rather than truncating mid-word", () => {
