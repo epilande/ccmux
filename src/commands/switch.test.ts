@@ -1,4 +1,14 @@
-import { describe, it, expect, spyOn, mock } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  it,
+  expect,
+  spyOn,
+  mock,
+} from "bun:test";
+import * as preferences from "../lib/preferences";
+import { resetTmuxSocketCache } from "../lib/tmux-socket";
 
 // Neutralize ensureDaemon so the action never spawns/probes a real daemon.
 // mock.module is process-wide but no other test imports "./shared", so it's
@@ -22,6 +32,32 @@ class ExitError extends Error {
     super(`process.exit(${code})`);
   }
 }
+
+const ORIGINAL_SOCKET_ENV = process.env.CCMUX_TMUX_SOCKET;
+
+/**
+ * A configured socket override would prepend `-L`/`-S` to every argv asserted
+ * below, and would give the guard a second known socket to compare. Stub the
+ * developer's real env/config out (spyOn, not mock.module, which leaks).
+ */
+let prefsSpy: ReturnType<
+  typeof spyOn<typeof preferences, "getPreferencesSync">
+>;
+
+beforeEach(() => {
+  prefsSpy = spyOn(preferences, "getPreferencesSync").mockImplementation(
+    () => ({}),
+  );
+  delete process.env.CCMUX_TMUX_SOCKET;
+  resetTmuxSocketCache();
+});
+
+afterEach(() => {
+  prefsSpy.mockRestore();
+  resetTmuxSocketCache();
+  if (ORIGINAL_SOCKET_ENV === undefined) delete process.env.CCMUX_TMUX_SOCKET;
+  else process.env.CCMUX_TMUX_SOCKET = ORIGINAL_SOCKET_ENV;
+});
 
 function withExitSentinel(): () => void {
   const original = process.exit;

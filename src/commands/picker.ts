@@ -10,6 +10,7 @@ import {
 } from "../lib/icons";
 import { markStartup } from "../lib/startup-timing";
 import { PICKER_PANE_TITLE } from "../lib/config";
+import { tmuxArgv } from "../lib/tmux-exec";
 import { forkableAgentNames } from "../lib/agents";
 
 /**
@@ -76,14 +77,9 @@ export function createPickerCommand(): Command {
         // Tag persistent picker panes so the daemon ignores them for active-pane tracking
         const selfPane = process.env.TMUX_PANE;
         if (persistent && selfPane) {
-          Bun.spawn([
-            "tmux",
-            "select-pane",
-            "-t",
-            selfPane,
-            "-T",
-            PICKER_PANE_TITLE,
-          ]);
+          Bun.spawn(
+            tmuxArgv("select-pane", "-t", selfPane, "-T", PICKER_PANE_TITLE),
+          );
         }
 
         await tui.launchTUI({

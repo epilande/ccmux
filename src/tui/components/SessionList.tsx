@@ -2,7 +2,7 @@ import type { Component } from "solid-js";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import { useTerminalDimensions } from "@opentui/solid";
-import type { EnrichedSession } from "../../types";
+import type { EnrichedSession, TmuxSocketError } from "../../types";
 import type { IconStyle } from "../../lib/icons";
 import type {
   ColumnsConfig,
@@ -24,6 +24,7 @@ import {
   rowHasContent,
 } from "./session-columns";
 import { theme } from "../theme";
+import { socketErrorMessage } from "../../lib/tmux-socket";
 
 interface SessionListProps {
   items: FlatItem[];
@@ -40,6 +41,9 @@ interface SessionListProps {
   /** Prompt display mode (cycled by the `p` key): inline, own row, or off. */
   promptDisplay?: PromptDisplay;
   loading?: boolean;
+  /** Set when the daemon cannot reach its tmux server; replaces the empty
+   *  state, which would otherwise read as "no agents are running". */
+  socketError?: TmuxSocketError | null;
   onActivate?: (item: FlatItem, index: number) => void;
   onContextMenu?: (item: FlatItem, index: number, event: MouseEvent) => void;
   /**
@@ -231,7 +235,16 @@ export const SessionList: Component<SessionListProps> = (props) => {
         fallback={
           <Show when={!props.loading}>
             <box paddingLeft={1} paddingTop={1}>
-              <text fg={theme.overlay}>No sessions found</text>
+              <Show
+                when={props.socketError}
+                fallback={<text fg={theme.overlay}>No sessions found</text>}
+              >
+                {(error: () => TmuxSocketError) => (
+                  <text fg={theme.red}>
+                    {socketErrorMessage(error().attemptedSocket)}
+                  </text>
+                )}
+              </Show>
             </box>
           </Show>
         }

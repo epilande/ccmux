@@ -15,6 +15,7 @@ import {
   probeAllowPassthrough,
 } from "../lib/notify-osc";
 import { DAEMON_HOST, DAEMON_PORT } from "../lib/config";
+import { tmuxCaptureSync } from "../lib/tmux-exec";
 
 const TEST_MESSAGE = "Notifications are working";
 
@@ -235,20 +236,6 @@ async function runCcmuxNotifierFlow(
   }
 }
 
-/** Runs a tmux command synchronously, returning stdout or null on failure. */
-function runTmuxCapture(args: string[]): string | null {
-  try {
-    const result = Bun.spawnSync(["tmux", ...args], {
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    if (!result.success) return null;
-    return result.stdout.toString();
-  } catch {
-    return null;
-  }
-}
-
 /**
  * `ccmux notify` flow for the osc backend, delivered through this command's
  * own pane. Unlike the daemon (which stays silent and drops), it explains
@@ -266,7 +253,7 @@ function runOscFlow(
     return false;
   }
 
-  const tty = runTmuxCapture([
+  const tty = tmuxCaptureSync([
     "display-message",
     "-p",
     "-t",
@@ -278,7 +265,7 @@ function runOscFlow(
     return false;
   }
 
-  if (!probeAllowPassthrough(runTmuxCapture)) {
+  if (!probeAllowPassthrough(tmuxCaptureSync)) {
     console.error(
       "tmux option allow-passthrough is not enabled; the escape sequence would be swallowed.",
     );
@@ -291,7 +278,7 @@ function runOscFlow(
     buildTestPayload(message, notifications, { pane: paneId }),
     tty,
     {
-      runTmux: runTmuxCapture,
+      runTmux: tmuxCaptureSync,
       log: (msg, error) => console.error(msg, error ?? ""),
     },
   );
@@ -299,7 +286,7 @@ function runOscFlow(
   // Script-friendly: a caller-supplied message stays quiet on success.
   if (message) return true;
 
-  const termnames = runTmuxCapture([
+  const termnames = tmuxCaptureSync([
     "list-clients",
     "-t",
     paneId,

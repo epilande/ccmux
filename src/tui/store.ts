@@ -19,6 +19,7 @@ import type {
   FinishedInvocationStatus,
   InvocationSnapshotEntry,
   DaemonHealth,
+  TmuxSocketError,
 } from "../types";
 import type { ConnectionState } from "./utils/sse";
 import type { IconStyle } from "../lib/icons";
@@ -294,6 +295,13 @@ interface TUIState {
   connectionState: ConnectionState;
   /** Daemon scan-health; drives the degraded warning in the header. */
   daemonHealth: DaemonHealth;
+  /**
+   * Why the daemon cannot reach its tmux server, or null when it can. Turns an
+   * empty board into a diagnostic instead of a bare "No sessions found":
+   * with no reachable server there are no panes to find, and that is not the
+   * same fact as having no agents running.
+   */
+  tmuxSocketError: TmuxSocketError | null;
   error: string | null;
   showPreview: boolean;
   promptDisplay: PromptDisplay;
@@ -669,6 +677,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     confirmSessionIds: [],
     connectionState: "disconnected",
     daemonHealth: { degraded: false },
+    tmuxSocketError: null,
     error: null,
     showPreview: options.sidebar ? false : (options.initialPreview ?? false),
     promptDisplay: options.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
@@ -1488,6 +1497,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     setDaemonHealth(health: DaemonHealth) {
       setState("daemonHealth", health);
+    },
+
+    setTmuxSocketError(socketError: TmuxSocketError | null) {
+      setState("tmuxSocketError", socketError);
     },
 
     setError(error: string | null) {

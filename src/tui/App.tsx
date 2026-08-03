@@ -17,6 +17,7 @@ import {
 } from "@opentui/solid";
 import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../types/session";
+import type { TmuxSocketError } from "../types";
 import {
   createTUIStore,
   namesAWorktree,
@@ -46,6 +47,7 @@ import {
   resolveLaunchPane,
   type OpenAgentsResult,
 } from "./utils/tmux";
+import { tmuxArgv } from "../lib/tmux-exec";
 import { isSameServerCached, setDaemonSocketPath } from "./utils/server-guard";
 import { getDaemonUrl, resolvedHomeDir, STATE_FILE } from "../lib/config";
 import { getUIState } from "../lib/state";
@@ -204,9 +206,17 @@ export function App(props: AppProps) {
    *  a stale one. Fail-open until it resolves. */
   function refreshServerInfo(): void {
     fetch(`${getDaemonUrl()}/server-info`)
-      .then((r) => r.json() as Promise<{ socketPath: string | null }>)
+      .then(
+        (r) =>
+          r.json() as Promise<{
+            socketPath: string | null;
+            socketError?: TmuxSocketError | null;
+          }>,
+      )
       .then((d) => {
         setDaemonSocketPath(d.socketPath ?? null);
+        // A daemon predating the field omits it, which reads as "no error".
+        store.actions.setTmuxSocketError(d.socketError ?? null);
       })
       .catch(() => {});
   }
@@ -2779,7 +2789,7 @@ export function App(props: AppProps) {
         if (props.sidebar) {
           const selfPane = process.env.TMUX_PANE;
           if (selfPane) {
-            Bun.spawn(["tmux", "kill-pane", "-t", selfPane]);
+            Bun.spawn(tmuxArgv("kill-pane", "-t", selfPane));
           }
         }
         process.exit(0);
@@ -2861,6 +2871,7 @@ export function App(props: AppProps) {
             sidebar={props.sidebar}
             promptDisplay={store.state.promptDisplay}
             loading={!initialDataReceived()}
+            socketError={store.state.tmuxSocketError}
             onActivate={handleRowActivate}
             onContextMenu={handleRowContextMenu}
             onRowAnchor={(resolve) => (rowAnchor = resolve)}

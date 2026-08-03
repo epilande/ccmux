@@ -10,6 +10,8 @@ import {
 } from "../lib/config";
 import { getPreferences } from "../lib/preferences";
 import { listTmuxClientTtys } from "../lib/tmux-client";
+import { tmuxArgv } from "../lib/tmux-exec";
+import { attemptedTmuxSocketPath } from "../lib/tmux-socket";
 import {
   capturePane,
   resolvePaneLocation,
@@ -55,6 +57,7 @@ import type {
   SSEEvent,
   FinishedInvocationStatus,
   DaemonHealth,
+  TmuxSocketError,
 } from "../types";
 import type { Session, TmuxPane, EnrichedSession } from "../types/session";
 import type { AttentionTracker } from "./attention-tracker";
@@ -384,6 +387,12 @@ export class DaemonServer {
    * `%N` (see the single-server invariant in pane-discovery.ts).
    */
   private serverSocketPath: string | null = null;
+  /**
+   * Why the tmux server could not be reached, and which socket was tried.
+   * Null whenever the last probe succeeded. Served by `GET /server-info` so a
+   * client can say "unreachable at <path>" instead of "no sessions".
+   */
+  private socketError: TmuxSocketError | null = null;
   private lastSidebarState: {
     selectedSessionId: string | null;
     selectedHeaderKey: string | null;
@@ -850,7 +859,7 @@ export class DaemonServer {
     // whenever a stale hook outlives the daemon.
     const hookCmd = `run-shell -b 'curl -s -X POST http://${DAEMON_HOST}:${DAEMON_PORT}/active-pane -H "Content-Type:application/json" -d "{\\"paneId\\":\\"#{pane_id}\\"}" > /dev/null 2>&1 || true'`;
     for (const hook of DaemonServer.ACTIVE_PANE_HOOKS) {
-      Bun.spawn(["tmux", "set-hook", "-g", hook, hookCmd], {
+      Bun.spawn(tmuxArgv("set-hook", "-g", hook, hookCmd), {
         stdout: "ignore",
         stderr: "ignore",
       });
@@ -862,7 +871,7 @@ export class DaemonServer {
    */
   private removePaneFocusHook(): void {
     for (const hook of DaemonServer.ACTIVE_PANE_HOOKS) {
-      Bun.spawn(["tmux", "set-hook", "-gu", hook], {
+      Bun.spawn(tmuxArgv("set-hook", "-gu", hook), {
         stdout: "ignore",
         stderr: "ignore",
       });
@@ -898,9 +907,13 @@ export class DaemonServer {
     }
 
     if (path === "/server-info" && req.method === "GET") {
+      // The probe runs first so its outcome, not a stale scan verdict, decides
+      // `socketError`: a tmux that has come back up clears the diagnostic here.
+      const socketPath = await this.getServerSocketPath();
       return Response.json(
         {
-          socketPath: await this.getServerSocketPath(),
+          socketPath,
+          socketError: this.socketError,
           health: this.getScanHealth(),
         },
         { headers: corsHeaders },
@@ -1079,28 +1092,60 @@ export class DaemonServer {
 
   /**
    * Resolve this daemon's tmux socket path. Works without an attached client
-   * (the daemon runs detached): `display-message -p` reads the server from the
-   * inherited env — the same one `list-panes -a` scans. Caches the first success;
-   * a null (no server up yet) is not cached, so the guard engages once tmux is up.
+   * (the daemon runs detached): `display-message -p` reads the same server
+   * `list-panes -a` scans (the configured socket override, else the inherited
+   * env). Caches the first success; a null (no server up yet) is not cached, so
+   * the guard engages once tmux is up.
+   *
+   * The cached success is dropped whenever a pane scan fails
+   * ({@link notePaneScanFailure}): a tmux restarted onto a different socket
+   * would otherwise leave `/server-info` naming the dead one forever, which
+   * flips every client guard into a false "different server" refusal.
    */
   private async getServerSocketPath(): Promise<string | null> {
     if (this.serverSocketPath) return this.serverSocketPath;
     try {
       const proc = Bun.spawn(
-        ["tmux", "display-message", "-p", "#{socket_path}"],
-        { stdout: "pipe", stderr: "ignore" },
+        tmuxArgv("display-message", "-p", "#{socket_path}"),
+        { stdout: "pipe", stderr: "pipe" },
       );
-      const [out, code] = await Promise.all([
+      const [out, stderr, code] = await Promise.all([
         new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
         proc.exited,
       ]);
       if (code === 0) {
         this.serverSocketPath = out.trim() || null;
+        if (this.serverSocketPath) this.socketError = null;
+      } else {
+        this.socketError = {
+          attemptedSocket: attemptedTmuxSocketPath(),
+          message: stderr.trim() || `tmux display-message exited ${code}`,
+        };
       }
-    } catch {
+    } catch (error) {
       // No server / spawn failure: leave unresolved, retry on next request.
+      this.socketError = {
+        attemptedSocket: attemptedTmuxSocketPath(),
+        message: errorMessage(error),
+      };
     }
     return this.serverSocketPath;
+  }
+
+  /**
+   * Record a failed pane scan. Invalidates the cached socket so the next
+   * `/server-info` re-probes, and keeps the reason around to explain an empty
+   * board (the reporter's case in issue #95: a daemon aimed at a stale socket
+   * scans a server that is not there and surfaces zero sessions with zero
+   * diagnostics). Cleared by the next successful probe.
+   */
+  notePaneScanFailure(message: string): void {
+    this.serverSocketPath = null;
+    this.socketError = {
+      attemptedSocket: attemptedTmuxSocketPath(),
+      message,
+    };
   }
 
   private handleHealth(headers: Record<string, string>): Response {
@@ -1906,7 +1951,7 @@ export class DaemonServer {
 
     try {
       const proc = Bun.spawn(
-        ["tmux", "send-keys", "-t", target, restartCommand, "Enter"],
+        tmuxArgv("send-keys", "-t", target, restartCommand, "Enter"),
         { stdout: "pipe", stderr: "pipe" },
       );
       const exitCode = await proc.exited;
@@ -2998,13 +3043,13 @@ export class DaemonServer {
     });
 
     // Create tmux pane
-    const tmuxArgv = buildTmuxSpawnArgv({
+    const spawnArgv = buildTmuxSpawnArgv({
       split,
       cwd: spawnCwd,
       placement,
       detach,
     });
-    const tmuxCmd = tmuxArgv[0];
+    const tmuxCmd = spawnArgv[0];
     // Hoisted so the outer catch (below) can kill a pane that was created
     // before a later step throws, not just before one that exits non-zero.
     // `Bun.spawn` throws rather than exiting non-zero for an oversized argv
@@ -3019,7 +3064,7 @@ export class DaemonServer {
     const killPane = async (): Promise<void> => {
       if (!paneId) return;
       try {
-        await Bun.spawn(["tmux", "kill-pane", "-t", paneId], {
+        await Bun.spawn(tmuxArgv("kill-pane", "-t", paneId), {
           stdout: "pipe",
           stderr: "pipe",
         }).exited;
@@ -3028,7 +3073,7 @@ export class DaemonServer {
       }
     };
     try {
-      const proc = Bun.spawn(["tmux", ...tmuxArgv], {
+      const proc = Bun.spawn(tmuxArgv(...spawnArgv), {
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -3052,7 +3097,7 @@ export class DaemonServer {
       // inside it as a single-quoted argument, so no part of it can be
       // interpreted as a tmux key name.
       const sendProc = Bun.spawn(
-        ["tmux", "send-keys", "-t", paneId, command, "Enter"],
+        tmuxArgv("send-keys", "-t", paneId, command, "Enter"),
         { stdout: "pipe", stderr: "pipe" },
       );
       const sendExit = await sendProc.exited;
@@ -3084,7 +3129,7 @@ export class DaemonServer {
       );
       if (focusArgv) {
         try {
-          const focusProc = Bun.spawn(["tmux", ...focusArgv], {
+          const focusProc = Bun.spawn(tmuxArgv(...focusArgv), {
             stdout: "pipe",
             stderr: "pipe",
           });

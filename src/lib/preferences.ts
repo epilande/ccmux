@@ -345,6 +345,14 @@ export interface Preferences {
   /** Desktop notification settings (default: disabled). See {@link NotificationsConfig}. */
   notifications?: NotificationsConfig;
   /**
+   * The tmux server ccmux tracks: a socket path (leading "/", passed as `-S`)
+   * or a socket label (anything else, passed as `-L`). Unset means today's
+   * ambient resolution (`$TMUX`, else tmux's default socket). Overridden by
+   * `CCMUX_TMUX_SOCKET`. ccmux tracks exactly one server; see
+   * `src/lib/tmux-socket.ts`.
+   */
+  tmuxSocket?: string;
+  /**
    * TUI color theme, resolved once at launch (no in-TUI toggle). A built-in
    * name (e.g. `"catppuccin-latte"`) or an object with a `base` plus per-key
    * `colors`/`ansi` overrides. An unknown base falls back to the default theme;
