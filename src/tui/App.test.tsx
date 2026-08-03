@@ -2473,6 +2473,7 @@ describe("App fork (F / context menu)", () => {
       const frame = setup.captureCharFrame();
       expect(frame).toContain("New session");
       expect(frame).toContain("keep this prompt");
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
     } finally {
       globalThis.fetch = original;
     }
@@ -4278,6 +4279,80 @@ describe("App move-changes menu gate", () => {
       await settle();
       await setup.renderOnce();
       expect(squish(setup.captureCharFrame())).toContain("RestartSession?");
+    } finally {
+      dirty.restore();
+    }
+  });
+
+  it("drops a hovered row's snapshot when right-click opens another menu", async () => {
+    const { restore } = captureDirty("never");
+    try {
+      await renderApp(120, 30, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        Array.from({ length: 12 }, (_, index) =>
+          mockEnrichedSession({
+            id: `s${index}`,
+            project: `p${index}`,
+            cwd: `/code/p${index}`,
+            tmuxPane: index === 11 ? null : `%${index}`,
+            trackingMode: index === 11 ? "background" : "pane",
+          }),
+        ),
+        null,
+      );
+      await setup.renderOnce();
+
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      const restart = menuRows().find((row) => row.label === "Restart")!;
+      await setup.mockMouse.moveTo(7, restart.row);
+      await setup.renderOnce();
+
+      // The twelfth row is below the first menu, so this reaches the list and
+      // replaces the still-mounted ContextMenu without dismissing it first.
+      await setup.mockMouse.click(5, 12, MouseButtons.RIGHT);
+      await setup.renderOnce();
+
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Attach agent");
+      expect(frame).toContain("Open agent view");
+      expect(frame).not.toContain("Restart");
+    } finally {
+      restore();
+    }
+  });
+
+  it("returns a pointer-frozen menu to its live items for keyboard input", async () => {
+    const dirty = heldDirty();
+    try {
+      await openMenuOnRow();
+      const restart = menuRows().find((row) => row.label === "Restart")!;
+
+      // Freeze the pointer's list, then leave it before the async item lands.
+      await setup.mockMouse.moveTo(7, restart.row);
+      await setup.renderOnce();
+      await setup.mockMouse.moveTo(0, 0);
+      await setup.renderOnce();
+      dirty.land();
+      await settle();
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Move changes");
+
+      // The first keyboard move takes ownership and must reveal the live list
+      // that App is navigating. Three more steps land on Move changes.
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Move changes");
+      for (const _ of [0, 1, 2]) {
+        setup.mockInput.pressKey("j");
+        await setup.renderOnce();
+      }
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(squish(setup.captureCharFrame())).toContain(
+        "Movechangestoworktree",
+      );
     } finally {
       dirty.restore();
     }

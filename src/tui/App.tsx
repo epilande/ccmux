@@ -615,6 +615,13 @@ export function App(props: AppProps) {
   } | null>(null);
 
   /**
+   * Identity of a particular row-menu opening. The menu component stays
+   * mounted when one open menu is replaced by another, so row identity alone
+   * is not enough: reopening the same row must also clear pointer snapshots.
+   */
+  const [menuOpenGeneration, setMenuOpenGeneration] = createSignal(0);
+
+  /**
    * Ask whether a row's checkout is dirty, for the menu gate.
    *
    * The answer arrives after the menu is already on screen, so the item it
@@ -687,6 +694,7 @@ export function App(props: AppProps) {
     y: number,
     focusFirst: boolean,
   ): void {
+    setMenuOpenGeneration((generation) => generation + 1);
     if (item.type === "session") {
       const session = item.filteredSession.session;
       store.actions.showContextMenu(session.id, x, y);
@@ -1602,13 +1610,13 @@ export function App(props: AppProps) {
         );
         return;
       }
-      // The request may have outlived its dialog. Close only the surface that
-      // submitted it, never a new draft opened after Escape while this await
-      // was pending.
-      if (
+      // The request may have outlived its dialog. An explicit dismissal or a
+      // replacement draft means the user no longer wants this completion to
+      // take over the picker, so neither close NOR navigate from stale work.
+      const ownsDialog =
         newSessionDialogSequence === dialogSequence &&
-        store.state.newSession !== null
-      ) {
+        store.state.newSession?.fork?.sessionId === fork.sessionId;
+      if (ownsDialog) {
         store.actions.closeNewSessionDialog();
       }
       // The daemon's name, not the row's preview: a derived name that collided
@@ -1619,6 +1627,16 @@ export function App(props: AppProps) {
         // already follows: the sidebar is a board you watch, not a place you
         // launch from and leave. The toast is then the only account there is
         // of where the fork landed, so it says so even unnamed.
+        store.actions.showToast(
+          created
+            ? `Forked into ${created}`
+            : toWorktree
+              ? "Forked into a new worktree"
+              : "Forked in this checkout",
+        );
+        return;
+      }
+      if (!ownsDialog) {
         store.actions.showToast(
           created
             ? `Forked into ${created}`
@@ -2954,6 +2972,7 @@ export function App(props: AppProps) {
         <Show when={store.state.contextMenu}>
           {(cm: () => NonNullable<typeof store.state.contextMenu>) => (
             <ContextMenu
+              openGeneration={menuOpenGeneration()}
               x={cm().x}
               y={cm().y}
               items={sessionMenuItems()}
@@ -2967,6 +2986,7 @@ export function App(props: AppProps) {
         <Show when={store.state.groupContextMenu}>
           {(cm: () => NonNullable<typeof store.state.groupContextMenu>) => (
             <ContextMenu
+              openGeneration={menuOpenGeneration()}
               x={cm().x}
               y={cm().y}
               items={groupMenuItems()}

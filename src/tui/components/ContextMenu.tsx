@@ -1,5 +1,5 @@
 import type { Component } from "solid-js";
-import { createSignal, For } from "solid-js";
+import { createEffect, createSignal, For } from "solid-js";
 import { useTerminalDimensions } from "@opentui/solid";
 import { MouseButton } from "@opentui/core";
 import { truncateText } from "../utils/format";
@@ -23,6 +23,13 @@ export interface ContextMenuItem {
 }
 
 interface ContextMenuProps {
+  /**
+   * Changes every time a row menu opens, even when it replaces one that is
+   * already mounted. A truthy `<Show>` does not remount its child when the
+   * row behind it changes, so local pointer state needs this explicit
+   * lifetime boundary.
+   */
+  openGeneration?: number;
   x: number;
   y: number;
   items: ContextMenuItem[];
@@ -92,6 +99,27 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
     items: ContextMenuItem[];
     reservedRows: number;
   } | null>(null);
+
+  /** A menu opened over another row keeps this component mounted. Drop every
+   * pointer-owned bit of state at that boundary so the new row cannot render
+   * the old row's frozen actions. */
+  createEffect(() => {
+    void props.openGeneration;
+    setPointerSnapshot(null);
+    setHovered(null);
+  });
+
+  /**
+   * A frozen list is only a pointer-safety device. Once the pointer has left
+   * and the keyboard owns a real highlight, render the same live list that
+   * App's key routing navigates. Otherwise an async item can be activated
+   * while absent from the box (or a removed item can remain visible).
+   */
+  createEffect(() => {
+    if (hovered() === null && props.highlight != null) {
+      setPointerSnapshot(null);
+    }
+  });
 
   const renderedItems = () => pointerSnapshot()?.items ?? props.items;
   const renderedReservedRows = () =>

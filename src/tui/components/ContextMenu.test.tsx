@@ -283,6 +283,42 @@ describe("ContextMenu sizing", () => {
  * keeps the individual pointer targets still when that item lands mid-list.
  */
 describe("ContextMenu with an item still to come", () => {
+  it("drops a pointer snapshot when another menu replaces the open one", async () => {
+    const first = itemSpies(["Attach", "Restart", "Kill"]);
+    const second = itemSpies(["Attach agent", "New session", "Kill"]);
+    const [items, setItems] = createSignal<ContextMenuItem[]>(first);
+    const [generation, setGeneration] = createSignal(1);
+
+    setup = await testRender(
+      () => (
+        <ContextMenu
+          openGeneration={generation()}
+          x={5}
+          y={2}
+          items={items()}
+          onClose={() => {}}
+        />
+      ),
+      { width: 60, height: 15 },
+    );
+    await setup.renderOnce();
+
+    const restart = locate(setup.captureCharFrame(), "Restart")!;
+    await setup.mockMouse.moveTo(restart.col, restart.row);
+    await setup.renderOnce();
+
+    // Replacing a truthy menu record does not remount ContextMenu. The open
+    // generation is the boundary that must release the first row's snapshot.
+    setItems(second);
+    setGeneration(2);
+    await setup.renderOnce();
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Attach agent");
+    expect(frame).toContain("New session");
+    expect(frame).not.toContain("Restart");
+  });
+
   it("keeps pointer targets fixed once the pointer enters a row", async () => {
     const base = itemSpies(["Attach", "Restart", "Kill"]);
     const late = itemSpies(["Move changes"])[0]!;
