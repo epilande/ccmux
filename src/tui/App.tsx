@@ -35,6 +35,7 @@ import {
   runHunkReview,
   type HunkReviewNote,
 } from "./utils/review";
+import { copyToClipboard } from "./utils/clipboard";
 import { SSEClient } from "./utils/sse";
 import {
   switchToPane,
@@ -972,6 +973,100 @@ export function App(props: AppProps) {
     if (session) reviewSession(session);
   }
 
+  /**
+   * Whether the transcript endpoint has any chance of answering for this row.
+   *
+   * It reads the agent's own transcript and degrades to a capture of the
+   * session's pane, so a row with neither is the one case we can rule out from
+   * here. Every other row is a question only the daemon can answer, and the
+   * toast is where a refusal belongs. Hidden rather than disabled, as
+   * everything else in this menu is.
+   */
+  function canCopyLastResponse(session: EnrichedSession | undefined): boolean {
+    if (!session) return false;
+    return session.tmuxPane != null || session.logPath != null;
+  }
+
+  /**
+   * Put this session's last response on the clipboard.
+   *
+   * Asynchronous by design: the menu is already closed when this starts, and
+   * the toast is the only thing that reports how it went. Blocking the picker
+   * on a daemon read would freeze every row over one row's transcript.
+   *
+   * `turns=1` is exactly one assistant entry (the frozen contract), so the
+   * join below is a formality that keeps this honest if the endpoint ever
+   * answers with more.
+   */
+  async function copyLastResponse(session: EnrichedSession) {
+    store.actions.showToast("Copying last response…", 10_000);
+    try {
+      const url = new URL(
+        `${getDaemonUrl()}/sessions/${session.id}/transcript`,
+      );
+      url.searchParams.set("turns", "1");
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      const data = (await response.json()) as {
+        source?: string;
+        turns?: { text?: string }[];
+        truncated?: boolean;
+        error?: string;
+      };
+      if (!response.ok) {
+        // The endpoint's own refusals name the reason ("no readable transcript
+        // and no tmux pane"); passing one through beats a generic failure.
+        store.actions.showToast(
+          `Copy failed: ${data.error ?? `HTTP ${response.status}`}`,
+          4_000,
+        );
+        return;
+      }
+      const text = (data.turns ?? [])
+        .map((turn) => turn.text ?? "")
+        .join("\n\n")
+        .trim();
+      if (!text) {
+        store.actions.showToast("Nothing to copy: no response yet", 3_000);
+        return;
+      }
+      const result = await copyToClipboard(text, {
+        osc52: (payload) => renderer.copyToClipboardOSC52(payload),
+      });
+      if (!result.ok) {
+        store.actions.showToast("Copy failed: no clipboard available", 4_000);
+        return;
+      }
+      // What was copied is not always the whole clean response, and a user who
+      // pastes a screen capture into a peer agent should have been told so
+      // BEFORE they paste: a size guard dropped content, or there was no
+      // transcript to read and this is what the pane happened to be showing.
+      const caveat = data.truncated
+        ? " (truncated)"
+        : data.source === "pane"
+          ? " (pane capture)"
+          : "";
+      // Short enough to stay on ONE line inside the toast's 40-column cap,
+      // caveat and all: the wrap otherwise splits "(pane capture)" across two
+      // lines, which is where a caveat stops reading as one.
+      store.actions.showToast(
+        `Copied ${text.length.toLocaleString()} chars${caveat}`,
+        caveat ? 4_000 : 2_500,
+      );
+    } catch {
+      store.actions.showToast("Copy failed: daemon unreachable", 4_000);
+    }
+  }
+
+  function contextMenuCopyLastResponse() {
+    const cm = store.state.contextMenu;
+    if (!cm) return;
+    const session = store.state.sessions.find((s) => s.id === cm.sessionId);
+    store.actions.hideContextMenu();
+    if (session) void copyLastResponse(session);
+  }
+
   function sessionMenuItems(): ContextMenuItem[] {
     // Paneless background rows get the launch actions (per-agent attach + the
     // global agent view) plus Kill, which stops the worker through the agent's
@@ -989,6 +1084,20 @@ export function App(props: AppProps) {
             hint: "d",
             color: theme.text,
             action: contextMenuReview,
+          },
+        ]
+      : [];
+    const copyItem: ContextMenuItem[] = canCopyLastResponse(session)
+      ? [
+          {
+            id: "copy-last-response",
+            // Exactly the 18 columns ContextMenu gives a hintless label; see
+            // "Move changes" on why a label that wraps breaks the menu's own
+            // height.
+            label: "Copy last response",
+            hint: "",
+            color: theme.text,
+            action: contextMenuCopyLastResponse,
           },
         ]
       : [];
@@ -1024,6 +1133,7 @@ export function App(props: AppProps) {
         },
         newSessionItem,
         ...reviewItem,
+        ...copyItem,
         // Last here too: the destructive action is the one that must never
         // slide under a pointer (or a highlight) reaching for something else,
         // and the bottom is the only position nothing can be appended below.
@@ -1070,9 +1180,9 @@ export function App(props: AppProps) {
       : [];
     // Ordered by what the actions DO, not by when they arrive: the things
     // that start something (attach, spawn, fork), then the things that read
-    // (review), then the ones that move work about, and the two that end a
-    // session last — Kill at the bottom, where a destructive action is
-    // hardest to hit by accident.
+    // (review the diff, copy the last response), then the ones that move work
+    // about, and the two that end a session last — Kill at the bottom, where a
+    // destructive action is hardest to hit by accident.
     //
     // Two of these come and go under an open menu. "Move changes" appears
     // when the dirty check answers, and Fork disappears on an SSE update that
@@ -1093,6 +1203,7 @@ export function App(props: AppProps) {
       newSessionItem,
       ...forkItem,
       ...reviewItem,
+      ...copyItem,
       ...moveChangesItem,
       {
         id: "restart",
