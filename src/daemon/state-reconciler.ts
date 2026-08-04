@@ -798,9 +798,12 @@ export function clearTerminalRuleCache(): void {
  *   session. OpenCode folds N sibling markers into one via
  *   `openCodeMarkerSource`; every other agent goes through
  *   `genericMarkerSource`.
- * - log source: present when this agent has a registered log adapter.
- *   The `LogWatcher` mutates `session.status` / `lastActivityAt` directly,
- *   so the factory just lifts those into cascade shape.
+ * - log source: present when this agent has a registered log adapter AND the
+ *   session has a LINKED log (`logPath`). The `LogWatcher` mutates
+ *   `session.status` / `lastActivityAt` directly, so the factory just lifts
+ *   those into cascade shape; with nothing linked there is nothing to lift
+ *   and the source would only echo the store back at itself (see the
+ *   deadlock note in `collectPaneTrackedSources`).
  * - terminal source: present when a terminal rule matched. Upgrade-only
  *   when there's another source to upgrade (canUpgrade=["waiting"]);
  *   baseline when it's the sole signal. When NO rule matched but the
@@ -883,17 +886,39 @@ async function reconcilePaneTrackedAgentSession(
 export function collectPaneTrackedSources(
   deps: Pick<
     ReconcilerDeps,
-    "hookManager" | "logAdapters" | "now" | "getLogFileMtime"
+    "hookManager" | "logAdapters" | "now" | "getLogFileMtime" | "agents"
   >,
   session: Session,
   ruleMatch: ReturnType<typeof matchTerminalRule>,
 ): { sources: CascadeSource[]; metadata: MarkerSourceMetadata } {
-  const hasLogAdapter = deps.logAdapters.has(session.agentType);
+  // A log source is evidence only when a log is actually LINKED. Registering
+  // an adapter for the agent type is not linkage: Codex acquires its
+  // `logPath` from rollout linking, which legitimately refuses (ambiguous
+  // same-cwd hookless sessions), and Cursor/OpenCode may never link at all.
+  //
+  // Pushing `logSource` for an unlinked session is a deadlock triad, verified
+  // live on a hookless Codex pane stuck at `waiting`/`permission` for 90s
+  // while the pane read `esc to interrupt`:
+  //  1. echo loop — `logSource` reads the SESSION (cascade-evaluator.ts), so
+  //     with no linked log it just re-asserts whatever the store already
+  //     holds, with a fresh-looking `lastActivityAt` timestamp, every tick;
+  //  2. upgrade-only pin — because that echo counts as a source, the terminal
+  //     source becomes `upgradeOnly`, and an upgrade-only source can lift TO
+  //     `waiting` but never move off it, so the live `working` rule match can
+  //     never clear the pin;
+  //  3. no escape — the synthetic-idle branch below needs `isLinkedLogSilent`,
+  //     which is false BY DESIGN when `logPath` is null.
+  // Dropping the echo leaves the terminal source as the primary (baseline,
+  // hence bidirectional), which is exactly how agents with no log adapter at
+  // all already behave. A marker, when present, still out-ranks it.
+  const hasLinkedLog =
+    deps.logAdapters.has(session.agentType) && !!session.logPath;
   const marker = deps.hookManager.getMarkerForSession(session);
 
   const sources: CascadeSource[] = [];
   let metadata: MarkerSourceMetadata = {};
 
+  let markerSource: CascadeSource | null = null;
   if (marker) {
     const built =
       session.agentType === "opencode"
@@ -902,19 +927,32 @@ export function collectPaneTrackedSources(
             deps.hookManager.getMarkersByAgentAndPid("opencode", marker.pid),
           )
         : genericMarkerSource(marker);
+    markerSource = built.source;
     sources.push(built.source);
     metadata = built.metadata;
   }
 
-  if (hasLogAdapter) {
-    sources.push(logSource(session));
+  let logSourceBuilt: CascadeSource | null = null;
+  if (hasLinkedLog) {
+    logSourceBuilt = logSource(session);
+    sources.push(logSourceBuilt);
   }
 
   if (ruleMatch) {
-    sources.push(
-      terminalSource(ruleMatch, { upgradeOnly: sources.length > 0 }),
-    );
-  } else if (!marker && hasLogAdapter && isLinkedLogSilent(deps, session)) {
+    if (
+      !dropsStalePermissionTerminalUpgrade(
+        deps,
+        session,
+        ruleMatch,
+        markerSource,
+        logSourceBuilt,
+      )
+    ) {
+      sources.push(
+        terminalSource(ruleMatch, { upgradeOnly: sources.length > 0 }),
+      );
+    }
+  } else if (!marker && hasLinkedLog && isLinkedLogSilent(deps, session)) {
     // Stale-log convergence. A hookless session's log source
     // echoes its frozen `working` and the upgrade-only terminal source can
     // never downgrade it, so a log that stops appending would deadlock. With
@@ -930,6 +968,82 @@ export function collectPaneTrackedSources(
   }
 
   return { sources, metadata };
+}
+
+/**
+ * The pane-tracked counterpart to `applyAmbiguousPermissionCorrection`: drop
+ * a `permission` terminal-rule match that would re-pin a wait the LOG has
+ * already moved past.
+ *
+ * The trap. `evaluateCascade` applies `upgradeOnly` sources with NO freshness
+ * comparison (`cascade-evaluator.ts`), by design — a pane prompt has no
+ * trustworthy timestamp of its own, and the whole point of the upgrade arm is
+ * that a wait on screen beats a baseline that predates it. But the terminal
+ * source is built from a 50-line capture that may be leftover prompt text, or
+ * from a `terminalRuleCache` entry taken DURING the wait and replayed after
+ * it, so "matched" is not the same as "still true". Once Codex's rules match
+ * the modern approval widget again (issue #103), every tick after an approval
+ * would lift the fresh log-derived `working` straight back to
+ * `waiting`/`permission`.
+ *
+ * Why that is worse than a cosmetic flicker: the notifier retracts a
+ * delivered banner when the wait clears and then refuses to renotify for 60s,
+ * so a spurious re-pin re-arms a SPENT Approve button against a pane that has
+ * already moved on — the same failure mode `applyAmbiguousPermissionCorrection`
+ * exists to prevent for Claude, and the same one commit 75fe2f9 guarded on the
+ * log side. Claude's guard drops the permission rule outright (its rule text
+ * lingers as narrative scrollback, so a match is never evidence of a LIVE
+ * wait). Codex's widget is genuinely removed from the transcript on
+ * resolution (verified live on 0.146.0), so its rule match is usually real;
+ * dropping it unconditionally would delete detection. Hence the narrower
+ * predicate below.
+ *
+ * Drop only when ALL of:
+ *  1. the agent declares `markerOwnsPermissionWait` (Codex alone — its
+ *     `PermissionRequest` hook opens the wait and NOTHING closes it, so the
+ *     marker is stuck at `waiting_permission` and the log is the resolution
+ *     authority). Cursor et al. are excluded: their hooks have no permission
+ *     event, so `terminalRules` are their ONLY wait source.
+ *  2. the session is hook-enriched — a marker source exists. Hookless Codex
+ *     keeps today's behavior exactly: the rules are its only waiting source.
+ *  3. the rule match is a permission wait (a `working` match is not an
+ *     upgrade and never re-pins anything).
+ *  4. a log source exists — which, since the collector only builds one for a
+ *     LINKED log, also means the rollout is linked — and is STRICTLY fresher
+ *     than the marker: the log
+ *     has seen something the marker has not, which is precisely the
+ *     post-resolution window (`applyResponseItem` flipping on a
+ *     `function_call_output`). A marker at least as fresh as the log means
+ *     the hook is still the newest word, so the pane is trusted.
+ *  5. that fresher log does NOT itself say `waiting`. A live wait keeps
+ *     appending rollout entries (`token_count`), so the log can out-fresh the
+ *     marker while still echoing the wait; only a log that has moved ON to
+ *     `working`/`idle` is evidence the prompt on screen is spent.
+ *
+ * Known cost of (4)+(5): a Codex old enough to ignore `PermissionRequest`
+ * (< 0.122, hooks installed so a `SessionStart` marker exists) has a marker
+ * that never claims a wait, so a genuine prompt arriving while its log ticks
+ * `working` is dropped. That window is pre-0.122 Codex with hooks — narrow,
+ * and unfixable without a resolution signal — and it fails toward `working`,
+ * which is the recoverable direction.
+ */
+function dropsStalePermissionTerminalUpgrade(
+  deps: Pick<ReconcilerDeps, "agents">,
+  session: Session,
+  ruleMatch: NonNullable<ReturnType<typeof matchTerminalRule>>,
+  markerSource: CascadeSource | null,
+  logSourceBuilt: CascadeSource | null,
+): boolean {
+  if (!markerSource || !logSourceBuilt) return false;
+  if (
+    ruleMatch.status !== "waiting" ||
+    ruleMatch.attentionType !== "permission"
+  )
+    return false;
+  const agent = deps.agents.find((a) => a.name === session.agentType);
+  if (!agent?.markerOwnsPermissionWait) return false;
+  if (logSourceBuilt.timestamp <= markerSource.timestamp) return false;
+  return logSourceBuilt.state.status !== "waiting";
 }
 
 /**
