@@ -96,6 +96,25 @@ export interface SubagentState {
    * the head read failed, in which case the preview renders no duration.
    */
   startedAt: string | null;
+  /**
+   * The isolated worktree this subagent runs in (Claude's Agent tool with
+   * `isolation: "worktree"`), or null for one working in its parent's
+   * checkout.
+   *
+   * A subagent is not a session — it has no pid, no pane and no cwd of its
+   * own on the parent row — so this is the ONLY thing that can attribute its
+   * work to a directory. Without it an `agent-*` worktree with three
+   * teammates in it reads as abandoned: it sorts as dead in the Worktrees
+   * panel, the prune scan's "an agent is working here" gate never fires for
+   * it, and Enter offers to spawn into a worktree that is already occupied.
+   *
+   * OPTIONAL rather than required-with-null only to spare a dozen existing
+   * fixtures a mechanical edit; the one producer
+   * (`log-adapter.handleSubagentChange`) always sets it explicitly, and
+   * `capStaleSubagents` carries it through by spread. Tighten to
+   * `worktreePath: string | null` when those fixtures are next touched.
+   */
+  worktreePath?: string | null;
 }
 
 /**

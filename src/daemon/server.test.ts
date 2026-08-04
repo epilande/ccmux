@@ -7471,3 +7471,168 @@ describe("worktree discovery for a bare repo", () => {
     expect(body.repos.map((r) => r.repoRoot)).toEqual([realpathSync(bare)]);
   });
 });
+
+/**
+ * Subagent worktree attribution, end to end.
+ *
+ * An Agent-tool teammate isolated into its own worktree is not a session, so
+ * an `agent-*` worktree with teammates in it used to read as abandoned: no
+ * sessions on the row, dead in the panel's sort, and invisible to the prune
+ * scan's "an agent is working here" gate.
+ */
+describe("subagent worktree attribution", () => {
+  let root: string;
+
+  /** A repo whose linked worktree is merged (so prune would offer it). */
+  function makeAgentWorktreeFixture(): { repo: string; worktree: string } {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-subagent-wt-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    const worktree = join(repo, ".claude", "worktrees", "agent-aabc123");
+    runFixtureGit(
+      repo,
+      "worktree",
+      "add",
+      "-b",
+      "feat/teammate",
+      worktree,
+      "main",
+    );
+    writeFileSync(join(worktree, "a.txt"), "a\n");
+    runFixtureGit(worktree, "add", "-A");
+    runFixtureGit(worktree, "commit", "-m", "work");
+    runFixtureGit(repo, "merge", "--no-ff", "-m", "merge", "feat/teammate");
+    return { repo, worktree };
+  }
+
+  /** An orchestrator at the repo root with one teammate in the worktree. */
+  function serverWithTeammate(repo: string, worktreePath: string) {
+    const ctx = createServer();
+    const session = ctx.manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd: repo,
+      pid: 4242,
+    });
+    ctx.manager.updateSubagent(session.id, {
+      agentId: "aabc123",
+      status: "working",
+      attentionType: null,
+      pendingTool: null,
+      lastActivityAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      worktreePath,
+    });
+    return { ...ctx, parentId: session.id };
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("attaches a teammate to its worktree row, pointing at the orchestrator's pane", async () => {
+    const { repo, worktree } = makeAgentWorktreeFixture();
+    const ctx = serverWithTeammate(repo, worktree);
+
+    const res = await ctx.internals.handleRequest(
+      new Request(
+        `http://127.0.0.1:2269/worktrees?cwd=${encodeURIComponent(repo)}`,
+      ),
+    );
+    const body = (await res.json()) as {
+      repos: Array<{
+        worktrees: Array<{
+          name: string;
+          sessions: Array<{
+            id: string;
+            status: string;
+            tmuxPane: string | null;
+            pid: number | null;
+            background?: boolean;
+          }>;
+        }>;
+      }>;
+    };
+
+    const row = body.repos[0].worktrees.find((w) => w.name === "agent-aabc123");
+    expect(row?.sessions).toHaveLength(1);
+    expect(row?.sessions[0]).toMatchObject({
+      id: `${ctx.parentId}:aabc123`,
+      status: "working",
+      // The parent's pane: a teammate has none, and the orchestrator is the
+      // only thing at that keyboard a human can talk to.
+      tmuxPane: "%1",
+      // Never signalled — that pid would be the orchestrator's.
+      pid: null,
+      background: true,
+    });
+  });
+
+  // The consequence that matters: this worktree's branch is merged, so
+  // without the attribution the scan would offer to delete it out from under
+  // a working teammate.
+  it("makes the prune scan skip a worktree a teammate is working in", async () => {
+    const { repo, worktree } = makeAgentWorktreeFixture();
+    const ctx = serverWithTeammate(repo, worktree);
+
+    const res = await ctx.internals.handleRequest(
+      new Request(
+        `http://127.0.0.1:2269/worktrees/prune-candidates?cwd=${encodeURIComponent(repo)}`,
+      ),
+    );
+    const body = (await res.json()) as {
+      candidates: Array<{ path: string }>;
+      skipped: Array<{ path: string; reason: string }>;
+    };
+
+    expect(body.candidates.map((c) => c.path)).not.toContain(
+      realpathSync(worktree),
+    );
+    expect(
+      body.skipped.find((s) => s.path === realpathSync(worktree))?.reason,
+    ).toBe("an agent is working here");
+  });
+
+  // Without a worktree it is not attributable to any row, and must not
+  // silently land on the parent's own.
+  it("ignores a subagent with no worktree of its own", async () => {
+    const { repo, worktree } = makeAgentWorktreeFixture();
+    const ctx = createServer();
+    const session = ctx.manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd: repo,
+      pid: 4242,
+    });
+    ctx.manager.updateSubagent(session.id, {
+      agentId: "aplain",
+      status: "working",
+      attentionType: null,
+      pendingTool: null,
+      lastActivityAt: new Date().toISOString(),
+      startedAt: null,
+      worktreePath: null,
+    });
+
+    const res = await ctx.internals.handleRequest(
+      new Request(
+        `http://127.0.0.1:2269/worktrees?cwd=${encodeURIComponent(repo)}`,
+      ),
+    );
+    const body = (await res.json()) as {
+      repos: Array<{
+        worktrees: Array<{ name: string; sessions: unknown[] }>;
+      }>;
+    };
+
+    const rows = body.repos[0].worktrees;
+    expect(rows.find((w) => w.name === "agent-aabc123")?.sessions).toEqual([]);
+    // The parent's own row still shows exactly one session: itself.
+    expect(rows.find((w) => w.name === "repo")?.sessions).toHaveLength(1);
+    expect(worktree).toContain("agent-aabc123");
+  });
+});

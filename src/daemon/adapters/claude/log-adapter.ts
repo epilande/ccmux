@@ -1,5 +1,5 @@
 import { watch, type FSWatcher } from "chokidar";
-import { existsSync, readdirSync, statSync } from "fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { join, dirname } from "path";
 import {
   PROJECTS_DIR,
@@ -11,13 +11,14 @@ import {
   extractSessionIdFromPath,
   readLogTail,
   readLogIncremental,
-  readFirstEntryTimestamp,
+  readFirstEntryFacts,
 } from "../../parser";
 import {
   deriveStateFromEntries,
   applyEntriesToState,
 } from "../../status-machine";
 import { getMarkerKey, type SessionManager } from "../../sessions";
+import { isWorktreeCheckoutPath } from "../../../lib/worktree-paths";
 import type { Session, SessionState } from "../../../types/session";
 import type {
   FullDerivation,
@@ -25,6 +26,35 @@ import type {
   LogAdapter,
   SessionMetadata,
 } from "../../log-adapter";
+
+/**
+ * The worktree a subagent was isolated into, from the `agent-<id>.meta.json`
+ * Claude Code writes beside the transcript.
+ *
+ * Authoritative and cheap: the file is a few hundred bytes and states the
+ * worktree outright, where the transcript head only shows a cwd that has to
+ * be recognized. Shape (the fields that matter here):
+ * `{"worktreePath": "...", "worktreeBranch": "...", "name": "...", ...}`.
+ * An ordinary Task subagent's meta file simply has no `worktreePath`.
+ *
+ * Absent, unreadable and malformed all answer null — this is attribution for
+ * a display row and a prune gate, not something to throw a scan over.
+ */
+export function readSubagentWorktreePath(
+  transcriptPath: string,
+): string | null {
+  const metaPath = transcriptPath.replace(/\.jsonl$/, ".meta.json");
+  try {
+    const parsed = JSON.parse(readFileSync(metaPath, "utf-8")) as {
+      worktreePath?: unknown;
+    };
+    return typeof parsed.worktreePath === "string" && parsed.worktreePath
+      ? parsed.worktreePath
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * When a Claude log's last activity is older than the idle threshold, a
@@ -402,10 +432,27 @@ export class ClaudeLogAdapter implements LogAdapter {
     if (!session) return;
 
     const existing = session.subagents.find((s) => s.agentId === agentId);
-    // Spawn time comes from the immutable transcript head, so a successful
-    // read is carried forward; a failed (null) read retries on the next
-    // change event.
-    const startedAt = existing?.startedAt ?? readFirstEntryTimestamp(path);
+    // Spawn time and worktree are both immutable head facts, so a successful
+    // read is carried forward and a failed (null) one retries on the next
+    // change event. They are resolved together, and only when something is
+    // still missing, so a busy subagent does not re-read its own head on
+    // every append.
+    let startedAt = existing?.startedAt ?? null;
+    let worktreePath = existing?.worktreePath ?? null;
+    if (startedAt === null || worktreePath === null) {
+      worktreePath ??= readSubagentWorktreePath(path);
+      if (startedAt === null || worktreePath === null) {
+        const facts = readFirstEntryFacts(path);
+        startedAt ??= facts.timestamp;
+        // The head's cwd is the FALLBACK for a missing meta file, and only
+        // when it is itself a worktree checkout. An ordinary Task subagent's
+        // head cwd is the parent's own repo root, and adopting that would
+        // attribute it to the main checkout — a row the parent session is
+        // already on, so every plain subagent would duplicate its orchestrator
+        // there and flip that row's Enter from "spawn" to "jump".
+        worktreePath ??= isWorktreeCheckoutPath(facts.cwd) ? facts.cwd : null;
+      }
+    }
 
     const offset = this.subagentFileOffsets.get(path) ?? 0;
     let state: SessionState;
@@ -449,6 +496,7 @@ export class ClaudeLogAdapter implements LogAdapter {
       pendingTool: state.pendingTool,
       lastActivityAt: state.lastActivityAt ?? null,
       startedAt,
+      worktreePath,
     });
 
     // Propagate subagent activity to parent session to keep it fresh

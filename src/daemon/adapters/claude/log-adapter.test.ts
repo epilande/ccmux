@@ -276,3 +276,120 @@ describe("ClaudeLogAdapter subagent watching", () => {
     expect(watchedDirs().has(subagentDir)).toBe(false);
   });
 });
+
+/**
+ * Worktree attribution for subagents.
+ *
+ * A subagent is not a session — no pid, no pane, no cwd of its own on the
+ * parent row — so this is the only thing that can tie an isolated teammate's
+ * work to the directory it happens in.
+ */
+describe("ClaudeLogAdapter subagent worktree attribution", () => {
+  let projectsDir: string;
+  let subagentDir: string;
+  let manager: SessionManager;
+  let adapter: ClaudeLogAdapter;
+
+  /** A transcript whose entries carry a cwd, as Claude Code writes them. */
+  function workingLogWithCwd(timestamp: string, cwd: string): string {
+    return workingLogContent(timestamp)
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.stringify({ ...JSON.parse(line), cwd }))
+      .join("\n")
+      .concat("\n");
+  }
+
+  async function firstSubagent() {
+    await waitFor(() => manager.getSession(SESSION_ID)!.subagents.length === 1);
+    return manager.getSession(SESSION_ID)!.subagents[0];
+  }
+
+  beforeEach(() => {
+    projectsDir = mkdtempSync(join(tmpdir(), "ccmux-subagent-wt-"));
+    const projectDir = join(projectsDir, ENCODED_PROJECT);
+    subagentDir = join(projectDir, SESSION_ID, "subagents");
+    mkdirSync(subagentDir, { recursive: true });
+    manager = new SessionManager();
+    manager.createSession(
+      SESSION_ID,
+      join(projectDir, `${SESSION_ID}.jsonl`),
+      "claude",
+    );
+    adapter = new ClaudeLogAdapter(manager, projectsDir);
+  });
+
+  afterEach(async () => {
+    await adapter.stop();
+    rmSync(projectsDir, { recursive: true, force: true });
+  });
+
+  it("reads the worktree from the sibling meta.json", async () => {
+    const worktree = "/Users/test/proj/.claude/worktrees/agent-aabc123";
+    writeFileSync(
+      join(subagentDir, "agent-aabc123.jsonl"),
+      workingLogWithCwd(new Date().toISOString(), worktree),
+    );
+    // The shape Claude Code writes, extra fields included.
+    writeFileSync(
+      join(subagentDir, "agent-aabc123.meta.json"),
+      JSON.stringify({
+        agentType: "general-purpose",
+        worktreePath: worktree,
+        worktreeBranch: "worktree-agent-aabc123",
+        name: "mutation-tester",
+        description: "Mutation-test the guards",
+      }),
+    );
+
+    adapter.onSessionStateUpdated(SESSION_ID, parentState());
+
+    expect((await firstSubagent()).worktreePath).toBe(worktree);
+  });
+
+  // The meta file is newer than some transcripts on disk, so the head's cwd
+  // has to carry those.
+  it("falls back to the transcript head cwd when no meta file exists", async () => {
+    const worktree = "/Users/test/proj/.claude/worktrees/agent-adef456";
+    writeFileSync(
+      join(subagentDir, "agent-adef456.jsonl"),
+      workingLogWithCwd(new Date().toISOString(), worktree),
+    );
+
+    adapter.onSessionStateUpdated(SESSION_ID, parentState());
+
+    expect((await firstSubagent()).worktreePath).toBe(worktree);
+  });
+
+  // An ordinary Task subagent runs in the parent's own checkout. Adopting
+  // that would attribute it to the main-checkout row the parent is already
+  // on, duplicating the orchestrator there and flipping that row's Enter
+  // from "spawn" to "jump".
+  it("stays null for a subagent working in the parent's own checkout", async () => {
+    writeFileSync(
+      join(subagentDir, "agent-a999.jsonl"),
+      workingLogWithCwd(new Date().toISOString(), "/Users/test/proj"),
+    );
+    writeFileSync(
+      join(subagentDir, "agent-a999.meta.json"),
+      JSON.stringify({ agentType: "general-purpose", description: "review" }),
+    );
+
+    adapter.onSessionStateUpdated(SESSION_ID, parentState());
+
+    expect((await firstSubagent()).worktreePath).toBeNull();
+  });
+
+  it("survives a malformed meta file by falling through to the head", async () => {
+    const worktree = "/Users/test/proj/.claude/worktrees/agent-abad";
+    writeFileSync(
+      join(subagentDir, "agent-abad.jsonl"),
+      workingLogWithCwd(new Date().toISOString(), worktree),
+    );
+    writeFileSync(join(subagentDir, "agent-abad.meta.json"), "{not json");
+
+    adapter.onSessionStateUpdated(SESSION_ID, parentState());
+
+    expect((await firstSubagent()).worktreePath).toBe(worktree);
+  });
+});

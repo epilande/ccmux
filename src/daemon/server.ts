@@ -159,30 +159,66 @@ export function cachedOpenPR(prs: BranchPR[] | null): PRState | null {
  * worktree root — the `sessionsFor` seam both worktree scans take. Shared so
  * the listing and the prune classification agree on what "a session in this
  * worktree" means.
+ *
+ * Subagents count. An Agent-tool teammate isolated into its own worktree is
+ * not a session — it has no pid, no pane and no row of its own — so keying
+ * strictly on `session.worktreeRoot` left every `agent-*` worktree looking
+ * abandoned while three teammates were working in it: dead in the panel's
+ * sort, invisible to the prune scan's session gate, and offered for a spawn
+ * it already had. They are folded in as SYNTHETIC entries below.
  */
 function worktreeSessionsByRoot(
   sessions: EnrichedSession[],
 ): Map<string, WorktreeSession[]> {
   const byWorktree = new Map<string, WorktreeSession[]>();
-  for (const session of sessions) {
-    const root = session.worktreeRoot;
-    if (!root) continue;
+  const push = (root: string, entry: WorktreeSession): void => {
     const key = normalizePath(root);
     const list = byWorktree.get(key) ?? [];
-    list.push({
-      id: session.id,
-      agentType: session.agentType,
-      status: session.status,
-      tmuxPane: session.tmuxPane,
-      tmuxTarget: session.tmuxTarget,
-      pid: session.pid ?? null,
-      // Carried, not filtered out: a background agent still has to GATE a
-      // removal when it is working. What it must never get is the SIGTERM —
-      // its pid belongs to Claude's supervisor, not to ccmux, exactly as
-      // `handleKillSession` says.
-      background: isBackgroundSession(session),
-    });
+    list.push(entry);
     byWorktree.set(key, list);
+  };
+
+  for (const session of sessions) {
+    if (session.worktreeRoot) {
+      push(session.worktreeRoot, {
+        id: session.id,
+        agentType: session.agentType,
+        status: session.status,
+        tmuxPane: session.tmuxPane,
+        tmuxTarget: session.tmuxTarget,
+        pid: session.pid ?? null,
+        // Carried, not filtered out: a background agent still has to GATE a
+        // removal when it is working. What it must never get is the SIGTERM —
+        // its pid belongs to Claude's supervisor, not to ccmux, exactly as
+        // `handleKillSession` says.
+        background: isBackgroundSession(session),
+      });
+    }
+
+    // `session.subagents` only ever holds live ones — `updateSubagent` drops
+    // an entry the moment it goes idle — so no status filter is needed here.
+    for (const subagent of session.subagents) {
+      if (!subagent.worktreePath) continue;
+      push(subagent.worktreePath, {
+        // Namespaced under the parent so it can never collide with a real
+        // session id, and so the row says which orchestrator owns it.
+        id: `${session.id}:${subagent.agentId}`,
+        agentType: session.agentType,
+        status: subagent.status,
+        // The PARENT's pane deliberately: a subagent has none, and the
+        // orchestrator is the only thing at that keyboard a human can talk
+        // to. Jumping to a teammate's worktree row should land there.
+        tmuxPane: session.tmuxPane,
+        tmuxTarget: session.tmuxTarget,
+        // No pid, and `background` for the same reason the Claude
+        // background rows carry it: this must GATE a removal while it works,
+        // and must never be signalled. The pid it would be signalled by
+        // belongs to the parent, so a SIGTERM here would kill the
+        // orchestrator to clean up a worktree.
+        pid: null,
+        background: true,
+      });
+    }
   }
   return byWorktree;
 }

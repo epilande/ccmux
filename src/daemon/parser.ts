@@ -80,6 +80,49 @@ export function readFirstEntryTimestamp(path: string): string | null {
 }
 
 /**
+ * Both head facts a subagent needs — its spawn timestamp and the directory
+ * it is working in — from ONE scan.
+ *
+ * Separate from {@link readFirstEntryTimestamp} rather than replacing it,
+ * because the two windows differ for a reason: a timestamp is on the very
+ * first line, while the cwd-bearing line is often a huge pasted entry a few
+ * lines in (see {@link readTranscriptCwd}'s 256 KB default and the corpus
+ * measurement above it). Callers that only want the timestamp should keep
+ * paying the smaller read.
+ *
+ * The scan stops as soon as both are known; a head carrying only one still
+ * returns that one, because the accumulator outlives the early exit.
+ */
+export function readFirstEntryFacts(
+  path: string,
+  initialBytes = 256 * 1024,
+): { timestamp: string | null; cwd: string | null } {
+  const facts: { timestamp: string | null; cwd: string | null } = {
+    timestamp: null,
+    cwd: null,
+  };
+  scanTranscriptHead(path, initialBytes, (entry) => {
+    if (
+      facts.timestamp === null &&
+      typeof entry.timestamp === "string" &&
+      entry.timestamp.length > 0
+    ) {
+      facts.timestamp = entry.timestamp;
+    }
+    if (
+      facts.cwd === null &&
+      typeof entry.cwd === "string" &&
+      entry.cwd.length > 0
+    ) {
+      facts.cwd = entry.cwd;
+    }
+    // Non-null ends the scan, so only claim done once both are in hand.
+    return facts.timestamp !== null && facts.cwd !== null ? true : null;
+  });
+  return facts;
+}
+
+/**
  * Extract session ID (UUID) from log file path
  * Path format: ~/.claude/projects/<encoded-path>/<uuid>.jsonl
  */
