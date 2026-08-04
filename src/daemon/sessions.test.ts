@@ -6,7 +6,7 @@ import {
   setSystemTime,
   afterEach,
 } from "bun:test";
-import { SessionManager, getMarkerKey } from "./sessions";
+import { SessionManager, adoptsLoggedCwd, getMarkerKey } from "./sessions";
 import type { Session } from "../types/session";
 import type { SessionPidMarker } from "./session-markers";
 
@@ -1253,5 +1253,99 @@ describe("getMarkerKey", () => {
       nativeSessionId: undefined,
     };
     expect(getMarkerKey(session)).toBe("codex_pane963");
+  });
+});
+
+/**
+ * cwd drift from a teammate's worktree.
+ *
+ * Claude Code writes entries into the PARENT's transcript carrying an
+ * isolated worktree's cwd while the Agent tool works there, and the last one
+ * wins — so an orchestrator sitting at the repo root ends up reporting a
+ * teammate's worktree as its own directory.
+ */
+describe("adoptsLoggedCwd", () => {
+  const repo = "/Users/dev/proj";
+  const agentWt = `${repo}/.claude/worktrees/agent-ae47057e96ad16689`;
+  const namedWt = `${repo}/.claude/worktrees/worktree-panel`;
+
+  it("refuses to move an established cwd into a teammate's worktree", () => {
+    expect(adoptsLoggedCwd(repo, agentWt)).toBe(false);
+    expect(adoptsLoggedCwd(repo, `${agentWt}/src/daemon`)).toBe(false);
+  });
+
+  // A session that really does live in a worktree keeps tracking its own
+  // subdirectories — this very session is one.
+  it("allows a session already inside that worktree to keep tracking it", () => {
+    expect(adoptsLoggedCwd(agentWt, `${agentWt}/src`)).toBe(true);
+    expect(adoptsLoggedCwd(`${agentWt}/src`, agentWt)).toBe(true);
+  });
+
+  // One worktree session must still not be dragged into another's.
+  it("refuses a move between two different worktrees", () => {
+    expect(adoptsLoggedCwd(namedWt, agentWt)).toBe(false);
+    expect(adoptsLoggedCwd(agentWt, namedWt)).toBe(false);
+  });
+
+  // First observation: a session genuinely started inside a worktree has to
+  // be able to learn its own cwd.
+  it("allows the first cwd a session ever sees", () => {
+    expect(adoptsLoggedCwd(null, agentWt)).toBe(true);
+  });
+
+  it("never refuses a move OUT of a worktree, or an ordinary move", () => {
+    expect(adoptsLoggedCwd(agentWt, repo)).toBe(true);
+    expect(adoptsLoggedCwd(repo, `${repo}/packages/app`)).toBe(true);
+  });
+
+  // A sibling directory that merely shares a prefix is not the same worktree.
+  it("does not treat a prefix-sharing sibling as the same worktree", () => {
+    expect(adoptsLoggedCwd(`${agentWt}-2`, agentWt)).toBe(false);
+  });
+});
+
+describe("updateSession cwd drift", () => {
+  const repo = "/Users/dev/proj";
+  const agentWt = `${repo}/.claude/worktrees/agent-ae47057e96ad16689`;
+
+  function managerWithSession(cwd: string): {
+    manager: SessionManager;
+    id: string;
+  } {
+    const manager = new SessionManager();
+    const session = manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd,
+      pid: null,
+    });
+    return { manager, id: session.id };
+  }
+
+  // The live symptom: an orchestrator whose pane sits at the repo root
+  // reporting a teammate's worktree as its own cwd, which then decides the
+  // project name and the worktree row it is attributed to.
+  it("keeps an orchestrator's cwd when a teammate's worktree is logged", () => {
+    const { manager, id } = managerWithSession(repo);
+
+    manager.updateSession(id, { cwd: agentWt });
+
+    expect(manager.getSession(id)?.cwd).toBe(repo);
+  });
+
+  it("still adopts an ordinary cwd correction", () => {
+    const { manager, id } = managerWithSession(repo);
+
+    manager.updateSession(id, { cwd: `${repo}/packages/app` });
+
+    expect(manager.getSession(id)?.cwd).toBe(`${repo}/packages/app`);
+  });
+
+  it("lets a session that lives in a worktree keep tracking inside it", () => {
+    const { manager, id } = managerWithSession(agentWt);
+
+    manager.updateSession(id, { cwd: `${agentWt}/src` });
+
+    expect(manager.getSession(id)?.cwd).toBe(`${agentWt}/src`);
   });
 });

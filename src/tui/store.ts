@@ -168,6 +168,7 @@ export interface NewSessionShape {
   moveChanges: boolean;
   destination: NewSessionDestination;
   fork: NewSessionFork | null;
+  existingWorktree: string | null;
 }
 
 /**
@@ -182,8 +183,13 @@ export interface NewSessionShape {
  * came loose must not take the field with it. A FORK is not on that list — it
  * chooses its destination like an ordinary spawn does (issue #99 follow-up),
  * so a fork continuing in the source's own checkout names nothing.
+ *
+ * A session going into a worktree that ALREADY exists names nothing either,
+ * and says so first: that mode creates no worktree at all, so a destination
+ * left over from before it opened must not put a Name row back on screen.
  */
 export function namesAWorktree(draft: NewSessionShape): boolean {
+  if (draft.existingWorktree !== null) return false;
   return draft.destination === "worktree" || draft.moveChanges;
 }
 
@@ -198,7 +204,9 @@ export function namesAWorktree(draft: NewSessionShape): boolean {
  * opening prompt is a choice it has. It KEEPS the destination — continuing
  * beside the original and continuing in a worktree of its own are the two
  * things a fork can mean — except where the source sits outside a repository,
- * which leaves nowhere for the second to go. The name belongs to whichever
+ * which leaves nowhere for the second to go. Existing-worktree mode (issue
+ * #102) drops the destination outright: the panel row IS the destination, so
+ * both options would be a choice already made. The name belongs to whichever
  * draft is making a worktree, and to none of them when the session starts in
  * the checkout it was opened over. A field that cannot be acted on must not be
  * reachable by Tab either — focusing a row whose keys do nothing is exactly
@@ -215,7 +223,9 @@ export function newSessionFields(
     if (field === "agent" || field === "prompt") return !forking;
     if (field === "destination") {
       return (
-        !draft.moveChanges && (draft.fork === null || draft.fork.canWorktree)
+        draft.existingWorktree === null &&
+        !draft.moveChanges &&
+        (draft.fork === null || draft.fork.canWorktree)
       );
     }
     if (field === "untracked") return draft.moveChanges;
@@ -268,6 +278,34 @@ export interface NewSessionDraft {
    * without a session to fork, and no session to fork outside fork mode.
    */
   fork: NewSessionFork | null;
+  /**
+   * The absolute path of the worktree this session starts in, or null for a
+   * spawn that is not aimed at one (issue #102).
+   *
+   * Set only by the Worktrees panel, over a checkout that is already on disk,
+   * and it is `cwd`'s reason rather than a second copy of it: the request is
+   * an ordinary spawn into that directory, carrying no `worktree` field at
+   * all. Nothing is created, so the destination, the name and the untracked
+   * choice all go with it — the fields exist to describe a worktree being
+   * MADE.
+   */
+  existingWorktree: string | null;
+  /**
+   * Where a CANCEL returns, or null for a dialog the Worktrees panel did not
+   * open (issue #102 follow-up). An origin marker, deliberately NOT a mode:
+   * it never reaches `NewSessionShape` or the policy functions, no field or
+   * row keys off it, and submit ignores it entirely, since a spawn hands the
+   * board to the new session. `cursor` is the panel row the dialog was
+   * opened over, so the reopened panel lands where the user left; `scope`
+   * is the panel's LIVE filter at that moment (null when Tab had widened
+   * it), which the reopen re-establishes, since the rescope is panel-local
+   * state nothing else remembers.
+   */
+  returnToWorktrees: {
+    repo: string | null;
+    scope: string | null;
+    cursor: string;
+  } | null;
   /** Which field the option/text keys currently apply to. */
   field: NewSessionField;
   /**
@@ -308,14 +346,29 @@ interface TUIState {
   previewFocused: boolean;
   showHelp: boolean;
   /**
-   * The worktree-prune overlay, or null when closed. `repo` scopes the scan
-   * to one main checkout (opened from a group header) and is null for the
-   * global keybinding. Everything else the overlay needs — the candidate
-   * list, the selection, the run log — is local to the component: it is
-   * fetched on open and discarded on close, so it would only be stale state
-   * for the rest of the picker's life.
+   * The Worktrees panel, or null when closed. `repo` scopes it to one main
+   * checkout (opened from a group header) and is null for the global
+   * keybinding; the panel's own Tab widens from there without reopening.
+   * Everything else the panel needs — the rows, the selection, the run log —
+   * is local to the component: it is fetched on open and discarded on close,
+   * so it would only be stale state for the rest of the picker's life.
+   * `initialCursor` seeds the panel's cursor on that row's path, for a reopen
+   * that should land where the user left (the review round-trip, a cancelled
+   * spawn dialog); the panel falls back to the first row when the path is
+   * not in the fetched list. `isReturn` marks exactly those reopens, and is
+   * what lets the panel reuse its last completed prune scan instead of
+   * re-firing it; a plain open (`W`, the group menu) always scans fresh.
+   * `startWidened` re-establishes a Tab-widened scope on a return: the
+   * rescope is panel-local state this store never sees, so the action
+   * payloads carry the live filter out and a return carries it back in,
+   * while `repo` keeps naming the opening repo Tab can narrow back to.
    */
-  prune: { repo: string | null } | null;
+  worktrees: {
+    repo: string | null;
+    initialCursor: string | null;
+    isReturn: boolean;
+    startWidened: boolean;
+  } | null;
   /**
    * A message that waits to be acknowledged, or null.
    *
@@ -695,7 +748,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     promptDisplay: options.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
     previewFocused: false,
     showHelp: false,
-    prune: null,
+    worktrees: null,
     notice: null,
     iconStyle: options.iconStyle ?? "dot",
     previewWidth: options.previewWidth ?? 40,
@@ -1286,8 +1339,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         // all, so any path that could flip it back to `here` would post a
         // spawn that silently dropped the changes it was opened to relocate.
         // A fork chooses freely, unless its source has no repository to hang
-        // a worktree off — there the lock is the other way round.
+        // a worktree off — there the lock is the other way round. A spawn into
+        // a worktree that already exists has no destination row at all, and a
+        // write that reached one anyway would put the Name row back with it.
         if (draft.moveChanges) return;
+        if (draft.existingWorktree !== null) return;
         if (draft.fork && !draft.fork.canWorktree) return;
         batch(() => {
           setState("newSession", "destination", option.value);
@@ -1678,13 +1734,32 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       /** Open in fork mode: continue this session, here or in a worktree of
        *  its own, with the agent and prompt gone. */
       fork?: NewSessionFork;
+      /** Open in existing-worktree mode: an ordinary spawn whose directory is
+       *  this worktree, with every row about CREATING one gone. The path is
+       *  the working directory too, so `cwd` need not repeat it. */
+      existingWorktree?: string;
+      /** Origin marker for a dialog the Worktrees panel opened: cancel
+       *  returns there. See {@link NewSessionDraft.returnToWorktrees}. */
+      returnToWorktrees?: {
+        repo: string | null;
+        scope: string | null;
+        cursor: string;
+      };
     }) {
-      const moveChanges = init.moveChanges === true;
-      const fork = init.fork ?? null;
+      // The three modes are mutually exclusive, and normalized here rather
+      // than defended against everywhere below: an existing worktree is where
+      // the session STARTS, and both other modes exist to create one, so a
+      // draft claiming two of them is not a state any consumer should have to
+      // answer for.
+      const existingWorktree = init.existingWorktree ?? null;
+      const moveChanges =
+        existingWorktree === null && init.moveChanges === true;
+      const fork = existingWorktree === null ? (init.fork ?? null) : null;
       // A move exists to put the changes somewhere new; everything else
       // defaults to the directory it was opened over, a fork included — the
       // key that opens it used to fork in place with no dialog at all, and
-      // Enter on an untouched dialog still does exactly that.
+      // Enter on an untouched dialog still does exactly that. An existing
+      // worktree IS that directory, which is why it needs no choice of its own.
       const destination: NewSessionDestination = moveChanges
         ? "worktree"
         : "here";
@@ -1692,7 +1767,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         setState("contextMenu", null);
         setState("groupContextMenu", null);
         setState("newSession", {
-          cwd: init.cwd,
+          // The worktree the panel aimed at is the working directory, taken
+          // from the mode rather than from a `cwd` the caller has to keep in
+          // step with it: the Directory row and the request would otherwise
+          // be free to name two different checkouts.
+          cwd: existingWorktree ?? init.cwd,
           agent: init.agent,
           // A fork belongs beside the conversation it continues, which is what
           // the one-shot `F` always did; anything else starts in a window of
@@ -1709,7 +1788,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           // source's branch instead, which the daemon reads for itself.
           worktreeName: null,
           fork,
-          field: newSessionFields({ moveChanges, destination, fork })[0]!,
+          existingWorktree,
+          returnToWorktrees: init.returnToWorktrees ?? null,
+          field: newSessionFields({
+            moveChanges,
+            destination,
+            fork,
+            existingWorktree,
+          })[0]!,
           dropdown: null,
         });
       });
@@ -1910,12 +1996,24 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("showHelp", false);
     },
 
-    showPrune(repo: string | null) {
-      setState("prune", { repo });
+    showWorktrees(
+      repo: string | null,
+      opts: {
+        initialCursor?: string;
+        isReturn?: boolean;
+        startWidened?: boolean;
+      } = {},
+    ) {
+      setState("worktrees", {
+        repo,
+        initialCursor: opts.initialCursor ?? null,
+        isReturn: opts.isReturn === true,
+        startWidened: opts.startWidened === true,
+      });
     },
 
-    hidePrune() {
-      setState("prune", null);
+    hideWorktrees() {
+      setState("worktrees", null);
     },
 
     resizePreview(delta: number) {

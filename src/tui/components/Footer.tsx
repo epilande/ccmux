@@ -125,6 +125,12 @@ export function defaultHints(props: {
     { text: "P preview", rank: 1 },
     { text: "r restart", rank: 1 },
     { text: "x kill", rank: 1 },
+    // Rank 1, and rightmost within it, so it is the FIRST hint a narrowing
+    // terminal gives up. `W` was previously taught only by the help overlay,
+    // which is why it needs a home here at all; it is also the one action on
+    // this line that opens a surface with its own hints, so losing the
+    // pointer costs less than losing any of the keys above.
+    { text: "W worktrees", rank: 1 },
     // Stays at 2 even though the row menu carries it too: this is the only
     // place the review integration is ADVERTISED, and it is already
     // conditional on hunk being installed, so the columns it costs are only

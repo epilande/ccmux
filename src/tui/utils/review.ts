@@ -3,6 +3,13 @@ import { resolve, sep } from "node:path";
 import type { CliRenderer } from "@opentui/core";
 import { LOG_FILE, MAX_SEND_TEXT_CHARS } from "../../lib/config";
 import { resolveRepoRoot } from "../../lib/git";
+// Pure git helpers, read-only, no daemon state: the same reason App.tsx
+// already reaches into `daemon/worktree-create` for its slug functions.
+import {
+  resolveBaseRefs,
+  runGit,
+  type GitRun,
+} from "../../daemon/worktree-git";
 
 export const HUNK_DIFF_ARGS = ["diff", "--watch"] as const;
 export const HUNK_INSTALL_HINT =
@@ -64,6 +71,17 @@ export interface RunHunkReviewDeps {
   sleep?: (ms: number) => Promise<void>;
   readFileLines?: (path: string) => Promise<string[]>;
   gitStatus?: (root: string) => Promise<string | null>;
+  /** Names of files differing from `target`; the emptiness pre-flight when
+   *  one is supplied, since a fully committed branch has a clean status and
+   *  a diff worth reading. */
+  gitDiffNames?: (root: string, target: string) => Promise<string | null>;
+  /**
+   * A git ref or SHA to review against instead of the working tree. An
+   * ARGUMENT, not an injected seam: it rides here because this is already the
+   * function's only options bag, and adding a positional would reorder every
+   * call site for one caller's sake.
+   */
+  target?: string;
 }
 
 interface HunkSessionListEntry {
@@ -220,6 +238,41 @@ async function defaultGitStatus(root: string): Promise<string | null> {
     return stdout;
   } catch (err) {
     debugLog(`git status --porcelain failed: ${err}`);
+    return null;
+  }
+}
+
+/**
+ * Files differing from `target`, as the branch review's emptiness check.
+ *
+ * Null (unknown) rather than empty on failure, matching {@link
+ * defaultGitStatus}: only a definite "nothing to show" refuses the review,
+ * so a git that cannot answer still opens hunk rather than silently
+ * swallowing the keypress.
+ */
+async function defaultGitDiffNames(
+  root: string,
+  target: string,
+): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(["git", "diff", "--name-only", target], {
+      cwd: root,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (exitCode !== 0) {
+      debugLog(`git diff --name-only ${target} failed: ${stderr.trim()}`);
+      return null;
+    }
+    return stdout;
+  } catch (err) {
+    debugLog(`git diff --name-only ${target} failed: ${err}`);
     return null;
   }
 }
@@ -416,17 +469,62 @@ export function isHunkAvailable(
  * Spawn `hunk diff --watch` in `root` with inherited stdio (`hunk` resolved via
  * PATH). Shared by the CLI `review` command and the in-picker review action;
  * both verify `hunk` is on PATH (`isHunkAvailable`) before calling.
+ *
+ * `target` is a git ref or SHA to compare against (`hunk diff <target>`),
+ * which turns the review from "what is uncommitted" into "what this branch
+ * changed". The Worktrees panel passes a merge-base for exactly that reason;
+ * omitting it keeps the working-tree review every other caller wants.
  */
 export function spawnHunkDiff(
   root: string,
+  target?: string,
   spawn: SpawnHunk = Bun.spawn as unknown as SpawnHunk,
 ): { exited: Promise<number> } {
-  return spawn(["hunk", ...HUNK_DIFF_ARGS], {
+  return spawn(["hunk", ...HUNK_DIFF_ARGS, ...(target ? [target] : [])], {
     cwd: root,
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
   });
+}
+
+/**
+ * The commit where a worktree's branch left the repo's default branch, or
+ * null when there is no such point to name.
+ *
+ * This, and not the base ref itself, is what a branch review compares
+ * against: `hunk diff origin/main` in a branch that is behind would also show
+ * everything that landed on main since the fork, which is not the work under
+ * review. Null on a repo with no recognizable default branch, on an orphan or
+ * unrelated history, and on a checkout sitting ON the base itself, where the
+ * caller falls back to the working-tree review rather than opening an empty
+ * one.
+ */
+export async function resolveMergeBase(
+  worktreePath: string,
+  deps: {
+    baseRefs?: (root: string) => Promise<string[]>;
+    git?: GitRun;
+  } = {},
+): Promise<string | null> {
+  const git = deps.git ?? runGit;
+  const baseRefs = deps.baseRefs ?? ((root: string) => resolveBaseRefs(root));
+  try {
+    const refs = await baseRefs(worktreePath);
+    for (const ref of refs) {
+      const res = await git(worktreePath, ["merge-base", ref, "HEAD"]);
+      const sha = res.stdout.trim();
+      if (res.exitCode !== 0 || !sha) continue;
+      // A branch sitting exactly on its base has no fork point to review.
+      const head = await git(worktreePath, ["rev-parse", "HEAD"]);
+      if (head.stdout.trim() === sha) return null;
+      return sha;
+    }
+  } catch {
+    // Git missing, a directory that moved, a repo too broken to answer: the
+    // caller's fallback is a working-tree review, which is still useful.
+  }
+  return null;
 }
 
 /**
@@ -461,12 +559,20 @@ export async function runHunkReview(
     deps.readFileLines ??
     (async (path: string) => (await Bun.file(path).text()).split("\n"));
   const gitStatus = deps.gitStatus ?? defaultGitStatus;
+  const gitDiffNames = deps.gitDiffNames ?? defaultGitDiffNames;
+  const target = deps.target;
 
   if (!which("hunk")) return { ok: false, error: HUNK_INSTALL_HINT };
   const root = await resolveRoot(cwd);
   if (!root) return { ok: false, error: "not a git repository" };
-  const status = await gitStatus(root);
-  if (status === "") return { ok: false, error: "no changes to review" };
+  // A branch review asks a different emptiness question than a working-tree
+  // one: a fully committed worktree has a clean `git status` and is exactly
+  // the case a branch review exists for, so checking status here would refuse
+  // the review that was asked for.
+  const changes = target
+    ? await gitDiffNames(root, target)
+    : await gitStatus(root);
+  if (changes === "") return { ok: false, error: "no changes to review" };
 
   // Resolve our tty while fd 0 is still the interactive terminal (before
   // suspend). This is the discovery fallback when there's no paneId to match,
@@ -487,7 +593,7 @@ export async function runHunkReview(
   };
 
   try {
-    const proc = spawnHunkDiff(root, spawn);
+    const proc = spawnHunkDiff(root, target, spawn);
     let exited = false;
     const exitPromise = proc.exited.then((code) => {
       exited = true;
