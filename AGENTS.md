@@ -12,7 +12,7 @@ ccmux is a CLI tool for tracking AI coding agent sessions running in tmux panes 
 - **Language:** TypeScript 5.x
 - **TUI Framework:** @opentui/solid 0.1.97 (Solid.js-based terminal UI)
 - **Reactivity:** Solid.js 1.9
-- **File Watching:** native recursive `fs.watch` for the agent log trees (`log-tree-watcher.ts`; chokidar fallback when recursive watching is unavailable), chokidar 4.x for the small flat dirs (markers, Claude subagents)
+- **File Watching:** native recursive `fs.watch` for the agent log trees (`log-tree-watcher.ts`; chokidar fallback when recursive watching is unavailable), chokidar 4.x for the small flat dirs (markers, Claude subagents); stat-polling for agents that hold their log fd open (codex), whose appends `fs.watch` cannot see
 - **CLI Framework:** Commander 14.x
 
 ## Development Guidelines

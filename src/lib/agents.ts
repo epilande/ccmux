@@ -218,6 +218,34 @@ export interface AgentDef {
    * off for agents whose permission markers are unambiguous.
    */
   ambiguousPermissionMarker?: boolean;
+  /**
+   * This agent's HOOK MARKER, not its pane, is the authority on whether a
+   * permission wait is still live — so a `permission` terminal-rule match
+   * must not re-assert a wait the log has already moved past.
+   *
+   * Codex is the one agent that needs this. Its `PermissionRequest` hook
+   * establishes the wait, but NO hook fires when the permission resolves, so
+   * the marker stays `waiting_permission` until end of turn and the log
+   * adapter is what infers the resolution (`function_call_output` flushes,
+   * `applyResponseItem`). That leaves a window where the freshest truth is a
+   * log-derived `working` while the marker still claims a wait — and the
+   * terminal source is `upgradeOnly`, which `evaluateCascade` applies with NO
+   * freshness comparison. Any leftover approval-widget text in the 50-line
+   * pane capture (or a `terminalRuleCache` entry taken during the wait and
+   * replayed after it) would then re-pin `waiting` every tick.
+   *
+   * Consumed by `dropsStalePermissionTerminalUpgrade` in the reconciler; see
+   * that function for the exact predicate and why re-pinning is destructive
+   * (retract + 60s renotify cooldown = the banner is gone for good). Off for
+   * every other agent: Cursor's hooks have no permission event at all, so its
+   * `terminalRules` ARE its only wait source, and dropping them would delete
+   * permission detection outright.
+   *
+   * Deliberately NOT user-overridable (unlike `terminalRules` /
+   * `ambiguousPermissionMarker`): it encodes a fact about an agent's hook
+   * contract, not a tuning knob.
+   */
+  markerOwnsPermissionWait?: boolean;
 }
 
 function parseRegex(pattern: string, fieldName: string): RegExp {
@@ -686,10 +714,62 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     shortCode: "cx",
     processMatch: /\bcodex\b/i,
     versionCommand: "codex --version",
+    // Pane strings below were re-captured live from a real Codex pane on
+    // codex-cli 0.146.0 (2026-08-03) as well as the earlier 0.144.5 pass;
+    // `strings` on the binary is NOT sufficient evidence (it lists widget
+    // variants the TUI may never render for a given config). Capture setup:
+    // sandbox CODEX_HOME, `approval_policy = "on-request"`,
+    // `sandbox_mode = "workspace-write"`, no approvals reviewer, no hooks.
+    //
+    // 0.146.0 command approval, verbatim:
+    //     Would you like to run the following command?
+    //     Environment: local
+    //     Reason: <model's reason>
+    //     $ git ls-remote https://github.com/... HEAD
+    //   › 1. Yes, proceed (y)
+    //     2. Yes, and don't ask again for commands that start with `git ls-remote` (p)
+    //     3. No, and tell Codex what to do differently (esc)
+    //     Press enter to confirm or esc to cancel
+    //
+    // 0.146.0 edit approval, verbatim:
+    //     Would you like to make the following edits?
+    //   › 1. Yes, proceed (y)
+    //     2. Yes, and don't ask again for these files (a)
+    //     3. No, and tell Codex what to do differently (esc)
+    //     Press enter to confirm or esc to cancel
+    //
+    // 0.146.0 working footer, verbatim:
+    //     • Working (12s • esc to interrupt) · 1 background terminal running · …
+    //
+    // So "press enter to confirm or esc to cancel" and "esc to interrupt"
+    // both SURVIVED into 0.146.0; what changed is that the widget now leads
+    // with a "Would you like to …?" heading, and the binary also carries a
+    // third heading, "Would you like to grant these permissions?", for the
+    // newer permission-escalation flow (that one is binary-observed only —
+    // it did not render under the capture config above, so it is listed but
+    // not live-verified). The headings are matched because they are the one
+    // part of the widget guaranteed present across all three variants, and
+    // are specific enough not to collide with ordinary command output.
     terminalRules: [
       {
         matchAny: [
+          // >= 0.146 approval widget headings (live-captured 2026-08-03,
+          // except the "grant these permissions" variant — see above).
+          "would you like to run the following command?",
+          "would you like to make the following edits?",
+          "would you like to grant these permissions?",
+          // Present in BOTH the <= 0.144.x and >= 0.146 widgets.
           "press enter to confirm or esc to cancel",
+          // Legacy (<= 0.144.x) shapes, kept for back-compat with older
+          // Codex builds. `allow command?` is a whole phrase and safe;
+          // `[y/n]` / `(y/n)` are loose two-character literals that appear
+          // in ordinary tool output (help text, prompts echoed by scripts,
+          // a README quoted into the pane) and WILL false-positive. They
+          // are last on purpose: `matchTerminalRule` returns on first rule
+          // match, not first literal, so ordering does not change semantics
+          // here, but it keeps the reliable evidence at the top for anyone
+          // reading or pruning this list. Remove them once pre-0.146 Codex
+          // is no longer worth supporting.
           "allow command?",
           "[y/n]",
           "(y/n)",
@@ -699,6 +779,11 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         pendingTool: "Command",
       },
       {
+        // "esc to interrupt" is the 0.146.0 footer verbatim (and the
+        // <= 0.144.x one). It renders as literal text, not a styled key
+        // glyph, so it survives the ANSI strip + lowercase in
+        // `matchTerminalRule`. "ctrl+c to interrupt" is the legacy
+        // (<= 0.144.x) variant, kept for back-compat.
         matchAny: ["esc to interrupt", "ctrl+c to interrupt"],
         status: "working",
         attentionType: null,
@@ -717,7 +802,15 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // session"; `codex exec` is the non-interactive subcommand.
     promptCommand: "{bin} '{prompt}'",
     sessionFilePattern: CODEX_SESSION_FILE_PATTERN,
-    // Codex's permission picker (verified e2e on codex-cli 0.144.5):
+    // The marker, not the pane, decides when a Codex permission wait ends:
+    // no hook fires on resolution, so the log adapter infers it and the pane
+    // must not re-assert the wait afterwards. See the field's doc on
+    // `AgentDef` and `dropsStalePermissionTerminalUpgrade`.
+    markerOwnsPermissionWait: true,
+    // Codex's permission picker (verified e2e on codex-cli 0.144.5, and
+    // re-verified on 0.146.0 — the option list and the enter/esc footer are
+    // unchanged; 0.146 only adds the "Would you like to …?" heading above
+    // them, see the `terminalRules` capture notes):
     //   › 1. Yes, proceed (y)
     //     2. Yes, and don't ask again for `<prefix>` (p)
     //     3. No, and tell Codex what to do differently (esc)
