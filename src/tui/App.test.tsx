@@ -6068,10 +6068,15 @@ describe("App worktrees panel (W)", () => {
     };
   }
 
-  /** Render App with one session, then open the panel over `rows`. */
+  /**
+   * Render App with one session (plus any `extraSessions`, for the lookups
+   * that have to pick the right one of several), then open the panel over
+   * `rows`.
+   */
   async function openPanel(
     rows: unknown[],
     sessionOverrides: Record<string, unknown> = {},
+    extraSessions: Record<string, unknown>[] = [],
   ) {
     const restore = mockWorktreeFetch(rows);
     await renderApp(120, 24, { groupBy: "none" });
@@ -6085,6 +6090,14 @@ describe("App worktrees panel (W)", () => {
           tmuxPane: "%1",
           ...sessionOverrides,
         }),
+        ...extraSessions.map((overrides) =>
+          mockEnrichedSession({
+            project: "myapp",
+            cwd: "/code/myapp",
+            mainRepoRoot: "/code/myapp",
+            ...overrides,
+          }),
+        ),
       ],
       null,
     );
@@ -6360,6 +6373,117 @@ describe("App worktrees panel (W)", () => {
       expect(shown).toContain(squish("no agent to send to"));
       expect(shown).not.toContain(squish("Send review comments"));
     } finally {
+      restore();
+    }
+  });
+
+  /**
+   * The DEFAULT shape for a worktree an isolated teammate holds: the daemon
+   * folds a live subagent into its worktree's row as a synthetic session
+   * (`${parent.id}:${agentId}`, carrying the parent's pane), and such a row
+   * has that session and nothing else.
+   *
+   * A lookup by the composite id matches no session, which used to send the
+   * review down the bare-worktree path — notes captured, nowhere to go — on
+   * every teammate-only row, while the fold's own design points that row's
+   * pane at the orchestrator a human can actually talk to.
+   */
+  it("hands a synthetic subagent row's notes back to the parent session", async () => {
+    runHunkReviewSpy.mockImplementation(async () => ({
+      ok: true,
+      notes: reviewNotes,
+    }));
+    const { restore, frame } = await openPanel([
+      {
+        ...WORKTREE_ROW,
+        sessions: [
+          {
+            id: "s1:agent-7",
+            agentType: "claude",
+            status: "working",
+            // The PARENT's pane, exactly as the daemon writes it.
+            tmuxPane: "%1",
+            tmuxTarget: "w:0.1",
+            pid: null,
+          },
+        ],
+      },
+    ]);
+    try {
+      setup.mockInput.pressKey("d");
+      const shown = squish(await frame());
+      expect(shown).toContain(squish("Send review comments"));
+      expect(shown).not.toContain(squish("no agent to send to"));
+    } finally {
+      restore();
+    }
+  });
+
+  // The jump leg of the same resolution. The synthetic row's pane is pinned
+  // stale here so the two outcomes are distinguishable: resolving to the
+  // parent jumps to the store's pane, failing to resolve jumps to the row's.
+  it("jumps a synthetic subagent row through the parent's live session", async () => {
+    const { restore: restoreExit } = withExitSpy();
+    const { restore, frame } = await openPanel([
+      {
+        ...WORKTREE_ROW,
+        sessions: [
+          {
+            id: "s1:agent-7",
+            agentType: "claude",
+            status: "working",
+            tmuxPane: "%stale",
+            tmuxTarget: "w:0.9",
+            pid: null,
+          },
+        ],
+      },
+    ]);
+    try {
+      setup.mockInput.pressEnter();
+      await frame();
+      expect(switchToPaneSpy).toHaveBeenCalledTimes(1);
+      expect(switchToPaneSpy.mock.calls[0]?.[0]).toBe("%1");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  // Split only on a MISS: a real id that happens to contain a colon must not
+  // be truncated onto a different session.
+  it("prefers a whole id that contains a colon over its prefix", async () => {
+    const { restore: restoreExit } = withExitSpy();
+    const { restore, frame } = await openPanel(
+      [
+        {
+          ...WORKTREE_ROW,
+          sessions: [
+            {
+              id: "s1:odd",
+              agentType: "claude",
+              status: "idle",
+              tmuxPane: "%stale",
+              tmuxTarget: "w:0.9",
+              pid: 3,
+            },
+          ],
+        },
+      ],
+      // The seeded session keeps id `s1` on %1, so a split-always lookup
+      // would land on it...
+      {},
+      // ...while the id the row actually names is a second, different
+      // session on its own pane.
+      [{ id: "s1:odd", tmuxPane: "%9" }],
+    );
+    try {
+      setup.mockInput.pressEnter();
+      await frame();
+      expect(switchToPaneSpy).toHaveBeenCalledTimes(1);
+      expect(switchToPaneSpy.mock.calls[0]?.[0]).toBe("%9");
+    } finally {
+      restoreExit();
       restore();
     }
   });

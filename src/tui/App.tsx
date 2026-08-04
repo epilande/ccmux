@@ -145,6 +145,32 @@ function sessionCwd(session: EnrichedSession): string {
   return session.paneCwd ?? session.cwd;
 }
 
+/**
+ * The live session a Worktrees-panel row's session id stands for.
+ *
+ * Rows can carry a SYNTHETIC id: the daemon folds a worktree-isolated subagent
+ * into its worktree's row as `${parent.id}:${agentId}` with the parent's pane
+ * (`worktreeSessionsByRoot`), and a teammate-only worktree's row is nothing
+ * BUT that. A plain `find` by such an id matches nothing, which would strand
+ * the row's actions on a session that is right there — so a miss falls back to
+ * the part before the first colon, which is the orchestrator the fold already
+ * routes the pane to.
+ *
+ * Split on MISS rather than always: a real session id could contain a colon,
+ * and truncating one would resolve to the wrong session (or a stranger's).
+ */
+function resolveWorktreeSession(
+  sessions: readonly EnrichedSession[],
+  id: string,
+): EnrichedSession | undefined {
+  const direct = sessions.find((s) => s.id === id);
+  if (direct) return direct;
+  const colon = id.indexOf(":");
+  if (colon === -1) return undefined;
+  const parentId = id.slice(0, colon);
+  return sessions.find((s) => s.id === parentId);
+}
+
 /** Shown when the daemon predates `GET /agents`. Exported for the test that
  *  pins the wording to the restart the fix actually needs. */
 export const STALE_DAEMON_HINT =
@@ -438,7 +464,7 @@ export function App(props: AppProps) {
       return;
     }
     const session = target.sessionId
-      ? store.state.sessions.find((s) => s.id === target.sessionId)
+      ? resolveWorktreeSession(store.state.sessions, target.sessionId)
       : undefined;
     // Close FIRST, like every other panel action. The panel is a full-screen
     // opaque overlay that also swallows every key, so the send-review confirm
@@ -482,7 +508,7 @@ export function App(props: AppProps) {
    */
   function jumpToWorktreeSession(session: WorktreeSession) {
     store.actions.hideWorktrees();
-    const enriched = store.state.sessions.find((s) => s.id === session.id);
+    const enriched = resolveWorktreeSession(store.state.sessions, session.id);
     if (enriched) {
       activateSession(enriched);
       return;
