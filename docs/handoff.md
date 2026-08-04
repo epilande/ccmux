@@ -312,17 +312,21 @@ printf 'line one\nline two\n' | ccmux send <id> --stdin --no-enter
 
 ## TUI
 
-### Hand off to…
+### Hand off
 
-The picker's row menu (right-click, or `m` on the selected row) has a **Hand off to…** item, offered on any row while another session is on the board. It starts a pick-a-target mode rather than opening a second list: the session list itself becomes the target picker, with a banner naming the source (`⇄ Hand off from <agent · project> · pick a target · enter send · esc cancel`). While aiming, `j`/`k` and the arrows move, `Enter` or a click on a row sends, `Esc` or `q` cancels, and every other key is swallowed so `x` is never one keystroke from killing the row being pointed at.
+The picker's row menu (right-click, or `m` on the selected row) has a **Hand off** item, offered on any row while another session is on the board. It starts a pick-a-target mode rather than opening a second list: the session list itself becomes the target picker, with a banner naming the source (`⇄ Hand off from <agent · project> · pick a target · enter send · esc cancel`). While aiming, `j`/`k` and the arrows move, `Enter` or a click on a row sends, `Esc` or `q` cancels, and every other key is swallowed so `x` is never one keystroke from killing the row being pointed at.
 
 Both ends go to `POST /handoff` as session ids with `turns: 1`, so no ambiguity refusal is possible here (the pick is the disambiguation). The outcome lands in a toast: `Handed 532 chars to <target>`, `Queued for <target> (1,769 chars); it lands when the turn ends`, or `Handoff refused: <the daemon's reason, verbatim>`.
 
 While a handoff is queued for a session, its row carries a **⇄** badge. It is driven straight off `pendingHandoff`, so it appears and clears with the SSE update that changed the fact, with no client-side timer, and it survives sidebar width.
 
-### Copy last response
+### Copy
 
-The row menu also has a **Copy last response** item. It reads the same transcript endpoint with `turns=1` and puts the text on the clipboard, reporting the result in a toast (`Copied 1,234 chars`, plus `(truncated)` or `(pane capture)` when either applies). It is hidden for a row with neither a pane nor a transcript path, and every other refusal comes back from the daemon into the toast.
+The row menu also has a **Copy** item. It opens a small centered dialog asking how much of the conversation to take, rather than copying at once. The dialog opens on **Last response** (one turn), so the fast path is menu, Copy, `Enter`.
+
+While it is open: `j`/`k` (and the arrows) count turns between 1 and `MAX_TURNS` (20), a digit jumps straight to a count (a leading `1` or `2` also waits for one more digit, so `1` `2` is 12 and `2` `5` is 5), `Enter` copies, `Esc` cancels, and any other key dismisses it without copying. Past one turn the dialog reads **Last N turns (with your prompts)**, which is what the payload becomes.
+
+The copy reads the same transcript endpoint with `turns=N`. One turn is the response on its own; more than one is rendered by the same `renderTurns` that `ccmux last` prints, `user:` / `assistant:` prefixes and all, so the clipboard and the CLI produce identical text for the same turns. The result lands in a toast (`Copied 1,234 chars`, plus `(truncated)` or `(pane capture)` when either applies). The item is hidden for a row with neither a pane nor a transcript path, and every other refusal comes back from the daemon into the toast.
 
 Two clipboard tiers, tried in an order that depends on where the picker is running (`src/tui/utils/clipboard.ts`):
 
@@ -348,9 +352,11 @@ POST /handoff  {from, to?, turns?, note?, callerPane?, spawn?}
 | :------------------------------------------------------- | :------------------------------------------------ |
 | Session reference resolution (tiers, proximity, refusal) | `src/daemon/session-ref.ts`                       |
 | Backwards line walk, JSONL turn fold, size guards        | `src/daemon/transcript-read.ts`                   |
+| Shared turn rendering (`ccmux last` and the TUI's Copy)  | `src/daemon/transcript-read.ts` (`renderTurns`)   |
 | Per-agent readers + registry                             | `src/daemon/transcript-readers/`                  |
 | Provenance header, compose, queue                        | `src/daemon/handoff.ts`                           |
 | Endpoints, guard stack, delivery, `--spawn`              | `src/daemon/server.ts`                            |
 | Shared delivery-safety guards                            | `src/daemon/send-guards.ts`                       |
 | `ccmux last` / `ccmux handoff` CLIs                      | `src/commands/last.ts`, `src/commands/handoff.ts` |
 | TUI clipboard tiers                                      | `src/tui/utils/clipboard.ts`                      |
+| The Copy dialog (row budget, turn label)                 | `src/tui/components/CopyDialog.tsx`               |

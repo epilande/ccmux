@@ -183,7 +183,7 @@ Callers pass the caller's `$TMUX_PANE` as `callerPane` (`GET /transcript` as a q
 
 ## Reading a session's last response (`/transcript`)
 
-`GET /sessions/:ref/transcript?turns=N` answers with the last N completed turns of a session's conversation, read from the agent's own transcript. `ccmux last` is the CLI over it; `POST /handoff` and the TUI's "Copy last response" are its other two consumers.
+`GET /sessions/:ref/transcript?turns=N` answers with the last N completed turns of a session's conversation, read from the agent's own transcript. `ccmux last` is the CLI over it; `POST /handoff` and the TUI's row-menu "Copy" (whose dialog picks the turn count, and which renders anything past one turn through the same `renderTurns` the CLI prints) are its other two consumers.
 
 The read is split the same way the invoke path is: `transcript-read.ts` holds the primitives (a backwards line walk, the JSONL turn fold, the size guards) and `transcript-readers/` holds one file per agent plus a registry. Adding an agent is a new file and one entry; nothing in the endpoint changes. A reader returning `null` (no path, unreadable file, no completed turn yet) means "fall back to the pane" to its caller.
 

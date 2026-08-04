@@ -73,6 +73,8 @@ import {
 } from "./components/NewSessionDialog";
 import { newSessionOptions } from "./new-session-options";
 import { NoticeDialog } from "./components/NoticeDialog";
+import { CopyDialog } from "./components/CopyDialog";
+import { MAX_TURNS, renderTurns } from "../daemon/transcript-read";
 import { slugFromPrompt, slugify } from "../daemon/worktree-create";
 import {
   failureNeedsAcknowledgement,
@@ -593,7 +595,8 @@ export function App(props: AppProps) {
       store.state.previewFocused ||
       store.state.newSession !== null ||
       store.state.prune !== null ||
-      store.state.notice !== null
+      store.state.notice !== null ||
+      store.state.copyDialog !== null
     );
   }
 
@@ -997,29 +1000,34 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Put this session's last response on the clipboard.
+   * Put `turns` of this session's conversation on the clipboard.
    *
-   * Asynchronous by design: the menu is already closed when this starts, and
+   * Asynchronous by design: the dialog is already closed when this starts, and
    * the toast is the only thing that reports how it went. Blocking the picker
    * on a daemon read would freeze every row over one row's transcript.
    *
    * `turns=1` is exactly one assistant entry (the frozen contract), so the
    * join below is a formality that keeps this honest if the endpoint ever
-   * answers with more.
+   * answers with more. Past one, the text is composed by the SAME renderer
+   * `ccmux last` prints, so the two surfaces cannot drift into two formats for
+   * the same exchange.
    */
-  async function copyLastResponse(session: EnrichedSession) {
-    store.actions.showToast("Copying last response…", 10_000);
+  async function copyLastResponse(session: EnrichedSession, turns = 1) {
+    store.actions.showToast(
+      turns === 1 ? "Copying last response…" : `Copying last ${turns} turns…`,
+      10_000,
+    );
     try {
       const url = new URL(
         `${getDaemonUrl()}/sessions/${session.id}/transcript`,
       );
-      url.searchParams.set("turns", "1");
+      url.searchParams.set("turns", String(turns));
       const response = await fetch(url, {
         signal: AbortSignal.timeout(10_000),
       });
       const data = (await response.json()) as {
         source?: string;
-        turns?: { text?: string }[];
+        turns?: { role?: string; text?: string }[];
         truncated?: boolean;
         error?: string;
       };
@@ -1032,11 +1040,22 @@ export function App(props: AppProps) {
         );
         return;
       }
-      const text = (data.turns ?? [])
-        .map((turn) => turn.text ?? "")
-        .join("\n\n")
-        .trim();
-      if (!text) {
+      const received = data.turns ?? [];
+      const text =
+        turns === 1
+          ? received
+              .map((turn) => turn.text ?? "")
+              .join("\n\n")
+              .trim()
+          : renderTurns(
+              received.map((turn) => ({
+                role: turn.role === "user" ? "user" : "assistant",
+                text: turn.text ?? "",
+              })),
+            );
+      // Trimmed for the TEST only: a multi-turn payload keeps whatever
+      // whitespace the CLI would have printed, byte for byte.
+      if (!text.trim()) {
         store.actions.showToast("Nothing to copy: no response yet", 3_000);
         return;
       }
@@ -1073,7 +1092,87 @@ export function App(props: AppProps) {
     if (!cm) return;
     const session = store.state.sessions.find((s) => s.id === cm.sessionId);
     store.actions.hideContextMenu();
-    if (session) void copyLastResponse(session);
+    if (session) store.actions.openCopyDialog(session.id);
+  }
+
+  /** The row the open Copy dialog is copying FROM, or undefined once it has
+   *  left the board (an SSE removal under an open dialog). */
+  function copyDialogSession(): EnrichedSession | undefined {
+    const open = store.state.copyDialog;
+    if (!open) return undefined;
+    return store.state.sessions.find((s) => s.id === open.sessionId);
+  }
+
+  /** Close the Copy dialog and start the copy it was configuring. */
+  function commitCopyDialog(): void {
+    const open = store.state.copyDialog;
+    if (!open) return;
+    const session = copyDialogSession();
+    store.actions.closeCopyDialog();
+    if (!session) {
+      store.actions.showToast("The session being copied is gone", 4_000);
+      return;
+    }
+    void copyLastResponse(session, open.turns);
+  }
+
+  /**
+   * The Copy dialog's key model.
+   *
+   * It owns j/k (and the arrows), Enter, Escape and the digits; every other
+   * key closes it WITHOUT copying and without acting on the board. That last
+   * half is where it parts company with the row menu, whose dismissing key
+   * goes on to mean what it always means: the menu is a small popup anchored
+   * beside a row, while this is a modal box over the middle of the list, and a
+   * `x` that both dismissed it and reached the board would be one keystroke
+   * from killing the row it was copying.
+   *
+   * Digits jump straight to a count. A leading `1` or `2` is the only
+   * ambiguous one (11-20 exist), so it takes effect immediately AND waits for
+   * one more digit: a second digit that lands inside the range replaces it
+   * (`1` `2` -> 12), one that would overshoot starts a fresh count (`2` `5` ->
+   * 5), and anything else just goes on meaning what it means with the leading
+   * digit already applied. There is no timer, so the same keys always produce
+   * the same count.
+   */
+  function handleCopyDialogKey(
+    event: KeyEvent,
+    open: NonNullable<typeof store.state.copyDialog>,
+  ): void {
+    const key = event.name;
+    event.preventDefault();
+
+    if (key === "j" || key === "down") {
+      store.actions.setCopyDialogTurns(open.turns + 1);
+      return;
+    }
+    if (key === "k" || key === "up") {
+      store.actions.setCopyDialogTurns(open.turns - 1);
+      return;
+    }
+    if (key === "return" || key === "enter") {
+      commitCopyDialog();
+      return;
+    }
+    if (key === "escape") {
+      store.actions.closeCopyDialog();
+      return;
+    }
+    if (key >= "0" && key <= "9") {
+      const digit = parseInt(key, 10);
+      if (open.pendingDigit) {
+        const combined = open.turns * 10 + digit;
+        if (combined <= MAX_TURNS) {
+          store.actions.setCopyDialogTurns(combined);
+          return;
+        }
+      }
+      // A bare 0 is not a count and nothing here can start with one.
+      if (digit === 0) return;
+      store.actions.setCopyDialogTurns(digit, digit * 10 <= MAX_TURNS);
+      return;
+    }
+    store.actions.closeCopyDialog();
   }
 
   /**
@@ -1103,8 +1202,9 @@ export function App(props: AppProps) {
     return store.state.sessions.find((s) => s.id === pick.fromSessionId);
   }
 
-  /** How a session is named while a handoff is being aimed or reported. Agent
-   *  plus project is what tells two rows of the same board apart. */
+  /** How a session is named while a handoff is being aimed or reported, and
+   *  in the Copy dialog's title. Agent plus project is what tells two rows of
+   *  the same board apart. */
   function handoffLabel(session: EnrichedSession): string {
     return session.project
       ? `${session.agentType} · ${session.project}`
@@ -1217,11 +1317,13 @@ export function App(props: AppProps) {
     const copyItem: ContextMenuItem[] = canCopyLastResponse(session)
       ? [
           {
+            // The id stays what it always was: it is identity, not copy, and
+            // the keyboard highlight is stored as one (see `ContextMenuItem`).
             id: "copy-last-response",
-            // Exactly the 18 columns ContextMenu gives a hintless label; see
-            // "Move changes" on why a label that wraps breaks the menu's own
-            // height.
-            label: "Copy last response",
+            // The action it opens asks HOW MUCH to copy, so the item is the
+            // verb alone; the dialog says the rest in full sentences it has
+            // the width for.
+            label: "Copy",
             hint: "",
             color: theme.text,
             action: contextMenuCopyLastResponse,
@@ -1238,7 +1340,7 @@ export function App(props: AppProps) {
         ? [
             {
               id: "handoff-to",
-              label: "Hand off to…",
+              label: "Hand off",
               hint: "",
               color: theme.text,
               action: contextMenuHandoff,
@@ -2678,6 +2780,14 @@ export function App(props: AppProps) {
       return;
     }
 
+    // Above the new-session dialog for the same reason the notice is: nothing
+    // opens both, but a key that reached two overlays at once would act on the
+    // one the user cannot see.
+    if (store.state.copyDialog) {
+      handleCopyDialogKey(event, store.state.copyDialog);
+      return;
+    }
+
     if (store.state.newSession) {
       handleNewSessionKey(event);
       return;
@@ -3269,6 +3379,21 @@ export function App(props: AppProps) {
               title={notice().title}
               lines={notice().lines}
               onDismiss={dismissNotice}
+            />
+          )}
+        </Show>
+
+        <Show when={store.state.copyDialog}>
+          {(copy: () => NonNullable<typeof store.state.copyDialog>) => (
+            <CopyDialog
+              // The row can leave the board under an open dialog; the dialog
+              // stays (Enter then reports the loss rather than copying), so
+              // the title falls back to the id it still holds.
+              label={(() => {
+                const session = copyDialogSession();
+                return session ? handoffLabel(session) : copy().sessionId;
+              })()}
+              turns={copy().turns}
             />
           )}
         </Show>

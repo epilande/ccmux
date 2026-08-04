@@ -1,10 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import {
-  createLastCommand,
-  renderCandidates,
-  renderTurns,
-  resolutionEcho,
-} from "./last";
+import { createLastCommand, renderCandidates, resolutionEcho } from "./last";
+import { renderTurns } from "../daemon/transcript-read";
 import type { SessionRefCandidate } from "../daemon/session-ref";
 
 describe("renderTurns", () => {

@@ -36,6 +36,7 @@ import {
   PLACEMENT_OPTIONS,
   UNTRACKED_OPTIONS,
 } from "./new-session-options";
+import { MAX_TURNS } from "../daemon/transcript-read";
 import type { TranscriptMatch } from "../daemon/transcript-search";
 import type { UntrackedMode } from "../daemon/worktree-move-changes";
 // The daemon's own slug rule, imported rather than mirrored: a name the
@@ -377,6 +378,25 @@ interface TUIState {
    * choosing, and a snapshot of the session would hand off yesterday's row.
    */
   handoffPick: { fromSessionId: string } | null;
+  /**
+   * The open Copy dialog, or null. `sessionId` is the row whose response is
+   * being copied, held by ID for the same reason the handoff pick is: SSE
+   * re-sorts the board while the dialog is up.
+   *
+   * `turns` is how much of the conversation to take, 1..MAX_TURNS, and 1 (the
+   * last response on its own) is what it opens on, so the fast path is menu,
+   * Copy, Enter.
+   *
+   * `pendingDigit` is true while a leading `1` or `2` is waiting to see
+   * whether a second digit follows. It lives here rather than as a local
+   * signal because it is part of what the number keys mean, and a half-typed
+   * count that outlived its dialog is not a state this surface can be in.
+   */
+  copyDialog: {
+    sessionId: string;
+    turns: number;
+    pendingDigit: boolean;
+  } | null;
   /** Open new-session dialog, or null when it is closed. */
   newSession: NewSessionDraft | null;
   /** Agent last spawned from the dialog, the default when the selected row
@@ -705,6 +725,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     contextMenu: null,
     groupContextMenu: null,
     handoffPick: null,
+    copyDialog: null,
     newSession: null,
     lastSpawnAgent: options.lastSpawnAgent ?? null,
     columns: options.columns,
@@ -1614,6 +1635,31 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     endHandoffPick() {
       setState("handoffPick", null);
+    },
+
+    /** Open the Copy dialog on a row, asking for the last response. */
+    openCopyDialog(sessionId: string) {
+      setState("copyDialog", { sessionId, turns: 1, pendingDigit: false });
+    },
+
+    /**
+     * Set how many turns the open Copy dialog would take, clamped to the range
+     * the endpoint accepts. Clamped HERE rather than at each caller because
+     * three of them can push past an edge: j/k at both ends, and a typed
+     * second digit.
+     */
+    setCopyDialogTurns(turns: number, pendingDigit = false) {
+      if (!state.copyDialog) return;
+      const clamped = Math.min(MAX_TURNS, Math.max(1, Math.round(turns)));
+      setState("copyDialog", {
+        ...state.copyDialog,
+        turns: clamped,
+        pendingDigit,
+      });
+    },
+
+    closeCopyDialog() {
+      setState("copyDialog", null);
     },
 
     /** Light a specific item of whichever menu is open, or nothing. */

@@ -45,6 +45,21 @@ export interface TranscriptResult {
 }
 
 /**
+ * Render turns as the text a human reads or pastes. A single entry prints
+ * bare (it IS the last response); several print with `user:` / `assistant:`
+ * labels so the exchange reads in order.
+ *
+ * It lives in this leaf module, rather than beside either caller, because it
+ * has TWO: `ccmux last` prints it and the picker's Copy dialog puts it on the
+ * clipboard. Both surfaces have to produce byte-identical text for the same
+ * turns, and one formatter is the only way that stays true.
+ */
+export function renderTurns(turns: TranscriptTurn[]): string {
+  if (turns.length === 1) return turns[0].text;
+  return turns.map((turn) => `${turn.role}:\n${turn.text}`).join("\n\n");
+}
+
+/**
  * The session facts a reader may need. Deliberately not "a file of lines":
  * the OpenCode reader queries SQLite by native session id and the Gemini
  * reader locates a whole-file JSON by cwd, so both live behind this same

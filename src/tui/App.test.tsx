@@ -13,6 +13,7 @@ import type { SSECallbacks } from "./utils/sse";
 import * as clipboard from "./utils/clipboard";
 import { mockEnrichedSession, squish } from "./components/test-helpers";
 import { HANDOFF_BADGE } from "./components/session-columns";
+import { MAX_TURNS, renderTurns } from "../daemon/transcript-read";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -4092,7 +4093,7 @@ describe("App move-changes menu gate", () => {
       "Attach",
       "New session",
       "Review diff",
-      "Copy last response",
+      "Copy",
       "Move changes",
       "Restart",
       "Kill",
@@ -4393,8 +4394,8 @@ describe("App move-changes menu gate", () => {
       setup.mockInput.pressKey("m");
       await settle();
       await setup.renderOnce();
-      // Attach -> New session -> Review diff -> Copy last response ->
-      // Restart. (No Fork: the row is not forkable here.)
+      // Attach -> New session -> Review diff -> Copy -> Restart. (No Fork:
+      // the row is not forkable here.)
       for (const _ of [0, 1, 2, 3]) {
         setup.mockInput.pressKey("j");
         await setup.renderOnce();
@@ -6015,8 +6016,8 @@ describe("App row menu (m)", () => {
   });
 });
 /**
- * "Copy last response": the row-menu item, the one request it makes, and what
- * the toast says about what actually landed on the clipboard.
+ * "Copy": the row-menu item, the dialog it opens, the request that dialog
+ * makes, and what the toast says about what actually landed on the clipboard.
  *
  * `copyToClipboard` is spied rather than left real: the fallback tier spawns
  * `pbcopy`, and a test suite that quietly replaces the developer's clipboard
@@ -6024,6 +6025,14 @@ describe("App row menu (m)", () => {
  */
 describe("App copy last response", () => {
   const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  /**
+   * The Copy item as the MENU draws it: the box border, the row's own
+   * padding, then the label. Anchored that way because the label is now a
+   * prefix of what the toasts say ("Copying…", "Copied 11 chars"), and a bare
+   * "Copy" would match a frame where the menu had closed.
+   */
+  const MENU_COPY = "│ Copy ";
 
   let copySpy: ReturnType<typeof spyOn<typeof clipboard, "copyToClipboard">>;
   /** What `copyToClipboard` was handed, newest last. */
@@ -6095,12 +6104,22 @@ describe("App copy last response", () => {
     await setup.renderOnce();
   };
 
-  /** Open the row's menu with `m` and activate the copy item. */
-  async function activateCopy() {
+  /** Open the row's menu with `m` and activate the copy item, which opens the
+   *  dialog without copying anything. */
+  async function openCopyDialog() {
     await press("m");
-    // Attach -> New session -> Review diff -> Copy last response.
+    // Attach -> New session -> Review diff -> Copy.
     for (const _ of [0, 1, 2]) await press("j");
-    expect(setup.captureCharFrame()).toContain("Copy last response");
+    expect(setup.captureCharFrame()).toContain(MENU_COPY);
+    setup.mockInput.pressEnter();
+    await settle();
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("Last response");
+  }
+
+  /** The whole fast path: menu, Copy, Enter. */
+  async function activateCopy() {
+    await openCopyDialog();
     setup.mockInput.pressEnter();
     await settle();
     await setup.renderOnce();
@@ -6111,7 +6130,7 @@ describe("App copy last response", () => {
     try {
       await renderRow();
       await press("m");
-      expect(setup.captureCharFrame()).toContain("Copy last response");
+      expect(setup.captureCharFrame()).toContain(MENU_COPY);
     } finally {
       restore();
     }
@@ -6125,7 +6144,7 @@ describe("App copy last response", () => {
       await renderRow();
       await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("Copy last response");
+      expect(setup.captureCharFrame()).toContain(MENU_COPY);
     } finally {
       restore();
     }
@@ -6143,8 +6162,8 @@ describe("App copy last response", () => {
           .findIndex((line) => line.includes(text));
       // By ORDER, not presence: a menu draws one row per item, so an item in
       // the wrong place moves every row below it.
-      expect(lineOf("Review diff")).toBeLessThan(lineOf("Copy last response"));
-      expect(lineOf("Copy last response")).toBeLessThan(lineOf("Restart"));
+      expect(lineOf("Review diff")).toBeLessThan(lineOf(MENU_COPY));
+      expect(lineOf(MENU_COPY)).toBeLessThan(lineOf("Restart"));
       expect(lineOf("Restart")).toBeLessThan(lineOf("Kill"));
     } finally {
       restore();
@@ -6164,7 +6183,7 @@ describe("App copy last response", () => {
       // Anchored on the background menu, so this can't pass by opening the
       // ordinary one.
       expect(frame).toContain("Attach agent");
-      expect(frame).toContain("Copy last response");
+      expect(frame).toContain(MENU_COPY);
     } finally {
       restore();
     }
@@ -6181,7 +6200,7 @@ describe("App copy last response", () => {
       await press("m");
       const frame = setup.captureCharFrame();
       expect(frame).toContain("Attach agent");
-      expect(frame).not.toContain("Copy last response");
+      expect(frame).not.toContain(MENU_COPY);
     } finally {
       restore();
     }
@@ -6198,8 +6217,10 @@ describe("App copy last response", () => {
       expect(copied).toEqual(["hello there"]);
       const frame = squish(setup.captureCharFrame());
       expect(frame).toContain("Copied11chars");
-      // The menu closed on activation; the toast is the only report.
-      expect(frame).not.toContain("Copylastresponse");
+      // Menu and dialog are both gone; the toast is the only report. Anchored
+      // on a label only the menu draws, since "Copy" now prefixes the toast.
+      expect(frame).not.toContain("Restart");
+      expect(frame).not.toContain("Lastresponse");
     } finally {
       restore();
     }
@@ -6300,14 +6321,172 @@ describe("App copy last response", () => {
       restore();
     }
   });
+
+  it("opens the dialog without copying anything", async () => {
+    const { asked, restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      // The menu is gone and the dialog is up, but nothing has been read or
+      // copied yet: the count is still a question.
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("Copyfromclaude");
+      expect(frame).not.toContain("Restart");
+      expect(asked).toEqual([]);
+      expect(copied).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("counts turns up and down with j/k, and stops at both ends", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      await press("j");
+      expect(squish(setup.captureCharFrame())).toContain(
+        "Last2turns(withyourprompts)",
+      );
+      await press("k");
+      expect(squish(setup.captureCharFrame())).toContain("Lastresponse");
+      // Below one there is nothing to copy, and above MAX_TURNS the endpoint
+      // clamps anyway; both ends hold rather than wrapping.
+      await press("k");
+      expect(squish(setup.captureCharFrame())).toContain("Lastresponse");
+      for (let i = 0; i < MAX_TURNS + 3; i++) await press("j");
+      expect(squish(setup.captureCharFrame())).toContain(`Last${MAX_TURNS}`);
+    } finally {
+      restore();
+    }
+  });
+
+  it("jumps to a count on a single digit", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      await press("5");
+      expect(squish(setup.captureCharFrame())).toContain("Last5turns");
+    } finally {
+      restore();
+    }
+  });
+
+  it("lets a leading 1 or 2 grow into a two-digit count", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      // The leading digit takes effect at once, so a `1` that is never
+      // followed still means one turn.
+      await press("1");
+      expect(squish(setup.captureCharFrame())).toContain("Lastresponse");
+      await press("2");
+      expect(squish(setup.captureCharFrame())).toContain("Last12turns");
+    } finally {
+      restore();
+    }
+  });
+
+  it("starts a fresh count when a second digit would overshoot", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      await press("2");
+      // 25 is past MAX_TURNS, so the 5 is read as a count of its own rather
+      // than silently clamping to 20.
+      await press("5");
+      expect(squish(setup.captureCharFrame())).toContain("Last5turns");
+    } finally {
+      restore();
+    }
+  });
+
+  it("asks for the count it is showing and formats the exchange like the CLI", async () => {
+    const { asked, restore } = withDaemon({
+      status: 200,
+      body: {
+        source: "transcript",
+        turns: [
+          { role: "assistant", text: "older" },
+          { role: "user", text: "then I asked" },
+          { role: "assistant", text: "newer" },
+        ],
+        truncated: false,
+      },
+    });
+    try {
+      await renderRow();
+      await openCopyDialog();
+      await press("3");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain("turns=3");
+      // Byte for byte what `ccmux last --turns 3` prints, because it is the
+      // same renderer.
+      expect(copied).toEqual([
+        renderTurns([
+          { role: "assistant", text: "older" },
+          { role: "user", text: "then I asked" },
+          { role: "assistant", text: "newer" },
+        ]),
+      ]);
+      expect(squish(setup.captureCharFrame())).toContain("Copied");
+    } finally {
+      restore();
+    }
+  });
+
+  it("closes on escape without reading or copying", async () => {
+    const { asked, restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      await press("escape");
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).not.toContain("Lastresponse");
+      expect(asked).toEqual([]);
+      expect(copied).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("dismisses on any other key, and that key does not reach the board", async () => {
+    const { asked, restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      await press("x");
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).not.toContain("Lastresponse");
+      // The kill confirmation is what `x` means on the list. A modal box over
+      // the middle of the rows must not put it one keystroke away.
+      expect(frame).not.toContain("KillSession?");
+      expect(asked).toEqual([]);
+      expect(copied).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
 });
 /**
- * "Hand off to…": the row-menu item, the transient pick-target mode it opens
- * on the ordinary list, the one request that mode makes, and what the toast
- * says about each of the endpoint's three outcomes.
+ * "Hand off": the row-menu item, the transient pick-target mode it opens on
+ * the ordinary list, the one request that mode makes, and what the toast says
+ * about each of the endpoint's three outcomes.
  */
 describe("App hand off to", () => {
   const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  /** The two read items as the MENU draws them (border, padding, label), so
+   *  neither can be matched by the pick banner or a toast that starts with
+   *  the same words. */
+  const MENU_COPY = "│ Copy ";
+  const MENU_HANDOFF = "│ Hand off ";
 
   /** Answers the menu's fetches; `handoff` is what `POST /handoff` replies. */
   function withDaemon(
@@ -6362,9 +6541,9 @@ describe("App hand off to", () => {
   /** Open the top row's menu with `m` and activate the handoff item. */
   async function startPick() {
     await press("m");
-    // Attach -> New session -> Review diff -> Copy last response -> Hand off.
+    // Attach -> New session -> Review diff -> Copy -> Hand off.
     for (const _ of [0, 1, 2, 3]) await press("j");
-    expect(setup.captureCharFrame()).toContain("Hand off to");
+    expect(setup.captureCharFrame()).toContain(MENU_HANDOFF);
     setup.mockInput.pressEnter();
     await settle();
     await setup.renderOnce();
@@ -6382,7 +6561,7 @@ describe("App hand off to", () => {
     try {
       await renderRows();
       await press("m");
-      expect(setup.captureCharFrame()).toContain("Hand off to");
+      expect(setup.captureCharFrame()).toContain(MENU_HANDOFF);
     } finally {
       restore();
     }
@@ -6396,7 +6575,7 @@ describe("App hand off to", () => {
       await renderRows();
       await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("Hand off to");
+      expect(setup.captureCharFrame()).toContain(MENU_HANDOFF);
     } finally {
       restore();
     }
@@ -6414,8 +6593,8 @@ describe("App hand off to", () => {
           .findIndex((line) => line.includes(text));
       // By ORDER, not presence: a menu draws one row per item, so an item in
       // the wrong place moves every row below it.
-      expect(lineOf("Copy last response")).toBeLessThan(lineOf("Hand off to"));
-      expect(lineOf("Hand off to")).toBeLessThan(lineOf("Restart"));
+      expect(lineOf(MENU_COPY)).toBeLessThan(lineOf(MENU_HANDOFF));
+      expect(lineOf(MENU_HANDOFF)).toBeLessThan(lineOf("Restart"));
       expect(lineOf("Restart")).toBeLessThan(lineOf("Kill"));
     } finally {
       restore();
@@ -6428,8 +6607,8 @@ describe("App hand off to", () => {
       await renderRows([{}]);
       await press("m");
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Copy last response");
-      expect(frame).not.toContain("Hand off to");
+      expect(frame).toContain(MENU_COPY);
+      expect(frame).not.toContain(MENU_HANDOFF);
     } finally {
       restore();
     }
