@@ -123,15 +123,27 @@ export function wrapText(text: string, width: number): string[] {
   return lines.length > 0 ? lines : [""];
 }
 
-/** What a draft needs from the row budget, without any of the width-dependent
- *  detail: one row per field it renders. */
-export interface DialogShape {
+/**
+ * Which mode a draft is in, flattened to the booleans the budget turns on.
+ * Named once and shared by the three functions below, so a mode added later
+ * cannot be taught to one of them and forgotten by the next.
+ */
+export interface DialogModeShape {
   moveChanges: boolean;
   /** Continuing a session rather than starting one, which drops the agent
    *  and prompt rows and locks the destination. */
   fork: boolean;
   /** The name row is shown, i.e. this spawn is making a worktree. */
   namesAWorktree: boolean;
+  /** Starting in a worktree that is already on disk, which creates nothing
+   *  and so drops the destination row along with the name and untracked
+   *  rows that the other two modes hide on their own terms. */
+  existingWorktree: boolean;
+}
+
+/** What a draft needs from the row budget, without any of the width-dependent
+ *  detail: one row per field it renders. */
+export interface DialogShape extends DialogModeShape {
   /** Rows the agent field would like: one for its dropdown pill, or its
    *  error's wrapped lines. The only field that can want more than one row —
    *  every option list lives in an overlay outside the budget. */
@@ -152,20 +164,17 @@ type FieldRows = Record<NewSessionField, number>;
  * error: a new member of `NewSessionField` fails to typecheck until it says
  * how many rows it wants.
  */
-function floorFieldRows(shape: {
-  moveChanges: boolean;
-  fork: boolean;
-  namesAWorktree: boolean;
-}): FieldRows {
+function floorFieldRows(shape: DialogModeShape): FieldRows {
   return {
     // Neither survives a fork: it continues the source's agent, and it
     // continues a conversation rather than opening one with a first message.
     agent: shape.fork ? 0 : 1,
     placement: 1,
     prompt: shape.fork ? 0 : 1,
-    // Present in every mode: a locked one-row restatement where the
-    // destination is fixed (a move, a fork), the choice otherwise.
-    destination: 1,
+    // A locked one-row restatement where the destination is fixed (a move, a
+    // fork), the choice otherwise — and nothing at all where the session is
+    // going into a checkout that already exists, which is neither.
+    destination: shape.existingWorktree ? 0 : 1,
     worktreeName: shape.namesAWorktree ? 1 : 0,
     untracked: shape.moveChanges ? 1 : 0,
   };
@@ -183,11 +192,7 @@ const sumFieldRows = (rows: FieldRows): number =>
  * the fields are not on screen, and a `2` that changed an invisible choice
  * would be the worst version of running out of room.
  */
-export function newSessionFloorRows(shape: {
-  moveChanges: boolean;
-  fork: boolean;
-  namesAWorktree: boolean;
-}): number {
+export function newSessionFloorRows(shape: DialogModeShape): number {
   // Border (2) + title, then the fields.
   return 3 + sumFieldRows(floorFieldRows(shape));
 }
@@ -208,8 +213,9 @@ export interface DialogRowPlan {
   showButtons: boolean;
   showDirectory: boolean;
   /** The one-line footnote a mode adds under the directory: what a move costs
-   *  the checkout named above it, or which session a fork continues. One flag
-   *  because it is one row, given up at one point in the order below. */
+   *  the checkout named above it, which session a fork continues, or which
+   *  existing worktree is being started in. One flag because it is one row,
+   *  given up at one point in the order below. */
   showModeNote: boolean;
   showKeyHints: boolean;
   agentRows: number;
@@ -260,7 +266,7 @@ export function planDialogRows(
     showFieldSpacers: true,
     showButtons: true,
     showDirectory: true,
-    showModeNote: shape.moveChanges || shape.fork,
+    showModeNote: shape.moveChanges || shape.fork || shape.existingWorktree,
     showKeyHints: shape.keyHints,
     // A fork has no agent row at all, so it asks for none rather than for the
     // one row `Math.max` would floor an empty list at.
@@ -383,6 +389,27 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   /** Continuing an existing session rather than starting a new one: no agent
    *  and no prompt to choose, and a destination that says where it continues. */
   const forking = () => props.draft.fork;
+
+  /** Starting in a worktree that is already on disk (issue #102): an ordinary
+   *  spawn whose directory was chosen in the Worktrees panel, so every row
+   *  about creating a worktree is gone. */
+  const existingWorktree = () => props.draft.existingWorktree;
+
+  /** Whether the Where row exists at all. The same condition
+   *  `newSessionFields` filters on and the budget counts zero rows for: a row
+   *  drawn past the budget lands on its neighbour rather than clipping. */
+  const showDestination = () => existingWorktree() === null;
+
+  /**
+   * What to call the worktree a session is being started in: the last segment
+   * of its path, which is the name it was created under. The full path is the
+   * Directory row's job.
+   */
+  const existingWorktreeName = () => {
+    const path = existingWorktree();
+    if (!path) return "";
+    return path.replace(/\/+$/, "").split("/").pop() || path;
+  };
 
   /** Whether the Where row is a statement rather than a choice: a move has
    *  nowhere to go but a new worktree, and a fork whose source is outside a
@@ -553,6 +580,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     moveChanges: moveChanges(),
     fork: forking() !== null,
     namesAWorktree: namesAWorktree(),
+    existingWorktree: existingWorktree() !== null,
   }));
 
   /**
@@ -799,8 +827,17 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
 
   /** What the mode's footnote says, and what to label it. A move reports what
    *  it costs the directory named directly above; a fork names the session it
-   *  continues, which is the one thing that row cannot say. */
+   *  continues, which is the one thing that row cannot say; a spawn into an
+   *  existing worktree names the worktree, which the path above only spells
+   *  out. */
   const modeNote = (): { label: string; text: string; color: string } => {
+    if (existingWorktree()) {
+      return {
+        label: "Worktree",
+        text: truncateText(existingWorktreeName(), contentWidth()),
+        color: theme.green,
+      };
+    }
     const fork = forking();
     if (fork) {
       return {
@@ -891,7 +928,9 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 ? "Fork session"
                 : moveChanges()
                   ? truncateText("Move changes to worktree", width() - 4)
-                  : "New session"}
+                  : existingWorktree()
+                    ? truncateText("New session in worktree", width() - 4)
+                    : "New session"}
             </strong>
           </text>
         </box>
@@ -982,31 +1021,38 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           </box>
         </Show>
 
-        <Show when={destinationLocked()}>
-          <FieldGap />
-          {/* Locked, so it is drawn like Directory rather than as a field: no
-            focus marker and no number keys, because a row that looks
-            selectable but refuses every key reads as broken. The changes have
-            nowhere to go but a new worktree, and a fork of a session outside a
-            repository has nowhere to put one — either way there is no second
-            choice to offer. */}
-          <box flexDirection="row" height={1}>
-            <box width={LABEL_WIDTH} paddingLeft={1}>
-              <text fg={theme.overlay}>Where</text>
+        {/* No Where row at all when the session is going into a worktree that
+          already exists: the panel row it was opened from IS the destination,
+          so both options would be a choice already made. Gated on the same
+          condition `newSessionFields` filters on and the budget counts zero
+          rows for. */}
+        <Show when={showDestination()}>
+          <Show when={destinationLocked()}>
+            <FieldGap />
+            {/* Locked, so it is drawn like Directory rather than as a field: no
+              focus marker and no number keys, because a row that looks
+              selectable but refuses every key reads as broken. The changes have
+              nowhere to go but a new worktree, and a fork of a session outside a
+              repository has nowhere to put one — either way there is no second
+              choice to offer. */}
+            <box flexDirection="row" height={1}>
+              <box width={LABEL_WIDTH} paddingLeft={1}>
+                <text fg={theme.overlay}>Where</text>
+              </box>
+              <box width={1 + CONTROL_GAP} />
+              <text fg={theme.green}>{lockedDestinationLabel()}</text>
             </box>
-            <box width={1 + CONTROL_GAP} />
-            <text fg={theme.green}>{lockedDestinationLabel()}</text>
-          </box>
-        </Show>
+          </Show>
 
-        <Show when={!destinationLocked()}>
-          <FieldGap />
-          {/* Just the choice. The name the worktree option would create used
-            to be appended here and truncated against what the row had left,
-            which at this dialog's width meant committing to `fix-sidebar-…`
-            (issue #83). Selecting it opens a row of its own below, where the
-            name is both legible and editable. */}
-          <OptionRow field="destination" label="Where" />
+          <Show when={!destinationLocked()}>
+            <FieldGap />
+            {/* Just the choice. The name the worktree option would create used
+              to be appended here and truncated against what the row had left,
+              which at this dialog's width meant committing to `fix-sidebar-…`
+              (issue #83). Selecting it opens a row of its own below, where the
+              name is both legible and editable. */}
+            <OptionRow field="destination" label="Where" />
+          </Show>
         </Show>
 
         <Show when={namesAWorktree()}>
