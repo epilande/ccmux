@@ -20,6 +20,7 @@ import {
   describeSkip,
   detailSegments,
   fitSegments,
+  titleSegments,
   dirtyPhrases,
   formatTracking,
   isLivenessSkip,
@@ -285,7 +286,15 @@ describe("WorktreesPanel loading", () => {
     const shown = await frame();
     expect(shown).toContain("main checkout");
     expect(shown).toContain("alpha");
-    expect(shown).toContain("Checking for finished worktrees");
+    // The in-flight scan is said once, on the title line above the list.
+    const [scanningAt, mainAt, alphaAt] = orderOf(
+      shown,
+      "scanning",
+      "main checkout",
+      "alpha",
+    );
+    expect(scanningAt).toBeLessThan(mainAt!);
+    expect(mainAt).toBeLessThan(alphaAt!);
     // Nothing is prune-selectable yet, so no row may show a checkbox.
     expect(shown).not.toContain("[ ]");
   });
@@ -347,6 +356,180 @@ describe("WorktreesPanel loading", () => {
     expect(recovered).toContain("main checkout");
     expect(recovered).toContain("alpha");
     expect(recovered).not.toContain("daemon is down");
+  });
+});
+
+/**
+ * Phase 2 lands a few hundred ms after phase 1 and re-sorts the list while
+ * the reader is looking at it. The title carries a scanning suffix for
+ * exactly that window, so the re-sort reads as the scan finishing instead of
+ * as a flicker. It is decoration and nothing else: every key keeps working
+ * throughout, and the suffix costs no rows.
+ */
+describe("WorktreesPanel scanning indicator", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  const twoRows = listOf([mainRow(), row()]);
+  /** A landed scan that moves `alpha` into the removable section. */
+  const merged: ScanResponse = { candidates: [candidate()], skipped: [] };
+
+  it("carries the suffix on the title line while the scan is pending", async () => {
+    const pending = deferred<Response>();
+    const { frame } = await mountPanel({
+      list: async () => json(twoRows),
+      scan: () => pending.promise,
+    });
+
+    const shown = await frame();
+    // On the TITLE, above every row, rather than in a status row of its own.
+    const title = lineWith(shown, "scanning");
+    expect(title).toContain("Worktrees");
+    const [scanningAt, mainAt, alphaAt] = orderOf(
+      shown,
+      "scanning",
+      "main checkout",
+      "alpha",
+    );
+    expect(scanningAt).toBeLessThan(mainAt!);
+    expect(mainAt).toBeLessThan(alphaAt!);
+    // The session list's working spinner, not a second vocabulary.
+    expect(
+      DOT_SPINNER_FRAMES.some((f) => title.includes(f)),
+      `no spinner frame in ${JSON.stringify(title)}`,
+    ).toBe(true);
+  });
+
+  // The indicator says something is happening; it must never be something
+  // that HAS to happen before the panel answers a key.
+  it("gates nothing while the scan is pending", async () => {
+    const pending = deferred<Response>();
+    const { keys, frame } = await mountPanel({
+      list: async () => json(twoRows),
+      scan: () => pending.promise,
+    });
+
+    await frame();
+    keys.pressKey("j");
+    const moved = await frame();
+    expect(moved).toContain("scanning");
+    expect(lineWith(moved, "alpha")).toContain("▎");
+  });
+
+  it("drops the suffix when the scan lands", async () => {
+    const pending = deferred<Response>();
+    const { frame } = await mountPanel({
+      list: async () => json(twoRows),
+      scan: () => pending.promise,
+    });
+
+    expect(await frame()).toContain("scanning");
+    pending.resolve(json(merged));
+    const landed = await frame();
+    expect(landed).not.toContain("scanning");
+    // ...and what it was waiting on is what the reader now sees: the row has
+    // sunk into the removable section under its rule.
+    const [titleAt, mainAt, ruleAt, alphaAt] = orderOf(
+      landed,
+      "Worktrees",
+      "main checkout",
+      "removable",
+      "alpha",
+    );
+    expect(titleAt).toBeLessThan(mainAt!);
+    expect(mainAt).toBeLessThan(ruleAt!);
+    expect(ruleAt).toBeLessThan(alphaAt!);
+  });
+
+  it("drops the suffix when the scan fails, leaving one error line", async () => {
+    const pending = deferred<Response>();
+    const { frame } = await mountPanel({
+      list: async () => json(twoRows),
+      scan: () => pending.promise,
+    });
+
+    expect(await frame()).toContain("scanning");
+    pending.reject(new Error("gh exploded"));
+    const failed = await frame();
+    expect(failed).not.toContain("scanning");
+    // The existing failure line says it once; the title says nothing.
+    expect(failed).toContain("Prune scan failed: gh exploded");
+    expect(lineWith(failed, "Worktrees")).not.toContain("scan");
+  });
+
+  it("advances the spinner while the scan is pending", async () => {
+    const pending = deferred<Response>();
+    const { frame } = await mountPanel({
+      list: async () => json(twoRows),
+      scan: () => pending.promise,
+    });
+
+    const frames = [...DOT_SPINNER_FRAMES];
+    const glyphOf = (text: string) =>
+      frames.find((f) => lineWith(text, "scanning").includes(f));
+    const before = glyphOf(await frame());
+    expect(before).toBeDefined();
+    // The real shared interval, which is what the title icon acquires.
+    await new Promise((resolve) =>
+      setTimeout(resolve, SPINNER_INTERVAL_MS + 80),
+    );
+    const after = glyphOf(await frame());
+    expect(after).toBeDefined();
+    expect(after).not.toBe(before);
+  });
+
+  // At sidebar widths the title is the thing worth keeping. OpenTUI wraps
+  // rather than clips, so an overlong title line does not truncate, it
+  // vanishes out of its `height={1}` box.
+  it("drops the suffix rather than the title when it cannot fit", async () => {
+    const pending = deferred<Response>();
+    const { frame } = await mountPanel(
+      { list: async () => json(twoRows), scan: () => pending.promise },
+      { compact: true, width: 24 },
+    );
+    const narrow = await frame();
+    expect(narrow).toContain("Worktrees");
+    expect(narrow).not.toContain("scanning");
+  });
+
+  // Tab re-fires both phases, and the slow scan from the previous scope is
+  // still out there. The generation guard owns which one may speak.
+  it("shows the suffix again for a re-fired scan and ignores the stale one", async () => {
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    const scans = [first, second];
+    let handed = 0;
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(twoRows),
+        scan: () => (scans[handed++] ?? second).promise,
+      },
+      { repo: "/repo" },
+    );
+
+    expect(await frame()).toContain("scanning");
+    keys.pressTab();
+    expect(await frame()).toContain("scanning");
+    expect(handed).toBe(2);
+
+    // The previous scope's scan lands late: it must not clear the indicator
+    // for the scan that is still running, nor merge its rows.
+    first.resolve(json(merged));
+    const stale = await frame();
+    expect(stale).toContain("scanning");
+    expect(stale).not.toContain("removable");
+
+    second.resolve(json(emptyScan));
+    const settled = await frame();
+    expect(settled).not.toContain("scanning");
+    expect(settled).toContain("Worktrees");
   });
 });
 
@@ -533,9 +716,9 @@ describe("WorktreesPanel structure", () => {
     );
     const columnOf = (line: string, needle: string) => line.indexOf(needle);
     // A kept row: name and detail start in the same column.
-    expect(
-      columnOf(lineWith(settled, "main checkout"), "main checkout"),
-    ).toBe(columnOf(lineWith(settled, "1 modified"), "1 modified"));
+    expect(columnOf(lineWith(settled, "main checkout"), "main checkout")).toBe(
+      columnOf(lineWith(settled, "1 modified"), "1 modified"),
+    );
     // A removable row: both shift right by the wider marker, together.
     const nameCol = columnOf(lineWith(settled, "alpha  "), "alpha");
     const detailCol = columnOf(lineWith(settled, "PR #68"), "PR #68");
@@ -1303,6 +1486,43 @@ describe("fitSegments", () => {
   });
 });
 
+describe("titleSegments", () => {
+  const title = "Worktrees · ccmux";
+  const suffix = " · ◐ scanning";
+
+  it("keeps the scanning suffix when both fit", () => {
+    expect(titleSegments(title, suffix, 40).map((s) => s.text)).toEqual([
+      title,
+      suffix,
+    ]);
+  });
+
+  // Whole, not truncated: half a word ("· ◐ scann…") is noise, and the columns
+  // it eats are the ones naming the repo.
+  it("drops the suffix rather than truncating it", () => {
+    const fitted = titleSegments(title, suffix, displayWidth(title) + 4);
+    expect(fitted.map((s) => s.text)).toEqual([title]);
+  });
+
+  it("keeps the whole suffix at the exact width it fits in", () => {
+    const exact = displayWidth(title) + displayWidth(suffix);
+    expect(titleSegments(title, suffix, exact)).toHaveLength(2);
+    expect(titleSegments(title, suffix, exact - 1)).toHaveLength(1);
+  });
+
+  it("still fits the title itself, which OpenTUI would wrap away", () => {
+    for (let width = 1; width <= displayWidth(title) + 2; width++) {
+      const fitted = titleSegments(title, suffix, width);
+      const used = fitted.reduce((n, s) => n + displayWidth(s.text), 0);
+      expect(used).toBeLessThanOrEqual(width);
+    }
+  });
+
+  it("renders the bare title when nothing is scanning", () => {
+    expect(titleSegments(title, null, 40).map((s) => s.text)).toEqual([title]);
+  });
+});
+
 /** The detail line as one string, which is how a reader sees it. */
 function detailText(entry: PanelRow, dirtyOk = false): string {
   return detailSegments(entry, { compact: false, dirtyOk })
@@ -1385,9 +1605,9 @@ describe("row line 1", () => {
 
 describe("row detail line", () => {
   it("draws nothing for a healthy, quiet, clean worktree", () => {
-    expect(detailSegments(panelRow(), { compact: false, dirtyOk: false })).toEqual(
-      [],
-    );
+    expect(
+      detailSegments(panelRow(), { compact: false, dirtyOk: false }),
+    ).toEqual([]);
     // ...which is what lets such a row collapse to a single line.
     expect(rowVisualHeight(panelRow(), false)).toBe(1);
   });
@@ -1408,13 +1628,17 @@ describe("row detail line", () => {
   it("says what is gone rather than a bare gone", () => {
     expect(
       formatTracking(
-        row({ upstream: { upstream: "origin/x", gone: true, ahead: 0, behind: 0 } }),
+        row({
+          upstream: { upstream: "origin/x", gone: true, ahead: 0, behind: 0 },
+        }),
       ),
     ).toBe("branch gone");
     expect(formatTracking(row())).toBe("");
     expect(
       formatTracking(
-        row({ upstream: { upstream: "origin/x", gone: false, ahead: 2, behind: 1 } }),
+        row({
+          upstream: { upstream: "origin/x", gone: false, ahead: 2, behind: 1 },
+        }),
       ),
     ).toBe("↑2 ↓1");
     expect(
@@ -1627,7 +1851,9 @@ describe("row detail line", () => {
   // A row nobody can remove has no opt-in to offer.
   it("leaves a healthy dirty row's counts unqualified", () => {
     const text = detailText(
-      panelRow({ row: row({ dirty: { dirty: true, modified: 3, untracked: 0 } }) }),
+      panelRow({
+        row: row({ dirty: { dirty: true, modified: 3, untracked: 0 } }),
+      }),
     );
     expect(text).toBe("3 modified");
   });

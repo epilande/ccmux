@@ -331,6 +331,33 @@ export function fitSegments(
   return kept;
 }
 
+/**
+ * The title line: the panel's name, plus the scanning suffix when phase 2 is
+ * still in flight.
+ *
+ * The suffix rides the title so the indicator costs no rows at all, and it is
+ * ALL OR NOTHING rather than fitted alongside the title. `fitSegments` would
+ * happily hand back `Worktrees · rep… · ◐ scan…`, which spends the columns
+ * that name the repo on a word it then truncates into nonsense; at sidebar
+ * widths the title is the thing worth keeping, so the suffix is dropped whole
+ * the moment both do not fit. The title itself is still fitted, because
+ * OpenTUI wraps rather than clips and a wrapped line in a `height={1}` box
+ * disappears entirely.
+ */
+export function titleSegments(
+  title: string,
+  suffix: string | null,
+  width: number,
+): RowSegment[] {
+  if (suffix !== null && displayWidth(title) + displayWidth(suffix) <= width) {
+    return [
+      { text: title, fg: theme.text },
+      { text: suffix, fg: theme.overlay },
+    ];
+  }
+  return fitSegments([{ text: title, fg: theme.text }], width);
+}
+
 /** Dirty rows stay flagged yellow unless the cursor is on them. */
 function rowColor(entry: PanelRow, isCursor: boolean): string {
   if (isCursor) return theme.text;
@@ -928,7 +955,9 @@ const RemovalConfirm: Component<{
  * whether a line exists.
  */
 export function rowVisualHeight(entry: PanelRow, compact = false): number {
-  return 1 + (detailPhrases(entry, { dirtyOk: false, compact }).length > 0 ? 1 : 0);
+  return (
+    1 + (detailPhrases(entry, { dirtyOk: false, compact }).length > 0 ? 1 : 0)
+  );
 }
 
 /** Where each row starts, and how tall it is, in the scrollbox's own units. */
@@ -1210,6 +1239,37 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const only = repos.length === 1 ? repos[0] : undefined;
     return only ? `Worktrees · ${only.repoName}` : "Worktrees";
   };
+
+  /**
+   * Whether phase 2 is still in flight.
+   *
+   * Derived from the merge's own inputs rather than kept as a second flag, so
+   * the indicator cannot disagree with the data it describes. That also makes
+   * it right across the generation counter for free: `load()` clears both
+   * before firing, so a re-fired scan (Tab, `r`) shows the indicator again,
+   * and every completion returns early on a stale generation, so a slow scan
+   * from the previous scope can never clear a newer one's indicator.
+   */
+  const scanning = (): boolean => scan() === null && scanError() === null;
+
+  // Purely decorative, and gated on `scanning()` so the shared spinner
+  // interval is released the moment the scan lands. Nothing keys off it: the
+  // list is fully navigable, selectable and actionable throughout phase 1.
+  const scanIcon = useStatusIcon(
+    () => (scanning() ? "working" : "idle"),
+    () => null,
+    // Spelled out, never left to default: `getAnimationFrames` only animates
+    // a style it was given, so an undefined one renders a STATIC dot here.
+    () => props.iconStyle ?? "dot",
+  );
+
+  /** The muted tail on the title line, or null when there is nothing to say. */
+  const scanSuffix = (): string | null =>
+    scanning() ? ` · ${scanIcon()} scanning` : null;
+
+  const titleLine = createMemo(() =>
+    titleSegments(panelTitle(), scanSuffix(), contentWidth()),
+  );
 
   function flash(message: string): void {
     setNote(message);
@@ -1580,10 +1640,19 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       paddingLeft={1}
       paddingRight={1}
     >
-      <box justifyContent="center" width="100%" height={1}>
-        <text fg={theme.text}>
-          <strong>{truncateText(panelTitle(), contentWidth())}</strong>
+      {/* No justifyContent here: with flexDirection="row" it would center the
+          title horizontally, where the pre-scanning-suffix box only centered
+          vertically (a height-1 no-op) and the header has always read as
+          left-aligned like every other dialog's. */}
+      <box width="100%" height={1} flexDirection="row">
+        <text fg={titleLine()[0]?.fg ?? theme.text}>
+          <strong>{titleLine()[0]?.text ?? ""}</strong>
         </text>
+        <Show when={titleLine()[1]}>
+          {(segment: () => RowSegment) => (
+            <text fg={segment().fg}>{segment().text}</text>
+          )}
+        </Show>
       </box>
 
       {/* One always-present growing body. A `flexGrow` scrollbox that only
@@ -1727,7 +1796,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                           with a tee, so the rail runs into it. */}
                       <Show when={split().removable.length > 0}>
                         <box height={1} flexDirection="row">
-                          <text fg={theme.overlay}>{" "}</text>
+                          <text fg={theme.overlay}> </text>
                           <text fg={theme.overlay}>
                             {dividerText(
                               split().removable.length,
@@ -1740,7 +1809,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                         {(entry, index) =>
                           // With no kept rows the divider is the group's first
                           // line, so every removable row still hangs off it.
-                          renderRow(entry, index() > 0 || split().kept.length > 0)
+                          renderRow(
+                            entry,
+                            index() > 0 || split().kept.length > 0,
+                          )
                         }
                       </For>
                     </box>
@@ -1750,11 +1822,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             </scrollbox>
           </Show>
 
-          <Show when={scan() === null && scanError() === null}>
-            <box height={1}>
-              <text fg={theme.overlay}>Checking for finished worktrees...</text>
-            </box>
-          </Show>
+          {/* The in-flight scan is announced on the TITLE line and nowhere
+              else. It used to have its own row here, which stated the fact a
+              second time and, worse, took its row back when the scan landed:
+              the whole list stepped down one line in the same frame the
+              re-sort moved rows around, which is the "glitch" the title
+              suffix exists to replace. */}
           <Show when={scanError()}>
             <box height={1}>
               <text fg={theme.yellow}>
