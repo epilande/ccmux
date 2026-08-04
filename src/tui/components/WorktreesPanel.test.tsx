@@ -22,6 +22,7 @@ import {
   fitSegments,
   dirtyPhrases,
   formatTracking,
+  isLivenessSkip,
   normalizeScan,
   orderRepos,
   partitionSelection,
@@ -1513,6 +1514,84 @@ describe("row detail line", () => {
       }),
     );
     expect(text.match(/locked/g)).toHaveLength(1);
+  });
+
+  /**
+   * The scan's liveness gate and the session summary are the same fact, and
+   * the summary says it better (it names the agent and counts them). This
+   * showed up live as "agent working here · 4 modified · claude working".
+   */
+  it("lets the session summary speak for a live worktree", () => {
+    const text = detailText(
+      panelRow({
+        row: row({ sessions: [session({ status: "working" })] }),
+        skip: {
+          path: "/repo/wt/alpha",
+          repoRoot: "/repo",
+          branch: "feat/alpha",
+          reason: "an agent is working here",
+        },
+      }),
+    );
+    expect(text).toBe("claude working");
+    expect(text).not.toContain("agent working here");
+  });
+
+  // Without a summary to defer to, the gate is the only thing that knows.
+  it("keeps the liveness reason when there is no session to state it", () => {
+    const text = detailText(
+      panelRow({
+        skip: {
+          path: "/repo/wt/alpha",
+          repoRoot: "/repo",
+          branch: "feat/alpha",
+          reason: "an agent is idle here",
+        },
+      }),
+    );
+    expect(text).toBe("agent idle here");
+  });
+
+  // A lock is not a liveness fact, so it survives alongside the summary.
+  it("keeps a locked row's lock beside its session summary", () => {
+    const text = detailText(
+      panelRow({
+        row: row({ locked: true, sessions: [session({ status: "idle" })] }),
+        skip: {
+          path: "/repo/wt/alpha",
+          repoRoot: "/repo",
+          branch: "feat/alpha",
+          reason: "locked",
+        },
+      }),
+    );
+    expect(text).toBe("locked · claude idle");
+  });
+
+  // Nor is an unresolvable PR state: nothing else on the row carries it.
+  it("keeps a non-liveness reason beside the session summary", () => {
+    const text = detailText(
+      panelRow({
+        row: row({ sessions: [session({ status: "idle" })] }),
+        skip: {
+          path: "/repo/wt/alpha",
+          repoRoot: "/repo",
+          branch: "feat/alpha",
+          reason: "PR state could not be determined: gh is not installed",
+        },
+      }),
+    );
+    expect(text).toContain("PR state could not be determined");
+    expect(text).toContain("claude idle");
+  });
+
+  it("recognizes the liveness gate by the daemon's own wording", () => {
+    expect(isLivenessSkip("an agent is working here")).toBe(true);
+    expect(isLivenessSkip("an agent is idle here")).toBe(true);
+    expect(isLivenessSkip("an agent is waiting here")).toBe(true);
+    // Anything unrecognized keeps its phrase rather than losing the fact.
+    expect(isLivenessSkip("locked")).toBe(false);
+    expect(isLivenessSkip("PR state could not be determined: x")).toBe(false);
   });
 
   it("names one agent and counts several", () => {

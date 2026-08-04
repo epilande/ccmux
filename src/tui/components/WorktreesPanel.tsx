@@ -436,6 +436,18 @@ export function describeReason(candidate: PruneCandidate): string {
 }
 
 /**
+ * Whether a skip reason is the daemon's agent-LIVENESS gate.
+ *
+ * Matched on the daemon's raw wording rather than on the trimmed phrase, and
+ * deliberately narrow: anything it does not recognize is treated as carrying
+ * an independent fact and kept. Failing that way round shows a redundant
+ * phrase, where the other way round would lose one.
+ */
+export function isLivenessSkip(reason: string): boolean {
+  return /^an agent is /.test(reason);
+}
+
+/**
  * A withheld worktree's reason, in the panel's voice. The daemon writes full
  * sentences (`an agent is working here`); this trims the article so the
  * phrase sits in a `·`-separated line without dominating it. Anything it does
@@ -510,11 +522,24 @@ export function detailPhrases(
   // Locked comes off the worktree itself, not off the scan, so it is already
   // true on the first paint. The scan's own `locked` skip would say it twice.
   if (row.locked) phrases.push({ text: "locked", fg: theme.overlay });
-  // The scan's own `locked` skip says the same thing, so it is dropped only
-  // when the row already said it. Dropping it unconditionally would lose the
-  // fact entirely on a row whose lock the phase-1 read did not report.
-  const skipText = entry.skip ? describeSkip(entry.skip.reason) : "";
-  if (skipText && !(row.locked && skipText === "locked")) {
+  // Two ways a skip repeats something already on the row, and neither may be
+  // dropped unconditionally.
+  //
+  // `locked` is dropped only when the row itself already said it, because a
+  // lock the phase-1 read missed would otherwise vanish entirely.
+  //
+  // The agent-liveness gate ("an agent is working here") was a PROXY for the
+  // session summary, which now states the same thing with more precision and
+  // a count. It is dropped only when that summary will actually be drawn, so
+  // a session-less row the daemon saw an agent in still says so rather than
+  // saying nothing.
+  const skipReason = entry.skip?.reason ?? "";
+  const skipText = skipReason ? describeSkip(skipReason) : "";
+  const sessionsText = describeSessions(row.sessions);
+  const alreadySaid =
+    (row.locked && skipText === "locked") ||
+    (sessionsText !== "" && isLivenessSkip(skipReason));
+  if (skipText && !alreadySaid) {
     phrases.push({ text: skipText, fg: theme.overlay });
   }
   // A removable row leads with its REASON, and its tracking state is either
@@ -556,9 +581,11 @@ export function detailPhrases(
   } else {
     phrases.push(...dirtySegments);
   }
-  const sessions = describeSessions(row.sessions);
-  if (sessions) {
-    phrases.push({ text: sessions, fg: statusColor(leadStatus(row.sessions)) });
+  if (sessionsText) {
+    phrases.push({
+      text: sessionsText,
+      fg: statusColor(leadStatus(row.sessions)),
+    });
   }
   if (candidate && candidate.ignoredFiles.length > 0) {
     phrases.push({
