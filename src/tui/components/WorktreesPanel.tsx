@@ -835,6 +835,31 @@ export function plural(count: number, one: string, many: string): string {
 }
 
 /**
+ * Whether a prune run went entirely to plan: something was removed, nothing
+ * was refused, and no step failed along the way (a failed step on a removed
+ * worktree, like a surviving branch or a skipped liveness check, is still
+ * something the user should see). This is the gate for skipping the outcome
+ * screen: its per-row detail is the point when anything went sideways, and
+ * pure ceremony when every line would be a green check.
+ */
+export function pruneFullySucceeded(result: PruneRunResult): boolean {
+  return (
+    result.outcomes.length > 0 &&
+    result.outcomes.every(
+      (outcome) =>
+        outcome.removed &&
+        outcome.error == null &&
+        outcome.steps.every((step) => step.ok),
+    )
+  );
+}
+
+/** The title-line notice a fully successful removal leaves behind. */
+export function removalNotice(count: number): string {
+  return `removed ${plural(count, "worktree", "worktrees")}`;
+}
+
+/**
  * The removal's headline, as a sentence rather than a schema.
  *
  * `Delete 1 worktree(s), 1 branch(es)?` made the reader parse a form to learn
@@ -1129,6 +1154,8 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   /** True while the panel is narrowed to `props.repo`; Tab flips it. */
   const [scoped, setScoped] = createSignal(props.repo !== null);
   const [note, setNote] = createSignal<string | null>(null);
+  /** A fully successful removal's title-line notice; the next load wipes it. */
+  const [titleNotice, setTitleNotice] = createSignal<string | null>(null);
   let listBox: ScrollBoxRenderable | undefined;
   /** Bumped when the scrollbox is measured or resized, so the scroll effect
    *  re-runs once there is a real viewport height to fit the cursor into. */
@@ -1319,12 +1346,22 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     () => props.iconStyle ?? "dot",
   );
 
-  /** The muted tail on the title line, or null when there is nothing to say. */
-  const scanSuffix = (): string | null =>
-    scanning() ? ` · ${scanIcon()} scanning` : null;
+  /**
+   * The muted tail on the title line, or null when there is nothing to say.
+   * A removal notice and the scanning announcement can coexist: a fully
+   * successful prune reloads in place, so its notice rides the very rescan
+   * it triggered.
+   */
+  const titleSuffix = (): string | null => {
+    const parts: string[] = [];
+    const notice = titleNotice();
+    if (notice) parts.push(` · ${notice}`);
+    if (scanning()) parts.push(` · ${scanIcon()} scanning`);
+    return parts.length > 0 ? parts.join("") : null;
+  };
 
   const titleLine = createMemo(() =>
-    titleSegments(panelTitle(), scanSuffix(), contentWidth()),
+    titleSegments(panelTitle(), titleSuffix(), contentWidth()),
   );
 
   function flash(message: string): void {
@@ -1345,6 +1382,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     setPhase("loading");
     setScan(null);
     setScanError(null);
+    // A removal notice describes the run that led HERE; any further load
+    // (Tab, `r`, a reopen) is news that supersedes it. The success path sets
+    // its notice AFTER calling load(), so the one reload it rides survives.
+    setTitleNotice(null);
 
     const listUrl = new URL(`${getDaemonUrl()}/worktrees`);
     if (filter) listUrl.searchParams.set("repo", filter);
@@ -1492,6 +1533,17 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         };
         if (!response.ok)
           throw new Error(data.error ?? `HTTP ${response.status}`);
+        if (pruneFullySucceeded(data)) {
+          // Straight back to the list: the outcome screen earns its keep with
+          // per-row detail, which an all-green run has none of. The removed
+          // paths are gone, so the selection and its opt-ins go with them
+          // rather than waiting for the rescan to filter them.
+          setSelected(new Set<string>());
+          setDirtyOk(new Set<string>());
+          load();
+          setTitleNotice(removalNotice(data.outcomes.length));
+          return;
+        }
         setResult(data);
         setPhase("done");
       })

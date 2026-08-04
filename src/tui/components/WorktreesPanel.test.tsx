@@ -3,6 +3,8 @@ import { testRender } from "@opentui/solid";
 import { createMockKeys } from "@opentui/core/testing";
 import type {
   PruneCandidate,
+  PruneOutcome,
+  PruneRunResult,
   ScanResponse,
   WorktreeSession,
 } from "../../daemon/worktree-prune";
@@ -26,7 +28,9 @@ import {
   isLivenessSkip,
   orderRepos,
   partitionSelection,
+  pruneFullySucceeded,
   removalDetails,
+  removalNotice,
   detailGutter,
   labelColumnWidth,
   markerWidth,
@@ -132,6 +136,25 @@ function candidate(overrides: Partial<PruneCandidate> = {}): PruneCandidate {
 
 function panelRow(overrides: Partial<PanelRow> = {}): PanelRow {
   return { row: row(), candidate: null, skip: null, pr: null, ...overrides };
+}
+
+function outcome(overrides: Partial<PruneOutcome> = {}): PruneOutcome {
+  return {
+    path: "/repo/wt/alpha",
+    repoRoot: "/repo",
+    branch: "feat/alpha",
+    reason: "pr-merged",
+    removed: true,
+    trashPath: null,
+    branchDeleted: true,
+    panesClosed: [],
+    steps: [{ step: "remove worktree", ok: true, detail: "removed" }],
+    ...overrides,
+  };
+}
+
+function runResult(outcomes: PruneOutcome[]): PruneRunResult {
+  return { outcomes, state: [], dryRun: false };
 }
 
 /** One `GET /worktrees` body, grouping rows by the repo they name. */
@@ -2486,6 +2509,102 @@ describe("partitionSelection", () => {
     );
     expect(removable).toEqual([]);
     expect(blockedDirty).toEqual([]);
+  });
+});
+
+describe("pruneFullySucceeded", () => {
+  it("holds only when every worktree was removed with every step ok", () => {
+    expect(
+      pruneFullySucceeded(runResult([outcome(), outcome({ path: "/b" })])),
+    ).toBe(true);
+  });
+
+  it("fails on a refusal, a recorded error, or a failed step", () => {
+    expect(pruneFullySucceeded(runResult([outcome({ removed: false })]))).toBe(
+      false,
+    );
+    expect(pruneFullySucceeded(runResult([outcome({ error: "boom" })]))).toBe(
+      false,
+    );
+    // A removed worktree can still carry a failed step (a surviving branch,
+    // a skipped liveness check); that detail must stay on screen.
+    expect(
+      pruneFullySucceeded(
+        runResult([
+          outcome({
+            steps: [
+              {
+                step: "live-pane check skipped",
+                ok: false,
+                detail: "tmux could not be listed",
+              },
+            ],
+          }),
+        ]),
+      ),
+    ).toBe(false);
+  });
+
+  it("treats an empty run as not a success", () => {
+    expect(pruneFullySucceeded(runResult([]))).toBe(false);
+  });
+});
+
+describe("removalNotice", () => {
+  it("pluralizes for real", () => {
+    expect(removalNotice(1)).toBe("removed 1 worktree");
+    expect(removalNotice(3)).toBe("removed 3 worktrees");
+  });
+});
+
+describe("WorktreesPanel prune outcome", () => {
+  it("returns to the list with a title notice when every removal succeeded", async () => {
+    const { keys, frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => json({ candidates: [candidate()], skipped: [] }),
+      prune: async () => json(runResult([outcome()])),
+    });
+    await frame();
+    keys.pressKey("j");
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    expect(await frame()).toContain("Remove worktrees?");
+    keys.pressKey("y");
+    await frame();
+    const after = await frame();
+    // Back on the list (freshly reloaded), not parked on the outcome screen...
+    expect(after).not.toContain("✓");
+    expect(after).toContain("main checkout");
+    // ...with the run's one-line record riding the title.
+    expect(after).toContain("removed 1 worktree");
+  });
+
+  it("keeps the outcome screen when anything failed", async () => {
+    const { keys, frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => json({ candidates: [candidate()], skipped: [] }),
+      prune: async () =>
+        json(
+          runResult([
+            outcome(),
+            outcome({
+              path: "/repo/wt/bravo",
+              removed: false,
+              steps: [{ step: "refused", ok: false, detail: "occupied" }],
+            }),
+          ]),
+        ),
+    });
+    await frame();
+    keys.pressKey("j");
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    keys.pressKey("y");
+    await frame();
+    const after = await frame();
+    // The partial failure is exactly what the per-row screen exists for.
+    expect(after).toContain("✗ /repo/wt/bravo");
+    expect(after).not.toContain("removed 2 worktrees");
   });
 });
 
