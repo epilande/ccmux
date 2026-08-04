@@ -98,6 +98,13 @@ export interface ListDeps {
 const DIRTY_CONCURRENCY = 8;
 
 /**
+ * How many repos are listed at once. Each one fans out up to
+ * {@link DIRTY_CONCURRENCY} `git status` processes of its own, so this is a
+ * multiplier, not a budget: 3 repos in flight is already 24 processes.
+ */
+const REPO_CONCURRENCY = 3;
+
+/**
  * List one repo's worktrees. Null when `repoRoot` is not a git repo, or is one
  * with nothing to show — the caller drops those rather than rendering an empty
  * group.
@@ -171,14 +178,17 @@ export async function listAllWorktrees(
   deps: ListDeps = {},
 ): Promise<WorktreeListResponse> {
   const seen = new Set<string>();
-  const repos: WorktreeRepo[] = [];
-  for (const root of repoRoots) {
+  const roots = repoRoots.filter((root) => {
     const key = normalizePath(root);
-    if (seen.has(key)) continue;
+    if (seen.has(key)) return false;
     seen.add(key);
-    const repo = await listRepoWorktrees(root, deps);
-    if (repo) repos.push(repo);
-  }
+    return true;
+  });
+
+  const listed = await mapWithConcurrency(roots, REPO_CONCURRENCY, (root) =>
+    listRepoWorktrees(root, deps),
+  );
+  const repos = listed.filter((repo): repo is WorktreeRepo => repo !== null);
   repos.sort((a, b) => a.repoName.localeCompare(b.repoName));
   return { repos };
 }

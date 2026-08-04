@@ -132,6 +132,8 @@ export class ClaudeLogAdapter implements LogAdapter {
   private subagentWatcher: FSWatcher | null = null;
   private watchedSubagentDirs = new Set<string>();
   private subagentFileOffsets = new Map<string, number>();
+  // Transcripts whose head facts are settled — see `handleSubagentChange`.
+  private subagentHeadResolved = new Set<string>();
   private dirActivityCache = new Map<
     string,
     { checkedAt: number; active: boolean }
@@ -208,6 +210,7 @@ export class ClaudeLogAdapter implements LogAdapter {
     }
     this.watchedSubagentDirs.clear();
     this.subagentFileOffsets.clear();
+    this.subagentHeadResolved.clear();
     this.dirActivityCache.clear();
   }
 
@@ -326,6 +329,7 @@ export class ClaudeLogAdapter implements LogAdapter {
     for (const path of this.subagentFileOffsets.keys()) {
       if (path.startsWith(subagentDir)) {
         this.subagentFileOffsets.delete(path);
+        this.subagentHeadResolved.delete(path);
       }
     }
   }
@@ -416,6 +420,7 @@ export class ClaudeLogAdapter implements LogAdapter {
     for (const path of this.subagentFileOffsets.keys()) {
       if (path.startsWith(subagentDir)) {
         this.subagentFileOffsets.delete(path);
+        this.subagentHeadResolved.delete(path);
       }
     }
 
@@ -432,14 +437,21 @@ export class ClaudeLogAdapter implements LogAdapter {
     if (!session) return;
 
     const existing = session.subagents.find((s) => s.agentId === agentId);
-    // Spawn time and worktree are both immutable head facts, so a successful
-    // read is carried forward and a failed (null) one retries on the next
-    // change event. They are resolved together, and only when something is
-    // still missing, so a busy subagent does not re-read its own head on
-    // every append.
+    // Spawn time and worktree are both immutable head facts, resolved
+    // together and carried forward. A just-created transcript may not have
+    // flushed its head line yet, so a read that finds nothing has to retry on
+    // the next change event — but the retry must END, or a busy subagent
+    // re-reads its own head on every append (readFileSync of the meta file
+    // plus a 256KB-and-doubling head scan, both synchronous on the daemon
+    // loop, both growing with the transcript). A found cwd is what settles
+    // it: the head answer cannot change after that, worktree or not, and a
+    // null worktree is then the ANSWER rather than a missing read.
     let startedAt = existing?.startedAt ?? null;
     let worktreePath = existing?.worktreePath ?? null;
-    if (startedAt === null || worktreePath === null) {
+    if (
+      !this.subagentHeadResolved.has(path) &&
+      (startedAt === null || worktreePath === null)
+    ) {
       worktreePath ??= readSubagentWorktreePath(path);
       if (startedAt === null || worktreePath === null) {
         const facts = readFirstEntryFacts(path);
@@ -451,6 +463,7 @@ export class ClaudeLogAdapter implements LogAdapter {
         // already on, so every plain subagent would duplicate its orchestrator
         // there and flip that row's Enter from "spawn" to "jump".
         worktreePath ??= isWorktreeCheckoutPath(facts.cwd) ? facts.cwd : null;
+        if (facts.cwd !== null) this.subagentHeadResolved.add(path);
       }
     }
 

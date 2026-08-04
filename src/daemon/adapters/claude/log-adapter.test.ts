@@ -1,9 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "fs";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
+import {
+  appendFileSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { ClaudeLogAdapter } from "./log-adapter";
 import { SessionManager } from "../../sessions";
+import * as parser from "../../parser";
 import type { SessionState } from "../../../types/session";
 
 const SESSION_ID = "11111111-2222-3333-4444-555555555555";
@@ -46,6 +54,16 @@ function workingLogContent(timestamp: string): string {
     },
   });
   return `${toolUse}\n${toolResult}\n`;
+}
+
+/** A transcript whose entries carry a cwd, as Claude Code writes them. */
+function workingLogWithCwd(timestamp: string, cwd: string): string {
+  return workingLogContent(timestamp)
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.stringify({ ...JSON.parse(line), cwd }))
+    .join("\n")
+    .concat("\n");
 }
 
 /** Poll until `check` passes or the timeout elapses (chokidar is async). */
@@ -290,16 +308,6 @@ describe("ClaudeLogAdapter subagent worktree attribution", () => {
   let manager: SessionManager;
   let adapter: ClaudeLogAdapter;
 
-  /** A transcript whose entries carry a cwd, as Claude Code writes them. */
-  function workingLogWithCwd(timestamp: string, cwd: string): string {
-    return workingLogContent(timestamp)
-      .trimEnd()
-      .split("\n")
-      .map((line) => JSON.stringify({ ...JSON.parse(line), cwd }))
-      .join("\n")
-      .concat("\n");
-  }
-
   async function firstSubagent() {
     await waitFor(() => manager.getSession(SESSION_ID)!.subagents.length === 1);
     return manager.getSession(SESSION_ID)!.subagents[0];
@@ -391,5 +399,110 @@ describe("ClaudeLogAdapter subagent worktree attribution", () => {
     adapter.onSessionStateUpdated(SESSION_ID, parentState());
 
     expect((await firstSubagent()).worktreePath).toBe(worktree);
+  });
+});
+
+/**
+ * The head facts are read from the transcript itself, synchronously, on the
+ * daemon's own loop — so a subagent that keeps appending must stop paying for
+ * them. A worktree-less subagent is the common case (no `worktreePath` in the
+ * meta file, a head cwd that is the parent's own checkout), and its answer is
+ * null forever: without a settled flag the retry never ends.
+ */
+describe("ClaudeLogAdapter subagent head reads", () => {
+  let projectsDir: string;
+  let subagentDir: string;
+  let manager: SessionManager;
+  let adapter: ClaudeLogAdapter;
+  let headReads: ReturnType<typeof spyOn<typeof parser, "readFirstEntryFacts">>;
+
+  /**
+   * One watcher event, delivered by hand. The counts under test are per
+   * event, so waiting on chokidar would only add coalescing to the thing
+   * being counted — this is exactly what its `add`/`change` handlers do.
+   */
+  const deliverChange = (file: string): Promise<void> =>
+    (
+      adapter as unknown as {
+        handleSubagentChange(path: string): Promise<void>;
+      }
+    ).handleSubagentChange(file);
+
+  beforeEach(() => {
+    projectsDir = mkdtempSync(join(tmpdir(), "ccmux-subagent-head-"));
+    const projectDir = join(projectsDir, ENCODED_PROJECT);
+    subagentDir = join(projectDir, SESSION_ID, "subagents");
+    mkdirSync(subagentDir, { recursive: true });
+    manager = new SessionManager();
+    manager.createSession(
+      SESSION_ID,
+      join(projectDir, `${SESSION_ID}.jsonl`),
+      "claude",
+    );
+    adapter = new ClaudeLogAdapter(manager, projectsDir);
+    headReads = spyOn(parser, "readFirstEntryFacts");
+  });
+
+  afterEach(async () => {
+    headReads.mockRestore();
+    await adapter.stop();
+    rmSync(projectsDir, { recursive: true, force: true });
+  });
+
+  /** One more turn on disk, then the event that turn would produce. */
+  async function appendTurn(file: string): Promise<void> {
+    appendFileSync(file, workingLogContent(new Date().toISOString()));
+    await deliverChange(file);
+  }
+
+  it("reads the head once for a subagent that is in no worktree", async () => {
+    // The ~98% case: a meta file without `worktreePath`, and a head cwd that
+    // is the parent's own checkout, so `worktreePath` stays null for good.
+    const file = join(subagentDir, "agent-aplain.jsonl");
+    writeFileSync(
+      file,
+      workingLogWithCwd(new Date().toISOString(), "/Users/test/proj"),
+    );
+    writeFileSync(
+      join(subagentDir, "agent-aplain.meta.json"),
+      JSON.stringify({ agentType: "general-purpose", description: "review" }),
+    );
+
+    await deliverChange(file);
+    expect(headReads).toHaveBeenCalledTimes(1);
+
+    await appendTurn(file);
+    await appendTurn(file);
+    await appendTurn(file);
+
+    expect(headReads).toHaveBeenCalledTimes(1);
+    const sub = manager.getSession(SESSION_ID)!.subagents[0];
+    expect(sub.agentId).toBe("aplain");
+    expect(sub.worktreePath).toBeNull();
+  });
+
+  it("keeps retrying until the head is actually readable", async () => {
+    // A transcript that exists before its first line is flushed: the read has
+    // to come back for the cwd, and stop once it has it.
+    const worktree = "/Users/test/proj/.claude/worktrees/agent-alate";
+    const file = join(subagentDir, "agent-alate.jsonl");
+    writeFileSync(file, "");
+
+    await deliverChange(file);
+    expect(headReads).toHaveBeenCalledTimes(1);
+    expect(manager.getSession(SESSION_ID)!.subagents).toHaveLength(0);
+
+    appendFileSync(file, workingLogWithCwd(new Date().toISOString(), worktree));
+    await deliverChange(file);
+
+    expect(headReads).toHaveBeenCalledTimes(2);
+    expect(manager.getSession(SESSION_ID)!.subagents[0].worktreePath).toBe(
+      worktree,
+    );
+
+    await appendTurn(file);
+    await appendTurn(file);
+
+    expect(headReads).toHaveBeenCalledTimes(2);
   });
 });
