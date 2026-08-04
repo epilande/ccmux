@@ -1730,7 +1730,18 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                     );
                     return (
                       <box flexDirection="column">
-                        <box height={1} flexDirection="row">
+                        {/* The cursor row carries the session list's
+                            selected-row surface highlight, spanning both lines
+                            of a two-line row; the ▎ bar alone was easy to
+                            miss. */}
+                        <box
+                          height={1}
+                          width="100%"
+                          flexDirection="row"
+                          backgroundColor={
+                            isCursor() ? theme.surface : undefined
+                          }
+                        >
                           <text fg={isCursor() ? theme.mauve : theme.overlay}>
                             {isCursor() ? "▎" : " "}
                           </text>
@@ -1754,7 +1765,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                           </For>
                         </box>
                         <Show when={detail().length > 0}>
-                          <box height={1} flexDirection="row">
+                          <box
+                            height={1}
+                            width="100%"
+                            flexDirection="row"
+                            backgroundColor={
+                              isCursor() ? theme.surface : undefined
+                            }
+                          >
                             {/* A detail line always hangs off its own line 1,
                                 so it always carries the rail, and it indents
                                 to whatever marker that line 1 used. */}
