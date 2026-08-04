@@ -723,6 +723,46 @@ describe("WorktreesPanel structure", () => {
     }
   });
 
+  // With headers shown the header IS the group's first line, so every row
+  // hangs off it. The rail starting one line later left a hole under each
+  // header, with the rail floating from the detail line below.
+  it("hangs the rail from the repo header in the multi-repo view", async () => {
+    const { settled } = await mountSettled({
+      repos: [
+        { repoRoot: "/repo", repoName: "repo", worktrees: [mainRow()] },
+        {
+          repoRoot: "/other",
+          repoName: "other",
+          worktrees: [
+            row({
+              path: "/other/wt/delta",
+              repoRoot: "/other",
+              repoName: "other",
+              name: "delta",
+              branch: "delta",
+            }),
+          ],
+        },
+      ],
+    });
+    // Each group's first ROW is railed, headers or not...
+    expect(hasRail(lineWith(settled, "main checkout"))).toBe(true);
+    expect(hasRail(lineWith(settled, "delta"))).toBe(true);
+    // ...while the header itself stays bare: it is the anchor.
+    expect(hasRail(lineWith(settled, "other"))).toBe(false);
+  });
+
+  it("rails the first removable row when a group has no kept rows", async () => {
+    const { settled } = await mountSettled(listOf([row()]), {
+      candidates: [candidate()],
+      skipped: [],
+    });
+    // The divider above the section is the group's first line here, so the
+    // removable row below it still carries the rail.
+    expect(lineWith(settled, "removable · 1")).toContain("├─");
+    expect(hasRail(lineWith(settled, "alpha"))).toBe(true);
+  });
+
   // The bracket marker is four columns with its space where a status icon is
   // two, so a fixed detail indent would leave the removable section's two
   // lines out of step with each other.

@@ -1703,7 +1703,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                      whether it carries a checkbox. */
                   /**
                    * One row. `railed` is false only for the group's very
-                   * first LINE, which is what the rail hangs from.
+                   * first LINE, which is what the rail hangs from: the repo
+                   * header when headers are shown, else the first row's own
+                   * line 1.
                    */
                   const renderRow = (entry: PanelRow, railed: boolean) => {
                     const isCursor = () =>
@@ -1813,7 +1815,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                         </box>
                       </Show>
                       <For each={split().kept}>
-                        {(entry, index) => renderRow(entry, index() > 0)}
+                        {(entry, index) =>
+                          renderRow(
+                            entry,
+                            index() > 0 || showsGroupHeaders(merged()),
+                          )
+                        }
                       </For>
                       {/* Everything below this line can be deleted, and only
                           things below it carry checkboxes. The rule starts
@@ -1830,13 +1837,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                         </box>
                       </Show>
                       <For each={split().removable}>
-                        {(entry, index) =>
-                          // With no kept rows the divider is the group's first
-                          // line, so every removable row still hangs off it.
-                          renderRow(
-                            entry,
-                            index() > 0 || split().kept.length > 0,
-                          )
+                        {(entry) =>
+                          // The divider always renders above this section, so
+                          // a removable row is never the group's first line
+                          // and every one of them carries the rail.
+                          renderRow(entry, true)
                         }
                       </For>
                     </box>
