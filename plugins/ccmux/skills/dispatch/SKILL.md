@@ -418,8 +418,8 @@ answer from a faster sibling in a fan-out).
 
 ## Reading and relaying between peers
 
-Everything above launches _new_ workers. This section is about sessions that already exist —
-yours, the user's, another orchestrator's — and moving output between them. Two commands, and
+Everything above launches _new_ workers. This section is about sessions that already
+exist (yours, the user's, another orchestrator's) and moving output between them. Two commands, and
 the choice between them is one question: **does the content need to be in your context?**
 
 | Motion              | Command                        | Payload goes                           |
@@ -470,16 +470,16 @@ clean for a pipe.
 
 One line on stdout per outcome. Read it; do not assume delivery.
 
-- `Delivered <from> -> <to> (claude): 532 chars.` — the target was idle and has it now.
+- `Delivered <from> -> <to> (claude): 532 chars.` The target was idle and has it now.
 - `Queued for <to> (claude is working): 1,769 chars. It will be delivered when the turn ends.`
-  — the target was mid-turn. The daemon delivers when that turn ends and re-runs every safety
+  The target was mid-turn. The daemon delivers when that turn ends and re-runs every safety
   check at that point. **Do not poll and re-send:** a second handoff to the same target
   _replaces_ the queued one (and says so). One pending handoff per target, TTL 30 minutes.
-- `Spawned claude in /repo (pane %3) with the handoff as its opening prompt: 1,752 chars.` —
+- `Spawned claude in /repo (pane %3) with the handoff as its opening prompt: 1,752 chars.`
   `--spawn` opened a new session for it, defaulting to the source's agent and cwd.
 - Anything else is a **refusal**, printed verbatim, and the reason is the instruction. The ones
   you will actually hit: the target has a pending prompt (`resolve it in the pane, then hand
-off again` — a handoff is never used to answer a permission dialog), the source has no
+off again`, since a handoff is never used to answer a permission dialog), the source has no
   readable transcript (a handoff will not fall back to a pane scrape, because a screen capture
   makes a terrible prompt), or a ref was ambiguous.
 
@@ -500,7 +500,7 @@ note: failing test + repro, take it from here
 ```
 
 The header is machine-generated and trustworthy: the daemon composed it, not the sending
-agent. The body is a peer's claim, not verified fact — it arrived without the reasoning behind
+agent. The body is a peer's claim, not verified fact: it arrived without the reasoning behind
 it.
 
 **The session id is a pointer you can pull on.** The payload is deliberately lean (one turn),
@@ -517,8 +517,8 @@ the question back to the user.
 ### Gotchas
 
 - **The header alone teaches the receiver nothing.** Measured, not assumed: fresh Claude and
-  Codex receivers both noticed the missing context and then reasoned without it — one
-  explicitly concluded the earlier turns "aren't available to me" — and both ran
+  Codex receivers both noticed the missing context and then reasoned without it (one
+  explicitly concluded the earlier turns "aren't available to me"), and both ran
   `ccmux last <id> --turns 5` immediately once a `--note` named the command. **So when you send
   a handoff whose payload leans on context you are not sending, put the command in the note**,
   e.g. `--note "earlier reasoning: ccmux last <source-id> --turns 5"`.

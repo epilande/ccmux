@@ -226,11 +226,11 @@ Every outcome line reports the composed size, and appends `, truncated` when a s
 
 The whole safety case rests on one rule. Typing text and Enter into an **idle** composer is verified for all nine built-in agents (it is the same path a notification reply takes). What **mid-turn** typed input does is verified for none of them, Claude included. So:
 
-| Target state | Behavior                                                        |
-| :----------- | :-------------------------------------------------------------- |
-| `idle`       | deliver now                                                     |
-| `working`    | queue, deliver when the target next reaches idle                |
-| `waiting`    | **refuse** — a handoff is never used to answer a pending prompt |
+| Target state | Behavior                                                       |
+| :----------- | :------------------------------------------------------------- |
+| `idle`       | deliver now                                                    |
+| `working`    | queue, deliver when the target next reaches idle               |
+| `waiting`    | **refuse**: a handoff is never used to answer a pending prompt |
 
 There is deliberately no `--force`.
 
@@ -265,7 +265,7 @@ Each one is a refusal on purpose. All are printed verbatim by the CLI.
 | `unsafe-payload` | `The composed handoff contains text <agent>'s composer cannot receive safely`                                                         |
 | `target-busy`    | `Session <id> is <status>; a handoff is only ever delivered into an idle composer` (dequeue-time only)                                |
 
-The `no-transcript` refusal is the one asymmetry worth calling out: `ccmux last` happily degrades to a pane capture, and a handoff will not. A screen scrape is fine to **read** and useless as a **prompt** — box drawing, spinners and half a composer are noise the receiving agent then has to reason about.
+The `no-transcript` refusal is the one asymmetry worth calling out: `ccmux last` happily degrades to a pane capture, and a handoff will not. A screen scrape is fine to **read** and useless as a **prompt**: box drawing, spinners and half a composer are noise the receiving agent then has to reason about.
 
 ### The delivery guard stack
 
