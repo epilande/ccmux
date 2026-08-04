@@ -1106,6 +1106,8 @@ describe("WorktreesPanel keys", () => {
     const onCandidate = await frame();
     expect(onCandidate).toContain("[x]");
     expect(onCandidate).toContain("x remove 1");
+    // The dirty opt-in is advertised in words, not shorthand.
+    expect(onCandidate).toContain("D include dirty");
   });
 
   it("opens the confirmation on x, not on enter", async () => {
@@ -1418,6 +1420,28 @@ describe("WorktreesPanel compact", () => {
     expect(detail.indexOf("untracked")).toBeLessThan(
       detail.indexOf("(D removes it too)"),
     );
+  });
+
+  // fitHints drops whole entries by rank, so the grown label must vanish
+  // entirely at sidebar width rather than wrapping (a wrapped height-1 line
+  // vanishes and takes the whole hint row with it).
+  it("drops the dirty hint whole at sidebar width instead of wrapping it", async () => {
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(listOf([row()])),
+        scan: async () => json({ candidates: [candidate()], skipped: [] }),
+      },
+      { compact: true, width: 44, height: 18 },
+    );
+    await frame();
+    keys.pressKey(" ");
+    const settled = await frame();
+    // The essential removal hint survives on its one line...
+    const hintLines = settled.split("\n").filter((l) => l.includes("x remove"));
+    expect(hintLines.length).toBe(1);
+    // ...and the optional dirty hint is gone whole, not clipped mid-word.
+    expect(settled).not.toContain("D include");
+    expect(settled).not.toContain(" D ");
   });
 
   it("draws nothing past the panel border", async () => {

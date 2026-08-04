@@ -1613,7 +1613,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                     : "x remove",
                 rank: 4,
               },
-              { text: "D dirty too", rank: 1 },
+              { text: "D include dirty", rank: 1 },
               { text: "a all clean", rank: 1 },
             ]
           : []),
