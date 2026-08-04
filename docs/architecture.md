@@ -73,6 +73,8 @@ For panes no marker claims, each same-cwd group of sessions and candidate panes 
 
 Platform event names are unreliable and FSEvents coalescing is stream-local, so events are classified by `stat` + a known-files set, and every event reconciles a subtree (walk for new files, sweep for gone ones). `ready` is deferred ~50ms to cover the stream's arming window. It falls back to chokidar when the root is missing or recursive watching is unsupported.
 
+Watching is not the whole append story. An adapter sets `pollsLog` (`LogAdapter`, Codex only today) when its agent holds the log's file descriptor open for the life of the session: macOS emits no change event for appends made through an open fd, so `~/.codex/sessions` is watched for new and removed rollouts but is silent about the writes into them. `LogWatcher` stat-polls those adapters' linked log files once a second (`LOG_POLL_INTERVAL_MS`, `src/daemon/watcher.ts`) and dispatches the grown ones through the same debounce a real change event uses, so the polled and event-driven feeds stay one code path.
+
 ### Multiple Claude config dirs
 
 Claude Code writes transcripts to `$CLAUDE_CONFIG_DIR/projects`, so a second account (a work login in `~/.claude` plus a personal one under `CLAUDE_CONFIG_DIR=~/.claude-personal`) lands in a separate tree. `resolveClaudeProjectDirs` (`lib/config.ts`) collects `~/.claude` plus every dir from the `additionalClaudeConfigDirs` preference and `CLAUDE_CONFIG_DIR` (deduped, primary first). The daemon stands up one `ClaudeLogAdapter` + `LogWatcher` per tree — the same fan-out shape as one-adapter-per-agent — all feeding the shared `SessionManager`. Empty unless configured, so default single-dir behavior is unchanged. Only extra trees add watchers; the primary `~/.claude/projects` watcher stays authoritative for marker-driven, path-agnostic `processPath` routing, and `buildLogPath` probes every tree to locate a session's transcript.
@@ -307,6 +309,7 @@ What the picker does with the ANSWER to a move is `App.tsx`'s half of the same c
 | Worktree/repo identity for a cwd (`.git` walk + git's own `rev-parse` answer)                                           | `src/daemon/project-derivation.ts`            |
 | Regex on pane content                                                                                                   | `src/daemon/terminal-detector.ts`             |
 | Recursive log-tree watcher                                                                                              | `src/daemon/log-tree-watcher.ts`              |
+| Log tailing, offsets, stat-poll for open-fd appends                                                                     | `src/daemon/watcher.ts`                       |
 | Pane title / state heuristic (`classifyPaneTitle`, Braille spinner / `✳`; `detectPaneState` for Claude pane inspection) | `src/daemon/pane-classify.ts`                 |
 | `tmux capture-pane` wrapper                                                                                             | `src/daemon/pane-io.ts`                       |
 | Tmux pane listing, PID-to-pane                                                                                          | `src/daemon/pane-discovery.ts`                |

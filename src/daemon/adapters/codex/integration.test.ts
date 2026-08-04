@@ -33,6 +33,7 @@ type WatcherInternals = {
   pollTimer: Timer | null;
   pollInFlight: Promise<void> | null;
   debounceTimers: Map<string, Timer>;
+  fileOffsets: Map<string, number>;
 };
 
 const NATIVE_ID = "019c7dd4-ff41-79c0-8270-d030bb51cd90";
@@ -43,6 +44,8 @@ const NATIVE_ID = "019c7dd4-ff41-79c0-8270-d030bb51cd90";
  * back to disk in `afterEach` regardless).
  */
 const MARKER_NATIVE_ID = "019c7dd4-ff41-79c0-8270-d030bb51ce01";
+/** Same reasoning as `MARKER_NATIVE_ID`, for the non-waiting marker test. */
+const WORKING_MARKER_NATIVE_ID = "019c7dd4-ff41-79c0-8270-d030bb51ce02";
 
 function rolloutPath(dir: string, nativeId: string = NATIVE_ID): string {
   return join(dir, `rollout-2026-04-17T12-00-00-${nativeId}.jsonl`);
@@ -462,6 +465,131 @@ describe("Codex LogWatcher integration", () => {
     await internals.processFile(path, session.id);
 
     expect(manager.getSession(session.id)?.status).toBe("working");
+  });
+
+  it("ignores a marker that is not in waiting_permission, leaving the statusChangedAt fallback to admit the output", async () => {
+    // `markerWaitEstablishedAt` anchors only on a `waiting_permission`
+    // marker. Drop that condition and a marker resting at `working` becomes
+    // the anchor for a wait it never described (here the terminal overlay's),
+    // and its stamp rejects the very output that resolves it: the row sticks
+    // at waiting, which is the bug this gate exists to avoid.
+    const manager = new SessionManager();
+    const watcher = new LogWatcher(new CodexLogAdapter(), manager);
+    const internals = watcher as unknown as WatcherInternals;
+
+    const session = manager.createPaneTrackedSession({
+      agentType: "codex",
+      paneId: "%10",
+      cwd: "/Users/test/proj",
+      pid: 7474,
+    });
+    manager.setNativeSessionId(session.id, WORKING_MARKER_NATIVE_ID);
+
+    const dir = newTempDir();
+    const path = rolloutPath(dir, WORKING_MARKER_NATIVE_ID);
+    writeFileSync(
+      path,
+      jsonl(
+        codexSessionMeta({
+          id: WORKING_MARKER_NATIVE_ID,
+          timestamp: "2026-04-17T12:00:00.000Z",
+          cwd: "/Users/test/proj",
+        }),
+        eventMsg("2026-04-17T12:00:01Z", { type: "task_started" }),
+      ),
+    );
+    manager.setLogPath(session.id, path);
+
+    await watcher.processPath(path);
+    manager.updateSession(session.id, {
+      status: "waiting",
+      attentionType: "permission",
+      pendingTool: "Bash",
+    });
+    // The store stamped statusChangedAt off the real clock just now; every
+    // stamp below is written relative to it, so nothing here waits on time.
+    const waitAt = Date.now();
+
+    // A marker whose last hook left it at `working`, restamped 3s after the
+    // wait was established.
+    const marker: SessionPidMarker = {
+      agent_type: "codex",
+      pid: 7474,
+      tty: "ttys043",
+      session_id: WORKING_MARKER_NATIVE_ID,
+      timestamp: waitAt / 1000,
+      state: "working",
+      state_timestamp: (waitAt + 3000) / 1000,
+    };
+    const markerPath = join(dir, `codex-${WORKING_MARKER_NATIVE_ID}.json`);
+    writeFileSync(markerPath, JSON.stringify(marker));
+    loadMarkerIntoCache(markerPath);
+
+    // 500ms after the wait: well inside statusChangedAt's 2s slack, and
+    // 2.5s before the marker's stamp, so anchoring on that marker would
+    // reject it.
+    appendFileSync(
+      path,
+      jsonl(
+        responseItem(new Date(waitAt + 500).toISOString(), {
+          type: "function_call_output",
+          call_id: "call-gated-retry",
+        }),
+      ),
+    );
+
+    await internals.processFile(path, session.id);
+
+    expect(manager.getSession(session.id)?.status).toBe("working");
+    expect(manager.getSession(session.id)?.attentionType).toBeNull();
+  });
+
+  it("updates nothing and records no offset when the full derivation reports a read failure", async () => {
+    // stat keeps succeeding while the read fails (EACCES/EIO). Writing the
+    // adapter's placeholder state here would drop a live wait, and recording
+    // offset 0 against a non-empty file makes the next poll pass see growth
+    // and dispatch again: a 1Hz loop that restamps the session, bumps its
+    // attention generation, and retracts the delivered banner every second.
+    const manager = new SessionManager();
+    const adapter = new CodexLogAdapter();
+    adapter.deriveFullState = async () => ({
+      state: {
+        status: "idle",
+        attentionType: null,
+        pendingTool: null,
+        inPlanMode: false,
+      },
+      newOffset: 0,
+      failed: true,
+    });
+
+    const watcher = new LogWatcher(adapter, manager);
+    const internals = watcher as unknown as WatcherInternals;
+
+    const session = manager.createPaneTrackedSession({
+      agentType: "codex",
+      paneId: "%11",
+      cwd: "/Users/test/proj",
+      pid: 1212,
+    });
+    manager.setNativeSessionId(session.id, NATIVE_ID);
+
+    const dir = newTempDir();
+    const path = rolloutPath(dir);
+    writeFileSync(path, jsonl(sessionMeta()));
+    manager.setLogPath(session.id, path);
+    manager.updateSession(session.id, {
+      status: "waiting",
+      attentionType: "permission",
+      pendingTool: "Bash",
+    });
+
+    await internals.processFile(path, session.id);
+
+    const refreshed = manager.getSession(session.id)!;
+    expect(refreshed.status).toBe("waiting");
+    expect(refreshed.attentionType).toBe("permission");
+    expect(internals.fileOffsets.has(path)).toBe(false);
   });
 
   it("does not remove the session when the rollout file is unlinked", () => {

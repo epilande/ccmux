@@ -75,10 +75,20 @@ const STALE_OUTPUT_SLACK_MS = 2000;
 
 /**
  * Slack for the PREFERRED arm of the gate, `prev.waitEstablishedAt` (the
- * `PermissionRequest` marker's own `state_timestamp`). Marker and rollout
- * stamps come from the same machine's wall clock, and a genuine resolving
- * output is always AFTER the request that gated it — approval takes at least
- * a reviewer round-trip — so 250ms covers nothing but clock/stamp jitter.
+ * `PermissionRequest` marker's own `state_timestamp`). There is no clock
+ * skew to forgive here: the marker stamp (jq's `now`, in the hook script)
+ * and the rollout's entry timestamps are written by the same host clock at
+ * millisecond precision. What the slack covers is write-order jitter between
+ * two files flushed by different processes around the same instant.
+ *
+ * Its cost is known and bounded: it admits any output stamped up to 250ms
+ * BEFORE the request marker. In Codex's sandbox-fail-then-escalate flow the
+ * failed attempt's output landing inside that window would clear the new
+ * wait early. That residual has the same shape and the same blast radius as
+ * the parallel-output gap documented on `applyResponseItem`: a transient
+ * wrong `working`, a banner lost to the retract plus renotify cooldown, and
+ * a row the next cascade tick heals.
+ *
  * The wide 2s window above exists solely for the imprecise `statusChangedAt`
  * fallback, which is stamped after daemon observation lag.
  */
@@ -139,7 +149,9 @@ function waitAnchor(prev: SessionState): WaitAnchor | null {
  * the delivered desktop notification. The notifier retracts the banner
  * the moment status leaves `waiting`, and the restore lands inside the 60s
  * renotify cooldown, so the banner is permanently lost while the prompt is
- * still up. Missing or malformed timestamps fail open (flip as before).
+ * still up. A missing or malformed entry timestamp is not resolution
+ * evidence while an anchor exists; only the unanchored case still fails
+ * open and flips, as before.
  *
  * The anchor is two-tier (see `waitAnchor`) because of how this feed is
  * driven. Codex holds its rollout fd open, so `fs.watch` never reports its
@@ -179,8 +191,12 @@ function applyResponseItem(
   ) {
     return state;
   }
-  if (anchor && Date.parse(timestamp) < anchor.anchorMs - anchor.slackMs) {
-    return state;
+  const entryMs = Date.parse(timestamp);
+  if (anchor) {
+    // An entry that cannot say when it happened is not evidence that the
+    // wait resolved. Unanchored batches keep the old fail-open flip below.
+    if (!Number.isFinite(entryMs)) return state;
+    if (entryMs < anchor.anchorMs - anchor.slackMs) return state;
   }
   return {
     ...state,
@@ -296,7 +312,7 @@ export class CodexLogAdapter implements LogAdapter {
       content = await file.text();
       newOffset = file.size;
     } catch {
-      return { state: createInitialCodexState(), newOffset: 0 };
+      return { state: createInitialCodexState(), newOffset: 0, failed: true };
     }
     const entries = parseEntries(content);
     const state = applyEntries(createInitialCodexState(), entries);

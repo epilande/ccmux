@@ -312,6 +312,18 @@ describe("CodexLogAdapter", () => {
       expect(newOffset).toBe(0);
     });
 
+    it("flags a failed read so the watcher can tell it from an empty log", async () => {
+      // A directory is the deterministic stand-in for the shape that matters
+      // in production (stat succeeds, the read fails: EACCES/EIO). Without
+      // the flag the watcher writes the placeholder state and records offset
+      // 0 against a file that still has bytes, so every poll pass re-derives.
+      const { state, newOffset, failed } =
+        await adapter.deriveFullState(testDir);
+      expect(failed).toBe(true);
+      expect(state.status).toBe("idle");
+      expect(newOffset).toBe(0);
+    });
+
     it("skips malformed JSON lines and applies surrounding entries", async () => {
       const validHeader = JSON.stringify(sessionMeta());
       const garbage = "this is not json {{}";
@@ -572,6 +584,39 @@ describe("CodexLogAdapter", () => {
       expect(state.status).toBe("working");
     });
 
+    it("is a no-op on an idle prev status", async () => {
+      // The `working` fixture above is byte-identical to what an unguarded
+      // flip would produce, so idle is the case that actually pins the
+      // early return: only a live wait may be resolved by an output.
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      appendFileSync(
+        logPath,
+        jsonl(
+          responseItem("2026-04-01T12:00:05Z", {
+            type: "function_call_output",
+            call_id: "call-1",
+          }),
+        ),
+      );
+
+      const idlePrev: SessionState = {
+        status: "idle",
+        attentionType: null,
+        pendingTool: null,
+        inPlanMode: false,
+      };
+
+      const { state } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        idlePrev,
+      );
+
+      expect(state.status).toBe("idle");
+    });
+
     it("leaves waiting intact when the output predates the wait (stale buffered entry)", async () => {
       writeFileSync(logPath, jsonl(sessionMeta()));
       const seeded = await adapter.deriveFullState(logPath);
@@ -755,6 +800,60 @@ describe("CodexLogAdapter", () => {
       );
 
       expect(state.status).toBe("waiting");
+    });
+
+    it("does not flip on an unparseable entry timestamp while an anchor exists", async () => {
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      // An entry that cannot say when it happened cannot say that the wait
+      // resolved either, and clearing a live prompt on garbage costs the
+      // delivered banner. 27k real entries carry one well-formed format, so
+      // this is hardening, not an observed shape.
+      appendFileSync(
+        logPath,
+        jsonl(
+          responseItem("not-a-timestamp", {
+            type: "function_call_output",
+            call_id: "call-garbage",
+          }),
+        ),
+      );
+
+      const { state } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        waitingPrev("2026-04-01T12:00:15Z", "2026-04-01T12:00:15.000Z"),
+      );
+
+      expect(state.status).toBe("waiting");
+      expect(state.attentionType).toBe("permission");
+      expect(state.pendingTool).toBe("Bash");
+    });
+
+    it("still flips on an unparseable entry timestamp when no anchor exists", async () => {
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      appendFileSync(
+        logPath,
+        jsonl(
+          responseItem("not-a-timestamp", {
+            type: "function_call_output",
+            call_id: "call-garbage",
+          }),
+        ),
+      );
+
+      // No marker stamp and no statusChangedAt: there is nothing to compare
+      // against, so the pre-gate fail-open flip stands (compat path).
+      const { state } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        waitingPrev(),
+      );
+
+      expect(state.status).toBe("working");
     });
 
     it("full-derivation ordering: task_started, function_call request, function_call_output, task_complete settles to idle", async () => {

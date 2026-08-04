@@ -883,7 +883,13 @@ export class LogWatcher {
     const offset = this.fileOffsets.get(path) || 0;
 
     if (offset === 0) {
-      const { state, newOffset } = await this.adapter.deriveFullState(path);
+      const { state, newOffset, failed } =
+        await this.adapter.deriveFullState(path);
+      // A failed read is not a derivation: it must neither clobber the live
+      // state nor record an offset (0 against a non-empty file re-arms this
+      // full derive on every poll pass). Leaving the offset unset is what
+      // makes the next pass retry the read.
+      if (failed) return;
       this.sessionManager.updateSession(sessionId, state);
       this.fileOffsets.set(path, newOffset);
       this.adapter.onSessionStateUpdated?.(sessionId, state);

@@ -41,6 +41,15 @@ export interface FullDerivation {
   state: SessionState;
   /** Byte offset after the first full read; seeds subsequent incremental reads. */
   newOffset: number;
+  /**
+   * Set when the read itself failed, so `state` is a placeholder rather than
+   * a derivation. `LogWatcher` must then leave the session and the offset
+   * untouched: writing the placeholder would clobber live state, and
+   * recording offset 0 for a non-empty file re-arms a full derive on every
+   * subsequent pass. Adapters that cannot distinguish a read failure from an
+   * empty log leave it unset.
+   */
+  failed?: true;
 }
 
 /**
