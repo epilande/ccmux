@@ -6377,6 +6377,119 @@ describe("App worktrees panel (W)", () => {
     }
   });
 
+  // The user pressed `d` FROM the panel, so every exit of the round-trip
+  // lands them back on it, with the cursor still on the row they reviewed.
+  it("reopens the panel with the cursor on the reviewed row", async () => {
+    runHunkReviewSpy.mockImplementation(async () => ({
+      ok: true,
+      notes: reviewNotes,
+    }));
+    const occupied = {
+      ...WORKTREE_ROW,
+      sessions: [
+        {
+          id: "s1",
+          agentType: "claude",
+          status: "idle",
+          tmuxPane: "%1",
+          tmuxTarget: "w:0.1",
+          pid: 1,
+        },
+      ],
+    };
+    const bravo = {
+      ...WORKTREE_ROW,
+      path: "/code/myapp/wt/bravo",
+      name: "bravo",
+      branch: "feat/b",
+    };
+    const { restore, frame } = await openPanel([occupied, bravo]);
+    try {
+      // Down to the session-less row: its review has no one to hand notes
+      // to, which is the path that reopens without a confirm in between.
+      setup.mockInput.pressKey("j");
+      setup.mockInput.pressKey("d");
+      await frame();
+      const shown = await frame();
+      // The toast overlays the reopened panel, so its tail interleaves with
+      // row text in the char frame; the head is the part that stays whole.
+      expect(squish(shown)).toContain(squish("review note captured"));
+      expect(shown).toContain("Worktrees");
+      const lines = shown.split("\n");
+      expect(lines.find((l) => l.includes("bravo"))).toContain("▎");
+      expect(lines.find((l) => l.includes("feature"))).not.toContain("▎");
+    } finally {
+      restore();
+    }
+  });
+
+  // The reopen must FOLLOW the confirm's resolution, never precede it: the
+  // panel is the opaque overlay the close existed to get out of the way.
+  it("reopens the panel only after the send-review confirm is answered", async () => {
+    runHunkReviewSpy.mockImplementation(async () => ({
+      ok: true,
+      notes: reviewNotes,
+    }));
+    const occupied = {
+      ...WORKTREE_ROW,
+      sessions: [
+        {
+          id: "s1",
+          agentType: "claude",
+          status: "idle",
+          tmuxPane: "%1",
+          tmuxTarget: "w:0.1",
+          pid: 1,
+        },
+      ],
+    };
+    const { restore, frame } = await openPanel([occupied]);
+    try {
+      setup.mockInput.pressKey("d");
+      const confirmUp = await frame();
+      expect(squish(confirmUp)).toContain(squish("Send review comments"));
+      // Not back yet: reopening here would bury the dialog on screen.
+      expect(confirmUp).not.toContain("Worktrees");
+      // Cancel is a resolution too; the notes are dropped, the panel is not.
+      setup.mockInput.pressKey("n");
+      const after = await frame();
+      expect(squish(after)).not.toContain(squish("Send review comments"));
+      expect(after).toContain("Worktrees");
+    } finally {
+      restore();
+    }
+  });
+
+  it("reopens the panel after a confirmed hand-back as well", async () => {
+    runHunkReviewSpy.mockImplementation(async () => ({
+      ok: true,
+      notes: reviewNotes,
+    }));
+    const occupied = {
+      ...WORKTREE_ROW,
+      sessions: [
+        {
+          id: "s1",
+          agentType: "claude",
+          status: "idle",
+          tmuxPane: "%1",
+          tmuxTarget: "w:0.1",
+          pid: 1,
+        },
+      ],
+    };
+    const { restore, frame } = await openPanel([occupied]);
+    try {
+      setup.mockInput.pressKey("d");
+      expect(squish(await frame())).toContain(squish("Send review comments"));
+      setup.mockInput.pressKey("y");
+      const after = await frame();
+      expect(after).toContain("Worktrees");
+    } finally {
+      restore();
+    }
+  });
+
   /**
    * The DEFAULT shape for a worktree an isolated teammate holds: the daemon
    * folds a live subagent into its worktree's row as a synthetic session

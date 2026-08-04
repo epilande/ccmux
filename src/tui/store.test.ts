@@ -3870,3 +3870,22 @@ describe("store", () => {
     });
   });
 });
+
+describe("worktrees panel state", () => {
+  it("threads the initial cursor through showWorktrees", () => {
+    const store = createTUIStore();
+
+    store.actions.showWorktrees("/repo", "/repo/wt/alpha");
+    expect(store.state.worktrees).toEqual({
+      repo: "/repo",
+      initialCursor: "/repo/wt/alpha",
+    });
+
+    // The plain open (the W key) carries none.
+    store.actions.showWorktrees(null);
+    expect(store.state.worktrees).toEqual({ repo: null, initialCursor: null });
+
+    store.actions.hideWorktrees();
+    expect(store.state.worktrees).toBeNull();
+  });
+});

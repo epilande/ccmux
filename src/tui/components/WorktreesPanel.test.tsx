@@ -210,6 +210,7 @@ interface PanelOptions {
   compact?: boolean;
   width?: number;
   height?: number;
+  initialCursor?: string;
   onClose?: () => void;
   onJump?: (s: WorktreeSession) => void;
   onSpawn?: (t: { cwd: string; existingWorktree: string | null }) => void;
@@ -224,6 +225,7 @@ async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
         repo={opts.repo ?? null}
         cwd="/repo"
         compact={opts.compact}
+        initialCursor={opts.initialCursor}
         onClose={opts.onClose ?? (() => {})}
         onJump={opts.onJump ?? (() => {})}
         onSpawn={opts.onSpawn ?? (() => {})}
@@ -1095,6 +1097,21 @@ describe("WorktreesPanel ordering", () => {
     expect(after).not.toContain("wt20");
     // The cursor is on the first row, and the first row is on screen.
     expect(lineWith(after, "wt00")).toContain("▎");
+  });
+
+  // A reopen (after a review round-trip or a cancelled dialog) seeds the
+  // cursor back on the row the user left, not on the top of the list.
+  it("seeds the cursor on the initialCursor row", async () => {
+    const { settled } = await mountSettled(
+      listOf([
+        mainRow(),
+        row({ path: "/repo/wt/bravo", name: "bravo", branch: "bravo" }),
+      ]),
+      emptyScan,
+      { initialCursor: "/repo/wt/bravo" },
+    );
+    expect(lineWith(settled, "bravo")).toContain("▎");
+    expect(lineWith(settled, "main checkout")).not.toContain("▎");
   });
 
   it("leads with the repo it was opened over, then the alphabet", () => {

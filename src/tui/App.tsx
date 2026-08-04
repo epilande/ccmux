@@ -335,6 +335,10 @@ export function App(props: AppProps) {
   let pendingReviewNotes: {
     sessionId: string;
     notes: HunkReviewNote[];
+    /** Runs once the confirm RESOLVES, on both its branches: the Worktrees
+     *  panel's reopen rides here, and firing it any earlier would put the
+     *  panel back over the very dialog the close existed to unbury. */
+    onDone?: () => void;
   } | null = null;
 
   const pendingReviewNoteCount = () => pendingReviewNotes?.notes.length ?? 0;
@@ -394,18 +398,25 @@ export function App(props: AppProps) {
   function handBackReviewNotes(
     session: EnrichedSession,
     notes: HunkReviewNote[],
+    // Called when the hand-back is RESOLVED: immediately on the paths that
+    // never raise the confirm, and from the confirm's own two exits
+    // otherwise. Callers that need to run after the whole round-trip (the
+    // Worktrees panel's reopen) pass it; the session list passes nothing.
+    onDone?: () => void,
   ) {
     if (session.trackingMode === "background" || session.tmuxPane == null) {
       store.actions.showToast(
         `${notes.length} review note${notes.length === 1 ? "" : "s"} captured (no pane to send to)`,
       );
+      onDone?.();
       return;
     }
     if (props.reviewHandback === "auto" || props.reviewHandback === "fill") {
       void deliverReviewNotes(session.id, notes, props.reviewHandback);
+      onDone?.();
       return;
     }
-    pendingReviewNotes = { sessionId: session.id, notes };
+    pendingReviewNotes = { sessionId: session.id, notes, onDone };
     store.actions.showConfirmDialog(session.id, "send-review");
   }
 
@@ -471,6 +482,14 @@ export function App(props: AppProps) {
     // this review can raise would render underneath it and be unreachable —
     // captured notes with no way to answer for them. Nothing below needs the
     // panel: the row was already read into `target` and `session`.
+    //
+    // The scope is captured BEFORE that close so the round-trip can land the
+    // user back where they pressed `d`: every exit below reopens the panel
+    // with the cursor on the reviewed row, and the hand-back paths do it
+    // through `onDone` so the reopen provably follows the confirm's own
+    // resolution instead of racing it back over the dialog.
+    const scope = store.state.worktrees?.repo ?? null;
+    const reopen = () => store.actions.showWorktrees(scope, target.path);
     store.actions.hideWorktrees();
     reviewInFlight = true;
     // Resolved before the guard is honored so a slow git can't be raced, and
@@ -483,20 +502,26 @@ export function App(props: AppProps) {
         reviewInFlight = false;
         if (!result.ok) {
           store.actions.showToast(`Review failed: ${result.error}`);
+          reopen();
           return;
         }
-        if (result.notes.length === 0) return;
+        if (result.notes.length === 0) {
+          reopen();
+          return;
+        }
         if (session) {
-          handBackReviewNotes(session, result.notes);
+          handBackReviewNotes(session, result.notes, reopen);
           return;
         }
         store.actions.showToast(
           `${result.notes.length} review note${result.notes.length === 1 ? "" : "s"} captured (no agent to send to)`,
         );
+        reopen();
       })
       .catch(() => {
         reviewInFlight = false;
         store.actions.showToast("Review failed");
+        reopen();
       });
   }
 
@@ -2194,9 +2219,13 @@ export function App(props: AppProps) {
   function confirmDialogAction() {
     const action = store.state.confirmAction;
     const sessionId = store.state.confirmSessionId;
+    // Fired after the dialog is hidden, so what it does (reopen the
+    // Worktrees panel) lands on a screen the dialog has already left.
+    let afterResolve: (() => void) | undefined;
     if (action === "send-review" && sessionId) {
       const pending = pendingReviewNotes;
       pendingReviewNotes = null;
+      afterResolve = pending?.onDone;
       if (pending?.sessionId === sessionId) {
         void deliverReviewNotes(sessionId, pending.notes, "confirm");
       }
@@ -2219,6 +2248,23 @@ export function App(props: AppProps) {
       killOrCancelSession(sessionId);
     }
     store.actions.hideConfirmDialog();
+    afterResolve?.();
+  }
+
+  /**
+   * The confirm dialog's No/escape, shared by the key handler and the
+   * dialog's own cancel. Pending review notes are consumed here so a
+   * cancelled hand-back can never be delivered by a later confirm, and
+   * their `onDone` still fires: a cancel resolves the round-trip exactly as
+   * a confirm does, and the Worktrees panel reopen riding it must not be
+   * lost with the notes.
+   */
+  function cancelConfirmDialog() {
+    const wasReview = store.state.confirmAction === "send-review";
+    const pending = pendingReviewNotes;
+    pendingReviewNotes = null;
+    store.actions.hideConfirmDialog();
+    if (wasReview) pending?.onDone?.();
   }
 
   // Sidebar only: `ccmux sidebar` runs one full TUI process per tmux window,
@@ -2580,8 +2626,7 @@ export function App(props: AppProps) {
         return;
       }
       if (key === "n" || key === "N" || key === "escape") {
-        pendingReviewNotes = null;
-        store.actions.hideConfirmDialog();
+        cancelConfirmDialog();
         event.preventDefault();
         return;
       }
@@ -3111,10 +3156,7 @@ export function App(props: AppProps) {
             }
             groupLabel={store.selectedGroupHeader()?.label}
             onConfirm={confirmDialogAction}
-            onCancel={() => {
-              pendingReviewNotes = null;
-              store.actions.hideConfirmDialog();
-            }}
+            onCancel={cancelConfirmDialog}
           />
         </Show>
 
@@ -3157,6 +3199,7 @@ export function App(props: AppProps) {
               cwd={pickerCwd()}
               compact={props.sidebar}
               iconStyle={store.state.iconStyle}
+              initialCursor={panel().initialCursor}
               onClose={store.actions.hideWorktrees}
               onJump={jumpToWorktreeSession}
               onSpawn={spawnInWorktree}

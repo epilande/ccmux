@@ -336,8 +336,12 @@ interface TUIState {
    * Everything else the panel needs — the rows, the selection, the run log —
    * is local to the component: it is fetched on open and discarded on close,
    * so it would only be stale state for the rest of the picker's life.
+   * `initialCursor` seeds the panel's cursor on that row's path, for a reopen
+   * that should land where the user left (the review round-trip, a cancelled
+   * spawn dialog); the panel falls back to the first row when the path is
+   * not in the fetched list.
    */
-  worktrees: { repo: string | null } | null;
+  worktrees: { repo: string | null; initialCursor: string | null } | null;
   /**
    * A message that waits to be acknowledged, or null.
    *
@@ -1896,8 +1900,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("showHelp", false);
     },
 
-    showWorktrees(repo: string | null) {
-      setState("worktrees", { repo });
+    showWorktrees(repo: string | null, initialCursor?: string) {
+      setState("worktrees", { repo, initialCursor: initialCursor ?? null });
     },
 
     hideWorktrees() {

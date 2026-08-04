@@ -122,6 +122,13 @@ interface WorktreesPanelProps {
   /** The picker's icon style, so a row's status glyph is the SAME one the
    *  session list draws for that status. */
   iconStyle?: IconStyle;
+  /**
+   * Seed the cursor on this row's path, for a reopen that should land where
+   * the user left (the review round-trip, a cancelled spawn dialog). A path
+   * the fetched list does not hold falls back to the first row through the
+   * re-seed effect, exactly like a row that vanished under the cursor.
+   */
+  initialCursor?: string | null;
   onClose: () => void;
   /** Jump to a session living in the row (Enter on an occupied row). */
   onJump: (session: WorktreeSession) => void;
@@ -1146,7 +1153,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const [scan, setScan] = createSignal<PruneScan | null>(null);
   /** Phase 2's failure, which leaves the panel usable read-only. */
   const [scanError, setScanError] = createSignal<string | null>(null);
-  const [cursorPath, setCursorPath] = createSignal<string | null>(null);
+  const [cursorPath, setCursorPath] = createSignal<string | null>(
+    props.initialCursor ?? null,
+  );
   const [selected, setSelected] = createSignal<Set<string>>(new Set());
   const [dirtyOk, setDirtyOk] = createSignal<Set<string>>(new Set());
   const [result, setResult] = createSignal<PruneRunResult | null>(null);
