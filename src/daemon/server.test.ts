@@ -1967,6 +1967,43 @@ describe("DaemonServer", () => {
         true,
       );
     });
+
+    it("returns 400 for a payload that strips to empty, and never reaches the pane", async () => {
+      const paneSendDeps = {
+        sendLiteralToPane: mock(async () => true),
+        sendPromptToPane: mock(async () => true),
+      };
+      const { manager, internals } = createServer(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        paneSendDeps,
+      );
+      manager.createSession(
+        "s1",
+        "/Users/test/.claude/projects/-Users-test-proj/s1.jsonl",
+      );
+      manager.setTmuxPane("s1", "%1");
+
+      const response = await internals.handleSendToSession(
+        "s1",
+        new Request("http://localhost/sessions/s1/send", {
+          method: "POST",
+          body: JSON.stringify({ text: "\x1b\x1b" }),
+        }),
+        {},
+      );
+      const data = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(400);
+      expect(data.error).toBe(
+        "Text is empty after control-character sanitization",
+      );
+      expect(paneSendDeps.sendLiteralToPane).not.toHaveBeenCalled();
+      expect(paneSendDeps.sendPromptToPane).not.toHaveBeenCalled();
+    });
   });
 
   describe("handleSpawn", () => {

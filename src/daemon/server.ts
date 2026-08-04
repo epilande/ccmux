@@ -2086,6 +2086,19 @@ export class DaemonServer {
       keepTabs: true,
     });
 
+    // A payload of nothing but control chars (e.g. a lone ESC) strips to the
+    // empty string. `sendLiteralToPane(target, "", true)` would still press
+    // Enter with nothing queued in front of it, submitting whatever already
+    // sits in the pane's composer or accepting a pending dialog — reject
+    // before that reaches the pane rather than let stripping manufacture a
+    // no-op-looking Enter press.
+    if (text.length === 0) {
+      return Response.json(
+        { error: "Text is empty after control-character sanitization" },
+        { status: 400, headers },
+      );
+    }
+
     // Single-line text under MAX_SEND_TEXT_CHARS goes argv-bound through
     // `send-keys -l`; anything multiline, or over that cap, goes through the
     // stdin-fed `load-buffer`/`paste-buffer` path instead, which is capped
