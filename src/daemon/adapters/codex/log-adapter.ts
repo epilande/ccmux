@@ -12,9 +12,11 @@ import type {
 import {
   parseLine,
   parseEntries,
+  isSubagentRollout,
   type CodexEntry,
   type CodexSessionMetaPayload,
   type CodexEventPayload,
+  type CodexResponseItemPayload,
 } from "./parse";
 
 // Derived from CODEX_DIR so rollout discovery honors `$CODEX_HOME`, like the
@@ -57,7 +59,158 @@ function applyEventMsg(
   }
 }
 
+/**
+ * Slack for the FALLBACK arm of the stale-output gate below.
+ * `statusChangedAt` is stamped by the daemon when the marker's `waiting` won
+ * a cascade, which lands milliseconds to a second AFTER the hook observed the
+ * request, and the rollout's entry timestamps come from Codex's own clock. A
+ * genuine resolving output from an instant auto-approval could therefore
+ * carry an entry timestamp slightly older than the stamp; the slack keeps
+ * such outputs flipping (fail open, today's behavior) at the cost of not
+ * gating stale entries inside the window. Truly stale outputs belong to a
+ * PRIOR call, separated from the wait by at least a model round-trip, so
+ * they sit well outside 2s in practice.
+ */
+const STALE_OUTPUT_SLACK_MS = 2000;
+
+/**
+ * Slack for the PREFERRED arm of the gate, `prev.waitEstablishedAt` (the
+ * `PermissionRequest` marker's own `state_timestamp`). There is no clock
+ * skew to forgive here: the marker stamp (jq's `now`, in the hook script)
+ * and the rollout's entry timestamps are written by the same host clock at
+ * millisecond precision. What the slack covers is write-order jitter between
+ * two files flushed by different processes around the same instant.
+ *
+ * Its cost is known and bounded: it admits any output stamped up to 250ms
+ * BEFORE the request marker. In Codex's sandbox-fail-then-escalate flow the
+ * failed attempt's output landing inside that window would clear the new
+ * wait early. That residual has the same shape and the same blast radius as
+ * the parallel-output gap documented on `applyResponseItem`: a transient
+ * wrong `working`, a banner lost to the retract plus renotify cooldown, and
+ * a row the next cascade tick heals.
+ *
+ * The wide 2s window above exists solely for the imprecise `statusChangedAt`
+ * fallback, which is stamped after daemon observation lag.
+ */
+const MARKER_ANCHOR_SLACK_MS = 250;
+
+/**
+ * The moment the live wait was established, plus the slack the gate may
+ * forgive around it. Two tiers because the two sources have very different
+ * precision (see the two slack constants). `null` means "no gate": either
+ * `prev` is not waiting, or no usable anchor exists at all.
+ */
+interface WaitAnchor {
+  anchorMs: number;
+  slackMs: number;
+}
+
+/**
+ * Pick the wait anchor for a batch. The marker stamp wins when present and
+ * parseable; a missing or malformed one falls back to the store's
+ * `statusChangedAt` with the wide slack (hookless Codex has no marker at all:
+ * its waits come from the reconciler's terminal-rule overlay). A malformed
+ * `statusChangedAt` yields NaN, which disables the gate through the
+ * always-false comparison in `applyResponseItem` — fail open, as before.
+ */
+function waitAnchor(prev: SessionState): WaitAnchor | null {
+  if (prev.status !== "waiting") return null;
+  if (prev.waitEstablishedAt) {
+    const markerMs = Date.parse(prev.waitEstablishedAt);
+    if (!Number.isNaN(markerMs)) {
+      return { anchorMs: markerMs, slackMs: MARKER_ANCHOR_SLACK_MS };
+    }
+  }
+  if (prev.statusChangedAt) {
+    return {
+      anchorMs: Date.parse(prev.statusChangedAt),
+      slackMs: STALE_OUTPUT_SLACK_MS,
+    };
+  }
+  return null;
+}
+
+/**
+ * Tool OUTPUT items are the only in-log signal that a permission wait
+ * resolved: Codex fires no hook on approval (manual or via its automatic
+ * approval reviewer), and outputs are flushed only after the gated tool
+ * ran. Without this flip, nothing moves the session off the marker-written
+ * `waiting` mid-turn, so the row stays waiting until end of turn. Request
+ * items and token_count are deliberately NOT resolution evidence (they can
+ * flush while the prompt is still up). A NEWER PermissionRequest still wins
+ * in the cascade: its marker timestamp out-freshens this entry's
+ * lastActivityAt.
+ *
+ * The recency gate: an output whose entry timestamp predates the wait's
+ * establishment (`anchor.anchorMs`, minus `anchor.slackMs`) is a buffered
+ * leftover from a PRIOR call, not resolution evidence, and must not flip.
+ * The cascade alone is not enough protection here: it restores `waiting`
+ * at the next tick, but the transient store write is enough to destroy
+ * the delivered desktop notification. The notifier retracts the banner
+ * the moment status leaves `waiting`, and the restore lands inside the 60s
+ * renotify cooldown, so the banner is permanently lost while the prompt is
+ * still up. A missing or malformed entry timestamp is not resolution
+ * evidence while an anchor exists; only the unanchored case still fails
+ * open and flips, as before.
+ *
+ * The anchor is two-tier (see `waitAnchor`) because of how this feed is
+ * driven. Codex holds its rollout fd open, so `fs.watch` never reports its
+ * appends: the file is stat-polled once a second. Under event-driven parsing
+ * the failed ungated attempt's output in Codex's standard
+ * sandbox-fail-then-escalate flow was parsed BEFORE the wait even existed
+ * (~200ms parse latency), so `prev.status` wasn't waiting and no flip was
+ * possible. At 1s polling that same output is parsed AFTER the wait is
+ * established, and it sits comfortably inside the 2s `statusChangedAt`
+ * slack — it would spuriously clear the wait and destroy the banner.
+ * Anchoring on the marker's own `state_timestamp` (`prev.waitEstablishedAt`)
+ * fixes that: it is the request time itself, with no observation lag, so it
+ * needs only a 250ms jitter slack. It also fixes the waiting->waiting case,
+ * since the marker restamps on every request while `statusChangedAt` only
+ * moves on a status edge.
+ *
+ * The flip is otherwise deliberately uncorrelated with the call that
+ * established the wait, because no correlation key exists: the
+ * PermissionRequest payload carries no call_id (verified on codex-cli
+ * 0.146.0; it has session/turn ids, tool_name, and tool_input only), and
+ * command-string matching is ambiguous in Codex's standard
+ * sandbox-fail-then-escalate flow, which reuses the identical command
+ * across the ungated attempt and the gated retry. The one known gap: an
+ * unrelated PARALLEL tool's output flushing mid-wait is genuinely newer
+ * than the wait and still clears it early.
+ */
+function applyResponseItem(
+  state: SessionState,
+  payload: CodexResponseItemPayload,
+  timestamp: string,
+  anchor: WaitAnchor | null,
+): SessionState {
+  if (state.status !== "waiting") return state;
+  if (
+    payload?.type !== "function_call_output" &&
+    payload?.type !== "custom_tool_call_output"
+  ) {
+    return state;
+  }
+  const entryMs = Date.parse(timestamp);
+  if (anchor) {
+    // An entry that cannot say when it happened is not evidence that the
+    // wait resolved. Unanchored batches keep the old fail-open flip below.
+    if (!Number.isFinite(entryMs)) return state;
+    if (entryMs < anchor.anchorMs - anchor.slackMs) return state;
+  }
+  return {
+    ...state,
+    status: "working",
+    attentionType: null,
+    pendingTool: null,
+  };
+}
+
 function applyEntries(prev: SessionState, entries: CodexEntry[]): SessionState {
+  // Captured once per batch: the wait the store fed in was established at
+  // one moment, and every entry in this batch gates against that same
+  // moment (and the slack its source earns).
+  const anchor = waitAnchor(prev);
   let state = prev;
   for (const entry of entries) {
     state = { ...state, lastActivityAt: entry.timestamp };
@@ -65,6 +218,8 @@ function applyEntries(prev: SessionState, entries: CodexEntry[]): SessionState {
       state = applySessionMeta(state, entry.payload);
     } else if (entry.type === "event_msg") {
       state = applyEventMsg(state, entry.payload, entry.timestamp);
+    } else if (entry.type === "response_item") {
+      state = applyResponseItem(state, entry.payload, entry.timestamp, anchor);
     }
   }
   return state;
@@ -92,8 +247,16 @@ function createInitialCodexState(): SessionState {
  * from `event_msg` payloads of type `task_started` / `task_complete` /
  * `turn_aborted`. `lastPrompt` comes from `user_message` events.
  *
- * Codex has no permission-asked event in the log; permission/waiting state
- * is layered on by the reconciler's terminal-rule overlay (Option Y).
+ * Codex has no permission-ASKED event in the log (waiting comes from the
+ * `PermissionRequest` hook marker, or the reconciler's terminal-rule
+ * overlay when hooks aren't installed), but tool OUTPUT items serve as the
+ * permission-RESOLVED signal via `applyResponseItem`.
+ *
+ * Codex keeps the rollout's file descriptor open for the whole session, and
+ * macOS reports no `fs.watch` change event for appends through an open fd, so
+ * this adapter declares `pollsLog`: without the watcher's stat-poll the
+ * rollout would be parsed exactly once, at link time, and no in-log signal
+ * (including the resolution flip above) would ever reach the store mid-turn.
  */
 export class CodexLogAdapter implements LogAdapter {
   readonly agentType = "codex";
@@ -102,12 +265,22 @@ export class CodexLogAdapter implements LogAdapter {
   // below the root). A bounded depth keeps Linux inotify FD pressure flat as
   // a user's history grows.
   readonly watchDepth = 4;
+  // Codex holds the rollout fd open; see the class doc above.
+  readonly pollsLog = true;
 
   resolveSessionIdFromPath(path: string): string | null {
     const match = basename(path).match(CODEX_SESSION_FILE_PATTERN);
     return match ? match[1] : null;
   }
 
+  /**
+   * The sole consumer is `scanCodexRollouts` (index.ts), which treats every
+   * non-null return as a rollout-link candidate. Returning `null` for a
+   * subagent/reviewer thread (see `isSubagentRollout`) is therefore what
+   * keeps codex >= 0.146's auto-approval reviewer rollout — which duplicates
+   * its parent's session_id — out of link candidacy entirely, rather than
+   * relying on downstream cwd/timestamp tie-breaking to avoid it.
+   */
   parseSessionMetadata(firstLine: string): SessionMetadata | null {
     const entry = parseLine(firstLine);
     if (!entry || entry.type !== "session_meta") return null;
@@ -119,6 +292,7 @@ export class CodexLogAdapter implements LogAdapter {
     ) {
       return null;
     }
+    if (isSubagentRollout(payload)) return null;
     const ts = Date.parse(payload.timestamp);
     if (Number.isNaN(ts)) return null;
     return {
@@ -138,7 +312,7 @@ export class CodexLogAdapter implements LogAdapter {
       content = await file.text();
       newOffset = file.size;
     } catch {
-      return { state: createInitialCodexState(), newOffset: 0 };
+      return { state: createInitialCodexState(), newOffset: 0, failed: true };
     }
     const entries = parseEntries(content);
     const state = applyEntries(createInitialCodexState(), entries);

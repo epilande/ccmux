@@ -37,13 +37,13 @@ export function classifyPaneTitle(
 }
 
 /**
- * Foreground commands meaning no agent runs at the pane: a bare shell (a typed
- * Reply would EXECUTE as a command) or a terminal editor (keystrokes land as
- * normal-mode commands). Single owner for both idle-detection and the
- * notification-action liveness guard, so they can't drift. Bare names only; a
- * login shell's dash ("-zsh") is stripped before lookup.
+ * Interactive shells. Split out of {@link NON_AGENT_COMMANDS} because two
+ * callers need different questions answered: "is an agent running here"
+ * (shells AND editors say no) versus "is anything running here at all" (an
+ * editor says YES — someone is editing a file in this directory, which is
+ * exactly the live work the prune guard refuses to delete under).
  */
-const NON_AGENT_COMMANDS = new Set([
+const SHELL_COMMANDS = [
   "zsh",
   "bash",
   "fish",
@@ -52,16 +52,38 @@ const NON_AGENT_COMMANDS = new Set([
   "ksh",
   "nu",
   "pwsh",
-  "nvim",
-  "vim",
-  "vi",
-]);
+];
+
+/**
+ * Foreground commands meaning no agent runs at the pane: a bare shell (a typed
+ * Reply would EXECUTE as a command) or a terminal editor (keystrokes land as
+ * normal-mode commands). Single owner for both idle-detection and the
+ * notification-action liveness guard, so they can't drift. Bare names only; a
+ * login shell's dash ("-zsh") is stripped before lookup.
+ */
+const NON_AGENT_COMMANDS = new Set([...SHELL_COMMANDS, "nvim", "vim", "vi"]);
+
+/** Bare command name, with a login shell's leading dash ("-zsh") stripped. */
+function bareCommand(command: string): string {
+  return command.replace(/^-/, "");
+}
 
 /** True when the pane's foreground command is a shell or terminal editor, not a
  *  running agent. Strips a leading dash (login-shell "-zsh") before lookup. */
 export function isNonAgentCommand(command: string | null): boolean {
   if (!command) return false;
-  return NON_AGENT_COMMANDS.has(command.replace(/^-/, ""));
+  return NON_AGENT_COMMANDS.has(bareCommand(command));
+}
+
+/**
+ * True when the pane is sitting at a bare interactive shell — nothing running
+ * but the prompt itself. Deliberately NARROWER than
+ * {@link isNonAgentCommand}: an editor is not an agent, but it is somebody
+ * working.
+ */
+export function isShellCommand(command: string | null): boolean {
+  if (!command) return false;
+  return SHELL_COMMANDS.includes(bareCommand(command));
 }
 
 /**

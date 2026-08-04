@@ -233,11 +233,14 @@ describe("fitHints", () => {
         .map((segment) => segment.text)
         .filter((text) => !fitHints(hints(), width).includes(text));
 
-    // The first column the line has to give up takes Kill with it, and the
-    // next takes Restart. (Listed in display order, which is what the helper
-    // reads them off in — Restart sits left of Kill on the line.)
-    expect(dropped(118)).toEqual(["x kill"]);
-    expect(dropped(106)).toEqual(["r restart", "x kill"]);
+    // The first column the line has to give up takes the Worktrees pointer
+    // (the panel it opens teaches its own keys), the next takes Kill, and the
+    // one after that Restart. (Listed in display order, which is what the
+    // helper reads them off in — Restart sits left of Kill on the line, and
+    // both sit left of Worktrees.)
+    expect(dropped(132)).toEqual(["W worktrees"]);
+    expect(dropped(118)).toEqual(["x kill", "W worktrees"]);
+    expect(dropped(106)).toEqual(["r restart", "x kill", "W worktrees"]);
     // Both gone while everything they were ranked against is still there.
     const line = fitHints(hints(), 106);
     expect(line).toContain("/ search");

@@ -757,6 +757,12 @@ describe("reconcileAll", () => {
       return new Map([[agentType, { agentType } as LogAdapter]]);
     }
 
+    // A registered adapter is not linkage: the collector builds a log source
+    // only when the session also has a `logPath`, so every case that means
+    // "the log owns this status" has to link one.
+    const LINKED_ROLLOUT =
+      "/Users/test/.codex/sessions/2026/07/03/rollout-x.jsonl";
+
     it("keeps log-derived working state when terminal rule does not match", async () => {
       mockCapturePane = async () => "idle shell\n$ ";
 
@@ -766,11 +772,15 @@ describe("reconcileAll", () => {
         status: "working", // Simulates log-derived state
         tmuxPane: "%2",
       });
+      // The log source only exists for a LINKED log; a fresh mtime keeps the
+      // stale-log synthetic idle out of this case.
+      sessionManager.setLogPath(id, LINKED_ROLLOUT);
 
       await reconcileAll(
         makeDeps(sessionManager, {
           agents: [codexAgent],
           logAdapters: logAdapterMap("codex"),
+          getLogFileMtime: () => Date.now(),
         }),
         makeSnapshot({
           panes: [fakePane({ paneId: "%2", tty: "ttys002" })],
@@ -791,11 +801,13 @@ describe("reconcileAll", () => {
         status: "working",
         tmuxPane: "%2",
       });
+      sessionManager.setLogPath(id, LINKED_ROLLOUT);
 
       await reconcileAll(
         makeDeps(sessionManager, {
           agents: [codexAgent],
           logAdapters: logAdapterMap("codex"),
+          getLogFileMtime: () => Date.now(),
         }),
         makeSnapshot({
           panes: [fakePane({ paneId: "%2", tty: "ttys002" })],
@@ -817,11 +829,13 @@ describe("reconcileAll", () => {
         status: "idle",
         tmuxPane: "%2",
       });
+      sessionManager.setLogPath(id, LINKED_ROLLOUT);
 
       await reconcileAll(
         makeDeps(sessionManager, {
           agents: [codexAgent],
           logAdapters: logAdapterMap("codex"),
+          getLogFileMtime: () => Date.now(),
         }),
         makeSnapshot({
           panes: [fakePane({ paneId: "%2", tty: "ttys002" })],
@@ -843,6 +857,40 @@ describe("reconcileAll", () => {
         status: "working",
         tmuxPane: "%2",
       });
+      sessionManager.setLogPath(id, LINKED_ROLLOUT);
+
+      await reconcileAll(
+        makeDeps(sessionManager, {
+          agents: [codexAgent],
+          logAdapters: logAdapterMap("codex"),
+          getLogFileMtime: () => Date.now(),
+        }),
+        makeSnapshot({
+          panes: [fakePane({ paneId: "%2", tty: "ttys002" })],
+        }),
+      );
+
+      const session = sessionManager.getSession(id)!;
+      expect(session.status).toBe("working");
+    });
+
+    it("heals a row pinned at waiting/permission when the log was never linked", async () => {
+      // Live repro (hookless codex whose rollout linking refused): the user
+      // approved the prompt, the pane went back to the working indicator, and
+      // the row stayed `waiting`/`permission` for 90s. With no `logPath`
+      // there is no log evidence, so the terminal source is the baseline and
+      // moves the row off the wait.
+      mockCapturePane = async () => "codex is thinking about your request";
+
+      const id = makeSession(sessionManager, {
+        agentType: "codex",
+        trackingMode: "pane",
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Command",
+        tmuxPane: "%2",
+      });
+      expect(sessionManager.getSession(id)!.logPath).toBeNull();
 
       await reconcileAll(
         makeDeps(sessionManager, {
@@ -856,6 +904,8 @@ describe("reconcileAll", () => {
 
       const session = sessionManager.getSession(id)!;
       expect(session.status).toBe("working");
+      expect(session.attentionType).toBeNull();
+      expect(session.pendingTool).toBeNull();
     });
 
     it("heals a stuck working row when the linked log went silent and no rule matches", async () => {
@@ -956,6 +1006,7 @@ describe("reconcileAll", () => {
         lastActivityAt: logAt,
         nativeSessionId: "native-codex",
       });
+      sessionManager.setLogPath(id, LINKED_ROLLOUT);
 
       await reconcileAll(
         makeDeps(sessionManager, {
@@ -997,11 +1048,13 @@ describe("reconcileAll", () => {
         pendingTool: "Command",
         tmuxPane: "%2",
       });
+      sessionManager.setLogPath(id, LINKED_ROLLOUT);
 
       await reconcileAll(
         makeDeps(sessionManager, {
           agents: [codexAgent],
           logAdapters: logAdapterMap("codex"),
+          getLogFileMtime: () => Date.now(),
         }),
         makeSnapshot({
           panes: [fakePane({ paneId: "%2", tty: "ttys002" })],
@@ -1267,6 +1320,202 @@ describe("reconcileAll", () => {
       await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
       expect(captureCalls).toBe(1);
       expect(sessionManager.getSession(id)!.status).toBe("waiting");
+    });
+  });
+
+  describe("suspect permission upgrade: fresh-capture discriminator (codex)", () => {
+    // `dropsStalePermissionTerminalUpgrade` cannot tell a spent prompt from a
+    // live one on its own: its five conditions also all hold in the
+    // parallel-output gap, where an unrelated tool's output flips the log to
+    // `working` while the approval widget is STILL on screen. The widget is
+    // removed on both approve and deny (live-proven on 0.146.0), so the
+    // reconciler settles it with a capture taken this tick.
+    const codexAgent = BUILTIN_AGENTS.find((a) => a.name === "codex")!;
+
+    /** Verbatim 0.146.0 command-approval widget (see terminal-detector.test.ts). */
+    const APPROVAL_WIDGET = `• Running git ls-remote https://github.com/epilande/ccmux.git HEAD
+
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Do you want to allow this read-only GitHub request to retrieve the repository's HEAD revision?
+
+  $ git ls-remote https://github.com/epilande/ccmux.git HEAD
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with \`git ls-remote\` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel`;
+
+    /** The same pane after the approval resolved: no widget anywhere. */
+    const RESOLVED_PANE = `• Ran git ls-remote https://github.com/epilande/ccmux.git HEAD
+    4053c7b0e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5        HEAD
+
+›
+  gpt-5.6-sol default · /Users/test/proj`;
+
+    const LOG_PATH = "/Users/test/.codex/sessions/2026/08/03/rollout-x.jsonl";
+    const MARKER_TS_SEC = 1_700_000_500;
+
+    /**
+     * The suspect shape: a `PermissionRequest` marker nothing closes, plus a
+     * strictly fresher log that has moved on to `working`.
+     */
+    function suspectCodexSession(): {
+      id: string;
+      deps: ReconcilerDeps;
+    } {
+      const id = makeSession(sessionManager, {
+        agentType: "codex",
+        trackingMode: "pane",
+        tmuxPane: "%2",
+        nativeSessionId: "codex-sess-1",
+        status: "working",
+        lastActivityAt: new Date(MARKER_TS_SEC * 1000 + 5_000).toISOString(),
+      });
+      sessionManager.setLogPath(id, LOG_PATH);
+
+      const marker: SessionPidMarker = {
+        agent_type: "codex",
+        pid: 4321,
+        tty: "/dev/ttys002",
+        session_id: "codex-sess-1",
+        timestamp: 1_700_000_000,
+        state: "waiting_permission",
+        state_timestamp: MARKER_TS_SEC,
+        pending_tool: "Command",
+      };
+
+      const logAdapters = new Map<string, LogAdapter>();
+      logAdapters.set("codex", {} as LogAdapter);
+
+      const deps = makeDeps(sessionManager, {
+        agents: [codexAgent],
+        logAdapters,
+        hookManager: {
+          getMarkerForSession: () => marker,
+          getMarkersByAgentAndPid: () => [],
+        },
+      });
+      return { id, deps };
+    }
+
+    /**
+     * Stand in for the codex log adapter's next parse: a parallel tool's
+     * output flushes while the widget is still up and flips the session to
+     * `working` (`applyResponseItem`). Without it a tick that resolved to
+     * `waiting` would leave the log source echoing that wait, and the guard
+     * (condition 5) would not fire again.
+     */
+    function flipLogToWorking(id: string, secondsAfterMarker: number): void {
+      sessionManager.updateSession(id, {
+        status: "working",
+        attentionType: null,
+        pendingTool: null,
+        lastActivityAt: new Date(
+          MARKER_TS_SEC * 1000 + secondsAfterMarker * 1000,
+        ).toISOString(),
+      });
+    }
+
+    beforeEach(() => {
+      clearTerminalRuleCache();
+    });
+
+    it("keeps the wait when this tick's own capture still shows the widget", async () => {
+      // The parallel-output gap: the log falsely says `working` while codex is
+      // blocked on approval. The match was captured fresh this tick, so the
+      // widget is provably on screen and the terminal source stands.
+      let captureCalls = 0;
+      mockCapturePane = async () => {
+        captureCalls++;
+        return APPROVAL_WIDGET;
+      };
+
+      const { id, deps } = suspectCodexSession();
+      await reconcileAll(
+        deps,
+        makeSnapshot({
+          panes: [
+            fakePane({ paneId: "%2", tty: "ttys002", windowActivity: null }),
+          ],
+        }),
+      );
+
+      const session = sessionManager.getSession(id)!;
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("permission");
+      // No recapture: the discriminator reused this tick's capture.
+      expect(captureCalls).toBe(1);
+    });
+
+    it("recaptures a cached match and keeps the wait when the widget is still up", async () => {
+      let captureCalls = 0;
+      mockCapturePane = async () => {
+        captureCalls++;
+        return APPROVAL_WIDGET;
+      };
+
+      const { id, deps } = suspectCodexSession();
+      // A stamp in an earlier second than the capture, unchanged across ticks:
+      // the second tick is a cache hit (see the same-second guard).
+      const pane = fakePane({
+        paneId: "%2",
+        tty: "ttys002",
+        windowActivity: Math.floor(Date.now() / 1000) - 10,
+      });
+
+      await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
+      expect(captureCalls).toBe(1);
+      expect(sessionManager.getSession(id)!.status).toBe("waiting");
+
+      flipLogToWorking(id, 10);
+      await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
+      // The cached match alone is not evidence of a live wait, so the suspect
+      // branch pays for one capture even though the activity gate was cold.
+      expect(captureCalls).toBe(2);
+      const session = sessionManager.getSession(id)!;
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("permission");
+    });
+
+    it("drops a cached match the recapture no longer sees, and caches the fresh result", async () => {
+      // The guard's original case: the widget is gone, so the cached match was
+      // a replay of a spent prompt and the fresher log-derived working stands.
+      let captureCalls = 0;
+      let paneContent = APPROVAL_WIDGET;
+      mockCapturePane = async () => {
+        captureCalls++;
+        return paneContent;
+      };
+
+      const { id, deps } = suspectCodexSession();
+      const pane = fakePane({
+        paneId: "%2",
+        tty: "ttys002",
+        windowActivity: Math.floor(Date.now() / 1000) - 10,
+      });
+
+      await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
+      expect(sessionManager.getSession(id)!.status).toBe("waiting");
+      expect(captureCalls).toBe(1);
+
+      paneContent = RESOLVED_PANE;
+      flipLogToWorking(id, 10);
+      await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
+      expect(captureCalls).toBe(2);
+      const afterDrop = sessionManager.getSession(id)!;
+      expect(afterDrop.status).toBe("working");
+      expect(afterDrop.attentionType).toBeNull();
+
+      // The recapture replaced the cache entry, so the next tick has no
+      // permission match to suspect and spawns no capture at all.
+      await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
+      expect(captureCalls).toBe(2);
+      expect(sessionManager.getSession(id)!.status).toBe("working");
     });
   });
 
@@ -2263,9 +2512,10 @@ describe("collectPaneTrackedSources (wiring)", () => {
     hasLogAdapter?: boolean;
     now?: () => number;
     getLogFileMtime?: (logPath: string) => number | null;
+    agents?: AgentDef[];
   }): Pick<
     ReconcilerDeps,
-    "hookManager" | "logAdapters" | "now" | "getLogFileMtime"
+    "hookManager" | "logAdapters" | "now" | "getLogFileMtime" | "agents"
   > {
     const logAdapters = new Map<string, LogAdapter>();
     if (opts.hasLogAdapter) {
@@ -2280,8 +2530,14 @@ describe("collectPaneTrackedSources (wiring)", () => {
       logAdapters,
       now: opts.now ?? (() => Date.now()),
       getLogFileMtime: opts.getLogFileMtime ?? (() => 0),
+      // Real defs so `markerOwnsPermissionWait` (codex-only) is exercised
+      // exactly as production reads it.
+      agents: opts.agents ?? BUILTIN_AGENTS,
     };
   }
+
+  const LINKED_LOG =
+    "/Users/test/.codex/sessions/2026/08/03/rollout-linked.jsonl";
 
   function makeMarker(
     overrides: Partial<SessionPidMarker> = {},
@@ -2387,10 +2643,10 @@ describe("collectPaneTrackedSources (wiring)", () => {
     expect("lastPrompt" in metadata).toBe(true);
   });
 
-  it("log adapter present -> log source pushed even without lastActivityAt", () => {
+  it("linked log -> log source pushed even without lastActivityAt", () => {
     const { sources } = collectPaneTrackedSources(
       makeCollectorDeps({ hasLogAdapter: true }),
-      makePaneSession({ lastActivityAt: null }),
+      makePaneSession({ lastActivityAt: null, logPath: LINKED_LOG }),
       null,
     );
     expect(sources.some((s) => s.name === "log")).toBe(true);
@@ -2418,28 +2674,136 @@ describe("collectPaneTrackedSources (wiring)", () => {
     expect(terminal?.canUpgrade).toEqual(["waiting"]);
   });
 
-  it("terminal source is upgrade-only when log adapter is registered (even without marker)", () => {
+  it("terminal source is upgrade-only when the log is linked (even without marker)", () => {
     const { sources } = collectPaneTrackedSources(
       makeCollectorDeps({ hasLogAdapter: true }),
-      makePaneSession(),
+      makePaneSession({ logPath: LINKED_LOG }),
       { status: "waiting", attentionType: "permission", pendingTool: "Bash" },
     );
     const terminal = sources.find((s) => s.name === "terminal");
     expect(terminal?.canUpgrade).toEqual(["waiting"]);
   });
 
-  it("marker + log adapter + terminal -> all three sources in cascade", () => {
+  it("marker + linked log + terminal -> all three sources in cascade", () => {
     const marker = makeMarker({ state: "working" });
     const { sources } = collectPaneTrackedSources(
       makeCollectorDeps({ marker, hasLogAdapter: true }),
       makePaneSession({
         status: "working",
+        logPath: LINKED_LOG,
         lastActivityAt: "2026-05-17T10:00:00.000Z",
       }),
       { status: "waiting", attentionType: "permission", pendingTool: "Edit" },
     );
     const kinds = sources.map((s) => s.name).sort();
     expect(kinds).toEqual(["log", "marker", "terminal"]);
+  });
+
+  describe("unlinked log (hookless codex pinned at waiting/permission)", () => {
+    // Live repro: a pane-tracked codex whose rollout linking legitimately
+    // refused (ambiguous same-cwd hookless sessions, `logPath === null`).
+    // Pre-fix the log source echoed the stored `waiting`/`permission` every
+    // tick, which made the terminal source upgrade-only, which meant the
+    // live `esc to interrupt` working match could never clear the pin, and
+    // the synthetic-idle escape needs a LINKED log so it never fired.
+    function unlinkedCodexSession(overrides: Partial<Session> = {}): Session {
+      return makePaneSession({
+        id: "codex_pane1",
+        agentType: "codex",
+        logPath: null,
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Command",
+        lastActivityAt: "2026-08-03T12:00:00.000Z",
+        ...overrides,
+      });
+    }
+
+    it("a working rule match clears the stored permission wait", () => {
+      const { sources } = collectPaneTrackedSources(
+        makeCollectorDeps({ hasLogAdapter: true }),
+        unlinkedCodexSession(),
+        { status: "working", attentionType: null, pendingTool: null },
+      );
+
+      // The terminal source is the only source, hence a baseline that moves
+      // state in BOTH directions.
+      expect(sources.map((s) => s.name)).toEqual(["terminal"]);
+      expect(sources[0].canUpgrade).toBeUndefined();
+
+      const resolved = evaluateCascade(sources);
+      expect(resolved.status).toBe("working");
+      expect(resolved.attentionType).toBeNull();
+      expect(resolved.pendingTool).toBeNull();
+    });
+
+    it("the waiting rule is still the wait source for an unlinked session", () => {
+      const { sources } = collectPaneTrackedSources(
+        makeCollectorDeps({ hasLogAdapter: true }),
+        unlinkedCodexSession({
+          status: "idle",
+          attentionType: null,
+          pendingTool: null,
+        }),
+        {
+          status: "waiting",
+          attentionType: "permission",
+          pendingTool: "Command",
+        },
+      );
+      const resolved = evaluateCascade(sources);
+      expect(resolved.status).toBe("waiting");
+      expect(resolved.attentionType).toBe("permission");
+      expect(resolved.pendingTool).toBe("Command");
+    });
+
+    it("marker + unlinked log -> [marker, terminal(upgrade-only)]; the marker still wins", () => {
+      // Hooks installed, rollout not yet linked. Dropping the log echo must
+      // not promote the pane over the hook: with a marker present the
+      // terminal source stays upgrade-only, so a `working` match cannot
+      // downgrade the marker's word.
+      const marker = makeMarker({
+        agent_type: "codex",
+        state: "idle",
+        state_timestamp: 1_700_000_500,
+      });
+      const { sources } = collectPaneTrackedSources(
+        makeCollectorDeps({ marker, hasLogAdapter: true }),
+        unlinkedCodexSession(),
+        { status: "working", attentionType: null, pendingTool: null },
+      );
+
+      expect(sources.map((s) => s.name)).toEqual(["marker", "terminal"]);
+      expect(sources[1].canUpgrade).toEqual(["waiting"]);
+      expect(evaluateCascade(sources).status).toBe("idle");
+    });
+
+    it("marker + unlinked log: a permission rule is NOT dropped (the guard needs a linked log)", () => {
+      // `dropsStalePermissionTerminalUpgrade` requires BOTH a marker and a
+      // log source; no linkage means no log source, so the guard is inert and
+      // the rules keep their wait.
+      const marker = makeMarker({
+        agent_type: "codex",
+        state: "working",
+        state_timestamp: 1_700_000_500,
+      });
+      const { sources } = collectPaneTrackedSources(
+        makeCollectorDeps({ marker, hasLogAdapter: true }),
+        unlinkedCodexSession({
+          status: "working",
+          attentionType: null,
+          pendingTool: null,
+          lastActivityAt: new Date(1_700_000_505_000).toISOString(),
+        }),
+        {
+          status: "waiting",
+          attentionType: "permission",
+          pendingTool: "Command",
+        },
+      );
+      expect(sources.some((s) => s.name === "terminal")).toBe(true);
+      expect(evaluateCascade(sources).status).toBe("waiting");
+    });
   });
 
   describe("stale-log convergence (no-hooks codex stuck at working)", () => {
@@ -2498,7 +2862,10 @@ describe("collectPaneTrackedSources (wiring)", () => {
       expect(evaluateCascade(sources).status).toBe("working");
     });
 
-    it("unlinked session (logPath null) -> no synthetic source", () => {
+    it("unlinked session (logPath null) -> no log source and no synthetic source", () => {
+      // No linkage means no log evidence at all: the echo that used to stand
+      // in for it (and deadlock the row) is gone, and the synthetic idle it
+      // would have needed to escape is still correctly absent.
       const { sources } = collectPaneTrackedSources(
         makeCollectorDeps({
           hasLogAdapter: true,
@@ -2508,7 +2875,7 @@ describe("collectPaneTrackedSources (wiring)", () => {
         stuckWorkingSession({ logPath: null }),
         null,
       );
-      expect(sources.map((s) => s.name)).toEqual(["log"]);
+      expect(sources).toHaveLength(0);
     });
 
     it("marker-backed session -> no synthetic source even with a silent log", () => {
@@ -2556,6 +2923,184 @@ describe("collectPaneTrackedSources (wiring)", () => {
         null,
       );
       expect(evaluateCascade(sources).status).toBe("idle");
+    });
+  });
+
+  describe("stale permission terminal upgrade (codex, issue #103)", () => {
+    // Codex's rules match the modern approval widget again, so leftover
+    // prompt text (or a `terminalRuleCache` entry captured during the wait
+    // and replayed after it) can re-pin `waiting` over a fresher
+    // log-derived `working`. `dropsStalePermissionTerminalUpgrade` is what
+    // stops that; `markerOwnsPermissionWait` scopes it to Codex.
+    //
+    // The collector WITHHOLDS such a match and reports
+    // `suspectPermissionUpgrade`; whether it stays withheld is settled by a
+    // capture the caller takes (see the fresh-capture discriminator suite
+    // under `reconcileAll`), which these pure cases deliberately do not
+    // reach.
+    const MARKER_TS_SEC = 1_700_000_500;
+    const MARKER_TS_MS = MARKER_TS_SEC * 1000;
+    const PERMISSION_MATCH = {
+      status: "waiting",
+      attentionType: "permission",
+      pendingTool: "Command",
+    } as const;
+
+    function codexSession(overrides: Partial<Session> = {}): Session {
+      return makePaneSession({
+        id: "codex_pane1",
+        agentType: "codex",
+        nativeSessionId: "codex-sess-1",
+        logPath: "/Users/test/.codex/sessions/2026/08/03/rollout-x.jsonl",
+        ...overrides,
+      });
+    }
+
+    it("hook-enriched codex: fresher log-derived working is NOT re-pinned to waiting", () => {
+      // The post-approval window: Codex fires no hook on resolution, so the
+      // marker is stuck at `waiting_permission` while the log adapter has
+      // already flipped the session to `working` on a `function_call_output`.
+      const marker = makeMarker({
+        agent_type: "codex",
+        state: "waiting_permission",
+        pending_tool: "Command",
+        state_timestamp: MARKER_TS_SEC,
+      });
+      const { sources, suspectPermissionUpgrade } = collectPaneTrackedSources(
+        makeCollectorDeps({ marker, hasLogAdapter: true }),
+        codexSession({
+          status: "working",
+          lastActivityAt: new Date(MARKER_TS_MS + 5_000).toISOString(),
+        }),
+        PERMISSION_MATCH,
+      );
+
+      expect(sources.some((s) => s.name === "terminal")).toBe(false);
+      expect(suspectPermissionUpgrade).toBe(true);
+      expect(evaluateCascade(sources).status).toBe("working");
+    });
+
+    it("hook-enriched codex whose marker says working: same drop", () => {
+      const marker = makeMarker({
+        agent_type: "codex",
+        state: "working",
+        state_timestamp: MARKER_TS_SEC,
+      });
+      const { sources } = collectPaneTrackedSources(
+        makeCollectorDeps({ marker, hasLogAdapter: true }),
+        codexSession({
+          status: "working",
+          lastActivityAt: new Date(MARKER_TS_MS + 5_000).toISOString(),
+        }),
+        PERMISSION_MATCH,
+      );
+      expect(sources.some((s) => s.name === "terminal")).toBe(false);
+      expect(evaluateCascade(sources).status).toBe("working");
+    });
+
+    it("hookless codex: the rule is still the only waiting source, so it upgrades", () => {
+      const { sources } = collectPaneTrackedSources(
+        makeCollectorDeps({ hasLogAdapter: true }),
+        codexSession({
+          status: "working",
+          lastActivityAt: new Date(MARKER_TS_MS + 5_000).toISOString(),
+        }),
+        PERMISSION_MATCH,
+      );
+      const terminal = sources.find((s) => s.name === "terminal");
+      expect(terminal?.canUpgrade).toEqual(["waiting"]);
+      const resolved = evaluateCascade(sources);
+      expect(resolved.status).toBe("waiting");
+      expect(resolved.attentionType).toBe("permission");
+    });
+
+    it("marker still the freshest word (live wait): the rule is kept", () => {
+      const marker = makeMarker({
+        agent_type: "codex",
+        state: "waiting_permission",
+        pending_tool: "Command",
+        state_timestamp: MARKER_TS_SEC,
+      });
+      const { sources, suspectPermissionUpgrade } = collectPaneTrackedSources(
+        makeCollectorDeps({ marker, hasLogAdapter: true }),
+        codexSession({
+          status: "working",
+          lastActivityAt: new Date(MARKER_TS_MS - 5_000).toISOString(),
+        }),
+        PERMISSION_MATCH,
+      );
+      expect(sources.some((s) => s.name === "terminal")).toBe(true);
+      expect(suspectPermissionUpgrade).toBe(false);
+      const resolved = evaluateCascade(sources);
+      expect(resolved.status).toBe("waiting");
+      expect(resolved.attentionType).toBe("permission");
+    });
+
+    it("fresher log that still echoes the wait: the rule is kept", () => {
+      // A live wait keeps appending rollout entries (`token_count`), so the
+      // log can out-fresh the second-granularity marker while still saying
+      // waiting. Only a log that moved ON is evidence the prompt is spent.
+      const marker = makeMarker({
+        agent_type: "codex",
+        state: "waiting_permission",
+        pending_tool: "Command",
+        state_timestamp: MARKER_TS_SEC,
+      });
+      const { sources } = collectPaneTrackedSources(
+        makeCollectorDeps({ marker, hasLogAdapter: true }),
+        codexSession({
+          status: "waiting",
+          attentionType: "permission",
+          pendingTool: "Command",
+          lastActivityAt: new Date(MARKER_TS_MS + 5_000).toISOString(),
+        }),
+        PERMISSION_MATCH,
+      );
+      expect(sources.some((s) => s.name === "terminal")).toBe(true);
+      expect(evaluateCascade(sources).status).toBe("waiting");
+    });
+
+    it("a working rule match is never dropped", () => {
+      const marker = makeMarker({
+        agent_type: "codex",
+        state: "waiting_permission",
+        state_timestamp: MARKER_TS_SEC,
+      });
+      const { sources } = collectPaneTrackedSources(
+        makeCollectorDeps({ marker, hasLogAdapter: true }),
+        codexSession({
+          status: "working",
+          lastActivityAt: new Date(MARKER_TS_MS + 5_000).toISOString(),
+        }),
+        { status: "working", attentionType: null, pendingTool: null },
+      );
+      expect(sources.some((s) => s.name === "terminal")).toBe(true);
+    });
+
+    it("agents without markerOwnsPermissionWait keep the upgrade (cursor's rules are its only wait source)", () => {
+      const marker = makeMarker({
+        agent_type: "cursor",
+        state: "working",
+        state_timestamp: MARKER_TS_SEC,
+      });
+      const logAdapters = new Map<string, LogAdapter>();
+      logAdapters.set("cursor", {} as LogAdapter);
+      const deps = {
+        ...makeCollectorDeps({ marker }),
+        logAdapters,
+      };
+      const { sources } = collectPaneTrackedSources(
+        deps,
+        makePaneSession({
+          id: "cursor_pane1",
+          agentType: "cursor",
+          status: "working",
+          lastActivityAt: new Date(MARKER_TS_MS + 5_000).toISOString(),
+        }),
+        PERMISSION_MATCH,
+      );
+      expect(sources.some((s) => s.name === "terminal")).toBe(true);
+      expect(evaluateCascade(sources).status).toBe("waiting");
     });
   });
 });
