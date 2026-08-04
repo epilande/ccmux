@@ -11,6 +11,7 @@ import {
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { PICKER_PANE_TITLE, SIDEBAR_PANE_TITLE } from "../lib/config";
 import type { AgentStateFile } from "./agent-state";
 import {
   cleanStateEntries,
@@ -19,12 +20,15 @@ import {
 } from "./agent-state";
 import {
   branchDeletionFor,
+  describeHttpFailure,
   describeIgnoredDeletion,
   describeIgnoredDirs,
   describeIgnoredFiles,
+  normalizeScan,
   ghPRStateLookup,
   isRepoAdminDir,
   paneListIncludes,
+  paneOccupants,
   runPrune,
   scanRepo,
   selectPRForBranch,
@@ -280,9 +284,9 @@ describe("scanRepo classification", () => {
     expect(scan.skipped).toEqual([]);
   });
 
-  it("leaves a worktree with an open PR alone", async () => {
+  it("leaves a worktree with an open PR alone, and reports it as open", async () => {
     const { repo } = await makeRepo("open-pr");
-    await addWorktree(repo, "feat/open");
+    const wt = await addWorktree(repo, "feat/open");
     await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/open"]);
 
     const scan = await scanRepo(repo, {
@@ -298,17 +302,36 @@ describe("scanRepo classification", () => {
     });
 
     expect(scan.candidates).toEqual([]);
+    // Not a skip either: an open PR is the healthy in-flight state, and the
+    // panel shows it as a badge rather than as a withheld row.
+    expect(scan.skipped).toEqual([]);
+    expect(scan.open).toEqual([
+      {
+        path: normalizePath(wt),
+        repoRoot: repo,
+        branch: "feat/open",
+        pr: {
+          number: 3,
+          url: "https://github.com/o/r/pull/3",
+          state: "OPEN",
+        },
+      },
+    ]);
   });
 
   it("short-circuits on the daemon's open-PR cache without a gh lookup", async () => {
     const { repo } = await makeRepo("open-pr-cache");
-    await addWorktree(repo, "feat/cached");
+    const wt = await addWorktree(repo, "feat/cached");
     await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/cached"]);
     let lookups = 0;
 
     const scan = await scanRepo(repo, {
       skipFetch: true,
-      hasOpenPR: () => true,
+      openPR: () => ({
+        number: 12,
+        url: "https://github.com/o/r/pull/12",
+        state: "OPEN",
+      }),
       lookupPR: async () => {
         lookups++;
         return { ok: true, pr: null };
@@ -317,6 +340,42 @@ describe("scanRepo classification", () => {
 
     expect(scan.candidates).toEqual([]);
     expect(lookups).toBe(0);
+    // Reported rather than silently dropped, and the cache path carries the
+    // PR itself so the panel's badge has a number to show.
+    expect(scan.open).toEqual([
+      {
+        path: normalizePath(wt),
+        repoRoot: repo,
+        branch: "feat/cached",
+        pr: {
+          number: 12,
+          url: "https://github.com/o/r/pull/12",
+          state: "OPEN",
+        },
+      },
+    ]);
+  });
+
+  // An unusable cache entry must not become a PR-less "it's open" row: it
+  // falls through to the lookup, which answers the same question properly.
+  it("falls through to the gh lookup when the cache has nothing usable", async () => {
+    const { repo } = await makeRepo("open-pr-cache-miss");
+    await addWorktree(repo, "feat/uncached");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/uncached"]);
+    let lookups = 0;
+
+    const scan = await scanRepo(repo, {
+      skipFetch: true,
+      openPR: () => null,
+      lookupPR: async () => {
+        lookups++;
+        return { ok: true, pr: null };
+      },
+    });
+
+    expect(lookups).toBe(1);
+    expect(scan.open).toEqual([]);
+    expect(scan.candidates).toHaveLength(1);
   });
 
   it("never offers the main checkout as a candidate", async () => {
@@ -2656,5 +2715,421 @@ describe("readSymlinkDirectories scopes", () => {
       JSON.stringify({ worktree: { symlinkDirectories: ["vendor", 7, ""] } }),
     );
     expect(readSymlinkDirectories(repo, home)).toEqual(["vendor"]);
+  });
+});
+
+/**
+ * An occupied worktree is the likeliest of all to have an open PR, and the
+ * session gate used to return before the PR question was ever asked — so the
+ * panel's badge was unreachable for exactly those rows.
+ */
+describe("open rows for occupied worktrees", () => {
+  it("reports both the skip and the open PR for a worktree with a session", async () => {
+    const { repo } = await makeRepo("occupied-open-pr");
+    const wt = await addWorktree(repo, "feat/busy");
+
+    const scan = await scanRepo(repo, {
+      skipFetch: true,
+      sessionsFor: () => [session({ status: "working" })],
+      openPR: () => ({
+        number: 5,
+        url: "https://github.com/o/r/pull/5",
+        state: "OPEN",
+      }),
+      lookupPR: noPR,
+    });
+
+    // The skip still stands on its own: it is the removal gate.
+    expect(scan.skipped).toEqual([
+      {
+        path: normalizePath(wt),
+        repoRoot: repo,
+        branch: "feat/busy",
+        reason: "an agent is working here",
+      },
+    ]);
+    expect(scan.open).toEqual([
+      {
+        path: normalizePath(wt),
+        repoRoot: repo,
+        branch: "feat/busy",
+        pr: {
+          number: 5,
+          url: "https://github.com/o/r/pull/5",
+          state: "OPEN",
+        },
+      },
+    ]);
+    expect(scan.candidates).toEqual([]);
+  });
+
+  // Cache only: the worktree is not going to be offered for removal whatever
+  // the answer, so it does not get to spend a network round trip.
+  it("spends no gh call on an occupied worktree, and reports no open row without one", async () => {
+    const { repo } = await makeRepo("occupied-no-cache");
+    await addWorktree(repo, "feat/busy");
+    let lookups = 0;
+
+    const scan = await scanRepo(repo, {
+      skipFetch: true,
+      sessionsFor: () => [session({ status: "idle" })],
+      openPR: () => null,
+      lookupPR: async () => {
+        lookups++;
+        return { ok: true, pr: null };
+      },
+    });
+
+    expect(lookups).toBe(0);
+    expect(scan.open).toEqual([]);
+    expect(scan.skipped[0]?.reason).toBe("an agent is idle here");
+  });
+});
+
+/**
+ * The last-moment occupancy guard (S11).
+ *
+ * The session gate cannot close its own race: the scan snapshots sessions and
+ * then spends seconds on `gh`, and binding a newly started agent costs a pane
+ * scan plus a marker on top of that. tmux, asked at the moment of deletion,
+ * has no such latency.
+ */
+describe("paneOccupants", () => {
+  const pane = (
+    paneId: string,
+    currentPath: string | null,
+    currentCommand: string | null,
+    paneTitle: string | null = null,
+  ) => ({ paneId, currentPath, currentCommand, paneTitle });
+
+  it("reports a pane running a command inside the worktree", () => {
+    const found = paneOccupants(
+      [pane("%1", "/wt/feature", "node")],
+      "/wt/feature",
+    );
+    expect(found.map((p) => p.paneId)).toEqual(["%1"]);
+  });
+
+  it("reports one in a subdirectory too", () => {
+    const found = paneOccupants(
+      [pane("%1", "/wt/feature/src/tui", "claude")],
+      "/wt/feature",
+    );
+    expect(found.map((p) => p.paneId)).toEqual(["%1"]);
+  });
+
+  // The whole subtlety: a shell left sitting in a directory that is about to
+  // disappear is the ORDINARY leftover, and the prune surfaces are usually
+  // opened from a pane in the repo. Refusing on it would block most
+  // legitimate removals.
+  it("exempts a bare shell, including a login shell", () => {
+    expect(
+      paneOccupants(
+        [pane("%1", "/wt/feature", "zsh"), pane("%2", "/wt/feature", "-bash")],
+        "/wt/feature",
+      ),
+    ).toEqual([]);
+  });
+
+  // A sidebar reports `bun`, not a shell and not `ccmux`, so the shell
+  // exemption never covered it — and the popup picker, where TMUX_PANE is
+  // unset, sends no `callerPane` to cover it either. The title is what
+  // identifies a surface.
+  it("exempts a ccmux surface by its pane title", () => {
+    expect(
+      paneOccupants(
+        [
+          pane("%1", "/wt/feature", "bun", SIDEBAR_PANE_TITLE),
+          pane("%2", "/wt/feature", "bun", PICKER_PANE_TITLE),
+        ],
+        "/wt/feature",
+      ),
+    ).toEqual([]);
+  });
+
+  // The exemption is the ccmux prefix, not the command: an agent that happens
+  // to run under `bun` is still somebody working.
+  it("does NOT exempt a non-ccmux pane running the same command", () => {
+    const found = paneOccupants(
+      [
+        pane("%1", "/wt/feature", "bun", "zsh"),
+        pane("%2", "/wt/feature", "bun"),
+      ],
+      "/wt/feature",
+    );
+    expect(found.map((p) => p.paneId)).toEqual(["%1", "%2"]);
+  });
+
+  // An editor is not an agent, but it IS somebody working — which is why this
+  // uses `isShellCommand` rather than `isNonAgentCommand`.
+  it("does NOT exempt a terminal editor", () => {
+    const found = paneOccupants(
+      [pane("%1", "/wt/feature", "nvim")],
+      "/wt/feature",
+    );
+    expect(found.map((p) => p.paneId)).toEqual(["%1"]);
+  });
+
+  it("ignores panes outside the worktree, including a sibling with a shared prefix", () => {
+    expect(
+      paneOccupants(
+        [
+          pane("%1", "/wt/other", "node"),
+          pane("%2", "/wt/feature-2", "node"),
+          pane("%3", null, "node"),
+        ],
+        "/wt/feature",
+      ),
+    ).toEqual([]);
+  });
+
+  // The run has already stopped and closed these; a pane tmux has not
+  // finished reaping must not refuse the removal that just closed it.
+  it("ignores the candidate's own session panes", () => {
+    expect(
+      paneOccupants([pane("%1", "/wt/feature", "node")], "/wt/feature", ["%1"]),
+    ).toEqual([]);
+  });
+});
+
+describe("runPrune live-pane guard", () => {
+  /**
+   * One merged, prunable candidate. The branch is derived from `name` because
+   * the shared `addWorktree` helper keys the worktree PATH off the branch
+   * alone, so two repos in one test would otherwise collide on it.
+   */
+  async function mergedCandidate(name: string): Promise<PruneCandidate> {
+    const { repo } = await makeRepo(name);
+    const branch = `feat/${name}`;
+    await addWorktree(repo, branch);
+    await git(repo, ["merge", "--no-ff", "-m", "merge", branch]);
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+    return scan.candidates[0];
+  }
+
+  it("refuses a candidate with a live pane and leaves it on disk", async () => {
+    const candidate = await mergedCandidate("guard-refuses");
+
+    const result = await runPrune([candidate], {
+      listPanes: async () => [
+        {
+          paneId: "%7",
+          currentPath: candidate.path,
+          currentCommand: "claude",
+          paneTitle: null,
+        },
+      ],
+    });
+
+    expect(result.outcomes[0].removed).toBe(false);
+    expect(result.outcomes[0].error).toContain("something is running");
+    expect(existsSync(candidate.path)).toBe(true);
+    expect(
+      result.outcomes[0].steps.some(
+        (s) => s.step === "refused" && s.detail.includes("%7"),
+      ),
+    ).toBe(true);
+  });
+
+  it("removes it when the only pane there is a shell", async () => {
+    const candidate = await mergedCandidate("guard-allows-shell");
+
+    const result = await runPrune([candidate], {
+      listPanes: async () => [
+        {
+          paneId: "%7",
+          currentPath: candidate.path,
+          currentCommand: "zsh",
+          paneTitle: null,
+        },
+      ],
+    });
+
+    expect(result.outcomes[0].removed).toBe(true);
+    expect(existsSync(candidate.path)).toBe(false);
+  });
+
+  // The live case this was written for: a sidebar sits in the worktree,
+  // reporting `bun`, and the popup picker that asked for the prune has no
+  // TMUX_PANE to exempt it with.
+  it("removes it when the only pane there is a ccmux sidebar", async () => {
+    const candidate = await mergedCandidate("guard-allows-sidebar");
+
+    const result = await runPrune([candidate], {
+      listPanes: async () => [
+        {
+          paneId: "%7",
+          currentPath: candidate.path,
+          currentCommand: "bun",
+          paneTitle: SIDEBAR_PANE_TITLE,
+        },
+      ],
+    });
+
+    expect(result.outcomes[0].removed).toBe(true);
+    expect(existsSync(candidate.path)).toBe(false);
+  });
+
+  // Environmental, not a fact about this directory: refusing here would turn
+  // "tmux is missing" into "ccmux can no longer delete anything". It is
+  // recorded rather than silent.
+  it("proceeds but records a step when tmux cannot be listed", async () => {
+    const candidate = await mergedCandidate("guard-tmux-broken");
+
+    const result = await runPrune([candidate], {
+      listPanes: async () => {
+        throw new Error("tmux list-panes exited 1");
+      },
+    });
+
+    expect(result.outcomes[0].removed).toBe(true);
+    expect(
+      result.outcomes[0].steps.find((s) => s.step === "live-pane check skipped")
+        ?.detail,
+    ).toContain("tmux list-panes exited 1");
+  });
+
+  it("refuses only the occupied candidate, leaving the rest of the run intact", async () => {
+    const busy = await mergedCandidate("guard-mixed-busy");
+    const free = await mergedCandidate("guard-mixed-free");
+
+    const result = await runPrune([busy, free], {
+      listPanes: async () => [
+        {
+          paneId: "%7",
+          currentPath: busy.path,
+          currentCommand: "node",
+          paneTitle: null,
+        },
+      ],
+    });
+
+    expect(result.outcomes.map((o) => o.removed)).toEqual([false, true]);
+    expect(existsSync(busy.path)).toBe(true);
+    expect(existsSync(free.path)).toBe(false);
+  });
+});
+
+/**
+ * The caller's own pane.
+ *
+ * While `ccmux worktree prune` runs, its pane's foreground command is ccmux
+ * itself — so pruning a worktree from a pane sitting inside it, the most
+ * natural way to do it, would otherwise refuse on the process doing the
+ * pruning. (The picker needs no such exemption: a `display-popup` is not a
+ * pane and never appears in `list-panes -a`.)
+ */
+describe("runPrune callerPane exemption", () => {
+  async function mergedCandidate(name: string): Promise<PruneCandidate> {
+    const { repo } = await makeRepo(name);
+    const branch = `feat/${name}`;
+    await addWorktree(repo, branch);
+    await git(repo, ["merge", "--no-ff", "-m", "merge", branch]);
+    const scan = await scanRepo(repo, { skipFetch: true, lookupPR: noPR });
+    return scan.candidates[0];
+  }
+
+  it("removes a worktree the calling pane is sitting in", async () => {
+    const candidate = await mergedCandidate("caller-pane");
+    const panes = async () => [
+      {
+        paneId: "%9",
+        currentPath: candidate.path,
+        currentCommand: "ccmux",
+        paneTitle: null,
+      },
+    ];
+
+    const refused = await runPrune([candidate], { listPanes: panes });
+    expect(refused.outcomes[0].removed).toBe(false);
+    expect(existsSync(candidate.path)).toBe(true);
+
+    const allowed = await runPrune([candidate], {
+      listPanes: panes,
+      callerPane: "%9",
+    });
+    expect(allowed.outcomes[0].removed).toBe(true);
+    expect(existsSync(candidate.path)).toBe(false);
+  });
+
+  // The exemption is one pane, not a blanket disable.
+  it("still refuses when a different pane is live in the worktree", async () => {
+    const candidate = await mergedCandidate("caller-pane-other");
+
+    const result = await runPrune([candidate], {
+      callerPane: "%9",
+      listPanes: async () => [
+        {
+          paneId: "%9",
+          currentPath: candidate.path,
+          currentCommand: "ccmux",
+          paneTitle: null,
+        },
+        {
+          paneId: "%3",
+          currentPath: candidate.path,
+          currentCommand: "claude",
+          paneTitle: null,
+        },
+      ],
+    });
+
+    expect(result.outcomes[0].removed).toBe(false);
+    expect(result.outcomes[0].steps.some((s) => s.detail.includes("%3"))).toBe(
+      true,
+    );
+    expect(existsSync(candidate.path)).toBe(true);
+  });
+});
+
+describe("normalizeScan", () => {
+  // An older daemon is a live possibility, not a hypothetical: it is a
+  // long-lived background process that can predate whichever client is
+  // talking to it (the picker's panel and `ccmux worktree prune` both).
+  it("fills in the arrays an older daemon does not send", () => {
+    expect(normalizeScan({})).toEqual({
+      candidates: [],
+      skipped: [],
+      open: [],
+    });
+  });
+
+  it("keeps what it is given", () => {
+    const one: PruneCandidate = {
+      path: "/repo/wt/one",
+      repoRoot: "/repo",
+      repoName: "repo",
+      name: "one",
+      branch: "feat/one",
+      reason: "pr-merged",
+      detail: "PR #68 merged",
+      pr: null,
+      dirty: false,
+      modified: 0,
+      untracked: 0,
+      ignoredFiles: [],
+      ignoredDirs: [],
+      branchDeletion: "safe",
+      adminDir: null,
+      sessions: [],
+    };
+    expect(normalizeScan({ candidates: [one] })).toEqual({
+      candidates: [one],
+      skipped: [],
+      open: [],
+    });
+  });
+});
+
+describe("describeHttpFailure", () => {
+  // The daemon is long-lived and the worktree endpoints are new, so a 404 is
+  // the ordinary first result of upgrading without a restart, not an exotic
+  // failure. Both readers (the panel and the CLI) show this string verbatim.
+  it("names the out-of-date daemon on 404", () => {
+    expect(describeHttpFailure(404)).toContain("ccmux daemon restart");
+  });
+
+  it("leaves other statuses as the status", () => {
+    expect(describeHttpFailure(500)).toBe("HTTP 500");
   });
 });

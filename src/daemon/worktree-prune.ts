@@ -18,6 +18,10 @@ import { existsSync, renameSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import type { SessionStatus } from "../types/session";
+import { mapWithConcurrency } from "../lib/concurrency";
+import { isCcmuxPane } from "../lib/config";
+import { isShellCommand } from "./pane-classify";
+import { scanTmuxPanesOrThrow } from "./pane-discovery";
 import { tmuxArgv } from "../lib/tmux-exec";
 import {
   builtinStateFiles,
@@ -180,9 +184,79 @@ export interface PruneSkip {
   reason: string;
 }
 
+/**
+ * A worktree the scan dropped because its pull request is still OPEN — the
+ * healthy in-flight state, not a problem.
+ *
+ * Reported rather than silently dropped because the Worktrees panel shows a PR
+ * badge, and an open PR is the single most useful thing it can say about a
+ * worktree. It stays out of {@link PruneScan.candidates} for the same reason
+ * as before: an open PR means the work is still in flight, whatever the local
+ * refs look like.
+ *
+ * `branch` is a plain string, not nullable: a detached worktree is dropped
+ * before any PR question is asked, so an open row always has one. `pr` is
+ * likewise always present — both paths that produce this row (the daemon's
+ * open-PR cache and the `gh` lookup) carry the PR itself, and a cache entry
+ * too damaged to yield one falls through to the lookup rather than reporting a
+ * PR-less row.
+ */
+export interface PruneOpen {
+  path: string;
+  repoRoot: string;
+  branch: string;
+  pr: PRState;
+}
+
 export interface PruneScan {
   candidates: PruneCandidate[];
   skipped: PruneSkip[];
+  /** Worktrees withheld because their PR is still open. @see PruneOpen */
+  open: PruneOpen[];
+}
+
+/**
+ * `GET /worktrees/prune-candidates` as it may ARRIVE at a client.
+ *
+ * Every array {@link PruneScan} declares required is optional here, because
+ * the daemon answering is a long-lived background process that can predate the
+ * build talking to it: `open` (the healthy in-flight-PR rows) is simply absent
+ * from an older one, and `data.open.map` on undefined would throw in the middle
+ * of a merge that had nothing else wrong with it.
+ */
+export type ScanResponse = Partial<PruneScan>;
+
+/**
+ * The single place that knows an older daemon exists. Everything downstream —
+ * the picker's Worktrees panel and `ccmux worktree prune` alike — reads a whole
+ * {@link PruneScan}, so the guard lives at the boundary instead of at each of
+ * the reads.
+ *
+ * It lives beside the scan it normalizes rather than in either client, so the
+ * two cannot drift apart as the scan gains buckets.
+ */
+export function normalizeScan(data: ScanResponse): PruneScan {
+  return {
+    candidates: data.candidates ?? [],
+    skipped: data.skipped ?? [],
+    open: data.open ?? [],
+  };
+}
+
+/**
+ * Turn an HTTP status into something that names a cause the user can act on.
+ *
+ * 404 gets its own wording because it is not an exotic failure for the
+ * worktree endpoints: the daemon is a long-lived background process,
+ * `GET /worktrees` is new, and a daemon started before this build answers 404
+ * for it — which is the guaranteed first result of upgrading without a restart.
+ * "HTTP 404" describes that as a mystery; the restart command is the whole fix.
+ */
+export function describeHttpFailure(status: number): string {
+  if (status === 404) {
+    return "daemon is out of date (restart it: ccmux daemon restart)";
+  }
+  return `HTTP ${status}`;
 }
 
 /** One `gh pr list --json` row, with the fields that establish identity. */
@@ -367,11 +441,13 @@ export interface ScanDeps {
    */
   sessionsFor?: (worktreePath: string) => WorktreeSession[];
   /**
-   * Fast "there is already an open PR" read off the daemon's existing
-   * `branchPRs` cache. Lets the common busy-branch case skip the gh call
-   * entirely; returning false only costs a lookup that would have happened.
+   * The already-known OPEN pull request for a branch, read off the daemon's
+   * existing `branchPRs` cache. Lets the common busy-branch case skip the gh
+   * call entirely; answering null only costs a lookup that would have happened
+   * anyway, which is also what an unusable cache entry should do rather than
+   * reporting an open row with no PR to name.
    */
-  hasOpenPR?: (cwd: string, branch: string) => boolean;
+  openPR?: (cwd: string, branch: string) => PRState | null;
   /** Skip the per-repo `git fetch --prune` (tests, offline runs). */
   skipFetch?: boolean;
 }
@@ -495,7 +571,7 @@ export function branchDeletionFor(reason: PruneReason): BranchDeletion {
  * "is there an open PR" is exactly what the network is being asked. Measured:
  * 15 active worktrees still made 15 gh calls. What genuinely avoids the call
  * is a branch with no upstream, a branch already merged locally, or a hit in
- * the daemon's open-PR cache (`hasOpenPR`); everything else pays for it, which
+ * the daemon's open-PR cache (`openPR`); everything else pays for it, which
  * is why the calls run concurrently rather than one at a time.
  */
 export async function scanRepo(
@@ -505,10 +581,11 @@ export async function scanRepo(
   const git = deps.git ?? runGit;
   const candidates: PruneCandidate[] = [];
   const skipped: PruneSkip[] = [];
+  const open: PruneOpen[] = [];
 
   const entries = await listWorktrees(repoRoot, git);
   const linked = entries.filter((e) => !e.isMain && !e.bare);
-  if (linked.length === 0) return { candidates, skipped };
+  if (linked.length === 0) return { candidates, skipped, open };
 
   // One network call per repo, not per worktree: this is what turns a branch
   // deleted on GitHub into a locally visible `[gone]`.
@@ -545,12 +622,13 @@ export async function scanRepo(
         deps,
       }),
   );
-  for (const { candidate, skip } of results) {
-    if (candidate) candidates.push(candidate);
-    if (skip) skipped.push(skip);
+  for (const result of results) {
+    if (result.candidate) candidates.push(result.candidate);
+    if (result.skip) skipped.push(result.skip);
+    if (result.open) open.push(result.open);
   }
 
-  return { candidates, skipped };
+  return { candidates, skipped, open };
 }
 
 /** Concurrent `gh pr list` calls per repo during classification. */
@@ -565,31 +643,6 @@ const CLASSIFY_CONCURRENCY = 6;
 function onceAsync<T>(produce: () => Promise<T>): () => Promise<T> {
   let pending: Promise<T> | undefined;
   return () => (pending ??= produce());
-}
-
-/**
- * `Promise.all` with a ceiling on how many run at once, preserving input
- * order in the result.
- */
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const workers = Array.from(
-    { length: Math.min(limit, items.length) },
-    async () => {
-      while (true) {
-        const i = next++;
-        if (i >= items.length) return;
-        results[i] = await fn(items[i]);
-      }
-    },
-  );
-  await Promise.all(workers);
-  return results;
 }
 
 interface ClassifyContext {
@@ -609,6 +662,7 @@ interface ClassifyContext {
 interface Classification {
   candidate?: PruneCandidate;
   skip?: PruneSkip;
+  open?: PruneOpen;
 }
 
 /**
@@ -670,19 +724,41 @@ async function classifyOne(
   const live =
     sessions.find((s) => s.status === "working") ?? sessions.at(0) ?? null;
   if (live) {
-    return skip(
+    const reason =
       live.status === "working"
         ? "an agent is working here"
-        : `an agent is ${live.status} here`,
-    );
+        : `an agent is ${live.status} here`;
+    // The skip and the open row are INDEPENDENT facts, and an occupied
+    // worktree is the likeliest one of all to have an open PR — reporting
+    // only the skip made the panel's badge unreachable for exactly those
+    // rows. The skip still stands on its own: it is the removal gate, and
+    // nothing here weakens it.
+    //
+    // Cache only, no `gh` call. This worktree is not going to be offered for
+    // removal whatever the answer, so it does not get to spend a network
+    // round trip — and the daemon's PR cache is populated from the branches
+    // its SESSIONS sit on, which is precisely this case. A miss still warms
+    // the cache for the next scan (`PRResolver.get` refreshes in the
+    // background), so the badge arrives a scan later rather than never.
+    const openPR = deps.openPR?.(path, branch) ?? null;
+    return {
+      skip: { path, repoRoot, branch, reason },
+      ...(openPR ? { open: { path, repoRoot, branch, pr: openPR } } : {}),
+    };
   }
 
-  const upstream = ctx.upstreams.get(branch) ?? { upstream: null, gone: false };
+  const upstream = ctx.upstreams.get(branch) ?? {
+    upstream: null,
+    gone: false,
+    ahead: 0,
+    behind: 0,
+  };
 
   // An open PR means the work is still in flight, whatever the local refs
   // look like. Checked against the daemon's existing cache first so the
   // common case costs nothing.
-  if (deps.hasOpenPR?.(path, branch)) return {};
+  const cachedPR = deps.openPR?.(path, branch) ?? null;
+  if (cachedPR) return { open: { path, repoRoot, branch, pr: cachedPR } };
 
   const mergedLocally = await isMergedInto(repoRoot, branch, ctx.baseRefs, git);
 
@@ -719,7 +795,7 @@ async function classifyOne(
     return {};
   }
   const pr = lookup.pr;
-  if (pr?.state === "OPEN") return {};
+  if (pr?.state === "OPEN") return { open: { path, repoRoot, branch, pr } };
 
   const reason = reasonFor(pr, mergedLocally, upstream.gone);
   if (!reason) return {};
@@ -757,6 +833,7 @@ export async function scanRepos(
   const seen = new Set<string>();
   const candidates: PruneCandidate[] = [];
   const skipped: PruneSkip[] = [];
+  const open: PruneOpen[] = [];
   for (const root of repoRoots) {
     const key = normalizePath(root);
     if (seen.has(key)) continue;
@@ -764,12 +841,87 @@ export async function scanRepos(
     const scan = await scanRepo(root, deps);
     candidates.push(...scan.candidates);
     skipped.push(...scan.skipped);
+    open.push(...scan.open);
   }
   candidates.sort(
     (a, b) =>
       a.repoName.localeCompare(b.repoName) || a.name.localeCompare(b.name),
   );
-  return { candidates, skipped };
+  open.sort((a, b) => a.path.localeCompare(b.path));
+  return { candidates, skipped, open };
+}
+
+/**
+ * A pane as the last-moment occupancy guard sees it. Structural rather than
+ * `TmuxPane` so the rule below can be tested without building tmux rows.
+ */
+export interface OccupantPane {
+  paneId: string;
+  currentPath: string | null;
+  currentCommand: string | null;
+  /** `#{pane_title}`, which is how a ccmux surface identifies itself. */
+  paneTitle: string | null;
+}
+
+/**
+ * Panes that are evidence of LIVE WORK inside a worktree about to be removed.
+ *
+ * This exists because the session gate cannot close its own race. The scan
+ * snapshots sessions, then spends seconds on `git fetch` and a `gh` call per
+ * branch; the run re-derives, but an agent that started in the meantime — or
+ * one that started before the scan and has not been detected yet, since
+ * binding costs a pane scan and a marker — is invisible to both. tmux, asked
+ * at the moment of deletion, is the one observer that has no such latency.
+ *
+ * A pane counts as an occupant when its cwd is inside the worktree AND its
+ * foreground command is not a bare shell AND it is not a ccmux surface. The
+ * shell exemption is the whole subtlety: a shell left sitting in a directory
+ * that is about to disappear is the ORDINARY leftover, and refusing on it
+ * would block most legitimate removals (the prune surfaces are themselves
+ * usually opened from a pane in the repo). An editor is not exempt —
+ * `isShellCommand` is deliberately narrower than `isNonAgentCommand` for
+ * exactly this call.
+ *
+ * A ccmux surface is exempt BY IDENTITY, not by being the caller. A sidebar
+ * reports `bun` as its foreground command, so the shell exemption never
+ * covered it, and `callerPane` cannot cover it either: inside a
+ * `display-popup` TMUX_PANE is unset, so the popup picker sends no exemption
+ * at all and refused every prune of a worktree a sidebar happened to sit in.
+ * The pane title is what distinguishes them — every ccmux surface sets one
+ * (`isCcmuxPane`), and a surface is never the work a prune should refuse on.
+ *
+ * `ignorePaneIds` carries the candidate's own session panes, which
+ * {@link runPrune} has already stopped and closed by this point; a pane tmux
+ * has not finished reaping must not become a refusal of the removal that just
+ * closed it.
+ *
+ * What it does NOT catch, and cannot: work outside tmux (an editor in another
+ * terminal, a build in an IDE), and a process whose pane cwd is elsewhere. The
+ * guard narrows the window; it does not close it.
+ */
+export function paneOccupants(
+  panes: OccupantPane[],
+  worktreePath: string,
+  ignorePaneIds: Iterable<string> = [],
+): OccupantPane[] {
+  const root = normalizePath(worktreePath);
+  const prefix = root.endsWith(sep) ? root : root + sep;
+  const ignored = new Set(ignorePaneIds);
+  return panes.filter((pane) => {
+    if (ignored.has(pane.paneId)) return false;
+    if (!pane.currentPath) return false;
+    const path = normalizePath(pane.currentPath);
+    if (path !== root && !path.startsWith(prefix)) return false;
+    if (isCcmuxPane(pane.paneTitle)) return false;
+    return !isShellCommand(pane.currentCommand);
+  });
+}
+
+/** How the guard describes what it found, for the run log and the error. */
+function describeOccupants(occupants: OccupantPane[]): string {
+  return occupants
+    .map((pane) => `${pane.paneId} (${pane.currentCommand ?? "unknown"})`)
+    .join(", ");
 }
 
 /**
@@ -813,6 +965,15 @@ export interface PruneDeps {
   /** Injectable for tests; defaults to `process.kill`. */
   killProcess?: (pid: number, signal: NodeJS.Signals | 0) => void;
   closePane?: (paneId: string) => Promise<PaneCloseResult>;
+  /**
+   * Every tmux pane, for the last-moment occupancy guard
+   * ({@link paneOccupants}). THROWING means tmux could not be inspected;
+   * {@link runPrune} then proceeds WITHOUT the guard, logging a
+   * `live-pane check skipped` step — see the fail-soft rationale at the call
+   * site. A tmux that is simply not running is not a throw; it is zero panes,
+   * which is a definitive answer.
+   */
+  listPanes?: () => Promise<OccupantPane[]>;
   sleep?: (ms: number) => Promise<void>;
   stateFiles?: AgentStateFile[];
   now?: () => Date;
@@ -822,6 +983,24 @@ export interface PruneDeps {
 }
 
 export interface PruneOptions extends PruneDeps {
+  /**
+   * The pane the request came FROM, exempt from the occupancy guard.
+   *
+   * This covers the CLI, whose pane runs `ccmux worktree prune` itself: prune
+   * from a pane sitting inside the worktree, the most natural way to do it,
+   * and the guard would otherwise refuse on the process doing the pruning.
+   * Surfaces need no exemption of their own — a `display-popup` is not a pane
+   * (verified: a popup running a long command does not appear in
+   * `list-panes -a`), and a sidebar, which IS a real pane, is exempt by its
+   * title (see {@link paneOccupants}) rather than by sending an id it cannot
+   * always know. Callers that have `$TMUX_PANE` send it anyway, the same
+   * convention spawn placement uses.
+   *
+   * It exempts that pane from the LAST-MOMENT check only. A worktree with a
+   * bound session is still skipped at classification, so this cannot be used
+   * to prune a worktree an agent is actually working in.
+   */
+  callerPane?: string;
   dryRun?: boolean;
   /** Also drop state entries for directories deleted outside ccmux. */
   cleanOrphanState?: boolean;
@@ -926,6 +1105,25 @@ async function defaultClosePane(paneId: string): Promise<PaneCloseResult> {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Default pane source for the occupancy guard.
+ *
+ * `scanTmuxPanesOrThrow`, NOT the fail-soft `listTmuxPanes`: no tmux server is
+ * a definitive "there are no panes" and comes back as an empty list, while a
+ * tmux that could not be run or answered an unexpected error THROWS — so
+ * {@link runPrune} can tell the two apart and log that the check was skipped
+ * instead of silently treating a broken tmux as an empty one.
+ */
+async function defaultListPanes(): Promise<OccupantPane[]> {
+  const scan = await scanTmuxPanesOrThrow();
+  return scan.panes.map((pane) => ({
+    paneId: pane.paneId,
+    currentPath: pane.currentPath,
+    currentCommand: pane.currentCommand,
+    paneTitle: pane.paneTitle,
+  }));
 }
 
 /**
@@ -1227,6 +1425,49 @@ export async function runPrune(
         });
         continue;
       }
+    }
+
+    // LAST check before the directory moves, and the only one that does not
+    // rely on the daemon's own session tracking (S11). The session gate is a
+    // snapshot the scan took seconds ago, and binding a newly started agent
+    // costs a pane scan plus a marker on top of that, so an agent that
+    // started in this worktree during the window is invisible to every check
+    // above. tmux has no such latency.
+    //
+    // Placed after `stopSessions` deliberately: the panes this run legitimately
+    // closed are gone by now, and the candidate's own session panes are passed
+    // as exemptions for any tmux has not finished reaping.
+    try {
+      const panes = await (options.listPanes ?? defaultListPanes)();
+      const occupants = paneOccupants(panes, candidate.path, [
+        ...candidate.sessions.flatMap((s) => (s.tmuxPane ? [s.tmuxPane] : [])),
+        ...(options.callerPane ? [options.callerPane] : []),
+      ]);
+      if (occupants.length > 0) {
+        outcome.error =
+          "something is running in this worktree; nothing was deleted";
+        steps.push({
+          step: "refused",
+          ok: false,
+          detail: `${describeOccupants(occupants)} ${occupants.length === 1 ? "is" : "are"} live in this directory (a bare shell would not have blocked it)`,
+        });
+        continue;
+      }
+    } catch (err) {
+      // Fail SOFT, and say so in the log. This is the one place the guard
+      // deliberately does not follow `readDirtyState`'s "refuse what you
+      // cannot inspect" rule, because the two failures are not alike: an
+      // unreadable worktree is a fact about THIS directory, while an
+      // unreachable tmux is environmental and global. Refusing on it would
+      // turn "tmux is missing or misconfigured" into "ccmux can no longer
+      // delete anything", including on a machine that has no tmux at all —
+      // and the behavior this guard replaced was to proceed without checking
+      // at all. It may narrow the race; it must never be a new way to fail.
+      steps.push({
+        step: "live-pane check skipped",
+        ok: false,
+        detail: `tmux could not be listed (${errorMessage(err)}); removal proceeded unchecked`,
+      });
     }
 
     const trash = trashPathFor(candidate.path, now());
