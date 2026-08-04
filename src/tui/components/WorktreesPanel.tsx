@@ -627,14 +627,15 @@ export function detailPhrases(
 const PHRASE_SEPARATOR = " · ";
 
 /**
- * The rail: a single muted `│` in its own column, carried by every line of a
- * repo group below the group's first line.
+ * The rail: a single muted `│` in its own column, carried by EVERY row line
+ * of a repo group.
  *
  * A per-row connector was the obvious first shape and the wrong one. Rows that
  * had nothing to say drew no second line, so the connector appeared and
  * vanished down the list and read as a broken rail rather than as one group.
- * Continuous means CONTINUOUS: one-line rows carry it too, and the only line
- * without it is the one the rail hangs from.
+ * Continuous means CONTINUOUS: one-line rows carry it too. The only bare line
+ * is the one above the group that the rail hangs from: the panel title in
+ * the scoped view, the repo header in the multi-repo view.
  */
 export const RAIL = "│";
 
@@ -1702,12 +1703,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                   /* One row, in both sections: the section only decides
                      whether it carries a checkbox. */
                   /**
-                   * One row. `railed` is false only for the group's very
-                   * first LINE, which is what the rail hangs from: the repo
-                   * header when headers are shown, else the first row's own
-                   * line 1.
+                   * One row. The rail is continuous over EVERY row line; the
+                   * bare line above it (the panel title in the scoped view,
+                   * the repo header in the multi-repo view) is what it hangs
+                   * from. Leaving the first row's line 1 bare as an "anchor"
+                   * just read as a hole in the rail.
                    */
-                  const renderRow = (entry: PanelRow, railed: boolean) => {
+                  const renderRow = (entry: PanelRow) => {
                     const isCursor = () =>
                       cursorRow()?.row.path === entry.row.path;
                     const isSelected = () => selected().has(entry.row.path);
@@ -1747,9 +1749,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                           <text fg={isCursor() ? theme.mauve : theme.overlay}>
                             {isCursor() ? "▎" : " "}
                           </text>
-                          <text fg={theme.overlay}>
-                            {railed ? `${RAIL} ` : "  "}
-                          </text>
+                          <text fg={theme.overlay}>{`${RAIL} `}</text>
                           <For
                             each={fitSegments(
                               primarySegments(entry, {
@@ -1815,12 +1815,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                         </box>
                       </Show>
                       <For each={split().kept}>
-                        {(entry, index) =>
-                          renderRow(
-                            entry,
-                            index() > 0 || showsGroupHeaders(merged()),
-                          )
-                        }
+                        {(entry) => renderRow(entry)}
                       </For>
                       {/* Everything below this line can be deleted, and only
                           things below it carry checkboxes. The rule starts
@@ -1837,12 +1832,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                         </box>
                       </Show>
                       <For each={split().removable}>
-                        {(entry) =>
-                          // The divider always renders above this section, so
-                          // a removable row is never the group's first line
-                          // and every one of them carries the rail.
-                          renderRow(entry, true)
-                        }
+                        {(entry) => renderRow(entry)}
                       </For>
                     </box>
                   );

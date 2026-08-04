@@ -715,10 +715,9 @@ describe("WorktreesPanel structure", () => {
     const lines = settled.split("\n");
     const first = lines.findIndex((l) => l.includes("main checkout"));
     const last = lines.findIndex((l) => l.includes("busy"));
-    // The group's first line is what the rail hangs FROM, so it has none...
-    expect(hasRail(lines[first]!)).toBe(false);
-    // ...and every line after it, the quiet one included, carries it.
-    for (let i = first + 1; i <= last; i++) {
+    // EVERY row line carries the rail, the first row and the quiet one
+    // included; the bare line it hangs from is the title above the group.
+    for (let i = first; i <= last; i++) {
       expect(hasRail(lines[i]!), `line ${i} lost the rail`).toBe(true);
     }
   });
