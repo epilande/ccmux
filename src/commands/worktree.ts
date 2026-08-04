@@ -190,6 +190,16 @@ async function postPrune(body: {
   cleanState: boolean;
   repo?: string;
   /**
+   * This pane, exempt from the daemon's last-moment occupancy guard.
+   *
+   * Not a nicety: while this command runs, its own pane's foreground command
+   * is `ccmux` itself, not a shell. Pruning a worktree from a pane sitting
+   * inside it — the most natural way to do it — would otherwise see this
+   * process as the live occupant and refuse the removal the user just
+   * confirmed.
+   */
+  callerPane?: string;
+  /**
    * Must be the SAME cwd the candidate list was fetched with. The daemon
    * re-derives every candidate from a fresh scan over the repos this
    * discovery reaches, so a run that omits it is offered a smaller set than
@@ -249,6 +259,7 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
       cleanState,
       repo,
       cwd,
+      callerPane: process.env.TMUX_PANE,
     });
     printResult(result);
     return;
@@ -350,6 +361,7 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
       cleanState,
       repo,
       cwd,
+      callerPane: process.env.TMUX_PANE,
     });
     printResult(result);
   } finally {

@@ -19,6 +19,8 @@ import { rm } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import type { SessionStatus } from "../types/session";
 import { mapWithConcurrency } from "../lib/concurrency";
+import { isShellCommand } from "./pane-classify";
+import { scanTmuxPanesOrThrow } from "./pane-discovery";
 import { tmuxArgv } from "../lib/tmux-exec";
 import {
   builtinStateFiles,
@@ -805,6 +807,67 @@ export async function scanRepos(
 }
 
 /**
+ * A pane as the last-moment occupancy guard sees it. Structural rather than
+ * `TmuxPane` so the rule below can be tested without building tmux rows.
+ */
+export interface OccupantPane {
+  paneId: string;
+  currentPath: string | null;
+  currentCommand: string | null;
+}
+
+/**
+ * Panes that are evidence of LIVE WORK inside a worktree about to be removed.
+ *
+ * This exists because the session gate cannot close its own race. The scan
+ * snapshots sessions, then spends seconds on `git fetch` and a `gh` call per
+ * branch; the run re-derives, but an agent that started in the meantime — or
+ * one that started before the scan and has not been detected yet, since
+ * binding costs a pane scan and a marker — is invisible to both. tmux, asked
+ * at the moment of deletion, is the one observer that has no such latency.
+ *
+ * A pane counts as an occupant when its cwd is inside the worktree AND its
+ * foreground command is not a bare shell. The shell exemption is the whole
+ * subtlety: a shell left sitting in a directory that is about to disappear is
+ * the ORDINARY leftover, and refusing on it would block most legitimate
+ * removals (the prune surfaces are themselves usually opened from a pane in
+ * the repo). An editor is not exempt — `isShellCommand` is deliberately
+ * narrower than `isNonAgentCommand` for exactly this call.
+ *
+ * `ignorePaneIds` carries the candidate's own session panes, which
+ * {@link runPrune} has already stopped and closed by this point; a pane tmux
+ * has not finished reaping must not become a refusal of the removal that just
+ * closed it.
+ *
+ * What it does NOT catch, and cannot: work outside tmux (an editor in another
+ * terminal, a build in an IDE), and a process whose pane cwd is elsewhere. The
+ * guard narrows the window; it does not close it.
+ */
+export function paneOccupants(
+  panes: OccupantPane[],
+  worktreePath: string,
+  ignorePaneIds: Iterable<string> = [],
+): OccupantPane[] {
+  const root = normalizePath(worktreePath);
+  const prefix = root.endsWith(sep) ? root : root + sep;
+  const ignored = new Set(ignorePaneIds);
+  return panes.filter((pane) => {
+    if (ignored.has(pane.paneId)) return false;
+    if (!pane.currentPath) return false;
+    const path = normalizePath(pane.currentPath);
+    if (path !== root && !path.startsWith(prefix)) return false;
+    return !isShellCommand(pane.currentCommand);
+  });
+}
+
+/** How the guard describes what it found, for the run log and the error. */
+function describeOccupants(occupants: OccupantPane[]): string {
+  return occupants
+    .map((pane) => `${pane.paneId} (${pane.currentCommand ?? "unknown"})`)
+    .join(", ");
+}
+
+/**
  * Outcome of closing one pane. `already-gone` is a success: the pane closed
  * along with the agent that owned it.
  */
@@ -845,6 +908,15 @@ export interface PruneDeps {
   /** Injectable for tests; defaults to `process.kill`. */
   killProcess?: (pid: number, signal: NodeJS.Signals | 0) => void;
   closePane?: (paneId: string) => Promise<PaneCloseResult>;
+  /**
+   * Every tmux pane, for the last-moment occupancy guard
+   * ({@link paneOccupants}). THROWING means tmux could not be inspected;
+   * {@link runPrune} then proceeds WITHOUT the guard, logging a
+   * `live-pane check skipped` step — see the fail-soft rationale at the call
+   * site. A tmux that is simply not running is not a throw; it is zero panes,
+   * which is a definitive answer.
+   */
+  listPanes?: () => Promise<OccupantPane[]>;
   sleep?: (ms: number) => Promise<void>;
   stateFiles?: AgentStateFile[];
   now?: () => Date;
@@ -854,6 +926,23 @@ export interface PruneDeps {
 }
 
 export interface PruneOptions extends PruneDeps {
+  /**
+   * The pane the request came FROM, exempt from the occupancy guard.
+   *
+   * A `display-popup` is not a pane (verified: a popup running a long command
+   * does not appear in `list-panes -a`), so the picker's own overlay needs no
+   * exemption. A SIDEBAR does: it runs in a real pane, and pruning the
+   * worktree that pane happens to sit in is an ordinary thing to do from it —
+   * without this, the guard would refuse the removal on the surface that
+   * asked for it. Every ccmux surface therefore sends its own pane
+   * (`$TMUX_PANE` for the CLI, `callerPane` from the TUI, the same convention
+   * spawn placement uses).
+   *
+   * It exempts that pane from the LAST-MOMENT check only. A worktree with a
+   * bound session is still skipped at classification, so this cannot be used
+   * to prune a worktree an agent is actually working in.
+   */
+  callerPane?: string;
   dryRun?: boolean;
   /** Also drop state entries for directories deleted outside ccmux. */
   cleanOrphanState?: boolean;
@@ -958,6 +1047,24 @@ async function defaultClosePane(paneId: string): Promise<PaneCloseResult> {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Default pane source for the occupancy guard.
+ *
+ * `scanTmuxPanesOrThrow`, NOT the fail-soft `listTmuxPanes`: no tmux server is
+ * a definitive "there are no panes" and comes back as an empty list, while a
+ * tmux that could not be run or answered an unexpected error THROWS — so
+ * {@link runPrune} can tell the two apart and log that the check was skipped
+ * instead of silently treating a broken tmux as an empty one.
+ */
+async function defaultListPanes(): Promise<OccupantPane[]> {
+  const scan = await scanTmuxPanesOrThrow();
+  return scan.panes.map((pane) => ({
+    paneId: pane.paneId,
+    currentPath: pane.currentPath,
+    currentCommand: pane.currentCommand,
+  }));
 }
 
 /**
@@ -1259,6 +1366,49 @@ export async function runPrune(
         });
         continue;
       }
+    }
+
+    // LAST check before the directory moves, and the only one that does not
+    // rely on the daemon's own session tracking (S11). The session gate is a
+    // snapshot the scan took seconds ago, and binding a newly started agent
+    // costs a pane scan plus a marker on top of that, so an agent that
+    // started in this worktree during the window is invisible to every check
+    // above. tmux has no such latency.
+    //
+    // Placed after `stopSessions` deliberately: the panes this run legitimately
+    // closed are gone by now, and the candidate's own session panes are passed
+    // as exemptions for any tmux has not finished reaping.
+    try {
+      const panes = await (options.listPanes ?? defaultListPanes)();
+      const occupants = paneOccupants(panes, candidate.path, [
+        ...candidate.sessions.flatMap((s) => (s.tmuxPane ? [s.tmuxPane] : [])),
+        ...(options.callerPane ? [options.callerPane] : []),
+      ]);
+      if (occupants.length > 0) {
+        outcome.error =
+          "something is running in this worktree; nothing was deleted";
+        steps.push({
+          step: "refused",
+          ok: false,
+          detail: `${describeOccupants(occupants)} ${occupants.length === 1 ? "is" : "are"} live in this directory (a bare shell would not have blocked it)`,
+        });
+        continue;
+      }
+    } catch (err) {
+      // Fail SOFT, and say so in the log. This is the one place the guard
+      // deliberately does not follow `readDirtyState`'s "refuse what you
+      // cannot inspect" rule, because the two failures are not alike: an
+      // unreadable worktree is a fact about THIS directory, while an
+      // unreachable tmux is environmental and global. Refusing on it would
+      // turn "tmux is missing or misconfigured" into "ccmux can no longer
+      // delete anything", including on a machine that has no tmux at all —
+      // and the behavior this guard replaced was to proceed without checking
+      // at all. It may narrow the race; it must never be a new way to fail.
+      steps.push({
+        step: "live-pane check skipped",
+        ok: false,
+        detail: `tmux could not be listed (${errorMessage(err)}); removal proceeded unchecked`,
+      });
     }
 
     const trash = trashPathFor(candidate.path, now());

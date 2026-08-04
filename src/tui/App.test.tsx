@@ -6258,6 +6258,96 @@ describe("App worktrees panel (W)", () => {
     }
   });
 
+  /**
+   * The rows are a phase-1 SNAPSHOT and Enter lands seconds later, so a
+   * worktree that gained an agent in that window would otherwise get the
+   * spawn dialog: a second agent in an occupied worktree, the one thing the
+   * panel is designed never to offer.
+   */
+  it("jumps instead of spawning when the worktree gained a session since the fetch", async () => {
+    const { restore: restoreExit } = withExitSpy();
+    const { restore, frame } = await openPanel([WORKTREE_ROW], {
+      // The store's session lives in a SUBDIRECTORY of the row's worktree,
+      // which still counts as being in it.
+      cwd: "/code/myapp/wt/feature/src",
+      paneCwd: null,
+    });
+    try {
+      setup.mockInput.pressEnter();
+      const shown = squish(await frame());
+      expect(switchToPaneSpy).toHaveBeenCalledTimes(1);
+      expect(switchToPaneSpy.mock.calls[0]?.[0]).toBe("%1");
+      expect(shown).not.toContain(squish("New session in worktree"));
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  // The control: genuinely unoccupied, so the dialog is still the answer.
+  it("still opens the dialog when no live session is in the worktree", async () => {
+    const { restore, frame } = await openPanel([WORKTREE_ROW], {
+      // A sibling worktree whose name starts the same way must not count.
+      cwd: "/code/myapp/wt/feature-two",
+      paneCwd: null,
+    });
+    try {
+      setup.mockInput.pressEnter();
+      const shown = squish(await frame());
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+      expect(shown).toContain(squish("New session in worktree"));
+    } finally {
+      restore();
+    }
+  });
+
+  // The revalidation reads the same directory the rest of App does, which is
+  // the PANE's cwd when there is one.
+  it("revalidates against paneCwd, not the session's original cwd", async () => {
+    const { restore: restoreExit } = withExitSpy();
+    const { restore, frame } = await openPanel([WORKTREE_ROW], {
+      cwd: "/code/myapp",
+      paneCwd: "/code/myapp/wt/feature",
+    });
+    try {
+      setup.mockInput.pressEnter();
+      await frame();
+      expect(switchToPaneSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  // The main checkout is exempt: its Enter opens an ordinary dialog whose
+  // destination is still a real choice, and ccmux nests linked worktrees
+  // under the repo root, so a containment test there would jump to an
+  // unrelated worktree's agent.
+  it("does not revalidate the main checkout against nested worktrees", async () => {
+    const { restore, frame } = await openPanel(
+      [
+        {
+          ...WORKTREE_ROW,
+          path: "/code/myapp",
+          name: "myapp",
+          isMain: true,
+          branch: "main",
+        },
+      ],
+      { cwd: "/code/myapp/.claude/worktrees/other", paneCwd: null },
+    );
+    try {
+      setup.mockInput.pressEnter();
+      const shown = squish(await frame());
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+      // The ordinary dialog, not the worktree-locked one.
+      expect(shown).toContain(squish("New session"));
+      expect(shown).not.toContain(squish("New session in worktree"));
+    } finally {
+      restore();
+    }
+  });
+
   it("captures notes with nothing to hand them to on a bare worktree", async () => {
     runHunkReviewSpy.mockImplementation(async () => ({
       ok: true,

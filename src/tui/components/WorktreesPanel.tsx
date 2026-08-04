@@ -14,7 +14,7 @@ import {
   useTerminalDimensions,
 } from "@opentui/solid";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
-import { basename } from "node:path";
+import { basename, resolve, sep } from "node:path";
 import { getDaemonUrl } from "../../lib/config";
 import type {
   PRState,
@@ -193,6 +193,34 @@ export function partitionSelection(
     }
   }
   return { removable, blockedDirty };
+}
+
+/**
+ * Whether `candidate` is the worktree at `worktreePath` or a directory inside
+ * it.
+ *
+ * The panel's rows carry the sessions the daemon reported when the list was
+ * FETCHED, and Enter acts seconds later. Re-deciding "is this worktree
+ * occupied" at Enter time means asking the live session list, and a session's
+ * directory is only a path — an agent that has `cd`-ed into a subdirectory is
+ * still in that worktree, so this is a prefix test and not equality.
+ *
+ * The separator is part of the prefix on purpose: a plain `startsWith` makes
+ * `/wt/feature-two` look like it lives inside `/wt/feature`.
+ *
+ * Compares resolved paths, not real ones. Both sides come from the same
+ * daemon (git's worktree list and the pane scan), so they agree in practice;
+ * a symlinked checkout reached by two different absolute paths would not
+ * match, and would fall through to the spawn dialog.
+ */
+export function worktreeHoldsPath(
+  worktreePath: string,
+  candidate: string,
+): boolean {
+  if (!candidate) return false;
+  const root = resolve(worktreePath);
+  const path = resolve(candidate);
+  return path === root || path.startsWith(root + sep);
 }
 
 /**
@@ -864,6 +892,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         source: "picker",
         repo: repoFilter(),
         cwd: props.cwd,
+        // Exempt THIS surface's own pane from the daemon's live-pane
+        // occupancy guard. The picker's popup is invisible to it (a
+        // `display-popup` is not a real pane and never appears in
+        // `list-panes -a`), but the SIDEBAR runs in a real one, so pruning
+        // the worktree its pane sits in would otherwise refuse on itself.
+        // `JSON.stringify` drops the key when the variable is unset, which is
+        // exactly the optional-field contract the endpoint expects.
+        callerPane: process.env.TMUX_PANE,
       }),
       signal: AbortSignal.timeout(RUN_TIMEOUT_MS),
     })

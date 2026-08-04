@@ -1245,21 +1245,33 @@ export class DaemonServer {
    * `git worktree list` rather than a `rev-parse`, because the answer has to
    * be the main checkout even when the directory handed in is a linked
    * worktree — and git documents the main checkout as the first entry it
-   * prints, for every repo layout. A bare repo has no main checkout to point
-   * at, so it answers null rather than the bare directory.
+   * prints, for every repo layout.
+   *
+   * A BARE repo resolves to the bare directory itself. It has no main
+   * checkout to point at, but it does have linked worktrees, and those are
+   * the rows the panel exists to show — answering null dropped a
+   * `clone --bare` + `worktree add` layout from the product entirely. The
+   * bare entry is not itself a row (`worktree-list.ts` filters it: there is
+   * no working tree to inspect), so what surfaces is a repo group named after
+   * the bare directory holding its worktrees.
    */
   private async resolveMainRepoRoot(dir: string): Promise<string | null> {
     const entries = await listWorktrees(dir);
     const main = entries.find((entry) => entry.isMain);
-    if (!main || main.bare) return null;
-    // A repo whose main checkout IS `$HOME` is refused, the same carve-out
+    if (!main) return null;
+    // A repo whose root IS `$HOME` is refused, the same carve-out
     // `deriveProject` (stop-at-$HOME walk) and `gitProjectName` (S4) already
     // make. A `~/.git` dotfiles repo makes EVERY directory under the home
     // directory answer "$HOME", so without this one bogus repo group swallows
     // every cwd that is not really in a project — including the caller's cwd,
-    // which is the one this discovery exists to add. The common bare-repo
-    // dotfiles pattern (`~/.cfg --bare` with its worktree at `$HOME`) is
-    // unaffected: it is refused above as bare.
+    // which is the one this discovery exists to add.
+    //
+    // The bare dotfiles pattern (`~/.cfg --bare` with a worktree AT `$HOME`)
+    // is a different shape and is deliberately not refused: the root here is
+    // `~/.cfg`, and the `$HOME` row it yields is a real worktree of a real
+    // repo rather than the swallow-everything collapse above. It is also
+    // barely reachable, since that layout leaves no `.git` at `$HOME` for git
+    // to discover from a plain cwd.
     return normalizePath(main.path) === normalizePath(this.homeDir)
       ? null
       : main.path;
@@ -1440,6 +1452,7 @@ export class DaemonServer {
       cleanState?: unknown;
       repo?: unknown;
       cwd?: unknown;
+      callerPane?: unknown;
       source?: unknown;
     };
     try {
@@ -1537,6 +1550,12 @@ export class DaemonServer {
         // resolved through symlinks, so an opt-in echoed back through a client
         // still matches the candidate it was granted for.
         allowDirtyPaths: allowDirty.map(normalizePath),
+        // The surface's own pane, exempt from the last-moment occupancy
+        // guard so pruning the worktree a sidebar sits in still works. It
+        // never widens what is prunable: a worktree with a bound session is
+        // already skipped at classification.
+        callerPane:
+          typeof body.callerPane === "string" ? body.callerPane : undefined,
         source: typeof body.source === "string" ? body.source : "api",
       });
       // A removed worktree invalidates the cwd-keyed git cache for every path

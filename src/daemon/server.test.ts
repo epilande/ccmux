@@ -7403,3 +7403,71 @@ describe("worktree discovery with a $HOME git repo", () => {
     expect(body.candidates).toEqual([]);
   });
 });
+
+/**
+ * Bare-repo discovery.
+ *
+ * `clone --bare` + `worktree add` has no main checkout, and answering "no
+ * repo" for it dropped the layout from the product entirely: its linked
+ * worktrees are real working trees an agent can live in.
+ */
+describe("worktree discovery for a bare repo", () => {
+  let root: string;
+
+  function makeBareFixture(): { bare: string; worktree: string } {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-bare-repo-"));
+    const seed = join(root, "seed");
+    mkdirSync(seed, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", seed);
+    writeFileSync(join(seed, "README.md"), "hi\n");
+    runFixtureGit(seed, "add", "README.md");
+    runFixtureGit(seed, "commit", "-m", "init");
+    const bare = join(root, "proj.git");
+    runFixtureGit(root, "clone", "--bare", seed, bare);
+    const worktree = join(root, "feat-x");
+    runFixtureGit(bare, "worktree", "add", "-b", "feat/x", worktree, "main");
+    return { bare, worktree };
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  async function list(query: string) {
+    const ctx = createServer();
+    const res = await ctx.internals.handleRequest(
+      new Request(`http://127.0.0.1:2269/worktrees?${query}`),
+    );
+    expect(res.status).toBe(200);
+    return (await res.json()) as {
+      repos: Array<{
+        repoRoot: string;
+        repoName: string;
+        worktrees: Array<{ name: string; branch: string | null }>;
+      }>;
+    };
+  }
+
+  it("lists a bare repo's linked worktrees via an explicit repo", async () => {
+    const { bare } = makeBareFixture();
+
+    const body = await list(`repo=${encodeURIComponent(bare)}`);
+
+    expect(body.repos).toHaveLength(1);
+    expect(body.repos[0].repoRoot).toBe(realpathSync(bare));
+    expect(body.repos[0].repoName).toBe("proj.git");
+    // The bare entry itself is not a row — there is no working tree to
+    // inspect — so what surfaces is the worktree it holds.
+    expect(body.repos[0].worktrees).toEqual([
+      expect.objectContaining({ name: "feat-x", branch: "feat/x" }),
+    ]);
+  });
+
+  it("finds the same repo from a cwd inside one of its worktrees", async () => {
+    const { bare, worktree } = makeBareFixture();
+
+    const body = await list(`cwd=${encodeURIComponent(worktree)}`);
+
+    expect(body.repos.map((r) => r.repoRoot)).toEqual([realpathSync(bare)]);
+  });
+});

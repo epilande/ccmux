@@ -83,7 +83,7 @@ import {
   type MoveReport,
 } from "../lib/move-report";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
-import { WorktreesPanel } from "./components/WorktreesPanel";
+import { WorktreesPanel, worktreeHoldsPath } from "./components/WorktreesPanel";
 import type { WorktreeSession } from "../daemon/worktree-prune";
 import { HelpOverlay } from "./components/HelpOverlay";
 import type { SpawnableAgent } from "../lib/spawnable-agents";
@@ -495,15 +495,43 @@ export function App(props: AppProps) {
     store.actions.showToast("No pane to switch to");
   }
 
-  /** The Worktrees panel's Enter on a row with no agent in it. */
+  /**
+   * The Worktrees panel's Enter on a row that had no agent in it WHEN THE
+   * LIST WAS FETCHED, revalidated against the live session list before it is
+   * acted on.
+   *
+   * The panel's rows are a snapshot: the two reads behind them can be seconds
+   * old by the time Enter lands, and a worktree that gained an agent in that
+   * window would otherwise open the spawn dialog — the one thing the panel is
+   * designed never to offer, a second agent in an occupied worktree. The
+   * decision is re-made HERE rather than in the panel because this is where
+   * the live store is; the panel reports what it saw and this picks the verb.
+   *
+   * Only the linked-worktree case is revalidated. The main checkout's Enter
+   * opens an ordinary dialog whose destination is still a real choice, so an
+   * agent living there is no reason to refuse — and a containment test against
+   * a repo ROOT would match every linked worktree too, since ccmux puts them
+   * under `<repo>/.claude/worktrees/`. Prefix-matching there would jump to an
+   * unrelated worktree's agent.
+   */
   function spawnInWorktree(target: {
     cwd: string;
     existingWorktree: string | null;
   }) {
     store.actions.hideWorktrees();
+    const worktree = target.existingWorktree;
+    if (worktree) {
+      const live = store.state.sessions.find((session) =>
+        worktreeHoldsPath(worktree, sessionCwd(session)),
+      );
+      if (live) {
+        activateSession(live);
+        return;
+      }
+    }
     openNewSession({
       cwd: target.cwd,
-      existingWorktree: target.existingWorktree ?? undefined,
+      existingWorktree: worktree ?? undefined,
     });
   }
 

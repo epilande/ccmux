@@ -26,6 +26,7 @@ import {
   scrollTargetFor,
   sortWorktreeRows,
   visualLayout,
+  worktreeHoldsPath,
   type PanelRow,
   type ScanResponse,
 } from "./WorktreesPanel";
@@ -1055,6 +1056,44 @@ describe("visual scrolling", () => {
   });
 });
 
+describe("worktreeHoldsPath", () => {
+  it("holds the worktree root itself", () => {
+    expect(worktreeHoldsPath("/repo/wt/feature", "/repo/wt/feature")).toBe(
+      true,
+    );
+  });
+
+  // An agent that has cd-ed deeper is still in that worktree.
+  it("holds a subdirectory", () => {
+    expect(worktreeHoldsPath("/repo/wt/feature", "/repo/wt/feature/src")).toBe(
+      true,
+    );
+  });
+
+  // The separator is what keeps this from being a string-prefix test:
+  // `feature-two` is a sibling, not a child.
+  it("does not hold a sibling whose name starts the same way", () => {
+    expect(worktreeHoldsPath("/repo/wt/feature", "/repo/wt/feature-two")).toBe(
+      false,
+    );
+  });
+
+  it("does not hold the parent or an unrelated path", () => {
+    expect(worktreeHoldsPath("/repo/wt/feature", "/repo/wt")).toBe(false);
+    expect(worktreeHoldsPath("/repo/wt/feature", "/elsewhere")).toBe(false);
+    expect(worktreeHoldsPath("/repo/wt/feature", "")).toBe(false);
+  });
+
+  it("normalizes traversal rather than comparing raw strings", () => {
+    expect(
+      worktreeHoldsPath("/repo/wt/feature", "/repo/wt/feature/../feature/src"),
+    ).toBe(true);
+    expect(
+      worktreeHoldsPath("/repo/wt/feature", "/repo/wt/feature/../other"),
+    ).toBe(false);
+  });
+});
+
 describe("describeHttpFailure", () => {
   // The daemon is long-lived and `GET /worktrees` is new, so a 404 here is
   // the ordinary case, not an exotic one.
@@ -1350,5 +1389,58 @@ describe("WorktreesPanel dirty gate", () => {
       repo: "/repo",
       cwd: "/repo",
     });
+  });
+
+  /**
+   * The daemon exempts the requesting surface's own pane from its live-pane
+   * occupancy guard. The picker's popup is invisible to that guard anyway (a
+   * `display-popup` never appears in `list-panes -a`), but the SIDEBAR runs in
+   * a real pane, so without this it would refuse to prune the worktree it is
+   * itself sitting in.
+   */
+  async function pruneBody(): Promise<Record<string, unknown>> {
+    let body: Record<string, unknown> = {};
+    const { keys, frame } = await mountPanel({
+      list: async () => json(cleanList),
+      scan: async () => json(cleanScan),
+    });
+    await frame();
+    fetchSpy!.mockImplementation((async (
+      input: unknown,
+      init?: RequestInit,
+    ) => {
+      if (String(input).includes("/worktrees/prune") && init?.body) {
+        body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      }
+      return json({ outcomes: [] });
+    }) as unknown as typeof fetch);
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    keys.pressKey("y");
+    await frame();
+    return body;
+  }
+
+  it("names its own pane so the guard does not refuse on it", async () => {
+    const original = process.env.TMUX_PANE;
+    process.env.TMUX_PANE = "%7";
+    try {
+      expect(await pruneBody()).toMatchObject({ callerPane: "%7" });
+    } finally {
+      if (original === undefined) delete process.env.TMUX_PANE;
+      else process.env.TMUX_PANE = original;
+    }
+  });
+
+  // Outside tmux there is no pane to exempt, and the field is optional on the
+  // wire: it must be ABSENT rather than sent as null or an empty string.
+  it("omits the pane entirely when there is none", async () => {
+    const original = process.env.TMUX_PANE;
+    delete process.env.TMUX_PANE;
+    try {
+      expect(await pruneBody()).not.toHaveProperty("callerPane");
+    } finally {
+      if (original !== undefined) process.env.TMUX_PANE = original;
+    }
   });
 });
