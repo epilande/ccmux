@@ -1323,6 +1323,202 @@ describe("reconcileAll", () => {
     });
   });
 
+  describe("suspect permission upgrade: fresh-capture discriminator (codex)", () => {
+    // `dropsStalePermissionTerminalUpgrade` cannot tell a spent prompt from a
+    // live one on its own: its five conditions also all hold in the
+    // parallel-output gap, where an unrelated tool's output flips the log to
+    // `working` while the approval widget is STILL on screen. The widget is
+    // removed on both approve and deny (live-proven on 0.146.0), so the
+    // reconciler settles it with a capture taken this tick.
+    const codexAgent = BUILTIN_AGENTS.find((a) => a.name === "codex")!;
+
+    /** Verbatim 0.146.0 command-approval widget (see terminal-detector.test.ts). */
+    const APPROVAL_WIDGET = `• Running git ls-remote https://github.com/epilande/ccmux.git HEAD
+
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Do you want to allow this read-only GitHub request to retrieve the repository's HEAD revision?
+
+  $ git ls-remote https://github.com/epilande/ccmux.git HEAD
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with \`git ls-remote\` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel`;
+
+    /** The same pane after the approval resolved: no widget anywhere. */
+    const RESOLVED_PANE = `• Ran git ls-remote https://github.com/epilande/ccmux.git HEAD
+    4053c7b0e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5        HEAD
+
+›
+  gpt-5.6-sol default · /Users/test/proj`;
+
+    const LOG_PATH = "/Users/test/.codex/sessions/2026/08/03/rollout-x.jsonl";
+    const MARKER_TS_SEC = 1_700_000_500;
+
+    /**
+     * The suspect shape: a `PermissionRequest` marker nothing closes, plus a
+     * strictly fresher log that has moved on to `working`.
+     */
+    function suspectCodexSession(): {
+      id: string;
+      deps: ReconcilerDeps;
+    } {
+      const id = makeSession(sessionManager, {
+        agentType: "codex",
+        trackingMode: "pane",
+        tmuxPane: "%2",
+        nativeSessionId: "codex-sess-1",
+        status: "working",
+        lastActivityAt: new Date(MARKER_TS_SEC * 1000 + 5_000).toISOString(),
+      });
+      sessionManager.setLogPath(id, LOG_PATH);
+
+      const marker: SessionPidMarker = {
+        agent_type: "codex",
+        pid: 4321,
+        tty: "/dev/ttys002",
+        session_id: "codex-sess-1",
+        timestamp: 1_700_000_000,
+        state: "waiting_permission",
+        state_timestamp: MARKER_TS_SEC,
+        pending_tool: "Command",
+      };
+
+      const logAdapters = new Map<string, LogAdapter>();
+      logAdapters.set("codex", {} as LogAdapter);
+
+      const deps = makeDeps(sessionManager, {
+        agents: [codexAgent],
+        logAdapters,
+        hookManager: {
+          getMarkerForSession: () => marker,
+          getMarkersByAgentAndPid: () => [],
+        },
+      });
+      return { id, deps };
+    }
+
+    /**
+     * Stand in for the codex log adapter's next parse: a parallel tool's
+     * output flushes while the widget is still up and flips the session to
+     * `working` (`applyResponseItem`). Without it a tick that resolved to
+     * `waiting` would leave the log source echoing that wait, and the guard
+     * (condition 5) would not fire again.
+     */
+    function flipLogToWorking(id: string, secondsAfterMarker: number): void {
+      sessionManager.updateSession(id, {
+        status: "working",
+        attentionType: null,
+        pendingTool: null,
+        lastActivityAt: new Date(
+          MARKER_TS_SEC * 1000 + secondsAfterMarker * 1000,
+        ).toISOString(),
+      });
+    }
+
+    beforeEach(() => {
+      clearTerminalRuleCache();
+    });
+
+    it("keeps the wait when this tick's own capture still shows the widget", async () => {
+      // The parallel-output gap: the log falsely says `working` while codex is
+      // blocked on approval. The match was captured fresh this tick, so the
+      // widget is provably on screen and the terminal source stands.
+      let captureCalls = 0;
+      mockCapturePane = async () => {
+        captureCalls++;
+        return APPROVAL_WIDGET;
+      };
+
+      const { id, deps } = suspectCodexSession();
+      await reconcileAll(
+        deps,
+        makeSnapshot({
+          panes: [
+            fakePane({ paneId: "%2", tty: "ttys002", windowActivity: null }),
+          ],
+        }),
+      );
+
+      const session = sessionManager.getSession(id)!;
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("permission");
+      // No recapture: the discriminator reused this tick's capture.
+      expect(captureCalls).toBe(1);
+    });
+
+    it("recaptures a cached match and keeps the wait when the widget is still up", async () => {
+      let captureCalls = 0;
+      mockCapturePane = async () => {
+        captureCalls++;
+        return APPROVAL_WIDGET;
+      };
+
+      const { id, deps } = suspectCodexSession();
+      // A stamp in an earlier second than the capture, unchanged across ticks:
+      // the second tick is a cache hit (see the same-second guard).
+      const pane = fakePane({
+        paneId: "%2",
+        tty: "ttys002",
+        windowActivity: Math.floor(Date.now() / 1000) - 10,
+      });
+
+      await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
+      expect(captureCalls).toBe(1);
+      expect(sessionManager.getSession(id)!.status).toBe("waiting");
+
+      flipLogToWorking(id, 10);
+      await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
+      // The cached match alone is not evidence of a live wait, so the suspect
+      // branch pays for one capture even though the activity gate was cold.
+      expect(captureCalls).toBe(2);
+      const session = sessionManager.getSession(id)!;
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("permission");
+    });
+
+    it("drops a cached match the recapture no longer sees, and caches the fresh result", async () => {
+      // The guard's original case: the widget is gone, so the cached match was
+      // a replay of a spent prompt and the fresher log-derived working stands.
+      let captureCalls = 0;
+      let paneContent = APPROVAL_WIDGET;
+      mockCapturePane = async () => {
+        captureCalls++;
+        return paneContent;
+      };
+
+      const { id, deps } = suspectCodexSession();
+      const pane = fakePane({
+        paneId: "%2",
+        tty: "ttys002",
+        windowActivity: Math.floor(Date.now() / 1000) - 10,
+      });
+
+      await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
+      expect(sessionManager.getSession(id)!.status).toBe("waiting");
+      expect(captureCalls).toBe(1);
+
+      paneContent = RESOLVED_PANE;
+      flipLogToWorking(id, 10);
+      await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
+      expect(captureCalls).toBe(2);
+      const afterDrop = sessionManager.getSession(id)!;
+      expect(afterDrop.status).toBe("working");
+      expect(afterDrop.attentionType).toBeNull();
+
+      // The recapture replaced the cache entry, so the next tick has no
+      // permission match to suspect and spawns no capture at all.
+      await reconcileAll(deps, makeSnapshot({ panes: [pane] }));
+      expect(captureCalls).toBe(2);
+      expect(sessionManager.getSession(id)!.status).toBe("working");
+    });
+  });
+
   describe("ambiguous permission marker correction (AskUserQuestion)", () => {
     const claudeAgent = BUILTIN_AGENTS.find((a) => a.name === "claude")!;
 
@@ -2736,6 +2932,12 @@ describe("collectPaneTrackedSources (wiring)", () => {
     // and replayed after it) can re-pin `waiting` over a fresher
     // log-derived `working`. `dropsStalePermissionTerminalUpgrade` is what
     // stops that; `markerOwnsPermissionWait` scopes it to Codex.
+    //
+    // The collector WITHHOLDS such a match and reports
+    // `suspectPermissionUpgrade`; whether it stays withheld is settled by a
+    // capture the caller takes (see the fresh-capture discriminator suite
+    // under `reconcileAll`), which these pure cases deliberately do not
+    // reach.
     const MARKER_TS_SEC = 1_700_000_500;
     const MARKER_TS_MS = MARKER_TS_SEC * 1000;
     const PERMISSION_MATCH = {
@@ -2764,7 +2966,7 @@ describe("collectPaneTrackedSources (wiring)", () => {
         pending_tool: "Command",
         state_timestamp: MARKER_TS_SEC,
       });
-      const { sources } = collectPaneTrackedSources(
+      const { sources, suspectPermissionUpgrade } = collectPaneTrackedSources(
         makeCollectorDeps({ marker, hasLogAdapter: true }),
         codexSession({
           status: "working",
@@ -2774,6 +2976,7 @@ describe("collectPaneTrackedSources (wiring)", () => {
       );
 
       expect(sources.some((s) => s.name === "terminal")).toBe(false);
+      expect(suspectPermissionUpgrade).toBe(true);
       expect(evaluateCascade(sources).status).toBe("working");
     });
 
@@ -2818,7 +3021,7 @@ describe("collectPaneTrackedSources (wiring)", () => {
         pending_tool: "Command",
         state_timestamp: MARKER_TS_SEC,
       });
-      const { sources } = collectPaneTrackedSources(
+      const { sources, suspectPermissionUpgrade } = collectPaneTrackedSources(
         makeCollectorDeps({ marker, hasLogAdapter: true }),
         codexSession({
           status: "working",
@@ -2827,6 +3030,7 @@ describe("collectPaneTrackedSources (wiring)", () => {
         PERMISSION_MATCH,
       );
       expect(sources.some((s) => s.name === "terminal")).toBe(true);
+      expect(suspectPermissionUpgrade).toBe(false);
       const resolved = evaluateCascade(sources);
       expect(resolved.status).toBe("waiting");
       expect(resolved.attentionType).toBe("permission");

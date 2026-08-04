@@ -806,7 +806,10 @@ export function clearTerminalRuleCache(): void {
  *   deadlock note in `collectPaneTrackedSources`).
  * - terminal source: present when a terminal rule matched. Upgrade-only
  *   when there's another source to upgrade (canUpgrade=["waiting"]);
- *   baseline when it's the sole signal. When NO rule matched but the
+ *   baseline when it's the sole signal. A permission match the collector
+ *   flags as suspect (`suspectPermissionUpgrade`, see
+ *   `dropsStalePermissionTerminalUpgrade`) is settled here by a capture taken
+ *   this tick, because only the caller can capture. When NO rule matched but the
  *   session is markerless and its linked log file has been silent past
  *   `PANE_IDLE_THRESHOLD_MS`, a synthetic idle baseline stands in so a
  *   frozen log-derived `working` converges instead of deadlocking
@@ -844,6 +847,7 @@ async function reconcilePaneTrackedAgentSession(
   // subprocess spawn. The cascade evaluator still runs every tick to
   // react to fresh marker / log sources.
   let ruleMatch: ReturnType<typeof matchTerminalRule>;
+  let fromCache = false;
   const cached = terminalRuleCache.get(session.id);
   if (
     pane.windowActivity !== null &&
@@ -855,33 +859,66 @@ async function reconcilePaneTrackedAgentSession(
     pane.windowActivity < Math.floor(cached.capturedAtMs / 1000)
   ) {
     ruleMatch = cached.ruleMatch;
+    fromCache = true;
   } else {
-    const capturedAtMs = Date.now();
-    const content = await capturePane(session.tmuxPane!, 50);
-    ruleMatch = matchTerminalRule(content, agent);
-    if (pane.windowActivity !== null) {
-      terminalRuleCache.set(session.id, {
-        windowActivity: pane.windowActivity,
-        capturedAtMs,
-        ruleMatch,
-      });
+    ruleMatch = await captureTerminalRule(session, agent, pane);
+  }
+
+  const { sources, metadata, suspectPermissionUpgrade } =
+    collectPaneTrackedSources(deps, session, ruleMatch);
+
+  // The collector withheld a permission match its guard finds suspect. What
+  // it cannot know is whether the widget is on screen RIGHT NOW — and since
+  // Codex removes it on both approve and deny, a capture taken this tick
+  // settles it. Confined to this branch, so routine ticks pay nothing.
+  if (suspectPermissionUpgrade) {
+    const live = fromCache
+      ? await captureTerminalRule(session, agent, pane)
+      : ruleMatch;
+    if (live?.status === "waiting" && live.attentionType === "permission") {
+      sources.push(terminalSource(live, { upgradeOnly: sources.length > 0 }));
     }
   }
 
-  const { sources, metadata } = collectPaneTrackedSources(
-    deps,
-    session,
-    ruleMatch,
-  );
   const resolved = evaluateCascade(sources);
   const update: Partial<SessionState> = { ...metadata, ...resolved };
   deps.sessionManager.updateSession(session.id, update);
 }
 
 /**
+ * Capture the pane and match the agent's terminal rules against it, seeding
+ * `terminalRuleCache` with the result (the same-second guard in the cache doc
+ * decides whether a later tick may trust it). Shared by the windowActivity-
+ * gated path above and the suspect-permission recapture beside it, so both
+ * feed the cache identically.
+ */
+async function captureTerminalRule(
+  session: Session,
+  agent: AgentDef,
+  pane: TmuxPane,
+): Promise<ReturnType<typeof matchTerminalRule>> {
+  const capturedAtMs = Date.now();
+  const content = await capturePane(session.tmuxPane!, 50);
+  const ruleMatch = matchTerminalRule(content, agent);
+  if (pane.windowActivity !== null) {
+    terminalRuleCache.set(session.id, {
+      windowActivity: pane.windowActivity,
+      capturedAtMs,
+      ruleMatch,
+    });
+  }
+  return ruleMatch;
+}
+
+/**
  * Pure source-collection seam for `reconcilePaneTrackedAgentSession`.
  * Exported so wiring tests can assert source shapes directly without
  * stubbing the evaluator module.
+ *
+ * `suspectPermissionUpgrade` reports that a permission terminal match was
+ * WITHHELD by `dropsStalePermissionTerminalUpgrade`. Staying pure and sync is
+ * the point: deciding whether that match is a live widget or a stale one needs
+ * a fresh pane capture, which is the caller's job, not this function's.
  */
 export function collectPaneTrackedSources(
   deps: Pick<
@@ -890,7 +927,11 @@ export function collectPaneTrackedSources(
   >,
   session: Session,
   ruleMatch: ReturnType<typeof matchTerminalRule>,
-): { sources: CascadeSource[]; metadata: MarkerSourceMetadata } {
+): {
+  sources: CascadeSource[];
+  metadata: MarkerSourceMetadata;
+  suspectPermissionUpgrade: boolean;
+} {
   // A log source is evidence only when a log is actually LINKED. Registering
   // an adapter for the agent type is not linkage: Codex acquires its
   // `logPath` from rollout linking, which legitimately refuses (ambiguous
@@ -938,16 +979,16 @@ export function collectPaneTrackedSources(
     sources.push(logSourceBuilt);
   }
 
+  let suspectPermissionUpgrade = false;
   if (ruleMatch) {
-    if (
-      !dropsStalePermissionTerminalUpgrade(
-        deps,
-        session,
-        ruleMatch,
-        markerSource,
-        logSourceBuilt,
-      )
-    ) {
+    suspectPermissionUpgrade = dropsStalePermissionTerminalUpgrade(
+      deps,
+      session,
+      ruleMatch,
+      markerSource,
+      logSourceBuilt,
+    );
+    if (!suspectPermissionUpgrade) {
       sources.push(
         terminalSource(ruleMatch, { upgradeOnly: sources.length > 0 }),
       );
@@ -967,13 +1008,14 @@ export function collectPaneTrackedSources(
     });
   }
 
-  return { sources, metadata };
+  return { sources, metadata, suspectPermissionUpgrade };
 }
 
 /**
- * The pane-tracked counterpart to `applyAmbiguousPermissionCorrection`: drop
- * a `permission` terminal-rule match that would re-pin a wait the LOG has
- * already moved past.
+ * The pane-tracked counterpart to `applyAmbiguousPermissionCorrection`: flag a
+ * `permission` terminal-rule match that would re-pin a wait the LOG has
+ * already moved past as SUSPECT, so the caller can withhold it pending a
+ * fresh capture (see the discriminator note at the end of this block).
  *
  * The trap. `evaluateCascade` applies `upgradeOnly` sources with NO freshness
  * comparison (`cascade-evaluator.ts`), by design — a pane prompt has no
@@ -998,7 +1040,7 @@ export function collectPaneTrackedSources(
  * dropping it unconditionally would delete detection. Hence the narrower
  * predicate below.
  *
- * Drop only when ALL of:
+ * Suspect only when ALL of:
  *  1. the agent declares `markerOwnsPermissionWait` (Codex alone — its
  *     `PermissionRequest` hook opens the wait and NOTHING closes it, so the
  *     marker is stuck at `waiting_permission` and the log is the resolution
@@ -1026,6 +1068,20 @@ export function collectPaneTrackedSources(
  * `working` is dropped. That window is pre-0.122 Codex with hooks — narrow,
  * and unfixable without a resolution signal — and it fails toward `working`,
  * which is the recoverable direction.
+ *
+ * Why the five conditions only make a match SUSPECT, not dead. They also all
+ * hold during the parallel-output gap: an unrelated tool's output flushing
+ * while the widget is still up flips the log to `working`
+ * (`applyResponseItem`), and dropping the match there suppresses the very
+ * self-correction that used to re-pin the live wait — the row reads `working`
+ * while Codex sits blocked on approval, with the notification already
+ * retracted. What separates that from a genuinely spent prompt is one fact:
+ * the widget is REMOVED from the pane on both approve and deny (live-proven on
+ * 0.146.0). So a capture taken RIGHT NOW discriminates them exactly, and
+ * `reconcilePaneTrackedAgentSession` takes one — reusing this tick's capture
+ * when the match was fresh, recapturing when it came from
+ * `terminalRuleCache` — keeping the source when the widget is still there and
+ * dropping it when it is not.
  */
 function dropsStalePermissionTerminalUpgrade(
   deps: Pick<ReconcilerDeps, "agents">,
