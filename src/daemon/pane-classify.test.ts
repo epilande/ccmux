@@ -4,6 +4,7 @@ import {
   classifyPaneContent,
   classifyPaneTitle,
   isNonAgentCommand,
+  isShellCommand,
 } from "./pane-classify";
 
 describe("classifyPaneTitle", () => {
@@ -264,5 +265,44 @@ describe("classifyClaudePromptPane", () => {
     expect(
       classifyClaudePromptPane("do you want to proceed later?\nsome prose"),
     ).toBeNull();
+  });
+});
+
+/**
+ * The narrower sibling of `isNonAgentCommand`, used by the prune guard. The
+ * two questions genuinely differ: "is an agent running here" (an editor says
+ * no) versus "is anything running here at all" (an editor says yes — someone
+ * is editing a file in a directory that is about to be deleted).
+ */
+describe("isShellCommand", () => {
+  it("accepts every interactive shell, login form included", () => {
+    for (const cmd of [
+      "zsh",
+      "bash",
+      "fish",
+      "sh",
+      "dash",
+      "ksh",
+      "nu",
+      "pwsh",
+    ]) {
+      expect(isShellCommand(cmd)).toBe(true);
+      expect(isShellCommand(`-${cmd}`)).toBe(true);
+    }
+  });
+
+  // The whole reason this is separate from isNonAgentCommand.
+  it("rejects terminal editors, which isNonAgentCommand accepts", () => {
+    for (const cmd of ["nvim", "vim", "vi"]) {
+      expect(isShellCommand(cmd)).toBe(false);
+      expect(isNonAgentCommand(cmd)).toBe(true);
+    }
+  });
+
+  it("rejects agents and anything unknown", () => {
+    expect(isShellCommand("claude")).toBe(false);
+    expect(isShellCommand("node")).toBe(false);
+    expect(isShellCommand(null)).toBe(false);
+    expect(isShellCommand("")).toBe(false);
   });
 });

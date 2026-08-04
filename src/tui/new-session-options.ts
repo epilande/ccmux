@@ -132,7 +132,9 @@ export function newSessionOptions(
       // Locked in move-changes mode, and in a fork whose source has no
       // repository for the second option to live in; the store refuses the
       // write regardless, but a locked field must not offer a list either.
+      // Absent entirely for a spawn into a worktree that already exists.
       if (draft.moveChanges) return null;
+      if (draft.existingWorktree !== null) return null;
       if (draft.fork && !draft.fork.canWorktree) return null;
       return resolve(DESTINATION_OPTIONS, draft.destination);
     case "untracked":

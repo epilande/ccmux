@@ -1,5 +1,5 @@
 import { watch, type FSWatcher } from "chokidar";
-import { existsSync, readdirSync, statSync } from "fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { join, dirname } from "path";
 import {
   PROJECTS_DIR,
@@ -11,13 +11,14 @@ import {
   extractSessionIdFromPath,
   readLogTail,
   readLogIncremental,
-  readFirstEntryTimestamp,
+  readFirstEntryFacts,
 } from "../../parser";
 import {
   deriveStateFromEntries,
   applyEntriesToState,
 } from "../../status-machine";
 import { getMarkerKey, type SessionManager } from "../../sessions";
+import { isWorktreeCheckoutPath } from "../../../lib/worktree-paths";
 import type { Session, SessionState } from "../../../types/session";
 import type {
   FullDerivation,
@@ -25,6 +26,35 @@ import type {
   LogAdapter,
   SessionMetadata,
 } from "../../log-adapter";
+
+/**
+ * The worktree a subagent was isolated into, from the `agent-<id>.meta.json`
+ * Claude Code writes beside the transcript.
+ *
+ * Authoritative and cheap: the file is a few hundred bytes and states the
+ * worktree outright, where the transcript head only shows a cwd that has to
+ * be recognized. Shape (the fields that matter here):
+ * `{"worktreePath": "...", "worktreeBranch": "...", "name": "...", ...}`.
+ * An ordinary Task subagent's meta file simply has no `worktreePath`.
+ *
+ * Absent, unreadable and malformed all answer null — this is attribution for
+ * a display row and a prune gate, not something to throw a scan over.
+ */
+export function readSubagentWorktreePath(
+  transcriptPath: string,
+): string | null {
+  const metaPath = transcriptPath.replace(/\.jsonl$/, ".meta.json");
+  try {
+    const parsed = JSON.parse(readFileSync(metaPath, "utf-8")) as {
+      worktreePath?: unknown;
+    };
+    return typeof parsed.worktreePath === "string" && parsed.worktreePath
+      ? parsed.worktreePath
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * When a Claude log's last activity is older than the idle threshold, a
@@ -102,6 +132,8 @@ export class ClaudeLogAdapter implements LogAdapter {
   private subagentWatcher: FSWatcher | null = null;
   private watchedSubagentDirs = new Set<string>();
   private subagentFileOffsets = new Map<string, number>();
+  // Transcripts whose head facts are settled — see `handleSubagentChange`.
+  private subagentHeadResolved = new Set<string>();
   private dirActivityCache = new Map<
     string,
     { checkedAt: number; active: boolean }
@@ -178,6 +210,7 @@ export class ClaudeLogAdapter implements LogAdapter {
     }
     this.watchedSubagentDirs.clear();
     this.subagentFileOffsets.clear();
+    this.subagentHeadResolved.clear();
     this.dirActivityCache.clear();
   }
 
@@ -296,6 +329,7 @@ export class ClaudeLogAdapter implements LogAdapter {
     for (const path of this.subagentFileOffsets.keys()) {
       if (path.startsWith(subagentDir)) {
         this.subagentFileOffsets.delete(path);
+        this.subagentHeadResolved.delete(path);
       }
     }
   }
@@ -386,6 +420,7 @@ export class ClaudeLogAdapter implements LogAdapter {
     for (const path of this.subagentFileOffsets.keys()) {
       if (path.startsWith(subagentDir)) {
         this.subagentFileOffsets.delete(path);
+        this.subagentHeadResolved.delete(path);
       }
     }
 
@@ -402,10 +437,35 @@ export class ClaudeLogAdapter implements LogAdapter {
     if (!session) return;
 
     const existing = session.subagents.find((s) => s.agentId === agentId);
-    // Spawn time comes from the immutable transcript head, so a successful
-    // read is carried forward; a failed (null) read retries on the next
-    // change event.
-    const startedAt = existing?.startedAt ?? readFirstEntryTimestamp(path);
+    // Spawn time and worktree are both immutable head facts, resolved
+    // together and carried forward. A just-created transcript may not have
+    // flushed its head line yet, so a read that finds nothing has to retry on
+    // the next change event — but the retry must END, or a busy subagent
+    // re-reads its own head on every append (readFileSync of the meta file
+    // plus a 256KB-and-doubling head scan, both synchronous on the daemon
+    // loop, both growing with the transcript). A found cwd is what settles
+    // it: the head answer cannot change after that, worktree or not, and a
+    // null worktree is then the ANSWER rather than a missing read.
+    let startedAt = existing?.startedAt ?? null;
+    let worktreePath = existing?.worktreePath ?? null;
+    if (
+      !this.subagentHeadResolved.has(path) &&
+      (startedAt === null || worktreePath === null)
+    ) {
+      worktreePath ??= readSubagentWorktreePath(path);
+      if (startedAt === null || worktreePath === null) {
+        const facts = readFirstEntryFacts(path);
+        startedAt ??= facts.timestamp;
+        // The head's cwd is the FALLBACK for a missing meta file, and only
+        // when it is itself a worktree checkout. An ordinary Task subagent's
+        // head cwd is the parent's own repo root, and adopting that would
+        // attribute it to the main checkout — a row the parent session is
+        // already on, so every plain subagent would duplicate its orchestrator
+        // there and flip that row's Enter from "spawn" to "jump".
+        worktreePath ??= isWorktreeCheckoutPath(facts.cwd) ? facts.cwd : null;
+        if (facts.cwd !== null) this.subagentHeadResolved.add(path);
+      }
+    }
 
     const offset = this.subagentFileOffsets.get(path) ?? 0;
     let state: SessionState;
@@ -449,6 +509,7 @@ export class ClaudeLogAdapter implements LogAdapter {
       pendingTool: state.pendingTool,
       lastActivityAt: state.lastActivityAt ?? null,
       startedAt,
+      worktreePath,
     });
 
     // Propagate subagent activity to parent session to keep it fresh

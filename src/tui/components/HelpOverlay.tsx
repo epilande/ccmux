@@ -32,7 +32,7 @@ const leftGroups = (reviewable?: boolean): Group[] => [
       { key: "r", desc: "Restart session" },
       { key: "R", desc: "Reconnect" },
       { key: "x / X", desc: "Kill session / all" },
-      { key: "W", desc: "Prune finished worktrees" },
+      { key: "W", desc: "Worktrees" },
       ...(reviewable ? [{ key: "d", desc: "Review diff (hunk)" }] : []),
     ],
   },

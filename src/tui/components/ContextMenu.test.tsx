@@ -109,7 +109,13 @@ describe("ContextMenu", () => {
   it("renders the hint next to each item", async () => {
     const { frame } = await renderMenu({
       items: [
-        { id: "pin-top", label: "Pin to top", hint: "<", color: theme.blue, action: () => {} },
+        {
+          id: "pin-top",
+          label: "Pin to top",
+          hint: "<",
+          color: theme.blue,
+          action: () => {},
+        },
         {
           id: "pin-bottom",
           label: "Pin to bottom",
@@ -244,10 +250,34 @@ describe("ContextMenu sizing", () => {
   it("leaves the labels that fit alone", async () => {
     // The longest labels the app actually authors, each with its hint.
     const items: ContextMenuItem[] = [
-      { id: "new-session", label: "New session", hint: "n", color: theme.text, action() {} },
-      { id: "attach-agent", label: "Attach agent", hint: "enter", color: theme.text, action() {} },
-      { id: "prune", label: "Prune worktrees", hint: "W", color: theme.text, action() {} },
-      { id: "agent-view", label: "Open agent view", hint: "", color: theme.text, action() {} },
+      {
+        id: "new-session",
+        label: "New session",
+        hint: "n",
+        color: theme.text,
+        action() {},
+      },
+      {
+        id: "attach-agent",
+        label: "Attach agent",
+        hint: "enter",
+        color: theme.text,
+        action() {},
+      },
+      {
+        id: "worktrees",
+        label: "Worktrees",
+        hint: "W",
+        color: theme.text,
+        action() {},
+      },
+      {
+        id: "agent-view",
+        label: "Open agent view",
+        hint: "",
+        color: theme.text,
+        action() {},
+      },
     ];
     const { frame } = await renderMenu({ items });
 

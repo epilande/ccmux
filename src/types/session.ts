@@ -96,6 +96,25 @@ export interface SubagentState {
    * the head read failed, in which case the preview renders no duration.
    */
   startedAt: string | null;
+  /**
+   * The isolated worktree this subagent runs in (Claude's Agent tool with
+   * `isolation: "worktree"`), or null for one working in its parent's
+   * checkout.
+   *
+   * A subagent is not a session — it has no pid, no pane and no cwd of its
+   * own on the parent row — so this is the ONLY thing that can attribute its
+   * work to a directory. Without it an `agent-*` worktree with three
+   * teammates in it reads as abandoned: it sorts as dead in the Worktrees
+   * panel, the prune scan's "an agent is working here" gate never fires for
+   * it, and Enter offers to spawn into a worktree that is already occupied.
+   *
+   * OPTIONAL rather than required-with-null only to spare a dozen existing
+   * fixtures a mechanical edit; the one producer
+   * (`log-adapter.handleSubagentChange`) always sets it explicitly, and
+   * `capStaleSubagents` carries it through by spread. Tighten to
+   * `worktreePath: string | null` when those fixtures are next touched.
+   */
+  worktreePath?: string | null;
 }
 
 /**
@@ -214,6 +233,23 @@ export interface SessionState {
   inPlanMode: boolean;
   cwd?: string;
   project?: string;
+  /** Store-stamped time the session's status last changed, fed INTO log
+   * adapters via `sessionToState` as read-only context (the Codex adapter
+   * reads it as the wait-establishment time for its stale-output gate).
+   * Never applied on the way back: `updateSession` ignores it and stamps
+   * its own on every status change. */
+  statusChangedAt?: string;
+  /** Precise wait-establishment time taken from the agent's own hook marker
+   * (`state_timestamp`), fed INTO log adapters via `sessionToState` as
+   * read-only context exactly like `statusChangedAt`, and never applied on
+   * the way back. Preferred over `statusChangedAt` by the Codex stale-output
+   * gate for two reasons: the marker is restamped on EVERY PermissionRequest
+   * (while `statusChangedAt` only moves on a status EDGE, so a
+   * waiting->waiting swap leaves it pointing at the first wait), and it is
+   * stamped by the agent at request time, carrying no daemon observation
+   * lag. Absent when no waiting marker exists (e.g. hookless terminal-overlay
+   * waits). */
+  waitEstablishedAt?: string;
   /** Last activity timestamp from log entries (for stale detection) */
   lastActivityAt?: string;
   /** Last user input timestamp (for stable sorting) */
