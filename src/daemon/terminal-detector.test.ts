@@ -31,6 +31,85 @@ describe("terminal-detector", () => {
     expect(result.attentionType).toBeNull();
   });
 
+  describe("codex-cli 0.146.0 pane text (issue #103)", () => {
+    // Verbatim `tmux capture-pane -p` excerpts from a real Codex 0.146.0
+    // pane (2026-08-03, sandbox CODEX_HOME, approval_policy=on-request,
+    // sandbox_mode=workspace-write, no approvals reviewer, no hooks).
+    const COMMAND_APPROVAL = `• Running git ls-remote https://github.com/epilande/ccmux.git HEAD
+
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Do you want to allow this read-only GitHub request to retrieve the repository's HEAD revision?
+
+  $ git ls-remote https://github.com/epilande/ccmux.git HEAD
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with \`git ls-remote\` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel`;
+
+    const EDIT_APPROVAL = `• Added /tmp/scratch/outside-edit-test.txt (+1 -0)
+    1 +hello
+
+
+  Would you like to make the following edits?
+
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for these files (a)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel`;
+
+    const WORKING_FOOTER = `• Ran sleep 25
+
+• Working (12s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close`;
+
+    it("classifies the command-approval widget as waiting/permission", () => {
+      const result = detectTerminalStatus(COMMAND_APPROVAL, codex);
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("permission");
+      expect(result.pendingTool).toBe("Command");
+    });
+
+    it("classifies the edit-approval widget as waiting/permission", () => {
+      const result = detectTerminalStatus(EDIT_APPROVAL, codex);
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("permission");
+    });
+
+    it("classifies the modern working footer as working", () => {
+      const result = detectTerminalStatus(WORKING_FOOTER, codex);
+      expect(result.status).toBe("working");
+      expect(result.attentionType).toBeNull();
+    });
+
+    it("still matches the approval heading alone (footer-free variants)", () => {
+      // "Would you like to grant these permissions?" is the third heading in
+      // the 0.146.0 binary; it did not render under the capture config, so
+      // this asserts the heading carries the match on its own.
+      const result = detectTerminalStatus(
+        "  Would you like to grant these permissions?\n\n› 1. Yes, and allow these permissions for this session",
+        codex,
+      );
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("permission");
+    });
+
+    it("an idle composer is not a wait", () => {
+      const result = detectTerminalStatus(
+        `› Implement {feature}\n\n  gpt-5.6-sol default · /tmp/scratch`,
+        codex,
+      );
+      expect(result.status).toBe("idle");
+      expect(result.attentionType).toBeNull();
+    });
+  });
+
   it("uses first matching rule when multiple rules match", () => {
     const result = detectTerminalStatus("Allow once\nEsc interrupt", opencode);
     expect(result.status).toBe("waiting");

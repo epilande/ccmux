@@ -1,4 +1,5 @@
 import { statSync } from "fs";
+import { stat } from "fs/promises";
 import { createLogTreeWatcher, type LogTreeWatcher } from "./log-tree-watcher";
 import { WATCHER_DEBOUNCE_MS } from "../lib/config";
 import { extractEncodedProjectPath, readTranscriptCwd } from "./parser";
@@ -28,6 +29,39 @@ import type { Session, SessionState } from "../types/session";
 import type { LogAdapter, RuntimeMode } from "./log-adapter";
 
 /**
+ * Interval between stat-polls for adapters that declare `pollsLog`.
+ *
+ * Cost is one `fs.stat` per tracked session of that agent per second —
+ * microseconds each, and only for sessions the daemon has already linked to
+ * a log file. The price paid for it is latency: a status flip derived from a
+ * log append lands at worst this interval plus `WATCHER_DEBOUNCE_MS` after
+ * the write.
+ */
+const LOG_POLL_INTERVAL_MS = 1000;
+
+/**
+ * The wait-establishment stamp a log adapter should gate on, read from the
+ * agent's own hook marker rather than from the store.
+ *
+ * Only a marker that (a) exists for this session, (b) belongs to this
+ * session's agent, and (c) currently records `waiting_permission` with a
+ * usable numeric `state_timestamp` (float SECONDS, from jq's `now`) yields a
+ * value; every other shape is `undefined`, which sends the adapter back to
+ * its `statusChangedAt` fallback.
+ */
+function markerWaitEstablishedAt(session: Session): string | undefined {
+  const marker = getSessionPidMarker(session.nativeSessionId ?? session.id);
+  if (!marker || marker.agent_type !== session.agentType) return undefined;
+  if (marker.state !== "waiting_permission") return undefined;
+  const seconds = marker.state_timestamp;
+  if (typeof seconds !== "number" || !Number.isFinite(seconds))
+    return undefined;
+  const stampedAt = new Date(seconds * 1000);
+  if (Number.isNaN(stampedAt.getTime())) return undefined;
+  return stampedAt.toISOString();
+}
+
+/**
  * Extract SessionState from a Session object
  */
 function sessionToState(session: Session): SessionState {
@@ -36,6 +70,8 @@ function sessionToState(session: Session): SessionState {
     attentionType: session.attentionType,
     pendingTool: session.pendingTool,
     inPlanMode: session.inPlanMode,
+    statusChangedAt: session.statusChangedAt ?? undefined,
+    waitEstablishedAt: markerWaitEstablishedAt(session),
     cwd: session.cwd,
     project: session.project,
     lastActivityAt: session.lastActivityAt ?? undefined,
@@ -81,6 +117,19 @@ export class LogWatcher {
   private encodingDriftWarned: Set<string> = new Set();
   /** Last unbound-rebind attempt per session (cooldown bookkeeping). */
   private rebindAttemptAt: Map<string, number> = new Map();
+  /**
+   * Timer for the NEXT stat-poll pass, non-null only while an adapter with
+   * `pollsLog` runs and no pass is currently in flight (the loop
+   * self-schedules, so the two states are exclusive).
+   */
+  private pollTimer: Timer | null = null;
+  /**
+   * The in-flight poll pass, awaited by `stop()` so a pass suspended on a
+   * `stat` can never dispatch into timers that have already been swept.
+   */
+  private pollInFlight: Promise<void> | null = null;
+  /** Set by `stop()`, cleared by `startPolling()`; gates the pass mid-flight. */
+  private pollStopped = false;
   /** Min interval between rebind attempts for an unbound session. */
   private static readonly REBIND_COOLDOWN_MS = 30_000;
   /** Resolver for the ready promise */
@@ -241,13 +290,108 @@ export class LogWatcher {
       console.error("Watcher error:", error);
     });
 
+    if (this.adapter.pollsLog) {
+      this.startPolling();
+    }
+
     // Adapter-private lifecycle (e.g. Claude subagent chokidar).
     this.adapter.start?.();
+  }
+
+  /**
+   * Arm the stat-poll loop for adapters whose appends `fs.watch` cannot see
+   * (see `LogAdapter.pollsLog`). Idempotent: a second `start()` reuses the
+   * live scheduler instead of leaking one, whether the next pass is armed
+   * (`pollTimer`) or the current one is still running (`pollInFlight`).
+   * Re-arming after a `stop()` is supported: the stopped flag is cleared here.
+   */
+  private startPolling(): void {
+    if (this.pollTimer || this.pollInFlight) return;
+    this.pollStopped = false;
+    this.schedulePoll();
+  }
+
+  /**
+   * Arm the next pass. Self-scheduling rather than `setInterval`: the next
+   * timer is armed only once the current pass has settled, so a slow pass can
+   * never overlap its successor.
+   */
+  private schedulePoll(): void {
+    this.pollTimer = setTimeout(() => {
+      this.pollTimer = null;
+      const pass = this.runPollPass();
+      this.pollInFlight = pass;
+      void pass.then(() => {
+        if (this.pollInFlight === pass) this.pollInFlight = null;
+        if (!this.pollStopped) this.schedulePoll();
+      });
+    }, LOG_POLL_INTERVAL_MS);
+  }
+
+  /**
+   * One pass, with failures contained: `stop()` awaits this promise, so it
+   * must settle rather than reject.
+   */
+  private async runPollPass(): Promise<void> {
+    try {
+      await this.pollOnce();
+    } catch (error) {
+      console.error("Log poll error:", error);
+    }
+  }
+
+  /**
+   * One poll pass: stat every linked log file of this adapter's agent and
+   * dispatch the grown ones through the same debounce path a real change
+   * event uses, so polled and event-driven feeds stay one code path.
+   *
+   * A path with no recorded offset counts as changed: that is a session the
+   * daemon just linked, and the first pass is what catches it up.
+   *
+   * Every `stat` is an await point a `stop()` can land in the middle of, so
+   * the stopped flag is re-checked around each one — a dispatch after the
+   * shutdown sweep would leave a debounce timer nobody clears.
+   */
+  private async pollOnce(): Promise<void> {
+    for (const session of this.sessionManager.getSessions()) {
+      if (this.pollStopped) return;
+      if (session.agentType !== this.adapter.agentType) continue;
+      const path = session.logPath;
+      if (!path) continue;
+
+      let size: number;
+      try {
+        size = (await stat(path)).size;
+      } catch {
+        // Rotated, deleted, or momentarily unreadable — the next pass retries.
+        continue;
+      }
+      if (this.pollStopped) return;
+
+      const offset = this.fileOffsets.get(path);
+      if (offset !== undefined && size <= offset) continue;
+
+      this.scheduleProcessFile(path, session.id);
+    }
   }
 
   async stop(): Promise<void> {
     this.isInitialScan = false;
     this.initialScanQueue = [];
+
+    // Order matters: the flag and the pending timer go first, then the pass
+    // already running is drained, and only THEN does the debounce sweep at
+    // the bottom of this method run — a pass that outlived it would re-arm a
+    // timer against a watcher that is already down.
+    this.pollStopped = true;
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = null;
+    }
+    if (this.pollInFlight) {
+      await this.pollInFlight;
+      this.pollInFlight = null;
+    }
 
     if (this.watcher) {
       await this.watcher.close();
@@ -739,7 +883,13 @@ export class LogWatcher {
     const offset = this.fileOffsets.get(path) || 0;
 
     if (offset === 0) {
-      const { state, newOffset } = await this.adapter.deriveFullState(path);
+      const { state, newOffset, failed } =
+        await this.adapter.deriveFullState(path);
+      // A failed read is not a derivation: it must neither clobber the live
+      // state nor record an offset (0 against a non-empty file re-arms this
+      // full derive on every poll pass). Leaving the offset unset is what
+      // makes the next pass retry the read.
+      if (failed) return;
       this.sessionManager.updateSession(sessionId, state);
       this.fileOffsets.set(path, newOffset);
       this.adapter.onSessionStateUpdated?.(sessionId, state);

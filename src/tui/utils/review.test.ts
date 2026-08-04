@@ -13,7 +13,9 @@ const {
   MAX_REVIEW_PROMPT_CHARS,
   formatReviewPrompt,
   isHunkAvailable,
+  resolveMergeBase,
   runHunkReview,
+  spawnHunkDiff,
 } = (await import(REAL_REVIEW_SPECIFIER)) as typeof import("./review");
 
 function fakeRenderer() {
@@ -60,6 +62,18 @@ function hunkJsonWithComments(comments: unknown[]) {
     listSessions: async () => ({ sessions: [paneSession("h1", "%1")] }),
     listUserComments: async () => ({ comments }),
   };
+}
+
+/** A `GitRun` answering from a table, defaulting to a clean failure. */
+function fakeGit(table: Record<string, { stdout: string; exitCode?: number }>) {
+  const calls: string[][] = [];
+  const git = async (_cwd: string, args: string[]) => {
+    calls.push(args);
+    const hit = table[args.join(" ")];
+    if (!hit) return { stdout: "", stderr: "", exitCode: 1 };
+    return { stdout: hit.stdout, stderr: "", exitCode: hit.exitCode ?? 0 };
+  };
+  return { git, calls };
 }
 
 describe("isHunkAvailable", () => {
@@ -621,5 +635,162 @@ describe("formatReviewPrompt", () => {
     ]);
     expect(prompt.length).toBe(MAX_REVIEW_PROMPT_CHARS);
     expect(prompt).toEndWith("(truncated)");
+  });
+});
+
+/**
+ * Reviewing a BRANCH rather than a working tree (the Worktrees panel's `d`).
+ * The gate that matters is the emptiness pre-flight: a fully committed
+ * worktree has a clean `git status` and is exactly the case a branch review
+ * exists for, so checking status there would refuse the review asked for.
+ */
+describe("runHunkReview with a target", () => {
+  const cleanGitStatus = async () => "";
+
+  it("passes the target to hunk as the diff argument", async () => {
+    const { renderer } = fakeRenderer();
+    const { spawn, calls } = fakeSpawn(0);
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "/opt/homebrew/bin/hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: cleanGitStatus,
+      gitDiffNames: async () => "src/a.ts\n",
+      target: "abc123",
+      paneId: "",
+      spawn,
+    });
+    expect(result).toEqual({ ok: true, notes: [] });
+    expect((calls[0] as unknown[])[0]).toEqual([
+      "hunk",
+      ...HUNK_DIFF_ARGS,
+      "abc123",
+    ]);
+  });
+
+  it("reviews a committed worktree that a working-tree check would refuse", async () => {
+    const { renderer } = fakeRenderer();
+    const { spawn } = fakeSpawn(0);
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "/opt/homebrew/bin/hunk",
+      resolveRoot: async () => "/repo",
+      // Clean tree: the working-tree pre-flight would have said "no changes".
+      gitStatus: cleanGitStatus,
+      gitDiffNames: async () => "src/a.ts\n",
+      target: "abc123",
+      paneId: "",
+      spawn,
+    });
+    expect(result).toEqual({ ok: true, notes: [] });
+    expect(renderer.suspend).toHaveBeenCalled();
+  });
+
+  it("refuses when the branch differs from its target in nothing", async () => {
+    const { renderer } = fakeRenderer();
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "/opt/homebrew/bin/hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      gitDiffNames: async () => "",
+      target: "abc123",
+      paneId: "",
+    });
+    expect(result).toEqual({ ok: false, error: "no changes to review" });
+    expect(renderer.suspend).not.toHaveBeenCalled();
+  });
+
+  it("still opens when git cannot answer the emptiness question", async () => {
+    const { renderer } = fakeRenderer();
+    const { spawn } = fakeSpawn(0);
+    // Null is "unknown", not "empty": swallowing the keypress on a git that
+    // failed is worse than opening a reviewer that may have nothing in it.
+    const result = await runHunkReview(renderer, "/repo", {
+      which: () => "/opt/homebrew/bin/hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: cleanGitStatus,
+      gitDiffNames: async () => null,
+      target: "abc123",
+      paneId: "",
+      spawn,
+    });
+    expect(result).toEqual({ ok: true, notes: [] });
+  });
+});
+
+describe("spawnHunkDiff", () => {
+  it("omits the target argument when there is none", () => {
+    const { spawn, calls } = fakeSpawn(0);
+    spawnHunkDiff("/repo", undefined, spawn);
+    expect((calls[0] as unknown[])[0]).toEqual(["hunk", ...HUNK_DIFF_ARGS]);
+  });
+
+  it("appends the target when there is one", () => {
+    const { spawn, calls } = fakeSpawn(0);
+    spawnHunkDiff("/repo", "origin/main", spawn);
+    expect((calls[0] as unknown[])[0]).toEqual([
+      "hunk",
+      ...HUNK_DIFF_ARGS,
+      "origin/main",
+    ]);
+  });
+});
+
+describe("resolveMergeBase", () => {
+  it("returns the fork point with the first base ref that answers", async () => {
+    const { git, calls } = fakeGit({
+      "merge-base origin/main HEAD": { stdout: "base111\n" },
+      "rev-parse HEAD": { stdout: "head999\n" },
+    });
+    const base = await resolveMergeBase("/wt", {
+      baseRefs: async () => ["origin/main", "main"],
+      git,
+    });
+    expect(base).toBe("base111");
+    // The second ref is never asked once the first answers.
+    expect(calls.some((args) => args.includes("main") && args[1] === "main"))
+      .toBe(false);
+  });
+
+  it("falls through to the next ref when one has no common commit", async () => {
+    const { git } = fakeGit({
+      "merge-base main HEAD": { stdout: "base222\n" },
+      "rev-parse HEAD": { stdout: "head999\n" },
+    });
+    const base = await resolveMergeBase("/wt", {
+      baseRefs: async () => ["origin/main", "main"],
+      git,
+    });
+    expect(base).toBe("base222");
+  });
+
+  // A checkout sitting ON its base has no fork point, and a review against
+  // its own HEAD is an empty one. The caller falls back to the working tree.
+  it("is null when HEAD is the base itself", async () => {
+    const { git } = fakeGit({
+      "merge-base origin/main HEAD": { stdout: "same111\n" },
+      "rev-parse HEAD": { stdout: "same111\n" },
+    });
+    const base = await resolveMergeBase("/wt", {
+      baseRefs: async () => ["origin/main"],
+      git,
+    });
+    expect(base).toBeNull();
+  });
+
+  it("is null when the repo has no recognizable default branch", async () => {
+    const { git } = fakeGit({});
+    const base = await resolveMergeBase("/wt", {
+      baseRefs: async () => [],
+      git,
+    });
+    expect(base).toBeNull();
+  });
+
+  it("is null rather than throwing when git is unusable", async () => {
+    const base = await resolveMergeBase("/wt", {
+      baseRefs: async () => {
+        throw new Error("git missing");
+      },
+    });
+    expect(base).toBeNull();
   });
 });
