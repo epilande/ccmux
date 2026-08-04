@@ -3130,6 +3130,7 @@ export function App(props: AppProps) {
               repo={panel().repo}
               cwd={pickerCwd()}
               compact={props.sidebar}
+              iconStyle={store.state.iconStyle}
               onClose={store.actions.hideWorktrees}
               onJump={jumpToWorktreeSession}
               onSpawn={spawnInWorktree}

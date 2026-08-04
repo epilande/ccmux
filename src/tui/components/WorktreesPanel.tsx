@@ -14,6 +14,7 @@ import {
   useTerminalDimensions,
 } from "@opentui/solid";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
+import { MouseButton } from "@opentui/core";
 import { basename, resolve, sep } from "node:path";
 import { getDaemonUrl } from "../../lib/config";
 import type {
@@ -32,6 +33,8 @@ import type {
 import type { SessionStatus } from "../../types/session";
 import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
 import { fitHints } from "./Footer";
+import { useStatusIcon } from "../utils/useStatusIcon";
+import type { IconStyle } from "../../lib/icons";
 import { theme } from "../theme";
 
 /**
@@ -150,6 +153,9 @@ interface WorktreesPanelProps {
    * feedback that tells the user a dirty row is being held back.
    */
   compact?: boolean;
+  /** The picker's icon style, so a row's status glyph is the SAME one the
+   *  session list draws for that status. */
+  iconStyle?: IconStyle;
   onClose: () => void;
   /** Jump to a session living in the row (Enter on an occupied row). */
   onJump: (session: WorktreeSession) => void;
@@ -368,140 +374,549 @@ function prColor(pr: PRState): string {
 }
 
 /**
- * Ahead/behind as the CLI writes it. Omitted entirely when the branch is in
- * sync or has no upstream — a row of zeroes on every healthy worktree is
+ * Ahead/behind, in the arrows everyone already reads. Omitted when the branch
+ * is in sync or has no upstream: a row of zeroes on every healthy worktree is
  * noise that pushes the facts that DO differ off a narrow panel.
+ *
+ * A gone upstream reads as words rather than as a bare "gone", which said
+ * nothing about WHAT was gone.
  */
 export function formatTracking(row: WorktreeRow): string {
   const upstream = row.upstream;
   if (!upstream) return "";
-  if (upstream.gone) return "gone";
+  if (upstream.gone) return "branch gone";
   const parts: string[] = [];
   if (upstream.ahead > 0) parts.push(`↑${upstream.ahead}`);
   if (upstream.behind > 0) parts.push(`↓${upstream.behind}`);
   return parts.join(" ");
 }
 
-/** Uncommitted work as `2m/1u`, or empty when the tree is clean. */
-export function formatDirty(row: WorktreeRow): string {
-  if (!row.dirty.dirty) return "";
-  return `${row.dirty.modified}m/${row.dirty.untracked}u`;
+/**
+ * Uncommitted work in words, one phrase per half, and only the halves that
+ * are non-zero. `0m/4u` made the reader decode a format to learn one fact.
+ */
+export function dirtyPhrases(row: WorktreeRow): string[] {
+  if (!row.dirty.dirty) return [];
+  const parts: string[] = [];
+  if (row.dirty.modified > 0) parts.push(`${row.dirty.modified} modified`);
+  if (row.dirty.untracked > 0) parts.push(`${row.dirty.untracked} untracked`);
+  return parts;
 }
 
 /**
- * Everything on a row's first line except the cursor bar and the checkbox,
- * which are fixed-width and drawn by the component.
+ * The removal reason as a phrase, derived from the REASON rather than passed
+ * through from the daemon's `detail`.
+ *
+ * Two of the four reasons already name the PR, which is what made the old row
+ * say `PR #100 merged  #100 MERGED`: the reason and the badge were rendered
+ * as independent facts. Deriving here lets {@link detailPhrases} drop the
+ * badge when the reason has already spoken. The daemon's own `detail` is the
+ * fallback, so a reason it words differently still shows something true.
  */
-export function primarySegments(
+export function describeReason(candidate: PruneCandidate): string {
+  switch (candidate.reason) {
+    // The daemon's own detail already words these well and carries the
+    // number even in the cases where the candidate's `pr` did not survive the
+    // trip, so it is the fallback rather than a bare "PR merged".
+    case "pr-merged":
+      return candidate.pr
+        ? `PR #${candidate.pr.number} merged`
+        : candidate.detail;
+    case "pr-closed":
+      return candidate.pr
+        ? `PR #${candidate.pr.number} closed`
+        : candidate.detail;
+    case "upstream-gone":
+      return "branch gone";
+    case "merged-locally":
+      // `merged into origin/main` names a remote the reader did not ask
+      // about. Cosmetic only: an unrecognized wording passes through intact.
+      return candidate.detail.replace(/\borigin\//g, "");
+  }
+}
+
+/**
+ * A withheld worktree's reason, in the panel's voice. The daemon writes full
+ * sentences (`an agent is working here`); this trims the article so the
+ * phrase sits in a `·`-separated line without dominating it. Anything it does
+ * not recognize passes through unchanged.
+ */
+export function describeSkip(reason: string): string {
+  return reason.replace(/^an agent is /, "agent ");
+}
+
+/** An open PR, for a healthy row. Merged and closed ones arrive as reasons. */
+function describePR(pr: PRState): string {
+  return `PR #${pr.number} ${pr.state.toLowerCase()}`;
+}
+
+/** The status that decides how a group of sessions is coloured and counted. */
+function leadStatus(sessions: WorktreeSession[]): SessionStatus {
+  if (sessions.some((s) => s.status === "waiting")) return "waiting";
+  if (sessions.some((s) => s.status === "working")) return "working";
+  return "idle";
+}
+
+/**
+ * The agents living in a worktree, as a phrase.
+ *
+ * One agent is named (`claude working`); several collapse to a count, because
+ * six agent names is not something a row can hold and is not what the reader
+ * is asking. A mixed group leads with the count that matters: an idle six with
+ * one waiting is a row you want to visit.
+ */
+export function describeSessions(sessions: WorktreeSession[]): string {
+  const lead = sessions[0];
+  if (!lead) return "";
+  if (sessions.length === 1) return `${lead.agentType} ${lead.status}`;
+  const status = leadStatus(sessions);
+  const sharing = sessions.filter((s) => s.status === status).length;
+  if (sharing === sessions.length) {
+    return `${sessions.length} agents ${status}`;
+  }
+  return `${sessions.length} agents, ${sharing} ${status}`;
+}
+
+/** A phrase on the detail line, with the colour it carries. */
+export interface Phrase {
+  text: string;
+  fg: string;
+}
+
+/**
+ * Everything the detail line says about a row, in reading order and already
+ * de-duplicated: a fact is stated once, by whichever phrase says it best.
+ *
+ * Empty when a worktree genuinely has nothing to report, and the component
+ * then draws no second line at all rather than an indented blank.
+ */
+export function detailPhrases(
   entry: PanelRow,
-  isCursor: boolean,
-): RowSegment[] {
-  const segments: RowSegment[] = [
-    { text: entry.row.name, fg: rowColor(entry, isCursor) },
-  ];
-  if (entry.row.isMain) segments.push({ text: " main", fg: theme.mauve });
-  if (entry.row.locked) segments.push({ text: " locked", fg: theme.overlay });
-  segments.push({
-    text: `  ${entry.row.branch ?? "detached"}`,
-    fg: theme.overlay,
-  });
-  const tracking = formatTracking(entry.row);
+  opts: { dirtyOk: boolean; compact?: boolean },
+): Phrase[] {
+  const phrases: Phrase[] = [];
+  const candidate = entry.candidate;
+  const row = entry.row;
+
+  // At sidebar widths the line cannot hold both, and the phrase that must
+  // survive is the one about work that would be DELETED, not the one about
+  // why the row is removable (the rule above it already says that
+  // categorically). At full width the reason leads, which reads better.
+  const dirtyLeads = opts.compact === true && candidate?.dirty === true;
+  const reasonPhrase: Phrase[] = candidate
+    ? [{ text: describeReason(candidate), fg: reasonColor(candidate.reason) }]
+    : [];
+  if (!dirtyLeads) phrases.push(...reasonPhrase);
+  // Locked comes off the worktree itself, not off the scan, so it is already
+  // true on the first paint. The scan's own `locked` skip would say it twice.
+  if (row.locked) phrases.push({ text: "locked", fg: theme.overlay });
+  // The scan's own `locked` skip says the same thing, so it is dropped only
+  // when the row already said it. Dropping it unconditionally would lose the
+  // fact entirely on a row whose lock the phase-1 read did not report.
+  const skipText = entry.skip ? describeSkip(entry.skip.reason) : "";
+  if (skipText && !(row.locked && skipText === "locked")) {
+    phrases.push({ text: skipText, fg: theme.overlay });
+  }
+  // A removable row leads with its REASON, and its tracking state is either
+  // that same fact (`upstream-gone`) or the thing that produced it (a merged
+  // PR whose branch GitHub then deleted). Either way `PR #100 merged · branch
+  // gone` states one event twice. Tracking is news only on a row that is
+  // staying.
+  const tracking = candidate ? "" : formatTracking(row);
   if (tracking) {
-    segments.push({
-      text: `  ${tracking}`,
-      fg: entry.row.upstream?.gone ? theme.peach : theme.blue,
+    phrases.push({
+      text: tracking,
+      fg: row.upstream?.gone ? theme.peach : theme.blue,
     });
   }
-  const dirty = formatDirty(entry.row);
-  if (dirty) segments.push({ text: `  ${dirty}`, fg: theme.yellow });
-  return segments;
+  // A merged or closed PR arrives as the reason; only an OPEN one is news the
+  // reason has not already carried.
+  const reasonNamesPR =
+    candidate?.reason === "pr-merged" || candidate?.reason === "pr-closed";
+  if (entry.pr && !reasonNamesPR) {
+    phrases.push({ text: describePR(entry.pr), fg: prColor(entry.pr) });
+  }
+  const dirty = dirtyPhrases(row);
+  const dirtySegments: Phrase[] = [];
+  dirty.forEach((text, index) => {
+    // The opt-in note rides the LAST dirty phrase, where it reads as a
+    // sentence about the work rather than as a separate instruction.
+    const last = index === dirty.length - 1;
+    const note = candidate?.dirty && last;
+    dirtySegments.push({
+      text: note
+        ? `${text} ${opts.dirtyOk ? "(D armed, will be deleted)" : "(D removes it too)"}`
+        : text,
+      fg: note && opts.dirtyOk ? theme.red : theme.yellow,
+    });
+  });
+  if (dirtyLeads) {
+    phrases.unshift(...dirtySegments);
+    phrases.push(...reasonPhrase);
+  } else {
+    phrases.push(...dirtySegments);
+  }
+  const sessions = describeSessions(row.sessions);
+  if (sessions) {
+    phrases.push({ text: sessions, fg: statusColor(leadStatus(row.sessions)) });
+  }
+  if (candidate && candidate.ignoredFiles.length > 0) {
+    phrases.push({
+      text: `+${describeIgnoredFiles(candidate.ignoredFiles, 2)}`,
+      fg: theme.peach,
+    });
+  }
+  return phrases;
 }
 
+/** The separator between detail phrases, muted so the facts carry the line. */
+const PHRASE_SEPARATOR = " · ";
+
 /**
- * The row's second line: what phase 2 (or the session list) had to say about
- * it. Empty for a healthy, unoccupied, un-PR'd worktree, and the component
- * draws no line at all in that case rather than an empty one.
+ * The rail: a single muted `│` in its own column, carried by every line of a
+ * repo group below the group's first line.
+ *
+ * A per-row connector was the obvious first shape and the wrong one. Rows that
+ * had nothing to say drew no second line, so the connector appeared and
+ * vanished down the list and read as a broken rail rather than as one group.
+ * Continuous means CONTINUOUS: one-line rows carry it too, and the only line
+ * without it is the one the rail hangs from.
  */
+export const RAIL = "│";
+
+/** Columns before line 1's content: the cursor bar, the rail, and a space.
+ *  The marker slot is inside `primarySegments`, not here. */
+export const ROW_GUTTER = 3;
+
+/**
+ * The marker slot's width, which is not one number: a status icon is one
+ * column and a bracket checkbox is three, each plus a trailing space.
+ *
+ * The detail line spends the same slot on indentation, so it has to follow
+ * the wider marker inside the removable section or the section's two lines
+ * would not line up with each other.
+ */
+export function markerWidth(hasCheckbox: boolean): number {
+  return hasCheckbox ? 4 : 2;
+}
+
+/** Columns before a detail line's content, for a row with or without a box. */
+export function detailGutter(hasCheckbox: boolean): number {
+  return ROW_GUTTER + markerWidth(hasCheckbox);
+}
+
+/** Columns the scrollbox keeps to itself for its scrollbar. */
+const SCROLLBAR_GUTTER = 1;
+
+/** Phrases as renderable segments, with the separator as its own segment so
+ *  it stays muted while the phrases keep their own colours. */
 export function detailSegments(
   entry: PanelRow,
   opts: { compact: boolean; dirtyOk: boolean },
 ): RowSegment[] {
   const segments: RowSegment[] = [];
-  const candidate = entry.candidate;
-  if (candidate) {
-    segments.push({
-      text: candidate.detail,
-      fg: reasonColor(candidate.reason),
-    });
-  } else if (entry.skip) {
-    segments.push({ text: `held: ${entry.skip.reason}`, fg: theme.overlay });
-  }
-  const gap = () => (segments.length > 0 ? "  " : "");
-  // Straight after the reason, and BEFORE the PR badge and the sessions,
-  // because the line is fitted left to right and whatever sits last is what a
-  // narrow panel drops. Behind the badge this was the first thing truncated,
-  // which left a row still selectable with the one sentence explaining why it
-  // is being held back missing. Compact mode gives it a line of its own
-  // instead; a healthy row already states its counts on the first line.
-  if (candidate?.dirty && !opts.compact) {
-    segments.push({
-      text: `${gap()}${opts.dirtyOk ? "will be deleted (D)" : "press D to include"}`,
-      fg: opts.dirtyOk ? theme.red : theme.yellow,
-    });
-  }
-  if (entry.pr) {
-    segments.push({
-      text: `${gap()}#${entry.pr.number} ${entry.pr.state}`,
-      fg: prColor(entry.pr),
-    });
-  }
-  // Sessions are what Enter acts on, so the sidebar keeps them too — just the
-  // first one plus a count, since a ~40 column row cannot spell out three.
-  const sessions = entry.row.sessions;
-  const lead = sessions[0];
-  if (lead) {
-    const shown = opts.compact
-      ? `${lead.agentType} ${lead.status}${sessions.length > 1 ? ` +${sessions.length - 1}` : ""}`
-      : sessions.map((s) => `${s.agentType} ${s.status}`).join(", ");
-    segments.push({ text: `${gap()}[${shown}]`, fg: statusColor(lead.status) });
-  }
-  if (candidate && candidate.ignoredFiles.length > 0) {
-    segments.push({
-      text: opts.compact
-        ? `  +${candidate.ignoredFiles.length} ignored`
-        : `  +${describeIgnoredFiles(candidate.ignoredFiles, 2)}`,
-      fg: theme.peach,
-    });
+  for (const phrase of detailPhrases(entry, opts)) {
+    if (segments.length > 0) {
+      segments.push({ text: PHRASE_SEPARATOR, fg: theme.overlay });
+    }
+    segments.push(phrase);
   }
   return segments;
 }
 
 /**
- * Visual LINES a row occupies: its name line, plus compact mode's own dirty
- * warning line, plus the detail line when there is anything to put on it.
+ * The name a row shows.
  *
- * Rows are not one line each and never were, which is what made scrolling by
- * row INDEX wrong: a scrollbox measures `scrollTop` in lines, so a list of
- * two- and three-line rows scrolled the cursor off screen while the keys kept
- * acting on the row nobody could see. Derived from `detailSegments` rather
- * than from a copy of its conditions, so the height and the render cannot
- * disagree about whether a line exists.
+ * The main checkout says what it IS rather than repeating the directory name,
+ * which the repo header directly above has already said.
  */
-export function rowVisualHeight(entry: PanelRow, compact: boolean): number {
-  const dirtyLine = entry.candidate?.dirty && compact ? 1 : 0;
-  const detail = detailSegments(entry, { compact, dirtyOk: false });
-  return 1 + dirtyLine + (detail.length > 0 ? 1 : 0);
+export function rowLabel(row: WorktreeRow): string {
+  return row.isMain ? "main checkout" : row.name;
+}
+
+/**
+ * The branch, or empty when naming it would only stutter.
+ *
+ * A worktree derived from its branch carries the same word twice
+ * (`fix-codex  fix-codex`), which is the single loudest thing on a screen full
+ * of rows and says nothing. Shown only where the two genuinely differ.
+ */
+export function rowBranch(row: WorktreeRow): string {
+  if (row.detached || !row.branch) return "detached";
+  return row.branch === rowLabel(row) ? "" : row.branch;
+}
+
+/** Longest label in a group, so one group's branches line up in a column. */
+export function labelColumnWidth(rows: PanelRow[], max = 28): number {
+  let width = 0;
+  for (const entry of rows) {
+    width = Math.max(width, displayWidth(rowLabel(entry.row)));
+  }
+  return Math.min(width, max);
+}
+
+/**
+ * Line 1: the icon slot, the name, and the branch when it differs.
+ *
+ * Everything else a row knows moved to the detail line. That is what buys the
+ * alignment: the name always starts in the same column and the branch always
+ * starts in the same column, so a group reads as a table instead of as a
+ * paragraph that happens to be wrapped.
+ */
+export function primarySegments(
+  entry: PanelRow,
+  opts: {
+    isCursor: boolean;
+    labelWidth: number;
+    selected?: boolean;
+    /** The live status glyph for an occupied row, already resolved by the
+     *  caller (it animates, so it cannot come from a pure function). */
+    statusIcon?: string;
+  },
+): RowSegment[] {
+  const row = entry.row;
+  const segments: RowSegment[] = [];
+  if (entry.candidate) {
+    // The only rows with checkboxes are the ones under the removable
+    // divider, which is what makes an unexplained checkbox impossible.
+    // Brackets rather than ☐/☑: they are unambiguously three columns in
+    // every font, where the ballot glyphs are East Asian Ambiguous and would
+    // take two columns wherever a terminal decides they are wide, breaking
+    // the column the whole group aligns on.
+    segments.push({
+      text: opts.selected ? "[x] " : "[ ] ",
+      fg: opts.selected ? theme.green : theme.overlay,
+    });
+  } else if (row.isMain) {
+    segments.push({ text: "⌂ ", fg: theme.mauve });
+  } else if (row.sessions.length > 0) {
+    // The SAME glyph the session list uses for that status, spinner included:
+    // a static dot on a working row asked the reader to learn a second
+    // vocabulary for a fact ccmux already has one for.
+    segments.push({
+      text: `${opts.statusIcon ?? "●"} `,
+      fg: statusColor(leadStatus(row.sessions)),
+    });
+  } else {
+    segments.push({ text: "  ", fg: theme.overlay });
+  }
+
+  const label = rowLabel(row);
+  const branch = rowBranch(entry.row);
+  segments.push({ text: label, fg: rowColor(entry, opts.isCursor) });
+  if (branch) {
+    const pad = Math.max(1, opts.labelWidth - displayWidth(label) + 2);
+    segments.push({ text: " ".repeat(pad), fg: theme.overlay });
+    segments.push({ text: branch, fg: theme.overlay });
+  }
+  return segments;
+}
+
+/**
+ * A repo group's rows split at the removable line.
+ *
+ * `sortWorktreeRows` already sinks classified candidates to the bottom, so
+ * this is a partition and not a re-sort; it exists because the divider, the
+ * checkbox rule and the line arithmetic all need to agree on where the
+ * section starts.
+ */
+export function splitRemovable(rows: PanelRow[]): {
+  kept: PanelRow[];
+  removable: PanelRow[];
+} {
+  return {
+    kept: rows.filter((entry) => !entry.candidate),
+    removable: rows.filter((entry) => entry.candidate),
+  };
+}
+
+/**
+ * Whether the list draws a header line per repo.
+ *
+ * A single repo has its name in the panel's own title, and repeating it
+ * directly underneath is a line spent saying nothing. Derived rather than
+ * passed so the render and the line arithmetic cannot disagree about how many
+ * lines exist.
+ */
+export function showsGroupHeaders(repos: PanelRepo[]): boolean {
+  return repos.length > 1;
+}
+
+/**
+ * The full-width rule that opens a group's removable section.
+ *
+ * Starts with a tee so the rail runs INTO it rather than being interrupted by
+ * it: the section is a labelled break in one group, not a new group.
+ */
+export function dividerText(count: number, width: number): string {
+  const label = `├─ removable · ${count} `;
+  const fill = Math.max(0, width - displayWidth(label));
+  return `${label}${"─".repeat(fill)}`;
+}
+
+/** `1 worktree` / `3 worktrees`, so no sentence has to say `worktree(s)`. */
+export function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+/**
+ * The removal's headline, as a sentence rather than a schema.
+ *
+ * `Delete 1 worktree(s), 1 branch(es)?` made the reader parse a form to learn
+ * what was about to be deleted, at the one moment where the reading has to be
+ * effortless.
+ */
+export function describeRemoval(worktrees: number, branches: number): string {
+  if (branches === 0) {
+    return `Delete ${plural(worktrees, "worktree", "worktrees")}?`;
+  }
+  if (worktrees === 1 && branches === 1) {
+    return "Delete 1 worktree and its branch?";
+  }
+  return `Delete ${plural(worktrees, "worktree", "worktrees")} and ${plural(
+    branches,
+    "branch",
+    "branches",
+  )}?`;
+}
+
+/**
+ * The lines under the headline: everything that is true of THIS removal and
+ * nothing that is not. Each one is a consequence the headline does not carry,
+ * so an empty list means the headline told the whole story.
+ */
+export function removalDetails(opts: {
+  includedDirty: number;
+  blockedDirty: number;
+  ignoredFiles: number;
+}): string[] {
+  const lines: string[] = [];
+  if (opts.includedDirty > 0) {
+    lines.push(
+      `including ${plural(opts.includedDirty, "worktree", "worktrees")} with uncommitted work`,
+    );
+  }
+  if (opts.blockedDirty > 0) {
+    lines.push(
+      `skipping ${plural(opts.blockedDirty, "dirty worktree", "dirty worktrees")} (needs D)`,
+    );
+  }
+  if (opts.ignoredFiles > 0) {
+    lines.push(
+      `${plural(opts.ignoredFiles, "ignored file", "ignored files")} go too`,
+    );
+  }
+  return lines;
+}
+
+/**
+ * The removal confirmation, as a centered box over the list.
+ *
+ * Mirrors `ConfirmationDialog`'s visual language (the same centered box,
+ * border, and `Y confirm / N cancel` row) rather than reusing it: that
+ * component is typed against `ConfirmAction` and a `Session`, and renders a
+ * single subtitle line where this needs a headline plus up to three
+ * consequences. It renders as a CHILD of the panel, never through
+ * `store.showConfirmDialog`, because a sibling overlay is exactly how the
+ * send-review confirm ended up buried under this panel.
+ */
+const RemovalConfirm: Component<{
+  headline: string;
+  details: string[];
+  destructive: boolean;
+  width: number;
+  onConfirm: () => void;
+  onCancel: () => void;
+}> = (props) => {
+  const boxWidth = () => Math.max(24, Math.min(56, props.width));
+  const boxHeight = () => 7 + props.details.length;
+  return (
+    <box
+      position="absolute"
+      top="50%"
+      left="50%"
+      width={boxWidth()}
+      height={boxHeight()}
+      marginTop={-Math.floor(boxHeight() / 2)}
+      marginLeft={-Math.floor(boxWidth() / 2)}
+      backgroundColor={theme.base}
+      borderStyle="single"
+      borderColor={props.destructive ? theme.red : theme.border}
+      flexDirection="column"
+      justifyContent="center"
+      alignItems="center"
+    >
+      <text fg={theme.text}>
+        <strong>Remove worktrees?</strong>
+      </text>
+      <box height={1} />
+      {/* Red only when uncommitted work is actually going, so the one
+          irreversible case does not read like the routine one. */}
+      <text fg={props.destructive ? theme.red : theme.subtext}>
+        {truncateText(props.headline, boxWidth() - 2)}
+      </text>
+      <For each={props.details}>
+        {(line) => (
+          <text fg={theme.overlay}>{truncateText(line, boxWidth() - 2)}</text>
+        )}
+      </For>
+      <box height={1} />
+      <box flexDirection="row">
+        <box
+          flexDirection="row"
+          onMouseDown={(event) => {
+            if (event.button === MouseButton.LEFT) props.onConfirm();
+          }}
+        >
+          <text fg={theme.green}>
+            <strong>Y</strong>
+          </text>
+          <text fg={theme.overlay}> confirm </text>
+        </box>
+        <box
+          flexDirection="row"
+          onMouseDown={(event) => {
+            if (event.button === MouseButton.LEFT) props.onCancel();
+          }}
+        >
+          <text fg={theme.red}>
+            <strong>N</strong>
+          </text>
+          <text fg={theme.overlay}> cancel</text>
+        </box>
+      </box>
+    </box>
+  );
+};
+
+/**
+ * Visual LINES a row occupies: its name line, plus the detail line when there
+ * is anything to put on it.
+ *
+ * Rows are not one line each, which is what made scrolling by row INDEX
+ * wrong: a scrollbox measures `scrollTop` in lines, so a list of one- and
+ * two-line rows scrolled the cursor off screen while the keys kept acting on
+ * the row nobody could see. Derived from `detailPhrases` rather than from a
+ * copy of its conditions, so the height and the render cannot disagree about
+ * whether a line exists.
+ */
+export function rowVisualHeight(entry: PanelRow, compact = false): number {
+  return 1 + (detailPhrases(entry, { dirtyOk: false, compact }).length > 0 ? 1 : 0);
 }
 
 /** Where each row starts, and how tall it is, in the scrollbox's own units. */
 export type VisualLayout = Map<string, { line: number; height: number }>;
 
 /**
- * Lay the whole list out in visual lines, headers included (one line each).
+ * Lay the whole list out in visual lines: repo headers and the removable
+ * divider each take one, and a row takes whatever {@link rowVisualHeight}
+ * says.
  *
- * Keyed by PATH for the same reason the cursor is: phase 2 re-sorts the list,
- * and a layout keyed by position would describe the arrangement the cursor
- * just left.
+ * The divider is not a row and the cursor never lands on it, but it is a LINE,
+ * and a scroll target computed without it puts every row below the divider one
+ * line off. Keyed by PATH for the same reason the cursor is: phase 2 re-sorts
+ * the list, and a layout keyed by position would describe the arrangement the
+ * cursor just left.
  */
 export function visualLayout(
   repos: PanelRepo[],
@@ -509,13 +924,18 @@ export function visualLayout(
 ): VisualLayout {
   const layout: VisualLayout = new Map();
   let line = 0;
+  const place = (entry: PanelRow) => {
+    const height = heightOf(entry);
+    layout.set(entry.row.path, { line, height });
+    line += height;
+  };
+  const headers = showsGroupHeaders(repos);
   for (const repo of repos) {
-    line += 1; // the repo header
-    for (const entry of repo.rows) {
-      const height = heightOf(entry);
-      layout.set(entry.row.path, { line, height });
-      line += height;
-    }
+    if (headers) line += 1; // the repo header
+    const { kept, removable } = splitRemovable(repo.rows);
+    kept.forEach(place);
+    if (removable.length > 0) line += 1; // the removable divider
+    removable.forEach(place);
   }
   return layout;
 }
@@ -741,8 +1161,28 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
 
   /** Columns a row may occupy: the box minus its border and padding. */
   const contentWidth = () => Math.max(8, dims().width - 4);
-  /** The same, minus the fixed cursor bar and checkbox gutter. */
-  const rowWidth = () => Math.max(4, contentWidth() - 5);
+  /** What a line inside the SCROLLBOX may occupy: the content less the column
+   *  the scrollbox keeps for its bar. Text that overruns it does not clip, it
+   *  WRAPS, and a wrapped line inside a `height={1}` box disappears instead:
+   *  that is how the removable divider lost its rule (its run of dashes is one
+   *  unbreakable word, so the whole word moved to a line nobody renders). */
+  const listWidth = () => Math.max(8, contentWidth() - SCROLLBAR_GUTTER);
+  /** Line 1's budget, past the cursor bar, the rail and their space. The icon
+   *  slot lives inside `primarySegments`, so it is not subtracted here. */
+  const rowWidth = () => Math.max(4, listWidth() - ROW_GUTTER);
+  /** The detail line's budget, which also spends the marker slot on indent. */
+  const detailWidth = (hasCheckbox: boolean) =>
+    Math.max(4, listWidth() - detailGutter(hasCheckbox));
+
+  /**
+   * The panel's title. A single repo puts its name here, which is what lets
+   * the list drop the group header line that would otherwise repeat it.
+   */
+  const panelTitle = (): string => {
+    const repos = merged();
+    const only = repos.length === 1 ? repos[0] : undefined;
+    return only ? `Worktrees · ${only.repoName}` : "Worktrees";
+  };
 
   function flash(message: string): void {
     setNote(message);
@@ -1010,9 +1450,31 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       // is the picker's kill key on a session row, so it is the same verb in
       // the same place rather than a new one to learn.
       case "x":
-      case "X":
-        if (effective().length > 0) setPhase("confirm");
+      case "X": {
+        if (effective().length > 0) {
+          setPhase("confirm");
+          break;
+        }
+        // With nothing selected, `x` used to do nothing at all, which reads as
+        // a broken key. It now either acts on the row under the cursor or says
+        // what is missing.
+        if (entry?.candidate && !entry.candidate.dirty) {
+          // Single-target: the cursor IS the selection anyone would have made,
+          // and the confirm still stands between it and the deletion.
+          toggleSelected(entry.candidate.path);
+          setPhase("confirm");
+          break;
+        }
+        if (entry?.candidate) {
+          // A dirty row selected on its own still removes nothing, so sending
+          // it to a "delete 0 worktrees" confirm would be the same dead end
+          // wearing a dialog. Name the key that unblocks it instead.
+          flash("uncommitted work here: D includes it, then x");
+          break;
+        }
+        flash("nothing selected: space selects a worktree under `removable`");
         break;
+      }
       case "return":
       case "enter":
         if (entry) activateRow(entry);
@@ -1039,15 +1501,33 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * The hint line, ranked so a narrow panel drops the optional keys rather
    * than clipping the line mid-word. Same machinery the footer uses.
    */
-  const hintLine = () =>
-    fitHints(
+  const hintLine = () => {
+    // The removal keys are taught where they apply: on a row under the
+    // removable divider, or once something is already selected (so the count
+    // and the way to act on it never disappear mid-selection). Everywhere
+    // else they are noise about an action the cursor cannot take.
+    const inRemovable = cursorRow()?.candidate != null;
+    const removing = inRemovable || selected().size > 0;
+    return fitHints(
       [
         { text: "j/k move", rank: 3 },
         { text: "enter open", rank: 4 },
-        { text: "space select", rank: 3 },
-        { text: `x prune ${effective().length}`, rank: 4 },
-        { text: "a all clean", rank: 1 },
-        { text: "D dirty", rank: 1 },
+        ...(removing
+          ? [
+              { text: "space select", rank: 3 },
+              // A bare `x remove` until something is selected: `x remove 0`
+              // reads as a broken count rather than as an empty selection.
+              {
+                text:
+                  effective().length > 0
+                    ? `x remove ${effective().length}`
+                    : "x remove",
+                rank: 4,
+              },
+              { text: "D dirty too", rank: 1 },
+              { text: "a all clean", rank: 1 },
+            ]
+          : []),
         { text: "y copy", rank: 1 },
         ...(props.onReview ? [{ text: "d review", rank: 1 }] : []),
         ...(props.repo !== null
@@ -1057,6 +1537,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       ],
       contentWidth(),
     );
+  };
 
   return (
     <box
@@ -1074,7 +1555,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     >
       <box justifyContent="center" width="100%" height={1}>
         <text fg={theme.text}>
-          <strong>Worktrees</strong>
+          <strong>{truncateText(panelTitle(), contentWidth())}</strong>
         </text>
       </box>
 
@@ -1118,99 +1599,126 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
               }}
             >
               <For each={merged()}>
-                {(repo) => (
-                  <box flexDirection="column">
-                    <box height={1} flexDirection="row">
-                      <text fg={theme.mauve}>
-                        <strong>
-                          {truncateText(repo.repoName, contentWidth())}
-                        </strong>
-                      </text>
-                    </box>
-                    <For each={repo.rows}>
-                      {(entry) => {
-                        const isCursor = () =>
-                          cursorRow()?.row.path === entry.row.path;
-                        const isSelected = () => selected().has(entry.row.path);
-                        const opted = () => dirtyOk().has(entry.row.path);
-                        const detail = () =>
-                          detailSegments(entry, {
-                            compact: props.compact === true,
-                            dirtyOk: opted(),
-                          });
-                        return (
-                          <box flexDirection="column">
-                            <box height={1} flexDirection="row">
-                              <text
-                                fg={isCursor() ? theme.mauve : theme.overlay}
-                              >
-                                {isCursor() ? "▎" : " "}
-                              </text>
-                              {/* Only a candidate gets a box. The gutter is
-                                  still spent on every row so the names stay
-                                  in one column. */}
-                              <text
-                                fg={isSelected() ? theme.green : theme.overlay}
-                              >
-                                {entry.candidate
-                                  ? isSelected()
-                                    ? "[x] "
-                                    : "[ ] "
-                                  : "    "}
-                              </text>
-                              <For
-                                each={fitSegments(
-                                  primarySegments(entry, isCursor()),
-                                  rowWidth(),
-                                )}
-                              >
-                                {(segment) => (
-                                  <text fg={segment.fg}>{segment.text}</text>
-                                )}
-                              </For>
-                            </box>
-                            {/* Compact mode gives the dirty warning its own
-                                line. Sharing one with the reason meant a ~40
-                                column sidebar cut the warning in half, losing
-                                the only text that explains why the row is
-                                held back. */}
-                            <Show
-                              when={entry.candidate?.dirty && props.compact}
+                {(repo) => {
+                  const split = () => splitRemovable(repo.rows);
+                  const labelWidth = () => labelColumnWidth(repo.rows);
+                  /* One row, in both sections: the section only decides
+                     whether it carries a checkbox. */
+                  /**
+                   * One row. `railed` is false only for the group's very
+                   * first LINE, which is what the rail hangs from.
+                   */
+                  const renderRow = (entry: PanelRow, railed: boolean) => {
+                    const isCursor = () =>
+                      cursorRow()?.row.path === entry.row.path;
+                    const isSelected = () => selected().has(entry.row.path);
+                    const detail = () =>
+                      detailSegments(entry, {
+                        compact: props.compact === true,
+                        dirtyOk: dirtyOk().has(entry.row.path),
+                      });
+                    // The session list's own icon, spinner and all. Called
+                    // per row, which `<For>` gives its own reactive owner, so
+                    // the shared spinner interval is acquired and released
+                    // with the row.
+                    const statusIcon = useStatusIcon(
+                      () => leadStatus(entry.row.sessions),
+                      () => null,
+                      // Defaulted here because the two halves of the icon API
+                      // disagree: `getStatusIcon` treats an unset style as
+                      // "dot" while `getAnimationFrames` needs it spelled out,
+                      // so leaving it undefined yields a STATIC dot on a
+                      // working row, which is the exact bug being fixed.
+                      () => props.iconStyle ?? "dot",
+                    );
+                    return (
+                      <box flexDirection="column">
+                        <box height={1} flexDirection="row">
+                          <text fg={isCursor() ? theme.mauve : theme.overlay}>
+                            {isCursor() ? "▎" : " "}
+                          </text>
+                          <text fg={theme.overlay}>
+                            {railed ? `${RAIL} ` : "  "}
+                          </text>
+                          <For
+                            each={fitSegments(
+                              primarySegments(entry, {
+                                isCursor: isCursor(),
+                                labelWidth: labelWidth(),
+                                selected: isSelected(),
+                                statusIcon: statusIcon(),
+                              }),
+                              rowWidth(),
+                            )}
+                          >
+                            {(segment) => (
+                              <text fg={segment.fg}>{segment.text}</text>
+                            )}
+                          </For>
+                        </box>
+                        <Show when={detail().length > 0}>
+                          <box height={1} flexDirection="row">
+                            {/* A detail line always hangs off its own line 1,
+                                so it always carries the rail, and it indents
+                                to whatever marker that line 1 used. */}
+                            <text fg={theme.overlay}>
+                              {` ${RAIL} ${" ".repeat(
+                                markerWidth(entry.candidate !== null),
+                              )}`}
+                            </text>
+                            <For
+                              each={fitSegments(
+                                detail(),
+                                detailWidth(entry.candidate !== null),
+                              )}
                             >
-                              <box
-                                height={1}
-                                flexDirection="row"
-                                paddingLeft={5}
-                              >
-                                <text fg={opted() ? theme.red : theme.yellow}>
-                                  {truncateText(
-                                    opted()
-                                      ? "DIRTY, will be deleted"
-                                      : "DIRTY, press D to include",
-                                    rowWidth(),
-                                  )}
-                                </text>
-                              </box>
-                            </Show>
-                            <Show when={detail().length > 0}>
-                              <box
-                                height={1}
-                                flexDirection="row"
-                                paddingLeft={5}
-                              >
-                                <For each={fitSegments(detail(), rowWidth())}>
-                                  {(segment) => (
-                                    <text fg={segment.fg}>{segment.text}</text>
-                                  )}
-                                </For>
-                              </box>
-                            </Show>
+                              {(segment) => (
+                                <text fg={segment.fg}>{segment.text}</text>
+                              )}
+                            </For>
                           </box>
-                        );
-                      }}
-                    </For>
-                  </box>
-                )}
+                        </Show>
+                      </box>
+                    );
+                  };
+                  return (
+                    <box flexDirection="column">
+                      <Show when={showsGroupHeaders(merged())}>
+                        <box height={1} flexDirection="row">
+                          <text fg={theme.mauve}>
+                            <strong>
+                              {truncateText(repo.repoName, contentWidth())}
+                            </strong>
+                          </text>
+                        </box>
+                      </Show>
+                      <For each={split().kept}>
+                        {(entry, index) => renderRow(entry, index() > 0)}
+                      </For>
+                      {/* Everything below this line can be deleted, and only
+                          things below it carry checkboxes. The rule starts
+                          with a tee, so the rail runs into it. */}
+                      <Show when={split().removable.length > 0}>
+                        <box height={1} flexDirection="row">
+                          <text fg={theme.overlay}>{" "}</text>
+                          <text fg={theme.overlay}>
+                            {dividerText(
+                              split().removable.length,
+                              listWidth() - 1,
+                            )}
+                          </text>
+                        </box>
+                      </Show>
+                      <For each={split().removable}>
+                        {(entry, index) =>
+                          // With no kept rows the divider is the group's first
+                          // line, so every removable row still hangs off it.
+                          renderRow(entry, index() > 0 || split().kept.length > 0)
+                        }
+                      </For>
+                    </box>
+                  );
+                }}
               </For>
             </scrollbox>
           </Show>
@@ -1268,10 +1776,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       </box>
 
       <box justifyContent="center" width="100%" height={1}>
-        <Show when={phase() === "list"}>
+        <Show when={phase() === "list" || phase() === "confirm"}>
           <Show
             when={note()}
-            fallback={<text fg={theme.overlay}>{hintLine()}</text>}
+            fallback={
+              // Dimmed but present while the confirm owns the keyboard: the
+              // keys are still the panel's, they are just not answerable yet.
+              <text fg={phase() === "confirm" ? theme.surface : theme.overlay}>
+                {hintLine()}
+              </text>
+            }
           >
             {(message: () => string) => (
               <text fg={theme.green}>
@@ -1280,28 +1794,28 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             )}
           </Show>
         </Show>
-        <Show when={phase() === "confirm"}>
-          {/* Red whenever uncommitted work is actually going, so the one
-              irreversible case does not read like the routine one. */}
-          <text fg={includedDirty().length > 0 ? theme.red : theme.text}>
-            {`Delete ${effective().length} worktree(s)` +
-              `, ${effective().filter((c) => c.branch && c.branchDeletion !== "none").length} branch(es)` +
-              (ignoredCount() > 0
-                ? `, ${ignoredCount()} ignored file(s)`
-                : "") +
-              (includedDirty().length > 0
-                ? `, INCLUDING ${includedDirty().length} with uncommitted work`
-                : "") +
-              (blockedDirty().length > 0
-                ? `, skipping ${blockedDirty().length} dirty`
-                : "") +
-              "?  y / n"}
-          </text>
-        </Show>
         <Show when={phase() === "done"}>
           <text fg={theme.overlay}>j/k scroll · r reload · q close</text>
         </Show>
       </box>
+      <Show when={phase() === "confirm"}>
+        <RemovalConfirm
+          headline={describeRemoval(
+            effective().length,
+            effective().filter((c) => c.branch && c.branchDeletion !== "none")
+              .length,
+          )}
+          details={removalDetails({
+            includedDirty: includedDirty().length,
+            blockedDirty: blockedDirty().length,
+            ignoredFiles: ignoredCount(),
+          })}
+          destructive={includedDirty().length > 0}
+          width={contentWidth()}
+          onConfirm={runPrune}
+          onCancel={() => setPhase("list")}
+        />
+      </Show>
     </box>
   );
 };

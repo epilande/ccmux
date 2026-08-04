@@ -14,23 +14,38 @@ import {
   clipboardArgv,
   copyToClipboard,
   describeHttpFailure,
+  describeRemoval,
+  describeReason,
+  describeSessions,
+  describeSkip,
   detailSegments,
   fitSegments,
-  formatDirty,
+  dirtyPhrases,
   formatTracking,
   normalizeScan,
   orderRepos,
   partitionSelection,
+  removalDetails,
+  detailGutter,
+  labelColumnWidth,
+  markerWidth,
   primarySegments,
+  rowBranch,
+  rowLabel,
   rowVisualHeight,
   scrollTargetFor,
+  dividerText,
   sortWorktreeRows,
+  showsGroupHeaders,
+  splitRemovable,
   visualLayout,
   worktreeHoldsPath,
   type PanelRow,
   type ScanResponse,
 } from "./WorktreesPanel";
 import { displayWidth } from "../utils/format";
+import { DOT_SPINNER_FRAMES, getStatusIcon } from "../../lib/icons";
+import { SPINNER_INTERVAL_MS } from "../utils/useStatusIcon";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup | undefined;
@@ -74,7 +89,7 @@ function row(overrides: Partial<WorktreeRow> = {}): WorktreeRow {
 function mainRow(overrides: Partial<WorktreeRow> = {}): WorktreeRow {
   return row({
     path: "/repo",
-    name: "mainline",
+    name: "main checkout",
     branch: "main",
     isMain: true,
     ...overrides,
@@ -232,6 +247,22 @@ function orderOf(frame: string, ...needles: string[]): number[] {
   });
 }
 
+/**
+ * Whether a rendered line is a row's DETAIL line.
+ *
+ * Keyed on the rail plus the detail line's own indent, not on a bare `│`:
+ * every line carries one as the panel's border, and now every line below a
+ * group's first also carries the rail.
+ */
+function isDetailLine(line: string): boolean {
+  return / │ {3,5}\S/.test(line);
+}
+
+/** Whether a rendered line carries the group rail at all. */
+function hasRail(line: string): boolean {
+  return / │ /.test(line);
+}
+
 /** The rendered line holding `needle`. */
 function lineWith(frame: string, needle: string): string {
   const line = frame.split("\n").find((l) => l.includes(needle));
@@ -251,7 +282,7 @@ describe("WorktreesPanel loading", () => {
     });
 
     const shown = await frame();
-    expect(shown).toContain("mainline");
+    expect(shown).toContain("main checkout");
     expect(shown).toContain("alpha");
     expect(shown).toContain("Checking for finished worktrees");
     // Nothing is prune-selectable yet, so no row may show a checkbox.
@@ -312,7 +343,7 @@ describe("WorktreesPanel loading", () => {
     keys.pressKey("r");
     const recovered = await frame();
     expect(listAttempts).toBe(2);
-    expect(recovered).toContain("mainline");
+    expect(recovered).toContain("main checkout");
     expect(recovered).toContain("alpha");
     expect(recovered).not.toContain("daemon is down");
   });
@@ -353,8 +384,12 @@ describe("WorktreesPanel merge", () => {
     );
 
     expect(settled).toContain("PR #68 merged");
-    expect(settled).toContain("held: an agent is working here");
-    expect(settled).toContain("#102 OPEN");
+    // Plain words, and no `held:` prefix in front of a full sentence.
+    expect(settled).toContain("agent working here");
+    expect(settled).not.toContain("held:");
+    expect(settled).toContain("PR #102 open");
+    // Only the classified row sits under the rule, and only it has a box.
+    expect(settled).toContain("removable · 1");
   });
 
   it("shows tracking, dirty counts and sessions on the row", async () => {
@@ -374,16 +409,19 @@ describe("WorktreesPanel merge", () => {
       ]),
     );
 
-    const line = lineWith(settled, "alpha");
-    expect(line).toContain("↑3 ↓4");
-    expect(line).toContain("2m/1u");
-    expect(settled).toContain("[claude working]");
+    // Line 1 carries the name and (only when it differs) the branch; every
+    // other fact moved to the detail line, which is what buys the alignment.
+    expect(lineWith(settled, "alpha")).toContain("feat/alpha");
+    expect(settled).toContain("↑3 ↓4");
+    expect(settled).toContain("2 modified · 1 untracked");
+    expect(settled).toContain("claude working");
   });
 
-  // Behind the PR badge and the session list, this was the FIRST thing a
-  // narrow panel truncated, leaving a row still selectable with the one
-  // sentence explaining why it is held back missing.
-  it("keeps the dirty warning ahead of the badge that used to displace it", async () => {
+  // The dirty opt-in used to sit behind the PR badge and the session list,
+  // which made it the FIRST thing a narrow panel truncated: a row still
+  // selectable with the one sentence explaining the hold-back missing. It now
+  // rides the work it would delete, ahead of everything optional.
+  it("keeps the dirty opt-in ahead of what a narrow panel drops", async () => {
     const { settled } = await mountSettled(
       listOf([row({ dirty: { dirty: true, modified: 3, untracked: 2 } })]),
       {
@@ -392,8 +430,8 @@ describe("WorktreesPanel merge", () => {
             dirty: true,
             modified: 3,
             untracked: 2,
-            detail: "PR #68 merged",
-            pr: { number: 68, url: "u", state: "MERGED" },
+            reason: "upstream-gone",
+            detail: "upstream origin/feat/alpha is gone",
           }),
         ],
         skipped: [],
@@ -401,15 +439,13 @@ describe("WorktreesPanel merge", () => {
       { width: 80, height: 16 },
     );
 
-    expect(settled).toContain("press D to include");
-    const [reason, warning, badge] = orderOf(
+    expect(settled).toContain("(D removes it too)");
+    const [reason, note] = orderOf(
       settled,
-      "PR #68 merged",
-      "press D to include",
-      "#68 MERGED",
+      "branch gone",
+      "(D removes it too)",
     );
-    expect(reason).toBeLessThan(warning!);
-    expect(warning).toBeLessThan(badge!);
+    expect(reason).toBeLessThan(note!);
   });
 
   it("marks the main checkout and never offers it a checkbox", async () => {
@@ -418,10 +454,231 @@ describe("WorktreesPanel merge", () => {
       skipped: [],
     });
 
-    expect(lineWith(settled, "mainline")).toContain("main");
+    expect(lineWith(settled, "main checkout")).toContain("main");
     // Exactly one checkbox on screen, and it is not the main row's.
     expect(settled.match(/\[ \]/g)?.length ?? 0).toBe(1);
-    expect(lineWith(settled, "mainline")).not.toContain("[ ]");
+    expect(lineWith(settled, "main checkout")).not.toContain("[ ]");
+  });
+});
+
+describe("WorktreesPanel structure", () => {
+  // The complaint that started the redesign was "not sure what I am looking
+  // at": rows bled into each other because nothing marked where one ended.
+  it("ties a row's two lines together with a connector", async () => {
+    const { settled } = await mountSettled(
+      listOf([
+        mainRow(),
+        row({ dirty: { dirty: true, modified: 0, untracked: 4 } }),
+      ]),
+    );
+    expect(isDetailLine(lineWith(settled, "4 untracked"))).toBe(true);
+  });
+
+  it("collapses a worktree with nothing to report to a single line", async () => {
+    const { settled } = await mountSettled(
+      listOf([
+        mainRow(),
+        row({ path: "/repo/wt/quiet", name: "quiet", branch: "quiet" }),
+        row({ path: "/repo/wt/zulu", name: "zulu", branch: "zulu" }),
+      ]),
+    );
+    // No branch repeat...
+    expect(lineWith(settled, "quiet")).not.toContain("quiet  quiet");
+    // ...and the very next line is the NEXT ROW, so `quiet` took exactly one.
+    // A session-less row's line 1 and a detail line are deliberately the same
+    // shape (the rail plus an indent), so this is asserted by what follows it
+    // rather than by the prefix.
+    const lines = settled.split("\n");
+    const at = lines.findIndex((l) => l.includes("quiet"));
+    expect(lines[at + 1]).toContain("zulu");
+  });
+
+  // A per-row connector appeared and vanished down the list, which read as a
+  // broken rail. Continuous means one-line rows carry it too.
+  it("carries the rail across a row that has nothing to say", async () => {
+    const { settled } = await mountSettled(
+      listOf([
+        mainRow({ dirty: { dirty: true, modified: 1, untracked: 0 } }),
+        row({ path: "/repo/wt/quiet", name: "quiet", branch: "quiet" }),
+        row({
+          path: "/repo/wt/busy",
+          name: "busy",
+          branch: "busy",
+          sessions: [session({ status: "idle" })],
+        }),
+      ]),
+    );
+    const lines = settled.split("\n");
+    const first = lines.findIndex((l) => l.includes("main checkout"));
+    const last = lines.findIndex((l) => l.includes("busy"));
+    // The group's first line is what the rail hangs FROM, so it has none...
+    expect(hasRail(lines[first]!)).toBe(false);
+    // ...and every line after it, the quiet one included, carries it.
+    for (let i = first + 1; i <= last; i++) {
+      expect(hasRail(lines[i]!), `line ${i} lost the rail`).toBe(true);
+    }
+  });
+
+  // The bracket marker is four columns with its space where a status icon is
+  // two, so a fixed detail indent would leave the removable section's two
+  // lines out of step with each other.
+  it("indents a detail line to whatever marker its row used", async () => {
+    const { settled } = await mountSettled(
+      listOf([
+        mainRow({ dirty: { dirty: true, modified: 1, untracked: 0 } }),
+        row(),
+      ]),
+      { candidates: [candidate()], skipped: [] },
+    );
+    const columnOf = (line: string, needle: string) => line.indexOf(needle);
+    // A kept row: name and detail start in the same column.
+    expect(
+      columnOf(lineWith(settled, "main checkout"), "main checkout"),
+    ).toBe(columnOf(lineWith(settled, "1 modified"), "1 modified"));
+    // A removable row: both shift right by the wider marker, together.
+    const nameCol = columnOf(lineWith(settled, "alpha  "), "alpha");
+    const detailCol = columnOf(lineWith(settled, "PR #68"), "PR #68");
+    expect(nameCol).toBe(detailCol);
+    // ...and that column really is further right than the kept section's.
+    expect(nameCol).toBeGreaterThan(
+      columnOf(lineWith(settled, "main checkout"), "main checkout"),
+    );
+  });
+
+  it("sizes the marker slot for the glyph it holds", () => {
+    expect(markerWidth(false)).toBe(2);
+    expect(markerWidth(true)).toBe(4);
+    expect(detailGutter(true) - detailGutter(false)).toBe(2);
+  });
+
+  it("runs the rail into the removable rule rather than stopping at it", async () => {
+    const { settled } = await mountSettled(listOf([mainRow(), row()]), {
+      candidates: [candidate()],
+      skipped: [],
+    });
+    const rule = lineWith(settled, "removable · 1");
+    expect(rule).toContain("├─ removable · 1");
+    // The row below the rule still carries the rail.
+    const lines = settled.split("\n");
+    const at = lines.findIndex((l) => l.includes("removable · 1"));
+    expect(hasRail(lines[at + 1]!)).toBe(true);
+  });
+
+  /**
+   * The user asked "if it is working shouldn't it be the spinner?" of a
+   * static orange dot. These pin the panel to the SESSION LIST's vocabulary
+   * rather than a second one that happens to look similar.
+   */
+  it("spins a working row through the shared frames", async () => {
+    const { settled } = await mountSettled(
+      listOf([
+        mainRow(),
+        row({
+          path: "/repo/wt/busy",
+          name: "busy",
+          branch: "busy",
+          sessions: [session({ status: "working" })],
+        }),
+      ]),
+    );
+    const frames = [...DOT_SPINNER_FRAMES];
+    const shown = lineWith(settled, "busy");
+    expect(
+      frames.some((f) => shown.includes(f)),
+      `no spinner frame in ${JSON.stringify(shown)}`,
+    ).toBe(true);
+    // ...and it is NOT the idle dot.
+    expect(shown).not.toContain("●");
+  });
+
+  it("advances the spinner when the shared frame ticks", async () => {
+    const { settled, frame } = await mountSettled(
+      listOf([
+        mainRow(),
+        row({
+          path: "/repo/wt/busy",
+          name: "busy",
+          branch: "busy",
+          sessions: [session({ status: "working" })],
+        }),
+      ]),
+    );
+    const frames = [...DOT_SPINNER_FRAMES];
+    const glyphOf = (text: string) =>
+      frames.find((f) => lineWith(text, "busy").includes(f));
+    const before = glyphOf(settled);
+    expect(before).toBeDefined();
+    // Driven by the REAL shared interval rather than by a test-only setter:
+    // the row's `useStatusIcon` acquires it on mount, so waiting one tick is
+    // what a working row actually does.
+    await new Promise((resolve) =>
+      setTimeout(resolve, SPINNER_INTERVAL_MS + 80),
+    );
+    const after = glyphOf(await frame());
+    expect(after).toBeDefined();
+    expect(after).not.toBe(before);
+  });
+
+  it("leaves an idle row on the steady dot", async () => {
+    const { settled } = await mountSettled(
+      listOf([
+        mainRow(),
+        row({
+          path: "/repo/wt/parked",
+          name: "parked",
+          branch: "parked",
+          sessions: [session({ status: "idle" })],
+        }),
+      ]),
+    );
+    const shown = lineWith(settled, "parked");
+    expect(shown).toContain("●");
+    for (const f of DOT_SPINNER_FRAMES) expect(shown).not.toContain(f);
+  });
+
+  it("marks a waiting row the way the session list does", async () => {
+    const { settled } = await mountSettled(
+      listOf([
+        mainRow(),
+        row({
+          path: "/repo/wt/blocked",
+          name: "blocked",
+          branch: "blocked",
+          sessions: [session({ status: "waiting" })],
+        }),
+      ]),
+    );
+    expect(lineWith(settled, "blocked")).toContain(
+      getStatusIcon("waiting", null, "dot"),
+    );
+  });
+
+  it("puts a single repo in the title instead of a header line", async () => {
+    const { settled } = await mountSettled(listOf([mainRow(), row()]));
+    expect(settled).toContain("Worktrees · repo");
+    // The header line that would repeat it directly underneath is gone.
+    const lines = settled.split("\n");
+    const title = lines.findIndex((l) => l.includes("Worktrees · repo"));
+    expect(lines[title + 1]).toContain("main checkout");
+  });
+
+  it("keeps a header per repo once there are several", async () => {
+    const { settled } = await mountSettled({
+      repos: [
+        { repoRoot: "/repo", repoName: "repo", worktrees: [mainRow()] },
+        {
+          repoRoot: "/other",
+          repoName: "other",
+          worktrees: [
+            row({ path: "/other/wt/d", repoRoot: "/other", repoName: "other" }),
+          ],
+        },
+      ],
+    });
+    expect(settled).toContain("Worktrees");
+    expect(settled).not.toContain("Worktrees · ");
+    expect(settled).toContain("other");
+    expect(settled).toContain("repo");
   });
 });
 
@@ -446,7 +703,7 @@ describe("WorktreesPanel ordering", () => {
 
     const [main, busy, parked, zulu] = orderOf(
       settled,
-      "mainline",
+      "main checkout",
       "busy",
       "parked",
       "zulu",
@@ -551,7 +808,7 @@ describe("WorktreesPanel keys", () => {
     const shown = await frame();
     // One `j` from the last row of a group lands on the first row of the
     // next, crossing the group header rather than selecting it.
-    expect(lineWith(shown, "mainline")).toContain("▎");
+    expect(lineWith(shown, "main checkout")).toContain("▎");
     expect(lineWith(shown, "delta")).not.toContain("▎");
   });
 
@@ -572,30 +829,40 @@ describe("WorktreesPanel keys", () => {
         }),
     });
 
-    // Rows settle as main, the held one, then the candidate at the bottom.
+    // Rows settle as main, the held one, then the candidate under the rule.
     const settled = await frame();
-    const [main, held, prunable] = orderOf(
+    const [main, held, rule, prunable] = orderOf(
       settled,
-      "mainline",
+      "main checkout",
       "bravo",
+      "removable ·",
       "alpha",
     );
+    expect(held).toBeLessThan(rule!);
+    expect(rule).toBeLessThan(prunable!);
     expect(main).toBeLessThan(held!);
     expect(held).toBeLessThan(prunable!);
 
-    // Cursor starts on the main checkout, which has no removal to opt into.
+    // Cursor starts on the main checkout, which has no removal to opt into,
+    // so the removal keys are not even advertised there.
     keys.pressKey(" ");
-    expect(await frame()).toContain("x prune 0");
+    const onMain = await frame();
+    expect(onMain).not.toContain("[x]");
+    expect(onMain).not.toContain("x remove");
 
-    // The held row is likewise unselectable.
+    // The held row is likewise unselectable, and says why in plain words.
     keys.pressKey("j");
     keys.pressKey(" ");
-    expect(await frame()).toContain("x prune 0");
+    const onHeld = await frame();
+    expect(onHeld).not.toContain("[x]");
+    expect(onHeld).toContain("locked");
 
-    // The candidate is not.
+    // The candidate is selectable, and the removal keys appear with it.
     keys.pressKey("j");
     keys.pressKey(" ");
-    expect(await frame()).toContain("x prune 1");
+    const onCandidate = await frame();
+    expect(onCandidate).toContain("[x]");
+    expect(onCandidate).toContain("x remove 1");
   });
 
   it("opens the confirmation on x, not on enter", async () => {
@@ -611,17 +878,17 @@ describe("WorktreesPanel keys", () => {
 
     await frame();
     keys.pressKey(" ");
-    expect(await frame()).toContain("x prune 1");
+    expect(await frame()).toContain("x remove 1");
 
     // Enter is the row action now: it must not reach the delete confirmation.
     keys.pressEnter();
     const afterEnter = await frame();
-    expect(afterEnter).not.toContain("y / n");
+    expect(afterEnter).not.toContain("Remove worktrees?");
     expect(spawned).toBe(1);
     expect(jumped).toBe(0);
 
     keys.pressKey("x");
-    expect(await frame()).toContain("y / n");
+    expect(await frame()).toContain("Remove worktrees?");
   });
 
   it("routes enter by what the row holds", async () => {
@@ -686,14 +953,14 @@ describe("WorktreesPanel keys", () => {
 
     await frame();
     keys.pressKey("D", { shift: true });
-    expect(await frame()).toContain("x prune 1");
+    expect(await frame()).toContain("x remove 1");
     expect(reviewed).toHaveLength(0);
 
     keys.pressKey("d");
     await frame();
     expect(reviewed).toEqual([{ path: "/repo/wt/alpha", sessionId: null }]);
     // Reviewing must not have disturbed the opt-in.
-    expect(await frame()).toContain("x prune 1");
+    expect(await frame()).toContain("x remove 1");
   });
 
   it("refetches both phases when tab changes scope", async () => {
@@ -730,6 +997,155 @@ describe("WorktreesPanel keys", () => {
   });
 });
 
+/**
+ * `x` with an empty selection used to do nothing at all, which reads as a
+ * broken key rather than as an empty selection.
+ */
+describe("x with nothing selected", () => {
+  const oneClean = {
+    list: async () => json(listOf([mainRow(), row()])),
+    scan: async () => json({ candidates: [candidate()], skipped: [] }),
+  };
+
+  it("removes the row under the cursor when it is removable", async () => {
+    const { keys, frame } = await mountPanel(oneClean);
+    await frame();
+    // Down onto the one removable row, then straight to x with no selection.
+    keys.pressKey("j");
+    keys.pressKey("x");
+    const confirm = await frame();
+    expect(confirm).toContain("Remove worktrees?");
+    // Exactly that row, and the confirm still stands in front of it.
+    expect(confirm).toContain("Delete 1 worktree and its branch?");
+    expect(confirm).toContain("[x]");
+  });
+
+  it("says what is missing when the cursor is not on a removable row", async () => {
+    const { keys, frame } = await mountPanel(oneClean);
+    await frame();
+    // Cursor starts on the main checkout.
+    keys.pressKey("x");
+    const shown = await frame();
+    expect(shown).not.toContain("Remove worktrees?");
+    expect(shown).toContain("nothing selected");
+  });
+
+  // A dirty row selected alone still removes nothing, so a confirm reading
+  // "delete 0 worktrees" would be the same dead end wearing a dialog.
+  it("names the key that unblocks a dirty row instead of confirming zero", async () => {
+    const { keys, frame } = await mountPanel({
+      list: async () =>
+        json(
+          listOf([row({ dirty: { dirty: true, modified: 0, untracked: 1 } })]),
+        ),
+      scan: async () =>
+        json({
+          candidates: [candidate({ dirty: true, untracked: 1 })],
+          skipped: [],
+        }),
+    });
+    await frame();
+    keys.pressKey("x");
+    const shown = await frame();
+    expect(shown).not.toContain("Remove worktrees?");
+    expect(shown).toContain("D includes it");
+  });
+
+  it("counts the selection only once there is one", async () => {
+    const { keys, frame } = await mountPanel(oneClean);
+    await frame();
+    keys.pressKey("j");
+    const empty = await frame();
+    expect(empty).toContain("x remove");
+    expect(empty).not.toContain("x remove 0");
+    keys.pressKey(" ");
+    expect(await frame()).toContain("x remove 1");
+  });
+});
+
+describe("removal confirm", () => {
+  it("reads as a sentence for one worktree and for many", () => {
+    expect(describeRemoval(1, 1)).toBe("Delete 1 worktree and its branch?");
+    expect(describeRemoval(3, 2)).toBe("Delete 3 worktrees and 2 branches?");
+    expect(describeRemoval(3, 1)).toBe("Delete 3 worktrees and 1 branch?");
+    // A branch nobody is deleting is not mentioned.
+    expect(describeRemoval(2, 0)).toBe("Delete 2 worktrees?");
+    expect(describeRemoval(1, 0)).toBe("Delete 1 worktree?");
+  });
+
+  it("lists only the consequences that apply", () => {
+    expect(
+      removalDetails({ includedDirty: 0, blockedDirty: 0, ignoredFiles: 0 }),
+    ).toEqual([]);
+    expect(
+      removalDetails({ includedDirty: 1, blockedDirty: 2, ignoredFiles: 3 }),
+    ).toEqual([
+      "including 1 worktree with uncommitted work",
+      "skipping 2 dirty worktrees (needs D)",
+      "3 ignored files go too",
+    ]);
+  });
+
+  it("centers over a list that stays visible underneath", async () => {
+    const { keys, frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => json({ candidates: [candidate()], skipped: [] }),
+    });
+    await frame();
+    keys.pressKey("j");
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    const shown = await frame();
+    expect(shown).toContain("Remove worktrees?");
+    expect(shown).toContain("Y confirm");
+    expect(shown).toContain("N cancel");
+    // The panel is still the panel: title above, list behind, hints below.
+    expect(shown).toContain("Worktrees · repo");
+    expect(shown).toContain("main checkout");
+    expect(shown).toContain("j/k move");
+  });
+
+  it("restores the list on esc with the selection intact", async () => {
+    const { keys, frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => json({ candidates: [candidate()], skipped: [] }),
+    });
+    await frame();
+    keys.pressKey("j");
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    expect(await frame()).toContain("Remove worktrees?");
+    // A bare ESC is the prefix of every CSI sequence, so the parser holds it
+    // briefly to see whether more bytes follow. `frame()`'s single macrotask
+    // is not long enough (App.test.tsx waits the same way).
+    keys.pressEscape();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const back = await frame();
+    expect(back).not.toContain("Remove worktrees?");
+    expect(back).toContain("x remove 1");
+  });
+
+  it("swallows every key but the answer while it is up", async () => {
+    let closed = 0;
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(listOf([mainRow(), row()])),
+        scan: async () => json({ candidates: [candidate()], skipped: [] }),
+      },
+      { onClose: () => closed++ },
+    );
+    await frame();
+    keys.pressKey("j");
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    await frame();
+    // `q` closes the panel everywhere else; here it must not.
+    keys.pressKey("q");
+    expect(closed).toBe(0);
+    expect(await frame()).toContain("Remove worktrees?");
+  });
+});
+
 describe("WorktreesPanel compact", () => {
   it("keeps the whole dirty warning readable at sidebar width", async () => {
     const { settled } = await mountSettled(
@@ -739,6 +1155,7 @@ describe("WorktreesPanel compact", () => {
           candidate({
             dirty: true,
             untracked: 1,
+            reason: "merged-locally",
             detail: "merged into origin/main",
           }),
         ],
@@ -747,10 +1164,17 @@ describe("WorktreesPanel compact", () => {
       { compact: true, width: 44, height: 18 },
     );
 
-    expect(settled).toContain("DIRTY, press D to include");
-    expect(settled).toContain("merged into origin/main");
-    // The warning owns its own line rather than sharing the reason's.
-    expect(lineWith(settled, "DIRTY, press D")).not.toContain("merged into");
+    // Compact says the same words on the same two lines: the sidebar's old
+    // third line existed only to hold a warning that is now a phrase like any
+    // other. What compact changes is the ORDER, so the sentence about work
+    // that would be deleted outlives the truncation and the reason (which the
+    // rule above the row already gives categorically) is what gets cut.
+    expect(settled).toContain("(D removes it too)");
+    const detail = lineWith(settled, "(D removes it too)");
+    expect(isDetailLine(detail)).toBe(true);
+    expect(detail.indexOf("untracked")).toBeLessThan(
+      detail.indexOf("(D removes it too)"),
+    );
   });
 
   it("draws nothing past the panel border", async () => {
@@ -805,7 +1229,7 @@ describe("sortWorktreeRows", () => {
     ];
 
     expect(sortWorktreeRows(rows).map((r) => r.row.name)).toEqual([
-      "mainline",
+      "main checkout",
       "active",
       "idle",
       "empty",
@@ -878,77 +1302,338 @@ describe("fitSegments", () => {
   });
 });
 
-describe("row formatting", () => {
-  it("omits tracking for an in-sync branch and reports a gone upstream", () => {
+/** The detail line as one string, which is how a reader sees it. */
+function detailText(entry: PanelRow, dirtyOk = false): string {
+  return detailSegments(entry, { compact: false, dirtyOk })
+    .map((s) => s.text)
+    .join("");
+}
+
+/** Line 1 as one string, cursor gutter excluded (the component draws that). */
+function primaryText(entry: PanelRow, labelWidth = 0): string {
+  return primarySegments(entry, { isCursor: false, labelWidth })
+    .map((s) => s.text)
+    .join("");
+}
+
+describe("row line 1", () => {
+  // The loudest thing on the old screen was a worktree named after its branch
+  // saying both, twice per row, for rows that had nothing else to report.
+  it("omits a branch that only repeats the worktree name", () => {
+    expect(rowBranch(row({ name: "fix-codex", branch: "fix-codex" }))).toBe("");
+    expect(
+      rowBranch(row({ name: "worktree-panel", branch: "feat/worktree-panel" })),
+    ).toBe("feat/worktree-panel");
+  });
+
+  it("names the main checkout for what it is, not for its directory", () => {
+    expect(rowLabel(mainRow())).toBe("main checkout");
+    expect(rowLabel(row())).toBe("alpha");
+    // ...so its branch is never suppressed as a repeat of the directory name.
+    expect(rowBranch(mainRow())).toBe("main");
+  });
+
+  it("says detached rather than leaving the branch blank", () => {
+    expect(rowBranch(row({ branch: null, detached: true }))).toBe("detached");
+  });
+
+  it("gives the main checkout a home icon and an agent row a dot", () => {
+    expect(primaryText(panelRow({ row: mainRow() }))).toContain("⌂");
+    expect(
+      primaryText(panelRow({ row: row({ sessions: [session()] }) })),
+    ).toContain("●");
+    // A quiet worktree spends the slot on alignment rather than on a glyph.
+    expect(primaryText(panelRow())).toStartWith("  ");
+  });
+
+  // Checkboxes appear ONLY under the removable divider, which is what makes
+  // an unexplained checkbox impossible.
+  it("gives a checkbox to removable rows and to nothing else", () => {
+    expect(primaryText(panelRow({ candidate: candidate() }))).toContain("[ ]");
+    expect(
+      primarySegments(panelRow({ candidate: candidate() }), {
+        isCursor: false,
+        labelWidth: 0,
+        selected: true,
+      })
+        .map((s) => s.text)
+        .join(""),
+    ).toContain("[x]");
+    expect(primaryText(panelRow())).not.toContain("[ ]");
+    expect(primaryText(panelRow({ row: mainRow() }))).not.toContain("[ ]");
+  });
+
+  it("lines the branch column up across a group", () => {
+    const rows = [
+      panelRow({ row: row({ name: "a", branch: "feat/a" }) }),
+      panelRow({ row: row({ name: "a-much-longer-name", branch: "feat/b" }) }),
+    ];
+    const width = labelColumnWidth(rows);
+    expect(width).toBe("a-much-longer-name".length);
+    const columnOf = (entry: PanelRow) =>
+      primaryText(entry, width).indexOf("feat/");
+    expect(columnOf(rows[0]!)).toBe(columnOf(rows[1]!));
+  });
+
+  // One outlier name must not push every branch off the row.
+  it("caps the column so a long name cannot eat the line", () => {
+    const rows = [panelRow({ row: row({ name: "x".repeat(80) }) })];
+    expect(labelColumnWidth(rows)).toBeLessThanOrEqual(28);
+  });
+});
+
+describe("row detail line", () => {
+  it("draws nothing for a healthy, quiet, clean worktree", () => {
+    expect(detailSegments(panelRow(), { compact: false, dirtyOk: false })).toEqual(
+      [],
+    );
+    // ...which is what lets such a row collapse to a single line.
+    expect(rowVisualHeight(panelRow(), false)).toBe(1);
+  });
+
+  it("spells uncommitted work out and omits the zero halves", () => {
+    expect(dirtyPhrases(row())).toEqual([]);
+    expect(
+      dirtyPhrases(row({ dirty: { dirty: true, modified: 2, untracked: 4 } })),
+    ).toEqual(["2 modified", "4 untracked"]);
+    expect(
+      dirtyPhrases(row({ dirty: { dirty: true, modified: 0, untracked: 4 } })),
+    ).toEqual(["4 untracked"]);
+    expect(
+      dirtyPhrases(row({ dirty: { dirty: true, modified: 2, untracked: 0 } })),
+    ).toEqual(["2 modified"]);
+  });
+
+  it("says what is gone rather than a bare gone", () => {
+    expect(
+      formatTracking(
+        row({ upstream: { upstream: "origin/x", gone: true, ahead: 0, behind: 0 } }),
+      ),
+    ).toBe("branch gone");
     expect(formatTracking(row())).toBe("");
     expect(
       formatTracking(
-        row({
-          upstream: { upstream: "origin/x", gone: false, ahead: 2, behind: 0 },
-        }),
+        row({ upstream: { upstream: "origin/x", gone: false, ahead: 2, behind: 1 } }),
       ),
-    ).toBe("↑2");
-    expect(
-      formatTracking(
-        row({
-          upstream: { upstream: "origin/x", gone: true, ahead: 0, behind: 0 },
-        }),
-      ),
-    ).toBe("gone");
-    // Detached HEAD has no branch to track.
+    ).toBe("↑2 ↓1");
     expect(
       formatTracking(row({ branch: null, detached: true, upstream: null })),
     ).toBe("");
   });
 
-  it("omits dirty counts for a clean tree", () => {
-    expect(formatDirty(row())).toBe("");
-    expect(
-      formatDirty(row({ dirty: { dirty: true, modified: 1, untracked: 2 } })),
-    ).toBe("1m/2u");
-  });
-
-  it("names a detached row rather than leaving the branch blank", () => {
-    const text = primarySegments(
-      panelRow({ row: row({ branch: null, detached: true, upstream: null }) }),
-      false,
-    )
-      .map((s) => s.text)
-      .join("");
-    expect(text).toContain("detached");
-  });
-
-  it("draws no detail line for a healthy, empty worktree", () => {
-    expect(
-      detailSegments(panelRow(), { compact: false, dirtyOk: false }),
-    ).toEqual([]);
-  });
-
-  it("collapses several sessions to one in compact mode", () => {
-    const entry = panelRow({
-      row: row({
-        sessions: [
-          session({ status: "working" }),
-          session({ id: "s2", agentType: "codex" }),
-        ],
+  // The old row said `PR #100 merged  #100 MERGED`: the reason and the badge
+  // were rendered as independent facts about the same pull request.
+  it("states a pull request once, never as reason plus badge", () => {
+    const pr = { number: 100, url: "u", state: "MERGED" as const };
+    const text = detailText(
+      panelRow({
+        candidate: candidate({ reason: "pr-merged", pr }),
+        pr,
       }),
+    );
+    expect(text).toContain("PR #100 merged");
+    expect(text).not.toContain("MERGED");
+    expect(text.match(/#100/g)).toHaveLength(1);
+  });
+
+  it("keeps an open pull request on a healthy row", () => {
+    const text = detailText(
+      panelRow({ pr: { number: 101, url: "u", state: "OPEN" } }),
+    );
+    expect(text).toBe("PR #101 open");
+  });
+
+  // The reason and the tracking state are the same event: `upstream-gone` IS
+  // "branch gone", and a merged PR is why GitHub deleted the branch.
+  it("does not say the branch is gone twice", () => {
+    const text = detailText(
+      panelRow({
+        row: row({
+          upstream: { upstream: "origin/x", gone: true, ahead: 0, behind: 0 },
+        }),
+        candidate: candidate({ reason: "upstream-gone" }),
+      }),
+    );
+    expect(text.match(/branch gone/g)).toHaveLength(1);
+    // Same for a merged PR whose branch went with it.
+    const merged = detailText(
+      panelRow({
+        row: row({
+          upstream: { upstream: "origin/x", gone: true, ahead: 0, behind: 0 },
+        }),
+        candidate: candidate({
+          reason: "pr-merged",
+          pr: { number: 100, url: "u", state: "MERGED" },
+        }),
+      }),
+    );
+    expect(merged).toBe("PR #100 merged");
+  });
+
+  it("puts removal reasons in plain words", () => {
+    expect(
+      describeReason(
+        candidate({
+          reason: "pr-merged",
+          pr: { number: 68, url: "u", state: "MERGED" },
+        }),
+      ),
+    ).toBe("PR #68 merged");
+    expect(describeReason(candidate({ reason: "upstream-gone" }))).toBe(
+      "branch gone",
+    );
+    // The remote the reader never asked about is dropped.
+    expect(
+      describeReason(
+        candidate({
+          reason: "merged-locally",
+          detail: "merged into origin/main",
+        }),
+      ),
+    ).toBe("merged into main");
+  });
+
+  it("drops the daemon's article from a withheld reason", () => {
+    expect(describeSkip("an agent is working here")).toBe("agent working here");
+    expect(describeSkip("locked")).toBe("locked");
+  });
+
+  // `locked` is phase-1 truth, so it must not wait for the scan and must not
+  // then be said twice when the scan repeats it.
+  it("says locked once, from the worktree itself", () => {
+    const text = detailText(
+      panelRow({
+        row: row({ locked: true }),
+        skip: {
+          path: "/repo/wt/alpha",
+          repoRoot: "/repo",
+          branch: "feat/alpha",
+          reason: "locked",
+        },
+      }),
+    );
+    expect(text.match(/locked/g)).toHaveLength(1);
+  });
+
+  it("names one agent and counts several", () => {
+    expect(describeSessions([])).toBe("");
+    expect(describeSessions([session({ status: "working" })])).toBe(
+      "claude working",
+    );
+    expect(
+      describeSessions([
+        session({ status: "idle" }),
+        session({ id: "s2", status: "idle" }),
+        session({ id: "s3", status: "idle" }),
+      ]),
+    ).toBe("3 agents idle");
+    // A mixed group leads with the count worth acting on.
+    expect(
+      describeSessions([
+        session({ status: "idle" }),
+        session({ id: "s2", status: "waiting" }),
+      ]),
+    ).toBe("2 agents, 1 waiting");
+  });
+
+  it("attaches the dirty opt-in to the work it would delete", () => {
+    const entry = panelRow({
+      row: row({ dirty: { dirty: true, modified: 0, untracked: 1 } }),
+      candidate: candidate({ dirty: true, untracked: 1 }),
     });
-    const wide = detailSegments(entry, { compact: false, dirtyOk: false })
-      .map((s) => s.text)
-      .join("");
-    const narrow = detailSegments(entry, { compact: true, dirtyOk: false })
-      .map((s) => s.text)
-      .join("");
-    expect(wide).toContain("claude working, codex idle");
-    expect(narrow).toContain("[claude working +1]");
+    expect(detailText(entry)).toContain("1 untracked (D removes it too)");
+    expect(detailText(entry, true)).toContain("D armed");
+  });
+
+  // A row nobody can remove has no opt-in to offer.
+  it("leaves a healthy dirty row's counts unqualified", () => {
+    const text = detailText(
+      panelRow({ row: row({ dirty: { dirty: true, modified: 3, untracked: 0 } }) }),
+    );
+    expect(text).toBe("3 modified");
+  });
+
+  it("separates phrases with a middle dot", () => {
+    const text = detailText(
+      panelRow({
+        row: row({
+          dirty: { dirty: true, modified: 0, untracked: 4 },
+          sessions: [
+            session({ status: "idle" }),
+            session({ id: "s2", status: "idle" }),
+          ],
+        }),
+      }),
+    );
+    expect(text).toBe("4 untracked · 2 agents idle");
   });
 });
 
-/**
- * Scrolling is measured in LINES and rows are 1-3 of them, so scrolling by row
- * INDEX put the cursor off screen while space/x/Enter/y/D went on acting on
- * the row nobody could see.
- */
+describe("removable section", () => {
+  it("splits a group at the classified rows", () => {
+    const kept = panelRow({ row: row({ path: "/a", name: "a" }) });
+    const gone = panelRow({
+      row: row({ path: "/b", name: "b" }),
+      candidate: candidate({ path: "/b" }),
+    });
+    const split = splitRemovable([kept, gone]);
+    expect(split.kept.map((e) => e.row.path)).toEqual(["/a"]);
+    expect(split.removable.map((e) => e.row.path)).toEqual(["/b"]);
+  });
+
+  it("rules off the section with its count", () => {
+    const text = dividerText(6, 40);
+    // A tee, so the rail runs into the rule instead of stopping at it.
+    expect(text).toStartWith("├─ removable · 6 ");
+    expect(displayWidth(text)).toBe(40);
+    // A width too small to hold the label must not produce a negative repeat.
+    expect(displayWidth(dividerText(6, 4))).toBeGreaterThan(0);
+  });
+
+  // The divider is not a row, but it IS a line: a layout without it puts
+  // every row below the divider one line out.
+  it("counts the divider in the line layout", () => {
+    const kept = panelRow({ row: row({ path: "/a", name: "a" }) });
+    const gone = panelRow({
+      row: row({ path: "/b", name: "b" }),
+      candidate: candidate({ path: "/b" }),
+    });
+    const other = panelRow({ row: row({ path: "/c", name: "c" }) });
+    const repos = [
+      { repoRoot: "/r1", repoName: "r1", rows: [kept, gone] },
+      { repoRoot: "/r2", repoName: "r2", rows: [other] },
+    ];
+    const layout = visualLayout(repos, () => 1);
+    // header(0) | a(1) | divider(2) | b(3) | header(4) | c(5)
+    expect(layout.get("/a")).toEqual({ line: 1, height: 1 });
+    expect(layout.get("/b")).toEqual({ line: 3, height: 1 });
+    expect(layout.get("/c")).toEqual({ line: 5, height: 1 });
+  });
+
+  it("drops the group header line when there is only one repo", () => {
+    const only = panelRow({ row: row({ path: "/a", name: "a" }) });
+    const one = [{ repoRoot: "/r", repoName: "r", rows: [only] }];
+    expect(showsGroupHeaders(one)).toBe(false);
+    expect(visualLayout(one, () => 1).get("/a")).toEqual({
+      line: 0,
+      height: 1,
+    });
+    const two = [
+      ...one,
+      {
+        repoRoot: "/r2",
+        repoName: "r2",
+        rows: [panelRow({ row: row({ path: "/b", name: "b" }) })],
+      },
+    ];
+    expect(showsGroupHeaders(two)).toBe(true);
+    expect(visualLayout(two, () => 1).get("/a")).toEqual({
+      line: 1,
+      height: 1,
+    });
+  });
+});
+
 describe("visual scrolling", () => {
   it("counts a plain row as one line and a detailed one as two", () => {
     expect(rowVisualHeight(panelRow(), false)).toBe(1);
@@ -957,13 +1642,14 @@ describe("visual scrolling", () => {
     );
   });
 
-  // Compact gives the dirty warning a line of its own, which is a third line.
-  it("counts compact's dirty warning as its own line", () => {
+  // Compact no longer spends a third line on the dirty warning: it is a
+  // phrase on the detail line like every other fact.
+  it("is the same height in compact as at full width", () => {
     const entry = panelRow({
       row: row({ dirty: { dirty: true, modified: 0, untracked: 1 } }),
       candidate: candidate({ dirty: true, untracked: 1 }),
     });
-    expect(rowVisualHeight(entry, true)).toBe(3);
+    expect(rowVisualHeight(entry, true)).toBe(2);
     expect(rowVisualHeight(entry, false)).toBe(2);
   });
 
@@ -981,10 +1667,11 @@ describe("visual scrolling", () => {
       ],
       (entry) => rowVisualHeight(entry, false),
     );
-    // header(1) | a(1) | b(2) | header(1) | c
+    // header(0) | a(1) | divider(2) | b(3,4) | header(5) | c(6). `b` is
+    // classified, so it sits under its group's removable divider.
     expect(layout.get("/a")).toEqual({ line: 1, height: 1 });
-    expect(layout.get("/b")).toEqual({ line: 2, height: 2 });
-    expect(layout.get("/c")).toEqual({ line: 5, height: 1 });
+    expect(layout.get("/b")).toEqual({ line: 3, height: 2 });
+    expect(layout.get("/c")).toEqual({ line: 6, height: 1 });
   });
 
   it("scrolls only when the row is not already fully visible", () => {
@@ -1052,7 +1739,9 @@ describe("visual scrolling", () => {
       [{ repoRoot: "/r", repoName: "r", rows: resorted }],
       () => 1,
     );
-    expect(scrollTargetFor(after, "/w/0", 0, 6)).toBe(7);
+    // One repo, so no header line: eleven rows above it, and its own line is
+    // the twelfth (index 11), which must sit on the viewport's last line.
+    expect(scrollTargetFor(after, "/w/0", 0, 6)).toBe(6);
   });
 });
 
@@ -1270,7 +1959,7 @@ describe("WorktreesPanel dirty gate", () => {
     keys.pressKey(" ");
     const shown = await frame();
     expect(shown).toContain("[x]");
-    expect(shown).toContain("x prune 0");
+    expect(shown).toContain("x remove");
   });
 
   it("arms a dirty row with D and disarms it again", async () => {
@@ -1280,9 +1969,9 @@ describe("WorktreesPanel dirty gate", () => {
     });
     await frame();
     keys.pressKey("D", { shift: true });
-    expect(await frame()).toContain("x prune 1");
+    expect(await frame()).toContain("x remove 1");
     keys.pressKey("D", { shift: true });
-    expect(await frame()).toContain("x prune 0");
+    expect(await frame()).toContain("x remove");
   });
 
   it("selects only clean rows with a", async () => {
@@ -1314,7 +2003,7 @@ describe("WorktreesPanel dirty gate", () => {
     });
     await frame();
     keys.pressKey("a");
-    expect(await frame()).toContain("x prune 1");
+    expect(await frame()).toContain("x remove 1");
   });
 
   // A dirty opt-in must not outlive the selection that carried it.
@@ -1325,11 +2014,11 @@ describe("WorktreesPanel dirty gate", () => {
     });
     await frame();
     keys.pressKey("D", { shift: true });
-    expect(await frame()).toContain("x prune 1");
+    expect(await frame()).toContain("x remove 1");
     keys.pressKey("a"); // deselects: the only row is dirty
-    expect(await frame()).toContain("x prune 0");
+    expect(await frame()).toContain("x remove");
     keys.pressKey(" "); // reselect by hand, with no fresh D
-    expect(await frame()).toContain("x prune 0");
+    expect(await frame()).toContain("x remove");
   });
 
   it("names the destructive case at the confirmation step", async () => {
@@ -1340,7 +2029,9 @@ describe("WorktreesPanel dirty gate", () => {
     await frame();
     keys.pressKey("D", { shift: true });
     keys.pressKey("x");
-    expect(await frame()).toContain("INCLUDING 1 with uncommitted work");
+    const confirm = await frame();
+    expect(confirm).toContain("Remove worktrees?");
+    expect(confirm).toContain("including 1 worktree with uncommitted work");
   });
 
   it("backs out of confirm with n", async () => {
@@ -1351,9 +2042,12 @@ describe("WorktreesPanel dirty gate", () => {
     await frame();
     keys.pressKey(" ");
     keys.pressKey("x");
-    expect(await frame()).toContain("y / n");
+    expect(await frame()).toContain("Remove worktrees?");
     keys.pressKey("n");
-    expect(await frame()).toContain("x prune 1");
+    const back = await frame();
+    expect(back).not.toContain("Remove worktrees?");
+    // The selection survives the cancel.
+    expect(back).toContain("x remove 1");
   });
 
   it("sends the scope and the caller cwd with the run", async () => {
