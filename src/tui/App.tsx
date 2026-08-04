@@ -32,6 +32,7 @@ import {
   formatReviewPrompt,
   HUNK_INSTALL_HINT,
   isHunkAvailable,
+  resolveMergeBase,
   runHunkReview,
   type HunkReviewNote,
 } from "./utils/review";
@@ -82,7 +83,8 @@ import {
   type MoveReport,
 } from "../lib/move-report";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
-import { PruneDialog } from "./components/PruneDialog";
+import { WorktreesPanel, worktreeHoldsPath } from "./components/WorktreesPanel";
+import type { WorktreeSession } from "../daemon/worktree-prune";
 import { HelpOverlay } from "./components/HelpOverlay";
 import type { SpawnableAgent } from "../lib/spawnable-agents";
 import { theme } from "./theme";
@@ -141,6 +143,32 @@ function errText(err: unknown): string {
  *  one, since that follows the agent as it cds, else where it started. */
 function sessionCwd(session: EnrichedSession): string {
   return session.paneCwd ?? session.cwd;
+}
+
+/**
+ * The live session a Worktrees-panel row's session id stands for.
+ *
+ * Rows can carry a SYNTHETIC id: the daemon folds a worktree-isolated subagent
+ * into its worktree's row as `${parent.id}:${agentId}` with the parent's pane
+ * (`worktreeSessionsByRoot`), and a teammate-only worktree's row is nothing
+ * BUT that. A plain `find` by such an id matches nothing, which would strand
+ * the row's actions on a session that is right there — so a miss falls back to
+ * the part before the first colon, which is the orchestrator the fold already
+ * routes the pane to.
+ *
+ * Split on MISS rather than always: a real session id could contain a colon,
+ * and truncating one would resolve to the wrong session (or a stranger's).
+ */
+function resolveWorktreeSession(
+  sessions: readonly EnrichedSession[],
+  id: string,
+): EnrichedSession | undefined {
+  const direct = sessions.find((s) => s.id === id);
+  if (direct) return direct;
+  const colon = id.indexOf(":");
+  if (colon === -1) return undefined;
+  const parentId = id.slice(0, colon);
+  return sessions.find((s) => s.id === parentId);
 }
 
 /** Shown when the daemon predates `GET /agents`. Exported for the test that
@@ -245,7 +273,15 @@ export function App(props: AppProps) {
       store.actions.toggleGroupCollapse(item.groupKey);
       return;
     }
-    const session = item.filteredSession.session;
+    activateSession(item.filteredSession.session);
+  }
+
+  /**
+   * Go to a session, wherever it lives. Split out of `activateItem` because
+   * the Worktrees panel activates a session that was never a row in the list
+   * (issue #102), and the two must not drift on what "go to" means.
+   */
+  function activateSession(session: EnrichedSession) {
     if (session.tmuxPane) {
       store.actions.setActiveSessionId(session.id);
       selectPane(session.tmuxPane);
@@ -299,6 +335,10 @@ export function App(props: AppProps) {
   let pendingReviewNotes: {
     sessionId: string;
     notes: HunkReviewNote[];
+    /** Runs once the confirm RESOLVES, on both its branches: the Worktrees
+     *  panel's reopen rides here, and firing it any earlier would put the
+     *  panel back over the very dialog the close existed to unbury. */
+    onDone?: () => void;
   } | null = null;
 
   const pendingReviewNoteCount = () => pendingReviewNotes?.notes.length ?? 0;
@@ -346,6 +386,40 @@ export function App(props: AppProps) {
     }
   }
 
+  /**
+   * Offer a review's notes back to the agent that owns the checkout.
+   *
+   * Shared by the session list's `d` and the Worktrees panel's, because the
+   * rule about what reaches an agent unprompted should have one home: only an
+   * explicit auto/fill skips the dialog, and every other value (undefined, or
+   * an unvalidated config typo like "Fill") falls through to confirm rather
+   * than silently submitting.
+   */
+  function handBackReviewNotes(
+    session: EnrichedSession,
+    notes: HunkReviewNote[],
+    // Called when the hand-back is RESOLVED: immediately on the paths that
+    // never raise the confirm, and from the confirm's own two exits
+    // otherwise. Callers that need to run after the whole round-trip (the
+    // Worktrees panel's reopen) pass it; the session list passes nothing.
+    onDone?: () => void,
+  ) {
+    if (session.trackingMode === "background" || session.tmuxPane == null) {
+      store.actions.showToast(
+        `${notes.length} review note${notes.length === 1 ? "" : "s"} captured (no pane to send to)`,
+      );
+      onDone?.();
+      return;
+    }
+    if (props.reviewHandback === "auto" || props.reviewHandback === "fill") {
+      void deliverReviewNotes(session.id, notes, props.reviewHandback);
+      onDone?.();
+      return;
+    }
+    pendingReviewNotes = { sessionId: session.id, notes, onDone };
+    store.actions.showConfirmDialog(session.id, "send-review");
+  }
+
   function reviewSession(session: EnrichedSession) {
     if (reviewInFlight) return;
     const cwd = sessionCwd(session);
@@ -368,28 +442,7 @@ export function App(props: AppProps) {
           return;
         }
         if (result.notes.length === 0) return;
-        if (session.trackingMode === "background" || session.tmuxPane == null) {
-          store.actions.showToast(
-            `${result.notes.length} review note${result.notes.length === 1 ? "" : "s"} captured (no pane to send to)`,
-          );
-          return;
-        }
-        // Only an explicit auto/fill skips the dialog; every other value
-        // (undefined, or an unvalidated config typo like "Fill") falls through
-        // to confirm rather than silently auto-submitting to the agent.
-        if (
-          props.reviewHandback === "auto" ||
-          props.reviewHandback === "fill"
-        ) {
-          void deliverReviewNotes(
-            session.id,
-            result.notes,
-            props.reviewHandback,
-          );
-        } else {
-          pendingReviewNotes = { sessionId: session.id, notes: result.notes };
-          store.actions.showConfirmDialog(session.id, "send-review");
-        }
+        handBackReviewNotes(session, result.notes);
       })
       .catch(() => {
         // runHunkReview resolves on every expected failure; this guards an
@@ -398,6 +451,158 @@ export function App(props: AppProps) {
         reviewInFlight = false;
         store.actions.showToast("Review failed");
       });
+  }
+
+  /**
+   * The Worktrees panel's `d`, which reviews a BRANCH rather than a working
+   * tree: the base is the merge-base with the repo's default branch, so a
+   * worktree whose work is already committed shows what it changed instead of
+   * "no changes to review". A worktree with no fork point to name (sitting on
+   * the base, orphaned, or in a repo with no recognizable default branch)
+   * falls back to the working-tree review the session list's `d` does.
+   *
+   * The handback is what the row's session buys: notes from an occupied
+   * worktree go to that agent exactly as they do from the list. A bare
+   * worktree still captures them, and says how many, rather than dropping
+   * them silently.
+   */
+  function reviewWorktree(target: {
+    path: string;
+    sessionId: string | null;
+    panelRepo: string | null;
+    panelScope: string | null;
+  }) {
+    if (reviewInFlight) return;
+    // Re-probe live (not the launch-time `hunkAtLaunch`) so a hunk installed
+    // after the picker started works without a restart.
+    if (!isHunkAvailable()) {
+      store.actions.showToast(HUNK_INSTALL_HINT);
+      return;
+    }
+    const session = target.sessionId
+      ? resolveWorktreeSession(store.state.sessions, target.sessionId)
+      : undefined;
+    // Close FIRST, like every other panel action. The panel is a full-screen
+    // opaque overlay that also swallows every key, so the send-review confirm
+    // this review can raise would render underneath it and be unreachable —
+    // captured notes with no way to answer for them. Nothing below needs the
+    // panel: the row was already read into `target` and `session`.
+    //
+    // The scope travels IN THE PAYLOAD, not from the store: Tab's rescope is
+    // panel-local state the store never sees, so reading the store here
+    // reopened a widened panel back on its narrow opening repo. Every exit
+    // below reopens the panel with the cursor on the reviewed row, and the
+    // hand-back paths do it through `onDone` so the reopen provably follows
+    // the confirm's own resolution instead of racing it back over the dialog.
+    const reopen = () =>
+      store.actions.showWorktrees(target.panelRepo, {
+        initialCursor: target.path,
+        isReturn: true,
+        startWidened: target.panelRepo !== null && target.panelScope === null,
+      });
+    store.actions.hideWorktrees();
+    reviewInFlight = true;
+    // Resolved before the guard is honored so a slow git can't be raced, and
+    // before `runHunkReview` because that is what suspends the renderer.
+    resolveMergeBase(target.path)
+      .then((base) =>
+        runHunkReview(renderer, target.path, { target: base ?? undefined }),
+      )
+      .then((result) => {
+        reviewInFlight = false;
+        if (!result.ok) {
+          store.actions.showToast(`Review failed: ${result.error}`);
+          reopen();
+          return;
+        }
+        if (result.notes.length === 0) {
+          reopen();
+          return;
+        }
+        if (session) {
+          handBackReviewNotes(session, result.notes, reopen);
+          return;
+        }
+        store.actions.showToast(
+          `${result.notes.length} review note${result.notes.length === 1 ? "" : "s"} captured (no agent to send to)`,
+        );
+        reopen();
+      })
+      .catch(() => {
+        reviewInFlight = false;
+        store.actions.showToast("Review failed");
+        reopen();
+      });
+  }
+
+  /**
+   * The Worktrees panel's Enter on an occupied row. The panel reports the
+   * session as the DAEMON described it, which may be a row the picker's own
+   * list never held (a repo discovered through cwd, filtered out by a search),
+   * so the enriched session is preferred and the pane is the fallback.
+   */
+  function jumpToWorktreeSession(session: WorktreeSession) {
+    store.actions.hideWorktrees();
+    const enriched = resolveWorktreeSession(store.state.sessions, session.id);
+    if (enriched) {
+      activateSession(enriched);
+      return;
+    }
+    if (session.tmuxPane) {
+      store.actions.setActiveSessionId(session.id);
+      selectPane(session.tmuxPane);
+      return;
+    }
+    store.actions.showToast("No pane to switch to");
+  }
+
+  /**
+   * The Worktrees panel's Enter on a row that had no agent in it WHEN THE
+   * LIST WAS FETCHED, revalidated against the live session list before it is
+   * acted on.
+   *
+   * The panel's rows are a snapshot: the two reads behind them can be seconds
+   * old by the time Enter lands, and a worktree that gained an agent in that
+   * window would otherwise open the spawn dialog — the one thing the panel is
+   * designed never to offer, a second agent in an occupied worktree. The
+   * decision is re-made HERE rather than in the panel because this is where
+   * the live store is; the panel reports what it saw and this picks the verb.
+   *
+   * Only the linked-worktree case is revalidated. The main checkout's Enter
+   * opens an ordinary dialog whose destination is still a real choice, so an
+   * agent living there is no reason to refuse — and a containment test against
+   * a repo ROOT would match every linked worktree too, since ccmux puts them
+   * under `<repo>/.claude/worktrees/`. Prefix-matching there would jump to an
+   * unrelated worktree's agent.
+   */
+  function spawnInWorktree(target: {
+    cwd: string;
+    existingWorktree: string | null;
+    panelRepo: string | null;
+    panelScope: string | null;
+  }) {
+    store.actions.hideWorktrees();
+    const worktree = target.existingWorktree;
+    if (worktree) {
+      const live = store.state.sessions.find((session) =>
+        worktreeHoldsPath(worktree, sessionCwd(session)),
+      );
+      if (live) {
+        activateSession(live);
+        return;
+      }
+    }
+    openNewSession({
+      cwd: target.cwd,
+      existingWorktree: worktree ?? undefined,
+      // The payload's own scope, not the store's: Tab's rescope is
+      // panel-local, and a cancel must land on the view the user left.
+      returnToWorktrees: {
+        repo: target.panelRepo,
+        scope: target.panelScope,
+        cursor: worktree ?? target.cwd,
+      },
+    });
   }
 
   /**
@@ -578,7 +783,7 @@ export function App(props: AppProps) {
    * the main switch, so they are already modal for keys. The mouse handlers
    * read the SAME predicate rather than repeating the list, because the
    * repeated list is what let two overlays ship modal for the keyboard and
-   * transparent to clicks: neither this dialog nor the prune dialog was
+   * transparent to clicks: neither this dialog nor the Worktrees panel was
    * added to it. A centered dialog leaves rows visible above and below, so
    * a click landing on one is a real click on a real row — in the one-shot
    * picker that meant switching panes and exiting, silently discarding a
@@ -590,7 +795,7 @@ export function App(props: AppProps) {
       store.state.confirmMode ||
       store.state.previewFocused ||
       store.state.newSession !== null ||
-      store.state.prune !== null ||
+      store.state.worktrees !== null ||
       store.state.notice !== null
     );
   }
@@ -858,11 +1063,12 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Repo to scope a prune scan to: the selected session's, or — when a group
-   * header is selected — one from the group. The repo comes off a session
-   * rather than the group key because a group key is a display label, while
-   * `mainRepoRoot` is the same value for a worktree and its main checkout,
-   * which is exactly what the scan keys off. Null scans every known repo.
+   * Repo to scope the Worktrees panel to: the selected session's, or — when a
+   * group header is selected — one from the group. The repo comes off a
+   * session rather than the group key because a group key is a display label,
+   * while `mainRepoRoot` is the same value for a worktree and its main
+   * checkout, which is exactly what the panel keys off. Null lists every
+   * known repo.
    */
   function selectedRepoRoot(): string | null {
     return (
@@ -872,12 +1078,12 @@ export function App(props: AppProps) {
     );
   }
 
-  function groupContextMenuPrune() {
+  function groupContextMenuWorktrees() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
     const repo = selectedRepoRoot();
     store.actions.hideGroupContextMenu();
-    store.actions.showPrune(repo);
+    store.actions.showWorktrees(repo);
   }
 
   function groupContextMenuToggleCollapse() {
@@ -1169,11 +1375,11 @@ export function App(props: AppProps) {
         action: () => groupContextMenuPin("bottom"),
       },
       {
-        id: "prune",
-        label: "Prune worktrees",
+        id: "worktrees",
+        label: "Worktrees",
         hint: "W",
         color: theme.text,
-        action: groupContextMenuPrune,
+        action: groupContextMenuWorktrees,
       },
       {
         id: "kill-group",
@@ -1374,6 +1580,18 @@ export function App(props: AppProps) {
     agent?: string;
     moveChanges?: boolean;
     fork?: NewSessionFork;
+    /** Start in this worktree, which is already on disk (issue #102). The
+     *  Worktrees panel's own entry point; it is the working directory too, so
+     *  `cwd` may simply repeat it. */
+    existingWorktree?: string;
+    /** Origin marker set ONLY by the Worktrees panel's Enter: a cancel of
+     *  this dialog returns to the panel, cursor on `cursor`, scoped to the
+     *  live filter the panel had (`scope`, null when Tab had widened it). */
+    returnToWorktrees?: {
+      repo: string | null;
+      scope: string | null;
+      cursor: string;
+    };
   }): void {
     // Mirrors `reviewSession`: refuse at the point of intent rather than
     // opening a dialog with a blank Directory row whose Enter round-trips
@@ -1402,7 +1620,27 @@ export function App(props: AppProps) {
         "claude",
       moveChanges: context.moveChanges,
       fork: context.fork,
+      existingWorktree: context.existingWorktree,
+      returnToWorktrees: context.returnToWorktrees,
     });
+  }
+
+  /**
+   * Escape/cancel on the new-session dialog. A dialog the Worktrees panel
+   * opened returns there with the cursor back on its row; every other origin
+   * (n, the row menus) just closes, and SUBMIT never comes back here at all,
+   * because a successful spawn hands the board to the new session.
+   */
+  function cancelNewSession(): void {
+    const marker = store.state.newSession?.returnToWorktrees ?? null;
+    store.actions.closeNewSessionDialog();
+    if (marker) {
+      store.actions.showWorktrees(marker.repo, {
+        initialCursor: marker.cursor,
+        isReturn: true,
+        startWidened: marker.repo !== null && marker.scope === null,
+      });
+    }
   }
 
   // The dialog opens before `/agents` answers, and the row's own agent may
@@ -1442,6 +1680,7 @@ export function App(props: AppProps) {
           moveChanges: draft.moveChanges,
           fork: draft.fork !== null,
           namesAWorktree: namesAWorktree(draft),
+          existingWorktree: draft.existingWorktree !== null,
         }),
     });
   }
@@ -1708,22 +1947,24 @@ export function App(props: AppProps) {
       );
       return;
     }
+    // Whether this spawn CREATES a worktree, which is what everything below
+    // turns on. A session started in one that already exists does not, and
+    // says so ahead of the destination: that mode has no Where row to have
+    // set it, so a `worktree` block built from a stale value would ask the
+    // daemon to make a second checkout next to the one that was chosen.
+    const toWorktree =
+      draft.existingWorktree === null && draft.destination === "worktree";
     // The name the request will carry. Empty means an untouched field: let
     // the daemon derive one.
-    const worktreeName =
-      draft.destination === "worktree" ? draftWorktreeName(draft) : "";
-    if (draft.destination === "worktree" && refuseUnslugifiableName(draft)) {
+    const worktreeName = toWorktree ? draftWorktreeName(draft) : "";
+    if (toWorktree && refuseUnslugifiableName(draft)) {
       return;
     }
     // With neither a name nor a prompt to derive one from there is nothing to
     // create. Refused here rather than posted: the daemon's own refusal reads
     // "pass one explicitly", which was CLI advice back when this dialog had
     // no field to act on it with.
-    if (
-      draft.destination === "worktree" &&
-      !worktreeName &&
-      !slugFromPrompt(prompt)
-    ) {
+    if (toWorktree && !worktreeName && !slugFromPrompt(prompt)) {
       store.actions.showToast(
         "Name the worktree, or type a prompt to derive one from",
         4000,
@@ -1775,15 +2016,14 @@ export function App(props: AppProps) {
           // In move-changes mode the same field carries the move: the daemon
           // routes creation through it, so the worktree is made once, with
           // the changes already in it.
-          worktree:
-            draft.destination === "worktree"
-              ? {
-                  ...(worktreeName ? { name: worktreeName } : {}),
-                  ...(draft.moveChanges
-                    ? { withChanges: true, untracked: draft.untracked }
-                    : {}),
-                }
-              : undefined,
+          worktree: toWorktree
+            ? {
+                ...(worktreeName ? { name: worktreeName } : {}),
+                ...(draft.moveChanges
+                  ? { withChanges: true, untracked: draft.untracked }
+                  : {}),
+              }
+            : undefined,
         }),
       });
       const body = (await response
@@ -1967,7 +2207,7 @@ export function App(props: AppProps) {
     }
 
     if (key === "escape") {
-      store.actions.closeNewSessionDialog();
+      cancelNewSession();
       event.preventDefault();
       return;
     }
@@ -2025,9 +2265,13 @@ export function App(props: AppProps) {
   function confirmDialogAction() {
     const action = store.state.confirmAction;
     const sessionId = store.state.confirmSessionId;
+    // Fired after the dialog is hidden, so what it does (reopen the
+    // Worktrees panel) lands on a screen the dialog has already left.
+    let afterResolve: (() => void) | undefined;
     if (action === "send-review" && sessionId) {
       const pending = pendingReviewNotes;
       pendingReviewNotes = null;
+      afterResolve = pending?.onDone;
       if (pending?.sessionId === sessionId) {
         void deliverReviewNotes(sessionId, pending.notes, "confirm");
       }
@@ -2050,6 +2294,23 @@ export function App(props: AppProps) {
       killOrCancelSession(sessionId);
     }
     store.actions.hideConfirmDialog();
+    afterResolve?.();
+  }
+
+  /**
+   * The confirm dialog's No/escape, shared by the key handler and the
+   * dialog's own cancel. Pending review notes are consumed here so a
+   * cancelled hand-back can never be delivered by a later confirm, and
+   * their `onDone` still fires: a cancel resolves the round-trip exactly as
+   * a confirm does, and the Worktrees panel reopen riding it must not be
+   * lost with the notes.
+   */
+  function cancelConfirmDialog() {
+    const wasReview = store.state.confirmAction === "send-review";
+    const pending = pendingReviewNotes;
+    pendingReviewNotes = null;
+    store.actions.hideConfirmDialog();
+    if (wasReview) pending?.onDone?.();
   }
 
   // Sidebar only: `ccmux sidebar` runs one full TUI process per tmux window,
@@ -2397,9 +2658,9 @@ export function App(props: AppProps) {
       return;
     }
 
-    // The prune overlay owns every key while it is up (it registers its own
+    // The Worktrees panel owns every key while it is up (it registers its own
     // handler), so nothing here may also act on them.
-    if (store.state.prune) {
+    if (store.state.worktrees) {
       event.preventDefault();
       return;
     }
@@ -2411,8 +2672,7 @@ export function App(props: AppProps) {
         return;
       }
       if (key === "n" || key === "N" || key === "escape") {
-        pendingReviewNotes = null;
-        store.actions.hideConfirmDialog();
+        cancelConfirmDialog();
         event.preventDefault();
         return;
       }
@@ -2622,11 +2882,12 @@ export function App(props: AppProps) {
         // Shift+W only, like every other capital action in this switch. Both
         // spellings are matched because the key arrives as name `"w"` with
         // `shift` set rather than as `"W"`; gating on the modifier is what
-        // keeps a bare `w` from opening a destructive surface.
+        // keeps a bare `w` from opening a surface that can delete.
         if (key !== "W" && !event.shift) break;
         // Scoped to the selected row's repo when there is one, so `W` on a
-        // group behaves like the group menu's item; global otherwise.
-        store.actions.showPrune(selectedRepoRoot());
+        // group behaves like the group menu's item; global otherwise. The
+        // panel's own Tab widens from there.
+        store.actions.showWorktrees(selectedRepoRoot());
         event.preventDefault();
         break;
 
@@ -2941,10 +3202,7 @@ export function App(props: AppProps) {
             }
             groupLabel={store.selectedGroupHeader()?.label}
             onConfirm={confirmDialogAction}
-            onCancel={() => {
-              pendingReviewNotes = null;
-              store.actions.hideConfirmDialog();
-            }}
+            onCancel={cancelConfirmDialog}
           />
         </Show>
 
@@ -2961,7 +3219,7 @@ export function App(props: AppProps) {
               onPromptInput={store.actions.setNewSessionPrompt}
               onWorktreeNameInput={store.actions.setNewSessionWorktreeName}
               onSubmit={() => void submitNewSession()}
-              onCancel={store.actions.closeNewSessionDialog}
+              onCancel={cancelNewSession}
               showKeyHints={props.sidebar === true}
             />
           )}
@@ -2980,12 +3238,23 @@ export function App(props: AppProps) {
           )}
         </Show>
 
-        <Show when={store.state.prune}>
-          {(prune: () => NonNullable<typeof store.state.prune>) => (
-            <PruneDialog
-              repo={prune().repo}
+        <Show when={store.state.worktrees}>
+          {(panel: () => NonNullable<typeof store.state.worktrees>) => (
+            <WorktreesPanel
+              repo={panel().repo}
+              cwd={pickerCwd()}
               compact={props.sidebar}
-              onClose={store.actions.hidePrune}
+              iconStyle={store.state.iconStyle}
+              initialCursor={panel().initialCursor}
+              isReturn={panel().isReturn}
+              startWidened={panel().startWidened}
+              onClose={store.actions.hideWorktrees}
+              onJump={jumpToWorktreeSession}
+              onSpawn={spawnInWorktree}
+              // Review suspends the renderer into a full-screen tool, which
+              // the sidebar has neither the room nor the focus for — the same
+              // reason its `d` key is inert on a session row.
+              onReview={props.sidebar ? undefined : reviewWorktree}
             />
           )}
         </Show>

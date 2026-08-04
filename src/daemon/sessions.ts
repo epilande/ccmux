@@ -14,6 +14,7 @@ import { appendPrompt } from "./status-machine";
 import { getSessionPidMarker } from "./session-markers";
 import { deriveProject } from "./project-derivation";
 import { findSoftEvictTargets } from "./binder/primitives";
+import { worktreeCheckoutRoot } from "../lib/worktree-paths";
 
 interface PaneTrackedSessionInput {
   agentType: string;
@@ -118,6 +119,39 @@ export function isPaneTrackedClaudeSession(session: Session): boolean {
 
 export function isBackgroundSession(session: Session): boolean {
   return session.trackingMode === "background";
+}
+
+/**
+ * Whether a cwd read out of a log entry may replace the session's current
+ * one.
+ *
+ * It may, except in one case: an orchestrator must not adopt a TEAMMATE's
+ * worktree as its own. Claude Code writes entries into the parent's
+ * transcript carrying the isolated worktree's cwd while the Agent tool works
+ * there, and the last one wins — so a lead sitting at the repo root ends up
+ * reporting `…/.claude/worktrees/agent-ae470…` as its directory (observed
+ * live: the session's pane was at the repo root while its cwd named a
+ * teammate's worktree). Everything keyed off cwd goes with it: the project
+ * name, the worktree row the session is attributed to, and the grouping.
+ *
+ * A transcript marker would be better and there is none. The entries that
+ * carry a teammate's cwd are `isSidechain: false` with no `agentId` — they
+ * are ordinary parent entries, indistinguishable in shape from the ones that
+ * name the parent's own directory. (The subagent's OWN transcript does carry
+ * both fields, but it lives in a separate file and never feeds this path.)
+ * So the rule is about paths, deliberately and narrowly:
+ *
+ * - only ever REFUSES a move INTO an agent worktree, never out of one;
+ * - only when the session already HAS a cwd, so a first observation still
+ *   lands (a session genuinely started inside one is unaffected);
+ * - and never when the session is already inside that same worktree, so a
+ *   session that really does live there keeps tracking its own subdirectories
+ *   (this very session is one).
+ */
+export function adoptsLoggedCwd(current: string | null, next: string): boolean {
+  const target = worktreeCheckoutRoot(next);
+  if (!target || !current) return true;
+  return current === target || current.startsWith(`${target}/`);
 }
 
 /**
@@ -527,8 +561,14 @@ export class SessionManager extends EventEmitter {
       changed = true;
     }
 
-    // Update cwd/project if provided from log entries (more accurate than decoded path)
-    if (state.cwd && state.cwd !== session.cwd) {
+    // Update cwd/project if provided from log entries (more accurate than
+    // decoded path), unless the update is an orchestrator drifting into a
+    // teammate's worktree — see `adoptsLoggedCwd`.
+    if (
+      state.cwd &&
+      state.cwd !== session.cwd &&
+      adoptsLoggedCwd(session.cwd, state.cwd)
+    ) {
       session.cwd = state.cwd;
       session.project = deriveProject(state.cwd, session.project);
       changed = true;

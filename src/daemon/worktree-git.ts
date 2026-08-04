@@ -546,6 +546,31 @@ export interface UpstreamState {
   upstream: string | null;
   /** Upstream was configured but no longer exists on the remote. */
   gone: boolean;
+  /** Commits this branch has that its upstream does not. 0 when in sync. */
+  ahead: number;
+  /** Commits the upstream has that this branch does not. 0 when in sync. */
+  behind: number;
+}
+
+/**
+ * Parse one `%(upstream:track)` value into the three facts it can carry.
+ *
+ * git prints `[ahead N]`, `[behind M]`, `[ahead N, behind M]`, `[gone]`, or
+ * nothing at all — the last one meaning either "no upstream configured" or
+ * "in sync with it", which only {@link readUpstreamStates} can tell apart
+ * (it also has the upstream NAME). A `[gone]` upstream carries no counts,
+ * so both stay 0 rather than being reported as "in sync".
+ */
+export function parseUpstreamTrack(track: string): {
+  gone: boolean;
+  ahead: number;
+  behind: number;
+} {
+  return {
+    gone: track.includes("[gone]"),
+    ahead: Number(track.match(/\bahead (\d+)/)?.[1] ?? 0),
+    behind: Number(track.match(/\bbehind (\d+)/)?.[1] ?? 0),
+  };
 }
 
 /**
@@ -573,9 +598,12 @@ export async function readUpstreamStates(
     if (line.trim() === "") continue;
     const [name, upstream = "", track = ""] = line.split("\t");
     if (!name) continue;
+    const parsed = parseUpstreamTrack(track);
     states.set(name, {
       upstream: upstream || null,
-      gone: upstream !== "" && track.includes("[gone]"),
+      gone: upstream !== "" && parsed.gone,
+      ahead: parsed.ahead,
+      behind: parsed.behind,
     });
   }
   return states;

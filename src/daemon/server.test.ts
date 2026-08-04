@@ -40,6 +40,7 @@ mock.module("../lib/config", () => ({
   STATE_FILE: joinPath(serverTestHome, "state.json"),
 }));
 import {
+  cachedOpenPR,
   DaemonServer,
   rejectCrossOriginBrowser,
   rejectNonLoopbackHost,
@@ -5937,6 +5938,24 @@ describe("worktree prune endpoints", () => {
     expect(body.error).toContain("No worktrees selected");
   });
 
+  // Validated like the spawn endpoint's own pane ids rather than accepted as
+  // any string: a malformed value can never match a pane, so passing it on
+  // would silently drop the exemption it was sent to request.
+  it("rejects a malformed callerPane instead of ignoring it", async () => {
+    const { repo, worktree } = makePruneFixture();
+    const { internals } = serverFor(repo);
+
+    const res = await post(internals, {
+      paths: [worktree],
+      callerPane: "not-a-pane",
+    });
+    const body = (await res.json()) as { error: string };
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("callerPane");
+    expect(existsSync(worktree)).toBe(true);
+  });
+
   it("refuses a dirty worktree that carries no opt-in, and keeps it on disk", async () => {
     const { repo, worktree } = makePruneFixture();
     writeFileSync(join(worktree, "uncommitted.txt"), "work\n");
@@ -7022,5 +7041,729 @@ describe("GET /sessions/:id/dirty", () => {
     const body = await dirtyOf(internals, id);
     expect(body.dirty).toBe(false);
     expect(body.untracked).toBe(0);
+  });
+});
+
+/**
+ * `GET /worktrees` — the Worktrees panel's first paint.
+ *
+ * The properties worth pinning are the two the prune endpoints do NOT have:
+ * every worktree is listed (main checkout included, no removal reason
+ * required), and a repo can enter scope through the CALLER's directory rather
+ * than only through a live session, which is what makes a repo whose agents
+ * have all exited visible at all.
+ */
+describe("worktree list endpoint", () => {
+  let root: string;
+
+  /** A repo with one linked worktree on an unmerged branch. */
+  function makeListFixture(): { repo: string; worktree: string } {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-worktree-list-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    const worktree = join(root, "wt");
+    runFixtureGit(repo, "worktree", "add", "-b", "feat/live", worktree, "main");
+    writeFileSync(join(worktree, "a.txt"), "a\n");
+    runFixtureGit(worktree, "add", "-A");
+    runFixtureGit(worktree, "commit", "-m", "work");
+    return { repo, worktree };
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  interface ListBody {
+    repos: Array<{
+      repoRoot: string;
+      repoName: string;
+      worktrees: Array<{
+        path: string;
+        name: string;
+        branch: string | null;
+        isMain: boolean;
+        dirty: { dirty: boolean; modified: number; untracked: number };
+        upstream: { ahead: number; behind: number; gone: boolean } | null;
+        sessions: Array<{ id: string; agentType: string; status: string }>;
+      }>;
+    }>;
+  }
+
+  async function list(
+    internals: ServerInternals,
+    query = "",
+  ): Promise<ListBody> {
+    const res = await internals.handleRequest(
+      new Request(`http://127.0.0.1:2269/worktrees${query}`),
+    );
+    expect(res.status).toBe(200);
+    return (await res.json()) as ListBody;
+  }
+
+  it("lists the main checkout and an in-flight worktree of a session's repo", async () => {
+    const { repo, worktree } = makeListFixture();
+    const ctx = createServer();
+    ctx.manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd: repo,
+      pid: null,
+    });
+
+    const body = await list(ctx.internals);
+
+    expect(body.repos).toHaveLength(1);
+    const rows = body.repos[0].worktrees;
+    // Both, in that order — and the linked one has no removal reason at all,
+    // so the prune scan would report nothing for it.
+    expect(rows.map((r) => r.name)).toEqual(["repo", "wt"]);
+    expect(rows[0]).toMatchObject({ isMain: true, branch: "main" });
+    expect(rows[1]).toMatchObject({
+      isMain: false,
+      branch: "feat/live",
+      path: realpathSync(worktree),
+    });
+  });
+
+  it("attaches the session living in a worktree to its row", async () => {
+    const { worktree } = makeListFixture();
+    const ctx = createServer();
+    ctx.manager.createPaneTrackedSession({
+      agentType: "codex",
+      paneId: "%2",
+      cwd: worktree,
+      pid: null,
+    });
+
+    const body = await list(ctx.internals);
+    const rows = body.repos[0].worktrees;
+
+    expect(rows.find((r) => r.name === "wt")?.sessions).toMatchObject([
+      { agentType: "codex" },
+    ]);
+    expect(rows.find((r) => r.name === "repo")?.sessions).toEqual([]);
+  });
+
+  // The zero-session case: no agent has ever run here, so the session-derived
+  // discovery finds nothing and the repo used to be invisible.
+  it("brings the caller's own repo into scope through cwd", async () => {
+    const { repo } = makeListFixture();
+    const ctx = createServer();
+
+    const body = await list(ctx.internals, `?cwd=${encodeURIComponent(repo)}`);
+
+    expect(body.repos.map((r) => r.repoRoot)).toEqual([realpathSync(repo)]);
+  });
+
+  // A picker can be launched from anywhere; a cwd outside a repo is not an
+  // error, it simply contributes nothing.
+  it("ignores a cwd that is not in a repo", async () => {
+    makeListFixture();
+    const outside = join(root, "not-a-repo");
+    mkdirSync(outside, { recursive: true });
+    const ctx = createServer();
+
+    const body = await list(
+      ctx.internals,
+      `?cwd=${encodeURIComponent(outside)}`,
+    );
+
+    expect(body.repos).toEqual([]);
+  });
+
+  // `repo` may name a linked worktree, and must resolve to the checkout that
+  // owns it rather than answering for the worktree alone.
+  it("resolves an explicit repo given as a linked worktree path", async () => {
+    const { repo, worktree } = makeListFixture();
+    const ctx = createServer();
+
+    const body = await list(
+      ctx.internals,
+      `?repo=${encodeURIComponent(worktree)}`,
+    );
+
+    expect(body.repos).toHaveLength(1);
+    expect(body.repos[0].repoRoot).toBe(realpathSync(repo));
+    expect(body.repos[0].worktrees.map((r) => r.name)).toEqual(["repo", "wt"]);
+  });
+
+  it("answers empty for an explicit repo that is not a repo", async () => {
+    const { repo } = makeListFixture();
+    const outside = join(root, "not-a-repo");
+    mkdirSync(outside, { recursive: true });
+    const ctx = createServer();
+    ctx.manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd: repo,
+      pid: null,
+    });
+
+    const body = await list(
+      ctx.internals,
+      `?repo=${encodeURIComponent(outside)}`,
+    );
+
+    // Not "fall back to every repo": a filter that resolves to nothing lists
+    // nothing.
+    expect(body.repos).toEqual([]);
+  });
+
+  it("reports uncommitted work per worktree", async () => {
+    const { repo, worktree } = makeListFixture();
+    writeFileSync(join(worktree, "a.txt"), "changed\n");
+    writeFileSync(join(worktree, "scratch.txt"), "new\n");
+    const ctx = createServer();
+
+    const body = await list(ctx.internals, `?cwd=${encodeURIComponent(repo)}`);
+    const rows = body.repos[0].worktrees;
+
+    expect(rows.find((r) => r.name === "wt")?.dirty).toEqual({
+      dirty: true,
+      modified: 1,
+      untracked: 1,
+    });
+    expect(rows.find((r) => r.name === "repo")?.dirty.dirty).toBe(false);
+  });
+});
+
+/**
+ * Explicit-repo discovery for the prune endpoints.
+ *
+ * Session-derived discovery cannot see a repo whose agents have all exited —
+ * which is exactly the repo whose stale worktrees you want to reclaim, and the
+ * case the panel hits when it asks for classification of the repo it is
+ * standing in.
+ */
+describe("prune candidates for an explicit repo", () => {
+  let root: string;
+
+  function makeMergedFixture(): { repo: string; worktree: string } {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-prune-explicit-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    const worktree = join(root, "wt");
+    runFixtureGit(repo, "worktree", "add", "-b", "feat/done", worktree, "main");
+    writeFileSync(join(worktree, "a.txt"), "a\n");
+    runFixtureGit(worktree, "add", "-A");
+    runFixtureGit(worktree, "commit", "-m", "work");
+    runFixtureGit(repo, "merge", "--no-ff", "-m", "merge", "feat/done");
+    return { repo, worktree };
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("classifies a repo no session lives in", async () => {
+    const { repo, worktree } = makeMergedFixture();
+    const { internals } = createServer();
+
+    const res = await internals.handleRequest(
+      new Request(
+        `http://127.0.0.1:2269/worktrees/prune-candidates?repo=${encodeURIComponent(repo)}`,
+      ),
+    );
+    const body = (await res.json()) as { candidates: Array<{ path: string }> };
+
+    expect(res.status).toBe(200);
+    expect(body.candidates.map((c) => c.path)).toContain(
+      realpathSync(worktree),
+    );
+  });
+
+  it("still answers nothing for a repo filter that is not a repo", async () => {
+    makeMergedFixture();
+    const outside = join(root, "not-a-repo");
+    mkdirSync(outside, { recursive: true });
+    const { internals } = createServer();
+
+    const res = await internals.handleRequest(
+      new Request(
+        `http://127.0.0.1:2269/worktrees/prune-candidates?repo=${encodeURIComponent(outside)}`,
+      ),
+    );
+    const body = (await res.json()) as { candidates: unknown[] };
+
+    expect(res.status).toBe(200);
+    expect(body.candidates).toEqual([]);
+  });
+});
+
+/**
+ * `cwd` on the prune endpoints, and the scan's `open` bucket.
+ *
+ * The two requests have to agree: `POST /worktrees/prune` re-derives its
+ * candidates from a fresh scan, so if the run's discovery is narrower than the
+ * listing's, every path the user just picked comes back 409 and the feature is
+ * unusable exactly where it was meant to help.
+ */
+describe("prune endpoints with a cwd-discovered repo", () => {
+  let root: string;
+
+  function makeMergedFixture(): { repo: string; worktree: string } {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-prune-cwd-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    const worktree = join(root, "wt");
+    runFixtureGit(repo, "worktree", "add", "-b", "feat/done", worktree, "main");
+    writeFileSync(join(worktree, "a.txt"), "a\n");
+    runFixtureGit(worktree, "add", "-A");
+    runFixtureGit(worktree, "commit", "-m", "work");
+    runFixtureGit(repo, "merge", "--no-ff", "-m", "merge", "feat/done");
+    return { repo, worktree };
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  // No session has ever run here, so session-derived discovery finds nothing.
+  it("classifies a repo reached only through cwd", async () => {
+    const { repo, worktree } = makeMergedFixture();
+    const { internals } = createServer();
+
+    const res = await internals.handleRequest(
+      new Request(
+        `http://127.0.0.1:2269/worktrees/prune-candidates?cwd=${encodeURIComponent(repo)}`,
+      ),
+    );
+    const body = (await res.json()) as { candidates: Array<{ path: string }> };
+
+    expect(res.status).toBe(200);
+    expect(body.candidates.map((c) => c.path)).toContain(
+      realpathSync(worktree),
+    );
+  });
+
+  it("finds nothing for the same repo when cwd is omitted", async () => {
+    makeMergedFixture();
+    const { internals } = createServer();
+
+    const res = await internals.handleRequest(
+      new Request("http://127.0.0.1:2269/worktrees/prune-candidates"),
+    );
+    const body = (await res.json()) as { candidates: unknown[] };
+
+    expect(body.candidates).toEqual([]);
+  });
+
+  // The whole point of accepting `cwd` on the POST: without it the re-derive
+  // runs over a smaller set of repos and refuses the client's own selection.
+  it("prunes a cwd-discovered worktree when the run echoes the same cwd", async () => {
+    const { repo, worktree } = makeMergedFixture();
+    const { internals } = createServer();
+
+    const res = await internals.handleRequest(
+      new Request("http://127.0.0.1:2269/worktrees/prune", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths: [worktree], cwd: repo, dryRun: true }),
+      }),
+    );
+    const body = (await res.json()) as {
+      outcomes: Array<{ path: string; removed: boolean }>;
+    };
+
+    expect(res.status).toBe(200);
+    expect(body.outcomes.map((o) => o.path)).toEqual([realpathSync(worktree)]);
+    // Dry run: it is still on disk.
+    expect(existsSync(worktree)).toBe(true);
+  });
+
+  it("refuses the same selection when the run omits the cwd", async () => {
+    const { worktree } = makeMergedFixture();
+    const { internals } = createServer();
+
+    const res = await internals.handleRequest(
+      new Request("http://127.0.0.1:2269/worktrees/prune", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths: [worktree], dryRun: true }),
+      }),
+    );
+
+    expect(res.status).toBe(409);
+    expect(existsSync(worktree)).toBe(true);
+  });
+});
+
+/**
+ * The daemon's open-PR cache, as the worktree scan reads it. This is the fast
+ * path: a hit here skips the `gh` call entirely, so it is also where the
+ * panel's PR badge gets its number from on a busy branch.
+ */
+describe("cachedOpenPR", () => {
+  it("turns a cached branch PR into an OPEN PR state", () => {
+    expect(
+      cachedOpenPR([{ id: "42", href: "https://github.com/o/r/pull/42" }]),
+    ).toEqual({
+      number: 42,
+      url: "https://github.com/o/r/pull/42",
+      state: "OPEN",
+    });
+  });
+
+  it("has nothing to say for an empty or absent cache", () => {
+    expect(cachedOpenPR(null)).toBeNull();
+    expect(cachedOpenPR([])).toBeNull();
+  });
+
+  // A half-answer would reach the panel as a badge with nothing to show, so
+  // an unusable entry answers null and lets the `gh` lookup settle it.
+  it("skips an entry whose number cannot be read", () => {
+    expect(
+      cachedOpenPR([{ id: "not-a-number", href: "https://x" }]),
+    ).toBeNull();
+    expect(cachedOpenPR([{ id: "0", href: "https://x" }])).toBeNull();
+    expect(
+      cachedOpenPR([
+        { id: "", href: "https://x" },
+        { id: "7", href: "https://github.com/o/r/pull/7" },
+      ]),
+    ).toMatchObject({ number: 7 });
+  });
+});
+
+/**
+ * The $HOME-repo guard on cwd discovery.
+ *
+ * A literal `~/.git` (dotfiles kept as an ordinary repo at the home
+ * directory) makes EVERY directory under home answer "$HOME" to
+ * `git worktree list`. Without the guard, one bogus repo group swallows every
+ * cwd that is not really in a project — including the caller's cwd, which is
+ * the whole reason this discovery exists. `deriveProject` and `gitProjectName`
+ * (S4) already make the same carve-out.
+ */
+describe("worktree discovery with a $HOME git repo", () => {
+  let root: string;
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  /**
+   * A dotfiles repo AT the home directory, carrying a linked worktree whose
+   * branch is already merged. The worktree matters: without it the prune half
+   * of this describe would pass with or without the guard, since a repo with
+   * no worktrees classifies nothing either way.
+   */
+  function makeHomeRepoFixture(): { home: string; notes: string } {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-home-repo-"));
+    const home = join(root, "home");
+    mkdirSync(join(home, "notes"), { recursive: true });
+    runFixtureGit(home, "init", "--initial-branch=main", home);
+    writeFileSync(join(home, ".bashrc"), "export X=1\n");
+    runFixtureGit(home, "add", ".bashrc");
+    runFixtureGit(home, "commit", "-m", "dotfiles");
+    const worktree = join(root, "dotfiles-wt");
+    runFixtureGit(home, "worktree", "add", "-b", "feat/done", worktree, "main");
+    writeFileSync(join(worktree, "a.txt"), "a\n");
+    runFixtureGit(worktree, "add", "-A");
+    runFixtureGit(worktree, "commit", "-m", "work");
+    runFixtureGit(home, "merge", "--no-ff", "-m", "merge", "feat/done");
+    return { home, notes: join(home, "notes") };
+  }
+
+  async function listWith(
+    internals: ServerInternals,
+    cwd: string,
+  ): Promise<Array<{ repoRoot: string }>> {
+    const res = await internals.handleRequest(
+      new Request(
+        `http://127.0.0.1:2269/worktrees?cwd=${encodeURIComponent(cwd)}`,
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { repos: Array<{ repoRoot: string }> };
+    return body.repos;
+  }
+
+  it("refuses a cwd whose repo root is $HOME itself", async () => {
+    const { home, notes } = makeHomeRepoFixture();
+    const ctx = createServer();
+    ctx.internals.homeDir = home;
+
+    expect(await listWith(ctx.internals, notes)).toEqual([]);
+    expect(await listWith(ctx.internals, home)).toEqual([]);
+  });
+
+  // The guard is about $HOME specifically, not about living under it: an
+  // ordinary project in the home directory is the normal case.
+  it("still lists an ordinary repo that lives under $HOME", async () => {
+    const { home } = makeHomeRepoFixture();
+    const project = join(home, "project");
+    mkdirSync(project, { recursive: true });
+    runFixtureGit(home, "init", "--initial-branch=main", project);
+    writeFileSync(join(project, "README.md"), "hi\n");
+    runFixtureGit(project, "add", "README.md");
+    runFixtureGit(project, "commit", "-m", "init");
+    const ctx = createServer();
+    ctx.internals.homeDir = home;
+
+    expect(await listWith(ctx.internals, project)).toEqual([
+      expect.objectContaining({ repoRoot: project }),
+    ]);
+  });
+
+  // Same resolution, so the prune surface must refuse it too.
+  it("classifies nothing for a cwd whose repo root is $HOME", async () => {
+    const { notes } = makeHomeRepoFixture();
+    const ctx = createServer();
+    ctx.internals.homeDir = join(root, "home");
+
+    const res = await ctx.internals.handleRequest(
+      new Request(
+        `http://127.0.0.1:2269/worktrees/prune-candidates?cwd=${encodeURIComponent(notes)}`,
+      ),
+    );
+    const body = (await res.json()) as { candidates: unknown[] };
+
+    expect(body.candidates).toEqual([]);
+  });
+});
+
+/**
+ * Bare-repo discovery.
+ *
+ * `clone --bare` + `worktree add` has no main checkout, and answering "no
+ * repo" for it dropped the layout from the product entirely: its linked
+ * worktrees are real working trees an agent can live in.
+ */
+describe("worktree discovery for a bare repo", () => {
+  let root: string;
+
+  function makeBareFixture(): { bare: string; worktree: string } {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-bare-repo-"));
+    const seed = join(root, "seed");
+    mkdirSync(seed, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", seed);
+    writeFileSync(join(seed, "README.md"), "hi\n");
+    runFixtureGit(seed, "add", "README.md");
+    runFixtureGit(seed, "commit", "-m", "init");
+    const bare = join(root, "proj.git");
+    runFixtureGit(root, "clone", "--bare", seed, bare);
+    const worktree = join(root, "feat-x");
+    runFixtureGit(bare, "worktree", "add", "-b", "feat/x", worktree, "main");
+    return { bare, worktree };
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  async function list(query: string) {
+    const ctx = createServer();
+    const res = await ctx.internals.handleRequest(
+      new Request(`http://127.0.0.1:2269/worktrees?${query}`),
+    );
+    expect(res.status).toBe(200);
+    return (await res.json()) as {
+      repos: Array<{
+        repoRoot: string;
+        repoName: string;
+        worktrees: Array<{ name: string; branch: string | null }>;
+      }>;
+    };
+  }
+
+  it("lists a bare repo's linked worktrees via an explicit repo", async () => {
+    const { bare } = makeBareFixture();
+
+    const body = await list(`repo=${encodeURIComponent(bare)}`);
+
+    expect(body.repos).toHaveLength(1);
+    expect(body.repos[0].repoRoot).toBe(realpathSync(bare));
+    expect(body.repos[0].repoName).toBe("proj.git");
+    // The bare entry itself is not a row — there is no working tree to
+    // inspect — so what surfaces is the worktree it holds.
+    expect(body.repos[0].worktrees).toEqual([
+      expect.objectContaining({ name: "feat-x", branch: "feat/x" }),
+    ]);
+  });
+
+  it("finds the same repo from a cwd inside one of its worktrees", async () => {
+    const { bare, worktree } = makeBareFixture();
+
+    const body = await list(`cwd=${encodeURIComponent(worktree)}`);
+
+    expect(body.repos.map((r) => r.repoRoot)).toEqual([realpathSync(bare)]);
+  });
+});
+
+/**
+ * Subagent worktree attribution, end to end.
+ *
+ * An Agent-tool teammate isolated into its own worktree is not a session, so
+ * an `agent-*` worktree with teammates in it used to read as abandoned: no
+ * sessions on the row, dead in the panel's sort, and invisible to the prune
+ * scan's "an agent is working here" gate.
+ */
+describe("subagent worktree attribution", () => {
+  let root: string;
+
+  /** A repo whose linked worktree is merged (so prune would offer it). */
+  function makeAgentWorktreeFixture(): { repo: string; worktree: string } {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-subagent-wt-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    const worktree = join(repo, ".claude", "worktrees", "agent-aabc123");
+    runFixtureGit(
+      repo,
+      "worktree",
+      "add",
+      "-b",
+      "feat/teammate",
+      worktree,
+      "main",
+    );
+    writeFileSync(join(worktree, "a.txt"), "a\n");
+    runFixtureGit(worktree, "add", "-A");
+    runFixtureGit(worktree, "commit", "-m", "work");
+    runFixtureGit(repo, "merge", "--no-ff", "-m", "merge", "feat/teammate");
+    return { repo, worktree };
+  }
+
+  /** An orchestrator at the repo root with one teammate in the worktree. */
+  function serverWithTeammate(repo: string, worktreePath: string) {
+    const ctx = createServer();
+    const session = ctx.manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd: repo,
+      pid: 4242,
+    });
+    ctx.manager.updateSubagent(session.id, {
+      agentId: "aabc123",
+      status: "working",
+      attentionType: null,
+      pendingTool: null,
+      lastActivityAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      worktreePath,
+    });
+    return { ...ctx, parentId: session.id };
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("attaches a teammate to its worktree row, pointing at the orchestrator's pane", async () => {
+    const { repo, worktree } = makeAgentWorktreeFixture();
+    const ctx = serverWithTeammate(repo, worktree);
+
+    const res = await ctx.internals.handleRequest(
+      new Request(
+        `http://127.0.0.1:2269/worktrees?cwd=${encodeURIComponent(repo)}`,
+      ),
+    );
+    const body = (await res.json()) as {
+      repos: Array<{
+        worktrees: Array<{
+          name: string;
+          sessions: Array<{
+            id: string;
+            status: string;
+            tmuxPane: string | null;
+            pid: number | null;
+            background?: boolean;
+          }>;
+        }>;
+      }>;
+    };
+
+    const row = body.repos[0].worktrees.find((w) => w.name === "agent-aabc123");
+    expect(row?.sessions).toHaveLength(1);
+    expect(row?.sessions[0]).toMatchObject({
+      id: `${ctx.parentId}:aabc123`,
+      status: "working",
+      // The parent's pane: a teammate has none, and the orchestrator is the
+      // only thing at that keyboard a human can talk to.
+      tmuxPane: "%1",
+      // Never signalled — that pid would be the orchestrator's.
+      pid: null,
+      background: true,
+    });
+  });
+
+  // The consequence that matters: this worktree's branch is merged, so
+  // without the attribution the scan would offer to delete it out from under
+  // a working teammate.
+  it("makes the prune scan skip a worktree a teammate is working in", async () => {
+    const { repo, worktree } = makeAgentWorktreeFixture();
+    const ctx = serverWithTeammate(repo, worktree);
+
+    const res = await ctx.internals.handleRequest(
+      new Request(
+        `http://127.0.0.1:2269/worktrees/prune-candidates?cwd=${encodeURIComponent(repo)}`,
+      ),
+    );
+    const body = (await res.json()) as {
+      candidates: Array<{ path: string }>;
+      skipped: Array<{ path: string; reason: string }>;
+    };
+
+    expect(body.candidates.map((c) => c.path)).not.toContain(
+      realpathSync(worktree),
+    );
+    expect(
+      body.skipped.find((s) => s.path === realpathSync(worktree))?.reason,
+    ).toBe("an agent is working here");
+  });
+
+  // Without a worktree it is not attributable to any row, and must not
+  // silently land on the parent's own.
+  it("ignores a subagent with no worktree of its own", async () => {
+    const { repo, worktree } = makeAgentWorktreeFixture();
+    const ctx = createServer();
+    const session = ctx.manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd: repo,
+      pid: 4242,
+    });
+    ctx.manager.updateSubagent(session.id, {
+      agentId: "aplain",
+      status: "working",
+      attentionType: null,
+      pendingTool: null,
+      lastActivityAt: new Date().toISOString(),
+      startedAt: null,
+      worktreePath: null,
+    });
+
+    const res = await ctx.internals.handleRequest(
+      new Request(
+        `http://127.0.0.1:2269/worktrees?cwd=${encodeURIComponent(repo)}`,
+      ),
+    );
+    const body = (await res.json()) as {
+      repos: Array<{
+        worktrees: Array<{ name: string; sessions: unknown[] }>;
+      }>;
+    };
+
+    const rows = body.repos[0].worktrees;
+    expect(rows.find((w) => w.name === "agent-aabc123")?.sessions).toEqual([]);
+    // The parent's own row still shows exactly one session: itself.
+    expect(rows.find((w) => w.name === "repo")?.sessions).toHaveLength(1);
+    expect(worktree).toContain("agent-aabc123");
   });
 });
