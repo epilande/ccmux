@@ -516,17 +516,19 @@ the question back to the user.
 
 ### Gotchas
 
-- **The header alone teaches the receiver nothing.** Measured, not assumed: fresh Claude and
-  Codex receivers both noticed the missing context and then reasoned without it (one
-  explicitly concluded the earlier turns "aren't available to me"), and both ran
-  `ccmux last <id> --turns 5` immediately once a `--note` named the command. **So when you send
-  a handoff whose payload leans on context you are not sending, put the command in the note**,
-  e.g. `--note "earlier reasoning: ccmux last <source-id> --turns 5"`.
-- **A codex receiver may be unable to pull.** Under codex's default `workspace-write` sandbox,
-  commands inside a turn cannot reach the loopback interface, so `ccmux last` cannot reach the
-  daemon (verified: `curl 127.0.0.1:<port>` returns `Couldn't connect to server`) even though
-  the same shell runs `git` and `rg` fine. When the receiver is codex, send the context
-  (`--turns N`) instead of a pointer to it.
+- **The header alone teaches the receiver nothing.** Measured, not assumed (2026-08,
+  claude-code 2.1.x and codex 0.146.x): fresh Claude and Codex receivers both noticed the
+  missing context and then reasoned without it (one explicitly concluded the earlier turns
+  "aren't available to me"), and both ran `ccmux last <id> --turns 5` immediately once a
+  `--note` named the command. **So when you send a handoff whose payload leans on context you
+  are not sending, put the command in the note**, e.g.
+  `--note "earlier reasoning: ccmux last <source-id> --turns 5"`.
+- **A codex receiver may be unable to pull.** Under codex's default `workspace-write` sandbox
+  (measured 2026-08, codex 0.146.x), commands inside a turn cannot reach the loopback
+  interface, so `ccmux last` cannot reach the daemon: a probe run inside a turn returned
+  `curl: (7) Failed to connect to 127.0.0.1 port 2280` while `git` and `rg` in the same shell
+  worked. When the receiver is codex, send the context (`--turns N`) instead of a pointer to
+  it.
 - **`--turns` caps at 20**, and asking for more than the transcript holds is harmless: you get
   the same shape with fewer entries. `--turns 1` is exactly one assistant response.
 - **Not every session can be read.** The daemon reads the agent's own transcript, so a session

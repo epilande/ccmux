@@ -478,7 +478,9 @@ ccmux handoff self --spawn             # ...into a session that does not exist y
 
 Both take a **session reference**, not just an id: a session id, `%pane`, `session:window.pane`, `self`, an agent type, or a project name. Fuzzy references are scoped by where you are sitting (same window, then same tmux session, then everything), and an ambiguous one is refused with the candidate list rather than guessed at.
 
-A handoff arrives with a provenance header naming the source session, agent, directory, branch, and time, and is **only ever typed into an idle composer**: a target that is mid-turn gets it queued and delivered when the turn ends, and a target with a pending prompt is refused. In the picker, the row menu's **Copy last response** puts the same text on your clipboard.
+A handoff arrives with a provenance header naming the source session, agent, directory, branch, and time, and is **only ever typed into an idle composer**: a target that is mid-turn gets it queued and delivered when the turn ends, and a target with a pending prompt is refused.
+
+In the picker, the row menu's **Copy last response** puts the same text on your clipboard, and **Hand off to…** starts a pick-target mode: the session list itself becomes the target picker, <kbd>j</kbd>/<kbd>k</kbd> move, <kbd>Enter</kbd> (or a click) sends, and <kbd>Esc</kbd> cancels. A queued handoff shows a **⇄** badge on the target row until it lands.
 
 ### Dispatch Skill
 
