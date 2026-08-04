@@ -23,9 +23,14 @@ import type {
   PruneRunResult,
   PruneScan,
   PruneSkip,
+  ScanResponse,
   WorktreeSession,
 } from "../../daemon/worktree-prune";
-import { describeIgnoredFiles } from "../../daemon/worktree-prune";
+import {
+  describeHttpFailure,
+  describeIgnoredFiles,
+  normalizeScan,
+} from "../../daemon/worktree-prune";
 import type {
   WorktreeListResponse,
   WorktreeRow,
@@ -78,45 +83,6 @@ const RUN_TIMEOUT_MS = 10 * 60_000;
 
 /** How long a `y` copy confirmation stays on the hint line. */
 const COPY_NOTE_MS = 2_000;
-
-/**
- * `GET /worktrees/prune-candidates` as it may ARRIVE.
- *
- * Every array the daemon declares required is optional here, because the
- * daemon is a long-lived background process that can predate this build:
- * `open` (the healthy in-flight-PR rows the panel badges) is simply absent
- * from an older one, and `data.open.map` on undefined would throw in the
- * middle of a merge that had nothing else wrong with it.
- */
-export type ScanResponse = Partial<PruneScan>;
-
-/**
- * The single place that knows an older daemon exists. Everything downstream
- * reads a whole {@link PruneScan}, so the guard lives at the boundary instead
- * of at each of the three reads.
- */
-export function normalizeScan(data: ScanResponse): PruneScan {
-  return {
-    candidates: data.candidates ?? [],
-    skipped: data.skipped ?? [],
-    open: data.open ?? [],
-  };
-}
-
-/**
- * Turn an HTTP status into something that names a cause the user can act on.
- *
- * 404 gets its own wording because it is not an exotic failure here: the
- * daemon is a long-lived background process, `GET /worktrees` is new, and a
- * daemon started before this build answers 404 for it. "HTTP 404" describes
- * that as a mystery; the restart command is the whole fix.
- */
-export function describeHttpFailure(status: number): string {
-  if (status === 404) {
-    return "daemon is out of date (restart it: ccmux daemon restart)";
-  }
-  return `HTTP ${status}`;
-}
 
 /**
  * One worktree as the panel knows it: what exists (phase 1) plus whatever
@@ -364,6 +330,27 @@ function rowColor(entry: PanelRow, isCursor: boolean): string {
   return entry.row.dirty.dirty ? theme.yellow : theme.subtext;
 }
 
+/**
+ * What a `switch` over a wire-sourced union falls back to, without giving up
+ * the compiler's help on the unions this repo owns.
+ *
+ * Every union the panel switches on arrives from the daemon, which is a
+ * long-lived background process that can be NEWER than this build: a reason or
+ * a PR state it has learned to send lands here as a value no case matches.
+ * Without a default that renders as an empty string, and an empty string on a
+ * removable row is a checkbox with no explanation beside it, the one thing
+ * the section's whole design rules out.
+ *
+ * A bare `default:` would buy that at the cost of the error that catches a
+ * member added to `PRUNE_REASONS` in this repo, which is the case worth
+ * failing loudly. Routing the default through here keeps both: the `never`
+ * parameter stops compiling the moment a case is missing, while the value
+ * still decides what an unknown one renders as.
+ */
+function unhandled<T>(_exhaustive: never, fallback: T): T {
+  return fallback;
+}
+
 /** Green for a proven merge, blue for the inferred one, peach for closed. */
 function reasonColor(reason: PruneCandidate["reason"]): string {
   switch (reason) {
@@ -374,6 +361,8 @@ function reasonColor(reason: PruneCandidate["reason"]): string {
       return theme.blue;
     case "pr-closed":
       return theme.peach;
+    default:
+      return unhandled(reason, theme.subtext);
   }
 }
 
@@ -397,6 +386,8 @@ function prColor(pr: PRState): string {
       return theme.mauve;
     case "CLOSED":
       return theme.peach;
+    default:
+      return unhandled(pr.state, theme.subtext);
   }
 }
 
@@ -419,15 +410,30 @@ export function formatTracking(row: WorktreeRow): string {
 }
 
 /**
+ * What a dirty worktree says when it cannot say how dirty.
+ *
+ * `readDirtyState` reports a worktree whose `git status` FAILED as dirty with
+ * both counts at zero. That is the safe direction for a destructive action, but a
+ * shape that leaves the row with nothing to print. The CLI already words it
+ * this way (`describeDirtyCounts` falls back to `dirty`); the panel spends the
+ * room it has on plain words.
+ */
+export const DIRTY_UNCOUNTED = "uncommitted work";
+
+/**
  * Uncommitted work in words, one phrase per half, and only the halves that
  * are non-zero. `0m/4u` made the reader decode a format to learn one fact.
+ *
+ * Never empty for a dirty row, which matters beyond the row reading blind:
+ * the `D` opt-in note rides the LAST of these phrases, so no phrase means a
+ * destructive opt-in with nothing on screen to show it was taken.
  */
 export function dirtyPhrases(row: WorktreeRow): string[] {
   if (!row.dirty.dirty) return [];
   const parts: string[] = [];
   if (row.dirty.modified > 0) parts.push(`${row.dirty.modified} modified`);
   if (row.dirty.untracked > 0) parts.push(`${row.dirty.untracked} untracked`);
-  return parts;
+  return parts.length > 0 ? parts : [DIRTY_UNCOUNTED];
 }
 
 /**
@@ -459,6 +465,11 @@ export function describeReason(candidate: PruneCandidate): string {
       // `merged into origin/main` names a remote the reader did not ask
       // about. Cosmetic only: an unrecognized wording passes through intact.
       return candidate.detail.replace(/\borigin\//g, "");
+    default:
+      // A reason only a newer daemon knows about. Its own sentence is the one
+      // thing about it that is guaranteed to be true, and the alternative is
+      // a checkbox with nothing next to it.
+      return unhandled(candidate.reason, candidate.detail);
   }
 }
 
@@ -588,7 +599,16 @@ export function detailPhrases(
   if (entry.pr && !reasonNamesPR) {
     phrases.push({ text: describePR(entry.pr), fg: prColor(entry.pr) });
   }
-  const dirty = dirtyPhrases(row);
+  // The two halves of the dirty story come from different phases: the phrases
+  // read the LIST's dirty state and the opt-in note gates on the SCAN's. When
+  // the scan saw uncommitted work the list did not (they are read seconds
+  // apart, and the merge joins them by path without reconciling them), there
+  // is no phrase for the note to ride and pressing `D` changes nothing on
+  // screen. The scan's own word for it stands in, so the note always has
+  // something to say it about, and only then, so a row never says it twice.
+  const rowDirty = dirtyPhrases(row);
+  const dirty =
+    rowDirty.length > 0 ? rowDirty : candidate?.dirty ? [DIRTY_UNCOUNTED] : [];
   const dirtySegments: Phrase[] = [];
   dirty.forEach((text, index) => {
     // The opt-in note rides the LAST dirty phrase, where it reads as a
@@ -1158,22 +1178,56 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
 
   // Tracked by PATH, not index: phase 2 re-sorts the list under the cursor,
   // and an index would silently point at whichever row moved into that slot.
-  const cursorIndex = (): number => {
+  //
+  // Memoized rather than plain accessors because EVERY row reads the cursor,
+  // several times over: a plain accessor makes each read a fresh O(rows)
+  // findIndex, so one j/k costs O(rows²) scans on top of re-running the row
+  // builders. Which row is the cursor's is one fact; it is computed once.
+  const cursorIndex = createMemo((): number => {
     const path = cursorPath();
     const rows = flatRows();
     const found = path ? rows.findIndex((r) => r.row.path === path) : -1;
     return found >= 0 ? found : 0;
-  };
-  const cursorRow = (): PanelRow | null => flatRows()[cursorIndex()] ?? null;
+  });
+  const cursorRow = createMemo((): PanelRow | null => {
+    return flatRows()[cursorIndex()] ?? null;
+  });
+  /**
+   * The cursor row's path, as the thing a row compares ITSELF against.
+   *
+   * A row that read `cursorRow()` would subscribe to the whole row object and
+   * re-render on any change to it; comparing paths lets each row's own
+   * `isCursor` memo hold its value, so a keypress re-renders the two rows
+   * whose boolean actually flipped instead of all of them.
+   */
+  const cursorKey = createMemo(() => cursorRow()?.row.path ?? null);
 
   // Seed the cursor the moment there is a row to sit on. Leaving it null and
   // falling back to index 0 looks identical until phase 2 re-sorts, at which
   // point "index 0" is a different worktree and the cursor has silently
   // jumped to whatever took the top slot.
+  //
+  // Re-seeded when the path is GONE for the same reason. A Tab re-scope or an
+  // `r` reload can drop the row the cursor was on, and the two halves of the
+  // cursor then disagree: `cursorIndex` falls back to 0, so the highlight and
+  // every key that acts move to the top row, while `cursorPath` still names a
+  // worktree that is not in the list, which the scroll effect looks up, does
+  // not find, and gives up on.
+  //
+  // Today that disagreement is invisible: a reload passes through the loading
+  // phase, so the scrollbox remounts at the top, where the row the fallback
+  // picked already is. It is repaired anyway because the PATH is what the
+  // panel treats as the cursor (that is the whole reason it is not an index),
+  // and one of the two halves quietly describing a row that no longer exists
+  // is the state every other rule here assumes cannot happen.
+  //
+  // The phase-2 re-sort does not trip this: it reorders the same paths.
   createEffect(() => {
     const rows = flatRows();
     const first = rows[0];
-    if (cursorPath() === null && first) setCursorPath(first.row.path);
+    const path = cursorPath();
+    const live = path !== null && rows.some((r) => r.row.path === path);
+    if (first && !live) setCursorPath(first.row.path);
   });
 
   /**
@@ -1561,6 +1615,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           flash("uncommitted work here: D includes it, then x");
           break;
         }
+        if (blockedDirty().length > 0) {
+          // Same dead end, reached from a row that is not the dirty one: the
+          // selection is entirely held back by the dirty gate. Saying
+          // "nothing selected" here contradicts the footer, which is counting
+          // that selection two lines below.
+          flash("uncommitted work: D includes it, then x");
+          break;
+        }
         flash("nothing selected: space selects a worktree under `removable`");
         break;
       }
@@ -1698,8 +1760,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             >
               <For each={merged()}>
                 {(repo) => {
-                  const split = () => splitRemovable(repo.rows);
-                  const labelWidth = () => labelColumnWidth(repo.rows);
+                  // Both are pure functions of a group that does not change
+                  // while it is mounted (a new `merged()` builds new groups),
+                  // but both are read once PER ROW: as plain accessors the
+                  // label column is measured over the whole group for every
+                  // row in it, and the split is recomputed at each of its four
+                  // call sites, on every keypress.
+                  const split = createMemo(() => splitRemovable(repo.rows));
+                  const labelWidth = createMemo(() =>
+                    labelColumnWidth(repo.rows),
+                  );
                   /* One row, in both sections: the section only decides
                      whether it carries a checkbox. */
                   /**
@@ -1710,14 +1780,23 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                    * just read as a hole in the rail.
                    */
                   const renderRow = (entry: PanelRow) => {
-                    const isCursor = () =>
-                      cursorRow()?.row.path === entry.row.path;
+                    // A memo, not an accessor: every j/k changes `cursorKey`,
+                    // and an accessor propagates that to each row's segment
+                    // builders, which then rebuild and recreate every `<text>`
+                    // child in the list. Held here, the value only changes for
+                    // the row being left and the row being entered.
+                    const isCursor = createMemo(
+                      () => cursorKey() === entry.row.path,
+                    );
                     const isSelected = () => selected().has(entry.row.path);
-                    const detail = () =>
+                    // Read twice per render (once to decide the line exists,
+                    // once to fit it), so it is computed once.
+                    const detail = createMemo(() =>
                       detailSegments(entry, {
                         compact: props.compact === true,
                         dirtyOk: dirtyOk().has(entry.row.path),
-                      });
+                      }),
+                    );
                     // The session list's own icon, spinner and all. Called
                     // per row, which `<For>` gives its own reactive owner, so
                     // the shared spinner interval is acquired and released
@@ -1808,8 +1887,17 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                       <Show when={showsGroupHeaders(merged())}>
                         <box height={1} flexDirection="row">
                           <text fg={theme.mauve}>
+                            {/* `listWidth`, not `contentWidth`: this line
+                                renders INSIDE the scrollbox, which keeps a
+                                column for its bar, so a name fitted to the
+                                content width overruns it by one. The
+                                scrollbox takes that column back silently,
+                                leaving a name that reads as complete with its
+                                last character gone and no ellipsis to say so
+                                (the divider, whose fill is one unbreakable
+                                word, wrapped away entirely instead). */}
                             <strong>
-                              {truncateText(repo.repoName, contentWidth())}
+                              {truncateText(repo.repoName, listWidth())}
                             </strong>
                           </text>
                         </box>

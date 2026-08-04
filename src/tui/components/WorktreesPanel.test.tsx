@@ -3,6 +3,7 @@ import { testRender } from "@opentui/solid";
 import { createMockKeys } from "@opentui/core/testing";
 import type {
   PruneCandidate,
+  ScanResponse,
   WorktreeSession,
 } from "../../daemon/worktree-prune";
 import type {
@@ -13,7 +14,6 @@ import {
   WorktreesPanel,
   clipboardArgv,
   copyToClipboard,
-  describeHttpFailure,
   describeRemoval,
   describeReason,
   describeSessions,
@@ -24,7 +24,6 @@ import {
   dirtyPhrases,
   formatTracking,
   isLivenessSkip,
-  normalizeScan,
   orderRepos,
   partitionSelection,
   removalDetails,
@@ -43,7 +42,6 @@ import {
   visualLayout,
   worktreeHoldsPath,
   type PanelRow,
-  type ScanResponse,
 } from "./WorktreesPanel";
 import { displayWidth } from "../utils/format";
 import { DOT_SPINNER_FRAMES, getStatusIcon } from "../../lib/icons";
@@ -923,6 +921,45 @@ describe("WorktreesPanel structure", () => {
     expect(settled).toContain("other");
     expect(settled).toContain("repo");
   });
+
+  // The header renders INSIDE the scrollbox, which keeps a column for its
+  // bar, so a name fitted to the panel's CONTENT width overruns it by one.
+  // The line survives that (the scrollbox cuts it where the divider's single
+  // unbreakable word wrapped away instead), but the last column goes with no
+  // ellipsis to say so: the name reads as complete when it is not.
+  it("fits a repo header to the scrollbox, not to the panel", async () => {
+    const wide = "r".repeat(36);
+    const { settled } = await mountSettled(
+      {
+        repos: [
+          {
+            repoRoot: "/wide",
+            repoName: wide,
+            worktrees: [
+              row({ path: "/wide/wt/a", repoRoot: "/wide", repoName: wide }),
+            ],
+          },
+          {
+            repoRoot: "/other",
+            repoName: "other",
+            worktrees: [
+              row({
+                path: "/other/wt/d",
+                repoRoot: "/other",
+                repoName: "other",
+              }),
+            ],
+          },
+        ],
+      },
+      emptyScan,
+      { width: 40 },
+    );
+    expect(settled).toContain("r".repeat(20));
+    // Cut by the panel, which says so, rather than shaved by the renderer,
+    // which does not.
+    expect(lineWith(settled, "r".repeat(20))).toContain("…");
+  });
 });
 
 describe("WorktreesPanel ordering", () => {
@@ -991,6 +1028,50 @@ describe("WorktreesPanel ordering", () => {
     // ...and the cursor went with the row, not with the slot.
     expect(lineWith(after, "alpha")).toContain("▎");
     expect(lineWith(after, "bravo")).not.toContain("▎");
+  });
+
+  /**
+   * A reload can drop the row the cursor was on. What the user must see
+   * afterwards is a cursor on a row that exists, on screen, which is what
+   * this pins.
+   *
+   * It does NOT isolate the re-seed itself, and cannot from out here: the
+   * index falls back to row 0 on its own, and a reload remounts the list at
+   * the top, so the stale-path state is invisible from the frame today. The
+   * re-seed keeps the two halves of the cursor from describing different rows;
+   * this keeps the behaviour they add up to.
+   */
+  it("puts the cursor on a visible row when a reload drops its own", async () => {
+    const many = (count: number, skip?: string) =>
+      listOf(
+        Array.from(
+          { length: count },
+          (_, i) => `wt${String(i).padStart(2, "0")}`,
+        )
+          .filter((name) => name !== skip)
+          .map((name) =>
+            row({ path: `/repo/wt/${name}`, name, branch: `feat/${name}` }),
+          ),
+      );
+    let body = many(30);
+    const { keys, frame } = await mountPanel(
+      { list: async () => json(body), scan: async () => json(emptyScan) },
+      { repo: "/repo", height: 12 },
+    );
+    await frame();
+    for (let i = 0; i < 20; i++) keys.pressKey("j");
+    const scrolled = await frame();
+    expect(lineWith(scrolled, "wt20")).toContain("▎");
+    // Deep enough that the top of the list is out of view.
+    expect(scrolled).not.toContain("wt00");
+
+    // Tab refetches, and this scope no longer holds the cursor's row.
+    body = many(30, "wt20");
+    keys.pressTab();
+    const after = await frame();
+    expect(after).not.toContain("wt20");
+    // The cursor is on the first row, and the first row is on screen.
+    expect(lineWith(after, "wt00")).toContain("▎");
   });
 
   it("leads with the repo it was opened over, then the alphabet", () => {
@@ -1293,6 +1374,35 @@ describe("x with nothing selected", () => {
     keys.pressKey("x");
     const shown = await frame();
     expect(shown).not.toContain("Remove worktrees?");
+    expect(shown).toContain("D includes it");
+  });
+
+  // Reached from a row that is not the dirty one: the selection is real and
+  // the footer is counting it two lines below, so "nothing selected" says the
+  // opposite of what the panel is showing.
+  it("names the dirty gate when it is all that holds the selection", async () => {
+    const { keys, frame } = await mountPanel({
+      list: async () =>
+        json(
+          listOf([
+            mainRow(),
+            row({ dirty: { dirty: true, modified: 1, untracked: 0 } }),
+          ]),
+        ),
+      scan: async () =>
+        json({
+          candidates: [candidate({ dirty: true, modified: 1 })],
+          skipped: [],
+        }),
+    });
+    await frame();
+    keys.pressKey("j"); // onto the dirty candidate
+    keys.pressKey(" "); // selected, but held back by the dirty gate
+    keys.pressKey("k"); // back to the main checkout
+    keys.pressKey("x");
+    const shown = await frame();
+    expect(shown).not.toContain("Remove worktrees?");
+    expect(shown).not.toContain("nothing selected");
     expect(shown).toContain("D includes it");
   });
 
@@ -1708,6 +1818,51 @@ describe("row detail line", () => {
     ).toEqual(["2 modified"]);
   });
 
+  // `readDirtyState` reports a worktree whose `git status` FAILED as dirty
+  // with both counts at zero, which is the safe direction for a destructive
+  // action and used to leave the row with nothing at all to say.
+  it("still says a worktree is dirty when it cannot say how dirty", () => {
+    expect(
+      dirtyPhrases(row({ dirty: { dirty: true, modified: 0, untracked: 0 } })),
+    ).toEqual(["uncommitted work"]);
+  });
+
+  // The note rides the LAST dirty phrase, so no phrase meant the destructive
+  // opt-in produced no visible change on screen at all.
+  it("hangs the opt-in note on an uncounted dirty row", () => {
+    const entry = panelRow({
+      row: row({ dirty: { dirty: true, modified: 0, untracked: 0 } }),
+      candidate: candidate({ dirty: true }),
+    });
+    expect(detailText(entry)).toContain("uncommitted work (D removes it too)");
+    expect(detailText(entry, true)).toContain(
+      "uncommitted work (D armed, will be deleted)",
+    );
+  });
+
+  // The phrases read the phase-1 list and the note gates on the phase-2 scan.
+  // They are separate reads joined by path, so the scan can be the only half
+  // that saw the work, and the row still has to show what `D` would delete.
+  it("speaks for uncommitted work only the scan saw", () => {
+    const entry = panelRow({
+      row: row({ dirty: { dirty: false, modified: 0, untracked: 0 } }),
+      candidate: candidate({ dirty: true, modified: 2 }),
+    });
+    expect(detailText(entry)).toContain("uncommitted work (D removes it too)");
+    // Stated once: the fallback stands IN for the phrases, never beside them.
+    expect(detailText(entry).match(/uncommitted work/g)).toHaveLength(1);
+  });
+
+  it("does not add the fallback beside counts that exist", () => {
+    const entry = panelRow({
+      row: row({ dirty: { dirty: true, modified: 2, untracked: 0 } }),
+      candidate: candidate({ dirty: true, modified: 2 }),
+    });
+    expect(detailText(entry)).toBe(
+      "PR #68 merged · 2 modified (D removes it too)",
+    );
+  });
+
   it("says what is gone rather than a bare gone", () => {
     expect(
       formatTracking(
@@ -1799,6 +1954,21 @@ describe("row detail line", () => {
         }),
       ),
     ).toBe("merged into main");
+  });
+
+  // The reasons come off the wire from a daemon that may be NEWER than this
+  // build. An unrecognized one still puts a checkbox on the row, so it must
+  // still put a sentence beside it: a checkbox nothing explains is the one
+  // thing the removable section rules out.
+  it("falls back to the daemon's own words for a reason it does not know", () => {
+    const future = candidate({
+      reason: "abandoned" as unknown as PruneCandidate["reason"],
+      detail: "untouched for 90 days",
+    });
+    expect(describeReason(future)).toBe("untouched for 90 days");
+    expect(detailText(panelRow({ candidate: future }))).toBe(
+      "untouched for 90 days",
+    );
   });
 
   it("drops the daemon's article from a withheld reason", () => {
@@ -2171,18 +2341,6 @@ describe("worktreeHoldsPath", () => {
   });
 });
 
-describe("describeHttpFailure", () => {
-  // The daemon is long-lived and `GET /worktrees` is new, so a 404 here is
-  // the ordinary case, not an exotic one.
-  it("names the out-of-date daemon on 404", () => {
-    expect(describeHttpFailure(404)).toContain("ccmux daemon restart");
-  });
-
-  it("leaves other statuses as the status", () => {
-    expect(describeHttpFailure(500)).toBe("HTTP 500");
-  });
-});
-
 describe("clipboardArgv", () => {
   it("uses pbcopy on macOS and refuses elsewhere", () => {
     expect(clipboardArgv("darwin")).toEqual(["pbcopy"]);
@@ -2271,26 +2429,10 @@ describe("copyToClipboard", () => {
   });
 });
 
+// `normalizeScan` itself is unit-tested beside the scan it normalizes, in
+// src/daemon/worktree-prune.test.ts. What belongs here is the panel actually
+// surviving the older daemon's body.
 describe("normalizeScan", () => {
-  // An older daemon is a live possibility, not a hypothetical: it is a
-  // long-lived background process that can predate the picker talking to it.
-  it("fills in the arrays an older daemon does not send", () => {
-    expect(normalizeScan({})).toEqual({
-      candidates: [],
-      skipped: [],
-      open: [],
-    });
-  });
-
-  it("keeps what it is given", () => {
-    const one = candidate();
-    expect(normalizeScan({ candidates: [one] })).toEqual({
-      candidates: [one],
-      skipped: [],
-      open: [],
-    });
-  });
-
   it("survives a body with no open array end to end", async () => {
     const { settled } = await mountSettled(listOf([mainRow(), row()]), {
       candidates: [candidate()],
