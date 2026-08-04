@@ -1,5 +1,12 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, appendFileSync } from "fs";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import {
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  appendFileSync,
+} from "fs";
+import * as fsPromises from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 import { SessionManager } from "../../sessions";
@@ -24,6 +31,8 @@ type WatcherInternals = {
   pollOnce(): Promise<void>;
   startPolling(): void;
   pollTimer: Timer | null;
+  pollInFlight: Promise<void> | null;
+  debounceTimers: Map<string, Timer>;
 };
 
 const NATIVE_ID = "019c7dd4-ff41-79c0-8270-d030bb51cd90";
@@ -277,6 +286,94 @@ describe("Codex LogWatcher integration", () => {
 
     await watcher.stop();
     expect(internals.pollTimer).toBeNull();
+
+    // A stopped watcher can be armed again: `startPolling` clears the flag
+    // its own `stop()` set, or a daemon restart would poll nothing.
+    internals.startPolling();
+    expect(internals.pollTimer).not.toBeNull();
+    await watcher.stop();
+    expect(internals.pollTimer).toBeNull();
+  });
+
+  it("a poll pass in flight across stop() dispatches nothing", async () => {
+    // `stop()` clears the debounce timers LAST, so a pass suspended on its
+    // `stat` must be drained first — otherwise it dispatches into the map
+    // after the sweep and leaves a timer nobody clears.
+    const manager = new SessionManager();
+    const adapter = new CodexLogAdapter();
+    let parses = 0;
+    const deriveIncremental = adapter.deriveIncrementalState.bind(adapter);
+    adapter.deriveIncrementalState = async (path, offset, prev) => {
+      parses++;
+      return deriveIncremental(path, offset, prev);
+    };
+
+    const watcher = new LogWatcher(adapter, manager);
+    const internals = watcher as unknown as WatcherInternals;
+
+    const session = manager.createPaneTrackedSession({
+      agentType: "codex",
+      paneId: "%9",
+      cwd: "/Users/test/proj",
+      pid: 9191,
+    });
+    manager.setNativeSessionId(session.id, NATIVE_ID);
+
+    const dir = newTempDir();
+    const path = rolloutPath(dir);
+    writeFileSync(
+      path,
+      jsonl(
+        sessionMeta(),
+        eventMsg("2026-04-17T12:00:01Z", { type: "task_started" }),
+      ),
+    );
+    // No recorded offset, so this pass would dispatch if it ran to completion.
+    manager.setLogPath(session.id, path);
+
+    // Hold the pass open inside its `stat` until the test releases it.
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const statSpy = spyOn(fsPromises, "stat").mockImplementation(async (p) => {
+      await gate;
+      return statSync(p as string) as never;
+    });
+
+    try {
+      internals.startPolling();
+
+      const deadline = Date.now() + 3000;
+      while (statSpy.mock.calls.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(statSpy.mock.calls.length).toBe(1);
+      expect(internals.pollInFlight).not.toBeNull();
+
+      const stopped = watcher.stop();
+      release?.();
+      await stopped;
+
+      // Sampled well inside WATCHER_DEBOUNCE_MS: a straggler dispatch would
+      // still be sitting in the map here, where the sweep can no longer see
+      // it. (Later it would fire, delete itself, and leave no trace.)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(internals.debounceTimers.size).toBe(0);
+
+      // Past one full interval plus the debounce: nothing was parsed and the
+      // loop never re-armed itself.
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      expect(parses).toBe(0);
+      expect(internals.debounceTimers.size).toBe(0);
+      expect(statSpy.mock.calls.length).toBe(1);
+
+      expect(internals.pollTimer).toBeNull();
+      expect(internals.pollInFlight).toBeNull();
+    } finally {
+      release?.();
+      statSpy.mockRestore();
+    }
   });
 
   it("threads the PermissionRequest marker's state_timestamp into the adapter as waitEstablishedAt", async () => {

@@ -117,8 +117,19 @@ export class LogWatcher {
   private encodingDriftWarned: Set<string> = new Set();
   /** Last unbound-rebind attempt per session (cooldown bookkeeping). */
   private rebindAttemptAt: Map<string, number> = new Map();
-  /** Stat-poll timer, non-null only while an adapter with `pollsLog` runs. */
+  /**
+   * Timer for the NEXT stat-poll pass, non-null only while an adapter with
+   * `pollsLog` runs and no pass is currently in flight (the loop
+   * self-schedules, so the two states are exclusive).
+   */
   private pollTimer: Timer | null = null;
+  /**
+   * The in-flight poll pass, awaited by `stop()` so a pass suspended on a
+   * `stat` can never dispatch into timers that have already been swept.
+   */
+  private pollInFlight: Promise<void> | null = null;
+  /** Set by `stop()`, cleared by `startPolling()`; gates the pass mid-flight. */
+  private pollStopped = false;
   /** Min interval between rebind attempts for an unbound session. */
   private static readonly REBIND_COOLDOWN_MS = 30_000;
   /** Resolver for the ready promise */
@@ -290,13 +301,43 @@ export class LogWatcher {
   /**
    * Arm the stat-poll loop for adapters whose appends `fs.watch` cannot see
    * (see `LogAdapter.pollsLog`). Idempotent: a second `start()` reuses the
-   * live timer instead of leaking one.
+   * live scheduler instead of leaking one, whether the next pass is armed
+   * (`pollTimer`) or the current one is still running (`pollInFlight`).
+   * Re-arming after a `stop()` is supported: the stopped flag is cleared here.
    */
   private startPolling(): void {
-    if (this.pollTimer) return;
-    this.pollTimer = setInterval(() => {
-      void this.pollOnce();
+    if (this.pollTimer || this.pollInFlight) return;
+    this.pollStopped = false;
+    this.schedulePoll();
+  }
+
+  /**
+   * Arm the next pass. Self-scheduling rather than `setInterval`: the next
+   * timer is armed only once the current pass has settled, so a slow pass can
+   * never overlap its successor.
+   */
+  private schedulePoll(): void {
+    this.pollTimer = setTimeout(() => {
+      this.pollTimer = null;
+      const pass = this.runPollPass();
+      this.pollInFlight = pass;
+      void pass.then(() => {
+        if (this.pollInFlight === pass) this.pollInFlight = null;
+        if (!this.pollStopped) this.schedulePoll();
+      });
     }, LOG_POLL_INTERVAL_MS);
+  }
+
+  /**
+   * One pass, with failures contained: `stop()` awaits this promise, so it
+   * must settle rather than reject.
+   */
+  private async runPollPass(): Promise<void> {
+    try {
+      await this.pollOnce();
+    } catch (error) {
+      console.error("Log poll error:", error);
+    }
   }
 
   /**
@@ -306,9 +347,14 @@ export class LogWatcher {
    *
    * A path with no recorded offset counts as changed: that is a session the
    * daemon just linked, and the first pass is what catches it up.
+   *
+   * Every `stat` is an await point a `stop()` can land in the middle of, so
+   * the stopped flag is re-checked around each one — a dispatch after the
+   * shutdown sweep would leave a debounce timer nobody clears.
    */
   private async pollOnce(): Promise<void> {
     for (const session of this.sessionManager.getSessions()) {
+      if (this.pollStopped) return;
       if (session.agentType !== this.adapter.agentType) continue;
       const path = session.logPath;
       if (!path) continue;
@@ -320,6 +366,7 @@ export class LogWatcher {
         // Rotated, deleted, or momentarily unreadable — the next pass retries.
         continue;
       }
+      if (this.pollStopped) return;
 
       const offset = this.fileOffsets.get(path);
       if (offset !== undefined && size <= offset) continue;
@@ -332,9 +379,18 @@ export class LogWatcher {
     this.isInitialScan = false;
     this.initialScanQueue = [];
 
+    // Order matters: the flag and the pending timer go first, then the pass
+    // already running is drained, and only THEN does the debounce sweep at
+    // the bottom of this method run — a pass that outlived it would re-arm a
+    // timer against a watcher that is already down.
+    this.pollStopped = true;
     if (this.pollTimer) {
-      clearInterval(this.pollTimer);
+      clearTimeout(this.pollTimer);
       this.pollTimer = null;
+    }
+    if (this.pollInFlight) {
+      await this.pollInFlight;
+      this.pollInFlight = null;
     }
 
     if (this.watcher) {
