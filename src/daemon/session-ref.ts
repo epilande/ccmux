@@ -15,6 +15,12 @@
  * that function is left alone: existing callers keep their behavior and this
  * one extends around them.
  *
+ * The exact tiers CLAIM their syntax: a ref shaped like a pane (`%7`), a
+ * coordinate (`work:1.0`) or the literal `self` that matches nothing returns
+ * not-found and deliberately does NOT fall through to the fuzzy tiers. A
+ * mistyped pane id must read as "no such pane", not silently become a project
+ * search that lands on some unrelated session.
+ *
  * PRIME DIRECTIVE (inherited from the binder, which learned it the hard way):
  * AMBIGUITY REFUSES, NEVER GUESSES. Proximity narrows the SCOPE a fuzzy ref
  * is searched in (same window > same tmux session > global) and a unique

@@ -26,6 +26,13 @@ export interface SSECallbacks {
     invocations?: InvocationSnapshotEntry[],
   ) => void;
   onSessionCreated: (session: EnrichedSession) => void;
+  /**
+   * A session's payload changed. Note that this fires for changes the session
+   * itself did not make: `pendingHandoff` (a `POST /handoff` waiting for the
+   * row to go idle) is enrich-time daemon state, and the daemon re-broadcasts
+   * the row when one is queued, delivered or expires. The field is optional,
+   * so a build older than the daemon simply ignores it.
+   */
   onSessionUpdated: (session: EnrichedSession) => void;
   onSessionRemoved: (sessionId: string) => void;
   onActivePane?: (sessionId: string | null, paneId: string) => void;

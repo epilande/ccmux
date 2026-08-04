@@ -10,6 +10,7 @@ import { getDaemonUrl } from "../lib/config";
 import { ensureDaemon } from "./shared";
 import { proximityLabel } from "../daemon/session-ref";
 import type { RefProximity, SessionRefCandidate } from "../daemon/session-ref";
+import { MAX_TURNS } from "../daemon/transcript-read";
 import type { TranscriptTurn } from "../daemon/transcript-read";
 
 /** The frozen transcript response contract, plus the daemon's account of how
@@ -72,8 +73,8 @@ export function renderCandidates(
 
 export function parseTurns(value: string): number {
   const turns = parseInt(value, 10);
-  if (isNaN(turns) || turns < 1 || turns > 20) {
-    console.error("Invalid --turns value (expected 1-20)");
+  if (isNaN(turns) || turns < 1 || turns > MAX_TURNS) {
+    console.error(`Invalid --turns value (expected 1-${MAX_TURNS})`);
     process.exit(1);
   }
   return turns;
