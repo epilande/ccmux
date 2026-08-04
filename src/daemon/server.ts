@@ -4,6 +4,7 @@ import {
   DAEMON_PORT,
   DAEMON_HOST,
   HEARTBEAT_INTERVAL_MS,
+  MAX_SEND_PASTE_CHARS,
   MAX_SEND_TEXT_CHARS,
   isCcmuxPane,
   resolvedHomeDir,
@@ -18,6 +19,7 @@ import {
   sendLiteralToPane,
   sendPromptToPane,
 } from "./pane-io";
+import { stripControlChars } from "./send-guards";
 import {
   buildAgentForkCommand,
   buildAgentSpawnCommand,
@@ -2062,18 +2064,39 @@ export class DaemonServer {
       );
     }
 
-    const { text, enter = true } = body;
-    if (!text || typeof text !== "string") {
+    const { text: rawText, enter = true } = body;
+    if (!rawText || typeof rawText !== "string") {
       return Response.json(
         { error: "Missing or invalid 'text' field" },
         { status: 400, headers },
       );
     }
 
-    if (text.length > MAX_SEND_TEXT_CHARS) {
+    // Defense in depth: the payload is delivered via `tmux paste-buffer -p`
+    // (bracketed paste) whenever it's multiline or over the literal cap, and
+    // a literal ESC byte inside a bracketed paste can emit its `ESC[201~`
+    // terminator early, leaking the remainder of the payload as live
+    // keystrokes into the pane. Strip C0/DEL/C1 controls up front (keeping
+    // `\t`/`\n`, mirroring the review hand-back's client-side strip in
+    // `review.ts`) so the cap check below runs against the text that's
+    // actually sent, and so callers who don't sanitize client-side (e.g. a
+    // future `/handoff`) are covered here regardless.
+    const text = stripControlChars(rawText, {
+      keepNewlines: true,
+      keepTabs: true,
+    });
+
+    // Single-line text under MAX_SEND_TEXT_CHARS goes argv-bound through
+    // `send-keys -l`; anything multiline, or over that cap, goes through the
+    // stdin-fed `load-buffer`/`paste-buffer` path instead, which is capped
+    // much higher since it isn't argv-bound. Reject only above the paste cap.
+    const usesPastePath =
+      text.includes("\n") || text.length > MAX_SEND_TEXT_CHARS;
+    const cap = usesPastePath ? MAX_SEND_PASTE_CHARS : MAX_SEND_TEXT_CHARS;
+    if (text.length > cap) {
       return Response.json(
         {
-          error: `Text exceeds maximum length of ${MAX_SEND_TEXT_CHARS.toLocaleString("en-US")} characters`,
+          error: `Text exceeds maximum length of ${cap.toLocaleString("en-US")} characters`,
         },
         { status: 400, headers },
       );
@@ -2085,7 +2108,7 @@ export class DaemonServer {
     // wrong pane. `%N` is immutable for the pane's life.
     const target = session.tmuxPane;
 
-    const sent = text.includes("\n")
+    const sent = usesPastePath
       ? await this.paneSendDeps.sendPromptToPane(target, text, enter)
       : await this.paneSendDeps.sendLiteralToPane(target, text, enter);
     if (!sent) {

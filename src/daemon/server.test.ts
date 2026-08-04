@@ -1761,7 +1761,7 @@ describe("DaemonServer", () => {
       expect(data.error).toBe("Missing or invalid 'text' field");
     });
 
-    it("should return 400 for text exceeding max length", async () => {
+    it("should return 400 for multiline text exceeding the paste cap", async () => {
       const { manager, internals } = createServer();
       manager.createSession(
         "s1",
@@ -1772,7 +1772,7 @@ describe("DaemonServer", () => {
       const req = new Request("http://localhost/sessions/s1/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: "x".repeat(10_001) }),
+        body: JSON.stringify({ text: "x\n".repeat(32_769) }), // > 65,536 chars
       });
 
       const response = await internals.handleSendToSession("s1", req, {});
@@ -1780,8 +1780,46 @@ describe("DaemonServer", () => {
 
       expect(response.status).toBe(400);
       expect(data.error).toBe(
-        "Text exceeds maximum length of 10,000 characters",
+        "Text exceeds maximum length of 65,536 characters",
       );
+    });
+
+    it("routes an 11k single-line payload through the paste path instead of rejecting", async () => {
+      const paneSendDeps = {
+        sendLiteralToPane: mock(async () => true),
+        sendPromptToPane: mock(async () => true),
+      };
+      const { manager, internals } = createServer(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        paneSendDeps,
+      );
+      manager.createSession(
+        "s1",
+        "/Users/test/.claude/projects/-Users-test-proj/s1.jsonl",
+      );
+      manager.setTmuxPane("s1", "%1");
+
+      const longSingleLine = "x".repeat(11_000);
+      const response = await internals.handleSendToSession(
+        "s1",
+        new Request("http://localhost/sessions/s1/send", {
+          method: "POST",
+          body: JSON.stringify({ text: longSingleLine }),
+        }),
+        {},
+      );
+
+      expect(response.status).toBe(200);
+      expect(paneSendDeps.sendPromptToPane).toHaveBeenCalledWith(
+        "%1",
+        longSingleLine,
+        true,
+      );
+      expect(paneSendDeps.sendLiteralToPane).not.toHaveBeenCalled();
     });
 
     it("routes single-line text through literal delivery with enter threading", async () => {
@@ -1890,6 +1928,44 @@ describe("DaemonServer", () => {
       expect(await response.json()).toEqual({
         error: "Failed to send to session",
       });
+    });
+
+    it("strips control chars (e.g. a raw ESC) before delivery, keeping tabs and newlines", async () => {
+      const paneSendDeps = {
+        sendLiteralToPane: mock(async () => true),
+        sendPromptToPane: mock(async () => true),
+      };
+      const { manager, internals } = createServer(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        paneSendDeps,
+      );
+      manager.createSession(
+        "s1",
+        "/Users/test/.claude/projects/-Users-test-proj/s1.jsonl",
+      );
+      manager.setTmuxPane("s1", "%1");
+
+      const response = await internals.handleSendToSession(
+        "s1",
+        new Request("http://localhost/sessions/s1/send", {
+          method: "POST",
+          body: JSON.stringify({
+            text: "line one\x1b[201~\tline\ttwo\nline three",
+          }),
+        }),
+        {},
+      );
+
+      expect(response.status).toBe(200);
+      expect(paneSendDeps.sendPromptToPane).toHaveBeenCalledWith(
+        "%1",
+        "line one[201~\tline\ttwo\nline three",
+        true,
+      );
     });
   });
 
