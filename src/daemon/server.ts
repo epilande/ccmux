@@ -59,7 +59,12 @@ import type {
   DaemonHealth,
   TmuxSocketError,
 } from "../types";
-import type { Session, TmuxPane, EnrichedSession } from "../types/session";
+import type {
+  BranchPR,
+  Session,
+  TmuxPane,
+  EnrichedSession,
+} from "../types/session";
 import type { AttentionTracker } from "./attention-tracker";
 import type { InvocationManager, InvocationEvent } from "./invocation-manager";
 import { readInvocationResult } from "./invocation-results";
@@ -83,11 +88,13 @@ import {
 import {
   runPrune,
   scanRepos,
+  type PRState,
   type PruneCandidate,
   type PruneScan,
   type WorktreeSession,
 } from "./worktree-prune";
-import { fetchPrune, normalizePath } from "./worktree-git";
+import { fetchPrune, listWorktrees, normalizePath } from "./worktree-git";
+import { listAllWorktrees } from "./worktree-list";
 import {
   moveChangesToWorktree,
   readUncommitted,
@@ -126,6 +133,94 @@ interface SpawnMoveReport {
 
 function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && "code" in err;
+}
+
+/**
+ * The daemon's cached open PR for a branch, as the worktree scan wants it.
+ *
+ * `PRResolver` only ever holds OPEN pull requests (its lookup filters merged
+ * and closed ones out), so a cache hit IS an open-PR answer. An entry whose
+ * number cannot be read answers null rather than a PR-less "it's open": null
+ * costs one `gh` call, which resolves the same question properly, while a
+ * half-answer would reach the panel as a badge with nothing to show.
+ */
+export function cachedOpenPR(prs: BranchPR[] | null): PRState | null {
+  for (const pr of prs ?? []) {
+    const number = Number(pr.id);
+    if (Number.isInteger(number) && number > 0) {
+      return { number, url: pr.href, state: "OPEN" };
+    }
+  }
+  return null;
+}
+
+/**
+ * Sessions grouped by the checkout they live in, keyed by realpath-normalized
+ * worktree root — the `sessionsFor` seam both worktree scans take. Shared so
+ * the listing and the prune classification agree on what "a session in this
+ * worktree" means.
+ *
+ * Subagents count. An Agent-tool teammate isolated into its own worktree is
+ * not a session — it has no pid, no pane and no row of its own — so keying
+ * strictly on `session.worktreeRoot` left every `agent-*` worktree looking
+ * abandoned while three teammates were working in it: dead in the panel's
+ * sort, invisible to the prune scan's session gate, and offered for a spawn
+ * it already had. They are folded in as SYNTHETIC entries below.
+ */
+function worktreeSessionsByRoot(
+  sessions: EnrichedSession[],
+): Map<string, WorktreeSession[]> {
+  const byWorktree = new Map<string, WorktreeSession[]>();
+  const push = (root: string, entry: WorktreeSession): void => {
+    const key = normalizePath(root);
+    const list = byWorktree.get(key) ?? [];
+    list.push(entry);
+    byWorktree.set(key, list);
+  };
+
+  for (const session of sessions) {
+    if (session.worktreeRoot) {
+      push(session.worktreeRoot, {
+        id: session.id,
+        agentType: session.agentType,
+        status: session.status,
+        tmuxPane: session.tmuxPane,
+        tmuxTarget: session.tmuxTarget,
+        pid: session.pid ?? null,
+        // Carried, not filtered out: a background agent still has to GATE a
+        // removal when it is working. What it must never get is the SIGTERM —
+        // its pid belongs to Claude's supervisor, not to ccmux, exactly as
+        // `handleKillSession` says.
+        background: isBackgroundSession(session),
+      });
+    }
+
+    // `session.subagents` only ever holds live ones — `updateSubagent` drops
+    // an entry the moment it goes idle — so no status filter is needed here.
+    for (const subagent of session.subagents) {
+      if (!subagent.worktreePath) continue;
+      push(subagent.worktreePath, {
+        // Namespaced under the parent so it can never collide with a real
+        // session id, and so the row says which orchestrator owns it.
+        id: `${session.id}:${subagent.agentId}`,
+        agentType: session.agentType,
+        status: subagent.status,
+        // The PARENT's pane deliberately: a subagent has none, and the
+        // orchestrator is the only thing at that keyboard a human can talk
+        // to. Jumping to a teammate's worktree row should land there.
+        tmuxPane: session.tmuxPane,
+        tmuxTarget: session.tmuxTarget,
+        // No pid, and `background` for the same reason the Claude
+        // background rows carry it: this must GATE a removal while it works,
+        // and must never be signalled. The pid it would be signalled by
+        // belongs to the parent, so a SIGTERM here would kill the
+        // orchestrator to clean up a worktree.
+        pid: null,
+        background: true,
+      });
+    }
+  }
+  return byWorktree;
 }
 
 /**
@@ -932,6 +1027,10 @@ export class DaemonServer {
       return await this.handleSearch(url, corsHeaders);
     }
 
+    if (path === "/worktrees" && req.method === "GET") {
+      return await this.handleWorktreeList(url, corsHeaders);
+    }
+
     if (path === "/worktrees/prune-candidates" && req.method === "GET") {
       return await this.handlePruneCandidates(url, corsHeaders);
     }
@@ -1176,27 +1275,100 @@ export class DaemonServer {
   }
 
   /**
-   * Repos to scan for prunable worktrees: every main checkout the live
-   * sessions point at.
+   * The MAIN checkout a directory belongs to, or null when it is not in a
+   * (non-bare) git repo.
    *
-   * Sessions are the only repo inventory the daemon has, and it is the right
-   * one — a repo ccmux has never seen an agent in is not a repo whose
-   * worktrees ccmux should be offering to delete. One session anywhere in a
-   * repo (including its main checkout) brings that repo's whole worktree list
-   * into scope, so an abandoned worktree with no session of its own is still
-   * found.
+   * `git worktree list` rather than a `rev-parse`, because the answer has to
+   * be the main checkout even when the directory handed in is a linked
+   * worktree — and git documents the main checkout as the first entry it
+   * prints, for every repo layout.
+   *
+   * A BARE repo resolves to the bare directory itself. It has no main
+   * checkout to point at, but it does have linked worktrees, and those are
+   * the rows the panel exists to show — answering null dropped a
+   * `clone --bare` + `worktree add` layout from the product entirely. The
+   * bare entry is not itself a row (`worktree-list.ts` filters it: there is
+   * no working tree to inspect), so what surfaces is a repo group named after
+   * the bare directory holding its worktrees.
    */
-  private pruneRepoRoots(
-    sessions: EnrichedSession[],
-    filter: string | null,
-  ): string[] {
+  private async resolveMainRepoRoot(dir: string): Promise<string | null> {
+    const entries = await listWorktrees(dir);
+    const main = entries.find((entry) => entry.isMain);
+    if (!main) return null;
+    // A repo whose root IS `$HOME` is refused, the same carve-out
+    // `deriveProject` (stop-at-$HOME walk) and `gitProjectName` (S4) already
+    // make. A `~/.git` dotfiles repo makes EVERY directory under the home
+    // directory answer "$HOME", so without this one bogus repo group swallows
+    // every cwd that is not really in a project — including the caller's cwd,
+    // which is the one this discovery exists to add.
+    //
+    // The bare dotfiles pattern (`~/.cfg --bare` with a worktree AT `$HOME`)
+    // is a different shape and is deliberately not refused: the root here is
+    // `~/.cfg`, and the `$HOME` row it yields is a real worktree of a real
+    // repo rather than the swallow-everything collapse above. It is also
+    // barely reachable, since that layout leaves no `.git` at `$HOME` for git
+    // to discover from a plain cwd.
+    return normalizePath(main.path) === normalizePath(this.homeDir)
+      ? null
+      : main.path;
+  }
+
+  /**
+   * Repos the live sessions point at: every main checkout among their cwds.
+   *
+   * Sessions are the repo inventory the daemon derives for itself. One session
+   * anywhere in a repo (including its main checkout) brings that repo's whole
+   * worktree list into scope, so an abandoned worktree with no session of its
+   * own is still found.
+   */
+  private sessionRepoRoots(sessions: EnrichedSession[]): string[] {
     const roots = new Set<string>();
     for (const session of sessions) {
       if (session.mainRepoRoot) roots.add(session.mainRepoRoot);
     }
-    if (!filter) return [...roots];
-    const wanted = normalizePath(filter);
-    return [...roots].filter((root) => normalizePath(root) === wanted);
+    return [...roots];
+  }
+
+  /**
+   * The repos every worktree surface works over: listing, prune
+   * classification and the prune run itself, which MUST agree — the run
+   * re-derives its candidates through this same discovery, so a repo the
+   * listing can see and the run cannot is a 409 the user cannot act on.
+   *
+   * An explicit `repo` is RESOLVED rather than matched against the session
+   * roots: the caller may name a linked worktree, and may name a repo no
+   * session currently lives in, which is exactly the repo whose stale
+   * worktrees you want to reclaim. It still has to be a real non-bare repo;
+   * anything else scans nothing rather than falling back to every repo.
+   *
+   * `cwd` is ADDITIVE rather than a filter: it brings the repo the caller is
+   * standing in into scope alongside the session-derived ones, which is what
+   * makes a repo whose agents have all exited visible at all.
+   */
+  private async worktreeRepoRoots(
+    sessions: EnrichedSession[],
+    filter: string | null,
+    cwd: string | null,
+  ): Promise<string[]> {
+    if (filter) {
+      const resolved = await this.resolveMainRepoRoot(filter);
+      return resolved ? [resolved] : [];
+    }
+    const roots = this.sessionRepoRoots(sessions);
+    if (cwd) {
+      // A cwd outside a repo is not an error here — the caller sends whatever
+      // directory it was launched from — so it silently contributes nothing.
+      const resolved = await this.resolveMainRepoRoot(cwd);
+      // De-duplicated against the session roots by realpath, not by string.
+      // The same repo reached under two spellings (a symlinked home, a `/tmp`
+      // that git records as `/private/tmp`) survives `scanRepos`'s own dedupe
+      // as one scan, but not before each spelling has taken its own turn
+      // through the fetch-TTL map here — which is a second `git fetch` per
+      // window against the repo the user is standing in.
+      const seen = new Set(roots.map(normalizePath));
+      if (resolved && !seen.has(normalizePath(resolved))) roots.push(resolved);
+    }
+    return roots;
   }
 
   /**
@@ -1207,36 +1379,18 @@ export class DaemonServer {
    * so it can be rate-limited: opening the prune surface twice in a row
    * should not pay for the network twice.
    */
-  private async scanPruneCandidates(filter: string | null): Promise<PruneScan> {
+  private async scanPruneCandidates(
+    filter: string | null,
+    cwd: string | null,
+  ): Promise<PruneScan> {
     // Enriched ONCE and shared. Enrichment spawns git per distinct cwd, so
     // doing it separately for the repo list and the session map paid for the
     // whole thing twice on every scan.
     const sessions = await this.enrichSessions(
       this.sessionManager.getSessions(),
     );
-    const repoRoots = this.pruneRepoRoots(sessions, filter);
-
-    const byWorktree = new Map<string, WorktreeSession[]>();
-    for (const session of sessions) {
-      const root = session.worktreeRoot;
-      if (!root) continue;
-      const key = normalizePath(root);
-      const list = byWorktree.get(key) ?? [];
-      list.push({
-        id: session.id,
-        agentType: session.agentType,
-        status: session.status,
-        tmuxPane: session.tmuxPane,
-        tmuxTarget: session.tmuxTarget,
-        pid: session.pid ?? null,
-        // Carried, not filtered out: a background agent still has to GATE the
-        // removal when it is working. What it must never get is the SIGTERM —
-        // its pid belongs to Claude's supervisor, not to ccmux, exactly as
-        // `handleKillSession` says.
-        background: isBackgroundSession(session),
-      });
-      byWorktree.set(key, list);
-    }
+    const repoRoots = await this.worktreeRepoRoots(sessions, filter, cwd);
+    const byWorktree = worktreeSessionsByRoot(sessions);
 
     // Fetches run together: they are independent network calls against
     // different repos, and serializing them made the scan's fixed cost the
@@ -1253,9 +1407,44 @@ export class DaemonServer {
     return scanRepos(repoRoots, {
       skipFetch: true,
       sessionsFor: (path) => byWorktree.get(path) ?? [],
-      hasOpenPR: (cwd, branch) =>
-        (this.prResolver.get(cwd, branch)?.length ?? 0) > 0,
+      openPR: (dir, branch) => cachedOpenPR(this.prResolver.get(dir, branch)),
     });
+  }
+
+  /**
+   * `GET /worktrees` — every worktree of every repo in scope, from local data
+   * only. This is the panel's first paint; its slower half (fetch, PR state,
+   * prune classification) arrives separately from
+   * `GET /worktrees/prune-candidates` and is merged by path.
+   *
+   * `cwd` is the caller's directory, not a filter: it ADDS the repo it sits in
+   * to the session-derived ones. `repo` is the filter, and restricts the
+   * answer to that repo alone.
+   */
+  private async handleWorktreeList(
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    try {
+      const sessions = await this.enrichSessions(
+        this.sessionManager.getSessions(),
+      );
+      const repoRoots = await this.worktreeRepoRoots(
+        sessions,
+        url.searchParams.get("repo"),
+        url.searchParams.get("cwd"),
+      );
+      const byWorktree = worktreeSessionsByRoot(sessions);
+      const response = await listAllWorktrees(repoRoots, {
+        sessionsFor: (path) => byWorktree.get(path) ?? [],
+      });
+      return Response.json(response, { headers });
+    } catch (err) {
+      return Response.json(
+        { error: `Failed to list worktrees: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
+    }
   }
 
   private async handlePruneCandidates(
@@ -1263,7 +1452,12 @@ export class DaemonServer {
     headers: Record<string, string>,
   ): Promise<Response> {
     try {
-      const scan = await this.scanPruneCandidates(url.searchParams.get("repo"));
+      // Same two knobs as `GET /worktrees`, with the same meanings, because
+      // the panel asks both for one repo scope and merges the answers by path.
+      const scan = await this.scanPruneCandidates(
+        url.searchParams.get("repo"),
+        url.searchParams.get("cwd"),
+      );
       return Response.json(scan, { headers });
     } catch (err) {
       return Response.json(
@@ -1293,6 +1487,8 @@ export class DaemonServer {
       dryRun?: unknown;
       cleanState?: unknown;
       repo?: unknown;
+      cwd?: unknown;
+      callerPane?: unknown;
       source?: unknown;
     };
     try {
@@ -1344,6 +1540,17 @@ export class DaemonServer {
     const allowDirty = asPaths(body.allowDirty);
     const cleanState = body.cleanState === true;
 
+    // Validated the same way the spawn endpoint validates its own pane ids: a
+    // malformed value is a caller mistake worth naming, not something to
+    // quietly pass to the guard as an id that can never match a pane.
+    const callerPaneResult = normalizeTarget(body.callerPane, "callerPane");
+    if (!callerPaneResult.ok) {
+      return Response.json(
+        { error: callerPaneResult.error },
+        { status: 400, headers },
+      );
+    }
+
     if (paths.length === 0 && !cleanState) {
       return Response.json(
         { error: "No worktrees selected" },
@@ -1352,8 +1559,13 @@ export class DaemonServer {
     }
 
     try {
+      // `cwd` is echoed back from the same request that listed the
+      // candidates. It has to be, or the re-derivation below runs over a
+      // smaller set of repos than the client was offered and answers 409 for
+      // a worktree the user is looking at.
       const scan = await this.scanPruneCandidates(
         typeof body.repo === "string" ? body.repo : null,
+        typeof body.cwd === "string" ? body.cwd : null,
       );
       const byPath = new Map<string, PruneCandidate>();
       for (const candidate of scan.candidates) {
@@ -1385,6 +1597,11 @@ export class DaemonServer {
         // resolved through symlinks, so an opt-in echoed back through a client
         // still matches the candidate it was granted for.
         allowDirtyPaths: allowDirty.map(normalizePath),
+        // The caller's own pane, exempt from the last-moment occupancy guard
+        // so pruning from a pane inside the worktree still works. It never
+        // widens what is prunable: a worktree with a bound session is already
+        // skipped at classification.
+        callerPane: callerPaneResult.value,
         source: typeof body.source === "string" ? body.source : "api",
       });
       // A removed worktree invalidates the cwd-keyed git cache for every path
