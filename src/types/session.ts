@@ -214,6 +214,23 @@ export interface SessionState {
   inPlanMode: boolean;
   cwd?: string;
   project?: string;
+  /** Store-stamped time the session's status last changed, fed INTO log
+   * adapters via `sessionToState` as read-only context (the Codex adapter
+   * reads it as the wait-establishment time for its stale-output gate).
+   * Never applied on the way back: `updateSession` ignores it and stamps
+   * its own on every status change. */
+  statusChangedAt?: string;
+  /** Precise wait-establishment time taken from the agent's own hook marker
+   * (`state_timestamp`), fed INTO log adapters via `sessionToState` as
+   * read-only context exactly like `statusChangedAt`, and never applied on
+   * the way back. Preferred over `statusChangedAt` by the Codex stale-output
+   * gate for two reasons: the marker is restamped on EVERY PermissionRequest
+   * (while `statusChangedAt` only moves on a status EDGE, so a
+   * waiting->waiting swap leaves it pointing at the first wait), and it is
+   * stamped by the agent at request time, carrying no daemon observation
+   * lag. Absent when no waiting marker exists (e.g. hookless terminal-overlay
+   * waits). */
+  waitEstablishedAt?: string;
   /** Last activity timestamp from log entries (for stale detection) */
   lastActivityAt?: string;
   /** Last user input timestamp (for stable sorting) */
