@@ -13,8 +13,6 @@
  * no `--force`.
  */
 
-import type { SpawnSplit } from "./spawn-command";
-
 /** Greppable stable prefix. Receiving agents learn this shape; see the
  *  provenance section of `session-handoff-plan.md`, where it is FROZEN. */
 export const HANDOFF_PREFIX = "[ccmux handoff]";
@@ -137,7 +135,6 @@ export function composeHandoff(
 export interface HandoffSpawnRequest {
   agent?: string;
   cwd?: string;
-  split?: SpawnSplit;
 }
 
 export type HandoffSpawnResult =
@@ -173,20 +170,6 @@ export function normalizeHandoffSpawn(value: unknown): HandoffSpawnResult {
       return { ok: false, error: "Invalid 'spawn.cwd' field" };
     }
     request.cwd = raw.cwd;
-  }
-  if (raw.split !== undefined && raw.split !== null) {
-    if (
-      raw.split !== true &&
-      raw.split !== false &&
-      raw.split !== "h" &&
-      raw.split !== "v"
-    ) {
-      return {
-        ok: false,
-        error: `Invalid 'spawn.split' field: expected true, false, "h", or "v"`,
-      };
-    }
-    request.split = raw.split;
   }
   return { ok: true, value: request };
 }

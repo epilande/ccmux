@@ -104,11 +104,9 @@ describe("normalizeHandoffSpawn", () => {
   });
 
   it("accepts overrides", () => {
-    expect(
-      normalizeHandoffSpawn({ agent: " claude ", cwd: "/tmp", split: "h" }),
-    ).toEqual({
+    expect(normalizeHandoffSpawn({ agent: " claude ", cwd: "/tmp" })).toEqual({
       ok: true,
-      value: { agent: "claude", cwd: "/tmp", split: "h" },
+      value: { agent: "claude", cwd: "/tmp" },
     });
   });
 
@@ -118,7 +116,15 @@ describe("normalizeHandoffSpawn", () => {
     expect(normalizeHandoffSpawn({ agent: "" }).ok).toBe(false);
     expect(normalizeHandoffSpawn({ agent: 3 }).ok).toBe(false);
     expect(normalizeHandoffSpawn({ cwd: "" }).ok).toBe(false);
-    expect(normalizeHandoffSpawn({ split: "x" }).ok).toBe(false);
+  });
+
+  it("ignores an unknown field rather than failing on it", () => {
+    // No producer sends `split` any more; an old caller that still does gets
+    // its spawn, not a 400.
+    expect(normalizeHandoffSpawn({ agent: "claude", split: "h" })).toEqual({
+      ok: true,
+      value: { agent: "claude" },
+    });
   });
 });
 

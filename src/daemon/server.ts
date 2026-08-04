@@ -2540,6 +2540,19 @@ export class DaemonServer {
     const composed = composeHandoff(header, payload, MAX_SEND_PASTE_CHARS);
     const truncated = composed.truncated || transcript.truncated;
 
+    // THE control-char guarantee, on the FINAL composed text — the exact bytes
+    // that get pasted. The strip above covers the transcript payload, which is
+    // only one of the composed text's sources: the note is caller-supplied and
+    // merely whitespace-folded (`\x1b` is not `\s`), and a cwd may legally
+    // contain control bytes on POSIX, so either can carry an ESC into the
+    // header. A literal ESC inside a bracketed paste can emit its `ESC[201~`
+    // terminator early and leak the remainder into the pane as live
+    // keystrokes, so nothing downstream of here may be un-stripped.
+    const text = stripControlChars(composed.text, {
+      keepNewlines: true,
+      keepTabs: true,
+    });
+
     const from = {
       sessionId: source.id,
       agentType: source.agentType,
@@ -2553,13 +2566,12 @@ export class DaemonServer {
 
     if (spawnRequest.value) {
       return await this.handoffToNewSession(
-        composed.text,
-        { from, truncated, chars: composed.text.length },
+        text,
+        { from, truncated, chars: text.length },
         {
           agent: spawnRequest.value.agent ?? source.agentType,
           cwd: spawnRequest.value.cwd ?? source.cwd,
           callerPane,
-          split: spawnRequest.value.split,
         },
         headers,
       );
@@ -2632,7 +2644,7 @@ export class DaemonServer {
       const { record, replaced } = this.handoffQueue.enqueue({
         fromSessionId: source.id,
         toSessionId: target.id,
-        text: composed.text,
+        text,
         truncated,
       });
       void this.rebroadcastSession(target.id);
@@ -2652,7 +2664,7 @@ export class DaemonServer {
           status: "queued",
           from,
           to,
-          chars: composed.text.length,
+          chars: text.length,
           truncated,
           queuedAt: new Date(record.queuedAt).toISOString(),
           expiresAt: new Date(record.expiresAt).toISOString(),
@@ -2664,7 +2676,7 @@ export class DaemonServer {
       );
     }
 
-    const delivery = await this.deliverHandoff(target, composed.text);
+    const delivery = await this.deliverHandoff(target, text);
     if (!delivery.ok) {
       return Response.json(
         { error: delivery.error, reason: delivery.reason, from, to },
@@ -2677,7 +2689,7 @@ export class DaemonServer {
         status: "delivered",
         from,
         to,
-        chars: composed.text.length,
+        chars: text.length,
         truncated,
       },
       { headers },
@@ -2863,7 +2875,6 @@ export class DaemonServer {
       agent: string;
       cwd: string;
       callerPane: string | null;
-      split?: SpawnSplit;
     },
     headers: Record<string, string>,
   ): Promise<Response> {
@@ -2873,7 +2884,6 @@ export class DaemonServer {
       prompt: text,
     };
     if (spawn.callerPane) spawnBody.callerPane = spawn.callerPane;
-    if (spawn.split) spawnBody.split = spawn.split;
 
     const response = await this.handleSpawn(
       new Request("http://localhost/spawn", {

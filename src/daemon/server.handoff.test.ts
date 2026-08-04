@@ -38,6 +38,11 @@ type Internals = {
   enrichSession(session: unknown): Promise<EnrichedSession>;
 };
 
+/** A literal ESC byte, spelled without an escape sequence so it survives any
+ *  editor/tool round-trip intact. Inside a bracketed paste this is what can
+ *  emit `ESC[201~` early and leak the remainder into the pane as keystrokes. */
+const ESC = String.fromCharCode(0x1b);
+
 function pane(paneId: string, sessionName = "work", windowIndex = 0): TmuxPane {
   return {
     paneId,
@@ -425,14 +430,70 @@ describe("POST /handoff — guard stack", () => {
     expect(sendPromptToPane).not.toHaveBeenCalled();
   });
 
-  it("strips control characters out of the payload before it is composed", async () => {
+  it("strips control characters out of the payload", async () => {
     const { manager, internals, sendPromptToPane } = createServer();
-    pair(manager, "before[201~after");
+    pair(manager, `before${ESC}[201~after`);
 
     await post(internals, { from: "src", to: "dst" });
     const text = (sendPromptToPane.mock.calls[0] as unknown as string[])[1];
     expect(text).toContain("before[201~after");
-    expect(text).not.toContain("");
+    expect(text).not.toContain(ESC);
+  });
+
+  it("strips control characters that arrive through the NOTE, not just the payload", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    pair(manager, "clean payload");
+
+    // The note is caller-supplied and only whitespace-folded on its way into
+    // the header (ESC is not `\s`), so it reaches the composed text untouched
+    // by the payload's own strip. The guarantee has to live on the final
+    // composed text, which is what this proves.
+    const response = await post(internals, {
+      from: "src",
+      to: "dst",
+      note: `before${ESC}[201~after`,
+    });
+    expect(response.status).toBe(200);
+    const data = (await response.json()) as { chars: number };
+
+    const text = (sendPromptToPane.mock.calls[0] as unknown as string[])[1];
+    expect(text).not.toContain(ESC);
+    expect(text).toContain("note: before[201~after");
+    expect(text).toContain("clean payload");
+    // The reported size is the size of what was actually pasted.
+    expect(data.chars).toBe(text.length);
+  });
+
+  it("strips control characters that arrive through the source's cwd", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    pair(manager, "clean payload");
+    // A control byte is legal in a POSIX path, so the cwd is another way one
+    // reaches the header.
+    manager.updateSession("src", { cwd: `/tmp/we${ESC}ird` });
+
+    await post(internals, { from: "src", to: "dst" });
+    const text = (sendPromptToPane.mock.calls[0] as unknown as string[])[1];
+    expect(text).not.toContain(ESC);
+    expect(text).toContain("/tmp/weird");
+  });
+
+  it("keeps the QUEUED copy clean, so the dequeue pastes stripped text too", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    pair(manager, "clean payload");
+    manager.updateSession("dst", { status: "working" });
+
+    await post(internals, {
+      from: "src",
+      to: "dst",
+      note: `queued${ESC}[201~note`,
+    });
+    manager.updateSession("dst", { status: "idle" });
+    await Bun.sleep(10);
+
+    expect(sendPromptToPane).toHaveBeenCalledTimes(1);
+    const text = (sendPromptToPane.mock.calls[0] as unknown as string[])[1];
+    expect(text).not.toContain(ESC);
+    expect(text).toContain("note: queued[201~note");
   });
 });
 
