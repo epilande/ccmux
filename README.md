@@ -116,6 +116,7 @@ ccmux setup
 | `ccmux screen [id]`                         | Capture pane content                                                                                                          |
 | `ccmux screen --grep <pattern>`             | Search across all session panes                                                                                               |
 | `ccmux dismiss <id>`                        | Remove a session from tracking                                                                                                |
+| `ccmux worktree list`                       | List every worktree of the repos ccmux knows about, plus the one you are in (`--repo <path>`)                                 |
 | `ccmux worktree prune`                      | Remove worktrees whose work is finished (`--dry-run`, `--state`, `--repo <path>`)                                             |
 | `ccmux daemon start\|stop\|restart\|status` | Manage the background daemon                                                                                                  |
 | `ccmux config set <key> <value>`            | Set a preference                                                                                                              |
@@ -419,7 +420,9 @@ verified. Adding another is one config line once you have checked it yourself
 
 Agents create git worktrees faster than anyone cleans them up, and the ones where work actually happened are the ones that stick around. After a branch is merged (and auto-deleted on GitHub), three leftovers stay on your machine: the worktree directory, the local branch, and often a tmux pane with a finished agent in it.
 
-<kbd>W</kbd> in the picker (or `Prune worktrees` on a group header, or `ccmux worktree prune`) lists the worktrees whose work is finished, and why each one is removable:
+<kbd>W</kbd> in the picker (or `Worktrees` on a group header) opens the Worktrees panel: every worktree of every repo in scope, main checkout first, with its branch, ahead/behind, uncommitted counts, open PR, and the agent living in it. <kbd>Enter</kbd> jumps to that agent, or starts one in a worktree that has none. <kbd>Tab</kbd> widens from the selected row's repo to all of them, <kbd>y</kbd> copies a path, and <kbd>d</kbd> reviews what the branch changed since it left the default branch (not just what is uncommitted, which is what <kbd>d</kbd> on a session row shows).
+
+The panel loads in two passes: the list paints immediately from local git state, then the prune classification (which fetches and asks GitHub) merges in and sinks the finished worktrees to the bottom of their group. Those, and only those, become selectable for removal, showing why each one is removable. `ccmux worktree prune` runs the same classification from the command line:
 
 | Reason           | Meaning                                                                |
 | :--------------- | :--------------------------------------------------------------------- |
@@ -490,7 +493,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Kill session          | <kbd>x</kbd>                                                                       | Kill the selected session's process                                                                                    |
 | Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions                                                                                              |
 | Fork session          | <kbd>F</kbd>                                                                       | Branch the conversation into a pane of its own, leaving the original running                                           |
-| Prune worktrees       | <kbd>W</kbd>                                                                       | Open the prune list for finished worktrees (multi-select, confirmation)                                                |
+| Worktrees             | <kbd>W</kbd>                                                                       | Open the Worktrees panel: jump, start an agent, copy a path, review, or prune (multi-select, confirmation)             |
 | Review and hand back  | <kbd>d</kbd>                                                                       | Review with [hunk](https://github.com/modem-dev/hunk), then offer to send notes to the agent (requires `hunk` on PATH) |
 | Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state                                                                                           |
 | Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)                                                                                    |

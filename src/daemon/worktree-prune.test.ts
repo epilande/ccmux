@@ -280,9 +280,9 @@ describe("scanRepo classification", () => {
     expect(scan.skipped).toEqual([]);
   });
 
-  it("leaves a worktree with an open PR alone", async () => {
+  it("leaves a worktree with an open PR alone, and reports it as open", async () => {
     const { repo } = await makeRepo("open-pr");
-    await addWorktree(repo, "feat/open");
+    const wt = await addWorktree(repo, "feat/open");
     await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/open"]);
 
     const scan = await scanRepo(repo, {
@@ -298,17 +298,36 @@ describe("scanRepo classification", () => {
     });
 
     expect(scan.candidates).toEqual([]);
+    // Not a skip either: an open PR is the healthy in-flight state, and the
+    // panel shows it as a badge rather than as a withheld row.
+    expect(scan.skipped).toEqual([]);
+    expect(scan.open).toEqual([
+      {
+        path: normalizePath(wt),
+        repoRoot: repo,
+        branch: "feat/open",
+        pr: {
+          number: 3,
+          url: "https://github.com/o/r/pull/3",
+          state: "OPEN",
+        },
+      },
+    ]);
   });
 
   it("short-circuits on the daemon's open-PR cache without a gh lookup", async () => {
     const { repo } = await makeRepo("open-pr-cache");
-    await addWorktree(repo, "feat/cached");
+    const wt = await addWorktree(repo, "feat/cached");
     await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/cached"]);
     let lookups = 0;
 
     const scan = await scanRepo(repo, {
       skipFetch: true,
-      hasOpenPR: () => true,
+      openPR: () => ({
+        number: 12,
+        url: "https://github.com/o/r/pull/12",
+        state: "OPEN",
+      }),
       lookupPR: async () => {
         lookups++;
         return { ok: true, pr: null };
@@ -317,6 +336,42 @@ describe("scanRepo classification", () => {
 
     expect(scan.candidates).toEqual([]);
     expect(lookups).toBe(0);
+    // Reported rather than silently dropped, and the cache path carries the
+    // PR itself so the panel's badge has a number to show.
+    expect(scan.open).toEqual([
+      {
+        path: normalizePath(wt),
+        repoRoot: repo,
+        branch: "feat/cached",
+        pr: {
+          number: 12,
+          url: "https://github.com/o/r/pull/12",
+          state: "OPEN",
+        },
+      },
+    ]);
+  });
+
+  // An unusable cache entry must not become a PR-less "it's open" row: it
+  // falls through to the lookup, which answers the same question properly.
+  it("falls through to the gh lookup when the cache has nothing usable", async () => {
+    const { repo } = await makeRepo("open-pr-cache-miss");
+    await addWorktree(repo, "feat/uncached");
+    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/uncached"]);
+    let lookups = 0;
+
+    const scan = await scanRepo(repo, {
+      skipFetch: true,
+      openPR: () => null,
+      lookupPR: async () => {
+        lookups++;
+        return { ok: true, pr: null };
+      },
+    });
+
+    expect(lookups).toBe(1);
+    expect(scan.open).toEqual([]);
+    expect(scan.candidates).toHaveLength(1);
   });
 
   it("never offers the main checkout as a candidate", async () => {
@@ -2656,5 +2711,73 @@ describe("readSymlinkDirectories scopes", () => {
       JSON.stringify({ worktree: { symlinkDirectories: ["vendor", 7, ""] } }),
     );
     expect(readSymlinkDirectories(repo, home)).toEqual(["vendor"]);
+  });
+});
+
+/**
+ * An occupied worktree is the likeliest of all to have an open PR, and the
+ * session gate used to return before the PR question was ever asked — so the
+ * panel's badge was unreachable for exactly those rows.
+ */
+describe("open rows for occupied worktrees", () => {
+  it("reports both the skip and the open PR for a worktree with a session", async () => {
+    const { repo } = await makeRepo("occupied-open-pr");
+    const wt = await addWorktree(repo, "feat/busy");
+
+    const scan = await scanRepo(repo, {
+      skipFetch: true,
+      sessionsFor: () => [session({ status: "working" })],
+      openPR: () => ({
+        number: 5,
+        url: "https://github.com/o/r/pull/5",
+        state: "OPEN",
+      }),
+      lookupPR: noPR,
+    });
+
+    // The skip still stands on its own: it is the removal gate.
+    expect(scan.skipped).toEqual([
+      {
+        path: normalizePath(wt),
+        repoRoot: repo,
+        branch: "feat/busy",
+        reason: "an agent is working here",
+      },
+    ]);
+    expect(scan.open).toEqual([
+      {
+        path: normalizePath(wt),
+        repoRoot: repo,
+        branch: "feat/busy",
+        pr: {
+          number: 5,
+          url: "https://github.com/o/r/pull/5",
+          state: "OPEN",
+        },
+      },
+    ]);
+    expect(scan.candidates).toEqual([]);
+  });
+
+  // Cache only: the worktree is not going to be offered for removal whatever
+  // the answer, so it does not get to spend a network round trip.
+  it("spends no gh call on an occupied worktree, and reports no open row without one", async () => {
+    const { repo } = await makeRepo("occupied-no-cache");
+    await addWorktree(repo, "feat/busy");
+    let lookups = 0;
+
+    const scan = await scanRepo(repo, {
+      skipFetch: true,
+      sessionsFor: () => [session({ status: "idle" })],
+      openPR: () => null,
+      lookupPR: async () => {
+        lookups++;
+        return { ok: true, pr: null };
+      },
+    });
+
+    expect(lookups).toBe(0);
+    expect(scan.open).toEqual([]);
+    expect(scan.skipped[0]?.reason).toBe("an agent is idle here");
   });
 });

@@ -3087,6 +3087,9 @@ describe("store", () => {
         // Not continuing anything: fork mode is opened over a session, and
         // this dialog was opened over a directory.
         fork: null,
+        // And not aimed at a worktree that already exists, which is the
+        // Worktrees panel's own way in.
+        existingWorktree: null,
         field: "agent",
         dropdown: null,
       });
@@ -3149,6 +3152,7 @@ describe("store", () => {
         untracked: "move",
         worktreeName: null,
         fork: null,
+        existingWorktree: null,
         field: "prompt",
         dropdown: null,
       });
@@ -3225,6 +3229,7 @@ describe("store", () => {
         untracked: "move",
         worktreeName: null,
         fork: null,
+        existingWorktree: null,
         field: "agent",
         dropdown: null,
       });
@@ -3337,6 +3342,7 @@ describe("store", () => {
           untracked: "move",
           worktreeName: null,
           fork: FORK,
+          existingWorktree: null,
           // Not `agent`: the fork continues the source's agent, so that row
           // does not exist and focus cannot start on it.
           field: "placement",
@@ -3421,6 +3427,121 @@ describe("store", () => {
       });
     });
 
+    /**
+     * Existing-worktree mode (issue #102). The Worktrees panel opens the
+     * dialog over a checkout that is already on disk, so the request is an
+     * ordinary spawn into that directory and every field about MAKING a
+     * worktree is gone.
+     */
+    describe("existing worktree mode", () => {
+      const PATH = "/repo/.claude/worktrees/panel";
+      const SOURCE_FORK = {
+        sessionId: "s1",
+        label: "Claude · feat/parking",
+        branch: "feat/parking",
+        canWorktree: true,
+        pane: "%5",
+      };
+
+      it("opens over the worktree, with nothing left to create", () => {
+        const store = createTUIStore();
+
+        store.actions.openNewSessionDialog({
+          cwd: "/repo",
+          agent: "claude",
+          existingWorktree: PATH,
+        });
+
+        expect(store.state.newSession).toEqual({
+          // The worktree is the working directory, taken from the mode: the
+          // `cwd` the caller passed named the repo it came from.
+          cwd: PATH,
+          agent: "claude",
+          placement: "window",
+          // An ordinary spawn's destination, and the row that would show it
+          // is gone: this session is going into the checkout it was opened
+          // over, which is what `here` already means.
+          destination: "here",
+          prompt: "",
+          moveChanges: false,
+          untracked: "move",
+          worktreeName: null,
+          fork: null,
+          existingWorktree: PATH,
+          field: "agent",
+          dropdown: null,
+        });
+      });
+
+      it("offers the agent, placement and prompt, and nothing else", () => {
+        const store = createTUIStore();
+        store.actions.openNewSessionDialog({
+          cwd: PATH,
+          agent: "claude",
+          existingWorktree: PATH,
+        });
+
+        const seen: string[] = [];
+        for (let i = 0; i < NEW_SESSION_FIELDS.length + 1; i++) {
+          seen.push(store.state.newSession!.field);
+          store.actions.moveNewSessionField(1);
+        }
+
+        // Where, Name and Untracked all describe a worktree being made; this
+        // mode makes none. A row whose keys do nothing must not be a Tab stop
+        // either.
+        expect(new Set(seen)).toEqual(
+          new Set(["agent", "placement", "prompt"]),
+        );
+      });
+
+      it("refuses a destination it has no row for", () => {
+        const store = createTUIStore();
+        store.actions.openNewSessionDialog({
+          cwd: PATH,
+          agent: "claude",
+          existingWorktree: PATH,
+        });
+
+        // A write that landed would put the Name row back on a dialog with no
+        // worktree to give a name to, and send a `worktree` block asking for a
+        // second checkout beside the one that was chosen.
+        store.actions.setNewSessionDestination("worktree");
+        expect(store.state.newSession?.destination).toBe("here");
+
+        store.actions.openNewSessionDropdown("destination", 1);
+        expect(store.state.newSession?.dropdown).toBeNull();
+      });
+
+      it("drops the other two modes rather than combining with them", () => {
+        const store = createTUIStore();
+
+        // Both other modes exist to CREATE a worktree, so neither can be true
+        // of a session started in one that is already there. Normalized at the
+        // door, so nothing downstream has to answer what the combination
+        // would mean.
+        store.actions.openNewSessionDialog({
+          cwd: "/repo",
+          agent: "claude",
+          existingWorktree: PATH,
+          moveChanges: true,
+          fork: SOURCE_FORK,
+        });
+
+        expect(store.state.newSession?.moveChanges).toBe(false);
+        expect(store.state.newSession?.fork).toBeNull();
+        expect(store.state.newSession?.existingWorktree).toBe(PATH);
+      });
+
+      it("leaves an ordinary dialog aimed at no worktree", () => {
+        const store = createTUIStore();
+
+        store.actions.openNewSessionDialog({ cwd: "/repo", agent: "claude" });
+
+        expect(store.state.newSession?.existingWorktree).toBeNull();
+      });
+    });
+
     it("ignores draft edits while the dialog is closed", () => {
       const store = createTUIStore();
 
@@ -3449,6 +3570,7 @@ describe("store", () => {
             moveChanges: false,
             destination: "worktree",
             fork: null,
+            existingWorktree: null,
           }),
         ).toBe(true);
       });
@@ -3459,8 +3581,24 @@ describe("store", () => {
             moveChanges: true,
             destination: "here",
             fork: null,
+            existingWorktree: null,
           }),
         ).toBe(true);
+      });
+
+      it("is false for a session started in a worktree that already exists", () => {
+        // Nothing is created there, so nothing is named — and it outranks a
+        // destination left over from before the mode was opened, which would
+        // otherwise put a Name row on a dialog that has no worktree to give
+        // it to.
+        expect(
+          namesAWorktree({
+            moveChanges: false,
+            destination: "worktree",
+            fork: null,
+            existingWorktree: "/repo/.claude/worktrees/panel",
+          }),
+        ).toBe(false);
       });
 
       it("is false for a fork continuing in the source's own checkout", () => {
@@ -3477,6 +3615,7 @@ describe("store", () => {
               canWorktree: true,
               pane: "%5",
             },
+            existingWorktree: null,
           }),
         ).toBe(false);
       });
@@ -3487,6 +3626,7 @@ describe("store", () => {
             moveChanges: false,
             destination: "here",
             fork: null,
+            existingWorktree: null,
           }),
         ).toBe(false);
       });

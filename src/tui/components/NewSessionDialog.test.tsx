@@ -40,6 +40,7 @@ const draft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft => ({
   untracked: "move",
   worktreeName: null,
   fork: null,
+  existingWorktree: null,
   field: "agent",
   dropdown: null,
   ...overrides,
@@ -178,6 +179,7 @@ describe("planDialogRows", () => {
     moveChanges: true,
     fork: false,
     namesAWorktree: true,
+    existingWorktree: false,
     agentRows: 1,
     keyHints: true,
   };
@@ -254,6 +256,7 @@ describe("planDialogRows", () => {
       moveChanges: false,
       fork: false,
       namesAWorktree: false,
+      existingWorktree: false,
       agentRows: 1,
       keyHints: false,
     };
@@ -276,6 +279,7 @@ describe("planDialogRows", () => {
       moveChanges: false,
       fork: true,
       namesAWorktree: true,
+      existingWorktree: false,
       agentRows: 3,
       keyHints: true,
     };
@@ -322,7 +326,11 @@ describe("planDialogRows", () => {
     it("asks for two fewer field rows than the same spawn would", () => {
       // Agent and Prompt, the two a fork does not have. The floor is a
       // border, a title and one row per field, so the gap IS those two rows.
-      const shape = { moveChanges: false, namesAWorktree: true };
+      const shape = {
+        moveChanges: false,
+        namesAWorktree: true,
+        existingWorktree: false,
+      };
       expect(newSessionFloorRows({ ...shape, fork: true })).toBe(6);
       expect(newSessionFloorRows({ ...shape, fork: false })).toBe(8);
     });
@@ -341,6 +349,68 @@ describe("planDialogRows", () => {
       });
       expect(planDialogRows(forkHere, 5).tooShort).toBe(false);
       expect(planDialogRows(forkHere, 4).tooShort).toBe(true);
+    });
+  });
+
+  /**
+   * Existing-worktree mode's own budget (issue #102). Same fields an ordinary
+   * spawn has minus the Where row, since the worktree the panel was on IS the
+   * destination, plus the note that names it.
+   */
+  describe("in existing-worktree mode", () => {
+    const existing = {
+      moveChanges: false,
+      fork: false,
+      namesAWorktree: false,
+      existingWorktree: true,
+      agentRows: 1,
+      keyHints: true,
+    };
+
+    it("spends its rows on three fields and a Worktree note", () => {
+      expect(planDialogRows(existing, 40)).toEqual({
+        tooShort: false,
+        // Border and title (3), the spacer, the directory, the Worktree note,
+        // the button row with its two blanks, the two hint rows, one row each
+        // for Agent, Placement and Prompt, and the three blank rows airing
+        // that four-block stack.
+        height: 17,
+        showTitleSpacer: true,
+        showFieldSpacers: true,
+        showButtons: true,
+        showDirectory: true,
+        // Which worktree, which the path above only spells out.
+        showModeNote: true,
+        showKeyHints: true,
+        agentRows: 1,
+      });
+    });
+
+    it("asks for one field row fewer than the same spawn elsewhere", () => {
+      // The Where row, and only that: an ordinary spawn into a checkout has
+      // the same agent, placement and prompt. A floor that still counted it
+      // would report a row this mode does not need, and one SHORT of what is
+      // drawn lands a row on its neighbour instead of clipping.
+      const shape = { moveChanges: false, fork: false, namesAWorktree: false };
+      expect(newSessionFloorRows({ ...shape, existingWorktree: true })).toBe(6);
+      expect(newSessionFloorRows({ ...shape, existingWorktree: false })).toBe(
+        7,
+      );
+    });
+
+    it("gives up everything optional at its floor and still fits", () => {
+      expect(planDialogRows(existing, 6)).toEqual({
+        tooShort: false,
+        height: 6,
+        showTitleSpacer: false,
+        showFieldSpacers: false,
+        showButtons: false,
+        showDirectory: false,
+        showModeNote: false,
+        showKeyHints: false,
+        agentRows: 1,
+      });
+      expect(planDialogRows(existing, 5).tooShort).toBe(true);
     });
   });
 });
@@ -1589,6 +1659,7 @@ describe("NewSessionDialog fork mode", () => {
         moveChanges: false,
         namesAWorktree: true,
         fork: true,
+        existingWorktree: false,
       }),
     ).toBe(6);
 
@@ -1615,6 +1686,7 @@ describe("NewSessionDialog fork mode", () => {
         moveChanges: false,
         namesAWorktree: false,
         fork: true,
+        existingWorktree: false,
       }),
     ).toBe(5);
 
@@ -1628,5 +1700,115 @@ describe("NewSessionDialog fork mode", () => {
     expectFrameIntegrity(frame);
     expect(frame).not.toContain("Needs");
     expect(frame).toContain("Where");
+  });
+});
+
+/**
+ * Existing-worktree mode (issue #102): the same dialog, opened from the
+ * Worktrees panel over a checkout that is already on disk. An ordinary spawn
+ * whose directory has already been chosen, so every row about creating a
+ * worktree is gone and a note names the one being started in.
+ */
+describe("NewSessionDialog existing worktree mode", () => {
+  const PATH = "/Users/dev/code/ccmux/.claude/worktrees/worktree-panel";
+
+  const existingDraft = (
+    overrides: Partial<NewSessionDraft> = {},
+  ): NewSessionDraft =>
+    draft({ cwd: PATH, existingWorktree: PATH, ...overrides });
+
+  it("says what it is doing, and names the worktree", async () => {
+    const frame = await renderDialog({ draft: existingDraft() });
+
+    expect(frame).toContain("New session in worktree");
+    // The note carries the worktree's own name; the Directory row above it
+    // carries the path it sits at.
+    expect(frame).toContain("Worktree");
+    expect(frame).toContain("worktree-panel");
+  });
+
+  it("drops every row about creating a worktree", async () => {
+    const frame = await renderDialog({
+      draft: existingDraft(),
+      agents: [agent("claude"), agent("codex")],
+    });
+
+    // The panel row IS the destination, nothing is being made to name, and
+    // untracked files belong to a move.
+    expect(frame).not.toContain("Where");
+    expect(frame).not.toContain("This checkout");
+    expect(frame).not.toContain("New worktree");
+    expect(frame).not.toContain("Name");
+    expect(frame).not.toContain("Untracked");
+    // What an ordinary spawn chooses is all still there.
+    expect(frame).toContain("Agent");
+    expect(frame).toContain("Placement");
+    expect(frame).toContain("Prompt");
+  });
+
+  it("confirms with Spawn, like any other new session", async () => {
+    const frame = await renderDialog({ draft: existingDraft() });
+    const row = frame.split("\n").find((line) => line.includes("Cancel"));
+    expect(row).toContain("Spawn");
+  });
+
+  it("keeps every row inside the border, in order", async () => {
+    const frame = await renderDialog({
+      draft: existingDraft(),
+      showKeyHints: true,
+    });
+
+    expectFrameIntegrity(frame);
+    const lines = frame.split("\n");
+    const rowOf = (text: string) =>
+      lines.findIndex((line) => line.includes(text));
+    // A height that under-counts does not clip: it draws two rows over each
+    // other, so the ordering chain is what catches it.
+    const order = [
+      "New session in worktree",
+      "Agent",
+      "Placement",
+      "Prompt",
+      "Directory",
+      "Worktree",
+      "esc",
+      "└",
+    ];
+    let previous = -1;
+    for (const text of order) {
+      const row = rowOf(text);
+      expect([text, row]).toEqual([text, expect.any(Number)]);
+      expect(row).toBeGreaterThan(previous);
+      previous = row;
+    }
+  });
+
+  it("stays inside its border on a sidebar-width surface", async () => {
+    const frame = await renderDialog({
+      draft: existingDraft(),
+      width: 34,
+      height: 30,
+      showKeyHints: true,
+    });
+
+    expectFrameIntegrity(frame);
+    const lines = frame.split("\n");
+    const widest = Math.max(...lines.map((line) => line.trimEnd().length));
+    expect(widest).toBeLessThanOrEqual(34);
+  });
+
+  it("fits in a terminal one row shorter than an ordinary spawn needs", async () => {
+    // One field row fewer than a spawn that still has a Where row to offer,
+    // and the budget has to know it or the mode reports a floor it clears.
+    const frame = await renderDialog({
+      draft: existingDraft(),
+      width: 60,
+      height: 6,
+      showKeyHints: false,
+    });
+
+    expectFrameIntegrity(frame);
+    expect(frame).not.toContain("Needs");
+    expect(frame).toContain("Prompt");
   });
 });

@@ -18,6 +18,7 @@ import { existsSync, renameSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import type { SessionStatus } from "../types/session";
+import { mapWithConcurrency } from "../lib/concurrency";
 import { tmuxArgv } from "../lib/tmux-exec";
 import {
   builtinStateFiles,
@@ -180,9 +181,35 @@ export interface PruneSkip {
   reason: string;
 }
 
+/**
+ * A worktree the scan dropped because its pull request is still OPEN — the
+ * healthy in-flight state, not a problem.
+ *
+ * Reported rather than silently dropped because the Worktrees panel shows a PR
+ * badge, and an open PR is the single most useful thing it can say about a
+ * worktree. It stays out of {@link PruneScan.candidates} for the same reason
+ * as before: an open PR means the work is still in flight, whatever the local
+ * refs look like.
+ *
+ * `branch` is a plain string, not nullable: a detached worktree is dropped
+ * before any PR question is asked, so an open row always has one. `pr` is
+ * likewise always present — both paths that produce this row (the daemon's
+ * open-PR cache and the `gh` lookup) carry the PR itself, and a cache entry
+ * too damaged to yield one falls through to the lookup rather than reporting a
+ * PR-less row.
+ */
+export interface PruneOpen {
+  path: string;
+  repoRoot: string;
+  branch: string;
+  pr: PRState;
+}
+
 export interface PruneScan {
   candidates: PruneCandidate[];
   skipped: PruneSkip[];
+  /** Worktrees withheld because their PR is still open. @see PruneOpen */
+  open: PruneOpen[];
 }
 
 /** One `gh pr list --json` row, with the fields that establish identity. */
@@ -367,11 +394,13 @@ export interface ScanDeps {
    */
   sessionsFor?: (worktreePath: string) => WorktreeSession[];
   /**
-   * Fast "there is already an open PR" read off the daemon's existing
-   * `branchPRs` cache. Lets the common busy-branch case skip the gh call
-   * entirely; returning false only costs a lookup that would have happened.
+   * The already-known OPEN pull request for a branch, read off the daemon's
+   * existing `branchPRs` cache. Lets the common busy-branch case skip the gh
+   * call entirely; answering null only costs a lookup that would have happened
+   * anyway, which is also what an unusable cache entry should do rather than
+   * reporting an open row with no PR to name.
    */
-  hasOpenPR?: (cwd: string, branch: string) => boolean;
+  openPR?: (cwd: string, branch: string) => PRState | null;
   /** Skip the per-repo `git fetch --prune` (tests, offline runs). */
   skipFetch?: boolean;
 }
@@ -495,7 +524,7 @@ export function branchDeletionFor(reason: PruneReason): BranchDeletion {
  * "is there an open PR" is exactly what the network is being asked. Measured:
  * 15 active worktrees still made 15 gh calls. What genuinely avoids the call
  * is a branch with no upstream, a branch already merged locally, or a hit in
- * the daemon's open-PR cache (`hasOpenPR`); everything else pays for it, which
+ * the daemon's open-PR cache (`openPR`); everything else pays for it, which
  * is why the calls run concurrently rather than one at a time.
  */
 export async function scanRepo(
@@ -505,10 +534,11 @@ export async function scanRepo(
   const git = deps.git ?? runGit;
   const candidates: PruneCandidate[] = [];
   const skipped: PruneSkip[] = [];
+  const open: PruneOpen[] = [];
 
   const entries = await listWorktrees(repoRoot, git);
   const linked = entries.filter((e) => !e.isMain && !e.bare);
-  if (linked.length === 0) return { candidates, skipped };
+  if (linked.length === 0) return { candidates, skipped, open };
 
   // One network call per repo, not per worktree: this is what turns a branch
   // deleted on GitHub into a locally visible `[gone]`.
@@ -545,12 +575,13 @@ export async function scanRepo(
         deps,
       }),
   );
-  for (const { candidate, skip } of results) {
-    if (candidate) candidates.push(candidate);
-    if (skip) skipped.push(skip);
+  for (const result of results) {
+    if (result.candidate) candidates.push(result.candidate);
+    if (result.skip) skipped.push(result.skip);
+    if (result.open) open.push(result.open);
   }
 
-  return { candidates, skipped };
+  return { candidates, skipped, open };
 }
 
 /** Concurrent `gh pr list` calls per repo during classification. */
@@ -565,31 +596,6 @@ const CLASSIFY_CONCURRENCY = 6;
 function onceAsync<T>(produce: () => Promise<T>): () => Promise<T> {
   let pending: Promise<T> | undefined;
   return () => (pending ??= produce());
-}
-
-/**
- * `Promise.all` with a ceiling on how many run at once, preserving input
- * order in the result.
- */
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const workers = Array.from(
-    { length: Math.min(limit, items.length) },
-    async () => {
-      while (true) {
-        const i = next++;
-        if (i >= items.length) return;
-        results[i] = await fn(items[i]);
-      }
-    },
-  );
-  await Promise.all(workers);
-  return results;
 }
 
 interface ClassifyContext {
@@ -609,6 +615,7 @@ interface ClassifyContext {
 interface Classification {
   candidate?: PruneCandidate;
   skip?: PruneSkip;
+  open?: PruneOpen;
 }
 
 /**
@@ -670,19 +677,41 @@ async function classifyOne(
   const live =
     sessions.find((s) => s.status === "working") ?? sessions.at(0) ?? null;
   if (live) {
-    return skip(
+    const reason =
       live.status === "working"
         ? "an agent is working here"
-        : `an agent is ${live.status} here`,
-    );
+        : `an agent is ${live.status} here`;
+    // The skip and the open row are INDEPENDENT facts, and an occupied
+    // worktree is the likeliest one of all to have an open PR — reporting
+    // only the skip made the panel's badge unreachable for exactly those
+    // rows. The skip still stands on its own: it is the removal gate, and
+    // nothing here weakens it.
+    //
+    // Cache only, no `gh` call. This worktree is not going to be offered for
+    // removal whatever the answer, so it does not get to spend a network
+    // round trip — and the daemon's PR cache is populated from the branches
+    // its SESSIONS sit on, which is precisely this case. A miss still warms
+    // the cache for the next scan (`PRResolver.get` refreshes in the
+    // background), so the badge arrives a scan later rather than never.
+    const openPR = deps.openPR?.(path, branch) ?? null;
+    return {
+      skip: { path, repoRoot, branch, reason },
+      ...(openPR ? { open: { path, repoRoot, branch, pr: openPR } } : {}),
+    };
   }
 
-  const upstream = ctx.upstreams.get(branch) ?? { upstream: null, gone: false };
+  const upstream = ctx.upstreams.get(branch) ?? {
+    upstream: null,
+    gone: false,
+    ahead: 0,
+    behind: 0,
+  };
 
   // An open PR means the work is still in flight, whatever the local refs
   // look like. Checked against the daemon's existing cache first so the
   // common case costs nothing.
-  if (deps.hasOpenPR?.(path, branch)) return {};
+  const cachedPR = deps.openPR?.(path, branch) ?? null;
+  if (cachedPR) return { open: { path, repoRoot, branch, pr: cachedPR } };
 
   const mergedLocally = await isMergedInto(repoRoot, branch, ctx.baseRefs, git);
 
@@ -719,7 +748,7 @@ async function classifyOne(
     return {};
   }
   const pr = lookup.pr;
-  if (pr?.state === "OPEN") return {};
+  if (pr?.state === "OPEN") return { open: { path, repoRoot, branch, pr } };
 
   const reason = reasonFor(pr, mergedLocally, upstream.gone);
   if (!reason) return {};
@@ -757,6 +786,7 @@ export async function scanRepos(
   const seen = new Set<string>();
   const candidates: PruneCandidate[] = [];
   const skipped: PruneSkip[] = [];
+  const open: PruneOpen[] = [];
   for (const root of repoRoots) {
     const key = normalizePath(root);
     if (seen.has(key)) continue;
@@ -764,12 +794,14 @@ export async function scanRepos(
     const scan = await scanRepo(root, deps);
     candidates.push(...scan.candidates);
     skipped.push(...scan.skipped);
+    open.push(...scan.open);
   }
   candidates.sort(
     (a, b) =>
       a.repoName.localeCompare(b.repoName) || a.name.localeCompare(b.name),
   );
-  return { candidates, skipped };
+  open.sort((a, b) => a.path.localeCompare(b.path));
+  return { candidates, skipped, open };
 }
 
 /**

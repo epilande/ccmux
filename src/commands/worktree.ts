@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
+import { resolve } from "node:path";
 import { getDaemonUrl } from "../lib/config";
 import { ensureDaemon } from "./shared";
 import type {
@@ -9,6 +10,12 @@ import type {
   PruneSkip,
 } from "../daemon/worktree-prune";
 import { describeIgnoredFiles } from "../daemon/worktree-prune";
+import type {
+  WorktreeListResponse,
+  WorktreeRepo,
+  WorktreeRow,
+} from "../daemon/worktree-list";
+import { displayWidth } from "../tui/utils/format";
 
 /**
  * `ccmux worktree prune` — the CLI half of issue #68's cleanup.
@@ -93,6 +100,31 @@ function printResult(result: PruneRunResult): void {
 }
 
 /**
+ * The directory the user actually ran the command from.
+ *
+ * `bin/ccmux` cds into the package root for module resolution and carries the
+ * real invocation directory in `CCMUX_CALLER_PWD` (`spawn.ts` and `review.ts`
+ * restore it the same way). `process.cwd()` alone is therefore the ccmux
+ * INSTALL, which for cwd-based repo discovery is not a near miss: every
+ * `ccmux worktree list` would answer for the ccmux checkout no matter where
+ * the user was standing.
+ */
+export function callerCwd(): string {
+  return process.env.CCMUX_CALLER_PWD ?? process.cwd();
+}
+
+/**
+ * A `--repo` as the user meant it. Resolved client-side and against the
+ * CALLER's directory, because nothing downstream can do it: the daemon runs
+ * chdir'd to `/`, so a relative path sent as typed resolves against the root.
+ */
+export function resolveRepoOption(
+  repo: string | undefined,
+): string | undefined {
+  return repo ? resolve(callerCwd(), repo) : undefined;
+}
+
+/**
  * Parse a selection like `1,3-5` into candidate indices. Returns null on
  * anything unparseable or out of range, so a typo cancels the run instead of
  * silently removing a different worktree than the user meant.
@@ -123,8 +155,14 @@ export function parseSelection(input: string, count: number): number[] | null {
   return picked.size > 0 ? [...picked].sort((a, b) => a - b) : null;
 }
 
-async function fetchCandidates(repo?: string): Promise<PruneScan> {
-  const query = repo ? `?repo=${encodeURIComponent(repo)}` : "";
+async function fetchCandidates(
+  repo?: string,
+  cwd?: string,
+): Promise<PruneScan> {
+  const params = new URLSearchParams();
+  if (repo) params.set("repo", repo);
+  if (cwd) params.set("cwd", cwd);
+  const query = params.size > 0 ? `?${params}` : "";
   const response = await fetch(
     `${getDaemonUrl()}/worktrees/prune-candidates${query}`,
   );
@@ -134,7 +172,15 @@ async function fetchCandidates(repo?: string): Promise<PruneScan> {
     };
     throw new Error(body.error ?? `HTTP ${response.status}`);
   }
-  return (await response.json()) as PruneScan;
+  // Normalized, not cast: a daemon older than the `open` bucket sends a body
+  // without it, and a bare cast would hand every reader a field the type
+  // promises and the wire does not have.
+  const data = (await response.json()) as Partial<PruneScan>;
+  return {
+    candidates: data.candidates ?? [],
+    skipped: data.skipped ?? [],
+    open: data.open ?? [],
+  };
 }
 
 async function postPrune(body: {
@@ -143,6 +189,13 @@ async function postPrune(body: {
   dryRun: boolean;
   cleanState: boolean;
   repo?: string;
+  /**
+   * Must be the SAME cwd the candidate list was fetched with. The daemon
+   * re-derives every candidate from a fresh scan over the repos this
+   * discovery reaches, so a run that omits it is offered a smaller set than
+   * the user just chose from and refuses the selection with a 409.
+   */
+  cwd?: string;
 }): Promise<PruneRunResult> {
   const response = await fetch(`${getDaemonUrl()}/worktrees/prune`, {
     method: "POST",
@@ -168,7 +221,14 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
   await ensureDaemon();
 
   const cleanState = options.state === true;
-  const scan = await fetchCandidates(options.repo);
+  const repo = resolveRepoOption(options.repo);
+  // The cwd goes with every request of this run (both the listing and the
+  // run itself, or the run re-derives over fewer repos and 409s), and only
+  // when no `--repo` filter was given, which is the narrower ask. It is what
+  // lets you prune the repo you are standing in when no agent session has
+  // ever run there.
+  const cwd = repo ? undefined : callerCwd();
+  const scan = await fetchCandidates(repo, cwd);
   const { candidates } = scan;
 
   if (candidates.length === 0) {
@@ -187,7 +247,8 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
       allowDirty: [],
       dryRun: true,
       cleanState,
-      repo: options.repo,
+      repo,
+      cwd,
     });
     printResult(result);
     return;
@@ -287,7 +348,8 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
       allowDirty,
       dryRun: false,
       cleanState,
-      repo: options.repo,
+      repo,
+      cwd,
     });
     printResult(result);
   } finally {
@@ -295,10 +357,145 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
   }
 }
 
+/**
+ * `ccmux worktree list` — the CLI half of the Worktrees panel, and a thin
+ * formatter over `GET /worktrees` rather than its own scan: the daemon is the
+ * only process that knows which sessions live where, and duplicating the
+ * discovery here would give the two surfaces different answers.
+ *
+ * Read-only, so unlike `prune` it works fine non-interactively.
+ */
+
+/** `↑2 ↓1`, `gone`, or "" when there is nothing to say. */
+function describeTracking(row: WorktreeRow): string {
+  const upstream = row.upstream;
+  if (!upstream) return "";
+  // A gone upstream carries no counts, and "in sync" would be the wrong
+  // reading of the two zeros it leaves behind.
+  if (upstream.gone) return "gone";
+  const parts: string[] = [];
+  if (upstream.ahead > 0) parts.push(`↑${upstream.ahead}`);
+  if (upstream.behind > 0) parts.push(`↓${upstream.behind}`);
+  return parts.join(" ");
+}
+
+/** `2m 1u` — modified and untracked counts, or "" when clean. */
+function describeDirtyCounts(row: WorktreeRow): string {
+  if (!row.dirty.dirty) return "";
+  const parts: string[] = [];
+  if (row.dirty.modified > 0) parts.push(`${row.dirty.modified}m`);
+  if (row.dirty.untracked > 0) parts.push(`${row.dirty.untracked}u`);
+  // Dirty with no counts means `git status` itself failed, which
+  // `readDirtyState` reports as dirty on purpose.
+  return parts.join(" ") || "dirty";
+}
+
+function describeRowSessions(row: WorktreeRow): string {
+  return row.sessions.map((s) => `${s.agentType} ${s.status}`).join(", ");
+}
+
+/** The cells of one row, in column order. */
+function cellsFor(row: WorktreeRow): string[] {
+  return [
+    row.isMain ? `${row.name} (main)` : row.name,
+    row.branch ?? "(detached)",
+    describeTracking(row),
+    describeDirtyCounts(row),
+    describeRowSessions(row),
+  ];
+}
+
+function padCell(text: string, width: number): string {
+  return text + " ".repeat(Math.max(0, width - displayWidth(text)));
+}
+
+/**
+ * Render the whole listing. Column widths are computed across EVERY repo, so
+ * the groups line up with each other rather than each being its own table.
+ */
+export function formatWorktreeList(repos: WorktreeRepo[]): string[] {
+  if (repos.length === 0) return ["No worktrees found."];
+
+  const cells = new Map<WorktreeRow, string[]>();
+  for (const repo of repos) {
+    for (const row of repo.worktrees) cells.set(row, cellsFor(row));
+  }
+  const widths: number[] = [];
+  for (const row of cells.values()) {
+    row.forEach((cell, i) => {
+      widths[i] = Math.max(widths[i] ?? 0, displayWidth(cell));
+    });
+  }
+
+  const grouped = repos.length > 1;
+  const lines: string[] = [];
+  for (const repo of repos) {
+    if (grouped) {
+      if (lines.length > 0) lines.push("");
+      lines.push(`${repo.repoName}  (${repo.repoRoot})`);
+    }
+    for (const row of repo.worktrees) {
+      const rendered = (cells.get(row) ?? [])
+        .map((cell, i) => padCell(cell, widths[i] ?? 0))
+        .join("  ");
+      lines.push(`${grouped ? "  " : ""}${rendered}`.trimEnd());
+    }
+  }
+  return lines;
+}
+
+async function fetchWorktrees(options: {
+  repo?: string;
+  cwd?: string;
+}): Promise<WorktreeListResponse> {
+  const params = new URLSearchParams();
+  if (options.repo) params.set("repo", options.repo);
+  if (options.cwd) params.set("cwd", options.cwd);
+  const query = params.size > 0 ? `?${params}` : "";
+  const response = await fetch(`${getDaemonUrl()}/worktrees${query}`);
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as {
+      error?: string;
+    };
+    throw new Error(body.error ?? `HTTP ${response.status}`);
+  }
+  return (await response.json()) as WorktreeListResponse;
+}
+
+async function runListCommand(options: { repo?: string }): Promise<void> {
+  await ensureDaemon();
+  // The cwd is sent unconditionally (except under `--repo`, which is a
+  // filter): it is what puts the repo you are standing in on the list even
+  // when no agent session has ever run there.
+  const repo = resolveRepoOption(options.repo);
+  const { repos } = await fetchWorktrees({
+    repo,
+    cwd: repo ? undefined : callerCwd(),
+  });
+  for (const line of formatWorktreeList(repos)) console.log(line);
+}
+
 export function createWorktreeCommand(): Command {
   const worktree = new Command("worktree").description(
     "Manage git worktrees ccmux has agent sessions in",
   );
+
+  worktree
+    .command("list")
+    .description(
+      "List every worktree of the repos ccmux knows about, plus this one",
+    )
+    .option("--repo <path>", "Limit to one repository's worktrees")
+    .action(async (options: { repo?: string }) => {
+      try {
+        await runListCommand(options);
+      } catch (error) {
+        console.error(
+          `Failed to list worktrees: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        process.exit(1);
+      }
+    });
 
   worktree
     .command("prune")

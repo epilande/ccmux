@@ -84,6 +84,13 @@ const runHunkReviewSpy = mock(
   > => ({ ok: true, notes: [] }),
 );
 const HUNK_INSTALL_HINT_TEST = realReview.HUNK_INSTALL_HINT;
+// The Worktrees panel's `d` resolves a merge-base before it reviews, which is
+// two real `git` spawns against a path no test has on disk. Pinned so the
+// review starts on a predictable tick and the target it threads through is
+// assertable.
+const resolveMergeBaseSpy = mock(
+  async (_worktreePath: string): Promise<string | null> => "base-sha",
+);
 
 const reviewNotes = [
   {
@@ -99,6 +106,7 @@ const reviewNotes = [
 mock.module("./utils/review", () => ({
   ...realReview,
   isHunkAvailable: () => hunkAvailable,
+  resolveMergeBase: resolveMergeBaseSpy,
   runHunkReview: runHunkReviewSpy,
 }));
 
@@ -193,6 +201,8 @@ beforeEach(() => {
   hunkAvailable = true;
   runHunkReviewSpy.mockClear();
   runHunkReviewSpy.mockImplementation(async () => ({ ok: true, notes: [] }));
+  resolveMergeBaseSpy.mockClear();
+  resolveMergeBaseSpy.mockImplementation(async () => "base-sha");
 });
 
 afterEach(() => {
@@ -5998,6 +6008,267 @@ describe("App row menu (m)", () => {
         expect(`${row.label}@${row.row}`).not.toContain("@-1");
       const ordered = [...rows].sort((a, b) => a.row - b.row);
       expect(ordered.map((r) => r.label)).toEqual(rows.map((r) => r.label));
+    } finally {
+      restore();
+    }
+  });
+});
+
+/**
+ * The Worktrees panel's three App-side callbacks (issue #102).
+ *
+ * These live in App because they need the store, the renderer and the pane
+ * switcher; the panel itself only reports which row was acted on. The panel's
+ * own tests mock those callbacks, so without these the wiring between the two
+ * halves is untested.
+ */
+describe("App worktrees panel (W)", () => {
+  const WORKTREE_ROW = {
+    path: "/code/myapp/wt/feature",
+    repoRoot: "/code/myapp",
+    repoName: "myapp",
+    name: "feature",
+    branch: "feat/x",
+    detached: false,
+    isMain: false,
+    locked: false,
+    dirty: { dirty: false, modified: 0, untracked: 0 },
+    upstream: { upstream: "origin/feat/x", gone: false, ahead: 0, behind: 0 },
+    sessions: [] as unknown[],
+  };
+
+  /**
+   * Route the panel's two reads (and App's own onMount fetches) without
+   * touching whatever `fetch` a neighbouring test installed.
+   */
+  function mockWorktreeFetch(rows: unknown[]) {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = ((input: string | URL | Request) => {
+      const url =
+        typeof input === "string" || input instanceof URL
+          ? input.toString()
+          : input.url;
+      const body = url.includes("prune-candidates")
+        ? { candidates: [], skipped: [], open: [] }
+        : url.includes("/worktrees")
+          ? {
+              repos: [
+                { repoRoot: "/code/myapp", repoName: "myapp", worktrees: rows },
+              ],
+            }
+          : {};
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    }) as unknown as typeof fetch;
+    return () => {
+      globalThis.fetch = originalFetch;
+    };
+  }
+
+  /** Render App with one session, then open the panel over `rows`. */
+  async function openPanel(
+    rows: unknown[],
+    sessionOverrides: Record<string, unknown> = {},
+  ) {
+    const restore = mockWorktreeFetch(rows);
+    await renderApp(120, 24, { groupBy: "none" });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "s1",
+          project: "myapp",
+          cwd: "/code/myapp",
+          mainRepoRoot: "/code/myapp",
+          tmuxPane: "%1",
+          ...sessionOverrides,
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    setup.mockInput.pressKey("W", { shift: true });
+    // Both reads resolve through awaited promises, so drain them.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await setup.renderOnce();
+    return {
+      restore,
+      frame: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await setup.renderOnce();
+        return setup.captureCharFrame();
+      },
+    };
+  }
+
+  it("opens over the selected row's repo", async () => {
+    const { restore, frame } = await openPanel([WORKTREE_ROW]);
+    try {
+      const shown = await frame();
+      expect(shown).toContain("Worktrees");
+      expect(shown).toContain("feature");
+    } finally {
+      restore();
+    }
+  });
+
+  // The panel reports the session as the DAEMON described it. The enriched
+  // row in the store is the fresher one, so it wins when it is there.
+  it("jumps through the live store session when the id is known", async () => {
+    // Switching panes EXITS the one-shot picker. Without pinning
+    // `process.exit` the test process dies mid-file: bun reports zero tests
+    // and still exits 0, which looks like the file was never collected.
+    const { restore: restoreExit } = withExitSpy();
+    const { restore, frame } = await openPanel([
+      {
+        ...WORKTREE_ROW,
+        sessions: [
+          {
+            id: "s1",
+            agentType: "claude",
+            // Deliberately stale: the store says %1, and the store must win.
+            status: "idle",
+            tmuxPane: "%stale",
+            tmuxTarget: "w:0.9",
+            pid: 1,
+          },
+        ],
+      },
+    ]);
+    try {
+      setup.mockInput.pressEnter();
+      const shown = await frame();
+      expect(switchToPaneSpy).toHaveBeenCalledTimes(1);
+      expect(switchToPaneSpy.mock.calls[0]?.[0]).toBe("%1");
+      // Closed BEFORE acting, so the pane switch is not happening under a
+      // full-screen overlay.
+      expect(shown).not.toContain("Worktrees");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("falls back to the reported pane for a session the store does not hold", async () => {
+    const { restore: restoreExit } = withExitSpy();
+    const { restore, frame } = await openPanel([
+      {
+        ...WORKTREE_ROW,
+        sessions: [
+          {
+            id: "not-in-store",
+            agentType: "claude",
+            status: "idle",
+            tmuxPane: "%42",
+            tmuxTarget: "w:0.42",
+            pid: 2,
+          },
+        ],
+      },
+    ]);
+    try {
+      setup.mockInput.pressEnter();
+      await frame();
+      expect(switchToPaneSpy).toHaveBeenCalledTimes(1);
+      expect(switchToPaneSpy.mock.calls[0]?.[0]).toBe("%42");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
+  it("opens the existing-worktree dialog on a row with no session", async () => {
+    const { restore, frame } = await openPanel([WORKTREE_ROW]);
+    try {
+      setup.mockInput.pressEnter();
+      const shown = squish(await frame());
+      expect(shown).toContain(squish("New session in worktree"));
+      expect(shown).toContain("feature");
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  /**
+   * The panel is a full-screen opaque overlay that also swallows every key,
+   * so a confirm raised while it is up would render underneath it and be
+   * unreachable. Closing first is what makes the captured notes answerable.
+   */
+  it("closes the panel before starting a review", async () => {
+    let resolveReview!: (
+      r: { ok: true; notes: typeof reviewNotes } | { ok: false; error: string },
+    ) => void;
+    runHunkReviewSpy.mockImplementation(
+      () =>
+        new Promise<
+          { ok: true; notes: typeof reviewNotes } | { ok: false; error: string }
+        >((resolve) => {
+          resolveReview = resolve;
+        }),
+    );
+    // An OCCUPIED row, because the handback is what raises the confirm this
+    // test exists to prove is reachable.
+    const { restore, frame } = await openPanel([
+      {
+        ...WORKTREE_ROW,
+        sessions: [
+          {
+            id: "s1",
+            agentType: "claude",
+            status: "idle",
+            tmuxPane: "%1",
+            tmuxTarget: "w:0.1",
+            pid: 1,
+          },
+        ],
+      },
+    ]);
+    try {
+      setup.mockInput.pressKey("d");
+      // The merge-base resolves first, so the review starts a tick later.
+      const duringReview = await frame();
+      expect(runHunkReviewSpy).toHaveBeenCalledTimes(1);
+      // Reviewed against the fork point, not the working tree.
+      expect(resolveMergeBaseSpy.mock.calls[0]?.[0]).toBe(
+        "/code/myapp/wt/feature",
+      );
+      expect(runHunkReviewSpy.mock.calls[0]?.[2]).toEqual({
+        target: "base-sha",
+      });
+      // Gone while the review is still running, not merely afterwards.
+      expect(duringReview).not.toContain("Worktrees");
+
+      resolveReview({ ok: true, notes: reviewNotes });
+      const afterReview = squish(await frame());
+      // ...which is what lets the send-review confirm be seen at all. Under
+      // the panel it rendered beneath a full-screen opaque overlay that also
+      // swallowed every key, so the captured notes were unanswerable.
+      expect(afterReview).toContain(squish("Send review comments"));
+
+      // And it is live, not merely painted: the panel is not eating keys.
+      setup.mockInput.pressKey("n");
+      expect(squish(await frame())).not.toContain(
+        squish("Send review comments"),
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("captures notes with nothing to hand them to on a bare worktree", async () => {
+    runHunkReviewSpy.mockImplementation(async () => ({
+      ok: true,
+      notes: reviewNotes,
+    }));
+    const { restore, frame } = await openPanel([WORKTREE_ROW]);
+    try {
+      setup.mockInput.pressKey("d");
+      const shown = squish(await frame());
+      expect(shown).toContain(squish("no agent to send to"));
+      expect(shown).not.toContain(squish("Send review comments"));
     } finally {
       restore();
     }
