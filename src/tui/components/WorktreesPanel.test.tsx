@@ -2125,13 +2125,21 @@ describe("copyToClipboard", () => {
   // Both channels, not one with the other as fallback: OSC 52 reports success
   // for a sequence it merely WROTE, so a terminal that drops it would leave a
   // preferred-OSC-52 copy silently empty on the machine where pbcopy works.
+  // The platform is pinned in every case: the local channel is
+  // darwin-conditional, so a test that read the host's real platform would
+  // pass on a mac and fail on Linux CI.
   it("writes through both channels when both are available", () => {
     const { writer, copied } = osc52(true);
     const spawns: string[][] = [];
-    const how = copyToClipboard("/wt/x", writer, (argv) => {
-      spawns.push(argv);
-      return true;
-    });
+    const how = copyToClipboard(
+      "/wt/x",
+      writer,
+      (argv) => {
+        spawns.push(argv);
+        return true;
+      },
+      "darwin",
+    );
     expect(how).toEqual({ osc52: true, local: true });
     expect(copied).toEqual(["/wt/x"]);
     expect(spawns).toEqual([["pbcopy"]]);
@@ -2139,7 +2147,7 @@ describe("copyToClipboard", () => {
 
   it("still copies locally when the terminal has no OSC 52", () => {
     const { writer } = osc52(false);
-    const how = copyToClipboard("/wt/x", writer, () => true);
+    const how = copyToClipboard("/wt/x", writer, () => true, "darwin");
     expect(how).toEqual({ osc52: false, local: true });
   });
 
@@ -2147,17 +2155,33 @@ describe("copyToClipboard", () => {
   // `set-clipboard on`.
   it("records a refused OSC 52 write as not copied", () => {
     const { writer } = osc52(true, false);
-    const how = copyToClipboard("/wt/x", writer, () => true);
+    const how = copyToClipboard("/wt/x", writer, () => true, "darwin");
     expect(how).toEqual({ osc52: false, local: true });
+  });
+
+  it("never spawns a local helper off macOS", () => {
+    const { writer } = osc52(true);
+    const spawns: string[][] = [];
+    const how = copyToClipboard(
+      "/wt/x",
+      writer,
+      (argv) => {
+        spawns.push(argv);
+        return true;
+      },
+      "linux",
+    );
+    expect(how).toEqual({ osc52: true, local: false });
+    expect(spawns).toEqual([]);
   });
 
   it("reports nothing copied rather than claiming a copy that never happened", () => {
     const { writer } = osc52(false);
-    expect(copyToClipboard("/wt/x", writer, () => false)).toEqual({
+    expect(copyToClipboard("/wt/x", writer, () => false, "darwin")).toEqual({
       osc52: false,
       local: false,
     });
-    expect(copyToClipboard("/wt/x", null, () => false)).toEqual({
+    expect(copyToClipboard("/wt/x", null, () => false, "darwin")).toEqual({
       osc52: false,
       local: false,
     });

@@ -1067,11 +1067,12 @@ export function copyToClipboard(
   text: string,
   writer: Osc52Writer | null,
   spawn: (argv: string[], text: string) => boolean = spawnClipboardHelper,
+  platform: NodeJS.Platform = process.platform,
 ): { osc52: boolean; local: boolean } {
   const osc52 = Boolean(
     writer?.isOsc52Supported() && writer.copyToClipboardOSC52(text),
   );
-  const argv = clipboardArgv();
+  const argv = clipboardArgv(platform);
   const local = argv !== null && spawn(argv, text);
   return { osc52, local };
 }
