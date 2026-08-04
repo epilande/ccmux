@@ -28,6 +28,18 @@ export type DaemonHealth =
   | { degraded: true; reason: string; since: string };
 
 /**
+ * Why the daemon could not reach its tmux server, carried on `GET /server-info`
+ * next to `socketPath`. `attemptedSocket` is the socket that WOULD have been
+ * used (configured override, else `$TMUX`, else tmux's default), so a client
+ * can name it. Additive: a daemon predating the field omits it and clients must
+ * read a missing field as null.
+ */
+export interface TmuxSocketError {
+  attemptedSocket: string | null;
+  message: string;
+}
+
+/**
  * Minimal projection of a daemon `InvocationRecord` carried in the `init`
  * event so the board can reconcile its invoke state synchronously on every
  * (re)connect (`store.reconcileInvocations`). Embedded in `init` rather than

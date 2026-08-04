@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, mock } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { MouseButtons } from "@opentui/core/testing";
+import { RGBA } from "@opentui/core";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { expectFrameIntegrity } from "./test-helpers";
 import { theme } from "../theme";
@@ -13,10 +14,15 @@ afterEach(() => {
   setup?.renderer.destroy();
 });
 
+/** Ids derived from the labels, so a test can name the item it means
+ *  ("kill") rather than the row it happens to be in. */
+const idFor = (label: string) => label.toLowerCase().replace(/\s+/g, "-");
+
 function itemSpies(labels: string[]) {
   return labels.map(
     (label) =>
       ({
+        id: idFor(label),
         label,
         hint: label[0]!.toLowerCase(),
         color: theme.text,
@@ -33,6 +39,7 @@ async function renderMenu(
     onClose?: ReturnType<typeof mock>;
     size?: { width: number; height: number };
     reservedRows?: number;
+    highlight?: string | null;
   } = {},
 ) {
   const items = opts.items ?? itemSpies(["Attach", "Kill", "Restart"]);
@@ -45,6 +52,7 @@ async function renderMenu(
         y={opts.y ?? 2}
         items={items}
         reservedRows={opts.reservedRows}
+        highlight={opts.highlight}
         onClose={onClose}
       />
     ),
@@ -52,6 +60,27 @@ async function renderMenu(
   );
   await setup.renderOnce();
   return { frame: setup.captureCharFrame(), items, onClose };
+}
+
+/**
+ * Which item rows are drawn on the raised background.
+ *
+ * `captureCharFrame` is text-only and the highlight IS the background, so the
+ * only way to prove it reaches the screen is to read the spans. Returns
+ * labels rather than row numbers so a menu that grows an item does not
+ * silently change what the assertion means.
+ */
+function raisedLabels(items: ContextMenuItem[]): string[] {
+  const raised = RGBA.fromHex(theme.border).toInts().join(",");
+  const lit: string[] = [];
+  for (const line of setup.captureSpans().lines) {
+    for (const span of line.spans) {
+      if (span.bg.toInts().join(",") !== raised) continue;
+      const item = items.find((i) => span.text.includes(i.label));
+      if (item && !lit.includes(item.label)) lit.push(item.label);
+    }
+  }
+  return lit;
 }
 
 /** The box's own rows, border included, from a captured frame. */
@@ -80,18 +109,19 @@ describe("ContextMenu", () => {
   it("renders the hint next to each item", async () => {
     const { frame } = await renderMenu({
       items: [
-        { label: "Pin to Top", hint: "<", color: theme.blue, action: () => {} },
+        { id: "pin-top", label: "Pin to top", hint: "<", color: theme.blue, action: () => {} },
         {
-          label: "Pin to Bottom",
+          id: "pin-bottom",
+          label: "Pin to bottom",
           hint: ">",
           color: theme.blue,
           action: () => {},
         },
       ],
     });
-    expect(frame).toContain("Pin to Top");
+    expect(frame).toContain("Pin to top");
     expect(frame).toContain("<");
-    expect(frame).toContain("Pin to Bottom");
+    expect(frame).toContain("Pin to bottom");
     expect(frame).toContain(">");
   });
 
@@ -129,6 +159,65 @@ describe("ContextMenu", () => {
 });
 
 /**
+ * The keyboard highlight (the `m` key's menus). The menu draws it; which item
+ * is lit, and what moves it, belong to `App.tsx` and the store — so these
+ * cover the rendering half only: that a highlight arrives on screen at all,
+ * on the right row, and that it cannot be told apart from the pointer's.
+ */
+describe("ContextMenu keyboard highlight", () => {
+  it("raises the highlighted row", async () => {
+    const { items } = await renderMenu({ highlight: "kill" });
+    expect(raisedLabels(items)).toEqual(["Kill"]);
+  });
+
+  it("raises nothing for a menu the pointer opened", async () => {
+    // Null is how a right-click opens: the pointer highlights on hover, and a
+    // row lit under a pointer that is elsewhere would promise a pending key.
+    const { items } = await renderMenu({ highlight: null });
+    expect(raisedLabels(items)).toEqual([]);
+  });
+
+  it("raises nothing when the highlight is omitted", async () => {
+    const { items } = await renderMenu();
+    expect(raisedLabels(items)).toEqual([]);
+  });
+
+  it("uses the same affordance the pointer does", async () => {
+    // Hovering row 2 with no keyboard highlight, and highlighting row 2 with
+    // no pointer, have to be indistinguishable — two different "current" rows
+    // in one 22-column box would be a puzzle rather than a hint.
+    const { items } = await renderMenu();
+    const row = locate(setup.captureCharFrame(), "Kill")!.row;
+    await setup.mockMouse.moveTo(10, row);
+    await setup.renderOnce();
+    expect(raisedLabels(items)).toEqual(["Kill"]);
+  });
+
+  it("follows the pointer while it is over a row", async () => {
+    // Both at once: the hand wins, because it is the one still moving.
+    const { items } = await renderMenu({ highlight: "attach" });
+    expect(raisedLabels(items)).toEqual(["Attach"]);
+    const row = locate(setup.captureCharFrame(), "Restart")!.row;
+    await setup.mockMouse.moveTo(10, row);
+    await setup.renderOnce();
+    expect(raisedLabels(items)).toEqual(["Restart"]);
+  });
+
+  it("falls back to the keyboard's row when the pointer leaves", async () => {
+    const { items } = await renderMenu({ highlight: "attach" });
+    const row = locate(setup.captureCharFrame(), "Restart")!.row;
+    await setup.mockMouse.moveTo(10, row);
+    await setup.renderOnce();
+    expect(raisedLabels(items)).toEqual(["Restart"]);
+    // Off the menu entirely: the keyboard's row is still where Enter would
+    // land, so it has to come back rather than leaving the menu blank.
+    await setup.mockMouse.moveTo(45, 12);
+    await setup.renderOnce();
+    expect(raisedLabels(items)).toEqual(["Attach"]);
+  });
+});
+
+/**
  * Issue #82. The menu is a fixed 22 columns and sizes itself as
  * `items.length + 2`. A label long enough to wrap rendered two rows while
  * still counting as one item, so the box height — and with it the viewport
@@ -155,10 +244,10 @@ describe("ContextMenu sizing", () => {
   it("leaves the labels that fit alone", async () => {
     // The longest labels the app actually authors, each with its hint.
     const items: ContextMenuItem[] = [
-      { label: "New session here", hint: "n", color: theme.text, action() {} },
-      { label: "Attach agent", hint: "enter", color: theme.text, action() {} },
-      { label: "Prune Worktrees", hint: "W", color: theme.text, action() {} },
-      { label: "Open agent view", hint: "", color: theme.text, action() {} },
+      { id: "new-session", label: "New session", hint: "n", color: theme.text, action() {} },
+      { id: "attach-agent", label: "Attach agent", hint: "enter", color: theme.text, action() {} },
+      { id: "prune", label: "Prune worktrees", hint: "W", color: theme.text, action() {} },
+      { id: "agent-view", label: "Open agent view", hint: "", color: theme.text, action() {} },
     ];
     const { frame } = await renderMenu({ items });
 
@@ -192,13 +281,87 @@ describe("ContextMenu sizing", () => {
  * A menu that has been DRAWN must never move.
  *
  * One of its items arrives asynchronously (the row menu's "Move changes",
- * gated on a `git status` the daemon runs after the menu is up). Appending it
- * last keeps everything above it still — but only where the menu grows
- * downward. Clamped against the bottom edge it grows UPWARD instead, so every
- * row slides one line up as the answer lands, under a pointer that is already
- * travelling: the click aimed at Fork lands on Kill.
+ * gated on a `git status` the daemon runs after the menu is up). The reserved
+ * row keeps the box still at a viewport edge; freezing the list on first hover
+ * keeps the individual pointer targets still when that item lands mid-list.
  */
 describe("ContextMenu with an item still to come", () => {
+  it("drops a pointer snapshot when another menu replaces the open one", async () => {
+    const first = itemSpies(["Attach", "Restart", "Kill"]);
+    const second = itemSpies(["Attach agent", "New session", "Kill"]);
+    const [items, setItems] = createSignal<ContextMenuItem[]>(first);
+    const [generation, setGeneration] = createSignal(1);
+
+    setup = await testRender(
+      () => (
+        <ContextMenu
+          openGeneration={generation()}
+          x={5}
+          y={2}
+          items={items()}
+          onClose={() => {}}
+        />
+      ),
+      { width: 60, height: 15 },
+    );
+    await setup.renderOnce();
+
+    const restart = locate(setup.captureCharFrame(), "Restart")!;
+    await setup.mockMouse.moveTo(restart.col, restart.row);
+    await setup.renderOnce();
+
+    // Replacing a truthy menu record does not remount ContextMenu. The open
+    // generation is the boundary that must release the first row's snapshot.
+    setItems(second);
+    setGeneration(2);
+    await setup.renderOnce();
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Attach agent");
+    expect(frame).toContain("New session");
+    expect(frame).not.toContain("Restart");
+  });
+
+  it("keeps pointer targets fixed once the pointer enters a row", async () => {
+    const base = itemSpies(["Attach", "Restart", "Kill"]);
+    const late = itemSpies(["Move changes"])[0]!;
+    const [items, setItems] = createSignal<ContextMenuItem[]>(base);
+    const [reserved, setReserved] = createSignal(1);
+
+    setup = await testRender(
+      () => (
+        <ContextMenu
+          x={5}
+          y={2}
+          items={items()}
+          reservedRows={reserved()}
+          onClose={() => {}}
+        />
+      ),
+      { width: 60, height: 15 },
+    );
+    await setup.renderOnce();
+
+    const restart = locate(setup.captureCharFrame(), "Restart")!;
+    await setup.mockMouse.moveTo(restart.col, restart.row);
+    await setup.renderOnce();
+
+    // The async answer inserts a row above the one the pointer is aiming at.
+    // A pointer menu freezes at first hover, so the screen coordinate keeps
+    // meaning Restart rather than silently becoming Move changes.
+    setItems([base[0]!, late, base[1]!, base[2]!]);
+    setReserved(0);
+    await setup.renderOnce();
+
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("Move changes");
+    expect(locate(frame, "Restart")?.row).toBe(restart.row);
+
+    await setup.mockMouse.click(restart.col, restart.row, MouseButtons.LEFT);
+    expect(base[1]!.action).toHaveBeenCalledTimes(1);
+    expect(late.action).not.toHaveBeenCalled();
+  });
+
   it("holds its position at the bottom edge when the item arrives", async () => {
     const base = itemSpies(["Attach", "New session", "Kill", "Restart"]);
     const late = itemSpies(["Move changes"])[0]!;

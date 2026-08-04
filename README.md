@@ -143,7 +143,7 @@ https://github.com/user-attachments/assets/7e0d42b3-4e7b-43b8-8d06-72a2d69dd694
 
 ### Diff Review with Hunk
 
-[hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's working-tree diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the right-click context menu. If the working tree has no changes, ccmux reports that instead of opening an empty review.
+[hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's working-tree diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the row menu (<kbd>m</kbd>, or right-click). If the working tree has no changes, ccmux reports that instead of opening an empty review.
 
 To send review feedback back to the agent:
 
@@ -377,11 +377,12 @@ pane beside the original, and leaves the original running and untouched. The
 agent is heading down path A; fork it and try path B side by side. (A source
 with no pane of its own gets a new window instead.)
 
-<kbd>F</kbd> in the picker, or **Fork** in a session's context menu, does it,
-and places the new pane beside the source's own. `ccmux spawn --fork
-<session-id>` forks the same way but places the result like every other
-`ccmux spawn`, relative to the pane you run it from. Either way the new pane
-is tracked like any other session, with its own row, state and id.
+<kbd>F</kbd> in the picker, or **Fork** in a session's context menu, opens the
+new-session dialog over the row; Enter on it forks straight away, into a pane
+beside the source's own. `ccmux spawn --fork <session-id>` forks the same way
+but places the result like every other `ccmux spawn`, relative to the pane you
+run it from. Either way the new pane is tracked like any other session, with
+its own row, state and id.
 
 The fork starts in the source's directory by default, because that is where a
 side-by-side fork belongs. It is a default, not a limit: `--cwd` elsewhere is
@@ -396,15 +397,14 @@ written against. Name it yourself with `--worktree <name>` or pick the ref with
 `--base`. `--with-changes` is refused on a fork: the original session is still
 running in the checkout those changes would be moved out of.
 
-**Fork into worktree**, directly under **Fork** in the same context menu, is
-the picker's version of that. It routes through the new-session dialog rather
-than acting on the click, because this is the fork that has a decision in it: a
-fork beside the original needs none, but one in a checkout of its own has a
-name, and the name is what tells two forks of a branch apart a week later. The
-**Name** row previews the `<branch>-fork` the daemon would derive and takes one
-of your own instead; a **Source** row names the conversation being continued.
-Everything else comes off the row. The item appears only where a worktree can
-go, which means a forkable row whose checkout is in a git repository.
+The picker's version of that is the **Where** row in the dialog <kbd>F</kbd>
+opens. It starts on **This checkout**, so an untouched dialog is the plain fork
+beside the original; move it to **New worktree** and a **Name** row appears,
+previewing the `<branch>-fork` the daemon would derive and taking one of your
+own instead. The name is what tells two forks of a branch apart a week later.
+A **Source** row names the conversation being continued; everything else comes
+off the row. Where the source is not in a git repository the choice is locked
+to its own checkout, since there is nowhere for a linked one to go.
 
 Fork needs two things, and the picker hides the action when either is missing:
 the agent has to declare how it forks (`forkCommand`), and ccmux has to know
@@ -419,7 +419,7 @@ verified. Adding another is one config line once you have checked it yourself
 
 Agents create git worktrees faster than anyone cleans them up, and the ones where work actually happened are the ones that stick around. After a branch is merged (and auto-deleted on GitHub), three leftovers stay on your machine: the worktree directory, the local branch, and often a tmux pane with a finished agent in it.
 
-<kbd>W</kbd> in the picker (or `Prune Worktrees` on a group header, or `ccmux worktree prune`) lists the worktrees whose work is finished, and why each one is removable:
+<kbd>W</kbd> in the picker (or `Prune worktrees` on a group header, or `ccmux worktree prune`) lists the worktrees whose work is finished, and why each one is removable:
 
 | Reason           | Meaning                                                                |
 | :--------------- | :--------------------------------------------------------------------- |
@@ -478,6 +478,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Jump to first/last    | <kbd>g</kbd><kbd>g</kbd> / <kbd>G</kbd>                                            | Go to top / bottom                                                                                                     |
 | Jump to session       | <kbd>1</kbd>–<kbd>9</kbd>                                                          | Switch directly to session N                                                                                           |
 | Switch to session     | <kbd>Enter</kbd>                                                                   | Switch tmux to the selected pane                                                                                       |
+| Row menu              | <kbd>m</kbd>                                                                       | Open the selected row's (or group header's) context menu; <kbd>j</kbd>/<kbd>k</kbd> to move, <kbd>Enter</kbd> to run   |
 | New session           | <kbd>n</kbd>                                                                       | Open the new-session dialog (agent, placement, prompt, worktree + name; directory derived from the selected row)       |
 | Search                | <kbd>/</kbd>                                                                       | Enter fuzzy search mode                                                                                                |
 | Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel                                                                                            |
@@ -488,7 +489,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Reconnect             | <kbd>R</kbd>                                                                       | Reconnect to the daemon SSE stream                                                                                     |
 | Kill session          | <kbd>x</kbd>                                                                       | Kill the selected session's process                                                                                    |
 | Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions                                                                                              |
-| Fork session          | <kbd>F</kbd>                                                                       | Branch the conversation into a pane beside it, leaving the original running                                            |
+| Fork session          | <kbd>F</kbd>                                                                       | Branch the conversation into a pane of its own, leaving the original running                                           |
 | Prune worktrees       | <kbd>W</kbd>                                                                       | Open the prune list for finished worktrees (multi-select, confirmation)                                                |
 | Review and hand back  | <kbd>d</kbd>                                                                       | Review with [hunk](https://github.com/modem-dev/hunk), then offer to send notes to the agent (requires `hunk` on PATH) |
 | Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state                                                                                           |
@@ -504,7 +505,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 <details>
 <summary><strong>New session dialog keys</strong></summary>
 
-Opened with <kbd>n</kbd>, or from the right-click menu on a session row or a group header. Every field has a default, so <kbd>n</kbd> <kbd>Enter</kbd> spawns straight away.
+Opened with <kbd>n</kbd>, or from the row menu (<kbd>m</kbd>, or right-click) on a session row or a group header. Every field has a default, so <kbd>n</kbd> <kbd>Enter</kbd> spawns straight away.
 
 | Action              | Key                                                        |
 | :------------------ | :--------------------------------------------------------- |
@@ -524,7 +525,7 @@ Choosing the worktree adds a **Name** row showing the name it would create, deri
 
 Opened from **Move changes**, the same dialog runs in move mode: the title says so, **Where** is locked to the new worktree (there is nowhere else the changes can go), the same editable **Name** row is there, and an **Untracked** field appears — <kbd>1</kbd> move, <kbd>2</kbd> copy to both, <kbd>3</kbd> leave here. <kbd>Tab</kbd> skips the locked field. See [Moving Uncommitted Changes](#moving-uncommitted-changes).
 
-Opened from **Fork into worktree** it runs in fork mode: the title says so, a **Source** row names the conversation being continued, and the **Agent** and **Prompt** rows are gone — a fork continues the source's agent and its history, so there is nothing to pick and no first message to write. **Where** is locked to the new worktree, and the **Name** row previews `<branch>-fork`. Where no name can be derived (the source is on a detached HEAD, or on a branch with nothing in it to slugify) the row asks you to type one instead of promising an automatic name. See [Forking Sessions](#forking-sessions).
+Opened with <kbd>F</kbd> or from **Fork** it runs in fork mode: the title says so, a **Source** row names the conversation being continued, and the **Agent** and **Prompt** rows are gone — a fork continues the source's agent and its history, so there is nothing to pick and no first message to write. **Where** starts on this checkout and **Placement** on a split, so <kbd>F</kbd> <kbd>Enter</kbd> forks straight into a pane beside the original. Choose the new worktree instead and the **Name** row appears, previewing `<branch>-fork`; where no name can be derived (the source is on a detached HEAD, or on a branch with nothing in it to slugify) the row asks you to type one rather than promising an automatic name. A source outside a git repository has the choice locked to its own checkout. See [Forking Sessions](#forking-sessions).
 
 In a pane too short for every row, the dialog drops what it can spare before anything you act on — the key hints first, then the mode note (a move's, or a fork's **Source** row), then the blank line, then the option lists become scrolling windows, and the directory row last; below the height its fields need, it says how many rows it wants instead of drawing over itself, and the number keys go quiet while it does.
 
@@ -583,6 +584,7 @@ ccmux config list
 | `searchTranscript`           | `true`, `false`                                                              | `true`             | Search live Claude/Codex transcripts (full history + assistant text) via the daemon                                                |
 | `persistent`                 | `true`, `false`                                                              | `false`            | Keep picker open after switching sessions (dashboard mode)                                                                         |
 | `reviewHandback`             | `confirm`, `auto`, `fill`                                                    | `confirm`          | After a hunk review, confirm delivery, send immediately, or fill the agent composer without submitting                             |
+| `tmuxSocket`                 | socket path (`/...`) or label                                                | unset              | tmux server to track (daemon restart required; see [Non-default tmux Server](#-non-default-tmux-server))                           |
 | `sidebar.width`              | `10`–`80`                                                                    | `30`               | Sidebar pane width in columns                                                                                                      |
 | `sidebar.position`           | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                                                                                      |
 
@@ -870,6 +872,37 @@ Each `terminalRules` entry must define exactly one matcher:
 Rules are evaluated top-to-bottom, and the first match wins. This lets you express broad "working" prompts and more specific multi-line waiting prompts without detector-specific logic.
 
 </details>
+
+## 🔌 Non-default tmux Server
+
+By default every tmux call resolves ambiently: `$TMUX` when ccmux runs inside tmux, tmux's default socket otherwise. That breaks when your agents live on a named server (`tmux -L work`) but the daemon was auto-started from a plain login shell, which lands it on the default socket. It scans a server with no panes on it, finds nothing, and the board sits empty.
+
+Name the server explicitly, by config or environment:
+
+```bash
+ccmux config set tmuxSocket work           # a label -> tmux -L work
+ccmux config set tmuxSocket /tmp/my.sock   # a path  -> tmux -S /tmp/my.sock
+ccmux daemon restart
+
+export CCMUX_TMUX_SOCKET=work              # same thing, per shell (wins over the config key)
+```
+
+There is also a convenience flag for an explicitly started daemon:
+
+```bash
+ccmux daemon start -b --label work
+ccmux daemon start -b --socket /tmp/my.sock
+ccmux daemon status                        # prints the socket the running daemon tracks
+```
+
+A leading `/` means a socket path, anything else a label. Environment and config are the primary interface because the daemon is usually auto-started for you (it inherits your environment, so both reach it); the flag only applies to a `ccmux daemon start` you run yourself.
+
+Inside tmux, the client half of ccmux ignores the setting and uses the server you are attached to. You are physically on that server, so pointing the picker's pane actions at another one would be nonsense. The daemon always honors it, which is the point.
+
+> [!NOTE]
+> ccmux tracks exactly one tmux server. Pane ids (`%3`) are unique only within a server, and the daemon's marker directory and log watchers are process-global, so running two daemons against two servers is unsupported.
+
+When the configured server cannot be reached, the picker, the sidebar, and `ccmux show` say so and name the socket (`tmux server unreachable at /private/tmp/tmux-501/work`) instead of reporting an empty session list.
 
 ## 🌐 Remote / SSH
 

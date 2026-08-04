@@ -1,4 +1,5 @@
 import { PANE_FIELD_SEP } from "../../lib/tmux-format";
+import { tmuxArgv } from "../../lib/tmux-exec";
 
 /**
  * Live tmux state of the window hosting this process's own pane.
@@ -56,7 +57,7 @@ export async function fetchWindowState(): Promise<WindowState> {
       "#{session_attached}",
     ].join(PANE_FIELD_SEP);
     const proc = Bun.spawn(
-      ["tmux", "display-message", "-p", "-t", pane, format],
+      tmuxArgv("display-message", "-p", "-t", pane, format),
       { stdout: "pipe", stderr: "ignore" },
     );
     const out = await new Response(proc.stdout).text();

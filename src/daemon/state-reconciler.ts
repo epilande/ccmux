@@ -26,6 +26,7 @@ import { isPaneTrackedSession, isBackgroundSession } from "./sessions";
 import { resolveDeadProcessState } from "./status-machine";
 import { matchTerminalRule } from "./terminal-detector";
 import { capturePane } from "./pane-io";
+import { tmuxArgv } from "../lib/tmux-exec";
 import { detectPaneState } from "./pane-classify";
 import { normalizeTty } from "./pane-discovery";
 import type { AttentionTracker } from "./attention-tracker";
@@ -421,7 +422,7 @@ async function reconcileAttentionStates(deps: ReconcilerDeps): Promise<void> {
  */
 export async function getActivePaneId(): Promise<string | null> {
   try {
-    const proc = Bun.spawn(["tmux", "display-message", "-p", "#{pane_id}"], {
+    const proc = Bun.spawn(tmuxArgv("display-message", "-p", "#{pane_id}"), {
       stdout: "pipe",
       stderr: "pipe",
     });

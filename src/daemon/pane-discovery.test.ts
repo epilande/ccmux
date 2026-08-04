@@ -1,7 +1,113 @@
-import { describe, it, expect } from "bun:test";
-import { findPaneHostingPid } from "./pane-discovery";
+import { afterEach, beforeEach, describe, it, expect, spyOn } from "bun:test";
+import {
+  findPaneHostingPid,
+  PaneDiscoveryError,
+  scanTmuxPanesOrThrow,
+} from "./pane-discovery";
 import type { ProcessTree, ProcessNode } from "./process-tree";
 import type { TmuxPane } from "../types/session";
+import * as preferences from "../lib/preferences";
+import { resetTmuxSocketCache } from "../lib/tmux-socket";
+import { PANE_FIELD_SEP } from "../lib/tmux-format";
+
+describe("scanTmuxPanesOrThrow", () => {
+  const ORIGINAL_SOCKET_ENV = process.env.CCMUX_TMUX_SOCKET;
+  let prefsSpy: ReturnType<
+    typeof spyOn<typeof preferences, "getPreferencesSync">
+  >;
+  let originalSpawn: typeof Bun.spawn;
+
+  /** Canned `tmux list-panes` result, so no tmux binary is involved. */
+  function withTmuxResult(opts: {
+    exitCode: number;
+    stdout?: string;
+    stderr?: string;
+  }): void {
+    Bun.spawn = (() => ({
+      exited: Promise.resolve(opts.exitCode),
+      stdout: new Blob([opts.stdout ?? ""]).stream(),
+      stderr: new Blob([opts.stderr ?? ""]).stream(),
+    })) as unknown as typeof Bun.spawn;
+  }
+
+  beforeEach(() => {
+    // A developer's own tmuxSocket would otherwise leak into the argv and into
+    // the thrown message's `attemptedTmuxSocketPath()`.
+    prefsSpy = spyOn(preferences, "getPreferencesSync").mockImplementation(
+      () => ({}),
+    );
+    delete process.env.CCMUX_TMUX_SOCKET;
+    resetTmuxSocketCache();
+    originalSpawn = Bun.spawn;
+  });
+
+  afterEach(() => {
+    Bun.spawn = originalSpawn;
+    prefsSpy.mockRestore();
+    resetTmuxSocketCache();
+    if (ORIGINAL_SOCKET_ENV === undefined) delete process.env.CCMUX_TMUX_SOCKET;
+    else process.env.CCMUX_TMUX_SOCKET = ORIGINAL_SOCKET_ENV;
+  });
+
+  it("reports tmux's own words for a server that is not there, without throwing", async () => {
+    withTmuxResult({
+      exitCode: 1,
+      stderr: "no server running on /private/tmp/tmux-501/fix98\n",
+    });
+    // The empty pane list is what the scan loop acts on (reaping included);
+    // `noServer` only tells /server-info which socket went dead.
+    expect(await scanTmuxPanesOrThrow()).toEqual({
+      panes: [],
+      noServer: "no server running on /private/tmp/tmux-501/fix98",
+    });
+  });
+
+  it("reports the other no-server shape too", async () => {
+    withTmuxResult({
+      exitCode: 1,
+      stderr: "error connecting to /private/tmp/tmux-501/fix98 (No such file)",
+    });
+    const scan = await scanTmuxPanesOrThrow();
+    expect(scan.panes).toEqual([]);
+    expect(scan.noServer).toContain("error connecting to");
+  });
+
+  it("still throws for any other non-zero exit", async () => {
+    withTmuxResult({ exitCode: 1, stderr: "lost server" });
+    expect(scanTmuxPanesOrThrow()).rejects.toBeInstanceOf(PaneDiscoveryError);
+  });
+
+  it("gives no reason for a live server that simply has no panes", async () => {
+    withTmuxResult({ exitCode: 0, stdout: "" });
+    expect(await scanTmuxPanesOrThrow()).toEqual({ panes: [], noServer: null });
+  });
+
+  it("gives no reason alongside parsed panes", async () => {
+    const line = [
+      "%7",
+      "4242",
+      "work",
+      "1",
+      "0",
+      "/dev/ttys001",
+      "1700000000",
+      "1700000100",
+      "claude",
+      "node",
+      "/repo",
+    ].join(PANE_FIELD_SEP);
+    withTmuxResult({ exitCode: 0, stdout: `${line}\n` });
+
+    const scan = await scanTmuxPanesOrThrow();
+    expect(scan.noServer).toBe(null);
+    expect(scan.panes).toHaveLength(1);
+    expect(scan.panes[0]).toMatchObject({
+      paneId: "%7",
+      panePid: 4242,
+      target: "work:1.0",
+    });
+  });
+});
 
 describe("findPaneHostingPid", () => {
   const makePane = (paneId: string, panePid: number): TmuxPane => ({

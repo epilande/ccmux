@@ -17,6 +17,7 @@ import {
 } from "@opentui/solid";
 import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../types/session";
+import type { TmuxSocketError } from "../types";
 import {
   createTUIStore,
   namesAWorktree,
@@ -46,6 +47,7 @@ import {
   resolveLaunchPane,
   type OpenAgentsResult,
 } from "./utils/tmux";
+import { tmuxArgv } from "../lib/tmux-exec";
 import { isSameServerCached, setDaemonSocketPath } from "./utils/server-guard";
 import { getDaemonUrl, resolvedHomeDir, STATE_FILE } from "../lib/config";
 import { getUIState } from "../lib/state";
@@ -58,7 +60,7 @@ import {
 } from "./utils/perf";
 import { Header } from "./components/Header";
 import { Footer } from "./components/Footer";
-import { SessionList } from "./components/SessionList";
+import { type RowAnchor, SessionList } from "./components/SessionList";
 import { SearchInput } from "./components/SearchInput";
 import { Preview } from "./components/Preview";
 import { Toast } from "./components/Toast";
@@ -204,9 +206,17 @@ export function App(props: AppProps) {
    *  a stale one. Fail-open until it resolves. */
   function refreshServerInfo(): void {
     fetch(`${getDaemonUrl()}/server-info`)
-      .then((r) => r.json() as Promise<{ socketPath: string | null }>)
+      .then(
+        (r) =>
+          r.json() as Promise<{
+            socketPath: string | null;
+            socketError?: TmuxSocketError | null;
+          }>,
+      )
       .then((d) => {
         setDaemonSocketPath(d.socketPath ?? null);
+        // A daemon predating the field omits it, which reads as "no error".
+        store.actions.setTmuxSocketError(d.socketError ?? null);
       })
       .catch(() => {});
   }
@@ -421,14 +431,15 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Whether this row can be forked into a worktree of its own (issue #70).
+   * Whether this row's fork can be given a worktree of its own (issue #70).
    *
-   * Everything the plain fork needs, plus a repository for the worktree to
+   * Everything the fork itself needs, plus a repository for the worktree to
    * hang off: `mainRepoRoot` is what the daemon would resolve too, so a row
    * without one has nowhere to put a linked checkout. Checked here rather
-   * than left to the daemon's refusal because this is a MENU ITEM — hiding
-   * what cannot work is the same rule the plain Fork item follows, and an
-   * item that only ever answers with an error reads as broken.
+   * than left to the daemon's refusal, but only where the CHOICE is offered:
+   * the Fork item and the `F` key are gated on `canForkSession` alone, and a
+   * source outside a repository simply opens the dialog with its destination
+   * locked to the checkout it is already in.
    */
   function canForkIntoWorktree(
     session:
@@ -468,72 +479,96 @@ export function App(props: AppProps) {
    * open two panes off one conversation. */
   let forkInFlight = false;
 
+  /**
+   * Identity of the latest new-session dialog opened by this App instance.
+   * A fork request can outlive the dialog that submitted it; its completion
+   * must not close a replacement the user opened while the request was out.
+   */
+  let newSessionDialogSequence = 0;
+
   /** Ceiling on a fork request. Without one, a daemon that accepts the
    * connection and never answers latches `forkInFlight` for the rest of the
    * picker's life, and `F` silently stops working. */
   const FORK_TIMEOUT_MS = 15_000;
 
   /**
-   * Fork a session into a pane beside its own: same agent, same directory,
-   * conversation continued from the source's history, original untouched.
+   * Open the new-session dialog in fork mode over `session`: continue this
+   * conversation, either beside the original or in a worktree of its own.
    *
-   * The picker only chooses the DESTINATION here (`split` + `target` /
-   * `callerPane`); how to continue the conversation is the daemon's
-   * `forkCommand` template. No cwd is sent, which the daemon reads as "the
-   * source's directory" — a product choice (a fork sits beside its original),
-   * not a constraint: the daemon accepts an explicit cwd for a fork.
+   * The single entry point for both the `F` key and the row menu's Fork item.
+   * `F` used to post a fork on the keystroke and the menu carried a second
+   * item for the worktree variant; one item that always asks is fewer things
+   * to learn, and the destination is the only decision a fork has.
+   *
+   * Everything else the request needs comes off the row, since a fork's agent
+   * and directory are the source's — the dialog only carries enough of the
+   * source to describe it, because the session list re-sorts under SSE while
+   * a dialog is open.
    */
-  async function forkSession(session: EnrichedSession) {
-    if (!canForkSession(session)) return;
-    if (forkInFlight) {
-      // Say so rather than dropping it silently, which is indistinguishable
-      // from a dead key.
-      store.actions.showToast("Fork already in progress");
-      return;
+  function openForkDialog(session: EnrichedSession): void {
+    openNewSession({
+      cwd: sessionCwd(session),
+      agent: session.agentType,
+      fork: {
+        sessionId: session.id,
+        // The agent and the branch: between them they say which of a
+        // directory's sessions this is, and the branch is also what a derived
+        // worktree name is built from, so that preview is explained rather
+        // than merely displayed.
+        label: session.gitBranch
+          ? `${session.agentType} · ${session.gitBranch}`
+          : session.agentType,
+        // A detached checkout reports the literal string "HEAD" here, which
+        // is a branch column's honest answer and a naming rule's nonsense:
+        // the daemon names a fork of one after the sha (`readCheckoutHead`),
+        // so previewing `head-fork` promises a name nobody gets. Worse, the
+        // preview is typeable — sent as an EXPLICIT name it would make the
+        // second detached fork open the first one's checkout. Null instead,
+        // which is the row's existing "a name is coming, just not one this
+        // client can show" state. The label above keeps saying HEAD.
+        branch: session.gitBranch === "HEAD" ? null : session.gitBranch,
+        canWorktree: canForkIntoWorktree(session),
+        pane: session.tmuxPane ?? null,
+      },
+    });
+  }
+
+  /**
+   * Where a fork's new pane goes, in the daemon's own terms.
+   *
+   * The two destinations differ, and the difference is the point. A fork that
+   * stays in the source's checkout is a sibling of THAT conversation, so a
+   * split is taken out of the source's own pane (`target`) — which is what the
+   * one-shot `F` always did. A fork into a worktree has left that context
+   * behind, so it follows the ordinary spawn rule and splits the CALLER's pane
+   * instead; an explicit `target` there would insert a window mid-session and
+   * renumber everything after it.
+   *
+   * Falling back to `callerPane` also covers a source with no pane to sit
+   * beside: with no placement at all the daemon runs a bare `new-window`, and
+   * having no client of its own tmux picks its MRU session — so the window
+   * lands somewhere unrelated and the jump afterwards drags the user there.
+   */
+  async function forkPlacement(
+    draft: NewSessionDraft,
+    fork: NewSessionFork,
+  ): Promise<{
+    split: "h" | "v" | false;
+    target?: string;
+    callerPane?: string;
+  }> {
+    let split = SPAWN_SPLIT[draft.placement];
+    if (draft.destination !== "worktree" && split !== false && fork.pane) {
+      return { split, target: fork.pane };
     }
-    forkInFlight = true;
-    try {
-      // Beside the source when it has a pane to sit beside. Otherwise a new
-      // window in the CALLER's session: sending no placement at all leaves
-      // the daemon running a bare `new-window`, and since the daemon has no
-      // client, tmux picks its own MRU session — so the window lands
-      // somewhere unrelated and the jump below then drags the user there.
-      const target = session.tmuxPane ?? undefined;
-      const callerPane = target ? undefined : await resolveSpawnPane();
-      const response = await fetch(`${getDaemonUrl()}/spawn`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fork: session.id,
-          split: target ? "h" : false,
-          target,
-          callerPane: callerPane ?? undefined,
-          // The jump below is this component's own exit path (it flashes the
-          // pane and closes a one-shot picker); letting the daemon switch too
-          // would race it.
-          detach: true,
-        }),
-        signal: AbortSignal.timeout(FORK_TIMEOUT_MS),
-      });
-      const data = (await response.json().catch(() => null)) as {
-        paneId?: string;
-        error?: string;
-      } | null;
-      if (!response.ok || !data?.paneId) {
-        store.actions.showToast(
-          `Fork failed: ${data?.error ?? response.statusText}`,
-        );
-        return;
-      }
-      selectPane(data.paneId);
-    } catch (err: unknown) {
-      store.actions.showToast(`Fork failed: ${errText(err)}`);
-    } finally {
-      // In `finally`, not on each exit path: a throw between the guard and
-      // the response (an aborted fetch, a rejected json parse) used to leave
-      // the latch set forever.
-      forkInFlight = false;
+    const callerPane = await resolveSpawnPane();
+    // A sidebar alone in its window has nothing to split but itself, and the
+    // daemon's placement-less `split-window` would halve the rail.
+    if (split !== false && callerPane === null && props.sidebar) {
+      split = false;
+      store.actions.showToast("No pane to split here; opened a window");
     }
+    return { split, callerPane: callerPane ?? undefined };
   }
 
   /**
@@ -590,12 +625,18 @@ export function App(props: AppProps) {
   } | null>(null);
 
   /**
+   * Identity of a particular row-menu opening. The menu component stays
+   * mounted when one open menu is replaced by another, so row identity alone
+   * is not enough: reopening the same row must also clear pointer snapshots.
+   */
+  const [menuOpenGeneration, setMenuOpenGeneration] = createSignal(0);
+
+  /**
    * Ask whether a row's checkout is dirty, for the menu gate.
    *
-   * The answer arrives after the menu is already on screen, so the item it
-   * gates is APPENDED LAST (see `sessionMenuItems`). Anywhere else and a row
-   * the user is already reaching for would slide down as this lands — the
-   * same hazard that moved Fork below Restart. There is deliberately no
+   * The answer arrives after the menu is already on screen, so the menu
+   * reserves its height and freezes its pointer targets on first hover (see
+   * `sessionMenuItems` and `ContextMenu`). There is deliberately no
    * placeholder or "checking…" row in the meantime: the item is simply
    * absent, so the menu never shows something that isn't actionable.
    *
@@ -607,7 +648,10 @@ export function App(props: AppProps) {
    * the move will run in is how a gate ends up offering an action that then
    * refuses — or hiding one that would have worked.
    */
-  function refreshMenuDirty(session: EnrichedSession): void {
+  function refreshMenuDirty(
+    session: EnrichedSession,
+    openGeneration: number,
+  ): void {
     const sessionId = session.id;
     setMenuDirty(null);
     const url = new URL(`${getDaemonUrl()}/sessions/${sessionId}/dirty`);
@@ -618,10 +662,15 @@ export function App(props: AppProps) {
       .then(async (response) => {
         if (!response.ok) return;
         const data = (await response.json()) as { dirty?: boolean };
-        // Only apply it if that row's menu is STILL the one open. A slow
-        // answer for a menu the user already dismissed (or reopened on
-        // another row) must not resurrect an item there.
-        if (store.state.contextMenu?.sessionId !== sessionId) return;
+        // Only apply it if this PARTICULAR opening of that row's menu is
+        // still live. Session identity alone is not enough: close/reopen on
+        // the same row can leave the earlier request racing the new one.
+        if (
+          store.state.contextMenu?.sessionId !== sessionId ||
+          menuOpenGeneration() !== openGeneration
+        ) {
+          return;
+        }
         setMenuDirty({ sessionId, dirty: data.dirty === true });
       })
       .catch(() => {
@@ -639,16 +688,138 @@ export function App(props: AppProps) {
       return;
     }
     store.actions.setSelectedIndex(index);
+    openRowMenu(item, event.x, event.y, false);
+  }
+
+  /**
+   * Open the menu `item` owns at a screen position, lighting its first item
+   * when `focusFirst` (the keyboard's way in; the pointer highlights by
+   * hovering instead).
+   *
+   * Shared by the pointer and the `m` key so the two can only ever differ in
+   * where the menu is anchored and whether a row starts lit. Everything that
+   * makes a menu what it is — which menu, and the dirty question that gates
+   * "Move changes" — happens once, here.
+   *
+   * The first item is resolved AFTER the menu is open, because the item lists
+   * are built from the open menu's own state: there is no list to take a
+   * first item from until the state names which row the menu belongs to.
+   */
+  function openRowMenu(
+    item: FlatItem,
+    x: number,
+    y: number,
+    focusFirst: boolean,
+  ): void {
+    const openGeneration = menuOpenGeneration() + 1;
+    setMenuOpenGeneration(openGeneration);
     if (item.type === "session") {
       const session = item.filteredSession.session;
-      store.actions.showContextMenu(session.id, event.x, event.y);
+      store.actions.showContextMenu(session.id, x, y);
       // Same condition both consumers gate on (`sessionMenuItems` and
       // `sessionMenuReservedRows`): a background row has no move to offer, so
       // asking would spend a `git status -uall` on an answer nobody reads.
-      if (session.trackingMode !== "background") refreshMenuDirty(session);
+      if (session.trackingMode !== "background") {
+        refreshMenuDirty(session, openGeneration);
+      }
     } else {
-      store.actions.showGroupContextMenu(item.groupKey, event.x, event.y);
+      store.actions.showGroupContextMenu(item.groupKey, x, y);
     }
+    if (!focusFirst) return;
+    const first = menuItems()[0];
+    if (first) store.actions.setMenuHighlight(first.id);
+  }
+
+  /** The open menu's items, whichever menu that is, in the order they are
+   *  drawn — the one list the keys, the highlight and the render all read. */
+  function menuItems(): ContextMenuItem[] {
+    if (store.state.contextMenu) return sessionMenuItems();
+    if (store.state.groupContextMenu) return groupMenuItems();
+    return [];
+  }
+
+  /** How the list answers where a row is on screen; see `SessionList`'s
+   *  `onRowAnchor`. Undefined until the list has rows to draw. */
+  let rowAnchor: RowAnchor | undefined;
+
+  /**
+   * The `m` key: open the selected row's menu, or close the one that is open.
+   *
+   * A toggle rather than a second way in, because `m` is also the key the
+   * menu itself closes on — pressing it twice has to land somewhere sensible,
+   * and reopening the menu you just dismissed is not it.
+   *
+   * The anchor comes from the list rather than from the row: only the list
+   * knows where its rows currently are, and a menu that opened at a fixed
+   * corner would leave the user to work out which row it belonged to.
+   */
+  function toggleRowMenu(): void {
+    // Every overlay in this predicate already returns before the key switch
+    // reaches `m`, so this is the second lock on the same door — kept because
+    // the FIRST one is an ordering, and the comment on `modalOverlayOpen`
+    // exists because an ordering is exactly what two overlays have already
+    // been left out of. A menu opened under a dialog would be unreachable:
+    // the dialog's key branch runs first, so nothing could dismiss it.
+    if (modalOverlayOpen()) return;
+    if (store.state.contextMenu || store.state.groupContextMenu) {
+      store.actions.hideContextMenu();
+      store.actions.hideGroupContextMenu();
+      return;
+    }
+    const item = store.selectedFlatItem();
+    if (!item) return;
+    const anchor = rowAnchor?.(store.selectedIndex());
+    // No anchor means no drawn list to anchor in, which is also a list with
+    // nothing selected — so there is nothing to open a menu about.
+    if (!anchor) return;
+    // The first item lit: `m` is a keyboard action, and Enter has to have
+    // somewhere to land the moment the menu appears.
+    openRowMenu(item, anchor.x, anchor.y, true);
+  }
+
+  /**
+   * Keys while a row menu is open.
+   *
+   * Only the ones the menu itself answers to are taken; everything else
+   * closes the menu and falls through to its ordinary meaning, which is what
+   * this surface has always done with a menu on screen (a keypress means
+   * attention has moved on). Returning true here means the key was the
+   * menu's and the caller must stop.
+   */
+  function handleContextMenuKey(event: KeyEvent): boolean {
+    const key = event.name;
+    const items = menuItems();
+    if (key === "j" || key === "down") {
+      store.actions.moveMenuHighlight(
+        1,
+        items.map((i) => i.id),
+      );
+      return true;
+    }
+    if (key === "k" || key === "up") {
+      store.actions.moveMenuHighlight(
+        -1,
+        items.map((i) => i.id),
+      );
+      return true;
+    }
+    if (key === "return" || key === "enter") {
+      const menu = store.state.contextMenu ?? store.state.groupContextMenu;
+      // Nothing lit (a menu the pointer opened), or an item that has since
+      // left the list, means Enter has no target. Closing, or falling back to
+      // whatever now sits in that row, would be a guess at what was meant.
+      const highlighted = items.find((i) => i.id === menu?.highlight);
+      // The item's own action closes the menu — every one of them does, and
+      // doing it here as well would hide a menu the action meant to keep.
+      highlighted?.action();
+      return true;
+    }
+    if (key === "escape" || key === "m") {
+      store.actions.hideContextMenu();
+      store.actions.hideGroupContextMenu();
+      return true;
+    }
+    return false;
   }
 
   function contextMenuAttach() {
@@ -741,48 +912,7 @@ export function App(props: AppProps) {
     if (!cm) return;
     const session = store.state.sessions.find((s) => s.id === cm.sessionId);
     store.actions.hideContextMenu();
-    if (session) void forkSession(session);
-  }
-
-  /**
-   * "Fork into worktree": continue this session in a checkout of its own,
-   * through the dialog rather than on the click.
-   *
-   * The dialog is what makes this different from `F`: a fork beside the
-   * original needs no decisions, but a fork into a worktree has a name — and
-   * the name is what tells two forks of one branch apart later. Everything
-   * else the request needs comes off the row, since a fork's agent and
-   * directory are the source's.
-   */
-  function contextMenuForkIntoWorktree() {
-    const cm = store.state.contextMenu;
-    if (!cm) return;
-    const session = store.state.sessions.find((s) => s.id === cm.sessionId);
-    store.actions.hideContextMenu();
-    if (!session || !canForkIntoWorktree(session)) return;
-    openNewSession({
-      cwd: sessionCwd(session),
-      agent: session.agentType,
-      fork: {
-        sessionId: session.id,
-        // The agent and the branch: between them they say which of a
-        // directory's sessions this is, and the branch is also what the
-        // derived name is built from, so the preview below it is explained
-        // rather than merely displayed.
-        label: session.gitBranch
-          ? `${session.agentType} · ${session.gitBranch}`
-          : session.agentType,
-        // A detached checkout reports the literal string "HEAD" here, which
-        // is a branch column's honest answer and a naming rule's nonsense:
-        // the daemon names a fork of one after the sha (`readCheckoutHead`),
-        // so previewing `head-fork` promises a name nobody gets. Worse, the
-        // preview is typeable — sent as an EXPLICIT name it would make the
-        // second detached fork open the first one's checkout. Null instead,
-        // which is the row's existing "a name is coming, just not one this
-        // client can show" state. The label above keeps saying HEAD.
-        branch: session.gitBranch === "HEAD" ? null : session.gitBranch,
-      },
-    });
+    if (session && canForkSession(session)) openForkDialog(session);
   }
 
   function contextMenuNewSession() {
@@ -854,6 +984,7 @@ export function App(props: AppProps) {
     const reviewItem: ContextMenuItem[] = reviewEnabled
       ? [
           {
+            id: "review",
             label: "Review diff",
             hint: "d",
             color: theme.text,
@@ -862,33 +993,41 @@ export function App(props: AppProps) {
         ]
       : [];
     const newSessionItem: ContextMenuItem = {
-      label: "New session here",
+      id: "new-session",
+      label: "New session",
       hint: "n",
       color: theme.text,
       action: contextMenuNewSession,
     };
+    const killItem: ContextMenuItem = {
+      id: "kill",
+      label: "Kill",
+      hint: "x",
+      color: theme.red,
+      action: () => contextMenuConfirm("kill"),
+    };
     if (session?.trackingMode === "background") {
       return [
         {
+          id: "attach-agent",
           label: "Attach agent",
           hint: "enter",
           color: theme.green,
           action: contextMenuAttachAgent,
         },
         {
+          id: "agent-view",
           label: "Open agent view",
           hint: "",
           color: theme.text,
           action: contextMenuOpenAgentView,
         },
         newSessionItem,
-        {
-          label: "Kill",
-          hint: "x",
-          color: theme.red,
-          action: () => contextMenuConfirm("kill"),
-        },
         ...reviewItem,
+        // Last here too: the destructive action is the one that must never
+        // slide under a pointer (or a highlight) reaching for something else,
+        // and the bottom is the only position nothing can be appended below.
+        killItem,
       ];
     }
     // Only once the daemon has confirmed this row has uncommitted work.
@@ -900,6 +1039,7 @@ export function App(props: AppProps) {
       session && dirty?.sessionId === session.id && dirty.dirty
         ? [
             {
+              id: "move-changes",
               // Must fit ContextMenu's fixed 22-col box on ONE line: the
               // component computes its height as `items.length + 2`, so a
               // label that wraps renders two rows and silently breaks the
@@ -907,71 +1047,61 @@ export function App(props: AppProps) {
               // full phrase lives in the dialog this opens.
               label: "Move changes",
               hint: "",
-              color: theme.peach,
+              color: theme.text,
               action: contextMenuMoveChanges,
             },
           ]
         : [];
     // Hidden rather than disabled when the agent or the row can't be forked:
     // an item that is only ever there for Claude rows with hooks installed
-    // would otherwise read as broken on every other row.
+    // would otherwise read as broken on every other row. Where the fork can
+    // GO is the dialog's question, not this item's — a row outside a
+    // repository still forks, just with nowhere to put a worktree.
     const forkItem: ContextMenuItem[] = canForkSession(session)
       ? [
           {
+            id: "fork",
             label: "Fork",
             hint: "F",
-            color: theme.blue,
+            color: theme.text,
             action: contextMenuFork,
           },
-          // Directly under its one-shot sibling, and only where there is a
-          // repository to make a worktree in. Same 22-column, one-line rule
-          // as every other label here: at exactly 18 columns this one has no
-          // room to grow, and a wrap would silently break the whole menu's
-          // height.
-          ...(canForkIntoWorktree(session)
-            ? [
-                {
-                  label: "Fork into worktree",
-                  hint: "",
-                  color: theme.blue,
-                  action: contextMenuForkIntoWorktree,
-                },
-              ]
-            : []),
         ]
       : [];
+    // Ordered by what the actions DO, not by when they arrive: the things
+    // that start something (attach, spawn, fork), then the things that read
+    // (review), then the ones that move work about, and the two that end a
+    // session last — Kill at the bottom, where a destructive action is
+    // hardest to hit by accident.
+    //
+    // Two of these come and go under an open menu. "Move changes" appears
+    // when the dirty check answers, and Fork disappears on an SSE update that
+    // drops `nativeSessionId`. Neither is last any more, so each shifts the
+    // rows below it. The keyboard highlight is stored as an item ID so it
+    // follows the same action through that shift; once the pointer enters a
+    // row, ContextMenu freezes the rendered list instead, because a pointer
+    // addresses a screen coordinate and must never find a different action
+    // there on mouse-down.
     return [
       {
+        id: "attach",
         label: "Attach",
         hint: "enter",
         color: theme.green,
         action: contextMenuAttach,
       },
       newSessionItem,
-      {
-        label: "Kill",
-        hint: "x",
-        color: theme.red,
-        action: () => contextMenuConfirm("kill"),
-      },
-      {
-        label: "Restart",
-        hint: "r",
-        color: theme.peach,
-        action: () => contextMenuConfirm("restart"),
-      },
-      // Last of the always-present actions on purpose. This item appears and
-      // disappears reactively (an SSE update that drops `nativeSessionId`
-      // removes it), and anything above Kill would slide Kill under a cursor
-      // already hovering the old position.
       ...forkItem,
       ...reviewItem,
-      // ABSOLUTE LAST, and that position is the whole design. Unlike every
-      // item above it, this one arrives ASYNCHRONOUSLY: the menu is already
-      // on screen when the dirty answer lands, so anywhere else it would
-      // shove the items below it down under a cursor that is already moving.
-      // Last means the only thing that can change is empty space.
       ...moveChangesItem,
+      {
+        id: "restart",
+        label: "Restart",
+        hint: "r",
+        color: theme.text,
+        action: () => contextMenuConfirm("restart"),
+      },
+      killItem,
     ];
   }
 
@@ -979,6 +1109,12 @@ export function App(props: AppProps) {
    * Rows the row menu holds for the "Move changes" item that may still
    * arrive. See `ContextMenu`'s `reservedRows`: this is what keeps a
    * bottom-clamped menu from sliding up as the dirty answer lands.
+   *
+   * About the BOX, not the item's own position, which is why it still reads
+   * the same way now that the item lands mid-list rather than at the end: the
+   * menu grows by one row whichever slot the row goes into, and a menu
+   * clamped against the bottom edge grows upward — moving every row it
+   * already had.
    *
    * Held from the moment the menu opens until it closes, and released only
    * once the item is actually IN the list — a menu that never gets the item
@@ -1002,37 +1138,46 @@ export function App(props: AppProps) {
     const isCollapsed = cm ? store.collapsedGroups().has(cm.groupKey) : false;
     return [
       {
+        // One id for both labels: it is one action whose name reflects the
+        // group's current state, and a highlight must not drop off it because
+        // the group collapsed underneath.
+        id: "collapse",
         label: isCollapsed ? "Expand" : "Collapse",
         hint: "space",
         color: theme.text,
         action: groupContextMenuToggleCollapse,
       },
       {
-        label: "New session here",
+        id: "new-session",
+        label: "New session",
         hint: "n",
         color: theme.text,
         action: groupContextMenuNewSession,
       },
       {
-        label: "Pin to Top",
+        id: "pin-top",
+        label: "Pin to top",
         hint: "<",
-        color: theme.blue,
+        color: theme.text,
         action: () => groupContextMenuPin("top"),
       },
       {
-        label: "Pin to Bottom",
+        id: "pin-bottom",
+        label: "Pin to bottom",
         hint: ">",
-        color: theme.blue,
+        color: theme.text,
         action: () => groupContextMenuPin("bottom"),
       },
       {
-        label: "Prune Worktrees",
+        id: "prune",
+        label: "Prune worktrees",
         hint: "W",
-        color: theme.peach,
+        color: theme.text,
         action: groupContextMenuPrune,
       },
       {
-        label: "Kill Group",
+        id: "kill-group",
+        label: "Kill group",
         hint: "X",
         color: theme.red,
         action: groupContextMenuKill,
@@ -1232,12 +1377,20 @@ export function App(props: AppProps) {
   }): void {
     // Mirrors `reviewSession`: refuse at the point of intent rather than
     // opening a dialog with a blank Directory row whose Enter round-trips
-    // to a 400 from the daemon.
-    if (!context.cwd) {
+    // to a 400 from the daemon. A FORK is exempt: it sends no cwd at all (the
+    // daemon reads the source's), so a row whose directory never reached this
+    // client is still perfectly forkable, and refusing would break the `F`
+    // key on it for the sake of one blank row.
+    if (!context.cwd && !context.fork) {
       store.actions.showToast("Can't start here: no working directory");
       return;
     }
-    ensureSpawnableAgents();
+    // Fork mode inherits its agent from the source session and neither draws
+    // nor submits the Agent field. Keep the per-open refresh for every mode
+    // that actually offers that field, but do not pay for preferences/PATH
+    // resolution on a fork dialog that cannot consume the answer.
+    if (!context.fork) ensureSpawnableAgents();
+    newSessionDialogSequence += 1;
     store.actions.openNewSessionDialog({
       cwd: context.cwd,
       // The row's own agent, else whatever was spawned last (persisted, so
@@ -1409,55 +1562,59 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Continue the dialog's source session in a worktree of its own (issue
-   * #70): the `F` key's fork, with a destination and a name.
+   * Continue the dialog's source session (issue #70): the same conversation,
+   * in the checkout it is already in or in a worktree of its own.
    *
    * Split from the spawn path rather than folded into it, because almost none
    * of that path applies: there is no agent to resolve, no prompt to check
    * against one, no cwd (the daemon reads the source's), and no last-agent to
    * remember. What it shares is the DIALOG — the same placement semantics and
-   * the same derived-vs-explicit name — and the same one-at-a-time guard the
-   * key path uses, since both open a pane off one conversation.
+   * the same derived-vs-explicit name.
+   *
+   * The one-at-a-time guard is the whole reason a landed fork is not simply
+   * left to the daemon: one conversation must not become two panes because
+   * Enter was pressed twice.
    */
-  async function submitForkIntoWorktree(draft: NewSessionDraft): Promise<void> {
+  async function submitFork(draft: NewSessionDraft): Promise<void> {
     const fork = draft.fork;
     if (!fork) return;
-    if (refuseUnslugifiableName(draft)) return;
+    const toWorktree = draft.destination === "worktree";
+    if (toWorktree && refuseUnslugifiableName(draft)) return;
     // Placement carries a `%N` from OUR tmux server; see `submitNewSession`.
     if (!ensureSameServer()) return;
     if (forkInFlight) {
+      // Say so rather than dropping it silently, which is indistinguishable
+      // from a dead key.
       store.actions.showToast("Fork already in progress");
       return;
     }
     forkInFlight = true;
+    const dialogSequence = newSessionDialogSequence;
     const worktreeName = draftWorktreeName(draft);
     try {
-      const callerPane = await resolveSpawnPane();
-      let split = SPAWN_SPLIT[draft.placement];
-      if (split !== false && callerPane === null && props.sidebar) {
-        split = false;
-        store.actions.showToast("No pane to split here; opened a window");
-      }
+      const placement = await forkPlacement(draft, fork);
       const response = await fetch(`${getDaemonUrl()}/spawn`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           fork: fork.sessionId,
-          // `callerPane`, not `target`: same reasoning as the ordinary spawn's
-          // — the picker means "my session/pane", and an explicit target
-          // renumbers the windows after it.
-          split,
-          callerPane: callerPane ?? undefined,
+          ...placement,
           // The jump below is this component's own exit path; letting the
           // daemon switch too would race it.
           detach: true,
-          // Always present, even empty: the object is what asks for a worktree
-          // at all. Named only when one was typed — left out, the daemon
-          // derives `<branch>-fork` from the source checkout's own HEAD and
-          // numbers it past a collision, which is what an untouched row asked
-          // for. Sent, it means that worktree specifically, and an existing
-          // one of that name is opened rather than sidestepped.
-          worktree: worktreeName ? { name: worktreeName } : {},
+          // Present even when empty, and absent entirely otherwise: the object
+          // is what asks for a worktree at all, so a fork staying in the
+          // source's checkout must not send one. Named only when one was
+          // typed — left out, the daemon derives `<branch>-fork` from the
+          // source checkout's own HEAD and numbers it past a collision, which
+          // is what an untouched row asked for. Sent, it means that worktree
+          // specifically, and an existing one of that name is opened rather
+          // than sidestepped.
+          worktree: toWorktree
+            ? worktreeName
+              ? { name: worktreeName }
+              : {}
+            : undefined,
         }),
         signal: AbortSignal.timeout(FORK_TIMEOUT_MS),
       });
@@ -1473,7 +1630,15 @@ export function App(props: AppProps) {
         );
         return;
       }
-      store.actions.closeNewSessionDialog();
+      // The request may have outlived its dialog. An explicit dismissal or a
+      // replacement draft means the user no longer wants this completion to
+      // take over the picker, so neither close NOR navigate from stale work.
+      const ownsDialog =
+        newSessionDialogSequence === dialogSequence &&
+        store.state.newSession?.fork?.sessionId === fork.sessionId;
+      if (ownsDialog) {
+        store.actions.closeNewSessionDialog();
+      }
       // The daemon's name, not the row's preview: a derived name that collided
       // came back numbered.
       const created = body.worktree?.name;
@@ -1483,7 +1648,21 @@ export function App(props: AppProps) {
         // launch from and leave. The toast is then the only account there is
         // of where the fork landed, so it says so even unnamed.
         store.actions.showToast(
-          created ? `Forked into ${created}` : "Forked into a new worktree",
+          created
+            ? `Forked into ${created}`
+            : toWorktree
+              ? "Forked into a new worktree"
+              : "Forked in this checkout",
+        );
+        return;
+      }
+      if (!ownsDialog) {
+        store.actions.showToast(
+          created
+            ? `Forked into ${created}`
+            : toWorktree
+              ? "Forked into a new worktree"
+              : "Forked in this checkout",
         );
         return;
       }
@@ -1503,7 +1682,7 @@ export function App(props: AppProps) {
     if (!draft) return;
     // Fork mode shares the dialog and almost nothing else; see above.
     if (draft.fork) {
-      await submitForkIntoWorktree(draft);
+      await submitFork(draft);
       return;
     }
     if (spawnInFlight) return;
@@ -2247,12 +2426,16 @@ export function App(props: AppProps) {
     }
 
     if (store.state.contextMenu || store.state.groupContextMenu) {
-      store.actions.hideContextMenu();
-      store.actions.hideGroupContextMenu();
-      if (key === "escape") {
+      // The menu answers to its own keys first (j/k, enter, esc, m). Anything
+      // else dismisses it and goes on to mean what it always means — a
+      // keypress that is not the menu's is attention moving elsewhere, and
+      // making the menu modal would strand a user who opened it by accident.
+      if (handleContextMenuKey(event)) {
         event.preventDefault();
         return;
       }
+      store.actions.hideContextMenu();
+      store.actions.hideGroupContextMenu();
     }
 
     if (store.state.searchMode) {
@@ -2447,6 +2630,14 @@ export function App(props: AppProps) {
         event.preventDefault();
         break;
 
+      case "m":
+        // The keyboard's way into the right-click menus. Reached only with no
+        // menu already open — the block above owns `m` while one is, so the
+        // two halves of the toggle are never both live.
+        toggleRowMenu();
+        event.preventDefault();
+        break;
+
       case "/":
         store.actions.enterSearchMode();
         event.preventDefault();
@@ -2492,7 +2683,7 @@ export function App(props: AppProps) {
           // that can't be forked, say why. The help overlay lists `F`
           // unconditionally, so silence there reads as a broken key.
           if (sessionToFork) {
-            if (canForkSession(sessionToFork)) void forkSession(sessionToFork);
+            if (canForkSession(sessionToFork)) openForkDialog(sessionToFork);
             else store.actions.showToast(forkRefusalReason(sessionToFork));
           }
         } else {
@@ -2598,7 +2789,7 @@ export function App(props: AppProps) {
         if (props.sidebar) {
           const selfPane = process.env.TMUX_PANE;
           if (selfPane) {
-            Bun.spawn(["tmux", "kill-pane", "-t", selfPane]);
+            Bun.spawn(tmuxArgv("kill-pane", "-t", selfPane));
           }
         }
         process.exit(0);
@@ -2680,8 +2871,10 @@ export function App(props: AppProps) {
             sidebar={props.sidebar}
             promptDisplay={store.state.promptDisplay}
             loading={!initialDataReceived()}
+            socketError={store.state.tmuxSocketError}
             onActivate={handleRowActivate}
             onContextMenu={handleRowContextMenu}
+            onRowAnchor={(resolve) => (rowAnchor = resolve)}
           />
           <Show when={!props.sidebar && store.state.showPreview}>
             <Show
@@ -2800,10 +2993,12 @@ export function App(props: AppProps) {
         <Show when={store.state.contextMenu}>
           {(cm: () => NonNullable<typeof store.state.contextMenu>) => (
             <ContextMenu
+              openGeneration={menuOpenGeneration()}
               x={cm().x}
               y={cm().y}
               items={sessionMenuItems()}
               reservedRows={sessionMenuReservedRows()}
+              highlight={cm().highlight}
               onClose={store.actions.hideContextMenu}
             />
           )}
@@ -2812,9 +3007,11 @@ export function App(props: AppProps) {
         <Show when={store.state.groupContextMenu}>
           {(cm: () => NonNullable<typeof store.state.groupContextMenu>) => (
             <ContextMenu
+              openGeneration={menuOpenGeneration()}
               x={cm().x}
               y={cm().y}
               items={groupMenuItems()}
+              highlight={cm().highlight}
               onClose={store.actions.hideGroupContextMenu}
             />
           )}

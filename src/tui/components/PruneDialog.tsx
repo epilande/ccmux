@@ -304,7 +304,7 @@ export const PruneDialog: Component<PruneDialogProps> = (props) => {
     >
       <box justifyContent="center" width="100%" height={1}>
         <text fg={theme.text}>
-          <strong>Prune Worktrees</strong>
+          <strong>Prune worktrees</strong>
         </text>
       </box>
 

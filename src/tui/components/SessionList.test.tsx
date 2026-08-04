@@ -68,10 +68,50 @@ async function renderList(
   return setup.captureCharFrame();
 }
 
+/** Empty-list render with a socket diagnostic in play. */
+async function renderEmptyWithSocketError(
+  socketError: import("../../types").TmuxSocketError | null,
+) {
+  const [tick] = createSignal(0);
+  setup = await testRender(
+    () => (
+      <TickContext.Provider value={{ tick }}>
+        <SessionList
+          items={[]}
+          selectedIndex={0}
+          previewWidth={30}
+          socketError={socketError}
+        />
+      </TickContext.Provider>
+    ),
+    { width: 80, height: 20 },
+  );
+  await setup.renderOnce();
+  return setup.captureCharFrame();
+}
+
 describe("SessionList", () => {
   it("renders empty state message", async () => {
     const frame = await renderList([]);
     expect(frame).toContain("No sessions found");
+  });
+
+  it("replaces the empty state with the unreachable-server diagnostic", async () => {
+    // "No sessions found" would report a misaimed socket as an absence of
+    // agents, which is the whole reason the reporter in #95 saw nothing.
+    const frame = await renderEmptyWithSocketError({
+      attemptedSocket: "/private/tmp/tmux-501/work",
+      message: "no server running",
+    });
+    expect(frame).toContain("tmux server unreachable at");
+    expect(frame).toContain("/private/tmp/tmux-501/work");
+    expect(frame).not.toContain("No sessions found");
+  });
+
+  it("keeps the plain empty state when the server is reachable", async () => {
+    const frame = await renderEmptyWithSocketError(null);
+    expect(frame).toContain("No sessions found");
+    expect(frame).not.toContain("unreachable");
   });
 
   it("aligns the agent column across waiting and idle rows", async () => {

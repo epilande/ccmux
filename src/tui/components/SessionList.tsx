@@ -2,7 +2,7 @@ import type { Component } from "solid-js";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import { useTerminalDimensions } from "@opentui/solid";
-import type { EnrichedSession } from "../../types";
+import type { EnrichedSession, TmuxSocketError } from "../../types";
 import type { IconStyle } from "../../lib/icons";
 import type {
   ColumnsConfig,
@@ -14,6 +14,7 @@ import {
   type FlatItem,
   getSessionIndex,
   scrollTarget,
+  toVisualLine,
 } from "../utils/grouping";
 import { SessionItem } from "./SessionItem";
 import { GroupHeader } from "./GroupHeader";
@@ -23,6 +24,7 @@ import {
   rowHasContent,
 } from "./session-columns";
 import { theme } from "../theme";
+import { socketErrorMessage } from "../../lib/tmux-socket";
 
 interface SessionListProps {
   items: FlatItem[];
@@ -39,9 +41,27 @@ interface SessionListProps {
   /** Prompt display mode (cycled by the `p` key): inline, own row, or off. */
   promptDisplay?: PromptDisplay;
   loading?: boolean;
+  /** Set when the daemon cannot reach its tmux server; replaces the empty
+   *  state, which would otherwise read as "no agents are running". */
+  socketError?: TmuxSocketError | null;
   onActivate?: (item: FlatItem, index: number) => void;
   onContextMenu?: (item: FlatItem, index: number, event: MouseEvent) => void;
+  /**
+   * Hands the parent a way to ASK where a row currently sits on screen, for
+   * the keyboard path that opens a row menu without a pointer to anchor on.
+   *
+   * A pull rather than a push: the answer changes with every scroll, resize
+   * and row that grows a subtitle, and a pushed one would either be stale by
+   * the time a key was pressed or cost a callback per frame to keep fresh.
+   * This is the only place the geometry is known — the row heights, the
+   * scroll offset and the viewport's own position all live here.
+   */
+  onRowAnchor?: (resolve: RowAnchor) => void;
 }
+
+/** Where a flat-item row is on screen right now, or null when it is not
+ *  drawn (no list, or an index outside it). */
+export type RowAnchor = (index: number) => { x: number; y: number } | null;
 
 /**
  * Whether a row represents the active tmux pane. Guards `tmuxPane !== null`
@@ -54,6 +74,10 @@ export function isActivePaneRow(
 ): boolean {
   return session.tmuxPane !== null && session.tmuxPane === activePaneId;
 }
+
+/** Columns a keyboard-opened row menu is inset from the list's left edge, so
+ *  the row it belongs to is still identifiable underneath it. */
+const ROW_MENU_INDENT = 2;
 
 export const SessionList: Component<SessionListProps> = (props) => {
   let scrollboxRef: ScrollBoxRenderable | undefined;
@@ -107,6 +131,37 @@ export const SessionList: Component<SessionListProps> = (props) => {
       scrollboxRef.scrollTo(target);
     }
   });
+
+  /**
+   * The screen position of row `index`, for a menu opened from the keyboard.
+   *
+   * The same visual-line arithmetic the scroll effect above runs, less the
+   * scroll offset and plus the viewport's own origin — so the answer is in
+   * the absolute screen coordinates a mouse event would have carried, which
+   * is what `ContextMenu` clamps against.
+   *
+   * A non-first header draws a divider line above itself and `toVisualLine`
+   * counts it, so the header's own row is one line further down; anchoring on
+   * the divider would open the menu a row above the thing it belongs to.
+   */
+  const rowAnchor: RowAnchor = (index) => {
+    const scrollbox = scrollboxRef;
+    if (!scrollbox || index < 0 || index >= props.items.length) return null;
+    const item = props.items[index];
+    if (!item) return null;
+    const divider = item.type === "header" && index > 0 ? 1 : 0;
+    const line =
+      toVisualLine(props.items, index, hasSubtitle) -
+      scrollbox.scrollTop +
+      divider;
+    return {
+      // Indented off the list's left edge: the menu covers the row it belongs
+      // to either way, and leaving the selection marker and status glyph
+      // visible is what says WHICH row it came from.
+      x: scrollbox.viewport.x + ROW_MENU_INDENT,
+      y: scrollbox.viewport.y + line,
+    };
+  };
 
   const renderItem = (item: FlatItem, index: number) => {
     const onActivate = props.onActivate
@@ -180,7 +235,16 @@ export const SessionList: Component<SessionListProps> = (props) => {
         fallback={
           <Show when={!props.loading}>
             <box paddingLeft={1} paddingTop={1}>
-              <text fg={theme.overlay}>No sessions found</text>
+              <Show
+                when={props.socketError}
+                fallback={<text fg={theme.overlay}>No sessions found</text>}
+              >
+                {(error: () => TmuxSocketError) => (
+                  <text fg={theme.red}>
+                    {socketErrorMessage(error().attemptedSocket)}
+                  </text>
+                )}
+              </Show>
             </box>
           </Show>
         }
@@ -188,6 +252,11 @@ export const SessionList: Component<SessionListProps> = (props) => {
         <scrollbox
           ref={(r: ScrollBoxRenderable) => {
             scrollboxRef = r;
+            // Handed up here rather than on mount: with no rows there is no
+            // scrollbox at all (see the fallback above), and a resolver
+            // published before it existed would answer null for the list's
+            // whole life.
+            props.onRowAnchor?.(rowAnchor);
             // The root's resize fires before its children are measured, so
             // listen on the two nodes whose sizes the scroll effect reads.
             const bump = () => setScrollboxLayout((v) => v + 1);

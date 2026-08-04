@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { getDaemonUrl } from "../lib/config";
 import { isSameTmuxServer } from "../lib/tmux-server";
+import { tmuxArgv } from "../lib/tmux-exec";
 import { resolveActiveTmuxClientTty } from "../lib/tmux-client";
 import { ensureDaemon } from "./shared";
 
@@ -62,7 +63,7 @@ export function createSwitchCommand(): Command {
         // on, so target the most-recently-active attached client
         // explicitly. Inside tmux this is skipped entirely: argv is
         // unchanged from today's path.
-        const switchArgs = ["tmux", "switch-client"];
+        const switchArgs = ["switch-client"];
         if (!process.env.TMUX) {
           const clientTty = await resolveActiveTmuxClientTty();
           if (!clientTty) {
@@ -75,7 +76,7 @@ export function createSwitchCommand(): Command {
         }
         switchArgs.push("-t", target);
 
-        const proc = Bun.spawn(switchArgs, {
+        const proc = Bun.spawn(tmuxArgv(...switchArgs), {
           stdout: "pipe",
           stderr: "pipe",
         });

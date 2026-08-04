@@ -7,14 +7,24 @@
  * before targeting a pane, refusing a cross-server `%N` rather than switching or
  * sending keys to the wrong pane.
  *
- * Dependency-free so both the TUI and the CLI can import it.
+ * I/O-free (its only import reads configuration) so both the TUI and the CLI
+ * can import it.
  */
 
+import { activeTmuxSocketOverride, tmuxSocketPath } from "./tmux-socket";
+
 /**
- * This client's tmux socket, from the first field of `$TMUX`
- * (`<socket_path>,<pid>,<session>`), or null when not inside tmux.
+ * The tmux socket this process's own tmux calls target: a configured override
+ * when one applies here (see `activeTmuxSocketOverride`), else the first field
+ * of `$TMUX` (`<socket_path>,<pid>,<session>`), else null.
+ *
+ * The override arm is what makes the guard below stronger rather than weaker:
+ * a client outside tmux used to know nothing about its own server and had to
+ * fail open, and now it knows exactly which one it was pointed at.
  */
 export function currentTmuxSocket(): string | null {
+  const override = activeTmuxSocketOverride();
+  if (override) return tmuxSocketPath(override);
   return process.env.TMUX?.split(",")[0] ?? null;
 }
 

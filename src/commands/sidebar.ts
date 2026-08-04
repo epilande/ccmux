@@ -10,6 +10,7 @@ import { getUIState, resolvePromptDisplay } from "../lib/state";
 import { markStartup } from "../lib/startup-timing";
 import { SIDEBAR_PANE_TITLE, parseCcmuxPort } from "../lib/config";
 import { PANE_FIELD_SEP } from "../lib/tmux-format";
+import { tmuxArgv } from "../lib/tmux-exec";
 import { forkableAgentNames } from "../lib/agents";
 
 type SidebarPosition = "left" | "right";
@@ -135,14 +136,9 @@ export function createSidebarCommand(): Command {
 
         const selfPane = process.env.TMUX_PANE;
         if (selfPane) {
-          Bun.spawn([
-            "tmux",
-            "select-pane",
-            "-t",
-            selfPane,
-            "-T",
-            SIDEBAR_PANE_TITLE,
-          ]);
+          Bun.spawn(
+            tmuxArgv("select-pane", "-t", selfPane, "-T", SIDEBAR_PANE_TITLE),
+          );
         }
 
         // The bin/ccmux launcher cds to the project root for bun module
@@ -223,8 +219,8 @@ export function parseResizeHook(output: string): boolean {
     );
 }
 
-async function tmux(...args: string[]): Promise<string> {
-  const proc = Bun.spawn(["tmux", ...args], {
+async function runTmux(argv: string[]): Promise<string> {
+  const proc = Bun.spawn(argv, {
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -233,8 +229,15 @@ async function tmux(...args: string[]): Promise<string> {
   return output.trim();
 }
 
+async function tmux(...args: string[]): Promise<string> {
+  return runTmux(tmuxArgv(...args));
+}
+
 function tmuxWithSocket(socket?: string, ...args: string[]): Promise<string> {
-  if (socket) return tmux("-S", socket, ...args);
+  // A socket reaching here comes from a pre-upgrade hook body that already
+  // names its own server (see `--resize` above), so it bypasses the builder:
+  // adding this process's `-L`/`-S` on top would name two.
+  if (socket) return runTmux(["tmux", "-S", socket, ...args]);
   return tmux(...args);
 }
 

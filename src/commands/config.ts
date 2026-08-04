@@ -123,6 +123,13 @@ export const KNOWN_KEYS: Record<
     parse: (v) => v,
     description: `Hunk review note delivery (${VALID_REVIEW_HANDBACK.join(", ")}; default confirm)`,
   },
+  tmuxSocket: {
+    validate: (v) => v.trim().length > 0,
+    parse: (v) => v.trim(),
+    description:
+      "tmux server to track: a socket path (leading /) or a socket label (e.g. work)",
+    note: "Takes effect after a daemon restart (ccmux daemon restart)",
+  },
   theme: {
     validate: (v) => BUILTIN_THEME_NAMES.includes(v),
     parse: (v) => v,

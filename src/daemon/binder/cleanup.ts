@@ -53,7 +53,7 @@ function actionKey(action: ProposedAction): string {
  * removal only executes when two consecutive scans independently propose it.
  * A single scan's disappearance — `ps` etime jitter, a transient process-tree
  * gap, or a tmux hiccup that slipped past the observation-layer guard
- * (`listTmuxPanesOrThrow`) — therefore proposes but never destroys; evidence
+ * (`scanTmuxPanesOrThrow`) — therefore proposes but never destroys; evidence
  * returning on the next scan silently drops the proposal.
  *
  * The per-session branch logic is unchanged from the pre-Phase-2
