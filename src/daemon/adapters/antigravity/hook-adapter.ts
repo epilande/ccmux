@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "fs";
 import { homedir } from "os";
-import { basename, dirname, join } from "path";
+import { join } from "path";
 import { PREINVOCATION_HOOK_SCRIPT, STOP_HOOK_SCRIPT } from "./hook-scripts";
 import {
   findPaneTrackedSession,
@@ -216,15 +216,18 @@ export class AntigravityHookAdapter implements HookAdapter {
     ctx.sessionManager.updateSession(session.id, stateFromMarker(marker));
     // Antigravity has no registered LogAdapter, so this only makes the
     // transcript path visible to consumers that check for one themselves
-    // (fork's {path} template, ccmux show); it does not add a cascade log
-    // source (that's keyed on a registered adapter, not mere logPath
-    // presence). Existence-checked because the marker's value is unparsed
-    // input.
+    // (ccmux show); it does not add a cascade log source (that's keyed on a
+    // registered adapter, not mere logPath presence). Set verbatim, no
+    // existsSync and no transcript.jsonl -> transcript_full.jsonl
+    // preference (that swap is read-time policy owned by the transcript
+    // reader, not this adapter): a marker rewrite doesn't dispatch
+    // onMarkerChanged (unimplemented here), so this runs once per marker
+    // lifetime — an existence/preference check at that one moment would
+    // turn a file-created-later race into a permanent miss. A dangling path
+    // is safe; every consumer either tolerates a missing file or is
+    // unreachable for this agent type.
     if (marker.transcript_path) {
-      const preferred = preferAntigravityFullTranscript(marker.transcript_path);
-      if (existsSync(preferred)) {
-        ctx.sessionManager.setLogPath(session.id, preferred);
-      }
+      ctx.sessionManager.setLogPath(session.id, marker.transcript_path);
     }
   }
 
@@ -232,20 +235,6 @@ export class AntigravityHookAdapter implements HookAdapter {
     _marker: SessionPidMarker,
     _ctx: HookManagerContext,
   ): Promise<void> {}
-}
-
-/**
- * Antigravity's marker reports the CLI's own `transcriptPath`, which names
- * `transcript.jsonl`. A sibling `transcript_full.jsonl` in the same
- * directory carries the same turns but differs in `tool_calls.args`
- * quoting (verified against real Antigravity brain dirs 2026-08-03); prefer
- * it when present. Falls back to the marker's own path unchanged when there
- * is no sibling, or when the marker already names the full file.
- */
-function preferAntigravityFullTranscript(transcriptPath: string): string {
-  if (basename(transcriptPath) !== "transcript.jsonl") return transcriptPath;
-  const fullPath = join(dirname(transcriptPath), "transcript_full.jsonl");
-  return existsSync(fullPath) ? fullPath : transcriptPath;
 }
 
 function stateFromMarker(marker: SessionPidMarker): Partial<SessionState> {

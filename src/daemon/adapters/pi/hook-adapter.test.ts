@@ -271,7 +271,12 @@ describe("PiHookAdapter", () => {
       expect(session.state.logPath).toBe(transcriptPath);
     });
 
-    it("does not set logPath when transcript_path points to a missing file", async () => {
+    it("sets logPath from transcript_path verbatim even when the file does not exist yet", async () => {
+      // A marker rewrite doesn't dispatch onMarkerChanged (unimplemented),
+      // so onMarkerAdded runs once per marker lifetime. Refusing a
+      // not-yet-created transcript here would turn that race into a
+      // permanent miss; every logPath consumer either tolerates a missing
+      // file or is unreachable for this agent type.
       const session: FakeSession = {
         id: "sess-1",
         agentType: "pi",
@@ -280,15 +285,16 @@ describe("PiHookAdapter", () => {
         state: {},
       };
       const ctx = makeCtx([session], [makePane("%1", 9000)]);
+      const transcriptPath = join(tempRoot, "vanished.jsonl");
       const marker = makeMarker({
         pid: 9000,
         state: "working",
-        transcript_path: join(tempRoot, "vanished.jsonl"),
+        transcript_path: transcriptPath,
       });
       writeMarkerToCache(marker);
 
       await adapter.onMarkerAdded(marker, ctx);
-      expect(session.state.logPath).toBeUndefined();
+      expect(session.state.logPath).toBe(transcriptPath);
     });
   });
 });

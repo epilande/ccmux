@@ -516,7 +516,12 @@ describe("CursorHookAdapter", () => {
       expect(session.logPath).toBe(transcriptPath);
     });
 
-    it("does not set logPath when transcript_path points to a missing file", async () => {
+    it("sets logPath from transcript_path verbatim even when the file does not exist yet", async () => {
+      // A marker rewrite doesn't dispatch onMarkerChanged (unimplemented),
+      // so onMarkerAdded runs once per marker lifetime. Refusing a
+      // not-yet-created transcript here would turn that race into a
+      // permanent miss; every logPath consumer either tolerates a missing
+      // file or is unreachable for this agent type.
       const session: FakeSession = {
         id: "cursor-pane-5",
         agentType: "cursor",
@@ -524,6 +529,7 @@ describe("CursorHookAdapter", () => {
         tmuxPane: "%10",
       };
       const ctx = buildCtx([session], new Map([[556, { paneId: "%10" }]]));
+      const transcriptPath = join(tempRoot, "vanished.jsonl");
 
       await adapter.onMarkerAdded(
         {
@@ -532,12 +538,12 @@ describe("CursorHookAdapter", () => {
           session_id: "cursor-sid-5",
           state: "working",
           timestamp: 1,
-          transcript_path: join(tempRoot, "vanished.jsonl"),
+          transcript_path: transcriptPath,
         },
         ctx,
       );
 
-      expect(session.logPath).toBeUndefined();
+      expect(session.logPath).toBe(transcriptPath);
     });
   });
 });
