@@ -489,7 +489,8 @@ export function App(props: AppProps) {
     // through `onDone` so the reopen provably follows the confirm's own
     // resolution instead of racing it back over the dialog.
     const scope = store.state.worktrees?.repo ?? null;
-    const reopen = () => store.actions.showWorktrees(scope, target.path);
+    const reopen = () =>
+      store.actions.showWorktrees(scope, target.path, /* isReturn */ true);
     store.actions.hideWorktrees();
     reviewInFlight = true;
     // Resolved before the guard is honored so a slow git can't be raced, and
@@ -1614,7 +1615,13 @@ export function App(props: AppProps) {
   function cancelNewSession(): void {
     const marker = store.state.newSession?.returnToWorktrees ?? null;
     store.actions.closeNewSessionDialog();
-    if (marker) store.actions.showWorktrees(marker.repo, marker.cursor);
+    if (marker) {
+      store.actions.showWorktrees(
+        marker.repo,
+        marker.cursor,
+        /* isReturn */ true,
+      );
+    }
   }
 
   // The dialog opens before `/agents` answers, and the row's own agent may
@@ -3220,6 +3227,7 @@ export function App(props: AppProps) {
               compact={props.sidebar}
               iconStyle={store.state.iconStyle}
               initialCursor={panel().initialCursor}
+              isReturn={panel().isReturn}
               onClose={store.actions.hideWorktrees}
               onJump={jumpToWorktreeSession}
               onSpawn={spawnInWorktree}

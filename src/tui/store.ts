@@ -348,9 +348,15 @@ interface TUIState {
    * `initialCursor` seeds the panel's cursor on that row's path, for a reopen
    * that should land where the user left (the review round-trip, a cancelled
    * spawn dialog); the panel falls back to the first row when the path is
-   * not in the fetched list.
+   * not in the fetched list. `isReturn` marks exactly those reopens, and is
+   * what lets the panel reuse its last completed prune scan instead of
+   * re-firing it; a plain open (`W`, the group menu) always scans fresh.
    */
-  worktrees: { repo: string | null; initialCursor: string | null } | null;
+  worktrees: {
+    repo: string | null;
+    initialCursor: string | null;
+    isReturn: boolean;
+  } | null;
   /**
    * A message that waits to be acknowledged, or null.
    *
@@ -1913,8 +1919,16 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("showHelp", false);
     },
 
-    showWorktrees(repo: string | null, initialCursor?: string) {
-      setState("worktrees", { repo, initialCursor: initialCursor ?? null });
+    showWorktrees(
+      repo: string | null,
+      initialCursor?: string,
+      isReturn = false,
+    ) {
+      setState("worktrees", {
+        repo,
+        initialCursor: initialCursor ?? null,
+        isReturn,
+      });
     },
 
     hideWorktrees() {

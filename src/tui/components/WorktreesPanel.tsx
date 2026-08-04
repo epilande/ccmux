@@ -129,6 +129,12 @@ interface WorktreesPanelProps {
    * re-seed effect, exactly like a row that vanished under the cursor.
    */
   initialCursor?: string | null;
+  /**
+   * This open is a RETURN from an action the panel launched, so the first
+   * load may seed phase 2 from the last completed scan instead of firing
+   * it again. One-shot: `r` and Tab inside the same mount still rescan.
+   */
+  isReturn?: boolean;
   onClose: () => void;
   /** Jump to a session living in the row (Enter on an occupied row). */
   onJump: (session: WorktreeSession) => void;
@@ -867,6 +873,37 @@ export function removalNotice(count: number): string {
 }
 
 /**
+ * The last COMPLETED phase-2 scan, kept across panel mounts so a reopen that
+ * is a RETURN (the review round-trip, a cancelled spawn dialog) can seed
+ * itself from it instead of re-firing the fetch+gh scan the user just
+ * watched finish. Keyed by the repo scope it answered for: a cache from
+ * another scope is a miss, never a fallback. Only successful scans are
+ * stored (a failure has nothing worth reusing), and any completed prune run
+ * clears it, because its outcomes may have removed the very worktrees the
+ * scan classified. Plain opens (`W`, the group menu) never read it, so PR
+ * badges cannot go stale through ordinary use.
+ */
+export interface CachedScan {
+  scope: string | null;
+  scan: PruneScan;
+}
+
+let lastCompletedScan: CachedScan | null = null;
+
+/** The cached scan iff it answered for exactly this scope, else null. */
+export function cachedScanFor(
+  cache: CachedScan | null,
+  scope: string | null,
+): PruneScan | null {
+  return cache !== null && cache.scope === scope ? cache.scan : null;
+}
+
+/** Test hygiene: the cache is module state and must not leak across tests. */
+export function resetScanCache(): void {
+  lastCompletedScan = null;
+}
+
+/**
  * The removal's headline, as a sentence rather than a schema.
  *
  * `Delete 1 worktree(s), 1 branch(es)?` made the reader parse a form to learn
@@ -1166,6 +1203,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   /** A fully successful removal's title-line notice; the next load wipes it. */
   const [titleNotice, setTitleNotice] = createSignal<string | null>(null);
   let listBox: ScrollBoxRenderable | undefined;
+  /** One-shot: only a return-open's FIRST load may seed from the cache, so
+   *  `r` and Tab inside the same mount still rescan for real. */
+  let seedFromCache = props.isReturn === true;
   /** Bumped when the scrollbox is measured or resized, so the scroll effect
    *  re-runs once there is a real viewport height to fit the cursor into. */
   const [scrollboxLayout, setScrollboxLayout] = createSignal(0);
@@ -1413,6 +1453,21 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         setPhase("error");
       });
 
+    // A return-open reuses the scan the user just watched complete instead
+    // of re-firing it. The seed goes through `setScan` exactly like a live
+    // completion, so the merge, the single re-sort and the title suffix all
+    // behave identically, and nothing is in flight for this generation, so
+    // nothing can clobber it. Phase 1 above still re-ran: it is local and
+    // instant, and a review may have changed the dirty counts it reports.
+    const seeded = seedFromCache
+      ? cachedScanFor(lastCompletedScan, filter)
+      : null;
+    seedFromCache = false;
+    if (seeded) {
+      setScan(seeded);
+      return;
+    }
+
     const scanUrl = new URL(`${getDaemonUrl()}/worktrees/prune-candidates`);
     if (filter) scanUrl.searchParams.set("repo", filter);
     if (props.cwd) scanUrl.searchParams.set("cwd", props.cwd);
@@ -1421,6 +1476,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         if (!response.ok) throw new Error(describeHttpFailure(response.status));
         const data = normalizeScan((await response.json()) as ScanResponse);
         if (generation !== loadGeneration) return;
+        lastCompletedScan = { scope: filter, scan: data };
         setScan(data);
         // A selection made before the classification landed, or carried
         // across a Tab, may name paths this scope never classified. Dropping
@@ -1542,6 +1598,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         };
         if (!response.ok)
           throw new Error(data.error ?? `HTTP ${response.status}`);
+        // Either way the run may have removed worktrees the cached scan
+        // still classifies, so a later return-open must scan fresh.
+        lastCompletedScan = null;
         if (pruneFullySucceeded(data)) {
           // Straight back to the list: the outcome screen earns its keep with
           // per-row detail, which an all-green run has none of. The removed

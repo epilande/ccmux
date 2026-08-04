@@ -3884,11 +3884,24 @@ describe("worktrees panel state", () => {
     expect(store.state.worktrees).toEqual({
       repo: "/repo",
       initialCursor: "/repo/wt/alpha",
+      isReturn: false,
+    });
+
+    // A return-open says so, which is what lets the panel reuse its scan.
+    store.actions.showWorktrees("/repo", "/repo/wt/alpha", true);
+    expect(store.state.worktrees).toEqual({
+      repo: "/repo",
+      initialCursor: "/repo/wt/alpha",
+      isReturn: true,
     });
 
     // The plain open (the W key) carries none.
     store.actions.showWorktrees(null);
-    expect(store.state.worktrees).toEqual({ repo: null, initialCursor: null });
+    expect(store.state.worktrees).toEqual({
+      repo: null,
+      initialCursor: null,
+      isReturn: false,
+    });
 
     store.actions.hideWorktrees();
     expect(store.state.worktrees).toBeNull();

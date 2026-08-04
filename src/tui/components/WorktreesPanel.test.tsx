@@ -26,11 +26,13 @@ import {
   dirtyPhrases,
   formatTracking,
   isLivenessSkip,
+  cachedScanFor,
   orderRepos,
   partitionSelection,
   pruneFullySucceeded,
   removalDetails,
   removalNotice,
+  resetScanCache,
   detailGutter,
   labelColumnWidth,
   markerWidth,
@@ -62,6 +64,9 @@ afterEach(() => {
   // test files in Bun and take the whole suite down with them.
   fetchSpy?.mockRestore();
   fetchSpy = undefined;
+  // The scan cache is module state kept across mounts on purpose; across
+  // TESTS it would make one test's scan another's seeded return-open.
+  resetScanCache();
 });
 
 // ---------------------------------------------------------------------------
@@ -211,6 +216,7 @@ interface PanelOptions {
   width?: number;
   height?: number;
   initialCursor?: string;
+  isReturn?: boolean;
   onClose?: () => void;
   onJump?: (s: WorktreeSession) => void;
   onSpawn?: (t: { cwd: string; existingWorktree: string | null }) => void;
@@ -226,6 +232,7 @@ async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
         cwd="/repo"
         compact={opts.compact}
         initialCursor={opts.initialCursor}
+        isReturn={opts.isReturn}
         onClose={opts.onClose ?? (() => {})}
         onJump={opts.onJump ?? (() => {})}
         onSpawn={opts.onSpawn ?? (() => {})}
@@ -2622,6 +2629,137 @@ describe("WorktreesPanel prune outcome", () => {
     // The partial failure is exactly what the per-row screen exists for.
     expect(after).toContain("✗ /repo/wt/bravo");
     expect(after).not.toContain("removed 2 worktrees");
+  });
+});
+
+describe("WorktreesPanel scan cache", () => {
+  it("answers only for the scope it was scanned for", () => {
+    const scan = { candidates: [candidate()], skipped: [], open: [] };
+    expect(cachedScanFor(null, "/repo")).toBeNull();
+    expect(cachedScanFor({ scope: "/repo", scan }, "/repo")).toBe(scan);
+    expect(cachedScanFor({ scope: "/repo", scan }, "/other")).toBeNull();
+    expect(cachedScanFor({ scope: null, scan }, null)).toBe(scan);
+    expect(cachedScanFor({ scope: "/repo", scan }, null)).toBeNull();
+  });
+
+  it("seeds a return-open from the last completed scan, without rescanning", async () => {
+    // A first open completes a real scan, which is what fills the cache.
+    await mountSettled(listOf([mainRow(), row()]), {
+      candidates: [candidate()],
+      skipped: [],
+    });
+    setup!.renderer.destroy();
+    setup = undefined;
+    fetchSpy!.mockRestore();
+
+    // The return-open's own scan never resolves: only the cache can
+    // classify, and it must not even be asked.
+    let scanCalls = 0;
+    const { frame } = await mountPanel(
+      {
+        list: async () => json(listOf([mainRow(), row()])),
+        scan: () => {
+          scanCalls++;
+          return new Promise<Response>(() => {});
+        },
+      },
+      { isReturn: true, initialCursor: "/repo/wt/alpha" },
+    );
+    const shown = await frame();
+    expect(shown).toContain("removable · 1");
+    expect(shown).toContain("PR #68 merged");
+    expect(shown).not.toContain("scanning");
+    expect(scanCalls).toBe(0);
+  });
+
+  it("ignores the cache on a plain open", async () => {
+    await mountSettled(listOf([mainRow(), row()]), {
+      candidates: [candidate()],
+      skipped: [],
+    });
+    setup!.renderer.destroy();
+    setup = undefined;
+    fetchSpy!.mockRestore();
+
+    let scanCalls = 0;
+    const { frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: () => {
+        scanCalls++;
+        return new Promise<Response>(() => {});
+      },
+    });
+    const shown = await frame();
+    // Fresh opens rescan for real, so PR badges cannot go stale quietly.
+    expect(shown).toContain("scanning");
+    expect(shown).not.toContain("PR #68 merged");
+    expect(scanCalls).toBe(1);
+  });
+
+  it("does not cache a failed scan", async () => {
+    await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => {
+        throw new Error("gh exploded");
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    setup!.renderer.destroy();
+    setup = undefined;
+    fetchSpy!.mockRestore();
+
+    const { frame } = await mountPanel(
+      {
+        list: async () => json(listOf([mainRow(), row()])),
+        scan: () => new Promise<Response>(() => {}),
+      },
+      { isReturn: true },
+    );
+    // Nothing worth reusing was stored, so the return-open scans for real.
+    expect(await frame()).toContain("scanning");
+  });
+
+  it("is cleared by a prune run", async () => {
+    // The first scan fills the cache; the post-removal reload's scan hangs,
+    // so if the cache survives the prune the return-open below would render
+    // the stale candidate instead of scanning.
+    let scans = 0;
+    const list = () => json(listOf([mainRow(), row()]));
+    const hangAfterFirst = () => {
+      scans++;
+      if (scans === 1) {
+        return Promise.resolve(
+          json({ candidates: [candidate()], skipped: [] }),
+        );
+      }
+      return new Promise<Response>(() => {});
+    };
+    const { keys, frame } = await mountPanel({
+      list: async () => list(),
+      scan: hangAfterFirst,
+      prune: async () => json(runResult([outcome()])),
+    });
+    await frame();
+    keys.pressKey("j");
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    keys.pressKey("y");
+    await frame();
+    await frame();
+    setup!.renderer.destroy();
+    setup = undefined;
+    fetchSpy!.mockRestore();
+
+    const { frame: frame2 } = await mountPanel(
+      {
+        list: async () => list(),
+        scan: () => new Promise<Response>(() => {}),
+      },
+      { isReturn: true },
+    );
+    const shown = await frame2();
+    expect(shown).toContain("scanning");
+    expect(shown).not.toContain("PR #68 merged");
   });
 });
 
