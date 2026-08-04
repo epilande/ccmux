@@ -1775,9 +1775,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                           >
                             {/* A detail line always hangs off its own line 1,
                                 so it always carries the rail, and it indents
-                                to whatever marker that line 1 used. */}
+                                to whatever marker that line 1 used. The bar
+                                column matches line 1's, so a two-line cursor
+                                row wears the bar on both lines. */}
+                            <text fg={isCursor() ? theme.mauve : theme.overlay}>
+                              {isCursor() ? "▎" : " "}
+                            </text>
                             <text fg={theme.overlay}>
-                              {` ${RAIL} ${" ".repeat(
+                              {`${RAIL} ${" ".repeat(
                                 markerWidth(entry.candidate !== null),
                               )}`}
                             </text>

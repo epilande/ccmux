@@ -255,14 +255,17 @@ function orderOf(frame: string, ...needles: string[]): number[] {
  * Keyed on the rail plus the detail line's own indent, not on a bare `│`:
  * every line carries one as the panel's border, and now every line below a
  * group's first also carries the rail.
+ *
+ * The gutter column before the rail holds the cursor bar on the cursor row's
+ * lines, so both helpers accept either a space or the bar there.
  */
 function isDetailLine(line: string): boolean {
-  return / │ {3,5}\S/.test(line);
+  return /[ ▎]│ {3,5}\S/.test(line);
 }
 
 /** Whether a rendered line carries the group rail at all. */
 function hasRail(line: string): boolean {
-  return / │ /.test(line);
+  return /[ ▎]│ /.test(line);
 }
 
 /** The rendered line holding `needle`. */
@@ -656,6 +659,23 @@ describe("WorktreesPanel structure", () => {
       ]),
     );
     expect(isDetailLine(lineWith(settled, "4 untracked"))).toBe(true);
+  });
+
+  // The surface highlight spans both lines of a two-line cursor row, so a
+  // bar on line 1 alone read as lopsided against it.
+  it("wears the cursor bar on both lines of a two-line row", async () => {
+    const { settled } = await mountSettled(
+      listOf([
+        mainRow({ dirty: { dirty: true, modified: 1, untracked: 0 } }),
+        row({ dirty: { dirty: true, modified: 0, untracked: 4 } }),
+      ]),
+    );
+    // The cursor starts on the main checkout: both its lines carry the bar...
+    expect(lineWith(settled, "main checkout")).toContain("▎");
+    expect(lineWith(settled, "1 modified")).toContain("▎");
+    // ...and neither line of the neighbouring row carries one.
+    expect(lineWith(settled, "alpha")).not.toContain("▎");
+    expect(lineWith(settled, "4 untracked")).not.toContain("▎");
   });
 
   it("collapses a worktree with nothing to report to a single line", async () => {
