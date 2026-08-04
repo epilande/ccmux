@@ -290,6 +290,15 @@ export interface NewSessionDraft {
    * MADE.
    */
   existingWorktree: string | null;
+  /**
+   * Where a CANCEL returns, or null for a dialog the Worktrees panel did not
+   * open (issue #102 follow-up). An origin marker, deliberately NOT a mode:
+   * it never reaches `NewSessionShape` or the policy functions, no field or
+   * row keys off it, and submit ignores it entirely, since a spawn hands the
+   * board to the new session. `cursor` is the panel row the dialog was
+   * opened over, so the reopened panel lands where the user left.
+   */
+  returnToWorktrees: { repo: string | null; cursor: string } | null;
   /** Which field the option/text keys currently apply to. */
   field: NewSessionField;
   /**
@@ -1650,6 +1659,9 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
        *  this worktree, with every row about CREATING one gone. The path is
        *  the working directory too, so `cwd` need not repeat it. */
       existingWorktree?: string;
+      /** Origin marker for a dialog the Worktrees panel opened: cancel
+       *  returns there. See {@link NewSessionDraft.returnToWorktrees}. */
+      returnToWorktrees?: { repo: string | null; cursor: string };
     }) {
       // The three modes are mutually exclusive, and normalized here rather
       // than defended against everywhere below: an existing worktree is where
@@ -1694,6 +1706,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           worktreeName: null,
           fork,
           existingWorktree,
+          returnToWorktrees: init.returnToWorktrees ?? null,
           field: newSessionFields({
             moveChanges,
             destination,

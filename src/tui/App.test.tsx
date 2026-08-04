@@ -6460,6 +6460,59 @@ describe("App worktrees panel (W)", () => {
     }
   });
 
+  // Enter on a session-less row opens the spawn dialog; backing out of it
+  // returns to the panel, cursor still on the row, instead of dumping the
+  // user on the session list. Submit is deliberately not symmetrical: a
+  // successful spawn hands the board to the new session.
+  it("returns to the panel when the spawn dialog is cancelled", async () => {
+    const bravo = {
+      ...WORKTREE_ROW,
+      path: "/code/myapp/wt/bravo",
+      name: "bravo",
+      branch: "feat/b",
+    };
+    const { restore, frame } = await openPanel([WORKTREE_ROW, bravo]);
+    try {
+      // bravo sorts first (same bucket, name order), so j lands on feature.
+      setup.mockInput.pressKey("j");
+      setup.mockInput.pressEnter();
+      const dialog = await frame();
+      expect(squish(dialog)).toContain(squish("New session in worktree"));
+      expect(dialog).not.toContain("Worktrees ·");
+
+      setup.mockInput.pressEscape();
+      // A lone ESC needs the input parser disambiguation window before it
+      // is delivered as a key at all.
+      await new Promise((r) => setTimeout(r, 30));
+      const shown = await frame();
+      expect(shown).toContain("Worktrees ·");
+      expect(squish(shown)).not.toContain(squish("New session in worktree"));
+      const lines = shown.split("\n");
+      expect(lines.find((l) => l.includes("feature"))).toContain("▎");
+      expect(lines.find((l) => l.includes("bravo"))).not.toContain("▎");
+    } finally {
+      restore();
+    }
+  });
+
+  // The control: a dialog the panel did NOT open cancels to wherever it was
+  // opened from, marker-free.
+  it("does not open the panel when cancelling a dialog opened with n", async () => {
+    const { restore, frame } = await openPanel([WORKTREE_ROW]);
+    try {
+      setup.mockInput.pressKey("q");
+      await frame();
+      setup.mockInput.pressKey("n");
+      expect(squish(await frame())).toContain(squish("New session"));
+      setup.mockInput.pressEscape();
+      await new Promise((r) => setTimeout(r, 30));
+      const shown = await frame();
+      expect(shown).not.toContain("Worktrees ·");
+    } finally {
+      restore();
+    }
+  });
+
   it("reopens the panel after a confirmed hand-back as well", async () => {
     runHunkReviewSpy.mockImplementation(async () => ({
       ok: true,

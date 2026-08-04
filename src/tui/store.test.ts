@@ -3090,6 +3090,7 @@ describe("store", () => {
         // And not aimed at a worktree that already exists, which is the
         // Worktrees panel's own way in.
         existingWorktree: null,
+        returnToWorktrees: null,
         field: "agent",
         dropdown: null,
       });
@@ -3153,6 +3154,7 @@ describe("store", () => {
         worktreeName: null,
         fork: null,
         existingWorktree: null,
+        returnToWorktrees: null,
         field: "prompt",
         dropdown: null,
       });
@@ -3230,6 +3232,7 @@ describe("store", () => {
         worktreeName: null,
         fork: null,
         existingWorktree: null,
+        returnToWorktrees: null,
         field: "agent",
         dropdown: null,
       });
@@ -3345,6 +3348,7 @@ describe("store", () => {
           existingWorktree: null,
           // Not `agent`: the fork continues the source's agent, so that row
           // does not exist and focus cannot start on it.
+          returnToWorktrees: null,
           field: "placement",
           dropdown: null,
         });
@@ -3468,6 +3472,7 @@ describe("store", () => {
           worktreeName: null,
           fork: null,
           existingWorktree: PATH,
+          returnToWorktrees: null,
           field: "agent",
           dropdown: null,
         });
@@ -3887,5 +3892,28 @@ describe("worktrees panel state", () => {
 
     store.actions.hideWorktrees();
     expect(store.state.worktrees).toBeNull();
+  });
+});
+
+describe("new session dialog origin marker", () => {
+  it("threads the panel origin marker onto the draft", () => {
+    const store = createTUIStore();
+
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      existingWorktree: "/repo/.claude/worktrees/panel",
+      returnToWorktrees: {
+        repo: "/repo",
+        cursor: "/repo/.claude/worktrees/panel",
+      },
+    });
+
+    // The marker rides the draft untouched; its absence (every non-panel
+    // origin) is pinned to null by the full-draft assertions above.
+    expect(store.state.newSession?.returnToWorktrees).toEqual({
+      repo: "/repo",
+      cursor: "/repo/.claude/worktrees/panel",
+    });
   });
 });

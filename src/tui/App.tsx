@@ -569,6 +569,9 @@ export function App(props: AppProps) {
     cwd: string;
     existingWorktree: string | null;
   }) {
+    // Captured before the close: a cancel of the dialog this opens goes back
+    // to the panel, scoped as it was and with the cursor on this row.
+    const scope = store.state.worktrees?.repo ?? null;
     store.actions.hideWorktrees();
     const worktree = target.existingWorktree;
     if (worktree) {
@@ -583,6 +586,7 @@ export function App(props: AppProps) {
     openNewSession({
       cwd: target.cwd,
       existingWorktree: worktree ?? undefined,
+      returnToWorktrees: { repo: scope, cursor: worktree ?? target.cwd },
     });
   }
 
@@ -1565,6 +1569,9 @@ export function App(props: AppProps) {
      *  Worktrees panel's own entry point; it is the working directory too, so
      *  `cwd` may simply repeat it. */
     existingWorktree?: string;
+    /** Origin marker set ONLY by the Worktrees panel's Enter: a cancel of
+     *  this dialog returns to the panel, cursor on `cursor`. */
+    returnToWorktrees?: { repo: string | null; cursor: string };
   }): void {
     // Mirrors `reviewSession`: refuse at the point of intent rather than
     // opening a dialog with a blank Directory row whose Enter round-trips
@@ -1594,7 +1601,20 @@ export function App(props: AppProps) {
       moveChanges: context.moveChanges,
       fork: context.fork,
       existingWorktree: context.existingWorktree,
+      returnToWorktrees: context.returnToWorktrees,
     });
+  }
+
+  /**
+   * Escape/cancel on the new-session dialog. A dialog the Worktrees panel
+   * opened returns there with the cursor back on its row; every other origin
+   * (n, the row menus) just closes, and SUBMIT never comes back here at all,
+   * because a successful spawn hands the board to the new session.
+   */
+  function cancelNewSession(): void {
+    const marker = store.state.newSession?.returnToWorktrees ?? null;
+    store.actions.closeNewSessionDialog();
+    if (marker) store.actions.showWorktrees(marker.repo, marker.cursor);
   }
 
   // The dialog opens before `/agents` answers, and the row's own agent may
@@ -2161,7 +2181,7 @@ export function App(props: AppProps) {
     }
 
     if (key === "escape") {
-      store.actions.closeNewSessionDialog();
+      cancelNewSession();
       event.preventDefault();
       return;
     }
@@ -3173,7 +3193,7 @@ export function App(props: AppProps) {
               onPromptInput={store.actions.setNewSessionPrompt}
               onWorktreeNameInput={store.actions.setNewSessionWorktreeName}
               onSubmit={() => void submitNewSession()}
-              onCancel={store.actions.closeNewSessionDialog}
+              onCancel={cancelNewSession}
               showKeyHints={props.sidebar === true}
             />
           )}
