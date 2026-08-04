@@ -4,6 +4,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { CodexLogAdapter } from "./log-adapter";
 import type { SessionState } from "../../../types/session";
+import type { SessionMetadata } from "../../log-adapter";
+import { decideCodexRolloutLinks } from "../../binder/links";
 import {
   jsonl,
   codexSessionMeta as sessionMeta,
@@ -31,6 +33,10 @@ describe("CodexLogAdapter", () => {
       expect(adapter.agentType).toBe("codex");
       expect(adapter.logDirGlob).toMatch(/\.codex\/sessions$/);
       expect(adapter.watchDepth).toBe(4);
+    });
+
+    it("declares pollsLog, because Codex's open-fd appends fire no fs.watch event", () => {
+      expect(adapter.pollsLog).toBe(true);
     });
   });
 
@@ -92,6 +98,83 @@ describe("CodexLogAdapter", () => {
       const meta = adapter.parseSessionMetadata(line);
       expect(meta?.version).toBeUndefined();
       expect(meta?.gitBranch).toBeUndefined();
+    });
+
+    it("returns null for a subagent/reviewer thread (codex >= 0.146 auto-approval reviewer)", () => {
+      const line = JSON.stringify(
+        sessionMeta({
+          thread_source: "subagent",
+          parent_thread_id: "parent-id",
+        }),
+      );
+      expect(adapter.parseSessionMetadata(line)).toBeNull();
+    });
+
+    it("returns null for parent_thread_id alone, even without thread_source", () => {
+      const line = JSON.stringify(
+        sessionMeta({ parent_thread_id: "parent-id" }),
+      );
+      expect(adapter.parseSessionMetadata(line)).toBeNull();
+    });
+
+    it('returns metadata when thread_source is "user" (codex >= 0.146 real user session)', () => {
+      const line = JSON.stringify(sessionMeta({ thread_source: "user" }));
+      expect(adapter.parseSessionMetadata(line)).not.toBeNull();
+    });
+  });
+
+  describe("dual-rollout guard (codex >= 0.146 auto-approval reviewer)", () => {
+    it("excludes the reviewer's rollout from link candidacy so decideCodexRolloutLinks binds the user file", () => {
+      // Real observed shapes from issue #104: both files share a launch
+      // timestamp and cwd, so without the thread_source/parent_thread_id
+      // filter both would be eligible link candidates for the same pane.
+      const parentId = "019fca64-e45a-79c0-8270-d030bb51cd90";
+      const reviewerId = "019fca64-e528-79c0-8270-d030bb51cd90";
+      const ts = "2026-08-03T18:30:37.000Z";
+      const cwd = "/Users/test/project";
+
+      const userLine = JSON.stringify(
+        sessionMeta({
+          id: parentId,
+          timestamp: ts,
+          cwd,
+          thread_source: "user",
+        }),
+      );
+      const reviewerLine = JSON.stringify(
+        sessionMeta({
+          id: reviewerId,
+          timestamp: ts,
+          cwd,
+          parent_thread_id: parentId,
+          thread_source: "subagent",
+        }),
+      );
+
+      const userMeta = adapter.parseSessionMetadata(userLine);
+      const reviewerMeta = adapter.parseSessionMetadata(reviewerLine);
+
+      expect(userMeta).not.toBeNull();
+      expect(reviewerMeta).toBeNull();
+
+      // Mirrors `scanCodexRollouts`: only non-null parses become candidates.
+      const candidates: { path: string; metadata: SessionMetadata }[] = [];
+      if (userMeta)
+        candidates.push({ path: "/rollouts/user.jsonl", metadata: userMeta });
+      if (reviewerMeta) {
+        candidates.push({
+          path: "/rollouts/reviewer.jsonl",
+          metadata: reviewerMeta,
+        });
+      }
+      expect(candidates).toHaveLength(1);
+
+      const links = decideCodexRolloutLinks(
+        [{ sessionId: "s1", cwd, startTime: Date.parse(ts) - 1_000 }],
+        candidates,
+      );
+
+      expect(links).toEqual([{ sessionId: "s1", rollout: candidates[0] }]);
     });
   });
 
@@ -375,13 +458,17 @@ describe("CodexLogAdapter", () => {
     // is the store's stamp of when the wait was established, which the
     // stale-output gate compares entry timestamps against; omitting it
     // (the default) exercises the fail-open compat path.
-    function waitingPrev(statusChangedAt?: string): SessionState {
+    function waitingPrev(
+      statusChangedAt?: string,
+      waitEstablishedAt?: string,
+    ): SessionState {
       return {
         status: "waiting",
         attentionType: "permission",
         pendingTool: "Bash",
         inPlanMode: false,
         ...(statusChangedAt ? { statusChangedAt } : {}),
+        ...(waitEstablishedAt ? { waitEstablishedAt } : {}),
       };
     }
 
@@ -538,6 +625,7 @@ describe("CodexLogAdapter", () => {
 
       expect(state.status).toBe("working");
       expect(state.attentionType).toBeNull();
+      expect(state.lastActivityAt).toBe("2026-04-01T12:00:20Z");
     });
 
     it("flips on an output slightly older than the wait stamp (inside the slack window)", async () => {
@@ -565,6 +653,108 @@ describe("CodexLogAdapter", () => {
       );
 
       expect(state.status).toBe("working");
+    });
+
+    it("gates on waitEstablishedAt's tight slack: an output 600ms older than the marker stamp does not flip, even inside the 2s statusChangedAt window", async () => {
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      // The sandbox-fail-then-escalate shape: the ungated attempt's output
+      // flushes just before Codex asks for approval on the retry. Under 1s
+      // stat-polling it is parsed AFTER the wait exists, and the wide
+      // statusChangedAt slack would let it clear the live prompt.
+      appendFileSync(
+        logPath,
+        jsonl(
+          responseItem("2026-04-01T12:00:14.400Z", {
+            type: "function_call_output",
+            call_id: "call-ungated-attempt",
+          }),
+        ),
+      );
+
+      const { state } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        waitingPrev("2026-04-01T12:00:15Z", "2026-04-01T12:00:15.000Z"),
+      );
+
+      expect(state.status).toBe("waiting");
+      expect(state.attentionType).toBe("permission");
+      expect(state.pendingTool).toBe("Bash");
+    });
+
+    it("flips on an output newer than waitEstablishedAt", async () => {
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      appendFileSync(
+        logPath,
+        jsonl(
+          responseItem("2026-04-01T12:00:15.400Z", {
+            type: "function_call_output",
+            call_id: "call-gated-retry",
+          }),
+        ),
+      );
+
+      const { state } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        waitingPrev("2026-04-01T12:00:15Z", "2026-04-01T12:00:15.000Z"),
+      );
+
+      expect(state.status).toBe("working");
+      expect(state.attentionType).toBeNull();
+    });
+
+    it("falls back to statusChangedAt's wide slack when waitEstablishedAt is malformed", async () => {
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      // 12:00:14.400 is outside the marker anchor's 250ms slack but inside
+      // statusChangedAt's 2s: an unparseable marker stamp must land on the
+      // fallback arm, not disable the gate or reject the entry.
+      appendFileSync(
+        logPath,
+        jsonl(
+          responseItem("2026-04-01T12:00:14.400Z", {
+            type: "function_call_output",
+            call_id: "call-1",
+          }),
+        ),
+      );
+
+      const { state } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        waitingPrev("2026-04-01T12:00:15Z", "not-a-timestamp"),
+      );
+
+      expect(state.status).toBe("working");
+    });
+
+    it("still gates on the statusChangedAt fallback when waitEstablishedAt is malformed", async () => {
+      writeFileSync(logPath, jsonl(sessionMeta()));
+      const seeded = await adapter.deriveFullState(logPath);
+
+      appendFileSync(
+        logPath,
+        jsonl(
+          responseItem("2026-04-01T12:00:05Z", {
+            type: "function_call_output",
+            call_id: "call-stale",
+          }),
+        ),
+      );
+
+      const { state } = await adapter.deriveIncrementalState(
+        logPath,
+        seeded.newOffset,
+        waitingPrev("2026-04-01T12:00:15Z", "not-a-timestamp"),
+      );
+
+      expect(state.status).toBe("waiting");
     });
 
     it("full-derivation ordering: task_started, function_call request, function_call_output, task_complete settles to idle", async () => {

@@ -82,6 +82,20 @@ export interface LogAdapter {
   readonly watchDepth?: number;
 
   /**
+   * Whether `LogWatcher` must stat-poll this adapter's log files instead of
+   * relying on filesystem change events alone.
+   *
+   * Exists because Codex holds its rollout file descriptor OPEN for the life
+   * of the session, and macOS emits no `fs.watch` change event for appends
+   * made through an already-open fd (verified under both Bun and Node for the
+   * recursive tree watch). Without polling the incremental feed never fires
+   * and the rollout is parsed exactly once, at link time. Agents that
+   * open/write/close per append (Claude) are seen by the watcher normally and
+   * leave this unset.
+   */
+  readonly pollsLog?: boolean;
+
+  /**
    * Extract the agent's native session ID from a log file path.
    * Returns null when the ID is not encoded in the filename (in which
    * case the adapter must rely on `parseSessionMetadata` instead).

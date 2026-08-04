@@ -1,4 +1,5 @@
 import { statSync } from "fs";
+import { stat } from "fs/promises";
 import { createLogTreeWatcher, type LogTreeWatcher } from "./log-tree-watcher";
 import { WATCHER_DEBOUNCE_MS } from "../lib/config";
 import { extractEncodedProjectPath, readTranscriptCwd } from "./parser";
@@ -28,6 +29,39 @@ import type { Session, SessionState } from "../types/session";
 import type { LogAdapter, RuntimeMode } from "./log-adapter";
 
 /**
+ * Interval between stat-polls for adapters that declare `pollsLog`.
+ *
+ * Cost is one `fs.stat` per tracked session of that agent per second —
+ * microseconds each, and only for sessions the daemon has already linked to
+ * a log file. The price paid for it is latency: a status flip derived from a
+ * log append lands at worst this interval plus `WATCHER_DEBOUNCE_MS` after
+ * the write.
+ */
+const LOG_POLL_INTERVAL_MS = 1000;
+
+/**
+ * The wait-establishment stamp a log adapter should gate on, read from the
+ * agent's own hook marker rather than from the store.
+ *
+ * Only a marker that (a) exists for this session, (b) belongs to this
+ * session's agent, and (c) currently records `waiting_permission` with a
+ * usable numeric `state_timestamp` (float SECONDS, from jq's `now`) yields a
+ * value; every other shape is `undefined`, which sends the adapter back to
+ * its `statusChangedAt` fallback.
+ */
+function markerWaitEstablishedAt(session: Session): string | undefined {
+  const marker = getSessionPidMarker(session.nativeSessionId ?? session.id);
+  if (!marker || marker.agent_type !== session.agentType) return undefined;
+  if (marker.state !== "waiting_permission") return undefined;
+  const seconds = marker.state_timestamp;
+  if (typeof seconds !== "number" || !Number.isFinite(seconds))
+    return undefined;
+  const stampedAt = new Date(seconds * 1000);
+  if (Number.isNaN(stampedAt.getTime())) return undefined;
+  return stampedAt.toISOString();
+}
+
+/**
  * Extract SessionState from a Session object
  */
 function sessionToState(session: Session): SessionState {
@@ -37,6 +71,7 @@ function sessionToState(session: Session): SessionState {
     pendingTool: session.pendingTool,
     inPlanMode: session.inPlanMode,
     statusChangedAt: session.statusChangedAt ?? undefined,
+    waitEstablishedAt: markerWaitEstablishedAt(session),
     cwd: session.cwd,
     project: session.project,
     lastActivityAt: session.lastActivityAt ?? undefined,
@@ -82,6 +117,8 @@ export class LogWatcher {
   private encodingDriftWarned: Set<string> = new Set();
   /** Last unbound-rebind attempt per session (cooldown bookkeeping). */
   private rebindAttemptAt: Map<string, number> = new Map();
+  /** Stat-poll timer, non-null only while an adapter with `pollsLog` runs. */
+  private pollTimer: Timer | null = null;
   /** Min interval between rebind attempts for an unbound session. */
   private static readonly REBIND_COOLDOWN_MS = 30_000;
   /** Resolver for the ready promise */
@@ -242,13 +279,63 @@ export class LogWatcher {
       console.error("Watcher error:", error);
     });
 
+    if (this.adapter.pollsLog) {
+      this.startPolling();
+    }
+
     // Adapter-private lifecycle (e.g. Claude subagent chokidar).
     this.adapter.start?.();
+  }
+
+  /**
+   * Arm the stat-poll loop for adapters whose appends `fs.watch` cannot see
+   * (see `LogAdapter.pollsLog`). Idempotent: a second `start()` reuses the
+   * live timer instead of leaking one.
+   */
+  private startPolling(): void {
+    if (this.pollTimer) return;
+    this.pollTimer = setInterval(() => {
+      void this.pollOnce();
+    }, LOG_POLL_INTERVAL_MS);
+  }
+
+  /**
+   * One poll pass: stat every linked log file of this adapter's agent and
+   * dispatch the grown ones through the same debounce path a real change
+   * event uses, so polled and event-driven feeds stay one code path.
+   *
+   * A path with no recorded offset counts as changed: that is a session the
+   * daemon just linked, and the first pass is what catches it up.
+   */
+  private async pollOnce(): Promise<void> {
+    for (const session of this.sessionManager.getSessions()) {
+      if (session.agentType !== this.adapter.agentType) continue;
+      const path = session.logPath;
+      if (!path) continue;
+
+      let size: number;
+      try {
+        size = (await stat(path)).size;
+      } catch {
+        // Rotated, deleted, or momentarily unreadable — the next pass retries.
+        continue;
+      }
+
+      const offset = this.fileOffsets.get(path);
+      if (offset !== undefined && size <= offset) continue;
+
+      this.scheduleProcessFile(path, session.id);
+    }
   }
 
   async stop(): Promise<void> {
     this.isInitialScan = false;
     this.initialScanQueue = [];
+
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
 
     if (this.watcher) {
       await this.watcher.close();
