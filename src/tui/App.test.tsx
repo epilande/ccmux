@@ -6495,6 +6495,83 @@ describe("App worktrees panel (W)", () => {
     }
   });
 
+  // Tab's rescope is panel-local, so the return must carry it in the action
+  // payload: reading the store reopened a widened panel back on its narrow
+  // opening repo (wrong scope, lost cursor, cache miss, one wrong capture).
+  it("keeps a Tab-widened scope across the dialog round trip", async () => {
+    const urls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = ((input: string | URL | Request) => {
+      const url =
+        typeof input === "string" || input instanceof URL
+          ? input.toString()
+          : input.url;
+      urls.push(url);
+      const body = url.includes("prune-candidates")
+        ? { candidates: [], skipped: [], open: [] }
+        : url.includes("/worktrees")
+          ? {
+              repos: [
+                {
+                  repoRoot: "/code/myapp",
+                  repoName: "myapp",
+                  worktrees: [WORKTREE_ROW],
+                },
+              ],
+            }
+          : {};
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    }) as unknown as typeof fetch;
+    try {
+      await renderApp(120, 24, { groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            mainRepoRoot: "/code/myapp",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      setup.mockInput.pressKey("W", { shift: true });
+      await new Promise((r) => setTimeout(r, 0));
+      await setup.renderOnce();
+      // The scoped open filtered by repo; Tab widens and refetches without.
+      expect(urls.some((u) => u.includes("repo="))).toBe(true);
+      setup.mockInput.pressTab();
+      await new Promise((r) => setTimeout(r, 0));
+      await setup.renderOnce();
+
+      setup.mockInput.pressEnter();
+      await new Promise((r) => setTimeout(r, 0));
+      await setup.renderOnce();
+      const before = urls.length;
+      setup.mockInput.pressEscape();
+      await new Promise((r) => setTimeout(r, 30));
+      await setup.renderOnce();
+      await new Promise((r) => setTimeout(r, 0));
+      await setup.renderOnce();
+
+      expect(setup.captureCharFrame()).toContain("Worktrees");
+      const reopened = urls.slice(before);
+      // The reopened panel reads the widened scope, not the opening repo...
+      expect(reopened.some((u) => u.includes("/worktrees"))).toBe(true);
+      expect(reopened.every((u) => !u.includes("repo="))).toBe(true);
+      // ...and its widened scan is the cached one, so none is re-fired.
+      expect(reopened.every((u) => !u.includes("prune-candidates"))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   // The control: a dialog the panel did NOT open cancels to wherever it was
   // opened from, marker-free.
   it("does not open the panel when cancelling a dialog opened with n", async () => {

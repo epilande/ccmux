@@ -135,6 +135,14 @@ interface WorktreesPanelProps {
    * it again. One-shot: `r` and Tab inside the same mount still rescan.
    */
   isReturn?: boolean;
+  /**
+   * Open with the scope already Tab-widened. Set on a return whose action
+   * left from the widened view: Tab's rescope is panel-local state the store
+   * never sees, so it has to be re-established here, or the return would
+   * land back on the opening repo's narrow view. `repo` still names the
+   * opening repo, which is what keeps Tab able to narrow back to it.
+   */
+  startWidened?: boolean;
   onClose: () => void;
   /** Jump to a session living in the row (Enter on an occupied row). */
   onJump: (session: WorktreeSession) => void;
@@ -143,13 +151,23 @@ interface WorktreesPanelProps {
    * set for a linked worktree, whose directory the dialog then locks; the
    * main checkout sends null and gets the ordinary destination choice.
    */
-  onSpawn: (target: { cwd: string; existingWorktree: string | null }) => void;
+  onSpawn: (target: {
+    cwd: string;
+    existingWorktree: string | null;
+    panelRepo: string | null;
+    panelScope: string | null;
+  }) => void;
   /**
    * Review a worktree's uncommitted diff. Absent where review cannot run
    * (the sidebar, which has no room to suspend into a full-screen tool), and
    * the `d` hint goes with it.
    */
-  onReview?: (target: { path: string; sessionId: string | null }) => void;
+  onReview?: (target: {
+    path: string;
+    sessionId: string | null;
+    panelRepo: string | null;
+    panelScope: string | null;
+  }) => void;
 }
 
 /**
@@ -1198,7 +1216,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const [result, setResult] = createSignal<PruneRunResult | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   /** True while the panel is narrowed to `props.repo`; Tab flips it. */
-  const [scoped, setScoped] = createSignal(props.repo !== null);
+  const [scoped, setScoped] = createSignal(
+    props.repo !== null && props.startWidened !== true,
+  );
   const [note, setNote] = createSignal<string | null>(null);
   /** A fully successful removal's title-line notice; the next load wipes it. */
   const [titleNotice, setTitleNotice] = createSignal<string | null>(null);
@@ -1553,10 +1573,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       props.onJump(session);
       return;
     }
+    // The opening repo AND the live filter travel with the action: Tab's
+    // rescope is panel-local, so a return that read the store instead would
+    // land on the narrow view the user had already widened away from.
+    const origin = { panelRepo: props.repo, panelScope: repoFilter() };
     props.onSpawn(
       entry.row.isMain
-        ? { cwd: entry.row.repoRoot, existingWorktree: null }
-        : { cwd: entry.row.path, existingWorktree: entry.row.path },
+        ? { cwd: entry.row.repoRoot, existingWorktree: null, ...origin }
+        : { cwd: entry.row.path, existingWorktree: entry.row.path, ...origin },
     );
   }
 
@@ -1705,6 +1729,8 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           props.onReview({
             path: entry.row.path,
             sessionId: entry.row.sessions[0]?.id ?? null,
+            panelRepo: props.repo,
+            panelScope: repoFilter(),
           });
         }
         break;

@@ -296,9 +296,16 @@ export interface NewSessionDraft {
    * it never reaches `NewSessionShape` or the policy functions, no field or
    * row keys off it, and submit ignores it entirely, since a spawn hands the
    * board to the new session. `cursor` is the panel row the dialog was
-   * opened over, so the reopened panel lands where the user left.
+   * opened over, so the reopened panel lands where the user left; `scope`
+   * is the panel's LIVE filter at that moment (null when Tab had widened
+   * it), which the reopen re-establishes, since the rescope is panel-local
+   * state nothing else remembers.
    */
-  returnToWorktrees: { repo: string | null; cursor: string } | null;
+  returnToWorktrees: {
+    repo: string | null;
+    scope: string | null;
+    cursor: string;
+  } | null;
   /** Which field the option/text keys currently apply to. */
   field: NewSessionField;
   /**
@@ -351,11 +358,16 @@ interface TUIState {
    * not in the fetched list. `isReturn` marks exactly those reopens, and is
    * what lets the panel reuse its last completed prune scan instead of
    * re-firing it; a plain open (`W`, the group menu) always scans fresh.
+   * `startWidened` re-establishes a Tab-widened scope on a return: the
+   * rescope is panel-local state this store never sees, so the action
+   * payloads carry the live filter out and a return carries it back in,
+   * while `repo` keeps naming the opening repo Tab can narrow back to.
    */
   worktrees: {
     repo: string | null;
     initialCursor: string | null;
     isReturn: boolean;
+    startWidened: boolean;
   } | null;
   /**
    * A message that waits to be acknowledged, or null.
@@ -1667,7 +1679,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       existingWorktree?: string;
       /** Origin marker for a dialog the Worktrees panel opened: cancel
        *  returns there. See {@link NewSessionDraft.returnToWorktrees}. */
-      returnToWorktrees?: { repo: string | null; cursor: string };
+      returnToWorktrees?: {
+        repo: string | null;
+        scope: string | null;
+        cursor: string;
+      };
     }) {
       // The three modes are mutually exclusive, and normalized here rather
       // than defended against everywhere below: an existing worktree is where
@@ -1921,13 +1937,17 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     showWorktrees(
       repo: string | null,
-      initialCursor?: string,
-      isReturn = false,
+      opts: {
+        initialCursor?: string;
+        isReturn?: boolean;
+        startWidened?: boolean;
+      } = {},
     ) {
       setState("worktrees", {
         repo,
-        initialCursor: initialCursor ?? null,
-        isReturn,
+        initialCursor: opts.initialCursor ?? null,
+        isReturn: opts.isReturn === true,
+        startWidened: opts.startWidened === true,
       });
     },
 

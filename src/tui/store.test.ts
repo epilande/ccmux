@@ -3880,19 +3880,40 @@ describe("worktrees panel state", () => {
   it("threads the initial cursor through showWorktrees", () => {
     const store = createTUIStore();
 
-    store.actions.showWorktrees("/repo", "/repo/wt/alpha");
+    store.actions.showWorktrees("/repo", {
+      initialCursor: "/repo/wt/alpha",
+    });
     expect(store.state.worktrees).toEqual({
       repo: "/repo",
       initialCursor: "/repo/wt/alpha",
       isReturn: false,
+      startWidened: false,
     });
 
     // A return-open says so, which is what lets the panel reuse its scan.
-    store.actions.showWorktrees("/repo", "/repo/wt/alpha", true);
+    store.actions.showWorktrees("/repo", {
+      initialCursor: "/repo/wt/alpha",
+      isReturn: true,
+    });
     expect(store.state.worktrees).toEqual({
       repo: "/repo",
       initialCursor: "/repo/wt/alpha",
       isReturn: true,
+      startWidened: false,
+    });
+
+    // A return whose action left from the Tab-widened view carries that
+    // too, while `repo` still names the repo Tab can narrow back to.
+    store.actions.showWorktrees("/repo", {
+      initialCursor: "/repo/wt/alpha",
+      isReturn: true,
+      startWidened: true,
+    });
+    expect(store.state.worktrees).toEqual({
+      repo: "/repo",
+      initialCursor: "/repo/wt/alpha",
+      isReturn: true,
+      startWidened: true,
     });
 
     // The plain open (the W key) carries none.
@@ -3901,6 +3922,7 @@ describe("worktrees panel state", () => {
       repo: null,
       initialCursor: null,
       isReturn: false,
+      startWidened: false,
     });
 
     store.actions.hideWorktrees();
@@ -3918,14 +3940,17 @@ describe("new session dialog origin marker", () => {
       existingWorktree: "/repo/.claude/worktrees/panel",
       returnToWorktrees: {
         repo: "/repo",
+        scope: null,
         cursor: "/repo/.claude/worktrees/panel",
       },
     });
 
-    // The marker rides the draft untouched; its absence (every non-panel
-    // origin) is pinned to null by the full-draft assertions above.
+    // The marker rides the draft untouched, live scope included; its
+    // absence (every non-panel origin) is pinned to null by the full-draft
+    // assertions above.
     expect(store.state.newSession?.returnToWorktrees).toEqual({
       repo: "/repo",
+      scope: null,
       cursor: "/repo/.claude/worktrees/panel",
     });
   });

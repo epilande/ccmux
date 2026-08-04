@@ -466,7 +466,12 @@ export function App(props: AppProps) {
    * worktree still captures them, and says how many, rather than dropping
    * them silently.
    */
-  function reviewWorktree(target: { path: string; sessionId: string | null }) {
+  function reviewWorktree(target: {
+    path: string;
+    sessionId: string | null;
+    panelRepo: string | null;
+    panelScope: string | null;
+  }) {
     if (reviewInFlight) return;
     // Re-probe live (not the launch-time `hunkAtLaunch`) so a hunk installed
     // after the picker started works without a restart.
@@ -483,14 +488,18 @@ export function App(props: AppProps) {
     // captured notes with no way to answer for them. Nothing below needs the
     // panel: the row was already read into `target` and `session`.
     //
-    // The scope is captured BEFORE that close so the round-trip can land the
-    // user back where they pressed `d`: every exit below reopens the panel
-    // with the cursor on the reviewed row, and the hand-back paths do it
-    // through `onDone` so the reopen provably follows the confirm's own
-    // resolution instead of racing it back over the dialog.
-    const scope = store.state.worktrees?.repo ?? null;
+    // The scope travels IN THE PAYLOAD, not from the store: Tab's rescope is
+    // panel-local state the store never sees, so reading the store here
+    // reopened a widened panel back on its narrow opening repo. Every exit
+    // below reopens the panel with the cursor on the reviewed row, and the
+    // hand-back paths do it through `onDone` so the reopen provably follows
+    // the confirm's own resolution instead of racing it back over the dialog.
     const reopen = () =>
-      store.actions.showWorktrees(scope, target.path, /* isReturn */ true);
+      store.actions.showWorktrees(target.panelRepo, {
+        initialCursor: target.path,
+        isReturn: true,
+        startWidened: target.panelRepo !== null && target.panelScope === null,
+      });
     store.actions.hideWorktrees();
     reviewInFlight = true;
     // Resolved before the guard is honored so a slow git can't be raced, and
@@ -569,10 +578,9 @@ export function App(props: AppProps) {
   function spawnInWorktree(target: {
     cwd: string;
     existingWorktree: string | null;
+    panelRepo: string | null;
+    panelScope: string | null;
   }) {
-    // Captured before the close: a cancel of the dialog this opens goes back
-    // to the panel, scoped as it was and with the cursor on this row.
-    const scope = store.state.worktrees?.repo ?? null;
     store.actions.hideWorktrees();
     const worktree = target.existingWorktree;
     if (worktree) {
@@ -587,7 +595,13 @@ export function App(props: AppProps) {
     openNewSession({
       cwd: target.cwd,
       existingWorktree: worktree ?? undefined,
-      returnToWorktrees: { repo: scope, cursor: worktree ?? target.cwd },
+      // The payload's own scope, not the store's: Tab's rescope is
+      // panel-local, and a cancel must land on the view the user left.
+      returnToWorktrees: {
+        repo: target.panelRepo,
+        scope: target.panelScope,
+        cursor: worktree ?? target.cwd,
+      },
     });
   }
 
@@ -1571,8 +1585,13 @@ export function App(props: AppProps) {
      *  `cwd` may simply repeat it. */
     existingWorktree?: string;
     /** Origin marker set ONLY by the Worktrees panel's Enter: a cancel of
-     *  this dialog returns to the panel, cursor on `cursor`. */
-    returnToWorktrees?: { repo: string | null; cursor: string };
+     *  this dialog returns to the panel, cursor on `cursor`, scoped to the
+     *  live filter the panel had (`scope`, null when Tab had widened it). */
+    returnToWorktrees?: {
+      repo: string | null;
+      scope: string | null;
+      cursor: string;
+    };
   }): void {
     // Mirrors `reviewSession`: refuse at the point of intent rather than
     // opening a dialog with a blank Directory row whose Enter round-trips
@@ -1616,11 +1635,11 @@ export function App(props: AppProps) {
     const marker = store.state.newSession?.returnToWorktrees ?? null;
     store.actions.closeNewSessionDialog();
     if (marker) {
-      store.actions.showWorktrees(
-        marker.repo,
-        marker.cursor,
-        /* isReturn */ true,
-      );
+      store.actions.showWorktrees(marker.repo, {
+        initialCursor: marker.cursor,
+        isReturn: true,
+        startWidened: marker.repo !== null && marker.scope === null,
+      });
     }
   }
 
@@ -3228,6 +3247,7 @@ export function App(props: AppProps) {
               iconStyle={store.state.iconStyle}
               initialCursor={panel().initialCursor}
               isReturn={panel().isReturn}
+              startWidened={panel().startWidened}
               onClose={store.actions.hideWorktrees}
               onJump={jumpToWorktreeSession}
               onSpawn={spawnInWorktree}

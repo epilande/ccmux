@@ -217,10 +217,21 @@ interface PanelOptions {
   height?: number;
   initialCursor?: string;
   isReturn?: boolean;
+  startWidened?: boolean;
   onClose?: () => void;
   onJump?: (s: WorktreeSession) => void;
-  onSpawn?: (t: { cwd: string; existingWorktree: string | null }) => void;
-  onReview?: (t: { path: string; sessionId: string | null }) => void;
+  onSpawn?: (t: {
+    cwd: string;
+    existingWorktree: string | null;
+    panelRepo: string | null;
+    panelScope: string | null;
+  }) => void;
+  onReview?: (t: {
+    path: string;
+    sessionId: string | null;
+    panelRepo: string | null;
+    panelScope: string | null;
+  }) => void;
 }
 
 async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
@@ -233,6 +244,7 @@ async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
         compact={opts.compact}
         initialCursor={opts.initialCursor}
         isReturn={opts.isReturn}
+        startWidened={opts.startWidened}
         onClose={opts.onClose ?? (() => {})}
         onJump={opts.onJump ?? (() => {})}
         onSpawn={opts.onSpawn ?? (() => {})}
@@ -1266,7 +1278,12 @@ describe("WorktreesPanel keys", () => {
 
   it("routes enter by what the row holds", async () => {
     const jumps: WorktreeSession[] = [];
-    const spawns: { cwd: string; existingWorktree: string | null }[] = [];
+    const spawns: {
+      cwd: string;
+      existingWorktree: string | null;
+      panelRepo: string | null;
+      panelScope: string | null;
+    }[] = [];
     const { keys, frame } = await mountPanel(
       {
         list: async () =>
@@ -1289,7 +1306,12 @@ describe("WorktreesPanel keys", () => {
     await frame();
     // Main checkout: an ordinary spawn whose destination stays selectable.
     keys.pressEnter();
-    expect(spawns[0]).toEqual({ cwd: "/repo", existingWorktree: null });
+    expect(spawns[0]).toEqual({
+      cwd: "/repo",
+      existingWorktree: null,
+      panelRepo: null,
+      panelScope: null,
+    });
 
     // Occupied worktree: jump to the agent already there.
     keys.pressKey("j");
@@ -1302,11 +1324,64 @@ describe("WorktreesPanel keys", () => {
     expect(spawns[1]).toEqual({
       cwd: "/repo/wt/alpha",
       existingWorktree: "/repo/wt/alpha",
+      panelRepo: null,
+      panelScope: null,
     });
   });
 
+  // Tab's rescope is panel-local, so the payload must carry the LIVE filter
+  // out with the action: a return that read the store instead landed back on
+  // the narrow opening repo (wrong scope, lost cursor, cache miss at once).
+  it("reports the live filter on its action payloads after Tab", async () => {
+    const spawns: {
+      cwd: string;
+      existingWorktree: string | null;
+      panelRepo: string | null;
+      panelScope: string | null;
+    }[] = [];
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(listOf([mainRow(), row()])),
+        scan: async () => json(emptyScan),
+      },
+      { repo: "/repo", onSpawn: (t) => spawns.push(t) },
+    );
+    await frame();
+    keys.pressKey("j");
+    keys.pressEnter();
+    expect(spawns[0]).toMatchObject({
+      panelRepo: "/repo",
+      panelScope: "/repo",
+    });
+
+    keys.pressTab();
+    await frame();
+    keys.pressEnter();
+    expect(spawns[1]).toMatchObject({ panelRepo: "/repo", panelScope: null });
+  });
+
+  it("opens already widened when the return left from the widened view", async () => {
+    const { keys, frame } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      { repo: "/repo", startWidened: true },
+    );
+    // Both phase reads went out unscoped: this IS the widened view...
+    expect(requested.length).toBeGreaterThan(0);
+    expect(requested.every((url) => !url.includes("repo="))).toBe(true);
+    // ...and Tab can still narrow back to the opening repo.
+    keys.pressTab();
+    await frame();
+    expect(requested.some((url) => url.includes("repo="))).toBe(true);
+  });
+
   it("keeps D for the dirty opt-in and gives bare d to review", async () => {
-    const reviewed: { path: string; sessionId: string | null }[] = [];
+    const reviewed: {
+      path: string;
+      sessionId: string | null;
+      panelRepo: string | null;
+      panelScope: string | null;
+    }[] = [];
     const { keys, frame } = await mountPanel(
       {
         list: async () =>
@@ -1331,7 +1406,14 @@ describe("WorktreesPanel keys", () => {
 
     keys.pressKey("d");
     await frame();
-    expect(reviewed).toEqual([{ path: "/repo/wt/alpha", sessionId: null }]);
+    expect(reviewed).toEqual([
+      {
+        path: "/repo/wt/alpha",
+        sessionId: null,
+        panelRepo: null,
+        panelScope: null,
+      },
+    ]);
     // Reviewing must not have disturbed the opt-in.
     expect(await frame()).toContain("x remove 1");
   });
