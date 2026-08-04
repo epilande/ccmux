@@ -19,6 +19,8 @@ interface FooterProps {
    * text field.
    */
   newSessionOption?: "focused" | "dropdown";
+  /** A handoff is being aimed at a row, which changes what the keys do. */
+  handoffPickMode?: boolean;
   reviewable?: boolean;
 }
 
@@ -164,6 +166,11 @@ export const Footer: Component<FooterProps> = (props) => {
             {newSessionHintSegments(props.newSessionOption ?? "text")
               .map((segment) => `${segment.key} ${segment.gloss}`)
               .join(HINT_SEPARATOR)}
+          </text>
+        </Match>
+        <Match when={props.handoffPickMode}>
+          <text fg={theme.overlay}>
+            j/k pick target · enter hand off · esc cancel
           </text>
         </Match>
         <Match when={props.searchMode}>

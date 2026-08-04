@@ -6,6 +6,7 @@ import { SessionItem, abbreviateTarget, alignText } from "./SessionItem";
 import { TickContext } from "../store";
 import { mockEnrichedSession } from "./test-helpers";
 import { displayWidth } from "../utils/format";
+import { HANDOFF_BADGE } from "./session-columns";
 import type { EnrichedSession } from "../../types";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
@@ -339,6 +340,50 @@ describe("SessionItem", () => {
       }),
     });
     expect(frame).toContain("2 Agent");
+  });
+
+  it("badges a row a handoff is queued for, and only while it is", async () => {
+    const queued = {
+      pendingHandoff: {
+        fromSessionId: "s9",
+        queuedAt: "2024-01-15T12:00:00Z",
+      },
+    };
+    expect(
+      await renderItem({ session: mockEnrichedSession(queued) }),
+    ).toContain(HANDOFF_BADGE);
+    // The same row without the field: the badge is the daemon's fact, not a
+    // decoration the row wears by default.
+    expect(await renderItem({ session: mockEnrichedSession() })).not.toContain(
+      HANDOFF_BADGE,
+    );
+    // And it survives the sidebar, where the subagent count does not.
+    expect(
+      await renderItem(
+        { session: mockEnrichedSession(queued), sidebar: true },
+        30,
+      ),
+    ).toContain(HANDOFF_BADGE);
+  });
+
+  it("keeps the badge beside the attention label, not over it", async () => {
+    const frame = await renderItem({
+      session: mockEnrichedSession({
+        status: "waiting",
+        attentionType: "permission",
+        pendingHandoff: {
+          fromSessionId: "s9",
+          queuedAt: "2024-01-15T12:00:00Z",
+        },
+      }),
+    });
+    const line = frame.split("\n").find((l) => l.includes("Permission"))!;
+    expect(line).toBeDefined();
+    // Both drawn, the badge after the label: the cell reserves room for the
+    // pair, so neither overwrites the other.
+    expect(line.indexOf(HANDOFF_BADGE)).toBeGreaterThan(
+      line.indexOf("Permission"),
+    );
   });
 
   it("ellipsizes an attention label longer than the cap", async () => {

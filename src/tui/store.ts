@@ -1,4 +1,4 @@
-import { createStore } from "solid-js/store";
+import { createStore, reconcile } from "solid-js/store";
 import {
   batch,
   createContext,
@@ -365,6 +365,18 @@ interface TUIState {
     y: number;
     highlight: string | null;
   } | null;
+  /**
+   * The row whose last response is being handed off while the user picks a
+   * target, or null when nothing is being handed off.
+   *
+   * A transient MODE over the ordinary list rather than an overlay of its own:
+   * picking a session is what this list already does, so j/k, the rows, the
+   * grouping and the scroll all keep working and the mode costs one banner and
+   * one branch in the key handler. The source is held by ID because the row
+   * itself keeps moving underneath: SSE re-sorts the board while the user is
+   * choosing, and a snapshot of the session would hand off yesterday's row.
+   */
+  handoffPick: { fromSessionId: string } | null;
   /** Open new-session dialog, or null when it is closed. */
   newSession: NewSessionDraft | null;
   /** Agent last spawned from the dialog, the default when the selected row
@@ -692,6 +704,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     toastMessage: null,
     contextMenu: null,
     groupContextMenu: null,
+    handoffPick: null,
     newSession: null,
     lastSpawnAgent: options.lastSpawnAgent ?? null,
     columns: options.columns,
@@ -1330,10 +1343,21 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("sessions", (s) => [...s, session]);
     },
 
+    /**
+     * Replace a row with the daemon's latest payload.
+     *
+     * `reconcile`, not a plain set, because a plain set MERGES: a key the new
+     * payload omits keeps its old value forever. The daemon omits optional
+     * facts rather than nulling them (`pendingHandoff` is only on the wire
+     * while a handoff is actually queued), so merging leaves a row wearing a
+     * badge for something that has already been delivered. Reconciling also
+     * diffs field by field, so an unchanged key does not invalidate whatever
+     * reads it.
+     */
     updateSession(session: EnrichedSession) {
       const idx = state.sessions.findIndex((s) => s.id === session.id);
       if (idx !== -1) {
-        setState("sessions", idx, session);
+        setState("sessions", idx, reconcile(session));
       }
     },
 
@@ -1553,6 +1577,43 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     hideGroupContextMenu() {
       setState("groupContextMenu", null);
+    },
+
+    /**
+     * Start picking a handoff target for `fromSessionId`, moving the selection
+     * onto the nearest row that could actually receive one. Returns false, and
+     * enters nothing, when the board holds no other session: a mode whose only
+     * candidate is the source is a dead end the caller should report instead.
+     *
+     * The selection moves because the menu that opened this sits ON the source
+     * row, so the mode would otherwise start with Enter aimed at the one
+     * session that cannot be the target. It searches FORWARD with a wrap, so
+     * the first candidate is the next row down (the direction the eye is
+     * already travelling) rather than wherever a global scan happens to land.
+     */
+    beginHandoffPick(fromSessionId: string): boolean {
+      const items = flatItems();
+      const start = selectedIndex();
+      for (let step = 1; step <= items.length; step++) {
+        const index = (start + step) % items.length;
+        const item = items[index]!;
+        if (
+          item.type !== "session" ||
+          item.filteredSession.session.id === fromSessionId
+        ) {
+          continue;
+        }
+        batch(() => {
+          setState("handoffPick", { fromSessionId });
+          selectItemAt(index);
+        });
+        return true;
+      }
+      return false;
+    },
+
+    endHandoffPick() {
+      setState("handoffPick", null);
     },
 
     /** Light a specific item of whichever menu is open, or nothing. */
