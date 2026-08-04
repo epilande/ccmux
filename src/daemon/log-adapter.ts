@@ -41,6 +41,15 @@ export interface FullDerivation {
   state: SessionState;
   /** Byte offset after the first full read; seeds subsequent incremental reads. */
   newOffset: number;
+  /**
+   * Set when the read itself failed, so `state` is a placeholder rather than
+   * a derivation. `LogWatcher` must then leave the session and the offset
+   * untouched: writing the placeholder would clobber live state, and
+   * recording offset 0 for a non-empty file re-arms a full derive on every
+   * subsequent pass. Adapters that cannot distinguish a read failure from an
+   * empty log leave it unset.
+   */
+  failed?: true;
 }
 
 /**
@@ -80,6 +89,20 @@ export interface LogAdapter {
    * through verbatim.
    */
   readonly watchDepth?: number;
+
+  /**
+   * Whether `LogWatcher` must stat-poll this adapter's log files instead of
+   * relying on filesystem change events alone.
+   *
+   * Exists because Codex holds its rollout file descriptor OPEN for the life
+   * of the session, and macOS emits no `fs.watch` change event for appends
+   * made through an already-open fd (verified under both Bun and Node for the
+   * recursive tree watch). Without polling the incremental feed never fires
+   * and the rollout is parsed exactly once, at link time. Agents that
+   * open/write/close per append (Claude) are seen by the watcher normally and
+   * leave this unset.
+   */
+  readonly pollsLog?: boolean;
 
   /**
    * Extract the agent's native session ID from a log file path.
