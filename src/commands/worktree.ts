@@ -8,8 +8,13 @@ import type {
   PruneRunResult,
   PruneScan,
   PruneSkip,
+  ScanResponse,
 } from "../daemon/worktree-prune";
-import { describeIgnoredFiles } from "../daemon/worktree-prune";
+import {
+  describeHttpFailure,
+  describeIgnoredFiles,
+  normalizeScan,
+} from "../daemon/worktree-prune";
 import type {
   WorktreeListResponse,
   WorktreeRepo,
@@ -170,17 +175,12 @@ async function fetchCandidates(
     const body = (await response.json().catch(() => ({}))) as {
       error?: string;
     };
-    throw new Error(body.error ?? `HTTP ${response.status}`);
+    throw new Error(body.error ?? describeHttpFailure(response.status));
   }
   // Normalized, not cast: a daemon older than the `open` bucket sends a body
   // without it, and a bare cast would hand every reader a field the type
   // promises and the wire does not have.
-  const data = (await response.json()) as Partial<PruneScan>;
-  return {
-    candidates: data.candidates ?? [],
-    skipped: data.skipped ?? [],
-    open: data.open ?? [],
-  };
+  return normalizeScan((await response.json()) as ScanResponse);
 }
 
 async function postPrune(body: {
@@ -216,7 +216,7 @@ async function postPrune(body: {
     const data = (await response.json().catch(() => ({}))) as {
       error?: string;
     };
-    throw new Error(data.error ?? `HTTP ${response.status}`);
+    throw new Error(data.error ?? describeHttpFailure(response.status));
   }
   return (await response.json()) as PruneRunResult;
 }
@@ -469,7 +469,7 @@ async function fetchWorktrees(options: {
     const body = (await response.json().catch(() => ({}))) as {
       error?: string;
     };
-    throw new Error(body.error ?? `HTTP ${response.status}`);
+    throw new Error(body.error ?? describeHttpFailure(response.status));
   }
   return (await response.json()) as WorktreeListResponse;
 }

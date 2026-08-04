@@ -19,6 +19,7 @@ import { rm } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import type { SessionStatus } from "../types/session";
 import { mapWithConcurrency } from "../lib/concurrency";
+import { isCcmuxPane } from "../lib/config";
 import { isShellCommand } from "./pane-classify";
 import { scanTmuxPanesOrThrow } from "./pane-discovery";
 import { tmuxArgv } from "../lib/tmux-exec";
@@ -212,6 +213,50 @@ export interface PruneScan {
   skipped: PruneSkip[];
   /** Worktrees withheld because their PR is still open. @see PruneOpen */
   open: PruneOpen[];
+}
+
+/**
+ * `GET /worktrees/prune-candidates` as it may ARRIVE at a client.
+ *
+ * Every array {@link PruneScan} declares required is optional here, because
+ * the daemon answering is a long-lived background process that can predate the
+ * build talking to it: `open` (the healthy in-flight-PR rows) is simply absent
+ * from an older one, and `data.open.map` on undefined would throw in the middle
+ * of a merge that had nothing else wrong with it.
+ */
+export type ScanResponse = Partial<PruneScan>;
+
+/**
+ * The single place that knows an older daemon exists. Everything downstream —
+ * the picker's Worktrees panel and `ccmux worktree prune` alike — reads a whole
+ * {@link PruneScan}, so the guard lives at the boundary instead of at each of
+ * the reads.
+ *
+ * It lives beside the scan it normalizes rather than in either client, so the
+ * two cannot drift apart as the scan gains buckets.
+ */
+export function normalizeScan(data: ScanResponse): PruneScan {
+  return {
+    candidates: data.candidates ?? [],
+    skipped: data.skipped ?? [],
+    open: data.open ?? [],
+  };
+}
+
+/**
+ * Turn an HTTP status into something that names a cause the user can act on.
+ *
+ * 404 gets its own wording because it is not an exotic failure for the
+ * worktree endpoints: the daemon is a long-lived background process,
+ * `GET /worktrees` is new, and a daemon started before this build answers 404
+ * for it — which is the guaranteed first result of upgrading without a restart.
+ * "HTTP 404" describes that as a mystery; the restart command is the whole fix.
+ */
+export function describeHttpFailure(status: number): string {
+  if (status === 404) {
+    return "daemon is out of date (restart it: ccmux daemon restart)";
+  }
+  return `HTTP ${status}`;
 }
 
 /** One `gh pr list --json` row, with the fields that establish identity. */
@@ -814,6 +859,8 @@ export interface OccupantPane {
   paneId: string;
   currentPath: string | null;
   currentCommand: string | null;
+  /** `#{pane_title}`, which is how a ccmux surface identifies itself. */
+  paneTitle: string | null;
 }
 
 /**
@@ -827,12 +874,21 @@ export interface OccupantPane {
  * at the moment of deletion, is the one observer that has no such latency.
  *
  * A pane counts as an occupant when its cwd is inside the worktree AND its
- * foreground command is not a bare shell. The shell exemption is the whole
- * subtlety: a shell left sitting in a directory that is about to disappear is
- * the ORDINARY leftover, and refusing on it would block most legitimate
- * removals (the prune surfaces are themselves usually opened from a pane in
- * the repo). An editor is not exempt — `isShellCommand` is deliberately
- * narrower than `isNonAgentCommand` for exactly this call.
+ * foreground command is not a bare shell AND it is not a ccmux surface. The
+ * shell exemption is the whole subtlety: a shell left sitting in a directory
+ * that is about to disappear is the ORDINARY leftover, and refusing on it
+ * would block most legitimate removals (the prune surfaces are themselves
+ * usually opened from a pane in the repo). An editor is not exempt —
+ * `isShellCommand` is deliberately narrower than `isNonAgentCommand` for
+ * exactly this call.
+ *
+ * A ccmux surface is exempt BY IDENTITY, not by being the caller. A sidebar
+ * reports `bun` as its foreground command, so the shell exemption never
+ * covered it, and `callerPane` cannot cover it either: inside a
+ * `display-popup` TMUX_PANE is unset, so the popup picker sends no exemption
+ * at all and refused every prune of a worktree a sidebar happened to sit in.
+ * The pane title is what distinguishes them — every ccmux surface sets one
+ * (`isCcmuxPane`), and a surface is never the work a prune should refuse on.
  *
  * `ignorePaneIds` carries the candidate's own session panes, which
  * {@link runPrune} has already stopped and closed by this point; a pane tmux
@@ -856,6 +912,7 @@ export function paneOccupants(
     if (!pane.currentPath) return false;
     const path = normalizePath(pane.currentPath);
     if (path !== root && !path.startsWith(prefix)) return false;
+    if (isCcmuxPane(pane.paneTitle)) return false;
     return !isShellCommand(pane.currentCommand);
   });
 }
@@ -929,14 +986,15 @@ export interface PruneOptions extends PruneDeps {
   /**
    * The pane the request came FROM, exempt from the occupancy guard.
    *
-   * A `display-popup` is not a pane (verified: a popup running a long command
-   * does not appear in `list-panes -a`), so the picker's own overlay needs no
-   * exemption. A SIDEBAR does: it runs in a real pane, and pruning the
-   * worktree that pane happens to sit in is an ordinary thing to do from it —
-   * without this, the guard would refuse the removal on the surface that
-   * asked for it. Every ccmux surface therefore sends its own pane
-   * (`$TMUX_PANE` for the CLI, `callerPane` from the TUI, the same convention
-   * spawn placement uses).
+   * This covers the CLI, whose pane runs `ccmux worktree prune` itself: prune
+   * from a pane sitting inside the worktree, the most natural way to do it,
+   * and the guard would otherwise refuse on the process doing the pruning.
+   * Surfaces need no exemption of their own — a `display-popup` is not a pane
+   * (verified: a popup running a long command does not appear in
+   * `list-panes -a`), and a sidebar, which IS a real pane, is exempt by its
+   * title (see {@link paneOccupants}) rather than by sending an id it cannot
+   * always know. Callers that have `$TMUX_PANE` send it anyway, the same
+   * convention spawn placement uses.
    *
    * It exempts that pane from the LAST-MOMENT check only. A worktree with a
    * bound session is still skipped at classification, so this cannot be used
@@ -1064,6 +1122,7 @@ async function defaultListPanes(): Promise<OccupantPane[]> {
     paneId: pane.paneId,
     currentPath: pane.currentPath,
     currentCommand: pane.currentCommand,
+    paneTitle: pane.paneTitle,
   }));
 }
 

@@ -1540,6 +1540,17 @@ export class DaemonServer {
     const allowDirty = asPaths(body.allowDirty);
     const cleanState = body.cleanState === true;
 
+    // Validated the same way the spawn endpoint validates its own pane ids: a
+    // malformed value is a caller mistake worth naming, not something to
+    // quietly pass to the guard as an id that can never match a pane.
+    const callerPaneResult = normalizeTarget(body.callerPane, "callerPane");
+    if (!callerPaneResult.ok) {
+      return Response.json(
+        { error: callerPaneResult.error },
+        { status: 400, headers },
+      );
+    }
+
     if (paths.length === 0 && !cleanState) {
       return Response.json(
         { error: "No worktrees selected" },
@@ -1586,12 +1597,11 @@ export class DaemonServer {
         // resolved through symlinks, so an opt-in echoed back through a client
         // still matches the candidate it was granted for.
         allowDirtyPaths: allowDirty.map(normalizePath),
-        // The surface's own pane, exempt from the last-moment occupancy
-        // guard so pruning the worktree a sidebar sits in still works. It
-        // never widens what is prunable: a worktree with a bound session is
-        // already skipped at classification.
-        callerPane:
-          typeof body.callerPane === "string" ? body.callerPane : undefined,
+        // The caller's own pane, exempt from the last-moment occupancy guard
+        // so pruning from a pane inside the worktree still works. It never
+        // widens what is prunable: a worktree with a bound session is already
+        // skipped at classification.
+        callerPane: callerPaneResult.value,
         source: typeof body.source === "string" ? body.source : "api",
       });
       // A removed worktree invalidates the cwd-keyed git cache for every path

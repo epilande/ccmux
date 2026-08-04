@@ -5825,6 +5825,24 @@ describe("worktree prune endpoints", () => {
     expect(body.error).toContain("No worktrees selected");
   });
 
+  // Validated like the spawn endpoint's own pane ids rather than accepted as
+  // any string: a malformed value can never match a pane, so passing it on
+  // would silently drop the exemption it was sent to request.
+  it("rejects a malformed callerPane instead of ignoring it", async () => {
+    const { repo, worktree } = makePruneFixture();
+    const { internals } = serverFor(repo);
+
+    const res = await post(internals, {
+      paths: [worktree],
+      callerPane: "not-a-pane",
+    });
+    const body = (await res.json()) as { error: string };
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("callerPane");
+    expect(existsSync(worktree)).toBe(true);
+  });
+
   it("refuses a dirty worktree that carries no opt-in, and keeps it on disk", async () => {
     const { repo, worktree } = makePruneFixture();
     writeFileSync(join(worktree, "uncommitted.txt"), "work\n");

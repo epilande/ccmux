@@ -11,6 +11,7 @@ import {
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { PICKER_PANE_TITLE, SIDEBAR_PANE_TITLE } from "../lib/config";
 import type { AgentStateFile } from "./agent-state";
 import {
   cleanStateEntries,
@@ -19,9 +20,11 @@ import {
 } from "./agent-state";
 import {
   branchDeletionFor,
+  describeHttpFailure,
   describeIgnoredDeletion,
   describeIgnoredDirs,
   describeIgnoredFiles,
+  normalizeScan,
   ghPRStateLookup,
   isRepoAdminDir,
   paneListIncludes,
@@ -2796,7 +2799,8 @@ describe("paneOccupants", () => {
     paneId: string,
     currentPath: string | null,
     currentCommand: string | null,
-  ) => ({ paneId, currentPath, currentCommand });
+    paneTitle: string | null = null,
+  ) => ({ paneId, currentPath, currentCommand, paneTitle });
 
   it("reports a pane running a command inside the worktree", () => {
     const found = paneOccupants(
@@ -2825,6 +2829,35 @@ describe("paneOccupants", () => {
         "/wt/feature",
       ),
     ).toEqual([]);
+  });
+
+  // A sidebar reports `bun`, not a shell and not `ccmux`, so the shell
+  // exemption never covered it — and the popup picker, where TMUX_PANE is
+  // unset, sends no `callerPane` to cover it either. The title is what
+  // identifies a surface.
+  it("exempts a ccmux surface by its pane title", () => {
+    expect(
+      paneOccupants(
+        [
+          pane("%1", "/wt/feature", "bun", SIDEBAR_PANE_TITLE),
+          pane("%2", "/wt/feature", "bun", PICKER_PANE_TITLE),
+        ],
+        "/wt/feature",
+      ),
+    ).toEqual([]);
+  });
+
+  // The exemption is the ccmux prefix, not the command: an agent that happens
+  // to run under `bun` is still somebody working.
+  it("does NOT exempt a non-ccmux pane running the same command", () => {
+    const found = paneOccupants(
+      [
+        pane("%1", "/wt/feature", "bun", "zsh"),
+        pane("%2", "/wt/feature", "bun"),
+      ],
+      "/wt/feature",
+    );
+    expect(found.map((p) => p.paneId)).toEqual(["%1", "%2"]);
   });
 
   // An editor is not an agent, but it IS somebody working — which is why this
@@ -2879,7 +2912,12 @@ describe("runPrune live-pane guard", () => {
 
     const result = await runPrune([candidate], {
       listPanes: async () => [
-        { paneId: "%7", currentPath: candidate.path, currentCommand: "claude" },
+        {
+          paneId: "%7",
+          currentPath: candidate.path,
+          currentCommand: "claude",
+          paneTitle: null,
+        },
       ],
     });
 
@@ -2898,7 +2936,33 @@ describe("runPrune live-pane guard", () => {
 
     const result = await runPrune([candidate], {
       listPanes: async () => [
-        { paneId: "%7", currentPath: candidate.path, currentCommand: "zsh" },
+        {
+          paneId: "%7",
+          currentPath: candidate.path,
+          currentCommand: "zsh",
+          paneTitle: null,
+        },
+      ],
+    });
+
+    expect(result.outcomes[0].removed).toBe(true);
+    expect(existsSync(candidate.path)).toBe(false);
+  });
+
+  // The live case this was written for: a sidebar sits in the worktree,
+  // reporting `bun`, and the popup picker that asked for the prune has no
+  // TMUX_PANE to exempt it with.
+  it("removes it when the only pane there is a ccmux sidebar", async () => {
+    const candidate = await mergedCandidate("guard-allows-sidebar");
+
+    const result = await runPrune([candidate], {
+      listPanes: async () => [
+        {
+          paneId: "%7",
+          currentPath: candidate.path,
+          currentCommand: "bun",
+          paneTitle: SIDEBAR_PANE_TITLE,
+        },
       ],
     });
 
@@ -2931,7 +2995,12 @@ describe("runPrune live-pane guard", () => {
 
     const result = await runPrune([busy, free], {
       listPanes: async () => [
-        { paneId: "%7", currentPath: busy.path, currentCommand: "node" },
+        {
+          paneId: "%7",
+          currentPath: busy.path,
+          currentCommand: "node",
+          paneTitle: null,
+        },
       ],
     });
 
@@ -2963,7 +3032,12 @@ describe("runPrune callerPane exemption", () => {
   it("removes a worktree the calling pane is sitting in", async () => {
     const candidate = await mergedCandidate("caller-pane");
     const panes = async () => [
-      { paneId: "%9", currentPath: candidate.path, currentCommand: "ccmux" },
+      {
+        paneId: "%9",
+        currentPath: candidate.path,
+        currentCommand: "ccmux",
+        paneTitle: null,
+      },
     ];
 
     const refused = await runPrune([candidate], { listPanes: panes });
@@ -2985,8 +3059,18 @@ describe("runPrune callerPane exemption", () => {
     const result = await runPrune([candidate], {
       callerPane: "%9",
       listPanes: async () => [
-        { paneId: "%9", currentPath: candidate.path, currentCommand: "ccmux" },
-        { paneId: "%3", currentPath: candidate.path, currentCommand: "claude" },
+        {
+          paneId: "%9",
+          currentPath: candidate.path,
+          currentCommand: "ccmux",
+          paneTitle: null,
+        },
+        {
+          paneId: "%3",
+          currentPath: candidate.path,
+          currentCommand: "claude",
+          paneTitle: null,
+        },
       ],
     });
 
@@ -2995,5 +3079,57 @@ describe("runPrune callerPane exemption", () => {
       true,
     );
     expect(existsSync(candidate.path)).toBe(true);
+  });
+});
+
+describe("normalizeScan", () => {
+  // An older daemon is a live possibility, not a hypothetical: it is a
+  // long-lived background process that can predate whichever client is
+  // talking to it (the picker's panel and `ccmux worktree prune` both).
+  it("fills in the arrays an older daemon does not send", () => {
+    expect(normalizeScan({})).toEqual({
+      candidates: [],
+      skipped: [],
+      open: [],
+    });
+  });
+
+  it("keeps what it is given", () => {
+    const one: PruneCandidate = {
+      path: "/repo/wt/one",
+      repoRoot: "/repo",
+      repoName: "repo",
+      name: "one",
+      branch: "feat/one",
+      reason: "pr-merged",
+      detail: "PR #68 merged",
+      pr: null,
+      dirty: false,
+      modified: 0,
+      untracked: 0,
+      ignoredFiles: [],
+      ignoredDirs: [],
+      branchDeletion: "safe",
+      adminDir: null,
+      sessions: [],
+    };
+    expect(normalizeScan({ candidates: [one] })).toEqual({
+      candidates: [one],
+      skipped: [],
+      open: [],
+    });
+  });
+});
+
+describe("describeHttpFailure", () => {
+  // The daemon is long-lived and the worktree endpoints are new, so a 404 is
+  // the ordinary first result of upgrading without a restart, not an exotic
+  // failure. Both readers (the panel and the CLI) show this string verbatim.
+  it("names the out-of-date daemon on 404", () => {
+    expect(describeHttpFailure(404)).toContain("ccmux daemon restart");
+  });
+
+  it("leaves other statuses as the status", () => {
+    expect(describeHttpFailure(500)).toBe("HTTP 500");
   });
 });
