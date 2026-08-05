@@ -1,7 +1,16 @@
-import { describe, it, expect, afterEach, mock, beforeEach } from "bun:test";
+import {
+  describe,
+  it,
+  expect,
+  afterEach,
+  mock,
+  beforeEach,
+  spyOn,
+} from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import type { SSECallbacks } from "./utils/sse";
+import * as clipboard from "./utils/clipboard";
 import { mockEnrichedSession, squish } from "./components/test-helpers";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -4092,6 +4101,7 @@ describe("App move-changes menu gate", () => {
       "Attach",
       "New session",
       "Review diff",
+      "Copy last response",
       "Move changes",
       "Restart",
       "Kill",
@@ -4349,11 +4359,11 @@ describe("App move-changes menu gate", () => {
       expect(setup.captureCharFrame()).not.toContain("Move changes");
 
       // The first keyboard move takes ownership and must reveal the live list
-      // that App is navigating. Three more steps land on Move changes.
+      // that App is navigating. Four more steps land on Move changes.
       setup.mockInput.pressKey("j");
       await setup.renderOnce();
       expect(setup.captureCharFrame()).toContain("Move changes");
-      for (const _ of [0, 1, 2]) {
+      for (const _ of [0, 1, 2, 3]) {
         setup.mockInput.pressKey("j");
         await setup.renderOnce();
       }
@@ -4392,9 +4402,9 @@ describe("App move-changes menu gate", () => {
       setup.mockInput.pressKey("m");
       await settle();
       await setup.renderOnce();
-      // Attach -> New session -> Review diff -> Restart. (No Fork: the row is
-      // not forkable here.)
-      for (const _ of [0, 1, 2]) {
+      // Attach -> New session -> Review diff -> Copy last response ->
+      // Restart. (No Fork: the row is not forkable here.)
+      for (const _ of [0, 1, 2, 3]) {
         setup.mockInput.pressKey("j");
         await setup.renderOnce();
       }
@@ -6008,6 +6018,298 @@ describe("App row menu (m)", () => {
         expect(`${row.label}@${row.row}`).not.toContain("@-1");
       const ordered = [...rows].sort((a, b) => a.row - b.row);
       expect(ordered.map((r) => r.label)).toEqual(rows.map((r) => r.label));
+    } finally {
+      restore();
+    }
+  });
+});
+
+/**
+ * "Copy last response": the row-menu item, the one request it makes, and what
+ * the toast says about what actually landed on the clipboard.
+ *
+ * `copyToClipboard` is spied rather than left real: the fallback tier spawns
+ * `pbcopy`, and a test suite that quietly replaces the developer's clipboard
+ * is not one anybody should run twice.
+ */
+describe("App copy last response", () => {
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  let copySpy: ReturnType<typeof spyOn<typeof clipboard, "copyToClipboard">>;
+  /** What `copyToClipboard` was handed, newest last. */
+  let copied: string[] = [];
+
+  beforeEach(() => {
+    copied = [];
+    copySpy = spyOn(clipboard, "copyToClipboard").mockImplementation(
+      async (text: string) => {
+        copied.push(text);
+        return { ok: true, via: "command" };
+      },
+    );
+  });
+
+  afterEach(() => {
+    copySpy.mockRestore();
+  });
+
+  /** Answers the menu's fetches; `transcript` is what the endpoint replies. */
+  function withDaemon(
+    transcript:
+      | { status: number; body: Record<string, unknown> }
+      | "unreachable" = {
+      status: 200,
+      body: {
+        source: "transcript",
+        turns: [{ role: "assistant", text: "hello there" }],
+        truncated: false,
+      },
+    },
+  ) {
+    const asked: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/transcript")) {
+        asked.push(href);
+        if (transcript === "unreachable") throw new Error("ECONNREFUSED");
+        return Response.json(transcript.body, { status: transcript.status });
+      }
+      // Clean, so "Move changes" never arrives and the row order is stable.
+      if (href.includes("/dirty")) return Response.json({ dirty: false });
+      return Response.json({});
+    }) as unknown as typeof fetch;
+    return { asked, restore: () => (globalThis.fetch = original) };
+  }
+
+  async function renderRow(overrides: Record<string, unknown> = {}) {
+    await renderApp(120, 24, { groupBy: "none", persistent: true });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "s1",
+          project: "myapp",
+          cwd: "/code/myapp",
+          tmuxPane: "%1",
+          ...overrides,
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+  }
+
+  const press = async (key: string) => {
+    setup.mockInput.pressKey(key);
+    await settle();
+    await setup.renderOnce();
+  };
+
+  /** Open the row's menu with `m` and activate the copy item. */
+  async function activateCopy() {
+    await press("m");
+    // Attach -> New session -> Review diff -> Copy last response.
+    for (const _ of [0, 1, 2]) await press("j");
+    expect(setup.captureCharFrame()).toContain("Copy last response");
+    setup.mockInput.pressEnter();
+    await settle();
+    await setup.renderOnce();
+  }
+
+  it("offers the item on a session row's menu", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await press("m");
+      expect(setup.captureCharFrame()).toContain("Copy last response");
+    } finally {
+      restore();
+    }
+  });
+
+  it("offers the same item to a right-click", async () => {
+    // The two ways into the row menu are one thing (`openRowMenu`); this is
+    // the assertion that keeps them one thing.
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Copy last response");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps the read actions together, above the ones that end a session", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await press("m");
+      const lineOf = (text: string) =>
+        setup
+          .captureCharFrame()
+          .split("\n")
+          .findIndex((line) => line.includes(text));
+      // By ORDER, not presence: a menu draws one row per item, so an item in
+      // the wrong place moves every row below it.
+      expect(lineOf("Review diff")).toBeLessThan(lineOf("Copy last response"));
+      expect(lineOf("Copy last response")).toBeLessThan(lineOf("Restart"));
+      expect(lineOf("Restart")).toBeLessThan(lineOf("Kill"));
+    } finally {
+      restore();
+    }
+  });
+
+  it("offers it on a paneless background row that has a transcript", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow({
+        tmuxPane: null,
+        trackingMode: "background",
+        logPath: "/logs/bg.jsonl",
+      });
+      await press("m");
+      const frame = setup.captureCharFrame();
+      // Anchored on the background menu, so this can't pass by opening the
+      // ordinary one.
+      expect(frame).toContain("Attach agent");
+      expect(frame).toContain("Copy last response");
+    } finally {
+      restore();
+    }
+  });
+
+  it("hides it on a row with neither a pane nor a transcript", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow({
+        tmuxPane: null,
+        trackingMode: "background",
+        logPath: null,
+      });
+      await press("m");
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Attach agent");
+      expect(frame).not.toContain("Copy last response");
+    } finally {
+      restore();
+    }
+  });
+
+  it("asks for one turn and copies the text it gets back", async () => {
+    const { asked, restore } = withDaemon();
+    try {
+      await renderRow();
+      await activateCopy();
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain("/sessions/s1/transcript");
+      expect(asked[0]).toContain("turns=1");
+      expect(copied).toEqual(["hello there"]);
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("Copied11chars");
+      // The menu closed on activation; the toast is the only report.
+      expect(frame).not.toContain("Copylastresponse");
+    } finally {
+      restore();
+    }
+  });
+
+  it("says so when a size guard dropped part of the response", async () => {
+    const { restore } = withDaemon({
+      status: 200,
+      body: {
+        source: "transcript",
+        turns: [{ role: "assistant", text: "clipped" }],
+        truncated: true,
+      },
+    });
+    try {
+      await renderRow();
+      await activateCopy();
+      expect(squish(setup.captureCharFrame())).toContain("(truncated)");
+    } finally {
+      restore();
+    }
+  });
+
+  it("says so when what it copied is a screen capture", async () => {
+    // The daemon always sets truncated:true on a pane-capture fallback (a
+    // capture is never the whole response), so this is the only shape the
+    // real endpoint produces; the assertion is on source winning over the
+    // flag it always carries too, not on the flag's absence.
+    const { restore } = withDaemon({
+      status: 200,
+      body: {
+        source: "pane",
+        turns: [{ role: "assistant", text: "whatever was on screen" }],
+        truncated: true,
+      },
+    });
+    try {
+      await renderRow();
+      await activateCopy();
+      expect(squish(setup.captureCharFrame())).toContain("(panecapture)");
+    } finally {
+      restore();
+    }
+  });
+
+  it("passes the endpoint's own refusal through to the toast", async () => {
+    const { restore } = withDaemon({
+      status: 400,
+      body: { error: "Session has no readable transcript and no tmux pane" },
+    });
+    try {
+      await renderRow();
+      await activateCopy();
+      expect(squish(setup.captureCharFrame())).toContain(
+        "Copyfailed:Sessionhasnoreadabletranscript",
+      );
+      expect(copied).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("reports an unreachable daemon rather than claiming a copy", async () => {
+    const { restore } = withDaemon("unreachable");
+    try {
+      await renderRow();
+      await activateCopy();
+      expect(squish(setup.captureCharFrame())).toContain(
+        "Copyfailed:daemonunreachable",
+      );
+      expect(copied).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("reports a clipboard that took nothing", async () => {
+    copySpy.mockImplementation(async () => ({ ok: false, via: null }));
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await activateCopy();
+      expect(squish(setup.captureCharFrame())).toContain(
+        "Copyfailed:noclipboardavailable",
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not claim a copy when the turn came back empty", async () => {
+    const { restore } = withDaemon({
+      status: 200,
+      body: { source: "transcript", turns: [], truncated: false },
+    });
+    try {
+      await renderRow();
+      await activateCopy();
+      expect(squish(setup.captureCharFrame())).toContain("Nothingtocopy");
+      expect(copied).toEqual([]);
     } finally {
       restore();
     }
