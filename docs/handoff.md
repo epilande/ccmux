@@ -322,7 +322,9 @@ While a handoff is queued for a session, its row carries a **⇄** badge. It is 
 
 ### Copy
 
-The row menu also has a **Copy** item. It opens a small centered dialog asking how much of the conversation to take, rather than copying at once. The dialog opens on **Last response** (one turn), so the fast path is menu, Copy, `Enter`.
+The row menu also has a **Copy** item, and `y` on the selected row is the same thing without the menu (one key into the same dialog, which is why the menu item advertises `y` as its hint). It opens a small centered dialog asking how much of the conversation to take, rather than copying at once. The dialog opens on **Last response** (one turn), so the fast path is `y`, `Enter`.
+
+`y` is silent on a group header, as `r` and `x` are. On a row with neither a pane nor a transcript it says so in a toast rather than doing nothing: the menu can hide an item it cannot offer, but a key the help overlay lists unconditionally has to answer.
 
 While it is open: `j`/`k` (and the arrows) count turns between 1 and `MAX_TURNS` (20), a digit jumps straight to a count (a leading `1` or `2` also waits for one more digit, so `1` `2` is 12 and `2` `5` is 5), `Enter` copies, `Esc` cancels, and any other key dismisses it without copying. Past one turn the dialog reads **Last N turns (with your prompts)**, which is what the payload becomes.
 

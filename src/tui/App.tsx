@@ -1530,7 +1530,7 @@ export function App(props: AppProps) {
             // verb alone; the dialog says the rest in full sentences it has
             // the width for.
             label: "Copy",
-            hint: "",
+            hint: "y",
             color: theme.text,
             action: contextMenuCopyLastResponse,
           },
@@ -3284,6 +3284,31 @@ export function App(props: AppProps) {
         toggleRowMenu();
         event.preventDefault();
         break;
+
+      case "y": {
+        // The row menu's Copy item on one key, opening the SAME dialog through
+        // the same store action — a shortcut for a read that gets done over and
+        // over, not a second copy path.
+        const sessionToCopy = store.selectedSession();
+        // Silent on a group header, like `r` and `x`; but on a real row with
+        // nothing readable, say why. The menu HIDES its item in that case,
+        // while a key that is advertised unconditionally has to answer.
+        if (!event.shift && sessionToCopy) {
+          if (canCopyLastResponse(sessionToCopy)) {
+            store.actions.openCopyDialog(sessionToCopy.id);
+          } else {
+            store.actions.showToast(
+              "Nothing to copy: no transcript and no pane",
+              3_000,
+            );
+          }
+        }
+        // Shift+Y falls through deliberately, as `N` does: every other capital
+        // in this switch is its own action, so treating `Y` as `y` would claim
+        // a key some later feature wants.
+        event.preventDefault();
+        break;
+      }
 
       case "/":
         store.actions.enterSearchMode();

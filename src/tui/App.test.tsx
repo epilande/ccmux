@@ -6216,6 +6216,150 @@ describe("App copy last response", () => {
     }
   });
 
+  it("advertises the key on the menu item", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await press("m");
+      const line = setup
+        .captureCharFrame()
+        .split("\n")
+        .find((l) => l.includes(MENU_COPY));
+      // The hint sits at the right edge of the row, so this can't be satisfied
+      // by the `y` inside the label.
+      expect(line).toMatch(/y\s*│/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("opens the same dialog on `y`, with no menu in between", async () => {
+    const { asked, restore } = withDaemon();
+    try {
+      await renderRow();
+      await press("y");
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("Copyfromclaude");
+      expect(frame).toContain("Lastresponse");
+      // The menu never opened, and the dialog is still only a question.
+      expect(frame).not.toContain("Restart");
+      expect(asked).toEqual([]);
+      expect(copied).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("copies the row `y` was pressed on", async () => {
+    const { asked, restore } = withDaemon();
+    try {
+      await renderRow();
+      await press("y");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain("/sessions/s1/transcript");
+      expect(copied).toEqual(["hello there"]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("says why on a `y` over a row with nothing readable", async () => {
+    // The menu HIDES its item here; a key the help overlay lists
+    // unconditionally has to answer instead of doing nothing.
+    const { asked, restore } = withDaemon();
+    try {
+      await renderRow({
+        tmuxPane: null,
+        trackingMode: "background",
+        logPath: null,
+      });
+      await press("y");
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("Nothingtocopy");
+      expect(frame).not.toContain("Lastresponse");
+      expect(asked).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("does nothing on a `y` over a group header", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderApp(120, 24, { groupBy: "project", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      // Onto the header, from wherever the initial selection landed; the
+      // second `k` is a no-op once there.
+      await press("k");
+      await press("k");
+      await press("y");
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).not.toContain("Copyfromclaude");
+      expect(copied).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("is swallowed while a handoff is aiming at a target", async () => {
+    // Pick mode owns the keyboard: a `y` that opened a modal over the list the
+    // user is aiming at would be the same bug `x` is kept out of.
+    const { restore } = withDaemon();
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+            lastUserInputAt: "2024-01-01T13:00:00Z",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "other",
+            cwd: "/code/other",
+            tmuxPane: "%2",
+            lastUserInputAt: "2024-01-01T12:00:00Z",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      await press("m");
+      // Attach -> New session -> Review diff -> Copy -> Hand off.
+      for (const _ of [0, 1, 2, 3]) await press("j");
+      expect(setup.captureCharFrame()).toContain("│ Hand off ");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      await press("y");
+      const frame = squish(setup.captureCharFrame());
+      // Still aiming, and no dialog over it.
+      expect(frame).toContain("esccancel");
+      expect(frame).not.toContain("Copyfromclaude");
+      expect(copied).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
   it("asks for one turn and copies the text it gets back", async () => {
     const { asked, restore } = withDaemon();
     try {
