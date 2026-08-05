@@ -13,6 +13,7 @@ import type { SSECallbacks } from "./utils/sse";
 import * as clipboard from "./utils/clipboard";
 import { mockEnrichedSession, squish } from "./components/test-helpers";
 import { HANDOFF_BADGE } from "./components/session-columns";
+import { MAX_TURNS, renderTurns } from "../daemon/transcript-read";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -4102,7 +4103,7 @@ describe("App move-changes menu gate", () => {
       "Attach",
       "New session",
       "Review diff",
-      "Copy last response",
+      "Copy",
       "Move changes",
       "Restart",
       "Kill",
@@ -4403,8 +4404,8 @@ describe("App move-changes menu gate", () => {
       setup.mockInput.pressKey("m");
       await settle();
       await setup.renderOnce();
-      // Attach -> New session -> Review diff -> Copy last response ->
-      // Restart. (No Fork: the row is not forkable here.)
+      // Attach -> New session -> Review diff -> Copy -> Restart. (No Fork:
+      // the row is not forkable here.)
       for (const _ of [0, 1, 2, 3]) {
         setup.mockInput.pressKey("j");
         await setup.renderOnce();
@@ -6025,8 +6026,8 @@ describe("App row menu (m)", () => {
   });
 });
 /**
- * "Copy last response": the row-menu item, the one request it makes, and what
- * the toast says about what actually landed on the clipboard.
+ * "Copy": the row-menu item, the dialog it opens, the request that dialog
+ * makes, and what the toast says about what actually landed on the clipboard.
  *
  * `copyToClipboard` is spied rather than left real: the fallback tier spawns
  * `pbcopy`, and a test suite that quietly replaces the developer's clipboard
@@ -6034,6 +6035,14 @@ describe("App row menu (m)", () => {
  */
 describe("App copy last response", () => {
   const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  /**
+   * The Copy item as the MENU draws it: the box border, the row's own
+   * padding, then the label. Anchored that way because the label is now a
+   * prefix of what the toasts say ("Copying…", "Copied 11 chars"), and a bare
+   * "Copy" would match a frame where the menu had closed.
+   */
+  const MENU_COPY = "│ Copy ";
 
   let copySpy: ReturnType<typeof spyOn<typeof clipboard, "copyToClipboard">>;
   /** What `copyToClipboard` was handed, newest last. */
@@ -6105,12 +6114,22 @@ describe("App copy last response", () => {
     await setup.renderOnce();
   };
 
-  /** Open the row's menu with `m` and activate the copy item. */
-  async function activateCopy() {
+  /** Open the row's menu with `m` and activate the copy item, which opens the
+   *  dialog without copying anything. */
+  async function openCopyDialog() {
     await press("m");
-    // Attach -> New session -> Review diff -> Copy last response.
+    // Attach -> New session -> Review diff -> Copy.
     for (const _ of [0, 1, 2]) await press("j");
-    expect(setup.captureCharFrame()).toContain("Copy last response");
+    expect(setup.captureCharFrame()).toContain(MENU_COPY);
+    setup.mockInput.pressEnter();
+    await settle();
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("Last response");
+  }
+
+  /** The whole fast path: menu, Copy, Enter. */
+  async function activateCopy() {
+    await openCopyDialog();
     setup.mockInput.pressEnter();
     await settle();
     await setup.renderOnce();
@@ -6121,7 +6140,7 @@ describe("App copy last response", () => {
     try {
       await renderRow();
       await press("m");
-      expect(setup.captureCharFrame()).toContain("Copy last response");
+      expect(setup.captureCharFrame()).toContain(MENU_COPY);
     } finally {
       restore();
     }
@@ -6135,7 +6154,7 @@ describe("App copy last response", () => {
       await renderRow();
       await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("Copy last response");
+      expect(setup.captureCharFrame()).toContain(MENU_COPY);
     } finally {
       restore();
     }
@@ -6153,8 +6172,8 @@ describe("App copy last response", () => {
           .findIndex((line) => line.includes(text));
       // By ORDER, not presence: a menu draws one row per item, so an item in
       // the wrong place moves every row below it.
-      expect(lineOf("Review diff")).toBeLessThan(lineOf("Copy last response"));
-      expect(lineOf("Copy last response")).toBeLessThan(lineOf("Restart"));
+      expect(lineOf("Review diff")).toBeLessThan(lineOf(MENU_COPY));
+      expect(lineOf(MENU_COPY)).toBeLessThan(lineOf("Restart"));
       expect(lineOf("Restart")).toBeLessThan(lineOf("Kill"));
     } finally {
       restore();
@@ -6174,7 +6193,7 @@ describe("App copy last response", () => {
       // Anchored on the background menu, so this can't pass by opening the
       // ordinary one.
       expect(frame).toContain("Attach agent");
-      expect(frame).toContain("Copy last response");
+      expect(frame).toContain(MENU_COPY);
     } finally {
       restore();
     }
@@ -6191,7 +6210,151 @@ describe("App copy last response", () => {
       await press("m");
       const frame = setup.captureCharFrame();
       expect(frame).toContain("Attach agent");
-      expect(frame).not.toContain("Copy last response");
+      expect(frame).not.toContain(MENU_COPY);
+    } finally {
+      restore();
+    }
+  });
+
+  it("advertises the key on the menu item", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await press("m");
+      const line = setup
+        .captureCharFrame()
+        .split("\n")
+        .find((l) => l.includes(MENU_COPY));
+      // The hint sits at the right edge of the row, so this can't be satisfied
+      // by the `y` inside the label.
+      expect(line).toMatch(/y\s*│/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("opens the same dialog on `y`, with no menu in between", async () => {
+    const { asked, restore } = withDaemon();
+    try {
+      await renderRow();
+      await press("y");
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("Copyfromclaude");
+      expect(frame).toContain("Lastresponse");
+      // The menu never opened, and the dialog is still only a question.
+      expect(frame).not.toContain("Restart");
+      expect(asked).toEqual([]);
+      expect(copied).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("copies the row `y` was pressed on", async () => {
+    const { asked, restore } = withDaemon();
+    try {
+      await renderRow();
+      await press("y");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain("/sessions/s1/transcript");
+      expect(copied).toEqual(["hello there"]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("says why on a `y` over a row with nothing readable", async () => {
+    // The menu HIDES its item here; a key the help overlay lists
+    // unconditionally has to answer instead of doing nothing.
+    const { asked, restore } = withDaemon();
+    try {
+      await renderRow({
+        tmuxPane: null,
+        trackingMode: "background",
+        logPath: null,
+      });
+      await press("y");
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("Nothingtocopy");
+      expect(frame).not.toContain("Lastresponse");
+      expect(asked).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("does nothing on a `y` over a group header", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderApp(120, 24, { groupBy: "project", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      // Onto the header, from wherever the initial selection landed; the
+      // second `k` is a no-op once there.
+      await press("k");
+      await press("k");
+      await press("y");
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).not.toContain("Copyfromclaude");
+      expect(copied).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("is swallowed while a handoff is aiming at a target", async () => {
+    // Pick mode owns the keyboard: a `y` that opened a modal over the list the
+    // user is aiming at would be the same bug `x` is kept out of.
+    const { restore } = withDaemon();
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+            lastUserInputAt: "2024-01-01T13:00:00Z",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "other",
+            cwd: "/code/other",
+            tmuxPane: "%2",
+            lastUserInputAt: "2024-01-01T12:00:00Z",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      await press("m");
+      // Attach -> New session -> Review diff -> Copy -> Hand off.
+      for (const _ of [0, 1, 2, 3]) await press("j");
+      expect(setup.captureCharFrame()).toContain("│ Hand off ");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+
+      await press("y");
+      const frame = squish(setup.captureCharFrame());
+      // Still aiming, and no dialog over it.
+      expect(frame).toContain("esccancel");
+      expect(frame).not.toContain("Copyfromclaude");
+      expect(copied).toEqual([]);
     } finally {
       restore();
     }
@@ -6208,8 +6371,10 @@ describe("App copy last response", () => {
       expect(copied).toEqual(["hello there"]);
       const frame = squish(setup.captureCharFrame());
       expect(frame).toContain("Copied11chars");
-      // The menu closed on activation; the toast is the only report.
-      expect(frame).not.toContain("Copylastresponse");
+      // Menu and dialog are both gone; the toast is the only report. Anchored
+      // on a label only the menu draws, since "Copy" now prefixes the toast.
+      expect(frame).not.toContain("Restart");
+      expect(frame).not.toContain("Lastresponse");
     } finally {
       restore();
     }
@@ -6234,12 +6399,16 @@ describe("App copy last response", () => {
   });
 
   it("says so when what it copied is a screen capture", async () => {
+    // The daemon always sets truncated:true on a pane-capture fallback (a
+    // capture is never the whole response), so this is the only shape the
+    // real endpoint produces; the assertion is on source winning over the
+    // flag it always carries too, not on the flag's absence.
     const { restore } = withDaemon({
       status: 200,
       body: {
         source: "pane",
         turns: [{ role: "assistant", text: "whatever was on screen" }],
-        truncated: false,
+        truncated: true,
       },
     });
     try {
@@ -6310,14 +6479,172 @@ describe("App copy last response", () => {
       restore();
     }
   });
+
+  it("opens the dialog without copying anything", async () => {
+    const { asked, restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      // The menu is gone and the dialog is up, but nothing has been read or
+      // copied yet: the count is still a question.
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("Copyfromclaude");
+      expect(frame).not.toContain("Restart");
+      expect(asked).toEqual([]);
+      expect(copied).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("counts turns up and down with j/k, and stops at both ends", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      await press("j");
+      expect(squish(setup.captureCharFrame())).toContain(
+        "Last2turns(withyourprompts)",
+      );
+      await press("k");
+      expect(squish(setup.captureCharFrame())).toContain("Lastresponse");
+      // Below one there is nothing to copy, and above MAX_TURNS the endpoint
+      // clamps anyway; both ends hold rather than wrapping.
+      await press("k");
+      expect(squish(setup.captureCharFrame())).toContain("Lastresponse");
+      for (let i = 0; i < MAX_TURNS + 3; i++) await press("j");
+      expect(squish(setup.captureCharFrame())).toContain(`Last${MAX_TURNS}`);
+    } finally {
+      restore();
+    }
+  });
+
+  it("jumps to a count on a single digit", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      await press("5");
+      expect(squish(setup.captureCharFrame())).toContain("Last5turns");
+    } finally {
+      restore();
+    }
+  });
+
+  it("lets a leading 1 or 2 grow into a two-digit count", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      // The leading digit takes effect at once, so a `1` that is never
+      // followed still means one turn.
+      await press("1");
+      expect(squish(setup.captureCharFrame())).toContain("Lastresponse");
+      await press("2");
+      expect(squish(setup.captureCharFrame())).toContain("Last12turns");
+    } finally {
+      restore();
+    }
+  });
+
+  it("starts a fresh count when a second digit would overshoot", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      await press("2");
+      // 25 is past MAX_TURNS, so the 5 is read as a count of its own rather
+      // than silently clamping to 20.
+      await press("5");
+      expect(squish(setup.captureCharFrame())).toContain("Last5turns");
+    } finally {
+      restore();
+    }
+  });
+
+  it("asks for the count it is showing and formats the exchange like the CLI", async () => {
+    const { asked, restore } = withDaemon({
+      status: 200,
+      body: {
+        source: "transcript",
+        turns: [
+          { role: "assistant", text: "older" },
+          { role: "user", text: "then I asked" },
+          { role: "assistant", text: "newer" },
+        ],
+        truncated: false,
+      },
+    });
+    try {
+      await renderRow();
+      await openCopyDialog();
+      await press("3");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain("turns=3");
+      // Byte for byte what `ccmux last --turns 3` prints, because it is the
+      // same renderer.
+      expect(copied).toEqual([
+        renderTurns([
+          { role: "assistant", text: "older" },
+          { role: "user", text: "then I asked" },
+          { role: "assistant", text: "newer" },
+        ]),
+      ]);
+      expect(squish(setup.captureCharFrame())).toContain("Copied");
+    } finally {
+      restore();
+    }
+  });
+
+  it("closes on escape without reading or copying", async () => {
+    const { asked, restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      await press("escape");
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).not.toContain("Lastresponse");
+      expect(asked).toEqual([]);
+      expect(copied).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("dismisses on any other key, and that key does not reach the board", async () => {
+    const { asked, restore } = withDaemon();
+    try {
+      await renderRow();
+      await openCopyDialog();
+      await press("x");
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).not.toContain("Lastresponse");
+      // The kill confirmation is what `x` means on the list. A modal box over
+      // the middle of the rows must not put it one keystroke away.
+      expect(frame).not.toContain("KillSession?");
+      expect(asked).toEqual([]);
+      expect(copied).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
 });
 /**
- * "Hand off to…": the row-menu item, the transient pick-target mode it opens
- * on the ordinary list, the one request that mode makes, and what the toast
- * says about each of the endpoint's three outcomes.
+ * "Hand off": the row-menu item, the transient pick-target mode it opens on
+ * the ordinary list, the one request that mode makes, and what the toast says
+ * about each of the endpoint's three outcomes.
  */
 describe("App hand off to", () => {
   const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+  /** The two read items as the MENU draws them (border, padding, label), so
+   *  neither can be matched by the pick banner or a toast that starts with
+   *  the same words. */
+  const MENU_COPY = "│ Copy ";
+  const MENU_HANDOFF = "│ Hand off ";
 
   /** Answers the menu's fetches; `handoff` is what `POST /handoff` replies. */
   function withDaemon(
@@ -6372,9 +6699,9 @@ describe("App hand off to", () => {
   /** Open the top row's menu with `m` and activate the handoff item. */
   async function startPick() {
     await press("m");
-    // Attach -> New session -> Review diff -> Copy last response -> Hand off.
+    // Attach -> New session -> Review diff -> Copy -> Hand off.
     for (const _ of [0, 1, 2, 3]) await press("j");
-    expect(setup.captureCharFrame()).toContain("Hand off to");
+    expect(setup.captureCharFrame()).toContain(MENU_HANDOFF);
     setup.mockInput.pressEnter();
     await settle();
     await setup.renderOnce();
@@ -6392,7 +6719,7 @@ describe("App hand off to", () => {
     try {
       await renderRows();
       await press("m");
-      expect(setup.captureCharFrame()).toContain("Hand off to");
+      expect(setup.captureCharFrame()).toContain(MENU_HANDOFF);
     } finally {
       restore();
     }
@@ -6406,7 +6733,7 @@ describe("App hand off to", () => {
       await renderRows();
       await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
       await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("Hand off to");
+      expect(setup.captureCharFrame()).toContain(MENU_HANDOFF);
     } finally {
       restore();
     }
@@ -6424,8 +6751,8 @@ describe("App hand off to", () => {
           .findIndex((line) => line.includes(text));
       // By ORDER, not presence: a menu draws one row per item, so an item in
       // the wrong place moves every row below it.
-      expect(lineOf("Copy last response")).toBeLessThan(lineOf("Hand off to"));
-      expect(lineOf("Hand off to")).toBeLessThan(lineOf("Restart"));
+      expect(lineOf(MENU_COPY)).toBeLessThan(lineOf(MENU_HANDOFF));
+      expect(lineOf(MENU_HANDOFF)).toBeLessThan(lineOf("Restart"));
       expect(lineOf("Restart")).toBeLessThan(lineOf("Kill"));
     } finally {
       restore();
@@ -6438,8 +6765,8 @@ describe("App hand off to", () => {
       await renderRows([{}]);
       await press("m");
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Copy last response");
-      expect(frame).not.toContain("Hand off to");
+      expect(frame).toContain(MENU_COPY);
+      expect(frame).not.toContain(MENU_HANDOFF);
     } finally {
       restore();
     }
@@ -6614,298 +6941,6 @@ describe("App hand off to", () => {
       sseCallbacks!.onSessionUpdated(target);
       await setup.renderOnce();
       expect(setup.captureCharFrame()).not.toContain(HANDOFF_BADGE);
-    } finally {
-      restore();
-    }
-  });
-});
-
-/**
- * "Copy last response": the row-menu item, the one request it makes, and what
- * the toast says about what actually landed on the clipboard.
- *
- * `copyToClipboard` is spied rather than left real: the fallback tier spawns
- * `pbcopy`, and a test suite that quietly replaces the developer's clipboard
- * is not one anybody should run twice.
- */
-describe("App copy last response", () => {
-  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
-
-  let copySpy: ReturnType<typeof spyOn<typeof clipboard, "copyToClipboard">>;
-  /** What `copyToClipboard` was handed, newest last. */
-  let copied: string[] = [];
-
-  beforeEach(() => {
-    copied = [];
-    copySpy = spyOn(clipboard, "copyToClipboard").mockImplementation(
-      async (text: string) => {
-        copied.push(text);
-        return { ok: true, via: "command" };
-      },
-    );
-  });
-
-  afterEach(() => {
-    copySpy.mockRestore();
-  });
-
-  /** Answers the menu's fetches; `transcript` is what the endpoint replies. */
-  function withDaemon(
-    transcript:
-      | { status: number; body: Record<string, unknown> }
-      | "unreachable" = {
-      status: 200,
-      body: {
-        source: "transcript",
-        turns: [{ role: "assistant", text: "hello there" }],
-        truncated: false,
-      },
-    },
-  ) {
-    const asked: string[] = [];
-    const original = globalThis.fetch;
-    globalThis.fetch = (async (url: string | URL) => {
-      const href = String(url);
-      if (href.includes("/transcript")) {
-        asked.push(href);
-        if (transcript === "unreachable") throw new Error("ECONNREFUSED");
-        return Response.json(transcript.body, { status: transcript.status });
-      }
-      // Clean, so "Move changes" never arrives and the row order is stable.
-      if (href.includes("/dirty")) return Response.json({ dirty: false });
-      return Response.json({});
-    }) as unknown as typeof fetch;
-    return { asked, restore: () => (globalThis.fetch = original) };
-  }
-
-  async function renderRow(overrides: Record<string, unknown> = {}) {
-    await renderApp(120, 24, { groupBy: "none", persistent: true });
-    sseCallbacks!.onInit(
-      [
-        mockEnrichedSession({
-          id: "s1",
-          project: "myapp",
-          cwd: "/code/myapp",
-          tmuxPane: "%1",
-          ...overrides,
-        }),
-      ],
-      null,
-    );
-    await setup.renderOnce();
-  }
-
-  const press = async (key: string) => {
-    setup.mockInput.pressKey(key);
-    await settle();
-    await setup.renderOnce();
-  };
-
-  /** Open the row's menu with `m` and activate the copy item. */
-  async function activateCopy() {
-    await press("m");
-    // Attach -> New session -> Review diff -> Copy last response.
-    for (const _ of [0, 1, 2]) await press("j");
-    expect(setup.captureCharFrame()).toContain("Copy last response");
-    setup.mockInput.pressEnter();
-    await settle();
-    await setup.renderOnce();
-  }
-
-  it("offers the item on a session row's menu", async () => {
-    const { restore } = withDaemon();
-    try {
-      await renderRow();
-      await press("m");
-      expect(setup.captureCharFrame()).toContain("Copy last response");
-    } finally {
-      restore();
-    }
-  });
-
-  it("offers the same item to a right-click", async () => {
-    // The two ways into the row menu are one thing (`openRowMenu`); this is
-    // the assertion that keeps them one thing.
-    const { restore } = withDaemon();
-    try {
-      await renderRow();
-      await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
-      await setup.renderOnce();
-      expect(setup.captureCharFrame()).toContain("Copy last response");
-    } finally {
-      restore();
-    }
-  });
-
-  it("keeps the read actions together, above the ones that end a session", async () => {
-    const { restore } = withDaemon();
-    try {
-      await renderRow();
-      await press("m");
-      const lineOf = (text: string) =>
-        setup
-          .captureCharFrame()
-          .split("\n")
-          .findIndex((line) => line.includes(text));
-      // By ORDER, not presence: a menu draws one row per item, so an item in
-      // the wrong place moves every row below it.
-      expect(lineOf("Review diff")).toBeLessThan(lineOf("Copy last response"));
-      expect(lineOf("Copy last response")).toBeLessThan(lineOf("Restart"));
-      expect(lineOf("Restart")).toBeLessThan(lineOf("Kill"));
-    } finally {
-      restore();
-    }
-  });
-
-  it("offers it on a paneless background row that has a transcript", async () => {
-    const { restore } = withDaemon();
-    try {
-      await renderRow({
-        tmuxPane: null,
-        trackingMode: "background",
-        logPath: "/logs/bg.jsonl",
-      });
-      await press("m");
-      const frame = setup.captureCharFrame();
-      // Anchored on the background menu, so this can't pass by opening the
-      // ordinary one.
-      expect(frame).toContain("Attach agent");
-      expect(frame).toContain("Copy last response");
-    } finally {
-      restore();
-    }
-  });
-
-  it("hides it on a row with neither a pane nor a transcript", async () => {
-    const { restore } = withDaemon();
-    try {
-      await renderRow({
-        tmuxPane: null,
-        trackingMode: "background",
-        logPath: null,
-      });
-      await press("m");
-      const frame = setup.captureCharFrame();
-      expect(frame).toContain("Attach agent");
-      expect(frame).not.toContain("Copy last response");
-    } finally {
-      restore();
-    }
-  });
-
-  it("asks for one turn and copies the text it gets back", async () => {
-    const { asked, restore } = withDaemon();
-    try {
-      await renderRow();
-      await activateCopy();
-      expect(asked).toHaveLength(1);
-      expect(asked[0]).toContain("/sessions/s1/transcript");
-      expect(asked[0]).toContain("turns=1");
-      expect(copied).toEqual(["hello there"]);
-      const frame = squish(setup.captureCharFrame());
-      expect(frame).toContain("Copied11chars");
-      // The menu closed on activation; the toast is the only report.
-      expect(frame).not.toContain("Copylastresponse");
-    } finally {
-      restore();
-    }
-  });
-
-  it("says so when a size guard dropped part of the response", async () => {
-    const { restore } = withDaemon({
-      status: 200,
-      body: {
-        source: "transcript",
-        turns: [{ role: "assistant", text: "clipped" }],
-        truncated: true,
-      },
-    });
-    try {
-      await renderRow();
-      await activateCopy();
-      expect(squish(setup.captureCharFrame())).toContain("(truncated)");
-    } finally {
-      restore();
-    }
-  });
-
-  it("says so when what it copied is a screen capture", async () => {
-    // The daemon always sets truncated:true on a pane-capture fallback (a
-    // capture is never the whole response), so this is the only shape the
-    // real endpoint produces; the assertion is on source winning over the
-    // flag it always carries too, not on the flag's absence.
-    const { restore } = withDaemon({
-      status: 200,
-      body: {
-        source: "pane",
-        turns: [{ role: "assistant", text: "whatever was on screen" }],
-        truncated: true,
-      },
-    });
-    try {
-      await renderRow();
-      await activateCopy();
-      expect(squish(setup.captureCharFrame())).toContain("(panecapture)");
-    } finally {
-      restore();
-    }
-  });
-
-  it("passes the endpoint's own refusal through to the toast", async () => {
-    const { restore } = withDaemon({
-      status: 400,
-      body: { error: "Session has no readable transcript and no tmux pane" },
-    });
-    try {
-      await renderRow();
-      await activateCopy();
-      expect(squish(setup.captureCharFrame())).toContain(
-        "Copyfailed:Sessionhasnoreadabletranscript",
-      );
-      expect(copied).toEqual([]);
-    } finally {
-      restore();
-    }
-  });
-
-  it("reports an unreachable daemon rather than claiming a copy", async () => {
-    const { restore } = withDaemon("unreachable");
-    try {
-      await renderRow();
-      await activateCopy();
-      expect(squish(setup.captureCharFrame())).toContain(
-        "Copyfailed:daemonunreachable",
-      );
-      expect(copied).toEqual([]);
-    } finally {
-      restore();
-    }
-  });
-
-  it("reports a clipboard that took nothing", async () => {
-    copySpy.mockImplementation(async () => ({ ok: false, via: null }));
-    const { restore } = withDaemon();
-    try {
-      await renderRow();
-      await activateCopy();
-      expect(squish(setup.captureCharFrame())).toContain(
-        "Copyfailed:noclipboardavailable",
-      );
-    } finally {
-      restore();
-    }
-  });
-
-  it("does not claim a copy when the turn came back empty", async () => {
-    const { restore } = withDaemon({
-      status: 200,
-      body: { source: "transcript", turns: [], truncated: false },
-    });
-    try {
-      await renderRow();
-      await activateCopy();
-      expect(squish(setup.captureCharFrame())).toContain("Nothingtocopy");
-      expect(copied).toEqual([]);
     } finally {
       restore();
     }

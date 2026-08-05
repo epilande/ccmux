@@ -3,11 +3,10 @@ import {
   createLastCommand,
   parseTurns,
   renderCandidates,
-  renderTurns,
   resolutionEcho,
 } from "./last";
 import type { SessionRefCandidate } from "../daemon/session-ref";
-import { MAX_TURNS } from "../daemon/transcript-read";
+import { MAX_TURNS, renderTurns } from "../daemon/transcript-read";
 
 describe("renderTurns", () => {
   it("prints a single turn bare so stdout stays pipeable", () => {

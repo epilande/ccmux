@@ -1,0 +1,97 @@
+import { describe, it, expect, afterEach } from "bun:test";
+import { testRender } from "@opentui/solid";
+import {
+  CopyDialog,
+  COPY_DIALOG_FLOOR_ROWS,
+  copyTurnsLabel,
+  planCopyDialogRows,
+} from "./CopyDialog";
+import { squish } from "./test-helpers";
+
+describe("copyTurnsLabel", () => {
+  it("names one turn as the response it is", () => {
+    expect(copyTurnsLabel(1)).toBe("Last response");
+  });
+
+  it("says whose prompts come along once there is more than one", () => {
+    expect(copyTurnsLabel(3)).toBe("Last 3 turns (with your prompts)");
+    expect(copyTurnsLabel(20)).toBe("Last 20 turns (with your prompts)");
+  });
+});
+
+describe("planCopyDialogRows", () => {
+  it("draws everything when the terminal has room", () => {
+    expect(planCopyDialogRows(24)).toEqual({
+      spacers: true,
+      hint: true,
+      height: COPY_DIALOG_FLOOR_ROWS + 3,
+    });
+  });
+
+  it("gives up the blank rows before the key hints", () => {
+    // One row short of everything: the air goes, the hints stay.
+    const plan = planCopyDialogRows(COPY_DIALOG_FLOOR_ROWS + 2);
+    expect(plan.spacers).toBe(false);
+    expect(plan.hint).toBe(true);
+    expect(plan.height).toBe(COPY_DIALOG_FLOOR_ROWS + 1);
+  });
+
+  it("keeps the title and the count when nothing else fits", () => {
+    expect(planCopyDialogRows(COPY_DIALOG_FLOOR_ROWS)).toEqual({
+      spacers: false,
+      hint: false,
+      height: COPY_DIALOG_FLOOR_ROWS,
+    });
+  });
+
+  it("never asks for more rows than the terminal has", () => {
+    // A box taller than the screen draws its bottom border off it.
+    for (const height of [1, 2, 3]) {
+      expect(planCopyDialogRows(height).height).toBe(height);
+    }
+  });
+});
+
+describe("CopyDialog", () => {
+  let setup: Awaited<ReturnType<typeof testRender>> | null = null;
+
+  afterEach(() => {
+    setup?.renderer.destroy();
+    setup = null;
+  });
+
+  async function render(turns: number, width = 80, height = 24) {
+    setup = await testRender(
+      () => <CopyDialog label="claude · myapp" turns={turns} />,
+      { width, height },
+    );
+    await setup.renderOnce();
+    return squish(setup.captureCharFrame());
+  }
+
+  it("opens on the last response, named after the row it copies from", async () => {
+    const frame = await render(1);
+    expect(frame).toContain("Copyfromclaude·myapp");
+    expect(frame).toContain("Lastresponse");
+    expect(frame).toContain("j/kturns·entercopy·esccancel");
+  });
+
+  it("says a multi-turn copy brings the user's own prompts", async () => {
+    const frame = await render(3);
+    expect(frame).toContain("Last3turns(withyourprompts)");
+    expect(frame).not.toContain("Lastresponse");
+  });
+
+  it("keeps the count legible at a sidebar's width", async () => {
+    // The parenthetical is what a narrow box loses; the count itself is
+    // first in the line, so it survives.
+    const frame = await render(3, 30);
+    expect(frame).toContain("Last3turns");
+  });
+
+  it("drops the hints rather than drawing past a short terminal", async () => {
+    const frame = await render(1, 80, COPY_DIALOG_FLOOR_ROWS);
+    expect(frame).toContain("Lastresponse");
+    expect(frame).not.toContain("entercopy");
+  });
+});

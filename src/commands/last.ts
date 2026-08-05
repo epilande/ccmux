@@ -10,7 +10,7 @@ import { getDaemonUrl } from "../lib/config";
 import { ensureDaemon } from "./shared";
 import { proximityLabel } from "../daemon/session-ref";
 import type { RefProximity, SessionRefCandidate } from "../daemon/session-ref";
-import { MAX_TURNS } from "../daemon/transcript-read";
+import { MAX_TURNS, renderTurns } from "../daemon/transcript-read";
 import type { TranscriptTurn } from "../daemon/transcript-read";
 
 /** The frozen transcript response contract, plus the daemon's account of how
@@ -41,16 +41,6 @@ export function resolutionEcho(data: TranscriptResponse): string | null {
     ? ` (${proximityLabel(resolution.proximity)})`
     : "";
   return `${resolution.ref} -> ${data.sessionId}${where}`;
-}
-
-/**
- * Render the payload. A single entry prints bare (it IS the last response);
- * several print with `user:` / `assistant:` labels so the exchange reads in
- * order.
- */
-export function renderTurns(turns: TranscriptTurn[]): string {
-  if (turns.length === 1) return turns[0].text;
-  return turns.map((turn) => `${turn.role}:\n${turn.text}`).join("\n\n");
 }
 
 /** The candidate listing an ambiguous ref is refused with; it is the
