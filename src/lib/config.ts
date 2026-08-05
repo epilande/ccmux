@@ -302,11 +302,27 @@ export const ZOMBIE_STALE_MS = 5 * 60 * 1000;
 export const BACKGROUND_FRESH_THRESHOLD_MS = 10_000;
 
 /**
- * Maximum text length accepted by the daemon's `POST /sessions/:id/send`
- * endpoint. The review hand-back prompt cap (`MAX_REVIEW_PROMPT_CHARS`)
- * derives from this so the client never builds a prompt the daemon rejects.
+ * Maximum text length for the daemon's `POST /sessions/:id/send` endpoint
+ * when delivery goes through `send-keys -l` (single-line, argv-bound: the
+ * text is a literal shell argument, so it stays well under OS argv limits).
+ * The review hand-back prompt cap (`MAX_REVIEW_PROMPT_CHARS`) derives from
+ * this so the client never builds a prompt the daemon rejects.
+ *
+ * Text containing a newline, or exceeding this cap, instead goes through
+ * the `tmux load-buffer`/`paste-buffer` path (stdin-fed, not argv-bound),
+ * which is capped separately and much higher by
+ * {@link MAX_SEND_PASTE_CHARS}.
  */
 export const MAX_SEND_TEXT_CHARS = 10_000;
+
+/**
+ * Maximum text length accepted via the paste path (see
+ * {@link MAX_SEND_TEXT_CHARS}): `tmux load-buffer` feeds the payload over
+ * stdin, so it isn't argv-bound and can safely take a much larger cap. This
+ * is what governs multiline sends and single-line sends over
+ * `MAX_SEND_TEXT_CHARS`.
+ */
+export const MAX_SEND_PASTE_CHARS = 65_536;
 
 /**
  * Log parsing configuration

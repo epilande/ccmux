@@ -18,10 +18,16 @@
 
 import type { Session } from "../types/session";
 import type { AgentDef } from "../lib/agents";
-import { stripControlChars } from "./notify-text";
+import {
+  AMBIGUOUS_WAIT_ERROR,
+  checkForegroundLiveness,
+  defuseLeadingTrigger,
+  isAmbiguousWait,
+  matchesUnsafeReplyPattern,
+  stripControlChars,
+} from "./send-guards";
 import {
   classifyClaudePromptPane,
-  isNonAgentCommand,
   matchesQuestionPickerSignature,
 } from "./pane-classify";
 
@@ -233,19 +239,14 @@ async function tryPrefillReply(
   // leading whitespace before trigger detection, or fuzzy-match a command
   // token anywhere), and prefill IS typing, so never prefill them. Same gate
   // as the submit path.
-  const unsafePattern = na?.unsafeReplyPattern;
-  if (unsafePattern) {
-    // Reset for /g-flagged user-override regexes; `.test()` is stateful.
-    unsafePattern.lastIndex = 0;
-    if (unsafePattern.test(text)) return false;
-  }
+  if (matchesUnsafeReplyPattern(text, na?.unsafeReplyPattern)) return false;
 
   // Foreground liveness. The token gates run BEFORE the main liveness guard, so
   // a reply rejected there never reached it; re-check here so a prefill can't
   // land in a shell (where it would EXECUTE) or a terminal editor. Fail closed
   // on a query miss.
-  const foreground = await deps.getPaneCommand(pane);
-  if (foreground === null || isNonAgentCommand(foreground)) return false;
+  const { live } = await checkForegroundLiveness(pane, deps.getPaneCommand);
+  if (!live) return false;
 
   let capture: string;
   try {
@@ -271,8 +272,7 @@ async function tryPrefillReply(
   // the slash palette (and a later Enter could select a command), and `!foo`
   // trips Claude's shell mode. One leading space neutralizes both without
   // changing the visible content.
-  const toSend = /^[/!]/.test(text) ? ` ${text}` : text;
-  return deps.sendText(pane, toSend, false);
+  return deps.sendText(pane, defuseLeadingTrigger(text), false);
 }
 
 /**
@@ -481,7 +481,7 @@ export async function handleNotificationAction(
   // Claude-shaped (it never runs for OpenCode). Refuse the press: a keystroke
   // would land on whichever dialog the shared pane renders, possibly the wrong
   // session's tool. `default` (jump) already returned above.
-  if (session.ambiguousWait) {
+  if (isAmbiguousWait(session)) {
     // allowPrefill FALSE: the pane is shared by multiple server-side sessions, so
     // even a verified empty composer could belong to a different session than the
     // reply was meant for. Preserve the text (Tier 1) but never type it.
@@ -492,7 +492,7 @@ export async function handleNotificationAction(
     return {
       code: 409,
       ok: false,
-      error: "Multiple sessions are waiting; press is ambiguous",
+      error: AMBIGUOUS_WAIT_ERROR,
     };
   }
 
@@ -570,8 +570,11 @@ export async function handleNotificationAction(
   // as a command), a terminal editor (keystrokes become normal-mode commands), or
   // if the query fails (fail CLOSED — a dropped press is recoverable, a command in
   // the shell is not).
-  const foreground = await deps.getPaneCommand(pane);
-  if (foreground === null || isNonAgentCommand(foreground)) {
+  const { live, foreground } = await checkForegroundLiveness(
+    pane,
+    deps.getPaneCommand,
+  );
+  if (!live) {
     // The prefill helper re-runs this same liveness check, so it degrades to
     // Tier 1 here (it won't type into a shell/editor either).
     await reNotifyPreserving(true);
@@ -603,22 +606,22 @@ export async function handleNotificationAction(
     // live prompt, which must not happen for a reply that will never be
     // typed. The text is preserved via re-notify (Tier 1 only: prefilling it
     // is exactly the hazard) and the user delivers it from the pane.
-    const unsafePattern = agentDef?.notificationActions?.unsafeReplyPattern;
-    if (unsafePattern) {
-      // Reset for /g-flagged user-override regexes; `.test()` is stateful.
-      unsafePattern.lastIndex = 0;
-      if (unsafePattern.test(text)) {
-        await reNotifyPreserving(false);
-        log(
-          `notification-action: reply matches unsafeReplyPattern for agent "${session.agentType}", refusing to type`,
-        );
-        return {
-          code: 409,
-          ok: false,
-          error:
-            "Reply contains text this agent's composer cannot receive safely",
-        };
-      }
+    if (
+      matchesUnsafeReplyPattern(
+        text,
+        agentDef?.notificationActions?.unsafeReplyPattern,
+      )
+    ) {
+      await reNotifyPreserving(false);
+      log(
+        `notification-action: reply matches unsafeReplyPattern for agent "${session.agentType}", refusing to type`,
+      );
+      return {
+        code: 409,
+        ok: false,
+        error:
+          "Reply contains text this agent's composer cannot receive safely",
+      };
     }
     // Some waits ignore typed text and need a prelude keystroke to reach a
     // composer that accepts it (Claude's AskUserQuestion picker, or an
@@ -681,8 +684,7 @@ export async function handleNotificationAction(
     // footer offers "! for shell mode"). Neither reaches the agent as a message.
     // One leading space defuses both agent-agnostically without changing the
     // visible content. ("#" is NOT a mode trigger on 2.1.211; it types through.)
-    const toSend = /^[/!]/.test(text) ? ` ${text}` : text;
-    const sent = await deps.sendText(pane, toSend, true);
+    const sent = await deps.sendText(pane, defuseLeadingTrigger(text), true);
     if (!sent) {
       log("notification-action: sendText failed for answer");
       return { code: 500, ok: false, error: "Failed to send reply" };
