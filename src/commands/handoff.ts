@@ -14,10 +14,9 @@
 import { Command } from "commander";
 import { getDaemonUrl } from "../lib/config";
 import { ensureDaemon } from "./shared";
-import { MAX_TURNS } from "../daemon/transcript-read";
 import { proximityLabel } from "../daemon/session-ref";
 import type { RefProximity, SessionRefCandidate } from "../daemon/session-ref";
-import { renderCandidates } from "./last";
+import { parseTurns, renderCandidates } from "./last";
 
 interface HandoffEnd {
   sessionId?: string;
@@ -91,15 +90,6 @@ export function renderOutcome(data: HandoffResponse): string {
   return `Delivered ${data.from.sessionId} -> ${data.to.sessionId} (${data.to.agentType}): ${size}.`;
 }
 
-export function parseHandoffTurns(value: string): number {
-  const turns = parseInt(value, 10);
-  if (isNaN(turns) || turns < 1 || turns > MAX_TURNS) {
-    console.error(`Invalid --turns value (expected 1-${MAX_TURNS})`);
-    process.exit(1);
-  }
-  return turns;
-}
-
 export function createHandoffCommand(): Command {
   return new Command("handoff")
     .description("Hand a session's last response to another session")
@@ -130,7 +120,9 @@ export function createHandoffCommand(): Command {
           json?: boolean;
         },
       ) => {
-        const turns = parseHandoffTurns(options.turns);
+        // Shared with `ccmux last`: the same flag, the same bound, and the
+        // same message, from one place.
+        const turns = parseTurns(options.turns);
 
         if (options.spawn && to !== undefined) {
           console.error(
@@ -179,6 +171,20 @@ export function createHandoffCommand(): Command {
           const data = (await response
             .json()
             .catch(() => null)) as HandoffError | null;
+          // Under --json every outcome is JSON on stdout, refusals included:
+          // the caller is an agent parsing this, and a reason code it can
+          // branch on ("target-waiting" vs "unsafe-payload") is the whole
+          // point of the flag. Prose on stderr alone left it with nothing.
+          if (options.json) {
+            console.log(
+              JSON.stringify(
+                data ?? { error: `HTTP ${response.status}` },
+                null,
+                2,
+              ),
+            );
+            process.exit(1);
+          }
           if (data?.candidates) {
             // The listing IS the recovery path, so it names which end was
             // ambiguous and carries an id/coordinate to re-ask with.
