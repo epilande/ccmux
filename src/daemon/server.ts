@@ -19,6 +19,9 @@ import {
   sendLiteralToPane,
   sendPromptToPane,
 } from "./pane-io";
+import { resolveSessionRef } from "./session-ref";
+import { MAX_TURNS } from "./transcript-read";
+import { readSessionTranscript } from "./transcript-readers";
 import { stripControlChars } from "./send-guards";
 import {
   buildAgentForkCommand,
@@ -1049,6 +1052,24 @@ export class DaemonServer {
     ) {
       const sessionId = path.slice("/sessions/".length, -"/screen".length);
       return await this.handleScreenSession(sessionId, url, corsHeaders);
+    }
+
+    if (
+      path.startsWith("/sessions/") &&
+      path.endsWith("/transcript") &&
+      req.method === "GET"
+    ) {
+      const raw = path.slice("/sessions/".length, -"/transcript".length);
+      // A malformed escape (`%zz`) throws URIError, which would escape
+      // `handleRequest` as a 500 carrying Bun's HTML error page. The raw
+      // segment is a fine ref to try instead: it resolves or 404s.
+      let ref: string;
+      try {
+        ref = decodeURIComponent(raw);
+      } catch {
+        ref = raw;
+      }
+      return await this.handleSessionTranscript(ref, url, corsHeaders);
     }
 
     // BEFORE the catch-all GET below, which slices everything after
@@ -2386,6 +2407,116 @@ export class DaemonServer {
         sessionId: session.id,
         paneId: session.tmuxPane,
         lines: lineCount,
+      },
+      { headers },
+    );
+  }
+
+  /**
+   * `GET /sessions/:ref/transcript?turns=N&callerPane=%7` — the last N turns
+   * of a session's conversation, read from the agent's own transcript.
+   *
+   * The `:ref` segment is a session REFERENCE (see `session-ref.ts`), not
+   * only an id: exact refs behave as `resolveSession` always has, and a
+   * fuzzy ref is scoped by the caller's pane. An ambiguous ref is REFUSED
+   * with the full candidate list rather than guessed at.
+   *
+   * No reader for the agent, or nothing readable yet, degrades to a pane
+   * capture (`source: "pane"`). `capturePane` returns "" on ANY failure, so
+   * an empty capture is a 400 rather than an empty success.
+   */
+  private async handleSessionTranscript(
+    ref: string,
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    const resolution = resolveSessionRef(ref, {
+      sessions: this.sessionManager.getSessions(),
+      panes: this.getPaneCache(),
+      callerPane: url.searchParams.get("callerPane"),
+    });
+
+    if (resolution.outcome === "not-found") {
+      return Response.json(
+        { error: "Session not found" },
+        { status: 404, headers },
+      );
+    }
+    if (resolution.outcome === "ambiguous") {
+      return Response.json(
+        {
+          error: `Ambiguous session reference "${ref}"`,
+          candidates: resolution.candidates,
+        },
+        { status: 409, headers },
+      );
+    }
+
+    const session = resolution.session;
+    const requested = parseInt(url.searchParams.get("turns") ?? "1", 10);
+    const turns =
+      isNaN(requested) || requested < 1 ? 1 : Math.min(requested, MAX_TURNS);
+
+    const resolved = {
+      ref,
+      tier: resolution.tier,
+      exact: resolution.exact,
+      proximity: resolution.proximity,
+    };
+
+    const transcript = await readSessionTranscript(session, turns);
+    if (transcript) {
+      return Response.json(
+        {
+          sessionId: session.id,
+          agentType: session.agentType,
+          source: "transcript",
+          // Transcript text is agent-authored and reaches a TTY on the way
+          // out, so an ESC sequence in it would be INTERPRETED (a title
+          // change, an OSC 52 clipboard write). Newlines and tabs survive:
+          // unlike the pane branch below, this text carries code.
+          turns: transcript.turns.map((turn) => ({
+            ...turn,
+            text: stripControlChars(turn.text, {
+              keepNewlines: true,
+              keepTabs: true,
+            }),
+          })),
+          truncated: transcript.truncated,
+          resolution: resolved,
+        },
+        { headers },
+      );
+    }
+
+    if (!session.tmuxPane) {
+      return Response.json(
+        { error: "Session has no readable transcript and no tmux pane" },
+        { status: 400, headers },
+      );
+    }
+
+    const capture = stripControlChars(await capturePane(session.tmuxPane), {
+      keepNewlines: true,
+    }).trim();
+    if (capture.length === 0) {
+      return Response.json(
+        { error: "Session has no readable transcript and its pane is empty" },
+        { status: 400, headers },
+      );
+    }
+
+    return Response.json(
+      {
+        sessionId: session.id,
+        agentType: session.agentType,
+        source: "pane",
+        // Role is nominal here: a screen capture is not a parsed turn.
+        turns: [{ role: "assistant", text: capture }],
+        // Always: `capturePane` reads the visible tail (50 lines by
+        // default), so a pane capture is never the whole response.
+        truncated: true,
+        resolution: resolved,
       },
       { headers },
     );
