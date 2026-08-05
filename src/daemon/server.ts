@@ -21,9 +21,9 @@ import {
   sendPromptToPane,
 } from "./pane-io";
 import { resolveSessionRef } from "./session-ref";
+import type { SessionRefResolution } from "./session-ref";
 import { MAX_TURNS } from "./transcript-read";
 import { readSessionTranscript } from "./transcript-readers";
-import { stripControlChars } from "./send-guards";
 import {
   AMBIGUOUS_WAIT_ERROR,
   checkForegroundLiveness,
@@ -39,10 +39,6 @@ import {
   MAX_HANDOFF_NOTE_CHARS,
   normalizeHandoffSpawn,
 } from "./handoff";
-import { resolveSessionRef } from "./session-ref";
-import type { SessionRefResolution } from "./session-ref";
-import { MAX_TURNS } from "./transcript-read";
-import { readSessionTranscript } from "./transcript-readers";
 import {
   buildAgentForkCommand,
   buildAgentSpawnCommand,
