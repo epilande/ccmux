@@ -1,11 +1,13 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import {
   createLastCommand,
+  parseTurns,
   renderCandidates,
   renderTurns,
   resolutionEcho,
 } from "./last";
 import type { SessionRefCandidate } from "../daemon/session-ref";
+import { MAX_TURNS } from "../daemon/transcript-read";
 
 describe("renderTurns", () => {
   it("prints a single turn bare so stdout stays pipeable", () => {
@@ -97,6 +99,30 @@ describe("renderCandidates", () => {
     expect(out).toContain("[same window]");
     expect(out).toContain("codex-bbb  (no pane)");
     expect(out).toContain("[global]");
+  });
+});
+
+describe("parseTurns", () => {
+  it("accepts the daemon's own maximum", () => {
+    expect(parseTurns(String(MAX_TURNS))).toBe(MAX_TURNS);
+  });
+
+  it("refuses one past it, naming the shared limit", () => {
+    // Stubbed, or the refusal would take the test runner down with it.
+    const exit = spyOn(process, "exit").mockImplementation(
+      (() => undefined) as never,
+    );
+    const logged = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      parseTurns(String(MAX_TURNS + 1));
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(logged).toHaveBeenCalledWith(
+        `Invalid --turns value (expected 1-${MAX_TURNS})`,
+      );
+    } finally {
+      logged.mockRestore();
+      exit.mockRestore();
+    }
   });
 });
 

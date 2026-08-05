@@ -73,6 +73,13 @@ describe("readLinesBackwards", () => {
     const path = write("f.jsonl", "one\n\n\ntwo\n");
     expect(await collect(path)).toEqual(["two", "one"]);
   });
+
+  it("terminates on a chunk size that could never reach the head", async () => {
+    // A zero (or negative) chunk reads nothing per pass, so the walk would
+    // spin on `pos` forever rather than yield.
+    const path = write("g.jsonl", "one\ntwo\n");
+    expect(await collect(path, 0)).toEqual([]);
+  });
 });
 
 /** Minimal classifier: `{r: "assistant"|"user", t: "text", ts?}`. */
@@ -210,6 +217,46 @@ describe("foldJsonlTurns", () => {
     expect(result?.turns[0].text.endsWith("THE-END")).toBe(true);
     expect(result?.turns[0].text.startsWith("… ")).toBe(true);
     expect(result?.turns[0].text.length).toBe(MAX_TURN_CHARS + 2);
+  });
+
+  it("bounds a many-fragment turn's memory without changing a byte of output", async () => {
+    const fragments = Array.from(
+      { length: 60 },
+      (_, i) => `frag-${i}-` + "x".repeat(1000),
+    );
+    const path = write(
+      "t.jsonl",
+      jsonl(
+        { r: "user", t: "q" },
+        ...fragments.map((t) => ({ r: "assistant", t })),
+      ),
+    );
+    const result = await foldJsonlTurns(path, 1, classify);
+    // The pre-fix expectation: every fragment joined, then capped to the tail.
+    const whole = fragments.join("\n\n");
+    expect(whole.length).toBeGreaterThan(MAX_TURN_CHARS * 2);
+    expect(result?.truncated).toBe(true);
+    expect(result?.turns[0].text).toBe("… " + whole.slice(-MAX_TURN_CHARS));
+  });
+
+  it("keeps accumulating when whitespace makes the running length lie", async () => {
+    // The running count crosses the cap on the blank fragment alone, but the
+    // JOINED text trims back to nothing, so the older fragment behind it is
+    // still part of the answer and must not be dropped.
+    const fragments = ["OLD-" + "a".repeat(100), " ".repeat(25_000), "NEW"];
+    const path = write(
+      "t.jsonl",
+      jsonl(
+        { r: "user", t: "q" },
+        ...fragments.map((t) => ({ r: "assistant", t })),
+      ),
+    );
+    const result = await foldJsonlTurns(path, 1, classify);
+    const whole = fragments.join("\n\n").trim();
+    expect(result?.turns[0].text).toBe("… " + whole.slice(-MAX_TURN_CHARS));
+    // Bailing on the running count alone would trim the blank fragment away
+    // and answer a bare "NEW", untruncated.
+    expect(result?.truncated).toBe(true);
   });
 
   it("skips an oversized line unparsed and flags truncation", async () => {
