@@ -298,16 +298,16 @@ function orderOf(frame: string, ...needles: string[]): number[] {
  * every line carries one as the panel's border, and now every line below a
  * group's first also carries the rail.
  *
- * The gutter column before the rail holds the cursor bar on the cursor row's
- * lines, so both helpers accept either a space or the bar there.
+ * The cursor bar takes the rail's own column on the cursor row's lines, so
+ * both helpers accept either the rail or the bar there.
  */
 function isDetailLine(line: string): boolean {
-  return /[ ▎]│ {3,5}\S/.test(line);
+  return / [│┃] {3,5}\S/.test(line);
 }
 
 /** Whether a rendered line carries the group rail at all. */
 function hasRail(line: string): boolean {
-  return /[ ▎]│ /.test(line);
+  return / [│┃] /.test(line);
 }
 
 /** The rendered line holding `needle`. */
@@ -465,7 +465,7 @@ describe("WorktreesPanel scanning indicator", () => {
     keys.pressKey("j");
     const moved = await frame();
     expect(moved).toContain("scanning");
-    expect(lineWith(moved, "alpha")).toContain("▎");
+    expect(lineWith(moved, "alpha")).toContain("┃");
   });
 
   it("drops the suffix when the scan lands", async () => {
@@ -713,11 +713,11 @@ describe("WorktreesPanel structure", () => {
       ]),
     );
     // The cursor starts on the main checkout: both its lines carry the bar...
-    expect(lineWith(settled, "main checkout")).toContain("▎");
-    expect(lineWith(settled, "1 modified")).toContain("▎");
+    expect(lineWith(settled, "main checkout")).toContain("┃");
+    expect(lineWith(settled, "1 modified")).toContain("┃");
     // ...and neither line of the neighbouring row carries one.
-    expect(lineWith(settled, "alpha")).not.toContain("▎");
-    expect(lineWith(settled, "4 untracked")).not.toContain("▎");
+    expect(lineWith(settled, "alpha")).not.toContain("┃");
+    expect(lineWith(settled, "4 untracked")).not.toContain("┃");
   });
 
   it("collapses a worktree with nothing to report to a single line", async () => {
@@ -1061,7 +1061,7 @@ describe("WorktreesPanel ordering", () => {
     const [alphaBefore, bravoBefore] = orderOf(before, "alpha", "bravo");
     expect(alphaBefore).toBeLessThan(bravoBefore!);
     // The cursor starts on the first row, which is what has to be followed.
-    expect(lineWith(before, "alpha")).toContain("▎");
+    expect(lineWith(before, "alpha")).toContain("┃");
 
     releaseScan(json({ candidates: [candidate()], skipped: [] }));
     const after = await frame();
@@ -1070,8 +1070,8 @@ describe("WorktreesPanel ordering", () => {
     const [alphaAfter, bravoAfter] = orderOf(after, "alpha", "bravo");
     expect(bravoAfter).toBeLessThan(alphaAfter!);
     // ...and the cursor went with the row, not with the slot.
-    expect(lineWith(after, "alpha")).toContain("▎");
-    expect(lineWith(after, "bravo")).not.toContain("▎");
+    expect(lineWith(after, "alpha")).toContain("┃");
+    expect(lineWith(after, "bravo")).not.toContain("┃");
   });
 
   /**
@@ -1105,7 +1105,7 @@ describe("WorktreesPanel ordering", () => {
     await frame();
     for (let i = 0; i < 20; i++) keys.pressKey("j");
     const scrolled = await frame();
-    expect(lineWith(scrolled, "wt20")).toContain("▎");
+    expect(lineWith(scrolled, "wt20")).toContain("┃");
     // Deep enough that the top of the list is out of view.
     expect(scrolled).not.toContain("wt00");
 
@@ -1115,7 +1115,7 @@ describe("WorktreesPanel ordering", () => {
     const after = await frame();
     expect(after).not.toContain("wt20");
     // The cursor is on the first row, and the first row is on screen.
-    expect(lineWith(after, "wt00")).toContain("▎");
+    expect(lineWith(after, "wt00")).toContain("┃");
   });
 
   // A reopen (after a review round-trip or a cancelled dialog) seeds the
@@ -1129,8 +1129,8 @@ describe("WorktreesPanel ordering", () => {
       emptyScan,
       { initialCursor: "/repo/wt/bravo" },
     );
-    expect(lineWith(settled, "bravo")).toContain("▎");
-    expect(lineWith(settled, "main checkout")).not.toContain("▎");
+    expect(lineWith(settled, "bravo")).toContain("┃");
+    expect(lineWith(settled, "main checkout")).not.toContain("┃");
   });
 
   it("leads with the repo it was opened over, then the alphabet", () => {
@@ -1185,14 +1185,14 @@ describe("WorktreesPanel keys", () => {
     // Repos come out alphabetically, so `other` leads and its only row is
     // where the cursor starts.
     const before = await frame();
-    expect(lineWith(before, "delta")).toContain("▎");
+    expect(lineWith(before, "delta")).toContain("┃");
 
     keys.pressKey("j");
     const shown = await frame();
     // One `j` from the last row of a group lands on the first row of the
     // next, crossing the group header rather than selecting it.
-    expect(lineWith(shown, "main checkout")).toContain("▎");
-    expect(lineWith(shown, "delta")).not.toContain("▎");
+    expect(lineWith(shown, "main checkout")).toContain("┃");
+    expect(lineWith(shown, "delta")).not.toContain("┃");
   });
 
   it("selects only classified candidates", async () => {

@@ -690,8 +690,19 @@ const PHRASE_SEPARATOR = " · ";
  */
 export const RAIL = "│";
 
-/** Columns before line 1's content: the cursor bar, the rail, and a space.
- *  The marker slot is inside `primarySegments`, not here. */
+/**
+ * The cursor bar, drawn IN the rail's column on the cursor row's lines.
+ *
+ * Heavy vertical, not the session list's `▎`: box-drawing verticals are
+ * centered in their cell while `▎` hugs the cell's left edge, so `▎` in the
+ * rail column sticks out left of the line it is supposed to sit on. `┃`
+ * shares `│`'s centerline and reads as a thicker, highlighted rail segment.
+ */
+export const CURSOR_BAR = "┃";
+
+/** Columns before line 1's content: a space, the rail (which the cursor bar
+ *  overlays on the cursor row), and a space. The marker slot is inside
+ *  `primarySegments`, not here. */
 export const ROW_GUTTER = 3;
 
 /**
@@ -1961,68 +1972,79 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                       <box flexDirection="column">
                         {/* The cursor row carries the session list's
                             selected-row surface highlight, spanning both lines
-                            of a two-line row; the ▎ bar alone was easy to
-                            miss. */}
-                        <box
-                          height={1}
-                          width="100%"
-                          flexDirection="row"
-                          backgroundColor={
-                            isCursor() ? theme.surface : undefined
-                          }
-                        >
-                          <text fg={isCursor() ? theme.mauve : theme.overlay}>
-                            {isCursor() ? "▎" : " "}
-                          </text>
-                          <text fg={theme.overlay}>{`${RAIL} `}</text>
-                          <For
-                            each={fitSegments(
-                              primarySegments(entry, {
-                                isCursor: isCursor(),
-                                labelWidth: labelWidth(),
-                                selected: isSelected(),
-                                statusIcon: statusIcon(),
-                              }),
-                              rowWidth(),
-                            )}
-                          >
-                            {(segment) => (
-                              <text fg={segment.fg}>{segment.text}</text>
-                            )}
-                          </For>
-                        </box>
-                        <Show when={detail().length > 0}>
+                            of a two-line row; the cursor bar alone was easy to
+                            miss. The bar takes the RAIL's own column, and the
+                            highlight starts there too (the nested box is what
+                            keeps the column before the rail bare), so bar,
+                            rail, and highlight share one left edge. */}
+                        <box height={1} width="100%" flexDirection="row">
+                          <text> </text>
                           <box
+                            flexGrow={1}
                             height={1}
-                            width="100%"
                             flexDirection="row"
                             backgroundColor={
                               isCursor() ? theme.surface : undefined
                             }
                           >
-                            {/* A detail line always hangs off its own line 1,
-                                so it always carries the rail, and it indents
-                                to whatever marker that line 1 used. The bar
-                                column matches line 1's, so a two-line cursor
-                                row wears the bar on both lines. */}
                             <text fg={isCursor() ? theme.mauve : theme.overlay}>
-                              {isCursor() ? "▎" : " "}
-                            </text>
-                            <text fg={theme.overlay}>
-                              {`${RAIL} ${" ".repeat(
-                                markerWidth(entry.candidate !== null),
-                              )}`}
+                              {`${isCursor() ? CURSOR_BAR : RAIL} `}
                             </text>
                             <For
                               each={fitSegments(
-                                detail(),
-                                detailWidth(entry.candidate !== null),
+                                primarySegments(entry, {
+                                  isCursor: isCursor(),
+                                  labelWidth: labelWidth(),
+                                  selected: isSelected(),
+                                  statusIcon: statusIcon(),
+                                }),
+                                rowWidth(),
                               )}
                             >
                               {(segment) => (
                                 <text fg={segment.fg}>{segment.text}</text>
                               )}
                             </For>
+                          </box>
+                        </box>
+                        <Show when={detail().length > 0}>
+                          <box height={1} width="100%" flexDirection="row">
+                            <text> </text>
+                            <box
+                              flexGrow={1}
+                              height={1}
+                              flexDirection="row"
+                              backgroundColor={
+                                isCursor() ? theme.surface : undefined
+                              }
+                            >
+                              {/* A detail line always hangs off its own line
+                                  1, so it always carries the rail, and it
+                                  indents to whatever marker that line 1 used.
+                                  The rail column matches line 1's, so a
+                                  two-line cursor row wears the bar on both
+                                  lines. */}
+                              <text
+                                fg={isCursor() ? theme.mauve : theme.overlay}
+                              >
+                                {isCursor() ? CURSOR_BAR : RAIL}
+                              </text>
+                              <text fg={theme.overlay}>
+                                {` ${" ".repeat(
+                                  markerWidth(entry.candidate !== null),
+                                )}`}
+                              </text>
+                              <For
+                                each={fitSegments(
+                                  detail(),
+                                  detailWidth(entry.candidate !== null),
+                                )}
+                              >
+                                {(segment) => (
+                                  <text fg={segment.fg}>{segment.text}</text>
+                                )}
+                              </For>
+                            </box>
                           </box>
                         </Show>
                       </box>
