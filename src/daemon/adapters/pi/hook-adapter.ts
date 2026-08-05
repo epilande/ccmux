@@ -174,6 +174,18 @@ export class PiHookAdapter implements HookAdapter {
       return;
     }
     ctx.sessionManager.updateSession(session.id, stateFromPiMarker(marker));
+    // pi has no registered LogAdapter, so this only makes the transcript
+    // path visible to consumers that check for one themselves (ccmux show);
+    // it does not add a cascade log source (that's keyed on a registered
+    // adapter, not mere logPath presence). Set verbatim, no existsSync: a
+    // marker rewrite doesn't dispatch onMarkerChanged (unimplemented here),
+    // so this runs once per marker lifetime — an existence check at that one
+    // moment would turn a transcript-created-later race into a permanent
+    // miss. A dangling path is safe; every consumer either tolerates a
+    // missing file or is unreachable for this agent type.
+    if (marker.transcript_path) {
+      ctx.sessionManager.setLogPath(session.id, marker.transcript_path);
+    }
   }
 
   async onMarkerRemoved(

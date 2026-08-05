@@ -13,14 +13,26 @@ import type {
   TranscriptResult,
   TranscriptSession,
 } from "../transcript-read";
+import { antigravityTranscriptReader } from "./antigravity";
 import { claudeTranscriptReader } from "./claude";
 import { codexTranscriptReader } from "./codex";
 import { copilotTranscriptReader } from "./copilot";
+import { cursorTranscriptReader } from "./cursor";
+import { geminiTranscriptReader } from "./gemini";
+import { ompTranscriptReader } from "./omp";
+import { opencodeTranscriptReader } from "./opencode";
+import { piTranscriptReader } from "./pi";
 
 const READERS: TranscriptReader[] = [
   claudeTranscriptReader,
   codexTranscriptReader,
   copilotTranscriptReader,
+  cursorTranscriptReader,
+  piTranscriptReader,
+  ompTranscriptReader,
+  antigravityTranscriptReader,
+  opencodeTranscriptReader,
+  geminiTranscriptReader,
 ];
 
 export const BUILTIN_TRANSCRIPT_READERS: Map<string, TranscriptReader> =

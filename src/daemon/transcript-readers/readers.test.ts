@@ -5,6 +5,9 @@ import { join } from "path";
 import { classifyClaudeLine } from "./claude";
 import { classifyCodexLine } from "./codex";
 import { classifyCopilotLine } from "./copilot";
+import { classifyCursorLine } from "./cursor";
+import { classifyPiFamilyLine } from "./pi-family";
+import { classifyAntigravityLine } from "./antigravity";
 import { BUILTIN_TRANSCRIPT_READERS, readSessionTranscript } from "./index";
 import type { TranscriptSession } from "../transcript-read";
 
@@ -315,12 +318,345 @@ describe("copilot reader", () => {
   });
 });
 
+describe("cursor reader", () => {
+  it("collects text blocks, ignores tool_use, and skips turn_ended", () => {
+    expect(
+      classifyCursorLine({
+        role: "assistant",
+        message: {
+          content: [
+            { type: "text", text: "hello" },
+            { type: "tool_use", name: "Shell", input: { command: "ls" } },
+          ],
+        },
+      }),
+    ).toEqual({ kind: "assistant", text: "hello" });
+    expect(
+      classifyCursorLine({ type: "turn_ended", status: "success" }),
+    ).toEqual({ kind: "skip" });
+  });
+
+  it("unwraps <user_query> and drops the <timestamp> sibling tag", () => {
+    expect(
+      classifyCursorLine({
+        role: "user",
+        message: {
+          content: [
+            {
+              type: "text",
+              text: "<timestamp>Sunday, Jul 19, 2026, 7:17 PM (UTC-7)</timestamp>\n<user_query>\nreply with the single word ok\n</user_query>",
+            },
+          ],
+        },
+      }),
+    ).toEqual({ kind: "user", text: "reply with the single word ok" });
+  });
+
+  it("reads a real multi-turn shape (real fixture: turn_ended fires once, not per turn)", async () => {
+    // Modeled on a real 56-line Cursor transcript: 9 user/assistant exchanges
+    // but exactly one trailing turn_ended for the whole file.
+    const path = fixture("cursor.jsonl", [
+      {
+        role: "user",
+        message: {
+          content: [
+            { type: "text", text: "<user_query>\nfirst\n</user_query>" },
+          ],
+        },
+      },
+      {
+        role: "assistant",
+        message: {
+          content: [
+            { type: "text", text: "first reply" },
+            { type: "tool_use", name: "Shell" },
+          ],
+        },
+      },
+      {
+        role: "user",
+        message: {
+          content: [
+            { type: "text", text: "<user_query>\nsecond\n</user_query>" },
+          ],
+        },
+      },
+      {
+        role: "assistant",
+        message: { content: [{ type: "tool_use", name: "Shell" }] },
+      },
+      {
+        role: "assistant",
+        message: { content: [{ type: "text", text: "second reply" }] },
+      },
+      { type: "turn_ended", status: "success" },
+    ]);
+    const one = await readSessionTranscript(session("cursor", path), 1);
+    expect(one).toEqual({
+      turns: [{ role: "assistant", text: "second reply" }],
+      truncated: false,
+    });
+    const two = await readSessionTranscript(session("cursor", path), 2);
+    expect(two).toEqual({
+      turns: [
+        { role: "assistant", text: "first reply" },
+        { role: "user", text: "second" },
+        { role: "assistant", text: "second reply" },
+      ],
+      truncated: false,
+    });
+  });
+});
+
+describe("pi / omp reader (shared schema)", () => {
+  it("only counts an assistant message with stopReason 'stop', using the ENVELOPE timestamp", () => {
+    expect(
+      classifyPiFamilyLine({
+        type: "message",
+        timestamp: "2026-06-23T18:57:46.612Z",
+        message: {
+          role: "assistant",
+          stopReason: "toolUse",
+          content: [{ type: "text", text: "narrating" }],
+          timestamp: 1782241066611, // message-level epoch ms, deliberately ignored
+        },
+      }),
+    ).toEqual({ kind: "skip" });
+    expect(
+      classifyPiFamilyLine({
+        type: "message",
+        timestamp: "2026-06-23T18:57:48.301Z",
+        message: {
+          role: "assistant",
+          stopReason: "stop",
+          content: [
+            { type: "thinking", thinking: "hmm" },
+            { type: "text", text: "PI_INVOKE_OK" },
+          ],
+          timestamp: 1782241068301,
+        },
+      }),
+    ).toEqual({
+      kind: "assistant",
+      text: "PI_INVOKE_OK",
+      timestamp: "2026-06-23T18:57:48.301Z",
+    });
+  });
+
+  it("skips the first-class toolResult role, even a huge one", () => {
+    expect(
+      classifyPiFamilyLine({
+        type: "message",
+        timestamp: "t0",
+        message: {
+          role: "toolResult",
+          content: [{ type: "text", text: "x".repeat(200) }],
+        },
+      }),
+    ).toEqual({ kind: "skip" });
+    expect(
+      classifyPiFamilyLine({ type: "session", timestamp: "t0", id: "s1" }),
+    ).toEqual({ kind: "skip" });
+  });
+
+  it("reads the last completed turn for both pi and omp", async () => {
+    const entries = [
+      { type: "session", timestamp: "t0", id: "s1" },
+      {
+        type: "message",
+        timestamp: "t1",
+        message: { role: "user", content: [{ type: "text", text: "hi" }] },
+      },
+      {
+        type: "message",
+        timestamp: "t2",
+        message: {
+          role: "assistant",
+          stopReason: "toolUse",
+          content: [{ type: "toolCall", name: "Bash" }],
+        },
+      },
+      {
+        type: "message",
+        timestamp: "t3",
+        message: {
+          role: "toolResult",
+          content: [{ type: "text", text: "output" }],
+        },
+      },
+      {
+        type: "message",
+        timestamp: "t4",
+        message: {
+          role: "assistant",
+          stopReason: "stop",
+          content: [{ type: "text", text: "done" }],
+        },
+      },
+    ];
+    const piPath = fixture("pi.jsonl", entries);
+    const ompPath = fixture("omp.jsonl", entries);
+    expect(await readSessionTranscript(session("pi", piPath), 1)).toEqual({
+      turns: [{ role: "assistant", text: "done", timestamp: "t4" }],
+      truncated: false,
+    });
+    expect(await readSessionTranscript(session("omp", ompPath), 1)).toEqual({
+      turns: [{ role: "assistant", text: "done", timestamp: "t4" }],
+      truncated: false,
+    });
+  });
+});
+
+describe("antigravity reader", () => {
+  it("takes PLANNER_RESPONSE/DONE/MODEL as the response and strips the USER_REQUEST wrapper", () => {
+    expect(
+      classifyAntigravityLine({
+        step_index: 2,
+        source: "MODEL",
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: "2026-07-20T02:16:13Z",
+        content: "ok",
+      }),
+    ).toEqual({
+      kind: "assistant",
+      text: "ok",
+      timestamp: "2026-07-20T02:16:13Z",
+    });
+
+    expect(
+      classifyAntigravityLine({
+        step_index: 0,
+        source: "USER_EXPLICIT",
+        type: "USER_INPUT",
+        status: "DONE",
+        created_at: "2026-07-20T02:16:13Z",
+        content:
+          "<USER_REQUEST>\nreply with the single word ok\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: ...\n</ADDITIONAL_METADATA>",
+      }),
+    ).toEqual({
+      kind: "user",
+      text: "reply with the single word ok",
+      timestamp: "2026-07-20T02:16:13Z",
+    });
+  });
+
+  it("skips a tool-call-only PLANNER_RESPONSE (content: null) and other sidecar types", () => {
+    expect(
+      classifyAntigravityLine({
+        step_index: 7,
+        source: "MODEL",
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: "t0",
+        content: null,
+        tool_calls: [{ name: "run_command", args: {} }],
+      }),
+    ).toEqual({ kind: "skip" });
+    for (const type of [
+      "CONVERSATION_HISTORY",
+      "CHECKPOINT",
+      "ERROR_MESSAGE",
+      "GENERIC",
+    ]) {
+      expect(classifyAntigravityLine({ type, created_at: "t0" })).toEqual({
+        kind: "skip",
+      });
+    }
+  });
+
+  it("walks past a trailing tool-only response to the last real reply (real fixture shape)", async () => {
+    // Modeled on a real transcript_full.jsonl: the file's last entry is a
+    // PLANNER_RESPONSE with tool_calls and content: null (the agent's last
+    // visible act was running a command), not a text reply.
+    const path = fixture("antigravity.jsonl", [
+      {
+        step_index: 4,
+        source: "USER_EXPLICIT",
+        type: "USER_INPUT",
+        status: "DONE",
+        created_at: "t4",
+        content: "<USER_REQUEST>\nsecond prompt\n</USER_REQUEST>",
+      },
+      {
+        step_index: 5,
+        source: "MODEL",
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: "t5",
+        content: "second reply",
+      },
+      {
+        step_index: 6,
+        source: "USER_EXPLICIT",
+        type: "USER_INPUT",
+        status: "DONE",
+        created_at: "t6",
+        content: "<USER_REQUEST>\nrun a command\n</USER_REQUEST>",
+      },
+      {
+        step_index: 7,
+        source: "MODEL",
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: "t7",
+        content: null,
+        tool_calls: [{ name: "run_command", args: { CommandLine: "echo hi" } }],
+      },
+    ]);
+    const result = await readSessionTranscript(session("antigravity", path), 1);
+    expect(result).toEqual({
+      turns: [{ role: "assistant", text: "second reply", timestamp: "t5" }],
+      truncated: false,
+    });
+  });
+
+  it("prefers a sibling transcript_full.jsonl over the plain path it's given", async () => {
+    const plainPath = join(dir, "transcript.jsonl");
+    writeFileSync(
+      plainPath,
+      JSON.stringify({
+        step_index: 0,
+        source: "MODEL",
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: "t0",
+        content: "plain version",
+      }) + "\n",
+    );
+    writeFileSync(
+      join(dir, "transcript_full.jsonl"),
+      JSON.stringify({
+        step_index: 0,
+        source: "MODEL",
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: "t0",
+        content: "full version",
+      }) + "\n",
+    );
+    const result = await readSessionTranscript(
+      session("antigravity", plainPath),
+      1,
+    );
+    expect(result?.turns).toEqual([
+      { role: "assistant", text: "full version", timestamp: "t0" },
+    ]);
+  });
+});
+
 describe("registry", () => {
-  it("registers exactly the agents wave 1 reads", () => {
+  it("registers every built-in agent with a transcript reader", () => {
     expect([...BUILTIN_TRANSCRIPT_READERS.keys()].sort()).toEqual([
+      "antigravity",
       "claude",
       "codex",
       "copilot",
+      "cursor",
+      "gemini",
+      "omp",
+      "opencode",
+      "pi",
     ]);
   });
 

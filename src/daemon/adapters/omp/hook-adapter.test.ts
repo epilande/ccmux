@@ -84,6 +84,12 @@ function makeCtx(
         s.nativeSessionId = nativeSessionId;
         return true;
       },
+      setLogPath: (id: string, logPath: string | null) => {
+        const s = sessions.find((x) => x.id === id);
+        if (!s) return false;
+        s.state.logPath = logPath;
+        return true;
+      },
     } as unknown as HookManagerContext["sessionManager"],
     getLogWatcher: () => undefined,
     getLogWatchers: () => [],
@@ -296,6 +302,42 @@ describe("OmpHookAdapter", () => {
       await adapter.onMarkerAdded(marker, ctx);
       expect(session.nativeSessionId).toBeUndefined();
       expect(session.state.status).toBeUndefined();
+    });
+
+    it("sets logPath from the marker's transcript_path when the file exists", async () => {
+      const session = paneSession();
+      const ctx = makeCtx([session], [makePane("%1", 9000)]);
+      const transcriptPath = join(tempRoot, "session.jsonl");
+      writeFileSync(transcriptPath, "{}\n");
+      const marker = makeMarker({
+        pid: 9000,
+        state: "working",
+        transcript_path: transcriptPath,
+      });
+      writeMarkerToCache(marker);
+
+      await adapter.onMarkerAdded(marker, ctx);
+      expect(session.state.logPath).toBe(transcriptPath);
+    });
+
+    it("sets logPath from transcript_path verbatim even when the file does not exist yet", async () => {
+      // A marker rewrite doesn't dispatch onMarkerChanged (unimplemented),
+      // so onMarkerAdded runs once per marker lifetime. Refusing a
+      // not-yet-created transcript here would turn that race into a
+      // permanent miss; every logPath consumer either tolerates a missing
+      // file or is unreachable for this agent type.
+      const session = paneSession();
+      const ctx = makeCtx([session], [makePane("%1", 9000)]);
+      const transcriptPath = join(tempRoot, "vanished.jsonl");
+      const marker = makeMarker({
+        pid: 9000,
+        state: "working",
+        transcript_path: transcriptPath,
+      });
+      writeMarkerToCache(marker);
+
+      await adapter.onMarkerAdded(marker, ctx);
+      expect(session.state.logPath).toBe(transcriptPath);
     });
 
     it("does not claim a pane-tracked pi session", async () => {
