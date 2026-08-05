@@ -27,6 +27,7 @@ import { InvocationRegistry } from "./invokers/registry";
 import { stubInvoker } from "./invokers/test-helpers";
 import { BUILTIN_AGENTS } from "../lib/agents";
 import { HANDOFF_PREFIX, MAX_HANDOFF_NOTE_CHARS } from "./handoff";
+import { renderTurns } from "./transcript-read";
 import { MAX_SEND_PASTE_CHARS } from "../lib/config";
 import type { EnrichedSession, TmuxPane } from "../types/session";
 
@@ -139,6 +140,32 @@ function transcript(name: string, answer = "the conclusion"): string {
   return path;
 }
 
+/** A Claude transcript of several complete turns, oldest first: `exchanges`
+ *  is read as `[prompt, answer]` pairs. */
+function multiTurnTranscript(
+  name: string,
+  exchanges: [string, string][],
+): string {
+  const path = join(dir, name);
+  const lines: string[] = [];
+  exchanges.forEach(([prompt, answer], index) => {
+    lines.push(
+      JSON.stringify({
+        type: "user",
+        timestamp: `2024-01-15T12:0${index}:00Z`,
+        message: { content: prompt },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        timestamp: `2024-01-15T12:0${index}:30Z`,
+        message: { content: [{ type: "text", text: answer }] },
+      }),
+    );
+  });
+  writeFileSync(path, lines.join("\n") + "\n");
+  return path;
+}
+
 /** A codex rollout whose last turn's text is `answer`. Used where the source
  *  must NOT be a claude session (so a fuzzy `claude` ref can't match it). */
 function codexTranscript(name: string, answer = "the conclusion"): string {
@@ -205,6 +232,79 @@ describe("POST /handoff — composition", () => {
     expect(lines[1]).toBe("note: over to you");
     expect(lines[2]).toBe("");
     expect(lines[3]).toBe("ship it");
+  });
+
+  it("keeps a one-turn payload bare, with no role labels", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    pair(manager, "ship it");
+
+    await post(internals, { from: "src", to: "dst", turns: 1 });
+    const text = (sendPromptToPane.mock.calls[0] as unknown as string[])[1];
+    // One turn IS the last response, which is what every caller that omits
+    // `turns` has always received.
+    expect(text).not.toContain("assistant:");
+    expect(text.split("\n\n").slice(1).join("\n\n")).toBe("ship it");
+  });
+
+  it("renders several turns exactly as `ccmux last --turns N` prints them", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    manager.createSession(
+      "src",
+      multiTurnTranscript("src.jsonl", [
+        ["first prompt", "first answer"],
+        ["second prompt", "second answer"],
+      ]),
+    );
+    manager.setTmuxPane("src", "%1");
+    manager.createSession("dst", transcript("dst.jsonl"));
+    manager.setTmuxPane("dst", "%2");
+
+    await post(internals, { from: "src", to: "dst", turns: 2 });
+    const text = (sendPromptToPane.mock.calls[0] as unknown as string[])[1];
+    const payload = text.split("\n\n").slice(1).join("\n\n");
+    // Byte-identical to the shared renderer, so a receiver told to pull more
+    // with `ccmux last <id> --turns N` sees the same shape it was handed.
+    // The leading prompt is dropped by the fold: `turns=2` is
+    // `[assistant, user, assistant]`, oldest first.
+    expect(payload).toBe(
+      renderTurns([
+        { role: "assistant", text: "first answer" },
+        { role: "user", text: "second prompt" },
+        { role: "assistant", text: "second answer" },
+      ]),
+    );
+  });
+
+  it("caps a multi-turn payload the same way, keeping the tail", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    manager.createSession(
+      "src",
+      multiTurnTranscript("src.jsonl", [
+        ["p1", "HEAD" + "x".repeat(MAX_SEND_PASTE_CHARS)],
+        ["p2", "the conclusion TAIL"],
+      ]),
+    );
+    manager.setTmuxPane("src", "%1");
+    manager.createSession("dst", transcript("dst.jsonl"));
+    manager.setTmuxPane("dst", "%2");
+
+    const response = await post(internals, {
+      from: "src",
+      to: "dst",
+      turns: 2,
+    });
+    const data = (await response.json()) as {
+      truncated: boolean;
+      chars: number;
+    };
+    expect(data.truncated).toBe(true);
+    const text = (sendPromptToPane.mock.calls[0] as unknown as string[])[1];
+    expect(text.length).toBeLessThanOrEqual(MAX_SEND_PASTE_CHARS);
+    expect(data.chars).toBe(text.length);
+    // One cap over the WHOLE composed text: the header survives at the front
+    // (it is what makes the paste identifiable) and the newest turn at the end.
+    expect(text.startsWith(HANDOFF_PREFIX)).toBe(true);
+    expect(text.endsWith("the conclusion TAIL")).toBe(true);
   });
 
   it("truncates past the paste cap and says so", async () => {
@@ -521,6 +621,41 @@ describe("POST /handoff — queue on busy", () => {
       fromSessionId: "src",
       queuedAt: data.queuedAt,
     });
+  });
+
+  it("queues the text already composed, turns and note included", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    manager.createSession(
+      "src",
+      multiTurnTranscript("src.jsonl", [
+        ["p1", "first answer"],
+        ["p2", "second answer"],
+      ]),
+    );
+    manager.setTmuxPane("src", "%1");
+    manager.createSession("dst", transcript("dst.jsonl"));
+    manager.setTmuxPane("dst", "%2");
+    manager.updateSession("dst", { status: "working" });
+
+    await post(internals, {
+      from: "src",
+      to: "dst",
+      turns: 2,
+      note: "over to you",
+    });
+    expect(sendPromptToPane).not.toHaveBeenCalled();
+
+    // Composition happens BEFORE the status branch, so what waits in the
+    // queue is the exact bytes that will be pasted — not a request to be
+    // re-read half an hour later against a transcript that has moved on.
+    manager.updateSession("dst", { status: "idle" });
+    // The listener is async; let its microtasks drain.
+    await Bun.sleep(10);
+    expect(sendPromptToPane).toHaveBeenCalledTimes(1);
+    const text = (sendPromptToPane.mock.calls[0] as unknown as string[])[1];
+    expect(text.split("\n")[1]).toBe("note: over to you");
+    expect(text).toContain("assistant:\nfirst answer");
+    expect(text).toContain("assistant:\nsecond answer");
   });
 
   it("omits pendingHandoff for a session with nothing queued", async () => {

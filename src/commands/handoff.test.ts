@@ -1,9 +1,11 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import {
   createHandoffCommand,
+  parseHandoffTurns,
   renderOutcome,
   resolutionEchoes,
 } from "./handoff";
+import { MAX_TURNS } from "../daemon/transcript-read";
 
 const from = {
   sessionId: "codex-a1b2",
@@ -104,6 +106,36 @@ describe("resolutionEchoes", () => {
         truncated: false,
       }),
     ).toEqual([]);
+  });
+});
+
+describe("parseHandoffTurns", () => {
+  it("takes every count the endpoint accepts", () => {
+    expect(parseHandoffTurns("1")).toBe(1);
+    expect(parseHandoffTurns("7")).toBe(7);
+    expect(parseHandoffTurns(String(MAX_TURNS))).toBe(MAX_TURNS);
+  });
+
+  it("refuses a count outside the range, or no count at all", () => {
+    // `process.exit` is spied rather than allowed to run: a real exit inside
+    // a test file takes the whole file's remaining tests with it.
+    const exit = spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("exit");
+    }) as never);
+    const errors: unknown[] = [];
+    const log = spyOn(console, "error").mockImplementation((...args) => {
+      errors.push(args.join(" "));
+    });
+    try {
+      for (const bad of ["0", "-1", String(MAX_TURNS + 1), "abc", ""]) {
+        expect(() => parseHandoffTurns(bad)).toThrow("exit");
+      }
+      // The message names the range, so the fix is in the refusal.
+      expect(errors[0]).toBe(`Invalid --turns value (expected 1-${MAX_TURNS})`);
+    } finally {
+      log.mockRestore();
+      exit.mockRestore();
+    }
   });
 });
 

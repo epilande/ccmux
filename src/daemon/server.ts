@@ -37,7 +37,7 @@ import {
 } from "./handoff";
 import { resolveSessionRef } from "./session-ref";
 import type { SessionRefResolution } from "./session-ref";
-import { MAX_TURNS } from "./transcript-read";
+import { MAX_TURNS, renderTurns } from "./transcript-read";
 import { readSessionTranscript } from "./transcript-readers";
 import {
   buildAgentForkCommand,
@@ -2715,16 +2715,16 @@ export class DaemonServer {
       );
     }
 
-    const payload = stripControlChars(
-      transcript.turns
-        .map((turn) =>
-          transcript.turns.length === 1
-            ? turn.text
-            : `${turn.role}:\n${turn.text}`,
-        )
-        .join("\n\n"),
-      { keepNewlines: true, keepTabs: true },
-    ).trim();
+    // The SAME renderer `ccmux last --turns N` prints and the picker's Copy
+    // dialog puts on the clipboard: one turn bare (it IS the last response),
+    // several with `user:` / `assistant:` labels. A receiver therefore sees
+    // exactly what the CLI would have shown for the same count, which is what
+    // makes the header's session id a usable pointer rather than a different
+    // rendering of the same conversation.
+    const payload = stripControlChars(renderTurns(transcript.turns), {
+      keepNewlines: true,
+      keepTabs: true,
+    }).trim();
     if (payload.length === 0) {
       return Response.json(
         {
