@@ -132,6 +132,9 @@ export async function sendLiteralToPane(
   }
 }
 
+/** Monotonic suffix for {@link sendPromptToPane}'s tmux buffer names. */
+let promptBufferSeq = 0;
+
 /**
  * Send a multi-line prompt to a pane via tmux's paste buffer with the
  * bracketed-paste flag (`paste-buffer -p`). The receiving TUI (Claude
@@ -151,10 +154,14 @@ export async function sendPromptToPane(
   text: string,
   pressEnter: boolean,
 ): Promise<boolean> {
-  // Per-pane buffer name keeps concurrent invocations from clobbering
-  // each other's buffer if tmux ever schedules paste-buffer out of order.
-  // The paneId is %<digits> in tmux, which is always safe in a buffer name.
-  const bufferName = `ccmux-invoke${paneId.replace(/[^A-Za-z0-9]/g, "_")}`;
+  // Per-CALL buffer name, not per-pane. Two sends aimed at the same pane
+  // (two /invoke calls, an /invoke racing a handoff) used to share one
+  // buffer, so the second load could overwrite the first's text between its
+  // load and its paste: the pane received the wrong prompt, both calls
+  // reported success, and Enter was pressed twice. The name never outlives
+  // this call, so a counter is enough to keep them apart. The paneId is
+  // %<digits> in tmux, which is always safe in a buffer name.
+  const bufferName = `ccmux-invoke${paneId.replace(/[^A-Za-z0-9]/g, "_")}-${++promptBufferSeq}`;
   try {
     const load = Bun.spawn(tmuxArgv("load-buffer", "-b", bufferName, "-"), {
       stdin: "pipe",
