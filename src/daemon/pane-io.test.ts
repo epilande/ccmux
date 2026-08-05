@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { resolvePaneLocation } from "./pane-io";
+import { resolvePaneLocation, sendPromptToPane } from "./pane-io";
 
 /**
  * Stub `Bun.spawn`, recording argv and replaying one tmux outcome.
@@ -20,6 +20,52 @@ function withTmux(outcome: { code?: number; out?: string; throws?: boolean }) {
   }) as unknown as typeof Bun.spawn;
   return { argv, restore: () => (Bun.spawn = original) };
 }
+
+/** As {@link withTmux}, plus the writable stdin `load-buffer` needs. */
+function withBufferTmux() {
+  const original = Bun.spawn;
+  const argv: string[][] = [];
+  Bun.spawn = ((spawned: string[]) => {
+    argv.push(spawned);
+    return {
+      exited: Promise.resolve(0),
+      stdin: { write: () => {}, end: () => Promise.resolve() },
+      stdout: new Blob([""]).stream(),
+      stderr: new Blob([""]).stream(),
+    };
+  }) as unknown as typeof Bun.spawn;
+  return { argv, restore: () => (Bun.spawn = original) };
+}
+
+describe("sendPromptToPane", () => {
+  it("names a distinct tmux buffer per call, even for the same pane", async () => {
+    // Two sends aimed at one pane used to share `ccmux-invoke%N`, so the
+    // second load could overwrite the first's text between its load and its
+    // paste: the pane got the wrong prompt, both callers were told it
+    // worked, and Enter was pressed twice. /invoke, /send and the handoff
+    // delivery all come through here, so they can genuinely overlap.
+    const { argv, restore } = withBufferTmux();
+    try {
+      await Promise.all([
+        sendPromptToPane("%3", "first", false),
+        sendPromptToPane("%3", "second", false),
+      ]);
+      const names = argv
+        .filter((a) => a.includes("load-buffer"))
+        .map((a) => a[a.indexOf("-b") + 1]);
+      expect(names).toHaveLength(2);
+      expect(new Set(names).size).toBe(2);
+
+      // Each paste still names the buffer its own load wrote.
+      const pasted = argv
+        .filter((a) => a.includes("paste-buffer"))
+        .map((a) => a[a.indexOf("-b") + 1]);
+      expect(pasted.sort()).toEqual([...names].sort());
+    } finally {
+      restore();
+    }
+  });
+});
 
 describe("resolvePaneLocation", () => {
   // This one lookup decides where EVERY spawned pane lands: the window

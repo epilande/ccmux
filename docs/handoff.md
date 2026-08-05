@@ -167,7 +167,7 @@ The payload is read and composed **inside the daemon**. It never transits the ca
 Every handoff arrives with this prepended:
 
 ```
-[ccmux handoff] from: <session-id> (<agent> · <cwd> · branch <branch>) at <YYYY-MM-DD HH:MM>
+[ccmux handoff] from: <session-id> (<agent> · `<cwd>` · branch <branch>) at <YYYY-MM-DD HH:MM>
 note: <note, if one was given>
 
 <response text>
@@ -176,7 +176,7 @@ note: <note, if one was given>
 Live example, as it lands in the target's composer:
 
 ```
-[ccmux handoff] from: 9ff6db28-4392-472e-80b9-2c0caa48f57a (claude · /tmp/hs5-proj · branch handoff-demo) at 2026-08-03 18:32
+[ccmux handoff] from: 9ff6db28-4392-472e-80b9-2c0caa48f57a (claude · `/tmp/hs5-proj` · branch handoff-demo) at 2026-08-03 18:32
 
 After tracing through the failure symptoms, my conclusion is that the retry loop
 documented in README.md is the culprit...
@@ -185,6 +185,8 @@ documented in README.md is the culprit...
 Properties, all deliberate:
 
 - **Greppable stable prefix** `[ccmux handoff]`. This shape is frozen; receiving agents are taught to recognize it.
+- **The genuine header is the only line carrying that prefix at column 0.** A payload can contain its own `[ccmux handoff]` line, whether a peer quoting one back or an outright forgery, so any payload line that would pass for the real one is quoted with `> ` before the text is capped. A receiver identifies the header as the first line of the message and as the only unquoted one; everything below it is payload, including anything that imitates a header.
+- **The cwd is backticked**, and that is load-bearing rather than decorative. Cursor's unsafe-reply guard is `/(^|\s)\/\S/`, which a bare absolute path after a space matches, so an unquoted cwd made ccmux's own header trip the delivery guard and refuse every handoff into a Cursor target. A branch name needs no such quoting, since git refuses a ref beginning with `/`.
 - **Short.** It is a tax paid on every handoff, so no YAML ceremony.
 - **The branch segment is omitted cleanly** when the daemon does not already know one. It is never worth a `git` spawn.
 - **Local time, minutes precision.**
@@ -236,6 +238,12 @@ There is deliberately no `--force`.
 
 The queue holds **at most one pending handoff per target**. A second enqueue replaces the first and says so, because a queue of prompts would arrive as a burst of pastes the moment the target went idle, which is exactly the behavior the idle-only rule exists to avoid. Records expire after 30 minutes; expiry is logged, not reported back (the sender was already told it was queued).
 
+**A guard that is already decidable refuses up front rather than queueing.** Both inputs to the unsafe-payload check are frozen the moment the text is composed (the composed text itself, and the target agent's own pattern), so a payload that agent can never receive is knowable at enqueue time and comes back as a 409 to a sender who is still listening. Queueing it instead would tell the sender "queued" and then drop the record half an hour later with nobody left to report it to.
+
+**A failure at dequeue splits two ways**, because by then the sender has been told "queued" and is gone. A deterministic refusal (`unsafe-payload`, `not-at-agent`, `target-waiting`, `ambiguous-wait`, `no-pane`) drops the record and logs why: re-running a check that just said no would only say no again. A transient one (the tmux send failed, or the target turned over between the readiness check and the paste) puts the record back with its attempt counted, for the next idle transition to retry, up to **3 attempts**. Retries never extend the TTL, so 30 minutes remains the outer bound either way.
+
+**The queue is in memory.** A daemon restart drops every queued handoff, including ones whose senders were already told "queued". Nothing is persisted and nothing is reported when it happens, so a handoff that matters across a restart has to be re-sent.
+
 A queued handoff is visible on the wire as an optional `pendingHandoff` field on the session, so a TUI can render it:
 
 ```jsonc
@@ -251,19 +259,20 @@ The payload itself is deliberately not on the wire: it is a prompt for the targe
 
 Each one is a refusal on purpose. All are printed verbatim by the CLI.
 
-| Reason           | Message                                                                                                                                                                                             |
-| :--------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ambiguous-ref`  | the candidate listing above, naming which end was ambiguous                                                                                                                                         |
-| `not-found`      | `Session not found for 'to': nope`                                                                                                                                                                  |
-| `self-handoff`   | `A session cannot hand off to itself`                                                                                                                                                               |
-| `no-transcript`  | `Session <id> (<agent>) has no readable transcript. A handoff will not fall back to a pane capture: a screen scrape is not a prompt.`                                                               |
-| `empty-payload`  | `Session <id> has nothing to hand off (its last response is empty)`                                                                                                                                 |
-| `target-waiting` | `Session <id> has a pending prompt. A handoff is never used to answer one: resolve it in the pane, then hand off again.`                                                                            |
-| `ambiguous-wait` | `Multiple sessions are waiting; press is ambiguous` (an aggregated OpenCode row: a paste could land on a sibling session's dialog)                                                                  |
-| `no-pane`        | `Session <id> has no tmux pane to deliver into`                                                                                                                                                     |
-| `not-at-agent`   | `Session <id> is no longer at the agent (pane foreground is "<cmd>")`                                                                                                                               |
-| `unsafe-payload` | `The composed handoff contains text <agent>'s composer cannot receive safely`                                                                                                                       |
-| `target-busy`    | `Session <id> is <status>; a handoff is only ever delivered into an idle composer` (usually a dequeue; a direct request whose target changed status while the source was being read reaches it too) |
+| Reason           | Message                                                                                                                                                                                                  |
+| :--------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ambiguous-ref`  | the candidate listing above, naming which end was ambiguous                                                                                                                                              |
+| `not-found`      | `Session not found for 'to': nope`                                                                                                                                                                       |
+| `self-handoff`   | `A session cannot hand off to itself`                                                                                                                                                                    |
+| `no-transcript`  | `Session <id> (<agent>) has no readable transcript. A handoff will not fall back to a pane capture: a screen scrape is not a prompt.`                                                                    |
+| `empty-payload`  | `Session <id> has nothing to hand off (its last response is empty)`                                                                                                                                      |
+| `target-waiting` | `Session <id> has a pending prompt. A handoff is never used to answer one: resolve it in the pane, then hand off again.`                                                                                 |
+| `ambiguous-wait` | `Multiple sessions are waiting; press is ambiguous` (an aggregated OpenCode row: a paste could land on a sibling session's dialog)                                                                       |
+| `no-pane`        | `Session <id> has no tmux pane to deliver into`                                                                                                                                                          |
+| `not-at-agent`   | `Session <id> is no longer at the agent (pane foreground is "<cmd>")`                                                                                                                                    |
+| `unsafe-payload` | `The composed handoff contains text <agent>'s composer cannot receive safely` (checked at enqueue as well as at delivery, so a busy target refuses instead of queueing something it could never receive) |
+| `too-large`      | `The composed handoff exceeds the spawn prompt budget (<n> bytes > 120832); retry with fewer --turns` (`--spawn` only)                                                                                   |
+| `target-busy`    | `Session <id> is <status>; a handoff is only ever delivered into an idle composer` (usually a dequeue; a direct request whose target changed status while the source was being read reaches it too)      |
 
 The `no-transcript` refusal is the one asymmetry worth calling out: `ccmux last` happily degrades to a pane capture, and a handoff will not. A screen scrape is fine to **read** and useless as a **prompt**: box drawing, spinners and half a composer are noise the receiving agent then has to reason about.
 
@@ -285,17 +294,31 @@ That ordering is what makes the queue safe: a queued record holds the already-st
 3. **Foreground liveness**, fail-closed. The reconciler keeps a dead agent's session idle with its pane still bound, so a handoff pasted after the agent exited would run a peer's prose as shell commands. A failed query counts as not-live.
 4. **Per-agent `unsafeReplyPattern`**, then the leading `/`/`!` defuse. The header makes a leading trigger impossible, so the defuse is provably a no-op today and is run anyway; the per-agent unsafe shapes are not about the leading character (most composers trim before trigger detection, and Cursor fuzzy-matches a `/token` anywhere), so a payload containing one is a refusal rather than something a defuse can neutralize.
 
+Check 4 is the one that _also_ runs at enqueue, for the reason the queue section gives: its two inputs are frozen at compose time, so a refusal it will certainly reach is better spent on a sender who is still listening. The other three depend on facts that move, and are therefore only ever asked at the moment of delivery.
+
+**Cursor targets are the sharp edge.** Cursor's pattern is `/(^|\s)\/\S/`, which matches a slash after any whitespace and not just a leading one, so **a handoff whose payload mentions an absolute path is refused** (`unsafe-payload`, 409 at enqueue) when the target is Cursor. This is live-verified behavior of Cursor's composer, where a whitespace-preceded `/token` opens a fuzzy command popup that can swallow the submitting Enter, and not something ccmux can defuse on its behalf. Handoffs into Cursor work normally for path-free payloads; the header itself is safe because its cwd is backticked. Nothing else about Cursor is special here.
+
 ### Caps
 
-| Cap                                 | Value        |
-| :---------------------------------- | :----------- |
-| Composed handoff (header + payload) | 65,536 chars |
-| Note                                | 500 chars    |
-| Turns                               | 20           |
-| Queue TTL                           | 30 minutes   |
-| Pending handoffs per target         | 1            |
+| Cap                                 | Value         |
+| :---------------------------------- | :------------ |
+| Composed handoff (header + payload) | 65,536 chars  |
+| Note                                | 500 chars     |
+| Turns                               | 20            |
+| Queue TTL                           | 30 minutes    |
+| Delivery attempts (queued)          | 3             |
+| Pending handoffs per target         | 1             |
+| `--spawn` prompt budget             | 120,832 bytes |
 
-The composed cap applies to the **final** text, header included, because it is a transport budget for what gets pasted, not a budget for the response that was read. Over-budget payloads are truncated tail-preserving with a leading `… ` marker, and the outcome line says `truncated`. The same cap governs `--spawn`, which sits well under `POST /spawn`'s own prompt budget, so a handoff behaves identically whichever way it lands.
+The composed cap applies to the **final** text, header included, because it is a transport budget for what gets pasted, not a budget for the response that was read. Over-budget payloads are truncated tail-preserving with a leading `… ` marker, and the outcome line says `truncated`.
+
+`--spawn` is budgeted a second time, and in **bytes** rather than chars. The composed text goes to the new agent in argv, so it is pre-checked against the spawn prompt budget before the spawn is attempted and refused with `too-large` if it overruns:
+
+```
+The composed handoff exceeds the spawn prompt budget (123456 bytes > 120832); retry with fewer --turns
+```
+
+The two budgets are close enough in size that only a multibyte-heavy payload separates them, which is exactly the case that reaches this: CJK or emoji text can sit comfortably under the 65,536-**char** cap and still overrun 120,832 **bytes**. It is caught in handoff's own terms rather than forwarded, which would return a 400 about an invalid `prompt` field the caller never sent.
 
 ## `ccmux send --stdin`
 
@@ -312,23 +335,17 @@ printf 'line one\nline two\n' | ccmux send <id> --stdin --no-enter
 
 ## TUI
 
-### Hand off
+### Hand off to…
 
-The picker's row menu (right-click, or `m` on the selected row) has a **Hand off** item, offered on any row while another session is on the board. It starts a pick-a-target mode rather than opening a second list: the session list itself becomes the target picker, with a banner naming the source (`⇄ Hand off from <agent · project> · pick a target · enter send · esc cancel`). While aiming, `j`/`k` and the arrows move, `Enter` or a click on a row sends, `Esc` or `q` cancels, and every other key is swallowed so `x` is never one keystroke from killing the row being pointed at.
+The picker's row menu (right-click, or `m` on the selected row) has a **Hand off to…** item, offered on any row while another session is on the board. It starts a pick-a-target mode rather than opening a second list: the session list itself becomes the target picker, with a banner naming the source (`⇄ Hand off from <agent · project> · pick a target · enter send · esc cancel`). While aiming, `j`/`k` and the arrows move, `Enter` or a click on a row sends, `Esc` or `q` cancels, and every other key is swallowed so `x` is never one keystroke from killing the row being pointed at.
 
 Both ends go to `POST /handoff` as session ids with `turns: 1`, so no ambiguity refusal is possible here (the pick is the disambiguation). The outcome lands in a toast: `Handed 532 chars to <target>`, `Queued for <target> (1,769 chars); it lands when the turn ends`, or `Handoff refused: <the daemon's reason, verbatim>`.
 
 While a handoff is queued for a session, its row carries a **⇄** badge. It is driven straight off `pendingHandoff`, so it appears and clears with the SSE update that changed the fact, with no client-side timer, and it survives sidebar width.
 
-### Copy
+### Copy last response
 
-The row menu also has a **Copy** item, and `y` on the selected row is the same thing without the menu (one key into the same dialog, which is why the menu item advertises `y` as its hint). It opens a small centered dialog asking how much of the conversation to take, rather than copying at once. The dialog opens on **Last response** (one turn), so the fast path is `y`, `Enter`.
-
-`y` is silent on a group header, as `r` and `x` are. On a row with neither a pane nor a transcript it says so in a toast rather than doing nothing: the menu can hide an item it cannot offer, but a key the help overlay lists unconditionally has to answer.
-
-While it is open: `j`/`k` (and the arrows) count turns between 1 and `MAX_TURNS` (20), a digit jumps straight to a count (a leading `1` or `2` also waits for one more digit, so `1` `2` is 12 and `2` `5` is 5), `Enter` copies, `Esc` cancels, and any other key dismisses it without copying. Past one turn the dialog reads **Last N turns (with your prompts)**, which is what the payload becomes.
-
-The copy reads the same transcript endpoint with `turns=N`. One turn is the response on its own; more than one is rendered by the same `renderTurns` that `ccmux last` prints, `user:` / `assistant:` prefixes and all, so the clipboard and the CLI produce identical text for the same turns. The result lands in a toast (`Copied 1,234 chars`, plus `(truncated)` or `(pane capture)` when either applies). The item is hidden for a row with neither a pane nor a transcript path, and every other refusal comes back from the daemon into the toast.
+The row menu also has a **Copy last response** item. It reads the same transcript endpoint with `turns=1` and puts the text on the clipboard, reporting the result in a toast (`Copied 1,234 chars`, plus `(truncated)` or `(pane capture)` when either applies). It is hidden for a row with neither a pane nor a transcript path, and every other refusal comes back from the daemon into the toast.
 
 Two clipboard tiers, tried in an order that depends on where the picker is running (`src/tui/utils/clipboard.ts`):
 
@@ -354,11 +371,9 @@ POST /handoff  {from, to?, turns?, note?, callerPane?, spawn?}
 | :------------------------------------------------------- | :------------------------------------------------ |
 | Session reference resolution (tiers, proximity, refusal) | `src/daemon/session-ref.ts`                       |
 | Backwards line walk, JSONL turn fold, size guards        | `src/daemon/transcript-read.ts`                   |
-| Shared turn rendering (`ccmux last` and the TUI's Copy)  | `src/daemon/transcript-read.ts` (`renderTurns`)   |
 | Per-agent readers + registry                             | `src/daemon/transcript-readers/`                  |
 | Provenance header, compose, queue                        | `src/daemon/handoff.ts`                           |
 | Endpoints, guard stack, delivery, `--spawn`              | `src/daemon/server.ts`                            |
 | Shared delivery-safety guards                            | `src/daemon/send-guards.ts`                       |
 | `ccmux last` / `ccmux handoff` CLIs                      | `src/commands/last.ts`, `src/commands/handoff.ts` |
 | TUI clipboard tiers                                      | `src/tui/utils/clipboard.ts`                      |
-| The Copy dialog (row budget, turn label)                 | `src/tui/components/CopyDialog.tsx`               |

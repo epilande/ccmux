@@ -12,10 +12,35 @@
  * Sidecar line types (`mode`, `last-prompt`, `ai-title`, `permission-mode`,
  * `file-history-snapshot`, ...) carry no conversation and some carry no
  * timestamp; they are skipped by falling through.
+ *
+ * Not every `user` entry is a prompt, though: `isMeta` entries and the markup
+ * shapes below are Claude's own bookkeeping and are skipped too, which means
+ * responses separated only by that noise merge into one turn (see
+ * `foldJsonlTurns`).
  */
 
 import type { LineMeaning, TranscriptReader } from "../transcript-read";
 import { SKIP_LINE, foldJsonlTurns } from "../transcript-read";
+
+/**
+ * String user content that is Claude's own markup rather than something the
+ * user typed: a slash command (`<command-message>…</command-message>\n
+ * <command-name>/model</command-name><command-args>…</command-args>`, either
+ * tag able to lead) and the local-command wrappers a command's output arrives
+ * in. Emitting these verbatim would put ccmux's own plumbing in the payload as
+ * the user's words, and treating them as boundaries would credit a response to
+ * a prompt nobody wrote. Matched as a PREFIX because each entry is entirely
+ * markup, so a real prompt that merely quotes a tag is unaffected.
+ * `src/tui/components/session-columns.ts:341-369` is the TUI's equivalent
+ * reduction of the same shapes (it rewrites rather than drops, since a
+ * subtitle still owes the row a line).
+ */
+const MARKUP_PREFIXES = [
+  "<command-message>",
+  "<command-name>",
+  "<local-command-stdout>",
+  "<local-command-caveat>",
+];
 
 /**
  * Classify one Claude JSONL line. Shape-guarded throughout (same reason as
@@ -27,8 +52,12 @@ export function classifyClaudeLine(entry: unknown): LineMeaning {
   const record = entry as {
     type?: unknown;
     timestamp?: unknown;
+    isMeta?: unknown;
     message?: { content?: unknown };
   };
+  // Claude's own injected context (command caveats, image placeholders,
+  // cross-session notes), never a prompt and never a turn boundary.
+  if (record.isMeta === true) return SKIP_LINE;
   const timestamp =
     typeof record.timestamp === "string" ? record.timestamp : undefined;
 
@@ -54,7 +83,11 @@ export function classifyClaudeLine(entry: unknown): LineMeaning {
   if (record.type === "user") {
     const content = record.message?.content;
     if (typeof content !== "string") return SKIP_LINE; // tool result
-    if (!content.trim()) return SKIP_LINE;
+    const trimmed = content.trim();
+    if (!trimmed) return SKIP_LINE;
+    if (MARKUP_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) {
+      return SKIP_LINE;
+    }
     return { kind: "user", text: content, timestamp };
   }
 

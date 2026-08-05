@@ -483,7 +483,7 @@ Both take a **session reference**, not just an id: a session id, `%pane`, `sessi
 
 A handoff arrives with a provenance header naming the source session, agent, directory, branch, and time, and is **only ever typed into an idle composer**: a target that is mid-turn gets it queued and delivered when the turn ends, and a target with a pending prompt is refused.
 
-In the picker, the row menu's **Copy** opens a small dialog asking how much to take: it starts on the last response, so <kbd>Enter</kbd> copies that straight to your clipboard, while <kbd>j</kbd>/<kbd>k</kbd> or a digit counts up to 20 turns (which brings your own prompts along, formatted exactly as `ccmux last` prints them). **Hand off** starts a pick-target mode: the session list itself becomes the target picker, <kbd>j</kbd>/<kbd>k</kbd> move, <kbd>Enter</kbd> (or a click) sends, and <kbd>Esc</kbd> cancels. A queued handoff shows a **⇄** badge on the target row until it lands.
+In the picker, the row menu's **Copy last response** puts the same text on your clipboard, and **Hand off to…** starts a pick-target mode: the session list itself becomes the target picker, <kbd>j</kbd>/<kbd>k</kbd> move, <kbd>Enter</kbd> (or a click) sends, and <kbd>Esc</kbd> cancels. A queued handoff shows a **⇄** badge on the target row until it lands.
 
 ### Dispatch Skill
 
