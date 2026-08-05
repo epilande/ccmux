@@ -782,6 +782,22 @@ describe("POST /handoff — the pane-evidence gate", () => {
     expect(sendPromptToPane).toHaveBeenCalledTimes(1);
   });
 
+  it("delivers when the pane cannot be read at all: the gate fails OPEN", async () => {
+    const { manager, internals, sendPromptToPane, capturePane } =
+      createServer();
+    pair(manager, "ship it");
+    // `capturePane` returns "" for every failure it has (dead pane, tmux
+    // error), so "" carries no evidence either way. Refusing on it would
+    // strand every handoff behind a transient tmux hiccup, and the checks
+    // above this gate already ran. Same direction as the #117 arm, which
+    // treats an unreadable pane as a no-op rather than a downgrade.
+    capturePane.mockResolvedValue("");
+
+    const response = await post(internals, { from: "src", to: "dst" });
+    expect(response.status).toBe(200);
+    expect(sendPromptToPane).toHaveBeenCalledTimes(1);
+  });
+
   it("RE-QUEUES a queued handoff the gate refuses, rather than dropping it", async () => {
     const { manager, internals, sendPromptToPane, capturePane } =
       createServer();
