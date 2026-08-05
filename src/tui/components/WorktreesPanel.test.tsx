@@ -41,6 +41,7 @@ import {
   rowLabel,
   rowVisualHeight,
   scrollTargetFor,
+  DIVIDER_MAX,
   dividerText,
   sortWorktreeRows,
   showsGroupHeaders,
@@ -49,6 +50,7 @@ import {
   worktreeHoldsPath,
   type PanelRow,
 } from "./WorktreesPanel";
+import { theme } from "../theme";
 import { displayWidth } from "../utils/format";
 import { DOT_SPINNER_FRAMES, getStatusIcon } from "../../lib/icons";
 import { SPINNER_INTERVAL_MS } from "../utils/useStatusIcon";
@@ -1872,8 +1874,17 @@ describe("row line 1", () => {
   it("names the main checkout for what it is, not for its directory", () => {
     expect(rowLabel(mainRow())).toBe("main checkout");
     expect(rowLabel(row())).toBe("alpha");
-    // ...so its branch is never suppressed as a repeat of the directory name.
-    expect(rowBranch(mainRow())).toBe("main");
+  });
+
+  // `main checkout  main` in every repo group said nothing. The branch is
+  // news only when the main checkout sits somewhere unexpected.
+  it("hides the main checkout's default branch, keeps an unexpected one", () => {
+    expect(rowBranch(mainRow())).toBe("");
+    expect(rowBranch(mainRow({ branch: "master" }))).toBe("");
+    expect(rowBranch(mainRow({ branch: "feat/overlay" }))).toBe("feat/overlay");
+    // The heuristic is scoped to the main checkout: a WORKTREE sitting on
+    // main is unusual enough to say so.
+    expect(rowBranch(row({ name: "wt-a", branch: "main" }))).toBe("main");
   });
 
   it("says detached rather than leaving the branch blank", () => {
@@ -1923,6 +1934,24 @@ describe("row line 1", () => {
     const rows = [panelRow({ row: row({ name: "x".repeat(80) }) })];
     expect(labelColumnWidth(rows)).toBeLessThanOrEqual(28);
   });
+
+  // Yellow means "removal would delete this work". A dirty main checkout is
+  // Tuesday, and a panel of glowing names left no colour for the real risk.
+  it("keeps a dirty kept row's name quiet, flags a dirty removable one", () => {
+    const dirty = { dirty: true, modified: 2, untracked: 0 };
+    const labelFg = (entry: PanelRow, isCursor = false) =>
+      primarySegments(entry, { isCursor, labelWidth: 0 }).find(
+        (s) => s.text === "alpha",
+      )?.fg;
+    expect(labelFg(panelRow({ row: row({ dirty }) }))).toBe(theme.subtext);
+    const removable = panelRow({
+      row: row({ dirty }),
+      candidate: candidate({ dirty: true }),
+    });
+    expect(labelFg(removable)).toBe(theme.yellow);
+    // The cursor row reads in the text colour wherever it is.
+    expect(labelFg(removable, true)).toBe(theme.text);
+  });
 });
 
 describe("row detail line", () => {
@@ -1945,6 +1974,29 @@ describe("row detail line", () => {
     expect(
       dirtyPhrases(row({ dirty: { dirty: true, modified: 2, untracked: 0 } })),
     ).toEqual(["2 modified"]);
+  });
+
+  // Same rule as the name colour: counts are information on a kept row and a
+  // warning only where a removal would delete the work being counted.
+  it("colours dirty counts as information on kept rows, warning on removable", () => {
+    const dirty = { dirty: true, modified: 2, untracked: 4 };
+    const kept = detailSegments(panelRow({ row: row({ dirty }) }), {
+      compact: false,
+      dirtyOk: false,
+    });
+    expect(kept.find((s) => s.text === "2 modified")?.fg).toBe(theme.subtext);
+
+    const removable = panelRow({
+      row: row({ dirty }),
+      candidate: candidate({ dirty: true, modified: 2, untracked: 4 }),
+    });
+    const segs = detailSegments(removable, { compact: false, dirtyOk: false });
+    expect(segs.find((s) => s.text === "2 modified")?.fg).toBe(theme.yellow);
+    expect(segs.find((s) => s.text.includes("(D removes it too)"))?.fg).toBe(
+      theme.yellow,
+    );
+    const armed = detailSegments(removable, { compact: false, dirtyOk: true });
+    expect(armed.find((s) => s.text.includes("D armed"))?.fg).toBe(theme.red);
   });
 
   // `readDirtyState` reports a worktree whose `git status` FAILED as dirty
@@ -2275,6 +2327,14 @@ describe("removable section", () => {
     expect(displayWidth(text)).toBe(40);
     // A width too small to hold the label must not produce a negative repeat.
     expect(displayWidth(dividerText(6, 4))).toBeGreaterThan(0);
+  });
+
+  // On a 200-column terminal a full-width dash run per repo is the heaviest
+  // ink on the screen; the rule reads as a break at a fraction of that.
+  it("caps the rule instead of filling a wide terminal", () => {
+    expect(displayWidth(dividerText(6, 200))).toBe(DIVIDER_MAX);
+    // A narrower list still rules to its own edge, not past it.
+    expect(displayWidth(dividerText(6, 40))).toBe(40);
   });
 
   // The divider is not a row, but it IS a line: a layout without it puts

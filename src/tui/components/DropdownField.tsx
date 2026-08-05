@@ -86,7 +86,7 @@ interface DropdownOverlayProps {
   options: DropdownOption[];
   /** The row j/k is on, drawn with the raised background. */
   highlight: number;
-  /** The draft's current value, drawn with the `>` marker. */
+  /** The draft's current value, drawn with the `▎` marker. */
   selected: number;
   /** Anchor within the parent the overlay is a child of, in that parent's
    *  content-box coordinates: the row under the field it belongs to. */
@@ -171,7 +171,7 @@ export const DropdownOverlay: Component<DropdownOverlayProps> = (props) => {
             >
               <box width={2}>
                 <text fg={theme.green}>
-                  {index() === props.selected ? ">" : ""}
+                  {index() === props.selected ? "▎" : ""}
                 </text>
               </box>
               {/* Only the first nine get a number key. */}

@@ -495,7 +495,7 @@ describe("NewSessionDialog", () => {
     });
     const lines = frame.split("\n");
     const pill = lines.findIndex((line) => line.includes("Placement"));
-    const first = lines.findIndex((line) => /> 1 New window/.test(line));
+    const first = lines.findIndex((line) => /▎ 1 New window/.test(line));
     // The overlay's top border sits in the gap row under the pill, so the
     // first option is exactly two rows below it — an anchor that ignored
     // the spacers would land the list a row high, over its own field.
@@ -515,8 +515,8 @@ describe("NewSessionDialog", () => {
       }),
       agents: [agent("claude"), agent("codex")],
     });
-    expect(frame).toContain("> 2 Codex");
-    expect(frame).not.toContain("> 1 Claude");
+    expect(frame).toContain("▎ 2 Codex");
+    expect(frame).not.toContain("▎ 1 Claude");
   });
 
   it("holds the placement on its pill and offers the rest in its dropdown", async () => {
@@ -534,7 +534,7 @@ describe("NewSessionDialog", () => {
       }),
     });
     expect(open).toContain("1 New window");
-    expect(open).toContain("> 2 Split right");
+    expect(open).toContain("▎ 2 Split right");
     expect(open).toContain("3 Split down");
   });
 
@@ -568,20 +568,20 @@ describe("NewSessionDialog", () => {
     // The number keys are scoped to the focused field, so which field has
     // focus has to survive a colourless terminal.
     const onAgent = await renderDialog({ draft: draft({ field: "agent" }) });
-    expect(onAgent).toContain(">Agent");
-    expect(onAgent).not.toContain(">Placement");
+    expect(onAgent).toContain("▎Agent");
+    expect(onAgent).not.toContain("▎Placement");
     setup.renderer.destroy();
 
     const onPlacement = await renderDialog({
       draft: draft({ field: "placement" }),
     });
-    expect(onPlacement).toContain(">Placement");
-    expect(onPlacement).not.toContain(">Agent");
+    expect(onPlacement).toContain("▎Placement");
+    expect(onPlacement).not.toContain("▎Agent");
     setup.renderer.destroy();
 
     const onPrompt = await renderDialog({ draft: draft({ field: "prompt" }) });
-    expect(onPrompt).toContain(">Prompt");
-    expect(onPrompt).not.toContain(">Placement");
+    expect(onPrompt).toContain("▎Prompt");
+    expect(onPrompt).not.toContain("▎Placement");
   });
 
   it("keeps the pills inside the border on a sidebar-width surface", async () => {
@@ -843,7 +843,7 @@ describe("NewSessionDialog destination", () => {
     const open = await renderDialog({
       draft: draft({ dropdown: { field: "destination" as const, index: 0 } }),
     });
-    expect(open).toContain("> 1 This checkout");
+    expect(open).toContain("▎ 1 This checkout");
     expect(open).toContain("2 New worktree");
   });
 
@@ -1032,7 +1032,7 @@ describe("NewSessionDialog worktree name", () => {
       .split("\n")
       .find((line) => line.includes("Name"))
       ?.trimEnd();
-    expect(row).toContain(">Name");
+    expect(row).toContain("▎Name");
   });
 
   /**
@@ -1139,7 +1139,7 @@ describe("NewSessionDialog move-changes mode", () => {
         dropdown: { field: "untracked" as const, index: 0 },
       }),
     });
-    expect(open).toContain("> 1 Move");
+    expect(open).toContain("▎ 1 Move");
     expect(open).toContain("2 Copy to both");
     expect(open).toContain("3 Leave here");
   });
@@ -1153,8 +1153,8 @@ describe("NewSessionDialog move-changes mode", () => {
     });
 
     expect(frame).toMatch(/Leave here\s+▾/);
-    expect(frame).toContain("> 3 Leave here");
-    expect(frame).not.toContain("> 1 Move");
+    expect(frame).toContain("▎ 3 Leave here");
+    expect(frame).not.toContain("▎ 1 Move");
   });
 
   it("hides the untracked field outside move-changes mode", async () => {
@@ -1175,7 +1175,7 @@ describe("NewSessionDialog move-changes mode", () => {
       .split("\n")
       .find((line) => line.includes("Untracked"))
       ?.trimEnd();
-    expect(row).toContain(">Untracked");
+    expect(row).toContain("▎Untracked");
   });
 
   /**

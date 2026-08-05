@@ -355,10 +355,19 @@ export function titleSegments(
   return fitSegments([{ text: title, fg: theme.text }], width);
 }
 
-/** Dirty rows stay flagged yellow unless the cursor is on them. */
+/**
+ * Yellow is reserved for the rows where dirt means DANGER: a dirty row under
+ * the removable divider, whose uncommitted work a removal would delete.
+ *
+ * A merely-dirty kept row stays in the ordinary colour. Dirty is the normal
+ * state of a main checkout, and a panel where half the names glow yellow has
+ * no colour left for the one row where the dirt actually threatens work.
+ */
 function rowColor(entry: PanelRow, isCursor: boolean): string {
   if (isCursor) return theme.text;
-  return entry.row.dirty.dirty ? theme.yellow : theme.subtext;
+  return entry.candidate && entry.row.dirty.dirty
+    ? theme.yellow
+    : theme.subtext;
 }
 
 /**
@@ -646,11 +655,16 @@ export function detailPhrases(
     // sentence about the work rather than as a separate instruction.
     const last = index === dirty.length - 1;
     const note = candidate?.dirty && last;
+    // Same rule as `rowColor`: the warning colours belong to the rows where
+    // a removal would delete the work being counted. On a kept row the same
+    // counts are information, and colouring them yellow made every dirty
+    // main checkout shout as loudly as the row that was actually at risk.
+    const warn = candidate ? theme.yellow : theme.subtext;
     dirtySegments.push({
       text: note
         ? `${text} ${opts.dirtyOk ? "(D armed, will be deleted)" : "(D removes it too)"}`
         : text,
-      fg: note && opts.dirtyOk ? theme.red : theme.yellow,
+      fg: note && opts.dirtyOk ? theme.red : warn,
     });
   });
   if (dirtyLeads) {
@@ -697,6 +711,11 @@ export const RAIL = "│";
  * centered in their cell while `▎` hugs the cell's left edge, so `▎` in the
  * rail column sticks out left of the line it is supposed to sit on. `┃`
  * shares `│`'s centerline and reads as a thicker, highlighted rail segment.
+ *
+ * The alternatives were both tried live and rejected: `▎` in this column
+ * sits visibly off the rail line, and `▎` in its OWN column left of the
+ * rail reads as a mark detached from the row's structure. The cursor
+ * belongs ON the rail, even at `┃`'s lighter weight.
  */
 export const CURSOR_BAR = "┃";
 
@@ -757,13 +776,30 @@ export function rowLabel(row: WorktreeRow): string {
  * A worktree derived from its branch carries the same word twice
  * (`fix-codex  fix-codex`), which is the single loudest thing on a screen full
  * of rows and says nothing. Shown only where the two genuinely differ.
+ *
+ * The main checkout has its own stutter: `main checkout  main` in every repo
+ * group. Its branch is news only when it is somewhere UNEXPECTED, so the
+ * default branch is hidden there too. A display heuristic, not truth — the
+ * rows do not carry the repo's real default branch, so a repo whose default
+ * is `develop` but whose main checkout sits on `main` wrongly hides it. That
+ * failure only hides a true name; it can never show a wrong one.
  */
 export function rowBranch(row: WorktreeRow): string {
   if (row.detached || !row.branch) return "detached";
-  return row.branch === rowLabel(row) ? "" : row.branch;
+  if (row.branch === rowLabel(row)) return "";
+  if (row.isMain && (row.branch === "main" || row.branch === "master")) {
+    return "";
+  }
+  return row.branch;
 }
 
-/** Longest label in a group, so one group's branches line up in a column. */
+/**
+ * Longest label among `rows`, so their branches line up in a column.
+ *
+ * The component measures the WHOLE panel, not one repo group: a per-group
+ * column put the branches at a different x in every group, and the eye
+ * tracked a zigzag down a multi-repo list instead of one straight line.
+ */
 export function labelColumnWidth(rows: PanelRow[], max = 28): number {
   let width = 0;
   for (const entry of rows) {
@@ -860,14 +896,19 @@ export function showsGroupHeaders(repos: PanelRepo[]): boolean {
 }
 
 /**
- * The full-width rule that opens a group's removable section.
+ * The rule that opens a group's removable section.
  *
  * Starts with a tee so the rail runs INTO it rather than being interrupted by
- * it: the section is a labelled break in one group, not a new group.
+ * it: the section is a labelled break in one group, not a new group. Capped
+ * at {@link DIVIDER_MAX} columns rather than filling the list width: on a wide
+ * terminal a full-width dash run is the heaviest ink on the screen, repeated
+ * once per repo, and the rule reads as a section break at a fraction of that.
  */
+export const DIVIDER_MAX = 48;
+
 export function dividerText(count: number, width: number): string {
   const label = `├─ removable · ${count} `;
-  const fill = Math.max(0, width - displayWidth(label));
+  const fill = Math.max(0, Math.min(width, DIVIDER_MAX) - displayWidth(label));
   return `${label}${"─".repeat(fill)}`;
 }
 
@@ -1280,6 +1321,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
 
   /** Every row in display order, which is what the cursor walks. */
   const flatRows = createMemo(() => merged().flatMap((repo) => repo.rows));
+
+  /** One label column for the whole panel, so the branches form a single
+   *  straight line across repo groups instead of re-aligning per group. */
+  const labelWidth = createMemo(() => labelColumnWidth(flatRows()));
 
   const candidates = (): PruneCandidate[] => scan()?.candidates ?? [];
 
@@ -1917,16 +1962,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             >
               <For each={merged()}>
                 {(repo) => {
-                  // Both are pure functions of a group that does not change
-                  // while it is mounted (a new `merged()` builds new groups),
-                  // but both are read once PER ROW: as plain accessors the
-                  // label column is measured over the whole group for every
-                  // row in it, and the split is recomputed at each of its four
-                  // call sites, on every keypress.
+                  // A pure function of a group that does not change while it
+                  // is mounted (a new `merged()` builds new groups), but read
+                  // once PER ROW: as a plain accessor the split is recomputed
+                  // at each of its four call sites, on every keypress. The
+                  // label column is NOT per-group — `labelWidth` above
+                  // measures the whole panel, so branches align across
+                  // groups.
                   const split = createMemo(() => splitRemovable(repo.rows));
-                  const labelWidth = createMemo(() =>
-                    labelColumnWidth(repo.rows),
-                  );
                   /* One row, in both sections: the section only decides
                      whether it carries a checkbox. */
                   /**

@@ -733,7 +733,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    * FOCUSED field, so a viewer who can't tell which label is highlighted
    * can press `2` believing they are on Agent, get "Split right", and spawn
    * with no confirmation step. The selections themselves already use
-   * colour-safe markers (`>` and the pills); this closes the last one.
+   * colour-safe markers (`▎` and the pills); this closes the last one.
    *
    * Marker (1) plus label cell (the rest of the gutter) is exactly the
    * width the content column is measured against, so nothing reflows.
@@ -745,7 +745,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     return (
       <box flexDirection="row" width={LABEL_WIDTH} height={1}>
         <box width={1}>
-          <text fg={theme.blue}>{focused() ? ">" : ""}</text>
+          <text fg={theme.blue}>{focused() ? "▎" : ""}</text>
         </box>
         <box width={LABEL_WIDTH - 1}>
           <text fg={focused() ? theme.blue : theme.overlay}>
