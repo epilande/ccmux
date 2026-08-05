@@ -6799,6 +6799,67 @@ describe("App hand off to", () => {
     }
   });
 
+  it("carries the aim past the source row", async () => {
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows([{}, {}, {}]);
+      // The MIDDLE row is the source, so the hop has a row on either side of
+      // it and can be told apart from a move that simply stopped.
+      await press("j");
+      await startPick();
+      // The aim opened on the row below the source; `k` carries past the
+      // source rather than landing on the one row it can never settle on.
+      await press("k");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(squish(setup.captureCharFrame())).toContain(
+        "Handofftoclaude·proj1",
+      );
+      expect(posted).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("ends the aim when the source leaves the board under it", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await startPick();
+      sseCallbacks!.onSessionRemoved("s1");
+      await settle();
+      await setup.renderOnce();
+      const frame = squish(setup.captureCharFrame());
+      // The banner went with the row, so a mode still armed under it would
+      // swallow keys with nothing on screen to say why.
+      expect(frame).not.toContain("esccancel");
+      expect(frame).toContain("sessionbeinghandedoffisgone");
+      // And the keyboard is the list's again: `x` means kill, not a key the
+      // pick mode eats.
+      await press("x");
+      expect(squish(setup.captureCharFrame())).toContain("KillSession?");
+    } finally {
+      restore();
+    }
+  });
+
+  it("ends the aim when the last row that could receive it leaves", async () => {
+    const { restore } = withDaemon();
+    try {
+      await renderRows();
+      await startPick();
+      sseCallbacks!.onSessionRemoved("s2");
+      await settle();
+      await setup.renderOnce();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).not.toContain("esccancel");
+      expect(frame).toContain("Noothersessionlefttohandoffto");
+    } finally {
+      restore();
+    }
+  });
+
   it("hands off to the row the pick lands on, by session id", async () => {
     const { posted, restore } = withDaemon();
     try {
@@ -7017,9 +7078,11 @@ describe("App hand off to", () => {
     try {
       await renderRows();
       await startPick();
-      // Back onto the source row, which is where the menu was opened.
-      await press("k");
-      setup.mockInput.pressEnter();
+      // A CLICK is the only way back onto the source row now that every move
+      // hops over it, and the pointer aims by coordinate rather than by what
+      // is a valid target, so the guard still has to hold.
+      // (the banner takes the line the top row sits on without it)
+      await setup.mockMouse.click(5, 2);
       await settle();
       await setup.renderOnce();
       expect(posted).toEqual([]);
