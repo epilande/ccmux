@@ -42,6 +42,7 @@ import {
   rowVisualHeight,
   scrollTargetFor,
   dividerText,
+  headerRule,
   sortWorktreeRows,
   showsGroupHeaders,
   splitRemovable,
@@ -49,6 +50,7 @@ import {
   worktreeHoldsPath,
   type PanelRow,
 } from "./WorktreesPanel";
+import { theme } from "../theme";
 import { displayWidth } from "../utils/format";
 import { DOT_SPINNER_FRAMES, getStatusIcon } from "../../lib/icons";
 import { SPINNER_INTERVAL_MS } from "../utils/useStatusIcon";
@@ -298,16 +300,16 @@ function orderOf(frame: string, ...needles: string[]): number[] {
  * every line carries one as the panel's border, and now every line below a
  * group's first also carries the rail.
  *
- * The gutter column before the rail holds the cursor bar on the cursor row's
- * lines, so both helpers accept either a space or the bar there.
+ * The cursor bar takes the rail's own column on the cursor row's lines, so
+ * both helpers accept either the rail or the bar there.
  */
 function isDetailLine(line: string): boolean {
-  return /[ ▎]│ {3,5}\S/.test(line);
+  return / [│┃] {3,5}\S/.test(line);
 }
 
 /** Whether a rendered line carries the group rail at all. */
 function hasRail(line: string): boolean {
-  return /[ ▎]│ /.test(line);
+  return / [│┃] /.test(line);
 }
 
 /** The rendered line holding `needle`. */
@@ -465,7 +467,7 @@ describe("WorktreesPanel scanning indicator", () => {
     keys.pressKey("j");
     const moved = await frame();
     expect(moved).toContain("scanning");
-    expect(lineWith(moved, "alpha")).toContain("▎");
+    expect(lineWith(moved, "alpha")).toContain("┃");
   });
 
   it("drops the suffix when the scan lands", async () => {
@@ -578,6 +580,66 @@ describe("WorktreesPanel scanning indicator", () => {
   });
 });
 
+/**
+ * The muted count on the title line: the list's size, said once, where the
+ * scoped view's repo name already lives. Counts describe the LOADED list, so
+ * phase 1 in flight says nothing rather than a number about to change.
+ */
+describe("WorktreesPanel title counts", () => {
+  it("counts one repo's worktrees on the title line", async () => {
+    const { settled } = await mountSettled(listOf([mainRow(), row()]));
+    expect(lineWith(settled, "Worktrees · repo")).toContain("2 worktrees");
+  });
+
+  it("pluralizes for real", async () => {
+    const { settled } = await mountSettled(listOf([mainRow()]));
+    const title = lineWith(settled, "Worktrees · repo");
+    expect(title).toContain("1 worktree");
+    expect(title).not.toContain("1 worktrees");
+  });
+
+  it("counts repos and worktrees across a widened panel", async () => {
+    const { settled } = await mountSettled(
+      listOf([
+        mainRow(),
+        row(),
+        mainRow({ path: "/other", repoRoot: "/other", repoName: "other" }),
+      ]),
+    );
+    expect(lineWith(settled, "Worktrees")).toContain("2 repos · 3 worktrees");
+  });
+
+  it("says the counts and the scan together, counts first", async () => {
+    const { frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: () => new Promise<Response>(() => {}),
+    });
+    const shown = await frame();
+    const title = lineWith(shown, "scanning");
+    const [countsAt, scanningAt] = orderOf(title, "2 worktrees", "scanning");
+    expect(countsAt).toBeLessThan(scanningAt!);
+  });
+
+  it("says nothing while the list itself is loading", async () => {
+    const { frame } = await mountPanel({
+      list: () => new Promise<Response>(() => {}),
+      scan: () => new Promise<Response>(() => {}),
+    });
+    // "Reading worktrees..." is on screen; a COUNT is not.
+    expect(await frame()).not.toMatch(/\d+ worktrees/);
+  });
+
+  it("drops the counts whole with the rest of the suffix when narrow", async () => {
+    const { settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      { compact: true, width: 24 },
+    );
+    expect(settled).toContain("Worktrees");
+    expect(settled).not.toMatch(/\d+ worktrees/);
+  });
+});
+
 describe("WorktreesPanel merge", () => {
   it("annotates rows from every part of the scan", async () => {
     const { settled } = await mountSettled(
@@ -668,12 +730,8 @@ describe("WorktreesPanel merge", () => {
       { width: 80, height: 16 },
     );
 
-    expect(settled).toContain("(D removes it too)");
-    const [reason, note] = orderOf(
-      settled,
-      "branch gone",
-      "(D removes it too)",
-    );
+    expect(settled).toContain("(D deletes them)");
+    const [reason, note] = orderOf(settled, "branch gone", "(D deletes them)");
     expect(reason).toBeLessThan(note!);
   });
 
@@ -713,11 +771,11 @@ describe("WorktreesPanel structure", () => {
       ]),
     );
     // The cursor starts on the main checkout: both its lines carry the bar...
-    expect(lineWith(settled, "main checkout")).toContain("▎");
-    expect(lineWith(settled, "1 modified")).toContain("▎");
+    expect(lineWith(settled, "main checkout")).toContain("┃");
+    expect(lineWith(settled, "1 modified")).toContain("┃");
     // ...and neither line of the neighbouring row carries one.
-    expect(lineWith(settled, "alpha")).not.toContain("▎");
-    expect(lineWith(settled, "4 untracked")).not.toContain("▎");
+    expect(lineWith(settled, "alpha")).not.toContain("┃");
+    expect(lineWith(settled, "4 untracked")).not.toContain("┃");
   });
 
   it("collapses a worktree with nothing to report to a single line", async () => {
@@ -961,7 +1019,10 @@ describe("WorktreesPanel structure", () => {
       ],
     });
     expect(settled).toContain("Worktrees");
-    expect(settled).not.toContain("Worktrees · ");
+    // The title carries the panel-wide counts, but never a repo NAME: with
+    // several repos on screen, naming one of them up there would lie.
+    expect(settled).not.toContain("Worktrees · repo");
+    expect(settled).not.toContain("Worktrees · other");
     expect(settled).toContain("other");
     expect(settled).toContain("repo");
   });
@@ -1061,7 +1122,7 @@ describe("WorktreesPanel ordering", () => {
     const [alphaBefore, bravoBefore] = orderOf(before, "alpha", "bravo");
     expect(alphaBefore).toBeLessThan(bravoBefore!);
     // The cursor starts on the first row, which is what has to be followed.
-    expect(lineWith(before, "alpha")).toContain("▎");
+    expect(lineWith(before, "alpha")).toContain("┃");
 
     releaseScan(json({ candidates: [candidate()], skipped: [] }));
     const after = await frame();
@@ -1070,8 +1131,8 @@ describe("WorktreesPanel ordering", () => {
     const [alphaAfter, bravoAfter] = orderOf(after, "alpha", "bravo");
     expect(bravoAfter).toBeLessThan(alphaAfter!);
     // ...and the cursor went with the row, not with the slot.
-    expect(lineWith(after, "alpha")).toContain("▎");
-    expect(lineWith(after, "bravo")).not.toContain("▎");
+    expect(lineWith(after, "alpha")).toContain("┃");
+    expect(lineWith(after, "bravo")).not.toContain("┃");
   });
 
   /**
@@ -1105,7 +1166,7 @@ describe("WorktreesPanel ordering", () => {
     await frame();
     for (let i = 0; i < 20; i++) keys.pressKey("j");
     const scrolled = await frame();
-    expect(lineWith(scrolled, "wt20")).toContain("▎");
+    expect(lineWith(scrolled, "wt20")).toContain("┃");
     // Deep enough that the top of the list is out of view.
     expect(scrolled).not.toContain("wt00");
 
@@ -1115,7 +1176,7 @@ describe("WorktreesPanel ordering", () => {
     const after = await frame();
     expect(after).not.toContain("wt20");
     // The cursor is on the first row, and the first row is on screen.
-    expect(lineWith(after, "wt00")).toContain("▎");
+    expect(lineWith(after, "wt00")).toContain("┃");
   });
 
   // A reopen (after a review round-trip or a cancelled dialog) seeds the
@@ -1129,8 +1190,8 @@ describe("WorktreesPanel ordering", () => {
       emptyScan,
       { initialCursor: "/repo/wt/bravo" },
     );
-    expect(lineWith(settled, "bravo")).toContain("▎");
-    expect(lineWith(settled, "main checkout")).not.toContain("▎");
+    expect(lineWith(settled, "bravo")).toContain("┃");
+    expect(lineWith(settled, "main checkout")).not.toContain("┃");
   });
 
   it("leads with the repo it was opened over, then the alphabet", () => {
@@ -1185,14 +1246,14 @@ describe("WorktreesPanel keys", () => {
     // Repos come out alphabetically, so `other` leads and its only row is
     // where the cursor starts.
     const before = await frame();
-    expect(lineWith(before, "delta")).toContain("▎");
+    expect(lineWith(before, "delta")).toContain("┃");
 
     keys.pressKey("j");
     const shown = await frame();
     // One `j` from the last row of a group lands on the first row of the
     // next, crossing the group header rather than selecting it.
-    expect(lineWith(shown, "main checkout")).toContain("▎");
-    expect(lineWith(shown, "delta")).not.toContain("▎");
+    expect(lineWith(shown, "main checkout")).toContain("┃");
+    expect(lineWith(shown, "delta")).not.toContain("┃");
   });
 
   it("selects only classified candidates", async () => {
@@ -1653,11 +1714,12 @@ describe("WorktreesPanel compact", () => {
     // other. What compact changes is the ORDER, so the sentence about work
     // that would be deleted outlives the truncation and the reason (which the
     // rule above the row already gives categorically) is what gets cut.
-    expect(settled).toContain("(D removes it too)");
-    const detail = lineWith(settled, "(D removes it too)");
+    // Singular: one untracked file reads as `it`, not `them`.
+    expect(settled).toContain("(D deletes it)");
+    const detail = lineWith(settled, "(D deletes it)");
     expect(isDetailLine(detail)).toBe(true);
     expect(detail.indexOf("untracked")).toBeLessThan(
-      detail.indexOf("(D removes it too)"),
+      detail.indexOf("(D deletes it)"),
     );
   });
 
@@ -1852,9 +1914,11 @@ function detailText(entry: PanelRow, dirtyOk = false): string {
     .join("");
 }
 
-/** Line 1 as one string, cursor gutter excluded (the component draws that). */
-function primaryText(entry: PanelRow, labelWidth = 0): string {
-  return primarySegments(entry, { isCursor: false, labelWidth })
+/** Line 1 as one string, cursor gutter excluded (the component draws that).
+ *  `markerBase` defaults to the no-checkbox base a candidate-free panel
+ *  uses; alignment tests across the divider pass the checkbox base. */
+function primaryText(entry: PanelRow, labelWidth = 0, markerBase = 2): string {
+  return primarySegments(entry, { isCursor: false, labelWidth, markerBase })
     .map((s) => s.text)
     .join("");
 }
@@ -1872,8 +1936,17 @@ describe("row line 1", () => {
   it("names the main checkout for what it is, not for its directory", () => {
     expect(rowLabel(mainRow())).toBe("main checkout");
     expect(rowLabel(row())).toBe("alpha");
-    // ...so its branch is never suppressed as a repeat of the directory name.
-    expect(rowBranch(mainRow())).toBe("main");
+  });
+
+  // `main checkout  main` in every repo group said nothing. The branch is
+  // news only when the main checkout sits somewhere unexpected.
+  it("hides the main checkout's default branch, keeps an unexpected one", () => {
+    expect(rowBranch(mainRow())).toBe("");
+    expect(rowBranch(mainRow({ branch: "master" }))).toBe("");
+    expect(rowBranch(mainRow({ branch: "feat/overlay" }))).toBe("feat/overlay");
+    // The heuristic is scoped to the main checkout: a WORKTREE sitting on
+    // main is unusual enough to say so.
+    expect(rowBranch(row({ name: "wt-a", branch: "main" }))).toBe("main");
   });
 
   it("says detached rather than leaving the branch blank", () => {
@@ -1885,8 +1958,10 @@ describe("row line 1", () => {
     expect(
       primaryText(panelRow({ row: row({ sessions: [session()] }) })),
     ).toContain("●");
-    // A quiet worktree spends the slot on alignment rather than on a glyph.
-    expect(primaryText(panelRow())).toStartWith("  ");
+    // A quiet worktree still marks the slot: rows are told apart from detail
+    // lines by the marker column, so an empty slot would leave line 1 the
+    // same shape as the line under it.
+    expect(primaryText(panelRow())).toStartWith("· ");
   });
 
   // Checkboxes appear ONLY under the removable divider, which is what makes
@@ -1897,6 +1972,7 @@ describe("row line 1", () => {
       primarySegments(panelRow({ candidate: candidate() }), {
         isCursor: false,
         labelWidth: 0,
+        markerBase: 4,
         selected: true,
       })
         .map((s) => s.text)
@@ -1918,10 +1994,45 @@ describe("row line 1", () => {
     expect(columnOf(rows[0]!)).toBe(columnOf(rows[1]!));
   });
 
+  // The branch column pads against the PANEL's widest marker, not the row's
+  // own: a kept row's 2-column dot and a removable row's 4-column checkbox
+  // must not put their branches two columns apart.
+  it("keeps the branch column straight across the removable divider", () => {
+    const kept = panelRow({ row: row({ name: "same-len", branch: "feat/a" }) });
+    const removable = panelRow({
+      row: row({ path: "/b", name: "same-len", branch: "feat/b" }),
+      candidate: candidate({ path: "/b" }),
+    });
+    const width = labelColumnWidth([kept, removable]);
+    const columnOf = (entry: PanelRow) =>
+      primaryText(entry, width, 4).indexOf("feat/");
+    expect(columnOf(kept)).toBe(columnOf(removable));
+  });
+
   // One outlier name must not push every branch off the row.
   it("caps the column so a long name cannot eat the line", () => {
     const rows = [panelRow({ row: row({ name: "x".repeat(80) }) })];
     expect(labelColumnWidth(rows)).toBeLessThanOrEqual(28);
+  });
+
+  // Yellow means "removal would delete this work". A dirty main checkout is
+  // Tuesday, and a panel of glowing names left no colour for the real risk.
+  // The ordinary colour is the BRIGHT text tone: names are the loud layer of
+  // a row, branches and detail phrases the dim one.
+  it("keeps a dirty kept row's name in the ordinary bright colour, flags a dirty removable one", () => {
+    const dirty = { dirty: true, modified: 2, untracked: 0 };
+    const labelFg = (entry: PanelRow, isCursor = false) =>
+      primarySegments(entry, { isCursor, labelWidth: 0, markerBase: 4 }).find(
+        (s) => s.text === "alpha",
+      )?.fg;
+    expect(labelFg(panelRow({ row: row({ dirty }) }))).toBe(theme.text);
+    const removable = panelRow({
+      row: row({ dirty }),
+      candidate: candidate({ dirty: true }),
+    });
+    expect(labelFg(removable)).toBe(theme.yellow);
+    // The cursor row reads in the text colour wherever it is.
+    expect(labelFg(removable, true)).toBe(theme.text);
   });
 });
 
@@ -1947,6 +2058,29 @@ describe("row detail line", () => {
     ).toEqual(["2 modified"]);
   });
 
+  // Same rule as the name colour: counts are information on a kept row and a
+  // warning only where a removal would delete the work being counted.
+  it("colours dirty counts as information on kept rows, warning on removable", () => {
+    const dirty = { dirty: true, modified: 2, untracked: 4 };
+    const kept = detailSegments(panelRow({ row: row({ dirty }) }), {
+      compact: false,
+      dirtyOk: false,
+    });
+    expect(kept.find((s) => s.text === "2 modified")?.fg).toBe(theme.subtext);
+
+    const removable = panelRow({
+      row: row({ dirty }),
+      candidate: candidate({ dirty: true, modified: 2, untracked: 4 }),
+    });
+    const segs = detailSegments(removable, { compact: false, dirtyOk: false });
+    expect(segs.find((s) => s.text === "2 modified")?.fg).toBe(theme.yellow);
+    expect(segs.find((s) => s.text.includes("(D deletes them)"))?.fg).toBe(
+      theme.yellow,
+    );
+    const armed = detailSegments(removable, { compact: false, dirtyOk: true });
+    expect(armed.find((s) => s.text.includes("D armed"))?.fg).toBe(theme.red);
+  });
+
   // `readDirtyState` reports a worktree whose `git status` FAILED as dirty
   // with both counts at zero, which is the safe direction for a destructive
   // action and used to leave the row with nothing at all to say.
@@ -1963,7 +2097,8 @@ describe("row detail line", () => {
       row: row({ dirty: { dirty: true, modified: 0, untracked: 0 } }),
       candidate: candidate({ dirty: true }),
     });
-    expect(detailText(entry)).toContain("uncommitted work (D removes it too)");
+    // Both counts at zero: the uncounted fallback reads as singular work.
+    expect(detailText(entry)).toContain("uncommitted work (D deletes it)");
     expect(detailText(entry, true)).toContain(
       "uncommitted work (D armed, will be deleted)",
     );
@@ -1977,7 +2112,9 @@ describe("row detail line", () => {
       row: row({ dirty: { dirty: false, modified: 0, untracked: 0 } }),
       candidate: candidate({ dirty: true, modified: 2 }),
     });
-    expect(detailText(entry)).toContain("uncommitted work (D removes it too)");
+    // The note pluralizes from the LIST's counts, and here only the scan has
+    // any: it rides the singular fallback phrase, so `it` is the right word.
+    expect(detailText(entry)).toContain("uncommitted work (D deletes it)");
     // Stated once: the fallback stands IN for the phrases, never beside them.
     expect(detailText(entry).match(/uncommitted work/g)).toHaveLength(1);
   });
@@ -1988,7 +2125,7 @@ describe("row detail line", () => {
       candidate: candidate({ dirty: true, modified: 2 }),
     });
     expect(detailText(entry)).toBe(
-      "PR #68 merged · 2 modified (D removes it too)",
+      "PR #68 merged · 2 modified (D deletes them)",
     );
   });
 
@@ -2226,7 +2363,7 @@ describe("row detail line", () => {
       row: row({ dirty: { dirty: true, modified: 0, untracked: 1 } }),
       candidate: candidate({ dirty: true, untracked: 1 }),
     });
-    expect(detailText(entry)).toContain("1 untracked (D removes it too)");
+    expect(detailText(entry)).toContain("1 untracked (D deletes it)");
     expect(detailText(entry, true)).toContain("D armed");
   });
 
@@ -2268,13 +2405,41 @@ describe("removable section", () => {
     expect(split.removable.map((e) => e.row.path)).toEqual(["/b"]);
   });
 
-  it("rules off the section with its count", () => {
-    const text = dividerText(6, 40);
-    // A tee, so the rail runs into the rule instead of stopping at it.
-    expect(text).toStartWith("├─ removable · 6 ");
-    expect(displayWidth(text)).toBe(40);
-    // A width too small to hold the label must not produce a negative repeat.
-    expect(displayWidth(dividerText(6, 4))).toBeGreaterThan(0);
+  it("labels the section with its count and no trailing rule", () => {
+    // A tee, so the rail runs into the label instead of stopping at it. No
+    // dash run after the words: the repo header owns the horizontal-rule
+    // language, and even a capped run here read as a competing boundary.
+    expect(dividerText(6, 40)).toBe("├─ removable · 6");
+    expect(dividerText(6, 200)).toBe("├─ removable · 6");
+  });
+
+  it("truncates the label instead of letting it wrap away", () => {
+    // OpenTUI wraps rather than clips, and a wrapped line in a height-1 box
+    // vanishes; a width too small for the label must shorten it, not lose it.
+    const narrow = dividerText(6, 8);
+    expect(displayWidth(narrow)).toBeLessThanOrEqual(8);
+    expect(displayWidth(narrow)).toBeGreaterThan(0);
+    expect(displayWidth(dividerText(6, 1))).toBeGreaterThan(0);
+  });
+
+  // The header's trailing rule is what makes a group boundary scannable on a
+  // tall multi-repo list without spending a blank line on it.
+  it("rules a repo header out to the full list width", () => {
+    // A space, then dashes to the width: name + rule together fill it.
+    expect(headerRule("ccmux", 40)).toBe(` ${"─".repeat(34)}`);
+    expect(displayWidth("ccmux" + headerRule("ccmux", 40))).toBe(40);
+    // Full width, unlike the removable divider's capped run: the header is
+    // the panel's primary boundary, the divider a break inside one group.
+    expect(displayWidth("ccmux" + headerRule("ccmux", 200))).toBe(200);
+  });
+
+  it("drops the header rule whole when the name leaves no room", () => {
+    // No room for a space plus at least one dash: no rule, never a negative
+    // repeat. The name itself is fitted by the caller.
+    expect(headerRule("ccmux", 5)).toBe("");
+    expect(headerRule("ccmux", 6)).toBe("");
+    expect(headerRule("ccmux", 7)).toBe(" ─");
+    expect(headerRule("a-name-longer-than-the-width", 10)).toBe("");
   });
 
   // The divider is not a row, but it IS a line: a layout without it puts

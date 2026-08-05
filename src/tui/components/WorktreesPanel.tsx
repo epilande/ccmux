@@ -355,10 +355,23 @@ export function titleSegments(
   return fitSegments([{ text: title, fg: theme.text }], width);
 }
 
-/** Dirty rows stay flagged yellow unless the cursor is on them. */
+/**
+ * The name is the BRIGHT layer of a row: line 1's label renders in the text
+ * colour while the branch beside it and the whole detail line stay dim, so a
+ * full screen reads as "bright = a worktree, dim = facts about it". With
+ * every row in the same subdued grey, names and detail phrases merged into
+ * one undifferentiated column.
+ *
+ * Yellow is reserved for the rows where dirt means DANGER: a dirty row under
+ * the removable divider, whose uncommitted work a removal would delete.
+ *
+ * A merely-dirty kept row stays in the ordinary colour. Dirty is the normal
+ * state of a main checkout, and a panel where half the names glow yellow has
+ * no colour left for the one row where the dirt actually threatens work.
+ */
 function rowColor(entry: PanelRow, isCursor: boolean): string {
   if (isCursor) return theme.text;
-  return entry.row.dirty.dirty ? theme.yellow : theme.subtext;
+  return entry.candidate && entry.row.dirty.dirty ? theme.yellow : theme.text;
 }
 
 /**
@@ -641,16 +654,26 @@ export function detailPhrases(
   const dirty =
     rowDirty.length > 0 ? rowDirty : candidate?.dirty ? [DIRTY_UNCOUNTED] : [];
   const dirtySegments: Phrase[] = [];
+  // `it` for a single file, `them` for several; the uncounted fallback has
+  // both counts at zero and reads as singular work ("uncommitted work
+  // (D deletes it)").
+  const dirtyFiles = row.dirty.modified + row.dirty.untracked;
+  const deleteNote = dirtyFiles > 1 ? "(D deletes them)" : "(D deletes it)";
   dirty.forEach((text, index) => {
     // The opt-in note rides the LAST dirty phrase, where it reads as a
     // sentence about the work rather than as a separate instruction.
     const last = index === dirty.length - 1;
     const note = candidate?.dirty && last;
+    // Same rule as `rowColor`: the warning colours belong to the rows where
+    // a removal would delete the work being counted. On a kept row the same
+    // counts are information, and colouring them yellow made every dirty
+    // main checkout shout as loudly as the row that was actually at risk.
+    const warn = candidate ? theme.yellow : theme.subtext;
     dirtySegments.push({
       text: note
-        ? `${text} ${opts.dirtyOk ? "(D armed, will be deleted)" : "(D removes it too)"}`
+        ? `${text} ${opts.dirtyOk ? "(D armed, will be deleted)" : deleteNote}`
         : text,
-      fg: note && opts.dirtyOk ? theme.red : theme.yellow,
+      fg: note && opts.dirtyOk ? theme.red : warn,
     });
   });
   if (dirtyLeads) {
@@ -690,8 +713,24 @@ const PHRASE_SEPARATOR = " · ";
  */
 export const RAIL = "│";
 
-/** Columns before line 1's content: the cursor bar, the rail, and a space.
- *  The marker slot is inside `primarySegments`, not here. */
+/**
+ * The cursor bar, drawn IN the rail's column on the cursor row's lines.
+ *
+ * Heavy vertical, not the session list's `▎`: box-drawing verticals are
+ * centered in their cell while `▎` hugs the cell's left edge, so `▎` in the
+ * rail column sticks out left of the line it is supposed to sit on. `┃`
+ * shares `│`'s centerline and reads as a thicker, highlighted rail segment.
+ *
+ * The alternatives were both tried live and rejected: `▎` in this column
+ * sits visibly off the rail line, and `▎` in its OWN column left of the
+ * rail reads as a mark detached from the row's structure. The cursor
+ * belongs ON the rail, even at `┃`'s lighter weight.
+ */
+export const CURSOR_BAR = "┃";
+
+/** Columns before line 1's content: a space, the rail (which the cursor bar
+ *  overlays on the cursor row), and a space. The marker slot is inside
+ *  `primarySegments`, not here. */
 export const ROW_GUTTER = 3;
 
 /**
@@ -746,13 +785,30 @@ export function rowLabel(row: WorktreeRow): string {
  * A worktree derived from its branch carries the same word twice
  * (`fix-codex  fix-codex`), which is the single loudest thing on a screen full
  * of rows and says nothing. Shown only where the two genuinely differ.
+ *
+ * The main checkout has its own stutter: `main checkout  main` in every repo
+ * group. Its branch is news only when it is somewhere UNEXPECTED, so the
+ * default branch is hidden there too. A display heuristic, not truth — the
+ * rows do not carry the repo's real default branch, so a repo whose default
+ * is `develop` but whose main checkout sits on `main` wrongly hides it. That
+ * failure only hides a true name; it can never show a wrong one.
  */
 export function rowBranch(row: WorktreeRow): string {
   if (row.detached || !row.branch) return "detached";
-  return row.branch === rowLabel(row) ? "" : row.branch;
+  if (row.branch === rowLabel(row)) return "";
+  if (row.isMain && (row.branch === "main" || row.branch === "master")) {
+    return "";
+  }
+  return row.branch;
 }
 
-/** Longest label in a group, so one group's branches line up in a column. */
+/**
+ * Longest label among `rows`, so their branches line up in a column.
+ *
+ * The component measures the WHOLE panel, not one repo group: a per-group
+ * column put the branches at a different x in every group, and the eye
+ * tracked a zigzag down a multi-repo list instead of one straight line.
+ */
 export function labelColumnWidth(rows: PanelRow[], max = 28): number {
   let width = 0;
   for (const entry of rows) {
@@ -774,6 +830,9 @@ export function primarySegments(
   opts: {
     isCursor: boolean;
     labelWidth: number;
+    /** The PANEL's widest marker slot ({@link markerWidth} of whether any
+     *  checkbox exists anywhere), which the branch column pads against. */
+    markerBase: number;
     selected?: boolean;
     /** The live status glyph for an occupied row, already resolved by the
      *  caller (it animates, so it cannot come from a pure function). */
@@ -804,14 +863,30 @@ export function primarySegments(
       fg: statusColor(leadStatus(row.sessions)),
     });
   } else {
-    segments.push({ text: "  ", fg: theme.overlay });
+    // Never an empty slot: every row's line 1 carries a marker, so the left
+    // edge reads as a legend down the screen (`⌂` main checkout, a status
+    // glyph where someone is working, `·` plain worktree, `[ ]` removable),
+    // and a detail line, which never has one, is structurally
+    // distinguishable from a one-line row instead of only tonally.
+    segments.push({ text: "· ", fg: theme.overlay });
   }
 
   const label = rowLabel(row);
   const branch = rowBranch(entry.row);
   segments.push({ text: label, fg: rowColor(entry, opts.isCursor) });
   if (branch) {
-    const pad = Math.max(1, opts.labelWidth - displayWidth(label) + 2);
+    // Padded against the PANEL's widest marker, not the row's own: kept rows
+    // wear a 2-column marker and removable rows a 4-column checkbox, and a
+    // pad computed from the label alone made the branch column jog two
+    // columns to the right at the removable divider.
+    const pad = Math.max(
+      1,
+      opts.markerBase +
+        opts.labelWidth +
+        2 -
+        markerWidth(entry.candidate !== null) -
+        displayWidth(label),
+    );
     segments.push({ text: " ".repeat(pad), fg: theme.overlay });
     segments.push({ text: branch, fg: theme.overlay });
   }
@@ -849,15 +924,34 @@ export function showsGroupHeaders(repos: PanelRepo[]): boolean {
 }
 
 /**
- * The full-width rule that opens a group's removable section.
+ * The label that opens a group's removable section.
  *
  * Starts with a tee so the rail runs INTO it rather than being interrupted by
- * it: the section is a labelled break in one group, not a new group.
+ * it: the section is a labelled break in one group, not a new group. No dash
+ * run after the label: the repo header owns the horizontal-rule language, and
+ * even a capped run here read as a competing boundary. The tee and the words
+ * are the whole divider. Truncated rather than trusted to fit, because OpenTUI
+ * wraps instead of clipping and a wrapped line in a `height={1}` box vanishes.
  */
 export function dividerText(count: number, width: number): string {
-  const label = `├─ removable · ${count} `;
-  const fill = Math.max(0, width - displayWidth(label));
-  return `${label}${"─".repeat(fill)}`;
+  return truncateText(`├─ removable · ${count}`, Math.max(1, width));
+}
+
+/**
+ * The dim rule that trails a repo header, giving a group boundary real
+ * weight without spending a blank line on it (which the layout deliberately
+ * does not have). It runs the FULL list width, and it is the ONLY horizontal
+ * rule in the panel: the header marks the panel's PRIMARY boundary, a repo,
+ * while the removable divider is a labelled break inside one group and stays
+ * visually subordinate by carrying no rule at all, just its tee and label.
+ *
+ * Only the fill: the name itself stays a separate render concern because it
+ * is bold mauve while the rule is muted. Empty when the name leaves no room
+ * for at least the leading space and one dash.
+ */
+export function headerRule(name: string, width: number): string {
+  const fill = width - displayWidth(name) - 1;
+  return fill > 0 ? ` ${"─".repeat(fill)}` : "";
 }
 
 /** `1 worktree` / `3 worktrees`, so no sentence has to say `worktree(s)`. */
@@ -1270,6 +1364,17 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   /** Every row in display order, which is what the cursor walks. */
   const flatRows = createMemo(() => merged().flatMap((repo) => repo.rows));
 
+  /** One label column for the whole panel, so the branches form a single
+   *  straight line across repo groups instead of re-aligning per group. */
+  const labelWidth = createMemo(() => labelColumnWidth(flatRows()));
+
+  /** The panel's widest marker slot: 4 the moment any checkbox exists, else
+   *  2. The branch column pads against this rather than each row's own
+   *  marker, so it cannot jog by two at the removable divider. */
+  const markerBase = createMemo(() =>
+    markerWidth(flatRows().some((entry) => entry.candidate !== null)),
+  );
+
   const candidates = (): PruneCandidate[] => scan()?.candidates ?? [];
 
   // Tracked by PATH, not index: phase 2 re-sorts the list under the cursor,
@@ -1416,13 +1521,33 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   );
 
   /**
+   * The list's size, said once on the title line: `N worktrees` when one
+   * repo owns the panel, `N repos · M worktrees` across all of them (M
+   * counts every row, main checkouts included). Counts describe the LOADED
+   * list, so nothing is said while phase 1 is in flight — `repos()` still
+   * holds the PREVIOUS scope's list during a Tab rescope, and a count that
+   * flickers from the old scope's number to the new one reads as a glitch.
+   */
+  const titleCounts = (): string | null => {
+    if (phase() === "loading") return null;
+    const groups = merged();
+    if (groups.length === 0) return null;
+    const rows = plural(flatRows().length, "worktree", "worktrees");
+    if (groups.length === 1) return rows;
+    return `${plural(groups.length, "repo", "repos")} · ${rows}`;
+  };
+
+  /**
    * The muted tail on the title line, or null when there is nothing to say.
-   * A removal notice and the scanning announcement can coexist: a fully
-   * successful prune reloads in place, so its notice rides the very rescan
-   * it triggered.
+   * Counts lead (they extend the title's own subject), then the removal
+   * notice, then the scanning announcement. A removal notice and the
+   * scanning announcement can coexist: a fully successful prune reloads in
+   * place, so its notice rides the very rescan it triggered.
    */
   const titleSuffix = (): string | null => {
     const parts: string[] = [];
+    const counts = titleCounts();
+    if (counts) parts.push(` · ${counts}`);
     const notice = titleNotice();
     if (notice) parts.push(` · ${notice}`);
     if (scanning()) parts.push(` · ${scanIcon()} scanning`);
@@ -1906,16 +2031,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             >
               <For each={merged()}>
                 {(repo) => {
-                  // Both are pure functions of a group that does not change
-                  // while it is mounted (a new `merged()` builds new groups),
-                  // but both are read once PER ROW: as plain accessors the
-                  // label column is measured over the whole group for every
-                  // row in it, and the split is recomputed at each of its four
-                  // call sites, on every keypress.
+                  // A pure function of a group that does not change while it
+                  // is mounted (a new `merged()` builds new groups), but read
+                  // once PER ROW: as a plain accessor the split is recomputed
+                  // at each of its four call sites, on every keypress. The
+                  // label column is NOT per-group — `labelWidth` above
+                  // measures the whole panel, so branches align across
+                  // groups.
                   const split = createMemo(() => splitRemovable(repo.rows));
-                  const labelWidth = createMemo(() =>
-                    labelColumnWidth(repo.rows),
-                  );
                   /* One row, in both sections: the section only decides
                      whether it carries a checkbox. */
                   /**
@@ -1961,62 +2084,36 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                       <box flexDirection="column">
                         {/* The cursor row carries the session list's
                             selected-row surface highlight, spanning both lines
-                            of a two-line row; the ▎ bar alone was easy to
-                            miss. */}
-                        <box
-                          height={1}
-                          width="100%"
-                          flexDirection="row"
-                          backgroundColor={
-                            isCursor() ? theme.surface : undefined
-                          }
-                        >
+                            of a two-line row; the cursor bar alone was easy to
+                            miss. The bar takes the RAIL's own column, but the
+                            highlight starts on the column AFTER it: `┃` is
+                            centered in its cell, so a highlight that includes
+                            the bar's own cell shows half a cell of surface
+                            poking out LEFT of the stroke. */}
+                        <box height={1} width="100%" flexDirection="row">
+                          <text> </text>
                           <text fg={isCursor() ? theme.mauve : theme.overlay}>
-                            {isCursor() ? "▎" : " "}
+                            {isCursor() ? CURSOR_BAR : RAIL}
                           </text>
-                          <text fg={theme.overlay}>{`${RAIL} `}</text>
-                          <For
-                            each={fitSegments(
-                              primarySegments(entry, {
-                                isCursor: isCursor(),
-                                labelWidth: labelWidth(),
-                                selected: isSelected(),
-                                statusIcon: statusIcon(),
-                              }),
-                              rowWidth(),
-                            )}
-                          >
-                            {(segment) => (
-                              <text fg={segment.fg}>{segment.text}</text>
-                            )}
-                          </For>
-                        </box>
-                        <Show when={detail().length > 0}>
                           <box
+                            flexGrow={1}
                             height={1}
-                            width="100%"
                             flexDirection="row"
                             backgroundColor={
                               isCursor() ? theme.surface : undefined
                             }
                           >
-                            {/* A detail line always hangs off its own line 1,
-                                so it always carries the rail, and it indents
-                                to whatever marker that line 1 used. The bar
-                                column matches line 1's, so a two-line cursor
-                                row wears the bar on both lines. */}
-                            <text fg={isCursor() ? theme.mauve : theme.overlay}>
-                              {isCursor() ? "▎" : " "}
-                            </text>
-                            <text fg={theme.overlay}>
-                              {`${RAIL} ${" ".repeat(
-                                markerWidth(entry.candidate !== null),
-                              )}`}
-                            </text>
+                            <text> </text>
                             <For
                               each={fitSegments(
-                                detail(),
-                                detailWidth(entry.candidate !== null),
+                                primarySegments(entry, {
+                                  isCursor: isCursor(),
+                                  labelWidth: labelWidth(),
+                                  markerBase: markerBase(),
+                                  selected: isSelected(),
+                                  statusIcon: statusIcon(),
+                                }),
+                                rowWidth(),
                               )}
                             >
                               {(segment) => (
@@ -2024,27 +2121,72 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                               )}
                             </For>
                           </box>
+                        </box>
+                        <Show when={detail().length > 0}>
+                          <box height={1} width="100%" flexDirection="row">
+                            <text> </text>
+                            {/* A detail line always hangs off its own line
+                                1, so it always carries the rail, and it
+                                indents to whatever marker that line 1 used.
+                                The rail column matches line 1's, so a
+                                two-line cursor row wears the bar on both
+                                lines — and, as on line 1, the highlight
+                                starts on the column after it. */}
+                            <text fg={isCursor() ? theme.mauve : theme.overlay}>
+                              {isCursor() ? CURSOR_BAR : RAIL}
+                            </text>
+                            <box
+                              flexGrow={1}
+                              height={1}
+                              flexDirection="row"
+                              backgroundColor={
+                                isCursor() ? theme.surface : undefined
+                              }
+                            >
+                              <text fg={theme.overlay}>
+                                {` ${" ".repeat(
+                                  markerWidth(entry.candidate !== null),
+                                )}`}
+                              </text>
+                              <For
+                                each={fitSegments(
+                                  detail(),
+                                  detailWidth(entry.candidate !== null),
+                                )}
+                              >
+                                {(segment) => (
+                                  <text fg={segment.fg}>{segment.text}</text>
+                                )}
+                              </For>
+                            </box>
+                          </box>
                         </Show>
                       </box>
                     );
                   };
+                  // `listWidth`, not `contentWidth`: the header renders
+                  // INSIDE the scrollbox, which keeps a column for its bar,
+                  // so a name fitted to the content width overruns it by
+                  // one. The scrollbox takes that column back silently,
+                  // leaving a name that reads as complete with its last
+                  // character gone and no ellipsis to say so (the divider,
+                  // whose fill is one unbreakable word, wrapped away
+                  // entirely instead).
+                  const headerName = () =>
+                    truncateText(repo.repoName, listWidth());
                   return (
                     <box flexDirection="column">
                       <Show when={showsGroupHeaders(merged())}>
                         <box height={1} flexDirection="row">
                           <text fg={theme.mauve}>
-                            {/* `listWidth`, not `contentWidth`: this line
-                                renders INSIDE the scrollbox, which keeps a
-                                column for its bar, so a name fitted to the
-                                content width overruns it by one. The
-                                scrollbox takes that column back silently,
-                                leaving a name that reads as complete with its
-                                last character gone and no ellipsis to say so
-                                (the divider, whose fill is one unbreakable
-                                word, wrapped away entirely instead). */}
-                            <strong>
-                              {truncateText(repo.repoName, listWidth())}
-                            </strong>
+                            <strong>{headerName()}</strong>
+                          </text>
+                          {/* The rule is what makes the boundary scannable
+                              on a tall multi-repo list without spending a
+                              blank line on it; muted so the bold name stays
+                              the loudest thing on the line. */}
+                          <text fg={theme.overlay}>
+                            {headerRule(headerName(), listWidth())}
                           </text>
                         </box>
                       </Show>
@@ -2052,7 +2194,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                         {(entry) => renderRow(entry)}
                       </For>
                       {/* Everything below this line can be deleted, and only
-                          things below it carry checkboxes. The rule starts
+                          things below it carry checkboxes. The label starts
                           with a tee, so the rail runs into it. */}
                       <Show when={split().removable.length > 0}>
                         <box height={1} flexDirection="row">

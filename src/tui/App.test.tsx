@@ -3019,7 +3019,7 @@ describe("App new session dialog", () => {
       setup.mockInput.pressKey("l");
       await setup.renderOnce();
       // The list is up, numbered, with the held value marked.
-      expect(setup.captureCharFrame()).toContain("> 1 New window");
+      expect(setup.captureCharFrame()).toContain("▎ 1 New window");
       setup.mockInput.pressKey("j");
       await setup.renderOnce();
       setup.mockInput.pressEnter();
@@ -7500,8 +7500,8 @@ describe("App worktrees panel (W)", () => {
       expect(squish(shown)).toContain(squish("review note captured"));
       expect(shown).toContain("Worktrees");
       const lines = shown.split("\n");
-      expect(lines.find((l) => l.includes("bravo"))).toContain("▎");
-      expect(lines.find((l) => l.includes("feature"))).not.toContain("▎");
+      expect(lines.find((l) => l.includes("bravo"))).toContain("┃");
+      expect(lines.find((l) => l.includes("feature"))).not.toContain("┃");
     } finally {
       restore();
     }
@@ -7572,8 +7572,8 @@ describe("App worktrees panel (W)", () => {
       expect(shown).toContain("Worktrees ·");
       expect(squish(shown)).not.toContain(squish("New session in worktree"));
       const lines = shown.split("\n");
-      expect(lines.find((l) => l.includes("feature"))).toContain("▎");
-      expect(lines.find((l) => l.includes("bravo"))).not.toContain("▎");
+      expect(lines.find((l) => l.includes("feature"))).toContain("┃");
+      expect(lines.find((l) => l.includes("bravo"))).not.toContain("┃");
     } finally {
       restore();
     }
