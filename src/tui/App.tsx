@@ -1279,11 +1279,16 @@ export function App(props: AppProps) {
       // pastes a screen capture into a peer agent should have been told so
       // BEFORE they paste: a size guard dropped content, or there was no
       // transcript to read and this is what the pane happened to be showing.
-      const caveat = data.truncated
-        ? " (truncated)"
-        : data.source === "pane"
+      // Source wins over the generic flag: a pane capture is ALWAYS
+      // truncated (the daemon sets both), and "(pane capture)" is the more
+      // informative caveat since it implies incompleteness and names the
+      // reason, so it must not be shadowed by the flag it always sets too.
+      const caveat =
+        data.source === "pane"
           ? " (pane capture)"
-          : "";
+          : data.truncated
+            ? " (truncated)"
+            : "";
       // Short enough to stay on ONE line inside the toast's 40-column cap,
       // caveat and all: the wrap otherwise splits "(pane capture)" across two
       // lines, which is where a caveat stops reading as one.

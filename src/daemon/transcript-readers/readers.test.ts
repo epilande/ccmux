@@ -84,6 +84,78 @@ describe("claude reader", () => {
     }
   });
 
+  it("skips Claude's own markup rather than reading it as the user's words", () => {
+    for (const content of [
+      "<command-name>/model</command-name><command-args>opus</command-args>",
+      "<command-message>dev-extras:codex</command-message>\n<command-name>/dev-extras:codex</command-name>",
+      "<local-command-stdout>Set model to opus</local-command-stdout>",
+      "<local-command-caveat>Caveat: the messages below…</local-command-caveat>",
+    ]) {
+      expect(
+        classifyClaudeLine({ type: "user", message: { content } }),
+      ).toEqual({ kind: "skip" });
+    }
+  });
+
+  it("skips isMeta entries, which are injected context and not a prompt", () => {
+    expect(
+      classifyClaudeLine({
+        type: "user",
+        isMeta: true,
+        message: { content: "Another Claude session sent a message:\n…" },
+      }),
+    ).toEqual({ kind: "skip" });
+  });
+
+  it("keeps a teammate message verbatim: it IS the prompt that drove the turn", () => {
+    const content =
+      '<teammate-message teammate_id="lead">apply the fix-up batch</teammate-message>';
+    expect(classifyClaudeLine({ type: "user", message: { content } })).toEqual({
+      kind: "user",
+      text: content,
+      timestamp: undefined,
+    });
+  });
+
+  it("folds responses either side of command noise into one entry", async () => {
+    const path = fixture("markup.jsonl", [
+      { type: "user", timestamp: "t0", message: { content: "q1" } },
+      {
+        type: "assistant",
+        timestamp: "t1",
+        message: { content: [{ type: "text", text: "A1" }] },
+      },
+      {
+        type: "user",
+        timestamp: "t2",
+        message: {
+          content:
+            "<command-name>/model</command-name><command-args>x</command-args>",
+        },
+      },
+      {
+        type: "user",
+        timestamp: "t3",
+        message: {
+          content: "<local-command-stdout>done</local-command-stdout>",
+        },
+      },
+      {
+        type: "assistant",
+        timestamp: "t4",
+        message: { content: [{ type: "text", text: "A2" }] },
+      },
+    ]);
+    const result = await readSessionTranscript(session("claude", path), 2);
+    // No markup reaches the payload, and with no real prompt between them the
+    // two responses are one turn (the fold's documented merge semantics).
+    expect(JSON.stringify(result)).not.toContain("command-name");
+    expect(JSON.stringify(result)).not.toContain("local-command-stdout");
+    expect(result?.turns).toEqual([
+      { role: "assistant", text: "A1\n\nA2", timestamp: "t4" },
+    ]);
+  });
+
   it("reads the last turn across several assistant lines, ignoring tool results", async () => {
     const path = fixture("claude.jsonl", [
       { type: "user", timestamp: "t0", message: { content: "prompt" } },

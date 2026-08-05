@@ -14,6 +14,7 @@ import {
   beforeEach,
   afterEach,
   mock,
+  spyOn,
   type Mock,
 } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
@@ -26,8 +27,13 @@ import { InvocationManager } from "./invocation-manager";
 import { InvocationRegistry } from "./invokers/registry";
 import { stubInvoker } from "./invokers/test-helpers";
 import { BUILTIN_AGENTS } from "../lib/agents";
-import { HANDOFF_PREFIX, MAX_HANDOFF_NOTE_CHARS } from "./handoff";
-import { renderTurns } from "./transcript-read";
+import {
+  HANDOFF_PREFIX,
+  MAX_HANDOFF_NOTE_CHARS,
+  type HandoffQueue,
+} from "./handoff";
+import { MAX_SPAWN_PROMPT_BYTES } from "./spawn-command";
+import { MAX_TURN_CHARS, renderTurns } from "./transcript-read";
 import { MAX_SEND_PASTE_CHARS } from "../lib/config";
 import type { EnrichedSession, TmuxPane } from "../types/session";
 
@@ -37,6 +43,17 @@ type Internals = {
     headers: Record<string, string>,
   ): Promise<Response>;
   enrichSession(session: unknown): Promise<EnrichedSession>;
+  /** One route test goes through the dispatcher, so the endpoint is proved
+   *  REACHABLE and not merely correct once called. */
+  handleRequest(req: Request): Promise<Response>;
+  /** For the wire assertions: a fake client, and the visibility gate
+   *  `rebroadcastSession` checks before it broadcasts. */
+  sseClients: Map<
+    string,
+    { id: string; controller: { enqueue: (data: string) => void } }
+  >;
+  visibleSessions: Set<string>;
+  handoffQueue: HandoffQueue;
 };
 
 /** A literal ESC byte, spelled without an escape sequence so it survives any
@@ -530,6 +547,62 @@ describe("POST /handoff — guard stack", () => {
     expect(sendPromptToPane).not.toHaveBeenCalled();
   });
 
+  it("delivers into a cursor target when only the HEADER's cwd looks like a slash command", async () => {
+    const panes = new Map([
+      ["%1", pane("%1")],
+      ["%2", pane("%2")],
+    ]);
+    const { manager, internals, sendPromptToPane } = createServer(panes);
+    // The discriminating case for the test above: a payload with no `/token`
+    // in it at all, and an absolute cwd. Cursor's pattern is `/(^|\s)\/\S/`,
+    // so an UNQUOTED cwd after the header's ` · ` separator matched, and
+    // ccmux refused every handoff into a cursor target on the strength of a
+    // header it wrote itself.
+    manager.createSession("src", transcript("src.jsonl", "the plan is ready"));
+    manager.setTmuxPane("src", "%1");
+    manager.updateSession("src", { cwd: "/Users/x/code/ccmux" });
+    manager.createSession("dst", transcript("dst.jsonl"), "cursor");
+    manager.setTmuxPane("dst", "%2");
+
+    const response = await post(internals, { from: "src", to: "dst" });
+    expect(response.status).toBe(200);
+    expect((await response.json()) as { status: string }).toMatchObject({
+      status: "delivered",
+    });
+    const text = (sendPromptToPane.mock.calls[0] as unknown as string[])[1];
+    expect(text).toContain("`/Users/x/code/ccmux`");
+  });
+
+  it("refuses an unsafe payload AT ENQUEUE rather than queueing a doomed one", async () => {
+    const panes = new Map([
+      ["%1", pane("%1")],
+      ["%2", pane("%2")],
+    ]);
+    const { manager, internals, sendPromptToPane } = createServer(panes);
+    manager.createSession("src", transcript("src.jsonl", "run /clear now"));
+    manager.setTmuxPane("src", "%1");
+    manager.createSession("dst", transcript("dst.jsonl"), "cursor");
+    manager.setTmuxPane("dst", "%2");
+    manager.updateSession("dst", { status: "working" });
+
+    // Both inputs to the check are frozen by now (the composed text, and the
+    // target's own pattern), so a busy target used to be told "queued" and
+    // the dequeue silently dropped it half an hour later.
+    const response = await post(internals, { from: "src", to: "dst" });
+    expect(response.status).toBe(409);
+    expect((await response.json()) as { reason: string }).toMatchObject({
+      reason: "unsafe-payload",
+    });
+    expect(internals.handoffQueue.peek("dst")).toBeNull();
+    const enriched = await internals.enrichSession(manager.getSession("dst"));
+    expect(enriched.pendingHandoff).toBeUndefined();
+
+    // And nothing arrives when the target frees up either.
+    manager.updateSession("dst", { status: "idle" });
+    await Bun.sleep(10);
+    expect(sendPromptToPane).not.toHaveBeenCalled();
+  });
+
   it("strips control characters out of the payload", async () => {
     const { manager, internals, sendPromptToPane } = createServer();
     pair(manager, `before${ESC}[201~after`);
@@ -756,6 +829,225 @@ describe("POST /handoff — queue on busy", () => {
     await Bun.sleep(5);
     expect(sendPromptToPane).not.toHaveBeenCalled();
   });
+
+  it("re-queues after a TRANSIENT send failure and retries on the next idle", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    pair(manager, "queued conclusion");
+    manager.updateSession("dst", { status: "working" });
+    await post(internals, { from: "src", to: "dst" });
+
+    // The tmux send fails once. That is not a refusal: nothing about the
+    // handoff was rejected, so dropping it would lose work over a hiccup.
+    let calls = 0;
+    sendPromptToPane.mockImplementation(async () => ++calls > 1);
+
+    manager.updateSession("dst", { status: "idle" });
+    await Bun.sleep(20);
+    expect(sendPromptToPane).toHaveBeenCalledTimes(1);
+    expect(internals.handoffQueue.peek("dst")?.attempts).toBe(1);
+    // Still on the wire: the sender was told "queued" and is owed a delivery.
+    const enriched = await internals.enrichSession(manager.getSession("dst"));
+    expect(enriched.pendingHandoff).toMatchObject({ fromSessionId: "src" });
+
+    manager.updateSession("dst", { status: "working" });
+    manager.updateSession("dst", { status: "idle" });
+    await Bun.sleep(20);
+    expect(sendPromptToPane).toHaveBeenCalledTimes(2);
+    expect(
+      (sendPromptToPane.mock.calls[1] as unknown as string[])[1],
+    ).toContain("queued conclusion");
+    expect(internals.handoffQueue.peek("dst")).toBeNull();
+  });
+
+  it("stops re-queueing after the attempt cap", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    pair(manager);
+    manager.updateSession("dst", { status: "working" });
+    await post(internals, { from: "src", to: "dst" });
+    sendPromptToPane.mockImplementation(async () => false);
+
+    for (let i = 0; i < 4; i++) {
+      manager.updateSession("dst", { status: "working" });
+      manager.updateSession("dst", { status: "idle" });
+      await Bun.sleep(20);
+    }
+    // Three attempts, then gone: a transient failure that never clears must
+    // still be bounded, and the TTL alone would keep retrying for half an
+    // hour.
+    expect(sendPromptToPane).toHaveBeenCalledTimes(3);
+    expect(internals.handoffQueue.peek("dst")).toBeNull();
+  });
+
+  it("drops on a DETERMINISTIC refusal instead of re-queueing it", async () => {
+    const { manager, internals, sendPromptToPane, getPaneCommand } =
+      createServer();
+    pair(manager);
+    manager.updateSession("dst", { status: "working" });
+    await post(internals, { from: "src", to: "dst" });
+
+    // The agent exited; re-running that check would only refuse again.
+    getPaneCommand.mockResolvedValue("zsh");
+    manager.updateSession("dst", { status: "idle" });
+    await Bun.sleep(20);
+
+    expect(sendPromptToPane).not.toHaveBeenCalled();
+    expect(internals.handoffQueue.peek("dst")).toBeNull();
+  });
+});
+
+describe("POST /handoff — concurrent delivery into one target", () => {
+  /** Source, second source, and a shared idle target. */
+  function trio(manager: SessionManager) {
+    manager.createSession("src", transcript("src.jsonl", "first"));
+    manager.setTmuxPane("src", "%1");
+    manager.createSession("src2", transcript("src2.jsonl", "second"));
+    manager.setTmuxPane("src2", "%3");
+    manager.createSession("dst", transcript("dst.jsonl"));
+    manager.setTmuxPane("dst", "%2");
+  }
+
+  it("never runs two deliveries at once, and tells both callers the truth", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    trio(manager);
+
+    // A delivery is several awaits long (probe, load, paste, gap, Enter), so
+    // two that both saw the same idle target used to interleave: the pane
+    // received two prompts back to back.
+    let inFlight = 0;
+    let peak = 0;
+    sendPromptToPane.mockImplementation(async () => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await Bun.sleep(20);
+      inFlight--;
+      return true;
+    });
+
+    const [a, b] = await Promise.all([
+      post(internals, { from: "src", to: "dst" }),
+      post(internals, { from: "src2", to: "dst" }),
+    ]);
+    expect(peak).toBe(1);
+    expect(sendPromptToPane).toHaveBeenCalledTimes(2);
+    // Nothing here moves the target's status, so the second is a serialized
+    // delivery rather than a queue, and both answers are accurate.
+    const statuses = [
+      ((await a.json()) as { status: string }).status,
+      ((await b.json()) as { status: string }).status,
+    ];
+    expect(statuses).toEqual(["delivered", "delivered"]);
+  });
+
+  it("queues the second when the first delivery leaves the target mid-turn", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    trio(manager);
+
+    // The realistic shape: the agent starts working on what it was just
+    // handed, so the second handoff's idle window is gone by the time it
+    // reaches the pane. It gets the `working` answer, not a lost paste.
+    sendPromptToPane.mockImplementation(async () => {
+      await Bun.sleep(5);
+      manager.updateSession("dst", { status: "working" });
+      return true;
+    });
+
+    const [a, b] = await Promise.all([
+      post(internals, { from: "src", to: "dst" }),
+      post(internals, { from: "src2", to: "dst" }),
+    ]);
+    expect(sendPromptToPane).toHaveBeenCalledTimes(1);
+    const statuses = [
+      ((await a.json()) as { status: string }).status,
+      ((await b.json()) as { status: string }).status,
+    ].sort();
+    expect(statuses).toEqual(["delivered", "queued"]);
+    expect(internals.handoffQueue.peek("dst")).not.toBeNull();
+  });
+});
+
+describe("POST /handoff — the wire", () => {
+  type WireSession = {
+    id: string;
+    pendingHandoff?: { fromSessionId: string; queuedAt: string };
+  };
+
+  /** A fake SSE client, plus the visibility gate `rebroadcastSession` reads. */
+  function watch(internals: Internals, sessionId: string) {
+    const frames: string[] = [];
+    internals.visibleSessions.add(sessionId);
+    internals.sseClients.set("test-client", {
+      id: "test-client",
+      controller: { enqueue: (data: string) => frames.push(data) },
+    });
+    return {
+      /** Every `session_updated` carrying `sessionId`, oldest first. */
+      updates(): WireSession[] {
+        return frames
+          .map(
+            (f) =>
+              JSON.parse(f.slice("data: ".length)) as {
+                type: string;
+                session?: WireSession;
+              },
+          )
+          .filter((e) => e.type === "session_updated")
+          .map((e) => e.session)
+          .filter((s): s is WireSession => s?.id === sessionId);
+      },
+    };
+  }
+
+  it("announces a queued handoff, and the delivery that clears it", async () => {
+    const { manager, internals } = createServer();
+    pair(manager, "queued conclusion");
+    manager.updateSession("dst", { status: "working" });
+    const wire = watch(internals, "dst");
+
+    const response = await post(internals, { from: "src", to: "dst" });
+    const { queuedAt } = (await response.json()) as { queuedAt: string };
+    await Bun.sleep(10);
+
+    // A queued handoff reaches clients as a field on the TARGET's session,
+    // carrying the same `queuedAt` its sender was given. Asserted on content
+    // rather than on a broadcast COUNT: every rebroadcast of a session with
+    // a record pending carries it, and the PR resolver landing a lookup is
+    // one such rebroadcast this test does not control.
+    const queued = wire.updates().filter((s) => s.pendingHandoff);
+    expect(queued.length).toBeGreaterThan(0);
+    for (const session of queued) {
+      expect(session.pendingHandoff).toEqual({
+        fromSessionId: "src",
+        queuedAt,
+      });
+    }
+
+    manager.updateSession("dst", { status: "idle" });
+    await Bun.sleep(20);
+    // The post-delivery rebroadcast takes the badge back off, and is the
+    // last word clients get on the session.
+    const updates = wire.updates();
+    expect(updates[updates.length - 1].pendingHandoff).toBeUndefined();
+  });
+});
+
+describe("the handoff route", () => {
+  it("is reachable as POST /handoff through the dispatcher", async () => {
+    const { manager, internals } = createServer();
+    pair(manager, "routed");
+
+    const response = await internals.handleRequest(
+      new Request("http://localhost/handoff", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ from: "src", to: "dst" }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect((await response.json()) as { status: string }).toMatchObject({
+      status: "delivered",
+    });
+  });
 });
 
 /**
@@ -765,9 +1057,11 @@ describe("POST /handoff — queue on busy", () => {
  */
 function stubSpawn(): { argv: string[][]; restore: () => void } {
   const argv: string[][] = [];
-  const original = Bun.spawn;
   let first = true;
-  Bun.spawn = ((spawned: string[]) => {
+  // `spyOn` + `mockRestore` rather than assigning `Bun.spawn` back by hand:
+  // a hand-assigned global survives a thrown assertion and leaks into every
+  // later file in the run, which is the shape that fails on Linux CI only.
+  const spy = spyOn(Bun, "spawn").mockImplementation(((spawned: string[]) => {
     argv.push(spawned);
     const stdout = first ? "%9\n" : "";
     first = false;
@@ -776,8 +1070,8 @@ function stubSpawn(): { argv: string[][]; restore: () => void } {
       stderr: new Response("").body,
       exited: Promise.resolve(0),
     };
-  }) as unknown as typeof Bun.spawn;
-  return { argv, restore: () => (Bun.spawn = original) };
+  }) as unknown as typeof Bun.spawn);
+  return { argv, restore: () => spy.mockRestore() };
 }
 
 describe("POST /handoff — --spawn", () => {
@@ -842,6 +1136,50 @@ describe("POST /handoff — --spawn", () => {
     } finally {
       spawn.restore();
     }
+  });
+
+  it("refuses a composed handoff that overruns the spawn's BYTE budget", async () => {
+    const { manager, internals } = createServer();
+    // The cap `composeHandoff` applies is in UTF-16 CHARS while the spawn
+    // path budgets BYTES, so multibyte text sits under the one and crosses
+    // the other. Forwarded, this came back as a 400 about an invalid
+    // 'prompt' field, which is not a field this caller ever sent.
+    //
+    // One turn cannot reach it (`MAX_TURN_CHARS` is 20,000), so this is a
+    // multi-turn read: the compose cap lets through 65,536 chars, and at
+    // three bytes each that is ~196KB against a 120,832-byte budget.
+    const path = join(dir, "big.jsonl");
+    const bulk = "書".repeat(MAX_TURN_CHARS);
+    const lines: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      lines.push(
+        JSON.stringify({
+          type: "user",
+          timestamp: `2024-01-15T12:0${i}:00Z`,
+          message: { content: "prompt" },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          timestamp: `2024-01-15T12:0${i}:30Z`,
+          message: { content: [{ type: "text", text: bulk }] },
+        }),
+      );
+    }
+    writeFileSync(path, lines.join("\n") + "\n");
+    manager.createSession("src", path);
+    manager.setTmuxPane("src", "%1");
+
+    const response = await post(internals, {
+      from: "src",
+      turns: 12,
+      spawn: { cwd: dir },
+    });
+    expect(response.status).toBe(409);
+    const data = (await response.json()) as { reason: string; error: string };
+    expect(data.reason).toBe("too-large");
+    expect(data.error).toContain("spawn prompt budget");
+    expect(data.error).toContain(String(MAX_SPAWN_PROMPT_BYTES));
+    expect(data.error).not.toContain("'prompt'");
   });
 
   it("reports a spawn refusal as the handoff's own failure", async () => {

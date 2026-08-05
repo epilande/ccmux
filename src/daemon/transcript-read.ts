@@ -124,7 +124,9 @@ export async function* readLinesBackwards(
   } catch {
     return;
   }
-  if (!pos) return;
+  // A non-finite size (Bun.file("/dev/zero").size is Infinity) or a
+  // non-positive chunk would both leave the walk below unable to reach 0.
+  if (!pos || !Number.isFinite(pos) || chunkSize <= 0) return;
 
   /** Bytes of the leftmost, not-yet-delimited line seen so far. */
   let carry: Bytes = EMPTY;
@@ -246,6 +248,17 @@ export function capText(text: string): { text: string; truncated: boolean } {
  * single-entry shape the pane fallback produces) and `turns=2` is
  * `[assistant, user, assistant]`, oldest first.
  *
+ * A turn is an EXCHANGE, not a response: consecutive assistant responses with
+ * no user entry between them are one turn's fragments and merge into a single
+ * entry, so asking for N can legitimately return fewer than N. That is also
+ * how a classifier that skips a boundary shape (Claude's slash-command
+ * markup, say) folds the responses either side of it together.
+ *
+ * The same is true of a line the size guard drops: an oversized line
+ * (> {@link MAX_LINE_BYTES}) is skipped WITHOUT being parsed, so if it happened
+ * to be a user entry its boundary is lost and the responses around it merge.
+ * `truncated` going true is the only signal that anything was dropped.
+ *
  * Returns null when the file is unreadable or holds no assistant text, which
  * the endpoint reads as "fall back to the pane".
  */
@@ -259,7 +272,15 @@ export async function foldJsonlTurns(
   let pending: string[] = [];
   let pendingTimestamp: string | undefined;
   let pendingLocked = false;
+  /** Set once `pending` provably holds more than the cap will keep; further
+   *  fragments of the same turn are then walked but not stored. */
+  let pendingFull = false;
+  /** Running length of `joinPending(pending)`, cheap enough to test every
+   *  fragment; the exact check below only runs once it is over the cap. */
+  let pendingChars = 0;
   let truncated = false;
+
+  const joinPending = (parts: string[]): string => parts.join("\n\n").trim();
 
   const pushTurn = (
     role: "user" | "assistant",
@@ -285,9 +306,11 @@ export async function foldJsonlTurns(
 
   /** Emit the accumulated assistant fragments as one turn. */
   const flushAssistant = (): boolean => {
-    const text = pending.join("\n\n").trim();
+    const text = joinPending(pending);
     pending = [];
     pendingLocked = false;
+    pendingFull = false;
+    pendingChars = 0;
     const timestamp = pendingTimestamp;
     pendingTimestamp = undefined;
     if (!text) return false;
@@ -327,10 +350,29 @@ export async function foldJsonlTurns(
       if (pendingLocked) continue;
       if (meaning.authoritative) {
         pending = [meaning.text];
+        pendingChars = meaning.text.length;
         pendingLocked = true;
         pendingTimestamp = meaning.timestamp ?? pendingTimestamp;
       } else {
-        pending.unshift(meaning.text);
+        if (!pendingFull) {
+          pending.unshift(meaning.text);
+          pendingChars += pendingChars
+            ? meaning.text.length + 2
+            : meaning.text.length;
+          // Once the turn provably holds more than the cap will keep, stop
+          // STORING further fragments (the walk goes on, for boundaries).
+          // Output-identical rather than merely close: the walk collects
+          // newest-first and `capText` keeps the tail, so every fragment
+          // past this point lands in the head it would cut anyway. The
+          // running count is only a trigger for the exact test, because a
+          // fragment run that trims back under the cap must keep growing.
+          if (
+            pendingChars > MAX_TURN_CHARS &&
+            joinPending(pending).length > MAX_TURN_CHARS
+          ) {
+            pendingFull = true;
+          }
+        }
         // The first timestamp seen walking backwards is the newest fragment's,
         // i.e. when the response finished.
         pendingTimestamp ??= meaning.timestamp;

@@ -20,6 +20,10 @@ import {
   sendLiteralToPane,
   sendPromptToPane,
 } from "./pane-io";
+import { resolveSessionRef } from "./session-ref";
+import type { SessionRefResolution } from "./session-ref";
+import { MAX_TURNS, renderTurns } from "./transcript-read";
+import { readSessionTranscript } from "./transcript-readers";
 import {
   AMBIGUOUS_WAIT_ERROR,
   checkForegroundLiveness,
@@ -32,18 +36,17 @@ import {
   composeHandoff,
   formatHandoffHeader,
   HandoffQueue,
+  MAX_HANDOFF_ATTEMPTS,
   MAX_HANDOFF_NOTE_CHARS,
   normalizeHandoffSpawn,
+  unsafeHandoffError,
 } from "./handoff";
-import { resolveSessionRef } from "./session-ref";
-import type { SessionRefResolution } from "./session-ref";
-import { MAX_TURNS, renderTurns } from "./transcript-read";
-import { readSessionTranscript } from "./transcript-readers";
 import {
   buildAgentForkCommand,
   buildAgentSpawnCommand,
   buildTmuxSpawnArgv,
   forkResumesByIdAlone,
+  MAX_SPAWN_PROMPT_BYTES,
   normalizeBoolean,
   normalizeClientTty,
   normalizePrompt,
@@ -548,6 +551,16 @@ export class DaemonServer {
    * affected session, which needs `this`.
    */
   private handoffQueue!: HandoffQueue;
+  /**
+   * One delivery at a time per TARGET session. The tail of each target's
+   * chain, dropped once nothing is waiting behind it.
+   *
+   * A delivery is several awaits long (a liveness probe, a buffer load, a
+   * paste, a deliberate 150ms gap, an Enter), and two handoffs that both saw
+   * the same idle target used to run all of that concurrently: the pane got
+   * two prompts back to back and each caller was told it delivered.
+   */
+  private handoffDeliveryChain = new Map<string, Promise<void>>();
 
   constructor(
     sessionManager: SessionManager,
@@ -1131,9 +1144,16 @@ export class DaemonServer {
       path.endsWith("/transcript") &&
       req.method === "GET"
     ) {
-      const ref = decodeURIComponent(
-        path.slice("/sessions/".length, -"/transcript".length),
-      );
+      const raw = path.slice("/sessions/".length, -"/transcript".length);
+      // A malformed escape (`%zz`) throws URIError, which would escape
+      // `handleRequest` as a 500 carrying Bun's HTML error page. The raw
+      // segment is a fine ref to try instead: it resolves or 404s.
+      let ref: string;
+      try {
+        ref = decodeURIComponent(raw);
+      } catch {
+        ref = raw;
+      }
       return await this.handleSessionTranscript(ref, url, corsHeaders);
     }
 
@@ -2540,7 +2560,17 @@ export class DaemonServer {
           sessionId: session.id,
           agentType: session.agentType,
           source: "transcript",
-          turns: transcript.turns,
+          // Transcript text is agent-authored and reaches a TTY on the way
+          // out, so an ESC sequence in it would be INTERPRETED (a title
+          // change, an OSC 52 clipboard write). Newlines and tabs survive:
+          // unlike the pane branch below, this text carries code.
+          turns: transcript.turns.map((turn) => ({
+            ...turn,
+            text: stripControlChars(turn.text, {
+              keepNewlines: true,
+              keepTabs: true,
+            }),
+          })),
           truncated: transcript.truncated,
           resolution: resolved,
         },
@@ -2572,7 +2602,9 @@ export class DaemonServer {
         source: "pane",
         // Role is nominal here: a screen capture is not a parsed turn.
         turns: [{ role: "assistant", text: capture }],
-        truncated: false,
+        // Always: `capturePane` reads the visible tail (50 lines by
+        // default), so a pane capture is never the whole response.
+        truncated: true,
         resolution: resolved,
       },
       { headers },
@@ -2647,13 +2679,25 @@ export class DaemonServer {
         { status: 400, headers },
       );
     }
-    if (!spawnRequest.value && typeof toRef !== "string") {
+    // Blank-after-trim is the same mistake as absent, and it is refused the
+    // same way at BOTH ends: `to: "   "` would otherwise reach the resolver
+    // as a ref nothing can match and come back as a confusing 404.
+    if (
+      !spawnRequest.value &&
+      (typeof toRef !== "string" || toRef.trim() === "")
+    ) {
       return Response.json(
         { error: "Missing or invalid 'to' field (or pass 'spawn')" },
         { status: 400, headers },
       );
     }
 
+    // REFUSED, where `GET /transcript` clamps the same field to the legal
+    // range. The asymmetry is the consequence: a read that asks for too much
+    // gets the most it can have, while this endpoint PASTES into somebody
+    // else's composer, so a caller who miscounted should learn that from an
+    // error rather than from a peer receiving a different amount of context
+    // than they asked to send.
     let turns = 1;
     if (body.turns != null) {
       const value = Number(body.turns);
@@ -2857,43 +2901,22 @@ export class DaemonServer {
       );
     }
 
+    const queueArgs = { source, target, text, truncated, from, to, headers };
     if (target.status === "working") {
-      const { record, replaced } = this.handoffQueue.enqueue({
-        fromSessionId: source.id,
-        toSessionId: target.id,
-        text,
-        truncated,
-      });
-      void this.rebroadcastSession(target.id);
-      console.log(
-        `handoff: queued ${source.id} -> ${target.id} (target is working)` +
-          (replaced
-            ? `, replacing a pending handoff from ${replaced.fromSessionId}`
-            : ""),
-      );
-      // The target may have gone idle between the status read above and the
-      // enqueue, in which case its `working -> idle` event has already fired
-      // and nothing else is coming to trigger delivery. Re-read and deliver
-      // now if so; `take()` makes the double-delivery race impossible.
-      void this.deliverQueuedHandoff(target.id);
-      return Response.json(
-        {
-          status: "queued",
-          from,
-          to,
-          chars: text.length,
-          truncated,
-          queuedAt: new Date(record.queuedAt).toISOString(),
-          expiresAt: new Date(record.expiresAt).toISOString(),
-          ...(replaced
-            ? { replaced: { fromSessionId: replaced.fromSessionId } }
-            : {}),
-        },
-        { headers },
-      );
+      return this.queueHandoff(queueArgs);
     }
 
-    const delivery = await this.deliverHandoff(target, text);
+    // Serialized per target, so a second handoff aimed at the same idle
+    // session waits for the first to finish rather than pasting over it.
+    const delivery = await this.serializeHandoffDelivery(target.id, () =>
+      this.deliverHandoff(target, text),
+    );
+    // The target stopped being idle while we waited our turn (or while the
+    // liveness probe ran). That is the `working` case arriving late, so it
+    // gets the `working` answer: queued, with a delivery owed on idle.
+    if (!delivery.ok && delivery.reason === "target-busy") {
+      return this.queueHandoff(queueArgs);
+    }
     if (!delivery.ok) {
       return Response.json(
         { error: delivery.error, reason: delivery.reason, from, to },
@@ -2911,6 +2934,113 @@ export class DaemonServer {
       },
       { headers },
     );
+  }
+
+  /**
+   * Queue a handoff for a target that is mid-turn, and answer its sender.
+   *
+   * The unsafe-payload check runs HERE as well as at delivery, and the
+   * duplication is the point: both of its inputs are already frozen (the
+   * composed text, and the target agent's own pattern), so a payload that
+   * agent can never receive is knowable now. Without this the sender was told
+   * "queued" and the dequeue-time check silently dropped the record half an
+   * hour later, with nobody left to report it to.
+   */
+  private queueHandoff(args: {
+    source: Session;
+    target: Session;
+    text: string;
+    truncated: boolean;
+    from: unknown;
+    to: unknown;
+    headers: Record<string, string>;
+  }): Response {
+    const { source, target, text, truncated, from, to, headers } = args;
+
+    const agentDef = this.getAgentByType(target.agentType);
+    if (
+      matchesUnsafeReplyPattern(
+        text,
+        agentDef?.notificationActions?.unsafeReplyPattern,
+      )
+    ) {
+      return Response.json(
+        {
+          error: unsafeHandoffError(target.agentType),
+          reason: "unsafe-payload",
+          from,
+          to,
+        },
+        { status: 409, headers },
+      );
+    }
+
+    const { record, replaced } = this.handoffQueue.enqueue({
+      fromSessionId: source.id,
+      toSessionId: target.id,
+      text,
+      truncated,
+    });
+    void this.rebroadcastSession(target.id);
+    // The live status, not the snapshot this handoff was resolved against:
+    // the caller can reach here from the idle path too, when the target
+    // turned over mid-request.
+    const status = this.sessionManager.getSession(target.id)?.status ?? "busy";
+    console.log(
+      `handoff: queued ${source.id} -> ${target.id} (target is ${status})` +
+        (replaced
+          ? `, replacing a pending handoff from ${replaced.fromSessionId}`
+          : ""),
+    );
+    // The target may have gone idle between the status read above and the
+    // enqueue, in which case its `working -> idle` event has already fired
+    // and nothing else is coming to trigger delivery. Re-read and deliver
+    // now if so; `take()` makes the double-delivery race impossible.
+    void this.deliverQueuedHandoff(target.id);
+    return Response.json(
+      {
+        status: "queued",
+        from,
+        to,
+        chars: text.length,
+        truncated,
+        queuedAt: new Date(record.queuedAt).toISOString(),
+        expiresAt: new Date(record.expiresAt).toISOString(),
+        ...(replaced
+          ? { replaced: { fromSessionId: replaced.fromSessionId } }
+          : {}),
+      },
+      { headers },
+    );
+  }
+
+  /**
+   * Run `fn` with no other handoff delivery in flight for `sessionId`.
+   *
+   * A plain mutex rather than a queue with a depth limit: the things that can
+   * contend here are a `POST /handoff` and a deliver-on-idle, and both are
+   * already bounded (one pending record per target, one HTTP request per
+   * sender). The chain entry is removed by whichever link is last, so an idle
+   * target costs nothing.
+   */
+  private async serializeHandoffDelivery<T>(
+    sessionId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const prior = this.handoffDeliveryChain.get(sessionId);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    this.handoffDeliveryChain.set(sessionId, held);
+    // A prior link that threw must not strand everyone behind it.
+    if (prior) await prior.catch(() => {});
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.handoffDeliveryChain.get(sessionId) === held) {
+        this.handoffDeliveryChain.delete(sessionId);
+      }
+    }
   }
 
   /** Render an unresolved session ref as the right refusal for its end. */
@@ -2946,6 +3076,9 @@ export class DaemonServer {
    * can have moved since the handoff was composed (a queued one waits up to
    * half an hour), which is exactly why the dequeue path calls this rather
    * than trusting the checks that ran at enqueue time.
+   *
+   * Call it through {@link serializeHandoffDelivery}: it is several awaits
+   * long, and two concurrent runs against one target both paste.
    */
   private async deliverHandoff(
     target: Session,
@@ -2994,12 +3127,32 @@ export class DaemonServer {
       };
     }
 
+    // The status check above ran BEFORE a subprocess round trip, and the
+    // caller's own read ran before that. Re-read and act on the current
+    // value: the idle window this handoff was cleared for may have closed
+    // while we asked, and pasting into a composer mid-turn is the one thing
+    // the whole guard stack exists to prevent. `target-busy` is what the
+    // caller turns into a queue.
+    const current = this.sessionManager.getSession(target.id) ?? target;
+    if (current.status !== "idle") {
+      return {
+        ok: false,
+        code: 409,
+        reason: current.status === "waiting" ? "target-waiting" : "target-busy",
+        error: `Session ${target.id} is ${current.status}; a handoff is only ever delivered into an idle composer`,
+      };
+    }
+
     // Run on the FINAL composed text. The header makes a leading `/` or `!`
     // impossible, so the defuse below is provably a no-op today — but the
     // per-agent unsafe shapes are NOT about the leading character (most
     // composers trim before trigger detection, and Cursor fuzzy-matches a
     // `/token` anywhere), so a payload that happens to contain one is a
     // refusal rather than something the defuse can neutralize.
+    //
+    // This runs on the PASTE path only. `handoffToNewSession` deliberately
+    // skips it: a spawn hands the text to the agent in argv, so it is never
+    // typed into a composer and no slash-trigger can fire from it.
     const agentDef = this.getAgentByType(target.agentType);
     if (
       matchesUnsafeReplyPattern(
@@ -3011,7 +3164,7 @@ export class DaemonServer {
         ok: false,
         code: 409,
         reason: "unsafe-payload",
-        error: `The composed handoff contains text ${target.agentType}'s composer cannot receive safely`,
+        error: unsafeHandoffError(target.agentType),
       };
     }
 
@@ -3053,9 +3206,17 @@ export class DaemonServer {
    * Deliver a target's queued handoff, if it has one and is ready for it.
    *
    * The record is TAKEN before delivery, so two overlapping idle observations
-   * cannot paste it twice. A refusal at this point drops the handoff and logs
-   * why: the sender was already told it was queued, and re-queueing a payload
-   * the guards just rejected would only retry the same rejection forever.
+   * cannot paste it twice.
+   *
+   * A failure splits two ways, because the sender was already told "queued"
+   * and is not listening any more. A DETERMINISTIC refusal (unsafe-payload,
+   * not-at-agent, target-waiting, ambiguous-wait, no-pane) drops the record
+   * and logs why: re-running a check that just said no would only say no
+   * again. A TRANSIENT one (the tmux send failed, or the target turned over
+   * between the readiness check and the paste) puts the record back with its
+   * attempt counted, for the next idle transition to retry, up to
+   * {@link MAX_HANDOFF_ATTEMPTS}. Retries never extend the TTL, so half an
+   * hour remains the outer bound either way.
    */
   private async deliverQueuedHandoff(sessionId: string): Promise<void> {
     const session = this.sessionManager.getSession(sessionId);
@@ -3063,10 +3224,27 @@ export class DaemonServer {
     const record = this.handoffQueue.take(sessionId);
     if (!record) return;
 
-    const result = await this.deliverHandoff(session, record.text);
+    const result = await this.serializeHandoffDelivery(sessionId, () =>
+      this.deliverHandoff(session, record.text),
+    );
     if (result.ok) {
       console.log(
         `handoff: delivered queued handoff ${record.fromSessionId} -> ${sessionId} on idle`,
+      );
+    } else if (
+      result.reason === "send-failed" ||
+      result.reason === "target-busy"
+    ) {
+      const attempts = (record.attempts ?? 0) + 1;
+      const requeued =
+        attempts < MAX_HANDOFF_ATTEMPTS &&
+        this.handoffQueue.requeue({ ...record, attempts });
+      console.log(
+        requeued
+          ? `handoff: re-queued ${record.fromSessionId} -> ${sessionId} after a transient failure ` +
+              `(attempt ${attempts}/${MAX_HANDOFF_ATTEMPTS}): ${result.error}`
+          : `handoff: dropped queued handoff ${record.fromSessionId} -> ${sessionId} ` +
+              `after ${attempts} attempt(s): ${result.error}`,
       );
     } else {
       console.log(
@@ -3084,6 +3262,11 @@ export class DaemonServer {
    * (verified live for claude and codex): the prompt is always inside single
    * quotes, so every embedded newline arrives while the shell is mid-string
    * and reads as a continuation, and the raw bytes land in argv unchanged.
+   *
+   * `unsafeReplyPattern` deliberately does NOT run here. It guards a paste
+   * into a live composer, where a `/token` can fire a slash command; a spawn
+   * delivers the text in argv to a process that has not started yet, so there
+   * is no composer and no trigger to defuse.
    */
   private async handoffToNewSession(
     text: string,
@@ -3095,6 +3278,25 @@ export class DaemonServer {
     },
     headers: Record<string, string>,
   ): Promise<Response> {
+    // `composeHandoff` caps the text in UTF-16 CHARS while the spawn path
+    // budgets it in BYTES, so a CJK- or emoji-heavy payload can sit under the
+    // char cap and still overrun the argv budget. Caught here, in handoff's
+    // own terms: forwarded, it comes back as a 400 about an invalid 'prompt'
+    // field, which is not a field this caller ever sent.
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > MAX_SPAWN_PROMPT_BYTES) {
+      return Response.json(
+        {
+          error:
+            `The composed handoff exceeds the spawn prompt budget ` +
+            `(${bytes} bytes > ${MAX_SPAWN_PROMPT_BYTES}); retry with fewer --turns`,
+          reason: "too-large",
+          from: summary.from,
+        },
+        { status: 409, headers },
+      );
+    }
+
     const spawnBody: Record<string, unknown> = {
       agent: spawn.agent,
       cwd: spawn.cwd,
