@@ -654,6 +654,11 @@ export function detailPhrases(
   const dirty =
     rowDirty.length > 0 ? rowDirty : candidate?.dirty ? [DIRTY_UNCOUNTED] : [];
   const dirtySegments: Phrase[] = [];
+  // `it` for a single file, `them` for several; the uncounted fallback has
+  // both counts at zero and reads as singular work ("uncommitted work
+  // (D deletes it)").
+  const dirtyFiles = row.dirty.modified + row.dirty.untracked;
+  const deleteNote = dirtyFiles > 1 ? "(D deletes them)" : "(D deletes it)";
   dirty.forEach((text, index) => {
     // The opt-in note rides the LAST dirty phrase, where it reads as a
     // sentence about the work rather than as a separate instruction.
@@ -666,7 +671,7 @@ export function detailPhrases(
     const warn = candidate ? theme.yellow : theme.subtext;
     dirtySegments.push({
       text: note
-        ? `${text} ${opts.dirtyOk ? "(D armed, will be deleted)" : "(D removes it too)"}`
+        ? `${text} ${opts.dirtyOk ? "(D armed, will be deleted)" : deleteNote}`
         : text,
       fg: note && opts.dirtyOk ? theme.red : warn,
     });
@@ -825,6 +830,9 @@ export function primarySegments(
   opts: {
     isCursor: boolean;
     labelWidth: number;
+    /** The PANEL's widest marker slot ({@link markerWidth} of whether any
+     *  checkbox exists anywhere), which the branch column pads against. */
+    markerBase: number;
     selected?: boolean;
     /** The live status glyph for an occupied row, already resolved by the
      *  caller (it animates, so it cannot come from a pure function). */
@@ -867,7 +875,18 @@ export function primarySegments(
   const branch = rowBranch(entry.row);
   segments.push({ text: label, fg: rowColor(entry, opts.isCursor) });
   if (branch) {
-    const pad = Math.max(1, opts.labelWidth - displayWidth(label) + 2);
+    // Padded against the PANEL's widest marker, not the row's own: kept rows
+    // wear a 2-column marker and removable rows a 4-column checkbox, and a
+    // pad computed from the label alone made the branch column jog two
+    // columns to the right at the removable divider.
+    const pad = Math.max(
+      1,
+      opts.markerBase +
+        opts.labelWidth +
+        2 -
+        markerWidth(entry.candidate !== null) -
+        displayWidth(label),
+    );
     segments.push({ text: " ".repeat(pad), fg: theme.overlay });
     segments.push({ text: branch, fg: theme.overlay });
   }
@@ -924,15 +943,17 @@ export function dividerText(count: number, width: number): string {
 /**
  * The dim rule that trails a repo header, giving a group boundary real
  * weight without spending a blank line on it (which the layout deliberately
- * does not have). Same {@link DIVIDER_MAX} cap and for the same reason: a
- * full-width dash run per repo is the heaviest ink on a wide screen.
+ * does not have). It runs the FULL list width, unlike the removable
+ * divider's capped run: the header marks the panel's PRIMARY boundary, a
+ * repo, while the divider is a labelled break inside one group and stays
+ * visually subordinate by stopping short.
  *
  * Only the fill: the name itself stays a separate render concern because it
  * is bold mauve while the rule is muted. Empty when the name leaves no room
  * for at least the leading space and one dash.
  */
 export function headerRule(name: string, width: number): string {
-  const fill = Math.min(width, DIVIDER_MAX) - displayWidth(name) - 1;
+  const fill = width - displayWidth(name) - 1;
   return fill > 0 ? ` ${"─".repeat(fill)}` : "";
 }
 
@@ -1350,6 +1371,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    *  straight line across repo groups instead of re-aligning per group. */
   const labelWidth = createMemo(() => labelColumnWidth(flatRows()));
 
+  /** The panel's widest marker slot: 4 the moment any checkbox exists, else
+   *  2. The branch column pads against this rather than each row's own
+   *  marker, so it cannot jog by two at the removable divider. */
+  const markerBase = createMemo(() =>
+    markerWidth(flatRows().some((entry) => entry.candidate !== null)),
+  );
+
   const candidates = (): PruneCandidate[] => scan()?.candidates ?? [];
 
   // Tracked by PATH, not index: phase 2 re-sorts the list under the cursor,
@@ -1496,13 +1524,33 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   );
 
   /**
+   * The list's size, said once on the title line: `N worktrees` when one
+   * repo owns the panel, `N repos · M worktrees` across all of them (M
+   * counts every row, main checkouts included). Counts describe the LOADED
+   * list, so nothing is said while phase 1 is in flight — `repos()` still
+   * holds the PREVIOUS scope's list during a Tab rescope, and a count that
+   * flickers from the old scope's number to the new one reads as a glitch.
+   */
+  const titleCounts = (): string | null => {
+    if (phase() === "loading") return null;
+    const groups = merged();
+    if (groups.length === 0) return null;
+    const rows = plural(flatRows().length, "worktree", "worktrees");
+    if (groups.length === 1) return rows;
+    return `${plural(groups.length, "repo", "repos")} · ${rows}`;
+  };
+
+  /**
    * The muted tail on the title line, or null when there is nothing to say.
-   * A removal notice and the scanning announcement can coexist: a fully
-   * successful prune reloads in place, so its notice rides the very rescan
-   * it triggered.
+   * Counts lead (they extend the title's own subject), then the removal
+   * notice, then the scanning announcement. A removal notice and the
+   * scanning announcement can coexist: a fully successful prune reloads in
+   * place, so its notice rides the very rescan it triggered.
    */
   const titleSuffix = (): string | null => {
     const parts: string[] = [];
+    const counts = titleCounts();
+    if (counts) parts.push(` · ${counts}`);
     const notice = titleNotice();
     if (notice) parts.push(` · ${notice}`);
     if (scanning()) parts.push(` · ${scanIcon()} scanning`);
@@ -2064,6 +2112,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                                 primarySegments(entry, {
                                   isCursor: isCursor(),
                                   labelWidth: labelWidth(),
+                                  markerBase: markerBase(),
                                   selected: isSelected(),
                                   statusIcon: statusIcon(),
                                 }),

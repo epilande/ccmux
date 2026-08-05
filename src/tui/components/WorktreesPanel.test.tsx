@@ -581,6 +581,66 @@ describe("WorktreesPanel scanning indicator", () => {
   });
 });
 
+/**
+ * The muted count on the title line: the list's size, said once, where the
+ * scoped view's repo name already lives. Counts describe the LOADED list, so
+ * phase 1 in flight says nothing rather than a number about to change.
+ */
+describe("WorktreesPanel title counts", () => {
+  it("counts one repo's worktrees on the title line", async () => {
+    const { settled } = await mountSettled(listOf([mainRow(), row()]));
+    expect(lineWith(settled, "Worktrees · repo")).toContain("2 worktrees");
+  });
+
+  it("pluralizes for real", async () => {
+    const { settled } = await mountSettled(listOf([mainRow()]));
+    const title = lineWith(settled, "Worktrees · repo");
+    expect(title).toContain("1 worktree");
+    expect(title).not.toContain("1 worktrees");
+  });
+
+  it("counts repos and worktrees across a widened panel", async () => {
+    const { settled } = await mountSettled(
+      listOf([
+        mainRow(),
+        row(),
+        mainRow({ path: "/other", repoRoot: "/other", repoName: "other" }),
+      ]),
+    );
+    expect(lineWith(settled, "Worktrees")).toContain("2 repos · 3 worktrees");
+  });
+
+  it("says the counts and the scan together, counts first", async () => {
+    const { frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: () => new Promise<Response>(() => {}),
+    });
+    const shown = await frame();
+    const title = lineWith(shown, "scanning");
+    const [countsAt, scanningAt] = orderOf(title, "2 worktrees", "scanning");
+    expect(countsAt).toBeLessThan(scanningAt!);
+  });
+
+  it("says nothing while the list itself is loading", async () => {
+    const { frame } = await mountPanel({
+      list: () => new Promise<Response>(() => {}),
+      scan: () => new Promise<Response>(() => {}),
+    });
+    // "Reading worktrees..." is on screen; a COUNT is not.
+    expect(await frame()).not.toMatch(/\d+ worktrees/);
+  });
+
+  it("drops the counts whole with the rest of the suffix when narrow", async () => {
+    const { settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      { compact: true, width: 24 },
+    );
+    expect(settled).toContain("Worktrees");
+    expect(settled).not.toMatch(/\d+ worktrees/);
+  });
+});
+
 describe("WorktreesPanel merge", () => {
   it("annotates rows from every part of the scan", async () => {
     const { settled } = await mountSettled(
@@ -671,12 +731,8 @@ describe("WorktreesPanel merge", () => {
       { width: 80, height: 16 },
     );
 
-    expect(settled).toContain("(D removes it too)");
-    const [reason, note] = orderOf(
-      settled,
-      "branch gone",
-      "(D removes it too)",
-    );
+    expect(settled).toContain("(D deletes them)");
+    const [reason, note] = orderOf(settled, "branch gone", "(D deletes them)");
     expect(reason).toBeLessThan(note!);
   });
 
@@ -964,7 +1020,10 @@ describe("WorktreesPanel structure", () => {
       ],
     });
     expect(settled).toContain("Worktrees");
-    expect(settled).not.toContain("Worktrees · ");
+    // The title carries the panel-wide counts, but never a repo NAME: with
+    // several repos on screen, naming one of them up there would lie.
+    expect(settled).not.toContain("Worktrees · repo");
+    expect(settled).not.toContain("Worktrees · other");
     expect(settled).toContain("other");
     expect(settled).toContain("repo");
   });
@@ -1656,11 +1715,12 @@ describe("WorktreesPanel compact", () => {
     // other. What compact changes is the ORDER, so the sentence about work
     // that would be deleted outlives the truncation and the reason (which the
     // rule above the row already gives categorically) is what gets cut.
-    expect(settled).toContain("(D removes it too)");
-    const detail = lineWith(settled, "(D removes it too)");
+    // Singular: one untracked file reads as `it`, not `them`.
+    expect(settled).toContain("(D deletes it)");
+    const detail = lineWith(settled, "(D deletes it)");
     expect(isDetailLine(detail)).toBe(true);
     expect(detail.indexOf("untracked")).toBeLessThan(
-      detail.indexOf("(D removes it too)"),
+      detail.indexOf("(D deletes it)"),
     );
   });
 
@@ -1855,9 +1915,11 @@ function detailText(entry: PanelRow, dirtyOk = false): string {
     .join("");
 }
 
-/** Line 1 as one string, cursor gutter excluded (the component draws that). */
-function primaryText(entry: PanelRow, labelWidth = 0): string {
-  return primarySegments(entry, { isCursor: false, labelWidth })
+/** Line 1 as one string, cursor gutter excluded (the component draws that).
+ *  `markerBase` defaults to the no-checkbox base a candidate-free panel
+ *  uses; alignment tests across the divider pass the checkbox base. */
+function primaryText(entry: PanelRow, labelWidth = 0, markerBase = 2): string {
+  return primarySegments(entry, { isCursor: false, labelWidth, markerBase })
     .map((s) => s.text)
     .join("");
 }
@@ -1911,6 +1973,7 @@ describe("row line 1", () => {
       primarySegments(panelRow({ candidate: candidate() }), {
         isCursor: false,
         labelWidth: 0,
+        markerBase: 4,
         selected: true,
       })
         .map((s) => s.text)
@@ -1932,6 +1995,21 @@ describe("row line 1", () => {
     expect(columnOf(rows[0]!)).toBe(columnOf(rows[1]!));
   });
 
+  // The branch column pads against the PANEL's widest marker, not the row's
+  // own: a kept row's 2-column dot and a removable row's 4-column checkbox
+  // must not put their branches two columns apart.
+  it("keeps the branch column straight across the removable divider", () => {
+    const kept = panelRow({ row: row({ name: "same-len", branch: "feat/a" }) });
+    const removable = panelRow({
+      row: row({ path: "/b", name: "same-len", branch: "feat/b" }),
+      candidate: candidate({ path: "/b" }),
+    });
+    const width = labelColumnWidth([kept, removable]);
+    const columnOf = (entry: PanelRow) =>
+      primaryText(entry, width, 4).indexOf("feat/");
+    expect(columnOf(kept)).toBe(columnOf(removable));
+  });
+
   // One outlier name must not push every branch off the row.
   it("caps the column so a long name cannot eat the line", () => {
     const rows = [panelRow({ row: row({ name: "x".repeat(80) }) })];
@@ -1945,7 +2023,7 @@ describe("row line 1", () => {
   it("keeps a dirty kept row's name in the ordinary bright colour, flags a dirty removable one", () => {
     const dirty = { dirty: true, modified: 2, untracked: 0 };
     const labelFg = (entry: PanelRow, isCursor = false) =>
-      primarySegments(entry, { isCursor, labelWidth: 0 }).find(
+      primarySegments(entry, { isCursor, labelWidth: 0, markerBase: 4 }).find(
         (s) => s.text === "alpha",
       )?.fg;
     expect(labelFg(panelRow({ row: row({ dirty }) }))).toBe(theme.text);
@@ -1997,7 +2075,7 @@ describe("row detail line", () => {
     });
     const segs = detailSegments(removable, { compact: false, dirtyOk: false });
     expect(segs.find((s) => s.text === "2 modified")?.fg).toBe(theme.yellow);
-    expect(segs.find((s) => s.text.includes("(D removes it too)"))?.fg).toBe(
+    expect(segs.find((s) => s.text.includes("(D deletes them)"))?.fg).toBe(
       theme.yellow,
     );
     const armed = detailSegments(removable, { compact: false, dirtyOk: true });
@@ -2020,7 +2098,8 @@ describe("row detail line", () => {
       row: row({ dirty: { dirty: true, modified: 0, untracked: 0 } }),
       candidate: candidate({ dirty: true }),
     });
-    expect(detailText(entry)).toContain("uncommitted work (D removes it too)");
+    // Both counts at zero: the uncounted fallback reads as singular work.
+    expect(detailText(entry)).toContain("uncommitted work (D deletes it)");
     expect(detailText(entry, true)).toContain(
       "uncommitted work (D armed, will be deleted)",
     );
@@ -2034,7 +2113,9 @@ describe("row detail line", () => {
       row: row({ dirty: { dirty: false, modified: 0, untracked: 0 } }),
       candidate: candidate({ dirty: true, modified: 2 }),
     });
-    expect(detailText(entry)).toContain("uncommitted work (D removes it too)");
+    // The note pluralizes from the LIST's counts, and here only the scan has
+    // any: it rides the singular fallback phrase, so `it` is the right word.
+    expect(detailText(entry)).toContain("uncommitted work (D deletes it)");
     // Stated once: the fallback stands IN for the phrases, never beside them.
     expect(detailText(entry).match(/uncommitted work/g)).toHaveLength(1);
   });
@@ -2045,7 +2126,7 @@ describe("row detail line", () => {
       candidate: candidate({ dirty: true, modified: 2 }),
     });
     expect(detailText(entry)).toBe(
-      "PR #68 merged · 2 modified (D removes it too)",
+      "PR #68 merged · 2 modified (D deletes them)",
     );
   });
 
@@ -2283,7 +2364,7 @@ describe("row detail line", () => {
       row: row({ dirty: { dirty: true, modified: 0, untracked: 1 } }),
       candidate: candidate({ dirty: true, untracked: 1 }),
     });
-    expect(detailText(entry)).toContain("1 untracked (D removes it too)");
+    expect(detailText(entry)).toContain("1 untracked (D deletes it)");
     expect(detailText(entry, true)).toContain("D armed");
   });
 
@@ -2344,12 +2425,13 @@ describe("removable section", () => {
 
   // The header's trailing rule is what makes a group boundary scannable on a
   // tall multi-repo list without spending a blank line on it.
-  it("rules a repo header out to the divider cap", () => {
+  it("rules a repo header out to the full list width", () => {
     // A space, then dashes to the width: name + rule together fill it.
     expect(headerRule("ccmux", 40)).toBe(` ${"─".repeat(34)}`);
     expect(displayWidth("ccmux" + headerRule("ccmux", 40))).toBe(40);
-    // Same cap as the removable divider, for the same heavy-ink reason.
-    expect(displayWidth("ccmux" + headerRule("ccmux", 200))).toBe(DIVIDER_MAX);
+    // Full width, unlike the removable divider's capped run: the header is
+    // the panel's primary boundary, the divider a break inside one group.
+    expect(displayWidth("ccmux" + headerRule("ccmux", 200))).toBe(200);
   });
 
   it("drops the header rule whole when the name leaves no room", () => {
