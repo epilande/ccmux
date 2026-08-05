@@ -314,9 +314,16 @@ printf 'line one\nline two\n' | ccmux send <id> --stdin --no-enter
 
 ### Hand off
 
-The picker's row menu (right-click, or `m` on the selected row) has a **Hand off** item, offered on any row while another session is on the board. It starts a pick-a-target mode rather than opening a second list: the session list itself becomes the target picker, with a banner naming the source (`⇄ Hand off from <agent · project> · pick a target · enter send · esc cancel`). While aiming, `j`/`k` and the arrows move, `Enter` or a click on a row sends, `Esc` or `q` cancels, and every other key is swallowed so `x` is never one keystroke from killing the row being pointed at.
+The picker's row menu (right-click, or `m` on the selected row) has a **Hand off** item, offered on any row while another session is on the board. It starts a pick-a-target mode rather than opening a second list: the session list itself becomes the target picker, with a banner naming the source (`⇄ Hand off from <agent · project> · pick a target · enter continue · esc cancel`). While aiming, `j`/`k` and the arrows move, `Esc` or `q` cancels, and every other key is swallowed so `x` is never one keystroke from killing the row being pointed at.
 
-Both ends go to `POST /handoff` as session ids with `turns: 1`, so no ambiguity refusal is possible here (the pick is the disambiguation). The outcome lands in a toast: `Handed 532 chars to <target>`, `Queued for <target> (1,769 chars); it lands when the turn ends`, or `Handoff refused: <the daemon's reason, verbatim>`.
+`Enter` (or a click on a row) settles WHO and opens the **handoff dialog**, which settles what they get. Nothing has been sent at that point. The dialog names both ends (the target in its title, the source under it) and asks two things:
+
+- **Turns**, the same selector the Copy dialog uses and with the same keys (`j`/`k` and the arrows count between 1 and `MAX_TURNS`, a digit jumps straight to a count, a leading `1` or `2` waits for one more so `1` `2` is 12 and `2` `5` is 5). It opens on **Last response**, so the fast path is still pick, `Enter`, `Enter`.
+- **Note**, an optional one-liner for the receiving agent, folded into the provenance header by the daemon. `Tab` moves between the two rows; the note row owns every printable key while it has focus, digits included, and the arrows move back to Turns there the way they do in the new-session dialog's text fields.
+
+`Enter` from either row sends. `Esc` cancels the WHOLE handoff in one keystroke: the pick mode ended when the dialog opened, so there is no aiming mode left behind it.
+
+Both ends go to `POST /handoff` as session ids, with the count the dialog was showing and the note if one was typed (a blank note is omitted rather than sent empty). No ambiguity refusal is possible here, since the pick is the disambiguation. The outcome lands in a toast: `Handed 532 chars to <target>`, `Queued for <target> (1,769 chars); it lands when the turn ends`, or `Handoff refused: <the daemon's reason, verbatim>`.
 
 While a handoff is queued for a session, its row carries a **⇄** badge. It is driven straight off `pendingHandoff`, so it appears and clears with the SSE update that changed the fact, with no client-side timer, and it survives sidebar width.
 
@@ -348,17 +355,21 @@ POST /handoff  {from, to?, turns?, note?, callerPane?, spawn?}
 
 `POST /handoff` answers 200 with `{status: "delivered" | "queued" | "spawned", from, to, chars, truncated, ...}`, 400 for a malformed request or a self-handoff, 404 for an unresolvable end, and 409 for every guard refusal (each carrying a `reason`). `spawn` is `true` for the bare form or an object with `agent` / `cwd` overrides, and is mutually exclusive with `to`.
 
+`turns` defaults to 1 and is refused outside 1-`MAX_TURNS` (20). One turn is the last response bare, exactly what every caller that omits the field has always received; more than one is rendered by the same `renderTurns` that `ccmux last --turns N` prints, so a receiver sees what the CLI would have shown for the same count. The payload is composed **before** the target's status is branched on, so a queued handoff holds the finished bytes rather than a request to be re-read when the turn ends, and the cap, the control-char strip and every delivery guard apply identically whatever the count.
+
 ## Where to look in the code
 
 | Concern                                                  | Path                                              |
 | :------------------------------------------------------- | :------------------------------------------------ |
 | Session reference resolution (tiers, proximity, refusal) | `src/daemon/session-ref.ts`                       |
 | Backwards line walk, JSONL turn fold, size guards        | `src/daemon/transcript-read.ts`                   |
-| Shared turn rendering (`ccmux last` and the TUI's Copy)  | `src/daemon/transcript-read.ts` (`renderTurns`)   |
+| Shared turn rendering (`ccmux last`, Copy, handoff)      | `src/daemon/transcript-read.ts` (`renderTurns`)   |
 | Per-agent readers + registry                             | `src/daemon/transcript-readers/`                  |
 | Provenance header, compose, queue                        | `src/daemon/handoff.ts`                           |
 | Endpoints, guard stack, delivery, `--spawn`              | `src/daemon/server.ts`                            |
 | Shared delivery-safety guards                            | `src/daemon/send-guards.ts`                       |
 | `ccmux last` / `ccmux handoff` CLIs                      | `src/commands/last.ts`, `src/commands/handoff.ts` |
 | TUI clipboard tiers                                      | `src/tui/utils/clipboard.ts`                      |
-| The Copy dialog (row budget, turn label)                 | `src/tui/components/CopyDialog.tsx`               |
+| The Copy dialog (row budget)                             | `src/tui/components/CopyDialog.tsx`               |
+| The handoff dialog (row budget, both fields)             | `src/tui/components/HandoffDialog.tsx`            |
+| The shared turns selector (label, digit rules)           | `src/tui/turns-selection.ts`                      |

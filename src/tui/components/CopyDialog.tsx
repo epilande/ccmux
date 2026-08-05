@@ -2,6 +2,7 @@ import type { Component } from "solid-js";
 import { Show } from "solid-js";
 import { useTerminalDimensions } from "@opentui/solid";
 import { truncateText } from "../utils/format";
+import { turnsLabel } from "../turns-selection";
 import { theme } from "../theme";
 
 const MAX_WIDTH = 46;
@@ -44,19 +45,6 @@ export function planCopyDialogRows(terminalHeight: number): CopyDialogRows {
     // would draw its bottom border off it.
     height: Math.min(Math.max(1, terminalHeight), COPY_DIALOG_FLOOR_ROWS),
   };
-}
-
-/**
- * How much of the conversation the current count would take, in words.
- *
- * One turn is the last response on its own, which is what the item promised
- * before it grew a dialog. Past one the payload stops being a response and
- * becomes an exchange, so the parenthetical says the thing a user would
- * otherwise discover only after pasting: their own prompts come too.
- */
-export function copyTurnsLabel(turns: number): string {
-  if (turns <= 1) return "Last response";
-  return `Last ${turns} turns (with your prompts)`;
 }
 
 interface CopyDialogProps {
@@ -112,7 +100,7 @@ export const CopyDialog: Component<CopyDialogProps> = (props) => {
       <box height={1}>
         <text fg={theme.text}>
           <strong>
-            {truncateText(copyTurnsLabel(props.turns), contentWidth())}
+            {truncateText(turnsLabel(props.turns), contentWidth())}
           </strong>
         </text>
       </box>

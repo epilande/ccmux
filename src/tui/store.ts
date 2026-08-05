@@ -37,6 +37,7 @@ import {
   UNTRACKED_OPTIONS,
 } from "./new-session-options";
 import { MAX_TURNS } from "../daemon/transcript-read";
+import type { HandoffDialogField } from "./components/HandoffDialog";
 import type { TranscriptMatch } from "../daemon/transcript-search";
 import type { UntrackedMode } from "../daemon/worktree-move-changes";
 // The daemon's own slug rule, imported rather than mirrored: a name the
@@ -450,6 +451,26 @@ interface TUIState {
     turns: number;
     pendingDigit: boolean;
   } | null;
+  /**
+   * The open Hand off dialog, or null. It is what a pick TURNS INTO: the pick
+   * mode ends when this opens, so the source and the target are both settled
+   * and both held by ID, for the same reason the pick's source is (SSE re-sorts
+   * the board, and a snapshot would hand off yesterday's row).
+   *
+   * `turns` and `pendingDigit` are the shared turns selector's state, the same
+   * pair the Copy dialog holds; `note` is the optional one-liner the daemon
+   * folds into the provenance header; `field` is which of the two rows the
+   * keyboard is on, and it scopes the digits, so a `3` typed into a note can
+   * never become a turn count.
+   */
+  handoffDialog: {
+    fromSessionId: string;
+    toSessionId: string;
+    turns: number;
+    pendingDigit: boolean;
+    note: string;
+    field: HandoffDialogField;
+  } | null;
   /** Open new-session dialog, or null when it is closed. */
   newSession: NewSessionDraft | null;
   /** Agent last spawned from the dialog, the default when the selected row
@@ -779,6 +800,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     groupContextMenu: null,
     handoffPick: null,
     copyDialog: null,
+    handoffDialog: null,
     newSession: null,
     lastSpawnAgent: options.lastSpawnAgent ?? null,
     columns: options.columns,
@@ -1716,6 +1738,74 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     closeCopyDialog() {
       setState("copyDialog", null);
+    },
+
+    /**
+     * Turn a settled pick into the Hand off dialog, ending the pick mode in
+     * the same batch: the two are one gesture, and a board that was still in
+     * pick mode under an open dialog would need two Escapes to leave.
+     *
+     * It opens on the answer most people want (the last response, no note), so
+     * Enter alone is still the whole interaction.
+     */
+    openHandoffDialog(fromSessionId: string, toSessionId: string) {
+      batch(() => {
+        setState("handoffPick", null);
+        setState("handoffDialog", {
+          fromSessionId,
+          toSessionId,
+          turns: 1,
+          pendingDigit: false,
+          note: "",
+          field: "turns",
+        });
+      });
+    },
+
+    /** Set how many turns the open Hand off dialog would send, clamped to the
+     *  range the endpoint accepts (the same clamp the Copy dialog's setter
+     *  applies, and for the same three callers: j/k at both ends, and a typed
+     *  second digit). */
+    setHandoffDialogTurns(turns: number, pendingDigit = false) {
+      if (!state.handoffDialog) return;
+      const clamped = Math.min(MAX_TURNS, Math.max(1, Math.round(turns)));
+      setState("handoffDialog", {
+        ...state.handoffDialog,
+        turns: clamped,
+        pendingDigit,
+      });
+    },
+
+    setHandoffDialogNote(note: string) {
+      if (!state.handoffDialog) return;
+      setState("handoffDialog", { ...state.handoffDialog, note });
+    },
+
+    /** Move the keyboard between the dialog's two rows. A toggle rather than
+     *  an index walk: with two fields, forward and backward are the same
+     *  move, which is why Tab and shift-Tab need no separate handling. */
+    toggleHandoffDialogField() {
+      if (!state.handoffDialog) return;
+      setState("handoffDialog", {
+        ...state.handoffDialog,
+        field: state.handoffDialog.field === "turns" ? "note" : "turns",
+        // A half-typed count does not survive leaving the row it was being
+        // typed into: `1`, Tab, `2` must not become 12.
+        pendingDigit: false,
+      });
+    },
+
+    setHandoffDialogField(field: HandoffDialogField) {
+      if (!state.handoffDialog) return;
+      setState("handoffDialog", {
+        ...state.handoffDialog,
+        field,
+        pendingDigit: false,
+      });
+    },
+
+    closeHandoffDialog() {
+      setState("handoffDialog", null);
     },
 
     /** Light a specific item of whichever menu is open, or nothing. */

@@ -6703,8 +6703,18 @@ describe("App hand off to", () => {
     await setup.renderOnce();
   }
 
+  /** Aim at the second row and press Enter, which opens the dialog. Nothing
+   *  is sent by this: the pick settles WHO, the dialog settles what. */
   async function pickTarget() {
     await startPick();
+    setup.mockInput.pressEnter();
+    await settle();
+    await setup.renderOnce();
+  }
+
+  /** The whole fast path: pick a target, then accept the dialog's defaults. */
+  async function sendPick() {
+    await pickTarget();
     setup.mockInput.pressEnter();
     await settle();
     await setup.renderOnce();
@@ -6789,7 +6799,7 @@ describe("App hand off to", () => {
     const { posted, restore } = withDaemon();
     try {
       await renderRows();
-      await pickTarget();
+      await sendPick();
       expect(posted).toHaveLength(1);
       // Both ends are IDs, which is the resolver's exact tier: the pick is the
       // disambiguation, so an ambiguity refusal is structurally unreachable.
@@ -6798,6 +6808,147 @@ describe("App hand off to", () => {
       expect(frame).toContain("Handed1,234charstoclaude·proj2");
       // The mode ended with the send.
       expect(frame).not.toContain("esccancel");
+    } finally {
+      restore();
+    }
+  });
+
+  it("opens the dialog on Enter rather than sending the pick", async () => {
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await pickTarget();
+      const frame = squish(setup.captureCharFrame());
+      // Both ends named: the target in the title (the irreversible half) and
+      // the source under it.
+      expect(frame).toContain("Handofftoclaude·proj2");
+      expect(frame).toContain("fromclaude·proj1");
+      expect(frame).toContain("Lastresponse");
+      expect(frame).toContain("entersend");
+      // The pick ended WITH the dialog opening, so one esc leaves the gesture.
+      expect(frame).not.toContain("pickatarget");
+      expect(posted).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("sends the turns and the note the dialog was showing", async () => {
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await pickTarget();
+      // Two digits with no timer between them: `1` `2` is 12.
+      await press("1");
+      await press("2");
+      expect(squish(setup.captureCharFrame())).toContain("Last12turns");
+      setup.mockInput.pressTab();
+      await settle();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("take it from here");
+      await settle();
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(posted).toHaveLength(1);
+      expect(posted[0]!.body).toEqual({
+        from: "s1",
+        to: "s2",
+        turns: 12,
+        note: "take it from here",
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  it("gives the note row every printable key, digits included", async () => {
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await pickTarget();
+      setup.mockInput.pressTab();
+      await settle();
+      await setup.renderOnce();
+      await setup.mockInput.typeText("j3");
+      await settle();
+      await setup.renderOnce();
+      // The count is untouched: the digits went into the note, which is the
+      // whole reason focus scopes them.
+      expect(squish(setup.captureCharFrame())).toContain("Lastresponse");
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(posted[0]!.body).toMatchObject({ turns: 1, note: "j3" });
+    } finally {
+      restore();
+    }
+  });
+
+  it("omits a blank note rather than sending an empty one", async () => {
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await sendPick();
+      expect(posted[0]!.body).not.toHaveProperty("note");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps its keys off the list underneath", async () => {
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await pickTarget();
+      // `x` is the kill key on the list and means nothing here; `j` is the
+      // turns step, not a selection move.
+      await press("x");
+      await press("j");
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).not.toContain("Killsession");
+      expect(frame).toContain("Last2turns");
+      expect(posted).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("cancels the whole handoff on one esc", async () => {
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await pickTarget();
+      setup.mockInput.pressEscape();
+      // A bare ESC byte is the prefix of every escape sequence, so the key
+      // parser holds it briefly before deciding it stands alone.
+      await settle(20);
+      await setup.renderOnce();
+      const frame = squish(setup.captureCharFrame());
+      // Neither the dialog nor the pick mode it came from is left behind.
+      expect(frame).not.toContain("Handofftoclaude·proj2");
+      expect(frame).not.toContain("esccancel");
+      expect(posted).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("says which end is gone when a row leaves the board under it", async () => {
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await pickTarget();
+      sseCallbacks!.onSessionRemoved("s2");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(posted).toEqual([]);
+      expect(squish(setup.captureCharFrame())).toContain(
+        "sessionbeinghandedofftoisgone",
+      );
     } finally {
       restore();
     }
@@ -6815,7 +6966,7 @@ describe("App hand off to", () => {
     });
     try {
       await renderRows([{}, { status: "working" }]);
-      await pickTarget();
+      await sendPick();
       const frame = squish(setup.captureCharFrame());
       expect(frame).toContain("Queuedforclaude·proj2");
       expect(frame).toContain("landswhentheturnends");
@@ -6835,7 +6986,7 @@ describe("App hand off to", () => {
     });
     try {
       await renderRows([{}, { status: "waiting" }]);
-      await pickTarget();
+      await sendPick();
       const frame = squish(setup.captureCharFrame());
       expect(frame).toContain("Handoffrefused:");
       expect(frame).toContain("Sessions2hasapendingprompt");
@@ -6848,7 +6999,7 @@ describe("App hand off to", () => {
     const { restore } = withDaemon("unreachable");
     try {
       await renderRows();
-      await pickTarget();
+      await sendPick();
       expect(squish(setup.captureCharFrame())).toContain(
         "Handofffailed:daemonunreachable",
       );

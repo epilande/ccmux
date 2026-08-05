@@ -1,6 +1,7 @@
 import { describe, it, expect, mock } from "bun:test";
 import type { FlatItem } from "./utils/grouping";
 import { mockEnrichedSession } from "./components/test-helpers";
+import { MAX_TURNS } from "../daemon/transcript-read";
 
 // capturePane is mocked (process-wide, per Bun's mock.module) so the
 // searchPaneLines tests can assert what the store passes it, without
@@ -3933,6 +3934,80 @@ describe("handoff pick mode", () => {
     expect(store.actions.beginHandoffPick("a")).toBe(false);
     // Nothing entered: a mode whose only candidate is the source is a dead end.
     expect(store.state.handoffPick).toBeNull();
+  });
+});
+
+describe("handoff dialog state", () => {
+  const open = () => {
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([
+      createMockSession({ id: "a", lastUserInputAt: "2024-01-01T13:00:00Z" }),
+      createMockSession({ id: "b", lastUserInputAt: "2024-01-01T12:00:00Z" }),
+    ]);
+    store.actions.beginHandoffPick("a");
+    store.actions.openHandoffDialog("a", "b");
+    return store;
+  };
+
+  it("ends the pick mode as it opens, on the last response and no note", () => {
+    const store = open();
+
+    // One gesture, so one Escape leaves it: a board still in pick mode under
+    // an open dialog would need two.
+    expect(store.state.handoffPick).toBeNull();
+    expect(store.state.handoffDialog).toEqual({
+      fromSessionId: "a",
+      toSessionId: "b",
+      turns: 1,
+      pendingDigit: false,
+      note: "",
+      field: "turns",
+    });
+  });
+
+  it("clamps the turn count to the range the endpoint accepts", () => {
+    const store = open();
+
+    store.actions.setHandoffDialogTurns(0);
+    expect(store.state.handoffDialog?.turns).toBe(1);
+    store.actions.setHandoffDialogTurns(999);
+    expect(store.state.handoffDialog?.turns).toBe(MAX_TURNS);
+    store.actions.setHandoffDialogTurns(2, true);
+    expect(store.state.handoffDialog).toMatchObject({
+      turns: 2,
+      pendingDigit: true,
+    });
+  });
+
+  it("drops a half-typed count when focus leaves the turns row", () => {
+    const store = open();
+    store.actions.setHandoffDialogTurns(1, true);
+
+    store.actions.toggleHandoffDialogField();
+    // `1`, Tab, `2` must not become 12: the digit was aimed at a row the
+    // keyboard has left.
+    expect(store.state.handoffDialog).toMatchObject({
+      field: "note",
+      pendingDigit: false,
+    });
+
+    store.actions.toggleHandoffDialogField();
+    expect(store.state.handoffDialog?.field).toBe("turns");
+  });
+
+  it("holds the note, and closes cleanly", () => {
+    const store = open();
+
+    store.actions.setHandoffDialogNote("take it from here");
+    expect(store.state.handoffDialog?.note).toBe("take it from here");
+
+    store.actions.closeHandoffDialog();
+    expect(store.state.handoffDialog).toBeNull();
+    // A closed dialog's setters are no-ops rather than reopening it.
+    store.actions.setHandoffDialogNote("late");
+    store.actions.setHandoffDialogTurns(3);
+    store.actions.toggleHandoffDialogField();
+    expect(store.state.handoffDialog).toBeNull();
   });
 });
 

@@ -176,7 +176,7 @@ export const Footer: Component<FooterProps> = (props) => {
         </Match>
         <Match when={props.handoffPickMode}>
           <text fg={theme.overlay}>
-            j/k pick target · enter hand off · esc cancel
+            j/k pick target · enter continue · esc cancel
           </text>
         </Match>
         <Match when={props.searchMode}>

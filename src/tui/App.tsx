@@ -75,7 +75,9 @@ import {
 import { newSessionOptions } from "./new-session-options";
 import { NoticeDialog } from "./components/NoticeDialog";
 import { CopyDialog } from "./components/CopyDialog";
-import { MAX_TURNS, renderTurns } from "../daemon/transcript-read";
+import { HandoffDialog } from "./components/HandoffDialog";
+import { applyTurnsKey } from "./turns-selection";
+import { renderTurns } from "../daemon/transcript-read";
 import { slugFromPrompt, slugify } from "../daemon/worktree-create";
 import {
   failureNeedsAcknowledgement,
@@ -801,7 +803,8 @@ export function App(props: AppProps) {
       store.state.newSession !== null ||
       store.state.worktrees !== null ||
       store.state.notice !== null ||
-      store.state.copyDialog !== null
+      store.state.copyDialog !== null ||
+      store.state.handoffDialog !== null
     );
   }
 
@@ -1325,21 +1328,14 @@ export function App(props: AppProps) {
   /**
    * The Copy dialog's key model.
    *
-   * It owns j/k (and the arrows), Enter, Escape and the digits; every other
-   * key closes it WITHOUT copying and without acting on the board. That last
-   * half is where it parts company with the row menu, whose dismissing key
-   * goes on to mean what it always means: the menu is a small popup anchored
-   * beside a row, while this is a modal box over the middle of the list, and a
-   * `x` that both dismissed it and reached the board would be one keystroke
-   * from killing the row it was copying.
-   *
-   * Digits jump straight to a count. A leading `1` or `2` is the only
-   * ambiguous one (11-20 exist), so it takes effect immediately AND waits for
-   * one more digit: a second digit that lands inside the range replaces it
-   * (`1` `2` -> 12), one that would overshoot starts a fresh count (`2` `5` ->
-   * 5), and anything else just goes on meaning what it means with the leading
-   * digit already applied. There is no timer, so the same keys always produce
-   * the same count.
+   * It owns the turns selector's keys (`turns-selection.ts`: j/k, the arrows
+   * and the digits), Enter and Escape; every other key closes it WITHOUT
+   * copying and without acting on the board. That last half is where it parts
+   * company with the row menu, whose dismissing key goes on to mean what it
+   * always means: the menu is a small popup anchored beside a row, while this
+   * is a modal box over the middle of the list, and a `x` that both dismissed
+   * it and reached the board would be one keystroke from killing the row it
+   * was copying.
    */
   function handleCopyDialogKey(
     event: KeyEvent,
@@ -1348,34 +1344,13 @@ export function App(props: AppProps) {
     const key = event.name;
     event.preventDefault();
 
-    if (key === "j" || key === "down") {
-      store.actions.setCopyDialogTurns(open.turns + 1);
-      return;
-    }
-    if (key === "k" || key === "up") {
-      store.actions.setCopyDialogTurns(open.turns - 1);
+    const turns = applyTurnsKey(key, open);
+    if (turns) {
+      store.actions.setCopyDialogTurns(turns.turns, turns.pendingDigit);
       return;
     }
     if (key === "return" || key === "enter") {
       commitCopyDialog();
-      return;
-    }
-    if (key === "escape") {
-      store.actions.closeCopyDialog();
-      return;
-    }
-    if (key >= "0" && key <= "9") {
-      const digit = parseInt(key, 10);
-      if (open.pendingDigit) {
-        const combined = open.turns * 10 + digit;
-        if (combined <= MAX_TURNS) {
-          store.actions.setCopyDialogTurns(combined);
-          return;
-        }
-      }
-      // A bare 0 is not a count and nothing here can start with one.
-      if (digit === 0) return;
-      store.actions.setCopyDialogTurns(digit, digit * 10 <= MAX_TURNS);
       return;
     }
     store.actions.closeCopyDialog();
@@ -1434,17 +1409,29 @@ export function App(props: AppProps) {
    * IDs, which is the resolver's exact tier, so there is never a candidate
    * list to render: the pick IS the disambiguation.
    */
-  async function handOffTo(from: EnrichedSession, to: EnrichedSession) {
+  async function handOffTo(
+    from: EnrichedSession,
+    to: EnrichedSession,
+    turns: number,
+    note: string,
+  ) {
     const target = handoffLabel(to);
     store.actions.showToast(`Handing off to ${target}…`, 15_000);
     try {
       const response = await fetch(`${getDaemonUrl()}/handoff`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // `turns: 1` is the endpoint's default, sent explicitly because this
-        // client's promise ("hand off the last response") is the one-turn
-        // shape, not whatever the default becomes.
-        body: JSON.stringify({ from: from.id, to: to.id, turns: 1 }),
+        // `turns` is sent even when it is 1 (the endpoint's default), because
+        // what this client promises is the count the dialog was showing, not
+        // whatever the default becomes. A blank note is OMITTED rather than
+        // sent empty: the header drops it either way, and a field that is not
+        // there cannot be misread as one that was cleared.
+        body: JSON.stringify({
+          from: from.id,
+          to: to.id,
+          turns,
+          ...(note.trim() ? { note } : {}),
+        }),
         signal: AbortSignal.timeout(15_000),
       });
       const data = (await response.json()) as {
@@ -1477,7 +1464,12 @@ export function App(props: AppProps) {
   }
 
   /**
-   * Pick the selected row as the handoff target and leave the mode.
+   * Pick the selected row as the handoff target and open the dialog that says
+   * how much to send with it.
+   *
+   * Nothing is delivered here. Aiming settles WHO, and the dialog settles what
+   * they get, which is why the pick mode ends at this point rather than at
+   * delivery: one gesture, one Escape to leave it.
    *
    * The two rows the selection can be sitting on that are not a target (a
    * group header, and the source itself) keep the mode open: leaving it on a
@@ -1496,8 +1488,97 @@ export function App(props: AppProps) {
       store.actions.showToast("A session cannot hand off to itself", 3_000);
       return;
     }
-    store.actions.endHandoffPick();
-    void handOffTo(from, to);
+    store.actions.openHandoffDialog(from.id, to.id);
+  }
+
+  /** An end of the open Hand off dialog, or undefined once that row has left
+   *  the board (an SSE removal under an open dialog). */
+  function handoffDialogSession(
+    end: "fromSessionId" | "toSessionId",
+  ): EnrichedSession | undefined {
+    const open = store.state.handoffDialog;
+    if (!open) return undefined;
+    return store.state.sessions.find((s) => s.id === open[end]);
+  }
+
+  /** Close the Hand off dialog and send what it was configuring. */
+  function commitHandoffDialog(): void {
+    const open = store.state.handoffDialog;
+    if (!open) return;
+    const from = handoffDialogSession("fromSessionId");
+    const to = handoffDialogSession("toSessionId");
+    store.actions.closeHandoffDialog();
+    // Either end can leave the board while the dialog is up. Reported rather
+    // than sent by id anyway: the daemon would refuse it, and this says which
+    // half of the gesture is gone before a round trip does.
+    if (!from) {
+      store.actions.showToast("The session being handed off is gone", 4_000);
+      return;
+    }
+    if (!to) {
+      store.actions.showToast("The session being handed off to is gone", 4_000);
+      return;
+    }
+    void handOffTo(from, to, open.turns, open.note);
+  }
+
+  /**
+   * The Hand off dialog's key model.
+   *
+   * Escape cancels the WHOLE handoff (the pick mode is already over by the
+   * time this is open, so one Escape leaves the gesture entirely) and Enter
+   * sends from either row, so the fast path stays the pick plus Enter. Tab is
+   * the only field switch: the turns row binds the arrows to the count, the
+   * same way the Copy dialog does, and rebinding them here would make two
+   * identical-looking rows answer the same key differently. From the note the
+   * keys an input does not consume (down/up, ctrl-n/ctrl-p) move as well,
+   * exactly as they do in the new-session dialog's text fields.
+   *
+   * While the note has focus every remaining key is the input's, `j` and `3`
+   * included; while the turns row has focus every unclaimed key is SWALLOWED
+   * rather than dismissing the dialog (the Copy dialog's rule), because a
+   * stray key next to a text field is far more likely to be someone starting
+   * to type their note on the wrong row than someone asking to leave.
+   */
+  function handleHandoffDialogKey(
+    event: KeyEvent,
+    open: NonNullable<typeof store.state.handoffDialog>,
+  ): void {
+    const key = event.name;
+
+    if (key === "escape") {
+      store.actions.closeHandoffDialog();
+      event.preventDefault();
+      return;
+    }
+    if (key === "return" || key === "enter") {
+      commitHandoffDialog();
+      event.preventDefault();
+      return;
+    }
+    if (key === "tab" || key === "backtab") {
+      store.actions.toggleHandoffDialogField();
+      event.preventDefault();
+      return;
+    }
+
+    if (open.field === "note") {
+      if (key === "down" || (key === "n" && event.ctrl)) {
+        store.actions.setHandoffDialogField("turns");
+        event.preventDefault();
+      } else if (key === "up" || (key === "p" && event.ctrl)) {
+        store.actions.setHandoffDialogField("turns");
+        event.preventDefault();
+      }
+      // Everything else belongs to the input, which needs the key left alone.
+      return;
+    }
+
+    const turns = applyTurnsKey(key, open);
+    if (turns) {
+      store.actions.setHandoffDialogTurns(turns.turns, turns.pendingDigit);
+    }
+    event.preventDefault();
   }
 
   function sessionMenuItems(): ContextMenuItem[] {
@@ -3048,6 +3129,15 @@ export function App(props: AppProps) {
       return;
     }
 
+    // Beside the Copy dialog, above the new-session dialog, and above the
+    // pick-mode branch below: the pick is over by the time this is open, but
+    // the ordering has to hold even so, or a key would reach a list the user
+    // can no longer see the aim on.
+    if (store.state.handoffDialog) {
+      handleHandoffDialogKey(event, store.state.handoffDialog);
+      return;
+    }
+
     if (store.state.newSession) {
       handleNewSessionKey(event);
       return;
@@ -3532,7 +3622,7 @@ export function App(props: AppProps) {
               <text fg={theme.mauve}>
                 {props.sidebar
                   ? `${HANDOFF_BADGE} pick target · enter · esc`
-                  : `${HANDOFF_BADGE} Hand off from ${handoffLabel(from())} · pick a target · enter send · esc cancel`}
+                  : `${HANDOFF_BADGE} Hand off from ${handoffLabel(from())} · pick a target · enter continue · esc cancel`}
               </text>
             </box>
           )}
@@ -3677,6 +3767,30 @@ export function App(props: AppProps) {
                 return session ? handoffLabel(session) : copy().sessionId;
               })()}
               turns={copy().turns}
+            />
+          )}
+        </Show>
+
+        <Show when={store.state.handoffDialog}>
+          {(handoff: () => NonNullable<typeof store.state.handoffDialog>) => (
+            <HandoffDialog
+              // Either row can leave the board under an open dialog; the
+              // dialog stays (Enter then reports the loss rather than
+              // sending), so a label falls back to the id it still holds.
+              fromLabel={(() => {
+                const session = handoffDialogSession("fromSessionId");
+                return session
+                  ? handoffLabel(session)
+                  : handoff().fromSessionId;
+              })()}
+              toLabel={(() => {
+                const session = handoffDialogSession("toSessionId");
+                return session ? handoffLabel(session) : handoff().toSessionId;
+              })()}
+              turns={handoff().turns}
+              note={handoff().note}
+              field={handoff().field}
+              onNoteInput={store.actions.setHandoffDialogNote}
             />
           )}
         </Show>
