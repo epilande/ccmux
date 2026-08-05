@@ -20,6 +20,10 @@ import {
   sendLiteralToPane,
   sendPromptToPane,
 } from "./pane-io";
+import { resolveSessionRef } from "./session-ref";
+import { MAX_TURNS } from "./transcript-read";
+import { readSessionTranscript } from "./transcript-readers";
+import { stripControlChars } from "./send-guards";
 import {
   AMBIGUOUS_WAIT_ERROR,
   checkForegroundLiveness,
@@ -1131,9 +1135,16 @@ export class DaemonServer {
       path.endsWith("/transcript") &&
       req.method === "GET"
     ) {
-      const ref = decodeURIComponent(
-        path.slice("/sessions/".length, -"/transcript".length),
-      );
+      const raw = path.slice("/sessions/".length, -"/transcript".length);
+      // A malformed escape (`%zz`) throws URIError, which would escape
+      // `handleRequest` as a 500 carrying Bun's HTML error page. The raw
+      // segment is a fine ref to try instead: it resolves or 404s.
+      let ref: string;
+      try {
+        ref = decodeURIComponent(raw);
+      } catch {
+        ref = raw;
+      }
       return await this.handleSessionTranscript(ref, url, corsHeaders);
     }
 
@@ -2540,7 +2551,17 @@ export class DaemonServer {
           sessionId: session.id,
           agentType: session.agentType,
           source: "transcript",
-          turns: transcript.turns,
+          // Transcript text is agent-authored and reaches a TTY on the way
+          // out, so an ESC sequence in it would be INTERPRETED (a title
+          // change, an OSC 52 clipboard write). Newlines and tabs survive:
+          // unlike the pane branch below, this text carries code.
+          turns: transcript.turns.map((turn) => ({
+            ...turn,
+            text: stripControlChars(turn.text, {
+              keepNewlines: true,
+              keepTabs: true,
+            }),
+          })),
           truncated: transcript.truncated,
           resolution: resolved,
         },
@@ -2572,7 +2593,9 @@ export class DaemonServer {
         source: "pane",
         // Role is nominal here: a screen capture is not a parsed turn.
         turns: [{ role: "assistant", text: capture }],
-        truncated: false,
+        // Always: `capturePane` reads the visible tail (50 lines by
+        // default), so a pane capture is never the whole response.
+        truncated: true,
         resolution: resolved,
       },
       { headers },
