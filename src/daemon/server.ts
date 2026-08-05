@@ -22,7 +22,7 @@ import {
 } from "./pane-io";
 import { resolveSessionRef } from "./session-ref";
 import type { SessionRefResolution } from "./session-ref";
-import { MAX_TURNS, renderTurns } from "./transcript-read";
+import { MAX_TURNS, parseTurnsField, renderTurns } from "./transcript-read";
 import { readSessionTranscript } from "./transcript-readers";
 import {
   AMBIGUOUS_WAIT_ERROR,
@@ -2542,9 +2542,21 @@ export class DaemonServer {
     }
 
     const session = resolution.session;
-    const requested = parseInt(url.searchParams.get("turns") ?? "1", 10);
+    // A read CLAMPS a count it can't fully serve (the asymmetry with
+    // `POST /handoff`, which refuses, is explained there), but a value that is
+    // not a count at all was never a request for N turns and is refused rather
+    // than silently read as 1, which `turns=true` used to be.
+    const requested = parseTurnsField(url.searchParams.get("turns"));
+    if (requested.kind === "invalid") {
+      return Response.json(
+        { error: `Invalid 'turns' value (expected 1-${MAX_TURNS})` },
+        { status: 400, headers },
+      );
+    }
     const turns =
-      isNaN(requested) || requested < 1 ? 1 : Math.min(requested, MAX_TURNS);
+      requested.kind === "absent" || requested.value < 1
+        ? 1
+        : Math.min(requested.value, MAX_TURNS);
 
     const resolved = {
       ref,
@@ -2698,17 +2710,18 @@ export class DaemonServer {
     // else's composer, so a caller who miscounted should learn that from an
     // error rather than from a peer receiving a different amount of context
     // than they asked to send.
-    let turns = 1;
-    if (body.turns != null) {
-      const value = Number(body.turns);
-      if (!Number.isInteger(value) || value < 1 || value > MAX_TURNS) {
-        return Response.json(
-          { error: `Invalid 'turns' field (expected 1-${MAX_TURNS})` },
-          { status: 400, headers },
-        );
-      }
-      turns = value;
+    const requested = parseTurnsField(body.turns);
+    if (
+      requested.kind === "invalid" ||
+      (requested.kind === "ok" &&
+        (requested.value < 1 || requested.value > MAX_TURNS))
+    ) {
+      return Response.json(
+        { error: `Invalid 'turns' field (expected 1-${MAX_TURNS})` },
+        { status: 400, headers },
+      );
     }
+    const turns = requested.kind === "ok" ? requested.value : 1;
 
     let note: string | undefined;
     if (body.note != null) {
@@ -2718,7 +2731,20 @@ export class DaemonServer {
           { status: 400, headers },
         );
       }
-      if (body.note.length > MAX_HANDOFF_NOTE_CHARS) {
+      // Trimmed BEFORE the cap, because the header would have trimmed it
+      // anyway: a note is measured as what actually travels.
+      const trimmed = body.note.trim();
+      // The header folds a note to one line and drops it when nothing is left,
+      // so a note of pure whitespace would travel as no note at all behind a
+      // 200 that says it was sent. Refused instead, at the only moment the
+      // sender is still listening.
+      if (trimmed === "") {
+        return Response.json(
+          { error: "Invalid 'note' field (a note cannot be only whitespace)" },
+          { status: 400, headers },
+        );
+      }
+      if (trimmed.length > MAX_HANDOFF_NOTE_CHARS) {
         return Response.json(
           {
             error: `Note exceeds ${MAX_HANDOFF_NOTE_CHARS} characters (a note is a one-liner; put the detail in the payload)`,
@@ -2726,7 +2752,7 @@ export class DaemonServer {
           { status: 400, headers },
         );
       }
-      note = body.note;
+      note = trimmed;
     }
 
     const callerPane =
@@ -2779,17 +2805,24 @@ export class DaemonServer {
       );
     }
 
+    // The pane's real cwd where there is one, `session.cwd` only as the
+    // fallback. For a native Claude session `session.cwd` can be a
+    // `decodeProjectPath` guess, which cannot tell a `-` in a directory name
+    // from the `/` it encodes, and the receiving agent may `cd` into what
+    // the header quotes (issue #121). Same notion of "where this session lives"
+    // the git/PR enrichment already uses, so the header's cwd and its branch
+    // can never describe two different directories.
+    const sourceCwd = this.effectiveCwd(source, refContext.panes);
     // `session.gitBranch` plus the git cache, never a fresh `git` spawn: the
     // header reports what the daemon already knows and omits the segment when
     // it knows nothing, rather than paying a subprocess for a decoration.
     const branch =
-      this.gitInfoCache.get(this.effectiveCwd(source, refContext.panes))?.info
-        .branch ?? source.gitBranch;
+      this.gitInfoCache.get(sourceCwd)?.info.branch ?? source.gitBranch;
     const header = formatHandoffHeader(
       {
         sessionId: source.id,
         agentType: source.agentType,
-        cwd: source.cwd,
+        cwd: sourceCwd,
         branch,
       },
       new Date(),
@@ -2831,7 +2864,10 @@ export class DaemonServer {
         { from, truncated, chars: text.length },
         {
           agent: spawnRequest.value.agent ?? source.agentType,
-          cwd: spawnRequest.value.cwd ?? source.cwd,
+          // Same live cwd the header quotes: a spawn defaulting to the
+          // source's directory must open where the header says the work is,
+          // not in a decoded guess at it (issue #121).
+          cwd: spawnRequest.value.cwd ?? sourceCwd,
           callerPane,
         },
         headers,

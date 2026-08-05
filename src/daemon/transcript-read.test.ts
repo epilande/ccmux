@@ -5,7 +5,9 @@ import { join } from "path";
 import {
   MAX_LINE_BYTES,
   MAX_TURN_CHARS,
+  SKIP_LINE,
   foldJsonlTurns,
+  parseTurnsField,
   readLinesBackwards,
   type LineMeaning,
 } from "./transcript-read";
@@ -291,5 +293,47 @@ describe("foldJsonlTurns", () => {
     ).toBeNull();
     const path = write("t.jsonl", jsonl({ r: "user", t: "q" }));
     expect(await foldJsonlTurns(path, 1, classify)).toBeNull();
+  });
+});
+
+/**
+ * Both endpoints used to coerce this field with `Number()`, which reads
+ * `true` as 1 and `["2"]` as 2, so a caller who sent nonsense got a
+ * plausible number of turns back instead of an error.
+ */
+describe("parseTurnsField", () => {
+  it("accepts an integer and a digit string, the two shapes the wire carries", () => {
+    expect(parseTurnsField(3)).toEqual({ kind: "ok", value: 3 });
+    expect(parseTurnsField("3")).toEqual({ kind: "ok", value: 3 });
+    expect(parseTurnsField(" 3 ")).toEqual({ kind: "ok", value: 3 });
+  });
+
+  it("reports an absent field rather than defaulting for the caller", () => {
+    expect(parseTurnsField(undefined)).toEqual({ kind: "absent" });
+    expect(parseTurnsField(null)).toEqual({ kind: "absent" });
+  });
+
+  it("refuses anything that is not a count", () => {
+    for (const raw of [true, false, ["2"], {}, "", " ", "2.5", "3abc", "-1"]) {
+      expect(parseTurnsField(raw)).toEqual({ kind: "invalid" });
+    }
+    expect(parseTurnsField(2.5)).toEqual({ kind: "invalid" });
+    expect(parseTurnsField(NaN)).toEqual({ kind: "invalid" });
+  });
+
+  // Range belongs to the caller: a read clamps where a paste refuses.
+  it("passes out-of-range integers through for the caller to judge", () => {
+    expect(parseTurnsField(0)).toEqual({ kind: "ok", value: 0 });
+    expect(parseTurnsField(9999)).toEqual({ kind: "ok", value: 9999 });
+  });
+});
+
+describe("SKIP_LINE", () => {
+  it("is frozen, since all nine readers return the same object", () => {
+    expect(Object.isFrozen(SKIP_LINE)).toBe(true);
+    expect(() => {
+      (SKIP_LINE as { kind: string }).kind = "user";
+    }).toThrow();
+    expect(SKIP_LINE.kind).toBe("skip");
   });
 });

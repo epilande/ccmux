@@ -29,6 +29,39 @@ export const MAX_TURN_CHARS = 20_000;
 /** How many turns a caller may ask for (the endpoint clamps to this). */
 export const MAX_TURNS = 20;
 
+/**
+ * The wire `turns` field, from either endpoint: a JSON body value or a raw
+ * query-string value. `null` means "the caller said nothing"; `"invalid"`
+ * means they said something that is not a count.
+ *
+ * Coercion is the whole point. `Number(true)` is `1` and `Number(["2"])` is
+ * `2`, so both endpoints used to accept a boolean or a one-element array as a
+ * turn count and quietly send that many turns. Only a real integer, or a
+ * string that is entirely digits, counts here: the two shapes JSON and a
+ * query string can each legitimately carry.
+ *
+ * Range is deliberately NOT decided here. A read clamps and a paste refuses
+ * (see the handoff handler), and one helper that returned a clamped value
+ * would take that choice away from the caller who has to make it.
+ */
+export function parseTurnsField(
+  raw: unknown,
+): { kind: "absent" } | { kind: "invalid" } | { kind: "ok"; value: number } {
+  if (raw === undefined || raw === null) return { kind: "absent" };
+  if (typeof raw === "number") {
+    return Number.isInteger(raw)
+      ? { kind: "ok", value: raw }
+      : { kind: "invalid" };
+  }
+  if (typeof raw === "string" && /^\d+$/.test(raw.trim())) {
+    const value = Number(raw.trim());
+    return Number.isSafeInteger(value)
+      ? { kind: "ok", value }
+      : { kind: "invalid" };
+  }
+  return { kind: "invalid" };
+}
+
 /** One entry of a transcript response: a user prompt or an assistant reply. */
 export interface TranscriptTurn {
   role: "user" | "assistant";
@@ -223,7 +256,10 @@ export type LineMeaning =
   | { kind: "user"; text: string; timestamp?: string }
   | { kind: "skip" };
 
-const SKIP: LineMeaning = { kind: "skip" };
+/** The one "this line says nothing" value every reader returns. Shared, so
+ *  FROZEN: a reader that mutated it would change what skip means for all nine
+ *  of them, and for every fold already in flight. */
+const SKIP: LineMeaning = Object.freeze({ kind: "skip" });
 export { SKIP as SKIP_LINE };
 
 /**
