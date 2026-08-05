@@ -359,6 +359,25 @@ export interface EnrichedSession extends Session {
    * no PR entries.
    */
   branchPRs?: BranchPR[] | null;
+  /**
+   * A handoff (`POST /handoff`) addressed at this session while it was
+   * mid-turn, waiting for it to go idle. Enrich-time only, read from the
+   * daemon's `HandoffQueue`, never persisted on the stored `Session`.
+   *
+   * Optional and additive on purpose: a TUI older than this field simply
+   * doesn't render it. Absent for every session with nothing queued, which is
+   * almost all of them.
+   */
+  pendingHandoff?: PendingHandoffSummary;
+}
+
+/** What a client needs to say "a handoff from X is waiting for this row".
+ *  The payload itself is deliberately NOT on the wire: it is a prompt for the
+ *  target agent, not content for a session list. */
+export interface PendingHandoffSummary {
+  fromSessionId: string;
+  /** ISO 8601, like every other timestamp on the wire. */
+  queuedAt: string;
 }
 
 /**
