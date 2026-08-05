@@ -214,10 +214,12 @@ async function reconcileNativeSession(
  * 2. Dismissed-prompt downgrade (`applyDismissedPermissionEvidence`): a
  *    permission prompt the user ESCAPES fires no hook, so the marker keeps
  *    claiming the wait, and on the native path nothing can contradict it:
- *    `nativeLogSource` echoes the stored `waiting` back with a refreshed
- *    timestamp every tick, and `resolveNativeClaudeStates` only pane-checks
- *    sessions that are `working`. The row then sits at `waiting` until the
- *    next real turn, refusing every handoff (issue #117).
+ *    `nativeLogSource` echoes the stored `waiting` back at the marker's own
+ *    timestamp every tick, so it ties the marker instead of out-freshening
+ *    it, and the tie resolves to the marker. `resolveNativeClaudeStates`
+ *    only pane-checks sessions that are `working`, so this path is not
+ *    covered there either. The row then sits at `waiting` until the next
+ *    real turn, refusing every handoff (issue #117).
  *
  * Both corrections mutate `sources` in place; any capture failure is a
  * fail-open no-op (the marker's `permission` stands).
@@ -311,9 +313,10 @@ async function applyPermissionPaneEvidence(
  * The observation enters the fold as a BASELINE terminal source stamped NOW,
  * which is the only shape that can win here: an `upgradeOnly` source cannot
  * downgrade by construction, and a stale marker's `waiting` is echoed back by
- * `nativeLogSource` with a fresh timestamp every tick, so nothing older than
- * this tick out-freshens it. Once it lands, the store holds `idle` and the log
- * echo carries the correction forward on its own.
+ * `nativeLogSource` at the marker's own timestamp every tick, so it ties the
+ * marker rather than out-freshening it, and the tie resolves to the marker.
+ * Only a source stamped this tick can win. Once it lands, the store holds
+ * `idle` and the log echo carries the correction forward on its own.
  *
  * Nothing is written to the marker file: it is the hook scripts' to own, and
  * the next real turn rewrites it anyway.

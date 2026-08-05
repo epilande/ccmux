@@ -78,6 +78,46 @@ function pane(paneId: string, sessionName = "work", windowIndex = 0): TmuxPane {
   };
 }
 
+/**
+ * What a capture of an idle Claude composer looks like: the glyph on a line of
+ * its own between the rule lines, with nothing but status chrome under it.
+ * Trimmed from a real Claude Code 2.1.222 pane, same fixture shape
+ * `pane-classify.test.ts` uses.
+ */
+const IDLE_COMPOSER = [
+  "⏺ Done.",
+  "",
+  "✻ Baked for 28s",
+  "",
+  "────────────────────────────────────────────",
+  "❯ ",
+  "────────────────────────────────────────────",
+  "  🤖 Opus 5 │ 🧠 4% │ ⏱️ 0m48s │ 📦 v2.1.222",
+  "  💬 run the bash command: touch probe.txt",
+  "",
+].join("\n");
+
+/** The same pane with a live permission prompt on it: the terminator plus its
+ *  option block, whose highlighted default a bare Enter would select. */
+const LIVE_PERMISSION_PROMPT = [
+  "⏺ I'll run that command.",
+  "",
+  "  Running 1 shell command…",
+  "",
+  "────────────────────────────────────────────",
+  " Bash command",
+  "",
+  "   touch /tmp/probe.txt",
+  "",
+  " Do you want to proceed?",
+  " ❯ 1. Yes",
+  "   2. Yes, and always allow access to tmp/ from this project",
+  "   3. No",
+  "",
+  " Esc to cancel · Tab to amend · ctrl+e to explain",
+  "",
+].join("\n");
+
 function createServer(paneCache: Map<string, TmuxPane> = new Map()) {
   const manager = new SessionManager();
   const invocationManager = new InvocationManager(
@@ -90,6 +130,10 @@ function createServer(paneCache: Map<string, TmuxPane> = new Map()) {
   const sendPromptToPane = mock(async () => true);
   // Every pane is at a live agent unless a test says otherwise.
   const getPaneCommand = mock(async () => "claude");
+  // ...and showing an idle composer. Injected rather than left to the real
+  // `capturePane` so no test in this file shells out to tmux for a pane that
+  // does not exist.
+  const capturePane = mock(async () => IDLE_COMPOSER);
   const server = new DaemonServer(
     manager,
     () => paneCache,
@@ -101,12 +145,14 @@ function createServer(paneCache: Map<string, TmuxPane> = new Map()) {
       sendLiteralToPane: mock(async () => true),
       sendPromptToPane,
       getPaneCommand,
+      capturePane,
     },
   );
   return {
     manager,
     sendPromptToPane,
     getPaneCommand,
+    capturePane,
     internals: server as unknown as Internals,
   };
 }
@@ -670,6 +716,102 @@ describe("POST /handoff — guard stack", () => {
   });
 });
 
+/**
+ * The last guard, and the only one that reads the PANE. Every other check in
+ * the stack asks about metadata, so a status that was NEVER right (a marker
+ * that outlived its prompt, issue #117) walks straight through them: the paste
+ * is swallowed by the live dialog and the trailing Enter selects its
+ * highlighted default.
+ */
+describe("POST /handoff — the pane-evidence gate", () => {
+  it("refuses a target whose pane is showing a live prompt, and types NOTHING", async () => {
+    const { manager, internals, sendPromptToPane, capturePane } =
+      createServer();
+    pair(manager);
+    // The store says idle. The pane says otherwise, and the pane is right.
+    capturePane.mockResolvedValue(LIVE_PERMISSION_PROMPT);
+
+    const response = await post(internals, { from: "src", to: "dst" });
+    expect(response.status).toBe(409);
+    expect((await response.json()) as { reason: string }).toMatchObject({
+      reason: "pane-not-ready",
+    });
+    // THE assertion: nothing reached the pane, so no default got selected.
+    expect(sendPromptToPane).not.toHaveBeenCalled();
+  });
+
+  it("delivers when the pane positively shows an idle composer", async () => {
+    const { manager, internals, sendPromptToPane, capturePane } =
+      createServer();
+    pair(manager, "ship it");
+    capturePane.mockResolvedValue(IDLE_COMPOSER);
+
+    const response = await post(internals, { from: "src", to: "dst" });
+    expect(response.status).toBe(200);
+    expect((await response.json()) as { status: string }).toMatchObject({
+      status: "delivered",
+    });
+    expect(sendPromptToPane).toHaveBeenCalledTimes(1);
+    expect(
+      (sendPromptToPane.mock.calls[0] as unknown as string[])[1],
+    ).toContain("ship it");
+  });
+
+  it("leaves a non-claude target alone: the pane vocabulary is Claude's", async () => {
+    const { manager, internals, sendPromptToPane, capturePane } =
+      createServer();
+    manager.createSession("src", transcript("src.jsonl", "ship it"));
+    manager.setTmuxPane("src", "%1");
+    // Antigravity, not codex: it is the other built-in that CARRIES a
+    // `readyPattern`, so dropping the agent-type scope would really measure
+    // its pane against Claude's composer here. A target with no pattern at
+    // all skips the gate for a second reason and proves nothing.
+    const antigravity = BUILTIN_AGENTS.find((a) => a.name === "antigravity");
+    expect(antigravity?.readyPattern).toBeDefined();
+    manager.createSession("dst", transcript("dst.jsonl"), "antigravity");
+    manager.setTmuxPane("dst", "%2");
+    // Content that would fail Claude's predicate outright. An antigravity
+    // pane is not measured against it at all.
+    capturePane.mockResolvedValue(LIVE_PERMISSION_PROMPT);
+
+    const response = await post(internals, { from: "src", to: "dst" });
+    expect(response.status).toBe(200);
+    expect((await response.json()) as { status: string }).toMatchObject({
+      status: "delivered",
+    });
+    expect(sendPromptToPane).toHaveBeenCalledTimes(1);
+  });
+
+  it("RE-QUEUES a queued handoff the gate refuses, rather than dropping it", async () => {
+    const { manager, internals, sendPromptToPane, capturePane } =
+      createServer();
+    pair(manager, "queued conclusion");
+    manager.updateSession("dst", { status: "working" });
+    await post(internals, { from: "src", to: "dst" });
+
+    // A pane that is not showing an idle composer this instant may well be
+    // showing one a second later, so this is TRANSIENT. Dropped, the sender
+    // would have been told "queued" and then silently lost the handoff.
+    capturePane.mockResolvedValue(LIVE_PERMISSION_PROMPT);
+    manager.updateSession("dst", { status: "idle" });
+    await Bun.sleep(20);
+
+    expect(sendPromptToPane).not.toHaveBeenCalled();
+    expect(internals.handoffQueue.peek("dst")?.attempts).toBe(1);
+
+    // And the retry lands once the prompt is gone.
+    capturePane.mockResolvedValue(IDLE_COMPOSER);
+    manager.updateSession("dst", { status: "working" });
+    manager.updateSession("dst", { status: "idle" });
+    await Bun.sleep(20);
+    expect(sendPromptToPane).toHaveBeenCalledTimes(1);
+    expect(
+      (sendPromptToPane.mock.calls[0] as unknown as string[])[1],
+    ).toContain("queued conclusion");
+    expect(internals.handoffQueue.peek("dst")).toBeNull();
+  });
+});
+
 describe("POST /handoff — queue on busy", () => {
   it("queues for a working target and surfaces it as pendingHandoff", async () => {
     const { manager, internals, sendPromptToPane } = createServer();
@@ -1179,6 +1321,30 @@ describe("POST /handoff — --spawn", () => {
       // a first-time directory-trust question.
       expect(data.notes).toHaveLength(1);
       expect(data.notes[0]).toContain("trust");
+    } finally {
+      spawn.restore();
+    }
+  });
+
+  it("opens in the source PANE's cwd, not its decoded session cwd", async () => {
+    // The test above passes an explicit `spawn.cwd`, so it never exercises the
+    // default at all. This one does: `session.cwd` is the `decodeProjectPath`
+    // guess (issue #121) and the pane is where the work actually is, so the
+    // spawn must open where the header says it does.
+    const panes = new Map<string, TmuxPane>([
+      ["%1", { ...pane("%1"), currentPath: dir }],
+    ]);
+    const { manager, internals } = createServer(panes);
+    manager.createSession("src", transcript("src.jsonl", "here is the plan"));
+    manager.setTmuxPane("src", "%1");
+    manager.updateSession("src", { cwd: "/Users/dev/my/project/sub/dir" });
+    const spawn = stubSpawn();
+
+    try {
+      const response = await post(internals, { from: "src", spawn: true });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as { to: { cwd: string } };
+      expect(data.to.cwd).toBe(dir);
     } finally {
       spawn.restore();
     }

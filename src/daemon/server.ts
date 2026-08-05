@@ -20,6 +20,7 @@ import {
   sendLiteralToPane,
   sendPromptToPane,
 } from "./pane-io";
+import { showsIdleClaudeComposer } from "./pane-classify";
 import { resolveSessionRef } from "./session-ref";
 import type { SessionRefResolution } from "./session-ref";
 import { MAX_TURNS, parseTurnsField, renderTurns } from "./transcript-read";
@@ -265,6 +266,10 @@ interface PaneSendDeps {
    *  existing injection site (which predates `/handoff`) still type-checks;
    *  the real `getPaneCurrentCommand` is the fallback. */
   getPaneCommand?: (paneId: string) => Promise<string | null>;
+  /** Pane-content probe for the handoff delivery gate. Optional for the same
+   *  reason as `getPaneCommand`: every injection site that predates it still
+   *  type-checks, and the real `capturePane` is the fallback. */
+  capturePane?: (paneId: string, lines?: number) => Promise<string>;
 }
 
 /** Runs one actionable-notification callback (constructed in `index.ts` with
@@ -2549,7 +2554,7 @@ export class DaemonServer {
     const requested = parseTurnsField(url.searchParams.get("turns"));
     if (requested.kind === "invalid") {
       return Response.json(
-        { error: `Invalid 'turns' value (expected 1-${MAX_TURNS})` },
+        { error: "Invalid 'turns' value (expected a whole number)" },
         { status: 400, headers },
       );
     }
@@ -3204,6 +3209,44 @@ export class DaemonServer {
       };
     }
 
+    // Fresh pane evidence, last and closest to the paste. Every check above
+    // asks about METADATA: a stored flag, a status derived up to a scan tick
+    // ago, the pane's foreground process, the payload's shape. So the re-read
+    // above catches a status that CHANGED and never one that was never right —
+    // and a marker that outlived its prompt (issue #117) is exactly the
+    // second kind. `paste-buffer` is swallowed by a live dialog, but the
+    // trailing Enter still lands on it, selecting the highlighted default
+    // (verified live on 2.1.222: a Write tool approved, the payload lost).
+    //
+    // Same predicate the #117 downgrade uses, in the safe direction: deliver
+    // only where the pane POSITIVELY shows an idle composer. `invoke` already
+    // refuses to type until this glyph appears (`isPromptReady`), so this is
+    // delivery reaching parity with a gate that already ships.
+    //
+    // SHRINKS the window, does not close it: a prompt drawn in the 150ms
+    // before the Enter still receives it. Closing that needs a re-check
+    // between the paste and the submit.
+    //
+    // Claude-scoped like the downgrade arm: the pane vocabulary is Claude's,
+    // and what a paste does to another agent's dialog is unverified. An
+    // unreadable pane returns "" and is a fail-OPEN no-op, matching
+    // `capturePane`'s own contract.
+    if (target.agentType === "claude" && agentDef?.readyPattern) {
+      const capture = this.paneSendDeps.capturePane ?? capturePane;
+      const paneText = await capture(target.tmuxPane, 50);
+      if (
+        paneText &&
+        !showsIdleClaudeComposer(paneText, agentDef.readyPattern)
+      ) {
+        return {
+          ok: false,
+          code: 409,
+          reason: "pane-not-ready",
+          error: `Session ${target.id} has something other than an empty composer on screen; a handoff is only ever delivered into an idle composer`,
+        };
+      }
+    }
+
     const sent = await this.paneSendDeps.sendPromptToPane(
       target.tmuxPane,
       defuseLeadingTrigger(text),
@@ -3248,9 +3291,12 @@ export class DaemonServer {
    * and is not listening any more. A DETERMINISTIC refusal (unsafe-payload,
    * not-at-agent, target-waiting, ambiguous-wait, no-pane) drops the record
    * and logs why: re-running a check that just said no would only say no
-   * again. A TRANSIENT one (the tmux send failed, or the target turned over
-   * between the readiness check and the paste) puts the record back with its
-   * attempt counted, for the next idle transition to retry, up to
+   * again. A TRANSIENT one (the tmux send failed, the target turned over
+   * between the readiness check and the paste, or `pane-not-ready`: a pane
+   * that is not showing an idle composer right now may well be showing one a
+   * second later, after a redraw or once the user is done mid-keystroke, so
+   * it is a retry and not a verdict) puts the record back with its attempt
+   * counted, for the next idle transition to retry, up to
    * {@link MAX_HANDOFF_ATTEMPTS}. Retries never extend the TTL, so half an
    * hour remains the outer bound either way.
    */
@@ -3269,7 +3315,8 @@ export class DaemonServer {
       );
     } else if (
       result.reason === "send-failed" ||
-      result.reason === "target-busy"
+      result.reason === "target-busy" ||
+      result.reason === "pane-not-ready"
     ) {
       const attempts = (record.attempts ?? 0) + 1;
       const requeued =

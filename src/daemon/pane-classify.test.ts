@@ -395,6 +395,51 @@ describe("showsIdleClaudeComposer", () => {
     expect(idleComposer(`${COMPOSER}\n${plan}`)).toBe(false);
   });
 
+  // Pins reading 1 (`classifyPaneContent`): Claude's startup/session picker
+  // (`terminalRules` matchAll "what would you like to work on" + "enter to
+  // select", src/lib/agents.ts:560) carries no numbered rows at all, so
+  // reading 3's option-row check can't see it, and its wording is nowhere
+  // near `PROMPT_TERMINATOR_RE`, so reading 2 can't either. Only the terminal
+  // rule catches it.
+  it("refuses the startup picker below an older composer frame", () => {
+    const startupPicker = [
+      " What would you like to work on?",
+      "",
+      " ❯ Continue the handoff work",
+      "   Review the open PR",
+      "",
+      " Enter to select · Esc to exit",
+    ].join("\n");
+    expect(idleComposer(`${COMPOSER}\n${startupPicker}`)).toBe(false);
+  });
+
+  // Pins reading 1 (`classifyPaneContent`): a bare approval narrative
+  // (`terminalRules` matchAny "requires approval", src/lib/agents.ts:549)
+  // with no option block below it. Reading 3 finds no numbered row to match.
+  // Reading 2 finds the terminator phrase itself ("requires approval" is one
+  // of `PROMPT_TERMINATOR_RE`'s alternatives) but then finds no option row
+  // beneath it, so `classifyClaudePromptPane` returns null rather than
+  // refusing. Only the terminal rule catches this one.
+  it("refuses a bare approval narrative with no options rendered yet", () => {
+    const narrative = " This command requires approval before it can run.";
+    expect(idleComposer(`${COMPOSER}\n${narrative}`)).toBe(false);
+  });
+
+  // Pins reading 2 (`classifyClaudePromptPane`): the option rows use `⎿`
+  // chrome, which sits outside `OPTION_LINE_RE`'s anchored class, so reading
+  // 3 can't see them, but they still satisfy the unanchored `OPTION_ROW_RE`
+  // that `classifyClaudePromptPane` uses internally. No terminal rule matches
+  // "Do you want to proceed?", so reading 1 stays "active". Only the
+  // terminator-plus-options reading catches this one.
+  it("refuses a permission prompt whose options use unanchored chrome", () => {
+    const boxedOptions = [
+      " Do you want to proceed?",
+      " ⎿ 1. Yes",
+      " ⎿ 2. No",
+    ].join("\n");
+    expect(idleComposer(`${COMPOSER}\n${boxedOptions}`)).toBe(false);
+  });
+
   /**
    * The case both of the other readings miss, and the reason the option-row
    * check is a safety requirement. Verbatim capture of a live Claude Code

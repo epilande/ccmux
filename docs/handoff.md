@@ -241,7 +241,7 @@ The queue holds **at most one pending handoff per target**. A second enqueue rep
 
 **A guard that is already decidable refuses up front rather than queueing.** Both inputs to the unsafe-payload check are frozen the moment the text is composed (the composed text itself, and the target agent's own pattern), so a payload that agent can never receive is knowable at enqueue time and comes back as a 409 to a sender who is still listening. Queueing it instead would tell the sender "queued" and then drop the record half an hour later with nobody left to report it to.
 
-**A failure at dequeue splits two ways**, because by then the sender has been told "queued" and is gone. A deterministic refusal (`unsafe-payload`, `not-at-agent`, `target-waiting`, `ambiguous-wait`, `no-pane`) drops the record and logs why: re-running a check that just said no would only say no again. A transient one (the tmux send failed, or the target turned over between the readiness check and the paste) puts the record back with its attempt counted, for the next idle transition to retry, up to **3 attempts**. Retries never extend the TTL, so 30 minutes remains the outer bound either way.
+**A failure at dequeue splits two ways**, because by then the sender has been told "queued" and is gone. A deterministic refusal (`unsafe-payload`, `not-at-agent`, `target-waiting`, `ambiguous-wait`, `no-pane`) drops the record and logs why: re-running a check that just said no would only say no again. A transient one (the tmux send failed, the target turned over between the readiness check and the paste, or `pane-not-ready`: a pane showing something other than an idle composer right now may well be showing one a second later) puts the record back with its attempt counted, for the next idle transition to retry, up to **3 attempts**. Retries never extend the TTL, so 30 minutes remains the outer bound either way.
 
 **The queue is in memory.** A daemon restart drops every queued handoff, including ones whose senders were already told "queued". Nothing is persisted and nothing is reported when it happens, so a handoff that matters across a restart has to be re-sent.
 
@@ -274,6 +274,7 @@ Each one is a refusal on purpose. All are printed verbatim by the CLI.
 | `unsafe-payload` | `The composed handoff contains text <agent>'s composer cannot receive safely` (checked at enqueue as well as at delivery, so a busy target refuses instead of queueing something it could never receive) |
 | `too-large`      | `The composed handoff exceeds the spawn prompt budget (<n> bytes > 120832); retry with fewer --turns` (`--spawn` only)                                                                                   |
 | `target-busy`    | `Session <id> is <status>; a handoff is only ever delivered into an idle composer` (usually a dequeue; a direct request whose target changed status while the source was being read reaches it too)      |
+| `pane-not-ready` | `Session <id> has something other than an empty composer on screen; a handoff is only ever delivered into an idle composer` (Claude targets only; transient, so a dequeue retries it)                    |
 
 The `no-transcript` refusal is the one asymmetry worth calling out: `ccmux last` happily degrades to a pane capture, and a handoff will not. A screen scrape is fine to **read** and useless as a **prompt**: box drawing, spinners and half a composer are noise the receiving agent then has to reason about.
 
@@ -334,7 +335,7 @@ printf 'line one\nline two\n' | ccmux send <id> --stdin --no-enter
 
 `ccmux send` is **not** the gated path. It takes a session id or pane id (not the six-tier reference), and it applies none of the handoff guard stack: no status gate, no liveness check, no unsafe-pattern refusal. Use `ccmux handoff` when you want those.
 
-That split is a decision, not a gap to be closed later. `ccmux send` stays the raw low-level escape hatch (an exact id or pane, no resolver, and no guards beyond the paste caps), precisely so there is one path that types exactly what you asked into exactly the pane you named, and `ccmux handoff` is where the guards live.
+That split is a decision, not a gap to be closed later. `ccmux send` stays the raw low-level escape hatch (an exact id or pane, no resolver, and none of the handoff guard stack beyond the control-char strip and the paste caps), precisely so there is one path that types exactly what you asked into exactly the pane you named, and `ccmux handoff` is where the guards live.
 
 ## TUI
 
@@ -379,7 +380,7 @@ GET  /sessions/:ref/transcript?turns=N&callerPane=%N
 POST /handoff  {from, to?, turns?, note?, callerPane?, spawn?}
 ```
 
-`GET /sessions/:ref/transcript` answers 200 with the contract above, 404 for an unknown ref, 409 with `candidates` for an ambiguous one, and 400 when there is neither a readable transcript nor a usable pane capture.
+`GET /sessions/:ref/transcript` answers 200 with the contract above, 404 for an unknown ref, 409 with `candidates` for an ambiguous one, and 400 when there is neither a readable transcript nor a usable pane capture, or when `turns` is not a whole number.
 
 `POST /handoff` answers 200 with `{status: "delivered" | "queued" | "spawned", from, to, chars, truncated, ...}`, 400 for a malformed request or a self-handoff, 404 for an unresolvable end, and 409 for every guard refusal (each carrying a `reason`). `spawn` is `true` for the bare form or an object with `agent` / `cwd` overrides, and is mutually exclusive with `to`.
 
