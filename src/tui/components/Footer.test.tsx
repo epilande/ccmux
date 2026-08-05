@@ -162,7 +162,7 @@ describe("Footer", () => {
   it("shows what the keys do while a handoff is being aimed", async () => {
     const frame = await renderFooter({ handoffPickMode: true });
     expect(frame).toContain("j/k pick target");
-    expect(frame).toContain("enter hand off");
+    expect(frame).toContain("enter continue");
     expect(frame).toContain("esc cancel");
   });
 
@@ -173,7 +173,7 @@ describe("Footer", () => {
       handoffPickMode: true,
       searchMode: true,
     });
-    expect(frame).toContain("enter hand off");
+    expect(frame).toContain("enter continue");
     expect(frame).not.toContain("type to search");
   });
 

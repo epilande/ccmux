@@ -106,6 +106,28 @@ describe("parseTurns", () => {
     expect(parseTurns(String(MAX_TURNS))).toBe(MAX_TURNS);
   });
 
+  it("takes every other count the endpoint accepts", () => {
+    expect(parseTurns("1")).toBe(1);
+    expect(parseTurns("7")).toBe(7);
+  });
+
+  it("refuses a count below the range, or no count at all", () => {
+    // Throwing rather than returning, so a refused value can never be seen
+    // running on past its own `process.exit`.
+    const exit = spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("exit");
+    }) as never);
+    const logged = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (const bad of ["0", "-1", "abc", ""]) {
+        expect(() => parseTurns(bad)).toThrow("exit");
+      }
+    } finally {
+      logged.mockRestore();
+      exit.mockRestore();
+    }
+  });
+
   it("refuses one past it, naming the shared limit", () => {
     // Stubbed, or the refusal would take the test runner down with it.
     const exit = spyOn(process, "exit").mockImplementation(

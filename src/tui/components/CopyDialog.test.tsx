@@ -3,21 +3,12 @@ import { testRender } from "@opentui/solid";
 import {
   CopyDialog,
   COPY_DIALOG_FLOOR_ROWS,
-  copyTurnsLabel,
   planCopyDialogRows,
 } from "./CopyDialog";
 import { squish } from "./test-helpers";
 
-describe("copyTurnsLabel", () => {
-  it("names one turn as the response it is", () => {
-    expect(copyTurnsLabel(1)).toBe("Last response");
-  });
-
-  it("says whose prompts come along once there is more than one", () => {
-    expect(copyTurnsLabel(3)).toBe("Last 3 turns (with your prompts)");
-    expect(copyTurnsLabel(20)).toBe("Last 20 turns (with your prompts)");
-  });
-});
+// The turn label itself is the shared selector's; see
+// `src/tui/turns-selection.test.ts`.
 
 describe("planCopyDialogRows", () => {
   it("draws everything when the terminal has room", () => {
