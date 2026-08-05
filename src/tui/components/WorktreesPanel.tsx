@@ -924,29 +924,26 @@ export function showsGroupHeaders(repos: PanelRepo[]): boolean {
 }
 
 /**
- * The rule that opens a group's removable section.
+ * The label that opens a group's removable section.
  *
  * Starts with a tee so the rail runs INTO it rather than being interrupted by
- * it: the section is a labelled break in one group, not a new group. Capped
- * at {@link DIVIDER_MAX} columns rather than filling the list width: on a wide
- * terminal a full-width dash run is the heaviest ink on the screen, repeated
- * once per repo, and the rule reads as a section break at a fraction of that.
+ * it: the section is a labelled break in one group, not a new group. No dash
+ * run after the label: the repo header owns the horizontal-rule language, and
+ * even a capped run here read as a competing boundary. The tee and the words
+ * are the whole divider. Truncated rather than trusted to fit, because OpenTUI
+ * wraps instead of clipping and a wrapped line in a `height={1}` box vanishes.
  */
-export const DIVIDER_MAX = 48;
-
 export function dividerText(count: number, width: number): string {
-  const label = `├─ removable · ${count} `;
-  const fill = Math.max(0, Math.min(width, DIVIDER_MAX) - displayWidth(label));
-  return `${label}${"─".repeat(fill)}`;
+  return truncateText(`├─ Removable · ${count}`, Math.max(1, width));
 }
 
 /**
  * The dim rule that trails a repo header, giving a group boundary real
  * weight without spending a blank line on it (which the layout deliberately
- * does not have). It runs the FULL list width, unlike the removable
- * divider's capped run: the header marks the panel's PRIMARY boundary, a
- * repo, while the divider is a labelled break inside one group and stays
- * visually subordinate by stopping short.
+ * does not have). It runs the FULL list width, and it is the ONLY horizontal
+ * rule in the panel: the header marks the panel's PRIMARY boundary, a repo,
+ * while the removable divider is a labelled break inside one group and stays
+ * visually subordinate by carrying no rule at all, just its tee and label.
  *
  * Only the fill: the name itself stays a separate render concern because it
  * is bold mauve while the rule is muted. Empty when the name leaves no room
@@ -2197,7 +2194,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                         {(entry) => renderRow(entry)}
                       </For>
                       {/* Everything below this line can be deleted, and only
-                          things below it carry checkboxes. The rule starts
+                          things below it carry checkboxes. The label starts
                           with a tee, so the rail runs into it. */}
                       <Show when={split().removable.length > 0}>
                         <box height={1} flexDirection="row">

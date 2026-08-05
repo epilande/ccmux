@@ -41,7 +41,6 @@ import {
   rowLabel,
   rowVisualHeight,
   scrollTargetFor,
-  DIVIDER_MAX,
   dividerText,
   headerRule,
   sortWorktreeRows,
@@ -2406,21 +2405,21 @@ describe("removable section", () => {
     expect(split.removable.map((e) => e.row.path)).toEqual(["/b"]);
   });
 
-  it("rules off the section with its count", () => {
-    const text = dividerText(6, 40);
-    // A tee, so the rail runs into the rule instead of stopping at it.
-    expect(text).toStartWith("├─ removable · 6 ");
-    expect(displayWidth(text)).toBe(40);
-    // A width too small to hold the label must not produce a negative repeat.
-    expect(displayWidth(dividerText(6, 4))).toBeGreaterThan(0);
+  it("labels the section with its count and no trailing rule", () => {
+    // A tee, so the rail runs into the label instead of stopping at it. No
+    // dash run after the words: the repo header owns the horizontal-rule
+    // language, and even a capped run here read as a competing boundary.
+    expect(dividerText(6, 40)).toBe("├─ removable · 6");
+    expect(dividerText(6, 200)).toBe("├─ removable · 6");
   });
 
-  // On a 200-column terminal a full-width dash run per repo is the heaviest
-  // ink on the screen; the rule reads as a break at a fraction of that.
-  it("caps the rule instead of filling a wide terminal", () => {
-    expect(displayWidth(dividerText(6, 200))).toBe(DIVIDER_MAX);
-    // A narrower list still rules to its own edge, not past it.
-    expect(displayWidth(dividerText(6, 40))).toBe(40);
+  it("truncates the label instead of letting it wrap away", () => {
+    // OpenTUI wraps rather than clips, and a wrapped line in a height-1 box
+    // vanishes; a width too small for the label must shorten it, not lose it.
+    const narrow = dividerText(6, 8);
+    expect(displayWidth(narrow)).toBeLessThanOrEqual(8);
+    expect(displayWidth(narrow)).toBeGreaterThan(0);
+    expect(displayWidth(dividerText(6, 1))).toBeGreaterThan(0);
   });
 
   // The header's trailing rule is what makes a group boundary scannable on a
