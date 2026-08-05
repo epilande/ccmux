@@ -119,6 +119,22 @@ export const OPENCODE_PLUGIN_DIR = join(OPENCODE_CONFIG_DIR, "plugin");
 export const OPENCODE_PLUGIN_FILE = join(OPENCODE_PLUGIN_DIR, "ccmux.js");
 
 /**
+ * OpenCode's SQLite state database (message/part history), read-only via
+ * `bun:sqlite`. Unlike `OPENCODE_CONFIG_DIR` above, this is unconditional
+ * `~/.local/share/opencode/opencode.db` — the transcript research (per
+ * `session-handoff-plan.md`, verified 2026-08-03) found this exact path with
+ * no XDG override in play; do not "improve" this to honor `XDG_DATA_HOME`
+ * without re-verifying against a real install.
+ */
+export const OPENCODE_DB_FILE = join(
+  homedir(),
+  ".local",
+  "share",
+  "opencode",
+  "opencode.db",
+);
+
+/**
  * Cursor CLI's own directory. Read-only except during
  * `ccmux setup --agent cursor`, which writes hook scripts and merges
  * entries into `hooks.json`. Cursor does not respect XDG overrides; it
@@ -158,6 +174,18 @@ export const OMP_AGENT_DIR = join(
 );
 export const OMP_EXTENSION_DIR = join(OMP_AGENT_DIR, "extensions");
 export const OMP_EXTENSION_FILE = join(OMP_EXTENSION_DIR, "ccmux.js");
+
+/**
+ * Gemini CLI's per-project transcript root. No hooks and no marker exist for
+ * Gemini, so there is no `transcript_path` to consume — the transcript
+ * reader discovers a session's chat log itself from `cwd` alone: each
+ * subdirectory here is one project, named after the project's cwd BASENAME
+ * with numeric dedupe on collision (`ccmux`, `ccmux2`, `epilande-1`, ...),
+ * so the directory name is never trusted directly. A `.project_root`
+ * sidecar file inside each holds that project's real absolute cwd (verified
+ * 2026-08-03); `chats/session-<ts>-<hex>.json` holds the transcript itself.
+ */
+export const GEMINI_TMP_DIR = join(homedir(), ".gemini", "tmp");
 
 /**
  * GitHub Copilot CLI's own directory. Read-only except during
