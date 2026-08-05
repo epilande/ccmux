@@ -84,6 +84,7 @@ import {
   type MoveReport,
 } from "../lib/move-report";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
+import { HANDOFF_BADGE } from "./components/session-columns";
 import { WorktreesPanel, worktreeHoldsPath } from "./components/WorktreesPanel";
 import type { WorktreeSession } from "../daemon/worktree-prune";
 import { HelpOverlay } from "./components/HelpOverlay";
@@ -811,6 +812,14 @@ export function App(props: AppProps) {
       return;
     }
     store.actions.setSelectedIndex(index);
+    // A click while aiming a handoff picks that row, the same as Enter on it.
+    // The alternative is the ordinary activation, which in the one-shot picker
+    // switches panes and EXITS, losing both the pick and the surface it was
+    // being made on.
+    if (store.state.handoffPick) {
+      commitHandoffPick();
+      return;
+    }
     activateItem(item);
   }
 
@@ -890,7 +899,7 @@ export function App(props: AppProps) {
     index: number,
     event: MouseEvent,
   ) {
-    if (modalOverlayOpen()) {
+    if (modalOverlayOpen() || store.state.handoffPick) {
       return;
     }
     store.actions.setSelectedIndex(index);
@@ -1248,11 +1257,16 @@ export function App(props: AppProps) {
       // pastes a screen capture into a peer agent should have been told so
       // BEFORE they paste: a size guard dropped content, or there was no
       // transcript to read and this is what the pane happened to be showing.
-      const caveat = data.truncated
-        ? " (truncated)"
-        : data.source === "pane"
+      // Source wins over the generic flag: a pane capture is ALWAYS
+      // truncated (the daemon sets both), and "(pane capture)" is the more
+      // informative caveat since it implies incompleteness and names the
+      // reason, so it must not be shadowed by the flag it always sets too.
+      const caveat =
+        data.source === "pane"
           ? " (pane capture)"
-          : "";
+          : data.truncated
+            ? " (truncated)"
+            : "";
       // Short enough to stay on ONE line inside the toast's 40-column cap,
       // caveat and all: the wrap otherwise splits "(pane capture)" across two
       // lines, which is where a caveat stops reading as one.
@@ -1271,6 +1285,124 @@ export function App(props: AppProps) {
     const session = store.state.sessions.find((s) => s.id === cm.sessionId);
     store.actions.hideContextMenu();
     if (session) void copyLastResponse(session);
+  }
+
+  /**
+   * Enter the pick-a-target mode for the row whose menu is open.
+   *
+   * The item is only ever offered when another session is on the board, so
+   * failing here is the race where the last one left between the menu being
+   * drawn and this running. It is reported rather than swallowed, since the
+   * mode visibly does not open.
+   */
+  function contextMenuHandoff() {
+    const cm = store.state.contextMenu;
+    if (!cm) return;
+    const session = store.state.sessions.find((s) => s.id === cm.sessionId);
+    store.actions.hideContextMenu();
+    if (!session) return;
+    if (!store.actions.beginHandoffPick(session.id)) {
+      store.actions.showToast("No other session in view to hand off to", 3_000);
+    }
+  }
+
+  /** The session a pick-mode handoff would come FROM, or undefined once it
+   *  has left the board (an SSE removal under an open pick). */
+  function handoffSource(): EnrichedSession | undefined {
+    const pick = store.state.handoffPick;
+    if (!pick) return undefined;
+    return store.state.sessions.find((s) => s.id === pick.fromSessionId);
+  }
+
+  /** How a session is named while a handoff is being aimed or reported. Agent
+   *  plus project is what tells two rows of the same board apart. */
+  function handoffLabel(session: EnrichedSession): string {
+    return session.project
+      ? `${session.agentType} · ${session.project}`
+      : session.agentType;
+  }
+
+  /**
+   * Hand the source's last response to `to`, and say what the daemon did with
+   * it.
+   *
+   * The three outcomes are the endpoint's, reported as they come: DELIVERED
+   * (the target was idle and has the text now), QUEUED (the target was working
+   * and gets it when the turn ends, which the row's own badge then shows), and
+   * REFUSED. A refusal's reason is passed through verbatim rather than
+   * rewritten: the guard stack refuses for reasons the user has to act on (a
+   * target with a permission prompt up, a source with no readable transcript),
+   * and a house-style summary of one of those is a worse sentence than the one
+   * the daemon already wrote.
+   *
+   * An ambiguity refusal cannot happen here. Both ends are sent as session
+   * IDs, which is the resolver's exact tier, so there is never a candidate
+   * list to render: the pick IS the disambiguation.
+   */
+  async function handOffTo(from: EnrichedSession, to: EnrichedSession) {
+    const target = handoffLabel(to);
+    store.actions.showToast(`Handing off to ${target}…`, 15_000);
+    try {
+      const response = await fetch(`${getDaemonUrl()}/handoff`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // `turns: 1` is the endpoint's default, sent explicitly because this
+        // client's promise ("hand off the last response") is the one-turn
+        // shape, not whatever the default becomes.
+        body: JSON.stringify({ from: from.id, to: to.id, turns: 1 }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      const data = (await response.json()) as {
+        status?: string;
+        chars?: number;
+        truncated?: boolean;
+        error?: string;
+      };
+      if (!response.ok) {
+        store.actions.showToast(
+          `Handoff refused: ${data.error ?? `HTTP ${response.status}`}`,
+          8_000,
+        );
+        return;
+      }
+      const size = `${(data.chars ?? 0).toLocaleString()} chars${
+        data.truncated ? ", truncated" : ""
+      }`;
+      if (data.status === "queued") {
+        store.actions.showToast(
+          `Queued for ${target} (${size}); it lands when the turn ends`,
+          5_000,
+        );
+        return;
+      }
+      store.actions.showToast(`Handed ${size} to ${target}`, 4_000);
+    } catch {
+      store.actions.showToast("Handoff failed: daemon unreachable", 4_000);
+    }
+  }
+
+  /**
+   * Pick the selected row as the handoff target and leave the mode.
+   *
+   * The two rows the selection can be sitting on that are not a target (a
+   * group header, and the source itself) keep the mode open: leaving it on a
+   * keypress that was aimed at nothing would cost the user the whole gesture.
+   */
+  function commitHandoffPick(): void {
+    const from = handoffSource();
+    if (!from) {
+      store.actions.endHandoffPick();
+      store.actions.showToast("The session being handed off is gone", 4_000);
+      return;
+    }
+    const to = store.selectedSession();
+    if (!to) return;
+    if (to.id === from.id) {
+      store.actions.showToast("A session cannot hand off to itself", 3_000);
+      return;
+    }
+    store.actions.endHandoffPick();
+    void handOffTo(from, to);
   }
 
   function sessionMenuItems(): ContextMenuItem[] {
@@ -1307,6 +1439,23 @@ export function App(props: AppProps) {
           },
         ]
       : [];
+    // Offered on every row that has somewhere to hand off TO, which is the
+    // only half of the question this side can answer. Whether the SOURCE can
+    // be read at all is the daemon's (nine readers, two of which find their
+    // transcript from the cwd with no `logPath` on the row to check), so a
+    // source it refuses is reported in the toast rather than guessed at here.
+    const handoffItem: ContextMenuItem[] =
+      session && store.state.sessions.some((s) => s.id !== session.id)
+        ? [
+            {
+              id: "handoff-to",
+              label: "Hand off to…",
+              hint: "",
+              color: theme.text,
+              action: contextMenuHandoff,
+            },
+          ]
+        : [];
     const newSessionItem: ContextMenuItem = {
       id: "new-session",
       label: "New session",
@@ -1340,6 +1489,7 @@ export function App(props: AppProps) {
         newSessionItem,
         ...reviewItem,
         ...copyItem,
+        ...handoffItem,
         // Last here too: the destructive action is the one that must never
         // slide under a pointer (or a highlight) reaching for something else,
         // and the bottom is the only position nothing can be appended below.
@@ -1386,9 +1536,10 @@ export function App(props: AppProps) {
       : [];
     // Ordered by what the actions DO, not by when they arrive: the things
     // that start something (attach, spawn, fork), then the things that read
-    // (review the diff, copy the last response), then the ones that move work
-    // about, and the two that end a session last — Kill at the bottom, where a
-    // destructive action is hardest to hit by accident.
+    // (review the diff, copy the last response, hand that response to another
+    // session), then the ones that move work about, and the two that end a
+    // session last — Kill at the bottom, where a destructive action is hardest
+    // to hit by accident.
     //
     // Two of these come and go under an open menu. "Move changes" appears
     // when the dirty check answers, and Fork disappears on an SSE update that
@@ -1410,6 +1561,7 @@ export function App(props: AppProps) {
       ...forkItem,
       ...reviewItem,
       ...copyItem,
+      ...handoffItem,
       ...moveChangesItem,
       {
         id: "restart",
@@ -2796,6 +2948,24 @@ export function App(props: AppProps) {
       return;
     }
 
+    // Aiming a handoff owns the keyboard: the keys that move and choose keep
+    // their meaning (that is the whole point of picking on the list itself)
+    // and every other key is swallowed. Letting them through would put `x`
+    // one keystroke from killing the session the user was pointing at.
+    //
+    // `q` cancels rather than being swallowed with the rest. It is the muscle
+    // memory for leaving this surface, and a `q` that does nothing at all
+    // reads as a hung picker; cancelling puts the user back where the next
+    // `q` quits.
+    if (store.state.handoffPick) {
+      if (key === "j" || key === "down") store.actions.moveSelection(1);
+      else if (key === "k" || key === "up") store.actions.moveSelection(-1);
+      else if (key === "return" || key === "enter") commitHandoffPick();
+      else if (key === "escape" || key === "q") store.actions.endHandoffPick();
+      event.preventDefault();
+      return;
+    }
+
     if (store.state.contextMenu || store.state.groupContextMenu) {
       // The menu answers to its own keys first (j/k, enter, esc, m). Anything
       // else dismisses it and goes on to mean what it always means — a
@@ -3222,6 +3392,22 @@ export function App(props: AppProps) {
           />
         </Show>
 
+        {/* The mode's only chrome: one line saying whose response is in hand
+            and how to aim it. It sits where the search input does, above the
+            list the pick is being made on, and the sidebar gets the short form
+            because it has no footer to carry the keys. */}
+        <Show when={handoffSource()}>
+          {(from: () => EnrichedSession) => (
+            <box paddingLeft={1} height={1}>
+              <text fg={theme.mauve}>
+                {props.sidebar
+                  ? `${HANDOFF_BADGE} pick target · enter · esc`
+                  : `${HANDOFF_BADGE} Hand off from ${handoffLabel(from())} · pick a target · enter send · esc cancel`}
+              </text>
+            </box>
+          )}
+        </Show>
+
         <Show when={store.state.error}>
           <box paddingLeft={1} height={1}>
             <text fg={theme.red}>Error: {store.state.error}</text>
@@ -3288,6 +3474,7 @@ export function App(props: AppProps) {
             groupBy={store.state.groupBy}
             newSessionMode={store.state.newSession !== null}
             newSessionOption={newSessionOptionMode()}
+            handoffPickMode={store.state.handoffPick !== null}
             reviewable={reviewEnabled}
           />
         </Show>

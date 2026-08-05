@@ -71,6 +71,12 @@ export function renderCandidates(
   return lines.join("\n");
 }
 
+/**
+ * The CLI REJECTS an out-of-range count where the endpoint clamps it: a typed
+ * `--turns 200` is a mistake worth naming, while an HTTP caller gets the
+ * nearest legal answer. Both read the same {@link MAX_TURNS}, so the message
+ * cannot drift from the limit it describes.
+ */
 export function parseTurns(value: string): number {
   const turns = parseInt(value, 10);
   if (isNaN(turns) || turns < 1 || turns > MAX_TURNS) {
@@ -112,10 +118,14 @@ export function createLastCommand(): Command {
       }
 
       if (response.status === 409) {
-        const data = (await response.json()) as {
-          candidates: SessionRefCandidate[];
-        };
-        console.error(renderCandidates(ref, data.candidates));
+        const data = (await response.json().catch(() => null)) as {
+          candidates?: SessionRefCandidate[];
+        } | null;
+        console.error(
+          data?.candidates
+            ? renderCandidates(ref, data.candidates)
+            : `Ambiguous session reference "${ref}"`,
+        );
         process.exit(1);
       }
 

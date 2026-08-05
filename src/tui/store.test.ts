@@ -3876,6 +3876,67 @@ describe("store", () => {
   });
 });
 
+describe("handoff pick mode", () => {
+  it("aims at the next row down and holds the source by id", () => {
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([
+      createMockSession({ id: "a", lastUserInputAt: "2024-01-01T13:00:00Z" }),
+      createMockSession({ id: "b", lastUserInputAt: "2024-01-01T12:00:00Z" }),
+      createMockSession({ id: "c", lastUserInputAt: "2024-01-01T11:00:00Z" }),
+    ]);
+    expect(store.selectedSession()?.id).toBe("a");
+
+    expect(store.actions.beginHandoffPick("a")).toBe(true);
+    expect(store.state.handoffPick).toEqual({ fromSessionId: "a" });
+    // The menu opened on "a", so starting there would aim Enter at the one
+    // session that cannot be the target.
+    expect(store.selectedSession()?.id).toBe("b");
+
+    store.actions.endHandoffPick();
+    expect(store.state.handoffPick).toBeNull();
+  });
+
+  it("wraps past the source rather than stopping at the end of the list", () => {
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([
+      createMockSession({ id: "a", lastUserInputAt: "2024-01-01T13:00:00Z" }),
+      createMockSession({ id: "b", lastUserInputAt: "2024-01-01T12:00:00Z" }),
+    ]);
+    store.actions.moveSelection(1);
+    expect(store.selectedSession()?.id).toBe("b");
+
+    expect(store.actions.beginHandoffPick("b")).toBe(true);
+    expect(store.selectedSession()?.id).toBe("a");
+  });
+
+  it("skips group headers, which are not sessions to hand off to", () => {
+    const store = createTUIStore({ groupBy: "project" });
+    store.actions.setSessions([
+      createMockSession({
+        id: "a",
+        project: "alpha",
+        lastUserInputAt: "2024-01-01T13:00:00Z",
+      }),
+      createMockSession({
+        id: "b",
+        project: "beta",
+        lastUserInputAt: "2024-01-01T12:00:00Z",
+      }),
+    ]);
+    expect(store.actions.beginHandoffPick("a")).toBe(true);
+    expect(store.selectedSession()?.id).toBe("b");
+  });
+
+  it("refuses to open with nothing but the source in view", () => {
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([createMockSession({ id: "a" })]);
+
+    expect(store.actions.beginHandoffPick("a")).toBe(false);
+    // Nothing entered: a mode whose only candidate is the source is a dead end.
+    expect(store.state.handoffPick).toBeNull();
+  });
+});
+
 describe("worktrees panel state", () => {
   it("threads the initial cursor through showWorktrees", () => {
     const store = createTUIStore();

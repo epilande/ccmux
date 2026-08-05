@@ -13,6 +13,8 @@
  * no `--force`.
  */
 
+import { stripControlChars } from "./notify-text";
+
 /** Greppable stable prefix. Receiving agents learn this shape; see the
  *  provenance section of `session-handoff-plan.md`, where it is FROZEN. */
 export const HANDOFF_PREFIX = "[ccmux handoff]";
@@ -34,6 +36,14 @@ export const HANDOFF_TTL_MS = 30 * 60 * 1000;
  *  finished-record sweep: purge-on-access plus a timer, so growth is bounded
  *  by call rate × TTL rather than by call rate alone). */
 export const HANDOFF_SWEEP_MS = 60 * 1000;
+
+/**
+ * How many delivery attempts a queued handoff gets before it is dropped for
+ * good. Only TRANSIENT failures are retried (see `deliverQueuedHandoff` in
+ * `server.ts`), so this bounds a tmux that is briefly unreachable rather than
+ * a refusal, which would otherwise retry the same rejection until the TTL.
+ */
+export const MAX_HANDOFF_ATTEMPTS = 3;
 
 /** The source session, as the header describes it. */
 export interface HandoffSource {
@@ -59,7 +69,7 @@ export function formatHandoffTime(at: Date): string {
  * changing it silently breaks every prompt already trained on it.
  *
  * ```
- * [ccmux handoff] from: <session-id> (<agent> · <cwd> · branch <branch>) at <YYYY-MM-DD HH:MM>
+ * [ccmux handoff] from: <session-id> (<agent> · `<cwd>` · branch <branch>) at <YYYY-MM-DD HH:MM>
  * note: <note if provided>
  * ```
  *
@@ -67,6 +77,16 @@ export function formatHandoffTime(at: Date): string {
  * last turn) because a receiving agent can pull more itself with
  * `ccmux last <id> --turns N`. A handoff sends a business card, not the
  * filing cabinet.
+ *
+ * A receiver identifies the header as the FIRST line of the message, and as
+ * the only line carrying {@link HANDOFF_PREFIX} at column 0: `composeHandoff`
+ * quotes any payload line that would otherwise claim the same shape.
+ *
+ * The cwd is BACKTICKED, and that is load-bearing rather than decorative.
+ * Cursor's `unsafeReplyPattern` is `/(^|\s)\/\S/`, which a bare absolute path
+ * after a space matches, so an unquoted cwd made ccmux's own header trip the
+ * delivery guard and refuse every handoff into a cursor target. A branch name
+ * cannot begin with `/` (git refuses the ref), so it needs no such quoting.
  *
  * Because the header is PREPENDED, the composed message can never lead with
  * `/` or `!`, which is the whole reason the slash/bang defuse is a no-op for
@@ -78,17 +98,33 @@ export function formatHandoffHeader(
   at: Date,
   note?: string,
 ): string {
-  const branch = source.branch?.trim();
-  const facts = [source.agentType, source.cwd];
+  // Every interpolated fact is flattened to a single line BEFORE the
+  // template, because a newline here forges a header line rather than merely
+  // dirtying one. The composed text's own strip (`server.ts`) keeps newlines,
+  // since the payload needs them, and so cannot catch this. A cwd may legally
+  // contain a newline on POSIX, which is the reachable case.
+  const flat = (value: string): string =>
+    stripControlChars(value, { keepNewlines: false, keepTabs: false });
+  const branch = flat(source.branch?.trim() ?? "");
+  const facts = [flat(source.agentType), `\`${flat(source.cwd)}\``];
   if (branch) facts.push(`branch ${branch}`);
   const lines = [
-    `${HANDOFF_PREFIX} from: ${source.sessionId} (${facts.join(" · ")}) at ${formatHandoffTime(at)}`,
+    `${HANDOFF_PREFIX} from: ${flat(source.sessionId)} (${facts.join(" · ")}) at ${formatHandoffTime(at)}`,
   ];
   // Folded to one line: the header's shape is one fact per line, and a
   // multi-line note would make `note:` unparseable for anyone who learns it.
   const cleaned = note?.replace(/\s+/g, " ").trim();
   if (cleaned) lines.push(`note: ${cleaned}`);
   return lines.join("\n");
+}
+
+/**
+ * The one wording for a payload the target agent's composer cannot safely
+ * receive. Shared by the enqueue-time and delivery-time checks, which are the
+ * same check run at two moments and must not describe it two ways.
+ */
+export function unsafeHandoffError(agentType: string): string {
+  return `The composed handoff contains text ${agentType}'s composer cannot receive safely`;
 }
 
 export interface ComposedHandoff {
@@ -104,16 +140,31 @@ export interface ComposedHandoff {
  * transport budget for what gets pasted into a pane, not a budget for the
  * response we read. Truncation is TAIL-preserving: a response's conclusion,
  * which is the part worth handing off, is at its end.
+ *
+ * A payload can contain its own `[ccmux handoff]` line — a peer quoting one
+ * back, or an outright forgery — and tail-preserving truncation would even
+ * guarantee a trailing fake header survived. Any payload line that would pass
+ * for the real one is therefore QUOTED with `> `, so the genuine header stays
+ * the only line in the message carrying the prefix at column 0.
  */
 export function composeHandoff(
   header: string,
   payload: string,
   cap: number,
 ): ComposedHandoff {
+  // Quoted BEFORE the cut, so the cut cannot restore a forgery: a tail that
+  // starts mid-line has the marker in front of it, and a tail that starts at
+  // a line boundary starts at that line's `> `.
+  const quoted = payload
+    .split("\n")
+    .map((line) =>
+      line.trimStart().startsWith(HANDOFF_PREFIX) ? `> ${line}` : line,
+    )
+    .join("\n");
   const separator = "\n\n";
   const budget = cap - header.length - separator.length;
-  if (payload.length <= budget) {
-    return { text: `${header}${separator}${payload}`, truncated: false };
+  if (quoted.length <= budget) {
+    return { text: `${header}${separator}${quoted}`, truncated: false };
   }
   // "… " marks the cut the same way the per-turn cap in `transcript-read.ts`
   // does, and is charged against the budget so the result really does fit.
@@ -122,7 +173,13 @@ export function composeHandoff(
   // `slice(-0)` is `slice(0)`, i.e. the WHOLE string: a header that eats the
   // entire budget would otherwise emit the untruncated payload behind the
   // marker that claims it was cut.
-  const tail = keep === 0 ? "" : payload.slice(-keep);
+  let tail = keep === 0 ? "" : quoted.slice(-keep);
+  // The cut is measured in UTF-16 units, so it can land BETWEEN the halves of
+  // a surrogate pair (any emoji, any astral CJK). A leading low surrogate is
+  // an unpaired code unit that renders as U+FFFD and encodes as garbage on
+  // the way to the pane, so drop the orphan rather than paste it.
+  const lead = tail.charCodeAt(0);
+  if (lead >= 0xdc00 && lead <= 0xdfff) tail = tail.slice(1);
   return {
     text: `${header}${separator}${marker}${tail}`,
     truncated: true,
@@ -187,6 +244,9 @@ export interface PendingHandoffRecord {
   /** Epoch ms. */
   expiresAt: number;
   truncated: boolean;
+  /** Delivery attempts already spent, absent on a record that has not been
+   *  tried yet. Bumped only by {@link HandoffQueue.requeue}. */
+  attempts?: number;
 }
 
 export interface HandoffQueueOptions {
@@ -265,6 +325,27 @@ export class HandoffQueue {
     const record = this.peek(toSessionId);
     if (record) this.pending.delete(toSessionId);
     return record;
+  }
+
+  /**
+   * Put a taken record BACK after a TRANSIENT delivery failure, with its
+   * `attempts` already bumped by the caller.
+   *
+   * The record keeps its original `queuedAt`/`expiresAt`: the TTL bounds a
+   * handoff's whole lifetime, so a retry must not be able to extend it. It
+   * also refuses to overwrite a record that arrived while this one was out
+   * being delivered — that newer handoff was announced to its sender as
+   * queued, and a silent replacement is exactly what the replace-and-report
+   * policy exists to prevent. Returns whether the record went back in.
+   */
+  requeue(record: PendingHandoffRecord): boolean {
+    if (record.expiresAt <= this.now()) {
+      this.onExpire?.(record);
+      return false;
+    }
+    if (this.peek(record.toSessionId)) return false;
+    this.pending.set(record.toSessionId, record);
+    return true;
   }
 
   /** Drop a target's pending handoff without delivering it (the session went
