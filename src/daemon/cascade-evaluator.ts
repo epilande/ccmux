@@ -322,9 +322,15 @@ export function nativeLogSource(session: Session): CascadeSource {
 
 /**
  * Wrap a terminal-rule match as a cascade source. `upgradeOnly: true` is
- * the typical path (rule may upgrade to `waiting` but never downgrade);
- * `upgradeOnly: false` is only correct when the terminal is the sole
- * signal — no marker AND no log adapter for this agent.
+ * the typical path (rule may upgrade to `waiting` but never downgrade).
+ *
+ * `upgradeOnly: false` takes two forms, and both are narrow. Either the
+ * terminal is the sole signal (no marker AND no log adapter for this agent),
+ * or the pane has POSITIVELY observed a state that contradicts a source no
+ * event will ever refresh: the dismissed-permission downgrade in
+ * `state-reconciler.ts`, which is the one place a terminal observation is
+ * allowed to lower a marker's `waiting`. A baseline built from "no rule
+ * matched" is neither.
  */
 export function terminalSource(
   rule: TerminalDetectionResult,

@@ -276,6 +276,18 @@ export const HEALTH_CHECK_TIMEOUT_MS = 100;
 export const PANE_IDLE_THRESHOLD_MS = 30_000;
 
 /**
+ * How long a `waiting_permission` marker is trusted without question before
+ * the pane is allowed to contradict it (see `showsIdleClaudeComposer`). Not a
+ * timeout: nothing expires here, and a prompt the user leaves up for an hour
+ * keeps its `waiting` row because the pane keeps showing it. The grace only
+ * covers the gap between a hook writing the marker and the pane finishing the
+ * draw of the prompt that hook is about, which is sub-second. 30s is
+ * generous insurance against a slow redraw, and it also bounds how early the
+ * (already per-tick) pane capture starts contributing a downgrade.
+ */
+export const STALE_PERMISSION_GRACE_MS = 30_000;
+
+/**
  * Subagent staleness threshold — a subagent still at `working` whose log has
  * been silent longer than this counts as finished. Needed because background
  * teammates (`Agent` tool, `taskKind: in_process_teammate`) never write a

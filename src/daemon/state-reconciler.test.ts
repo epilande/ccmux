@@ -1723,6 +1723,243 @@ describe("reconcileAll", () => {
     });
   });
 
+  /**
+   * Issue #117. Escape on a permission prompt fires no hook, so the marker
+   * keeps claiming `waiting_permission` and the native cascade has nothing
+   * that can contradict it: `nativeLogSource` echoes the stored `waiting`
+   * back with a refreshed timestamp every tick, and `resolveNativeClaudeStates`
+   * only pane-checks sessions that are `working`. The row sat at `waiting`
+   * until the next real turn, refusing every handoff.
+   */
+  describe("dismissed permission prompt (issue #117)", () => {
+    const claudeAgent = BUILTIN_AGENTS.find((a) => a.name === "claude")!;
+
+    /** Trimmed capture of a real Claude Code 2.1.222 pane after Escape. */
+    const IDLE_COMPOSER = [
+      "⏺ I'll run that command.",
+      "",
+      "  Ran 1 shell command",
+      "",
+      "────────────────────────────────────────────",
+      "❯ ",
+      "────────────────────────────────────────────",
+      "  🤖 Opus 5 │ 🧠 4% │ 📦 v2.1.222",
+      "  -- INSERT -- ⏸ manual mode on",
+    ].join("\n");
+
+    /** The same pane with the prompt still up. Matches none of Claude's
+     *  terminalRules, which is why the composer is the evidence that counts. */
+    const LIVE_PROMPT = [
+      "⏺ I'll run that command.",
+      "",
+      "────────────────────────────────────────────",
+      " Bash command",
+      "",
+      "   touch /tmp/probe.txt",
+      "",
+      " Do you want to proceed?",
+      " ❯ 1. Yes",
+      "   2. Yes, and always allow access to tmp/ from this project",
+      "   3. No",
+      "",
+      " Esc to cancel · Tab to amend · ctrl+e to explain",
+    ].join("\n");
+
+    function permissionMarker(ageMs: number): SessionPidMarker {
+      return {
+        agent_type: "claude",
+        pid: 1,
+        tty: "/dev/ttys001",
+        session_id: "cc-uuid",
+        timestamp: 1,
+        state: "waiting_permission",
+        state_timestamp: (Date.now() - ageMs) / 1000,
+      };
+    }
+
+    /** A session already pinned at waiting/permission with the log echoing
+     *  that state back: the steady state the bug leaves behind. */
+    async function run(
+      paneContent: string,
+      marker: SessionPidMarker,
+      overrides: { agentType?: string; trackingMode?: "native" | "pane" } = {},
+    ): Promise<Session> {
+      const id = makeSession(sessionManager, {
+        agentType: overrides.agentType ?? "claude",
+        trackingMode: overrides.trackingMode ?? "native",
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Bash",
+        // The log echo, stamped when the marker first won. Deliberately in the
+        // past: the pane evidence is stamped NOW, and equal timestamps would
+        // hand the fold to the log on the marker > log > terminal tie-break.
+        lastActivityAt: new Date(Date.now() - 5_000).toISOString(),
+        tmuxPane: "%1",
+      });
+      mockCapturePane = async () => paneContent;
+      const deps = makeDeps(sessionManager, {
+        agents: [
+          claudeAgent,
+          { ...claudeAgent, name: "codex", ambiguousPermissionMarker: false },
+        ],
+        hookManager: {
+          getMarkerForSession: () => marker,
+          getMarkersByAgentAndPid: () => [],
+        },
+      });
+      const session = sessionManager.getSession(id)!;
+      await reconcileOne(deps, session, new Map());
+      return sessionManager.getSession(id)!;
+    }
+
+    it("retires a stale permission marker when the pane shows an idle composer", async () => {
+      const session = await run(IDLE_COMPOSER, permissionMarker(5 * 60_000));
+      expect(session.status).toBe("idle");
+      expect(session.attentionType).toBeNull();
+      expect(session.pendingTool).toBeNull();
+    });
+
+    // The non-regression that matters: a prompt the user has not answered
+    // keeps its row, however long it has been up.
+    it("keeps waiting while the prompt is still on the pane", async () => {
+      const session = await run(LIVE_PROMPT, permissionMarker(30 * 60_000));
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("permission");
+    });
+
+    it("keeps waiting inside the grace window, where a composer is a half-drawn prompt", async () => {
+      const session = await run(IDLE_COMPOSER, permissionMarker(1_000));
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("permission");
+    });
+
+    it("keeps waiting when the pane cannot be read (fail-open)", async () => {
+      mockCapturePane = async () => {
+        throw new Error("pane is gone");
+      };
+      const id = makeSession(sessionManager, {
+        trackingMode: "native",
+        status: "waiting",
+        attentionType: "permission",
+        lastActivityAt: new Date(Date.now() - 5_000).toISOString(),
+        tmuxPane: "%1",
+      });
+      const deps = makeDeps(sessionManager, {
+        agents: [claudeAgent],
+        hookManager: {
+          getMarkerForSession: () => permissionMarker(5 * 60_000),
+          getMarkersByAgentAndPid: () => [],
+        },
+      });
+      await reconcileOne(deps, sessionManager.getSession(id)!, new Map());
+      const session = sessionManager.getSession(id)!;
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("permission");
+    });
+
+    // Claude-scoped on purpose: what a dismissal does to another agent's
+    // marker is unverified, and the composer vocabulary read here is Claude's.
+    it("leaves a non-Claude agent's permission marker alone", async () => {
+      const session = await run(IDLE_COMPOSER, permissionMarker(5 * 60_000), {
+        agentType: "codex",
+      });
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("permission");
+    });
+
+    // Found by capturing real panes: Claude keeps its composer on screen
+    // while it works, so the composer alone cannot separate idle from
+    // working. This is the post-keyboard-approval case (approval fires no
+    // hook either), where the log is already right.
+    it("leaves a working session alone, composer on screen and all", async () => {
+      const workingPane = [
+        "⏺ Reading src/daemon/server.ts",
+        "",
+        "────────────────────────────────────────────",
+        "❯ ",
+        "────────────────────────────────────────────",
+        "  🌿 main │ 🤖 Opus 5 │ 🧠 9%",
+        "  -- INSERT   ⏵⏵ bypass permissions on",
+      ].join("\n");
+      const id = makeSession(sessionManager, {
+        trackingMode: "native",
+        status: "working",
+        lastActivityAt: new Date(Date.now() - 5_000).toISOString(),
+        tmuxPane: "%1",
+      });
+      mockCapturePane = async () => workingPane;
+      const deps = makeDeps(sessionManager, {
+        agents: [claudeAgent],
+        hookManager: {
+          getMarkerForSession: () => permissionMarker(5 * 60_000),
+          getMarkersByAgentAndPid: () => [],
+        },
+      });
+      await reconcileOne(deps, sessionManager.getSession(id)!, new Map());
+      expect(sessionManager.getSession(id)!.status).toBe("working");
+    });
+
+    // One correction, not a per-tick pin: the second tick sees an `idle`
+    // session, the gate closes, and the log owns the row again.
+    it("stops contributing once the row has been corrected", async () => {
+      const id = makeSession(sessionManager, {
+        trackingMode: "native",
+        status: "waiting",
+        attentionType: "permission",
+        lastActivityAt: new Date(Date.now() - 5_000).toISOString(),
+        tmuxPane: "%1",
+      });
+      let captures = 0;
+      mockCapturePane = async () => {
+        captures += 1;
+        return IDLE_COMPOSER;
+      };
+      const deps = makeDeps(sessionManager, {
+        agents: [{ ...claudeAgent, ambiguousPermissionMarker: false }],
+        hookManager: {
+          getMarkerForSession: () => permissionMarker(5 * 60_000),
+          getMarkersByAgentAndPid: () => [],
+        },
+      });
+      await reconcileOne(deps, sessionManager.getSession(id)!, new Map());
+      expect(sessionManager.getSession(id)!.status).toBe("idle");
+      expect(captures).toBe(1);
+
+      // A later real turn moves the row on its own, with no pane read.
+      sessionManager.updateSession(id, { status: "working" });
+      await reconcileOne(deps, sessionManager.getSession(id)!, new Map());
+      expect(sessionManager.getSession(id)!.status).toBe("working");
+      expect(captures).toBe(1);
+    });
+
+    it("retires the marker on the pane-tracked path too", async () => {
+      // The pane-tracked marker branch runs only while the marker out-freshens
+      // the log, which is exactly the shape a late-arriving Notification hook
+      // leaves behind.
+      const id = makeSession(sessionManager, {
+        trackingMode: "pane",
+        tmuxPane: "%1",
+      });
+      sessionManager.updateSession(id, {
+        status: "waiting",
+        attentionType: "permission",
+        lastActivityAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+      });
+      mockCapturePane = async () => IDLE_COMPOSER;
+      const deps = makeDeps(sessionManager, {
+        agents: [claudeAgent],
+        hookManager: {
+          getMarkerForSession: () => permissionMarker(2 * 60_000),
+          getMarkersByAgentAndPid: () => [],
+        },
+      });
+      await reconcileOne(deps, sessionManager.getSession(id)!, new Map());
+      const session = sessionManager.getSession(id)!;
+      expect(session.status).toBe("idle");
+      expect(session.attentionType).toBeNull();
+    });
+  });
+
   describe("ordering guarantees", () => {
     it("tool execution runs before native state resolution", async () => {
       // A session waiting on Bash with shell children should be upgraded to working
