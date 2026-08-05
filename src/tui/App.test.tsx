@@ -6234,12 +6234,16 @@ describe("App copy last response", () => {
   });
 
   it("says so when what it copied is a screen capture", async () => {
+    // The daemon always sets truncated:true on a pane-capture fallback (a
+    // capture is never the whole response), so this is the only shape the
+    // real endpoint produces; the assertion is on source winning over the
+    // flag it always carries too, not on the flag's absence.
     const { restore } = withDaemon({
       status: 200,
       body: {
         source: "pane",
         turns: [{ role: "assistant", text: "whatever was on screen" }],
-        truncated: false,
+        truncated: true,
       },
     });
     try {
