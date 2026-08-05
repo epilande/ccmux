@@ -211,8 +211,12 @@ export type LineMeaning =
 const SKIP: LineMeaning = { kind: "skip" };
 export { SKIP as SKIP_LINE };
 
-/** Apply the per-turn cap, keeping the tail. */
-function capText(text: string): { text: string; truncated: boolean } {
+/**
+ * Apply the per-turn cap, keeping the tail. Exported so the two direct
+ * readers (OpenCode, Gemini) that don't go through {@link foldJsonlTurns}
+ * can apply the exact same guard rather than a hand-rolled equivalent.
+ */
+export function capText(text: string): { text: string; truncated: boolean } {
   if (text.length <= MAX_TURN_CHARS) return { text, truncated: false };
   return { text: "… " + text.slice(-MAX_TURN_CHARS), truncated: true };
 }
