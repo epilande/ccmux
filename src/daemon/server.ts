@@ -4,6 +4,7 @@ import {
   DAEMON_PORT,
   DAEMON_HOST,
   HEARTBEAT_INTERVAL_MS,
+  MAX_SEND_PASTE_CHARS,
   MAX_SEND_TEXT_CHARS,
   isCcmuxPane,
   resolvedHomeDir,
@@ -14,15 +15,38 @@ import { tmuxArgv } from "../lib/tmux-exec";
 import { attemptedTmuxSocketPath } from "../lib/tmux-socket";
 import {
   capturePane,
+  getPaneCurrentCommand,
   resolvePaneLocation,
   sendLiteralToPane,
   sendPromptToPane,
 } from "./pane-io";
+import { resolveSessionRef } from "./session-ref";
+import type { SessionRefResolution } from "./session-ref";
+import { MAX_TURNS, renderTurns } from "./transcript-read";
+import { readSessionTranscript } from "./transcript-readers";
+import {
+  AMBIGUOUS_WAIT_ERROR,
+  checkForegroundLiveness,
+  defuseLeadingTrigger,
+  isAmbiguousWait,
+  matchesUnsafeReplyPattern,
+  stripControlChars,
+} from "./send-guards";
+import {
+  composeHandoff,
+  formatHandoffHeader,
+  HandoffQueue,
+  MAX_HANDOFF_ATTEMPTS,
+  MAX_HANDOFF_NOTE_CHARS,
+  normalizeHandoffSpawn,
+  unsafeHandoffError,
+} from "./handoff";
 import {
   buildAgentForkCommand,
   buildAgentSpawnCommand,
   buildTmuxSpawnArgv,
   forkResumesByIdAlone,
+  MAX_SPAWN_PROMPT_BYTES,
   normalizeBoolean,
   normalizeClientTty,
   normalizePrompt,
@@ -237,6 +261,10 @@ type AgentLookup = (agentType: string) => AgentDef | undefined;
 interface PaneSendDeps {
   sendLiteralToPane: typeof sendLiteralToPane;
   sendPromptToPane: typeof sendPromptToPane;
+  /** Foreground-liveness probe for the handoff guard stack. Optional so every
+   *  existing injection site (which predates `/handoff`) still type-checks;
+   *  the real `getPaneCurrentCommand` is the fallback. */
+  getPaneCommand?: (paneId: string) => Promise<string | null>;
 }
 
 /** Runs one actionable-notification callback (constructed in `index.ts` with
@@ -517,6 +545,22 @@ export class DaemonServer {
    * the guard silently no-ops. @see resolvedHomeDir
    */
   private homeDir: string = resolvedHomeDir();
+  /**
+   * Handoffs waiting for their target to finish its turn. Constructed in the
+   * constructor rather than here because its expiry callback re-broadcasts the
+   * affected session, which needs `this`.
+   */
+  private handoffQueue!: HandoffQueue;
+  /**
+   * One delivery at a time per TARGET session. The tail of each target's
+   * chain, dropped once nothing is waiting behind it.
+   *
+   * A delivery is several awaits long (a liveness probe, a buffer load, a
+   * paste, a deliberate 150ms gap, an Enter), and two handoffs that both saw
+   * the same idle target used to run all of that concurrently: the pane got
+   * two prompts back to back and each caller was told it delivered.
+   */
+  private handoffDeliveryChain = new Map<string, Promise<void>>();
 
   constructor(
     sessionManager: SessionManager,
@@ -541,10 +585,27 @@ export class DaemonServer {
     this.retractNotification = retractNotification;
     this.getScanHealth = getScanHealth;
 
+    this.handoffQueue = new HandoffQueue({
+      onExpire: (record) => {
+        console.log(
+          `handoff: queued handoff from ${record.fromSessionId} to ${record.toSessionId} expired undelivered`,
+        );
+        void this.rebroadcastSession(record.toSessionId);
+      },
+    });
+
     // Listen for session changes
     this.sessionManager.on("change", async (event: SessionEvent) => {
       const sseEvent = await this.sessionEventToSSE(event);
       if (sseEvent) this.broadcastEvent(sseEvent);
+    });
+
+    // Deliver-on-idle, and queue cleanup for a target that goes away. A
+    // SEPARATE subscription from the SSE fan-out above: the broadcast must not
+    // wait behind a tmux paste, and this must not be skipped when a session
+    // isn't SSE-visible.
+    this.sessionManager.on("change", (event: SessionEvent) => {
+      void this.onSessionChangeForHandoff(event);
     });
 
     // Subscribe to invocation lifecycle, mirroring the sessionManager
@@ -827,6 +888,11 @@ export class DaemonServer {
       paneInfo?.sessionName,
     );
 
+    // Synchronous map read, and omitted entirely when nothing is queued (the
+    // overwhelmingly common case), so the field costs nothing on the wire for
+    // sessions it doesn't apply to.
+    const queued = this.handoffQueue.peek(session.id);
+
     return {
       ...session,
       tmuxTarget,
@@ -856,7 +922,31 @@ export class DaemonServer {
       worktreeRoot: gitInfo.worktreeRoot,
       branchPRs,
       originInvocationId,
+      ...(queued
+        ? {
+            pendingHandoff: {
+              fromSessionId: queued.fromSessionId,
+              queuedAt: new Date(queued.queuedAt).toISOString(),
+            },
+          }
+        : {}),
     };
+  }
+
+  /**
+   * Push one session's current enrichment to every SSE client. Used when
+   * something OUTSIDE the session's own state changed what clients should see
+   * about it (a handoff queued, delivered or expired), where no
+   * `SessionManager` event is coming.
+   */
+  private async rebroadcastSession(sessionId: string): Promise<void> {
+    const session = this.sessionManager.getSession(sessionId);
+    if (!session || !this.visibleSessions.has(sessionId)) return;
+    this.broadcastEvent({
+      type: "session_updated",
+      timestamp: new Date().toISOString(),
+      session: await this.enrichSession(session),
+    });
   }
 
   private async enrichSessions(
@@ -1049,6 +1139,24 @@ export class DaemonServer {
       return await this.handleScreenSession(sessionId, url, corsHeaders);
     }
 
+    if (
+      path.startsWith("/sessions/") &&
+      path.endsWith("/transcript") &&
+      req.method === "GET"
+    ) {
+      const raw = path.slice("/sessions/".length, -"/transcript".length);
+      // A malformed escape (`%zz`) throws URIError, which would escape
+      // `handleRequest` as a 500 carrying Bun's HTML error page. The raw
+      // segment is a fine ref to try instead: it resolves or 404s.
+      let ref: string;
+      try {
+        ref = decodeURIComponent(raw);
+      } catch {
+        ref = raw;
+      }
+      return await this.handleSessionTranscript(ref, url, corsHeaders);
+    }
+
     // BEFORE the catch-all GET below, which slices everything after
     // `/sessions/` as the id and would read this path's id as
     // `<id>/dirty`. Any future `GET /sessions/:id/<verb>` needs the same
@@ -1126,6 +1234,10 @@ export class DaemonServer {
 
     if (path === "/spawn" && req.method === "POST") {
       return await this.handleSpawn(req, corsHeaders);
+    }
+
+    if (path === "/handoff" && req.method === "POST") {
+      return await this.handleHandoff(req, corsHeaders);
     }
 
     if (path === "/invoke" && req.method === "POST") {
@@ -2279,18 +2391,52 @@ export class DaemonServer {
       );
     }
 
-    const { text, enter = true } = body;
-    if (!text || typeof text !== "string") {
+    const { text: rawText, enter = true } = body;
+    if (!rawText || typeof rawText !== "string") {
       return Response.json(
         { error: "Missing or invalid 'text' field" },
         { status: 400, headers },
       );
     }
 
-    if (text.length > MAX_SEND_TEXT_CHARS) {
+    // Defense in depth: the payload is delivered via `tmux paste-buffer -p`
+    // (bracketed paste) whenever it's multiline or over the literal cap, and
+    // a literal ESC byte inside a bracketed paste can emit its `ESC[201~`
+    // terminator early, leaking the remainder of the payload as live
+    // keystrokes into the pane. Strip C0/DEL/C1 controls up front (keeping
+    // `\t`/`\n`, mirroring the review hand-back's client-side strip in
+    // `review.ts`) so the cap check below runs against the text that's
+    // actually sent, and so callers who don't sanitize client-side (e.g. a
+    // future `/handoff`) are covered here regardless.
+    const text = stripControlChars(rawText, {
+      keepNewlines: true,
+      keepTabs: true,
+    });
+
+    // A payload of nothing but control chars (e.g. a lone ESC) strips to the
+    // empty string. `sendLiteralToPane(target, "", true)` would still press
+    // Enter with nothing queued in front of it, submitting whatever already
+    // sits in the pane's composer or accepting a pending dialog — reject
+    // before that reaches the pane rather than let stripping manufacture a
+    // no-op-looking Enter press.
+    if (text.length === 0) {
+      return Response.json(
+        { error: "Text is empty after control-character sanitization" },
+        { status: 400, headers },
+      );
+    }
+
+    // Single-line text under MAX_SEND_TEXT_CHARS goes argv-bound through
+    // `send-keys -l`; anything multiline, or over that cap, goes through the
+    // stdin-fed `load-buffer`/`paste-buffer` path instead, which is capped
+    // much higher since it isn't argv-bound. Reject only above the paste cap.
+    const usesPastePath =
+      text.includes("\n") || text.length > MAX_SEND_TEXT_CHARS;
+    const cap = usesPastePath ? MAX_SEND_PASTE_CHARS : MAX_SEND_TEXT_CHARS;
+    if (text.length > cap) {
       return Response.json(
         {
-          error: `Text exceeds maximum length of ${MAX_SEND_TEXT_CHARS.toLocaleString("en-US")} characters`,
+          error: `Text exceeds maximum length of ${cap.toLocaleString("en-US")} characters`,
         },
         { status: 400, headers },
       );
@@ -2302,7 +2448,7 @@ export class DaemonServer {
     // wrong pane. `%N` is immutable for the pane's life.
     const target = session.tmuxPane;
 
-    const sent = text.includes("\n")
+    const sent = usesPastePath
       ? await this.paneSendDeps.sendPromptToPane(target, text, enter)
       : await this.paneSendDeps.sendLiteralToPane(target, text, enter);
     if (!sent) {
@@ -2350,6 +2496,862 @@ export class DaemonServer {
         sessionId: session.id,
         paneId: session.tmuxPane,
         lines: lineCount,
+      },
+      { headers },
+    );
+  }
+
+  /**
+   * `GET /sessions/:ref/transcript?turns=N&callerPane=%7` — the last N turns
+   * of a session's conversation, read from the agent's own transcript.
+   *
+   * The `:ref` segment is a session REFERENCE (see `session-ref.ts`), not
+   * only an id: exact refs behave as `resolveSession` always has, and a
+   * fuzzy ref is scoped by the caller's pane. An ambiguous ref is REFUSED
+   * with the full candidate list rather than guessed at.
+   *
+   * No reader for the agent, or nothing readable yet, degrades to a pane
+   * capture (`source: "pane"`). `capturePane` returns "" on ANY failure, so
+   * an empty capture is a 400 rather than an empty success.
+   */
+  private async handleSessionTranscript(
+    ref: string,
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    const resolution = resolveSessionRef(ref, {
+      sessions: this.sessionManager.getSessions(),
+      panes: this.getPaneCache(),
+      callerPane: url.searchParams.get("callerPane"),
+    });
+
+    if (resolution.outcome === "not-found") {
+      return Response.json(
+        { error: "Session not found" },
+        { status: 404, headers },
+      );
+    }
+    if (resolution.outcome === "ambiguous") {
+      return Response.json(
+        {
+          error: `Ambiguous session reference "${ref}"`,
+          candidates: resolution.candidates,
+        },
+        { status: 409, headers },
+      );
+    }
+
+    const session = resolution.session;
+    const requested = parseInt(url.searchParams.get("turns") ?? "1", 10);
+    const turns =
+      isNaN(requested) || requested < 1 ? 1 : Math.min(requested, MAX_TURNS);
+
+    const resolved = {
+      ref,
+      tier: resolution.tier,
+      exact: resolution.exact,
+      proximity: resolution.proximity,
+    };
+
+    const transcript = await readSessionTranscript(session, turns);
+    if (transcript) {
+      return Response.json(
+        {
+          sessionId: session.id,
+          agentType: session.agentType,
+          source: "transcript",
+          // Transcript text is agent-authored and reaches a TTY on the way
+          // out, so an ESC sequence in it would be INTERPRETED (a title
+          // change, an OSC 52 clipboard write). Newlines and tabs survive:
+          // unlike the pane branch below, this text carries code.
+          turns: transcript.turns.map((turn) => ({
+            ...turn,
+            text: stripControlChars(turn.text, {
+              keepNewlines: true,
+              keepTabs: true,
+            }),
+          })),
+          truncated: transcript.truncated,
+          resolution: resolved,
+        },
+        { headers },
+      );
+    }
+
+    if (!session.tmuxPane) {
+      return Response.json(
+        { error: "Session has no readable transcript and no tmux pane" },
+        { status: 400, headers },
+      );
+    }
+
+    const capture = stripControlChars(await capturePane(session.tmuxPane), {
+      keepNewlines: true,
+    }).trim();
+    if (capture.length === 0) {
+      return Response.json(
+        { error: "Session has no readable transcript and its pane is empty" },
+        { status: 400, headers },
+      );
+    }
+
+    return Response.json(
+      {
+        sessionId: session.id,
+        agentType: session.agentType,
+        source: "pane",
+        // Role is nominal here: a screen capture is not a parsed turn.
+        turns: [{ role: "assistant", text: capture }],
+        // Always: `capturePane` reads the visible tail (50 lines by
+        // default), so a pane capture is never the whole response.
+        truncated: true,
+        resolution: resolved,
+      },
+      { headers },
+    );
+  }
+
+  /**
+   * `POST /handoff` — read one session's last response and give it to
+   * another session (or to a session spawned for it).
+   *
+   * Composed SERVER-SIDE, deliberately: the payload never transits the
+   * caller's context, and the provenance header can therefore be trusted to
+   * describe the session it names.
+   *
+   * Every refusal here is a refusal on purpose. The three that matter:
+   *
+   * - An AMBIGUOUS ref, at either end, is refused with the candidate list and
+   *   never guessed at. Delivering a prompt into the wrong session is the
+   *   worst thing this endpoint can do, so it is the one thing it will not
+   *   risk (settled decision 6 in `session-handoff-plan.md`).
+   * - A target in `waiting` is refused: answering a permission dialog with a
+   *   pasted peer response is not a thing anyone asked for.
+   * - A source with no readable transcript is refused rather than degraded to
+   *   a pane capture. A screen scrape is fine to READ (`GET /transcript`
+   *   falls back to one) and useless as a PROMPT: box drawing, spinners and
+   *   half a composer are noise the receiving agent has to reason about.
+   */
+  private async handleHandoff(
+    req: Request,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    let body: {
+      from?: unknown;
+      to?: unknown;
+      turns?: unknown;
+      note?: unknown;
+      callerPane?: unknown;
+      spawn?: unknown;
+    };
+    try {
+      body = (await req.json()) as typeof body;
+    } catch {
+      return Response.json(
+        { error: "Invalid JSON body" },
+        { status: 400, headers },
+      );
+    }
+
+    if (typeof body.from !== "string" || body.from.trim() === "") {
+      return Response.json(
+        { error: "Missing or invalid 'from' field" },
+        { status: 400, headers },
+      );
+    }
+    const fromRef = body.from;
+
+    const spawnRequest = normalizeHandoffSpawn(body.spawn);
+    if (!spawnRequest.ok) {
+      return Response.json(
+        { error: spawnRequest.error },
+        { status: 400, headers },
+      );
+    }
+
+    const toRef = body.to;
+    if (spawnRequest.value && toRef != null) {
+      return Response.json(
+        {
+          error:
+            "'to' and 'spawn' are mutually exclusive: a handoff either goes to an existing session or opens a new one",
+        },
+        { status: 400, headers },
+      );
+    }
+    // Blank-after-trim is the same mistake as absent, and it is refused the
+    // same way at BOTH ends: `to: "   "` would otherwise reach the resolver
+    // as a ref nothing can match and come back as a confusing 404.
+    if (
+      !spawnRequest.value &&
+      (typeof toRef !== "string" || toRef.trim() === "")
+    ) {
+      return Response.json(
+        { error: "Missing or invalid 'to' field (or pass 'spawn')" },
+        { status: 400, headers },
+      );
+    }
+
+    // REFUSED, where `GET /transcript` clamps the same field to the legal
+    // range. The asymmetry is the consequence: a read that asks for too much
+    // gets the most it can have, while this endpoint PASTES into somebody
+    // else's composer, so a caller who miscounted should learn that from an
+    // error rather than from a peer receiving a different amount of context
+    // than they asked to send.
+    let turns = 1;
+    if (body.turns != null) {
+      const value = Number(body.turns);
+      if (!Number.isInteger(value) || value < 1 || value > MAX_TURNS) {
+        return Response.json(
+          { error: `Invalid 'turns' field (expected 1-${MAX_TURNS})` },
+          { status: 400, headers },
+        );
+      }
+      turns = value;
+    }
+
+    let note: string | undefined;
+    if (body.note != null) {
+      if (typeof body.note !== "string") {
+        return Response.json(
+          { error: "Invalid 'note' field" },
+          { status: 400, headers },
+        );
+      }
+      if (body.note.length > MAX_HANDOFF_NOTE_CHARS) {
+        return Response.json(
+          {
+            error: `Note exceeds ${MAX_HANDOFF_NOTE_CHARS} characters (a note is a one-liner; put the detail in the payload)`,
+          },
+          { status: 400, headers },
+        );
+      }
+      note = body.note;
+    }
+
+    const callerPane =
+      typeof body.callerPane === "string" ? body.callerPane : null;
+    const refContext = {
+      sessions: this.sessionManager.getSessions(),
+      panes: this.getPaneCache(),
+      callerPane,
+    };
+
+    const fromResolution = resolveSessionRef(fromRef, refContext);
+    if (fromResolution.outcome !== "resolved") {
+      return this.refuseRef("from", fromRef, fromResolution, headers);
+    }
+    const source = fromResolution.session;
+
+    // Read through the reader layer IN-PROCESS rather than over HTTP: the
+    // endpoint is the same daemon, and a loopback round-trip would only add a
+    // way for the two ends to disagree about what was read.
+    const transcript = await readSessionTranscript(source, turns);
+    if (!transcript) {
+      return Response.json(
+        {
+          error:
+            `Session ${source.id} (${source.agentType}) has no readable transcript. ` +
+            `A handoff will not fall back to a pane capture: a screen scrape is not a prompt.`,
+          reason: "no-transcript",
+        },
+        { status: 409, headers },
+      );
+    }
+
+    // The SAME renderer `ccmux last --turns N` prints and the picker's Copy
+    // dialog puts on the clipboard: one turn bare (it IS the last response),
+    // several with `user:` / `assistant:` labels. A receiver therefore sees
+    // exactly what the CLI would have shown for the same count, which is what
+    // makes the header's session id a usable pointer rather than a different
+    // rendering of the same conversation.
+    const payload = stripControlChars(renderTurns(transcript.turns), {
+      keepNewlines: true,
+      keepTabs: true,
+    }).trim();
+    if (payload.length === 0) {
+      return Response.json(
+        {
+          error: `Session ${source.id} has nothing to hand off (its last response is empty)`,
+          reason: "empty-payload",
+        },
+        { status: 409, headers },
+      );
+    }
+
+    // `session.gitBranch` plus the git cache, never a fresh `git` spawn: the
+    // header reports what the daemon already knows and omits the segment when
+    // it knows nothing, rather than paying a subprocess for a decoration.
+    const branch =
+      this.gitInfoCache.get(this.effectiveCwd(source, refContext.panes))?.info
+        .branch ?? source.gitBranch;
+    const header = formatHandoffHeader(
+      {
+        sessionId: source.id,
+        agentType: source.agentType,
+        cwd: source.cwd,
+        branch,
+      },
+      new Date(),
+      note,
+    );
+    // One cap for both destinations. The paste path's cap is the binding one
+    // for an existing session, and it sits well under `POST /spawn`'s own
+    // prompt budget, so a handoff behaves identically whichever way it lands.
+    const composed = composeHandoff(header, payload, MAX_SEND_PASTE_CHARS);
+    const truncated = composed.truncated || transcript.truncated;
+
+    // THE control-char guarantee, on the FINAL composed text — the exact bytes
+    // that get pasted. The strip above covers the transcript payload, which is
+    // only one of the composed text's sources: the note is caller-supplied and
+    // merely whitespace-folded (`\x1b` is not `\s`), and a cwd may legally
+    // contain control bytes on POSIX, so either can carry an ESC into the
+    // header. A literal ESC inside a bracketed paste can emit its `ESC[201~`
+    // terminator early and leak the remainder into the pane as live
+    // keystrokes, so nothing downstream of here may be un-stripped.
+    const text = stripControlChars(composed.text, {
+      keepNewlines: true,
+      keepTabs: true,
+    });
+
+    const from = {
+      sessionId: source.id,
+      agentType: source.agentType,
+      resolution: {
+        ref: fromRef,
+        tier: fromResolution.tier,
+        exact: fromResolution.exact,
+        proximity: fromResolution.proximity,
+      },
+    };
+
+    if (spawnRequest.value) {
+      return await this.handoffToNewSession(
+        text,
+        { from, truncated, chars: text.length },
+        {
+          agent: spawnRequest.value.agent ?? source.agentType,
+          cwd: spawnRequest.value.cwd ?? source.cwd,
+          callerPane,
+        },
+        headers,
+      );
+    }
+
+    const toResolution = resolveSessionRef(String(toRef), refContext);
+    if (toResolution.outcome !== "resolved") {
+      return this.refuseRef("to", String(toRef), toResolution, headers);
+    }
+    const target = toResolution.session;
+
+    if (target.id === source.id) {
+      return Response.json(
+        {
+          error: "A session cannot hand off to itself",
+          reason: "self-handoff",
+        },
+        { status: 400, headers },
+      );
+    }
+
+    const to = {
+      sessionId: target.id,
+      agentType: target.agentType,
+      resolution: {
+        ref: String(toRef),
+        tier: toResolution.tier,
+        exact: toResolution.exact,
+        proximity: toResolution.proximity,
+      },
+    };
+
+    // Guard stack, in order. `ambiguousWait` and the pane check come before
+    // the status branch because they disqualify the target outright: queueing
+    // for a row that can never safely receive a paste would just defer the
+    // same refusal by up to half an hour.
+    if (isAmbiguousWait(target)) {
+      return Response.json(
+        { error: AMBIGUOUS_WAIT_ERROR, reason: "ambiguous-wait", from, to },
+        { status: 409, headers },
+      );
+    }
+    if (!target.tmuxPane) {
+      return Response.json(
+        {
+          error: `Session ${target.id} has no tmux pane to deliver into`,
+          reason: "no-pane",
+          from,
+          to,
+        },
+        { status: 409, headers },
+      );
+    }
+
+    if (target.status === "waiting") {
+      return Response.json(
+        {
+          error:
+            `Session ${target.id} has a pending prompt. A handoff is never used to answer one: ` +
+            `resolve it in the pane, then hand off again.`,
+          reason: "target-waiting",
+          from,
+          to,
+        },
+        { status: 409, headers },
+      );
+    }
+
+    const queueArgs = { source, target, text, truncated, from, to, headers };
+    if (target.status === "working") {
+      return this.queueHandoff(queueArgs);
+    }
+
+    // Serialized per target, so a second handoff aimed at the same idle
+    // session waits for the first to finish rather than pasting over it.
+    const delivery = await this.serializeHandoffDelivery(target.id, () =>
+      this.deliverHandoff(target, text),
+    );
+    // The target stopped being idle while we waited our turn (or while the
+    // liveness probe ran). That is the `working` case arriving late, so it
+    // gets the `working` answer: queued, with a delivery owed on idle.
+    if (!delivery.ok && delivery.reason === "target-busy") {
+      return this.queueHandoff(queueArgs);
+    }
+    if (!delivery.ok) {
+      return Response.json(
+        { error: delivery.error, reason: delivery.reason, from, to },
+        { status: delivery.code, headers },
+      );
+    }
+
+    return Response.json(
+      {
+        status: "delivered",
+        from,
+        to,
+        chars: text.length,
+        truncated,
+      },
+      { headers },
+    );
+  }
+
+  /**
+   * Queue a handoff for a target that is mid-turn, and answer its sender.
+   *
+   * The unsafe-payload check runs HERE as well as at delivery, and the
+   * duplication is the point: both of its inputs are already frozen (the
+   * composed text, and the target agent's own pattern), so a payload that
+   * agent can never receive is knowable now. Without this the sender was told
+   * "queued" and the dequeue-time check silently dropped the record half an
+   * hour later, with nobody left to report it to.
+   */
+  private queueHandoff(args: {
+    source: Session;
+    target: Session;
+    text: string;
+    truncated: boolean;
+    from: unknown;
+    to: unknown;
+    headers: Record<string, string>;
+  }): Response {
+    const { source, target, text, truncated, from, to, headers } = args;
+
+    const agentDef = this.getAgentByType(target.agentType);
+    if (
+      matchesUnsafeReplyPattern(
+        text,
+        agentDef?.notificationActions?.unsafeReplyPattern,
+      )
+    ) {
+      return Response.json(
+        {
+          error: unsafeHandoffError(target.agentType),
+          reason: "unsafe-payload",
+          from,
+          to,
+        },
+        { status: 409, headers },
+      );
+    }
+
+    const { record, replaced } = this.handoffQueue.enqueue({
+      fromSessionId: source.id,
+      toSessionId: target.id,
+      text,
+      truncated,
+    });
+    void this.rebroadcastSession(target.id);
+    // The live status, not the snapshot this handoff was resolved against:
+    // the caller can reach here from the idle path too, when the target
+    // turned over mid-request.
+    const status = this.sessionManager.getSession(target.id)?.status ?? "busy";
+    console.log(
+      `handoff: queued ${source.id} -> ${target.id} (target is ${status})` +
+        (replaced
+          ? `, replacing a pending handoff from ${replaced.fromSessionId}`
+          : ""),
+    );
+    // The target may have gone idle between the status read above and the
+    // enqueue, in which case its `working -> idle` event has already fired
+    // and nothing else is coming to trigger delivery. Re-read and deliver
+    // now if so; `take()` makes the double-delivery race impossible.
+    void this.deliverQueuedHandoff(target.id);
+    return Response.json(
+      {
+        status: "queued",
+        from,
+        to,
+        chars: text.length,
+        truncated,
+        queuedAt: new Date(record.queuedAt).toISOString(),
+        expiresAt: new Date(record.expiresAt).toISOString(),
+        ...(replaced
+          ? { replaced: { fromSessionId: replaced.fromSessionId } }
+          : {}),
+      },
+      { headers },
+    );
+  }
+
+  /**
+   * Run `fn` with no other handoff delivery in flight for `sessionId`.
+   *
+   * A plain mutex rather than a queue with a depth limit: the things that can
+   * contend here are a `POST /handoff` and a deliver-on-idle, and both are
+   * already bounded (one pending record per target, one HTTP request per
+   * sender). The chain entry is removed by whichever link is last, so an idle
+   * target costs nothing.
+   */
+  private async serializeHandoffDelivery<T>(
+    sessionId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const prior = this.handoffDeliveryChain.get(sessionId);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    this.handoffDeliveryChain.set(sessionId, held);
+    // A prior link that threw must not strand everyone behind it.
+    if (prior) await prior.catch(() => {});
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.handoffDeliveryChain.get(sessionId) === held) {
+        this.handoffDeliveryChain.delete(sessionId);
+      }
+    }
+  }
+
+  /** Render an unresolved session ref as the right refusal for its end. */
+  private refuseRef(
+    end: "from" | "to",
+    ref: string,
+    resolution: Exclude<SessionRefResolution, { outcome: "resolved" }>,
+    headers: Record<string, string>,
+  ): Response {
+    if (resolution.outcome === "ambiguous") {
+      return Response.json(
+        {
+          error: `Ambiguous session reference "${ref}" for '${end}'`,
+          reason: "ambiguous-ref",
+          end,
+          candidates: resolution.candidates,
+        },
+        { status: 409, headers },
+      );
+    }
+    return Response.json(
+      {
+        error: `Session not found for '${end}': ${ref}`,
+        reason: "not-found",
+        end,
+      },
+      { status: 404, headers },
+    );
+  }
+
+  /**
+   * The delivery half of the guard stack, re-runnable. Everything it checks
+   * can have moved since the handoff was composed (a queued one waits up to
+   * half an hour), which is exactly why the dequeue path calls this rather
+   * than trusting the checks that ran at enqueue time.
+   *
+   * Call it through {@link serializeHandoffDelivery}: it is several awaits
+   * long, and two concurrent runs against one target both paste.
+   */
+  private async deliverHandoff(
+    target: Session,
+    text: string,
+  ): Promise<
+    { ok: true } | { ok: false; code: number; reason: string; error: string }
+  > {
+    if (isAmbiguousWait(target)) {
+      return {
+        ok: false,
+        code: 409,
+        reason: "ambiguous-wait",
+        error: AMBIGUOUS_WAIT_ERROR,
+      };
+    }
+    if (!target.tmuxPane) {
+      return {
+        ok: false,
+        code: 409,
+        reason: "no-pane",
+        error: `Session ${target.id} has no tmux pane to deliver into`,
+      };
+    }
+    if (target.status !== "idle") {
+      return {
+        ok: false,
+        code: 409,
+        reason: target.status === "waiting" ? "target-waiting" : "target-busy",
+        error: `Session ${target.id} is ${target.status}; a handoff is only ever delivered into an idle composer`,
+      };
+    }
+
+    // Fail CLOSED: the reconciler keeps a dead agent's session idle with its
+    // pane still bound, so a handoff pasted after the agent exited would run
+    // a peer's prose as shell commands.
+    const { live, foreground } = await checkForegroundLiveness(
+      target.tmuxPane,
+      this.paneSendDeps.getPaneCommand ?? getPaneCurrentCommand,
+    );
+    if (!live) {
+      return {
+        ok: false,
+        code: 409,
+        reason: "not-at-agent",
+        error: `Session ${target.id} is no longer at the agent (pane foreground is "${foreground ?? "unknown"}")`,
+      };
+    }
+
+    // The status check above ran BEFORE a subprocess round trip, and the
+    // caller's own read ran before that. Re-read and act on the current
+    // value: the idle window this handoff was cleared for may have closed
+    // while we asked, and pasting into a composer mid-turn is the one thing
+    // the whole guard stack exists to prevent. `target-busy` is what the
+    // caller turns into a queue.
+    const current = this.sessionManager.getSession(target.id) ?? target;
+    if (current.status !== "idle") {
+      return {
+        ok: false,
+        code: 409,
+        reason: current.status === "waiting" ? "target-waiting" : "target-busy",
+        error: `Session ${target.id} is ${current.status}; a handoff is only ever delivered into an idle composer`,
+      };
+    }
+
+    // Run on the FINAL composed text. The header makes a leading `/` or `!`
+    // impossible, so the defuse below is provably a no-op today — but the
+    // per-agent unsafe shapes are NOT about the leading character (most
+    // composers trim before trigger detection, and Cursor fuzzy-matches a
+    // `/token` anywhere), so a payload that happens to contain one is a
+    // refusal rather than something the defuse can neutralize.
+    //
+    // This runs on the PASTE path only. `handoffToNewSession` deliberately
+    // skips it: a spawn hands the text to the agent in argv, so it is never
+    // typed into a composer and no slash-trigger can fire from it.
+    const agentDef = this.getAgentByType(target.agentType);
+    if (
+      matchesUnsafeReplyPattern(
+        text,
+        agentDef?.notificationActions?.unsafeReplyPattern,
+      )
+    ) {
+      return {
+        ok: false,
+        code: 409,
+        reason: "unsafe-payload",
+        error: unsafeHandoffError(target.agentType),
+      };
+    }
+
+    const sent = await this.paneSendDeps.sendPromptToPane(
+      target.tmuxPane,
+      defuseLeadingTrigger(text),
+      true,
+    );
+    if (!sent) {
+      return {
+        ok: false,
+        code: 500,
+        reason: "send-failed",
+        error: `Failed to deliver the handoff to session ${target.id}`,
+      };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * React to a session change on behalf of the handoff queue: deliver when
+   * the target reaches idle, and drop the record when the target goes away.
+   */
+  private async onSessionChangeForHandoff(event: SessionEvent): Promise<void> {
+    if (event.type === "removed") {
+      if (event.sessionId) this.handoffQueue.drop(event.sessionId);
+      return;
+    }
+    const session = event.session;
+    // Any transition INTO idle, not `working -> idle` specifically: a target
+    // can pass through `waiting` on its way (a permission prompt mid-turn),
+    // and the queued handoff is still owed a delivery when it comes out.
+    if (!session || session.status !== "idle") return;
+    if (!this.handoffQueue.peek(session.id)) return;
+    await this.deliverQueuedHandoff(session.id);
+  }
+
+  /**
+   * Deliver a target's queued handoff, if it has one and is ready for it.
+   *
+   * The record is TAKEN before delivery, so two overlapping idle observations
+   * cannot paste it twice.
+   *
+   * A failure splits two ways, because the sender was already told "queued"
+   * and is not listening any more. A DETERMINISTIC refusal (unsafe-payload,
+   * not-at-agent, target-waiting, ambiguous-wait, no-pane) drops the record
+   * and logs why: re-running a check that just said no would only say no
+   * again. A TRANSIENT one (the tmux send failed, or the target turned over
+   * between the readiness check and the paste) puts the record back with its
+   * attempt counted, for the next idle transition to retry, up to
+   * {@link MAX_HANDOFF_ATTEMPTS}. Retries never extend the TTL, so half an
+   * hour remains the outer bound either way.
+   */
+  private async deliverQueuedHandoff(sessionId: string): Promise<void> {
+    const session = this.sessionManager.getSession(sessionId);
+    if (!session || session.status !== "idle") return;
+    const record = this.handoffQueue.take(sessionId);
+    if (!record) return;
+
+    const result = await this.serializeHandoffDelivery(sessionId, () =>
+      this.deliverHandoff(session, record.text),
+    );
+    if (result.ok) {
+      console.log(
+        `handoff: delivered queued handoff ${record.fromSessionId} -> ${sessionId} on idle`,
+      );
+    } else if (
+      result.reason === "send-failed" ||
+      result.reason === "target-busy"
+    ) {
+      const attempts = (record.attempts ?? 0) + 1;
+      const requeued =
+        attempts < MAX_HANDOFF_ATTEMPTS &&
+        this.handoffQueue.requeue({ ...record, attempts });
+      console.log(
+        requeued
+          ? `handoff: re-queued ${record.fromSessionId} -> ${sessionId} after a transient failure ` +
+              `(attempt ${attempts}/${MAX_HANDOFF_ATTEMPTS}): ${result.error}`
+          : `handoff: dropped queued handoff ${record.fromSessionId} -> ${sessionId} ` +
+              `after ${attempts} attempt(s): ${result.error}`,
+      );
+    } else {
+      console.log(
+        `handoff: dropped queued handoff ${record.fromSessionId} -> ${sessionId}: ${result.error}`,
+      );
+    }
+    await this.rebroadcastSession(sessionId);
+  }
+
+  /**
+   * `--spawn`: open a new session and give it the handoff as its opening
+   * prompt, by riding `POST /spawn` rather than re-deriving any of it.
+   *
+   * A multiline prompt survives spawn's `send-keys`-without-`-l` layer intact
+   * (verified live for claude and codex): the prompt is always inside single
+   * quotes, so every embedded newline arrives while the shell is mid-string
+   * and reads as a continuation, and the raw bytes land in argv unchanged.
+   *
+   * `unsafeReplyPattern` deliberately does NOT run here. It guards a paste
+   * into a live composer, where a `/token` can fire a slash command; a spawn
+   * delivers the text in argv to a process that has not started yet, so there
+   * is no composer and no trigger to defuse.
+   */
+  private async handoffToNewSession(
+    text: string,
+    summary: { from: unknown; truncated: boolean; chars: number },
+    spawn: {
+      agent: string;
+      cwd: string;
+      callerPane: string | null;
+    },
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    // `composeHandoff` caps the text in UTF-16 CHARS while the spawn path
+    // budgets it in BYTES, so a CJK- or emoji-heavy payload can sit under the
+    // char cap and still overrun the argv budget. Caught here, in handoff's
+    // own terms: forwarded, it comes back as a 400 about an invalid 'prompt'
+    // field, which is not a field this caller ever sent.
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > MAX_SPAWN_PROMPT_BYTES) {
+      return Response.json(
+        {
+          error:
+            `The composed handoff exceeds the spawn prompt budget ` +
+            `(${bytes} bytes > ${MAX_SPAWN_PROMPT_BYTES}); retry with fewer --turns`,
+          reason: "too-large",
+          from: summary.from,
+        },
+        { status: 409, headers },
+      );
+    }
+
+    const spawnBody: Record<string, unknown> = {
+      agent: spawn.agent,
+      cwd: spawn.cwd,
+      prompt: text,
+    };
+    if (spawn.callerPane) spawnBody.callerPane = spawn.callerPane;
+
+    const response = await this.handleSpawn(
+      new Request("http://localhost/spawn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(spawnBody),
+      }),
+      headers,
+    );
+    const spawned = (await response.json()) as {
+      error?: string;
+      paneId?: string;
+    };
+    if (!response.ok) {
+      return Response.json(
+        {
+          error: spawned.error ?? `Spawn failed (HTTP ${response.status})`,
+          reason: "spawn-failed",
+          from: summary.from,
+        },
+        { status: response.status, headers },
+      );
+    }
+
+    const notes: string[] = [];
+    // Surfaced rather than auto-answered: codex holds its initial prompt
+    // behind a directory-trust prompt the first time it runs in a cwd, so a
+    // handoff into a fresh worktree looks stalled until someone answers it.
+    // Answering a trust prompt on the user's behalf is not this endpoint's
+    // call to make.
+    if (spawn.agent === "codex") {
+      notes.push(
+        "codex asks to trust a directory the first time it runs there and holds the initial prompt behind that question; " +
+          "if the new pane looks stalled, answer the trust prompt in it and the handoff will submit.",
+      );
+    }
+
+    return Response.json(
+      {
+        status: "spawned",
+        from: summary.from,
+        to: {
+          agentType: spawn.agent,
+          cwd: spawn.cwd,
+          paneId: spawned.paneId ?? null,
+        },
+        chars: summary.chars,
+        truncated: summary.truncated,
+        ...(notes.length > 0 ? { notes } : {}),
       },
       { headers },
     );

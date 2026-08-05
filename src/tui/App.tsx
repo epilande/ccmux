@@ -36,6 +36,7 @@ import {
   runHunkReview,
   type HunkReviewNote,
 } from "./utils/review";
+import { copyToClipboard } from "./utils/clipboard";
 import { SSEClient } from "./utils/sse";
 import {
   switchToPane,
@@ -73,6 +74,10 @@ import {
 } from "./components/NewSessionDialog";
 import { newSessionOptions } from "./new-session-options";
 import { NoticeDialog } from "./components/NoticeDialog";
+import { CopyDialog } from "./components/CopyDialog";
+import { HandoffDialog } from "./components/HandoffDialog";
+import { applyTurnsKey } from "./turns-selection";
+import { renderTurns } from "../daemon/transcript-read";
 import { slugFromPrompt, slugify } from "../daemon/worktree-create";
 import {
   failureNeedsAcknowledgement,
@@ -83,6 +88,7 @@ import {
   type MoveReport,
 } from "../lib/move-report";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
+import { HANDOFF_BADGE } from "./components/session-columns";
 import { WorktreesPanel, worktreeHoldsPath } from "./components/WorktreesPanel";
 import type { WorktreeSession } from "../daemon/worktree-prune";
 import { HelpOverlay } from "./components/HelpOverlay";
@@ -796,7 +802,9 @@ export function App(props: AppProps) {
       store.state.previewFocused ||
       store.state.newSession !== null ||
       store.state.worktrees !== null ||
-      store.state.notice !== null
+      store.state.notice !== null ||
+      store.state.copyDialog !== null ||
+      store.state.handoffDialog !== null
     );
   }
 
@@ -810,6 +818,14 @@ export function App(props: AppProps) {
       return;
     }
     store.actions.setSelectedIndex(index);
+    // A click while aiming a handoff picks that row, the same as Enter on it.
+    // The alternative is the ordinary activation, which in the one-shot picker
+    // switches panes and EXITS, losing both the pick and the surface it was
+    // being made on.
+    if (store.state.handoffPick) {
+      commitHandoffPick();
+      return;
+    }
     activateItem(item);
   }
 
@@ -889,7 +905,7 @@ export function App(props: AppProps) {
     index: number,
     event: MouseEvent,
   ) {
-    if (modalOverlayOpen()) {
+    if (modalOverlayOpen() || store.state.handoffPick) {
       return;
     }
     store.actions.setSelectedIndex(index);
@@ -1178,6 +1194,398 @@ export function App(props: AppProps) {
     if (session) reviewSession(session);
   }
 
+  /**
+   * Whether the transcript endpoint has any chance of answering for this row.
+   *
+   * It reads the agent's own transcript and degrades to a capture of the
+   * session's pane, so a row with neither is the one case we can rule out from
+   * here. Every other row is a question only the daemon can answer, and the
+   * toast is where a refusal belongs. Hidden rather than disabled, as
+   * everything else in this menu is.
+   */
+  function canCopyLastResponse(session: EnrichedSession | undefined): boolean {
+    if (!session) return false;
+    return session.tmuxPane != null || session.logPath != null;
+  }
+
+  /**
+   * Put `turns` of this session's conversation on the clipboard.
+   *
+   * Asynchronous by design: the dialog is already closed when this starts, and
+   * the toast is the only thing that reports how it went. Blocking the picker
+   * on a daemon read would freeze every row over one row's transcript.
+   *
+   * `turns=1` is exactly one assistant entry (the frozen contract), so the
+   * join below is a formality that keeps this honest if the endpoint ever
+   * answers with more. Past one, the text is composed by the SAME renderer
+   * `ccmux last` prints, so the two surfaces cannot drift into two formats for
+   * the same exchange.
+   */
+  async function copyLastResponse(session: EnrichedSession, turns = 1) {
+    store.actions.showToast(
+      turns === 1 ? "Copying last response…" : `Copying last ${turns} turns…`,
+      10_000,
+    );
+    try {
+      const url = new URL(
+        `${getDaemonUrl()}/sessions/${session.id}/transcript`,
+      );
+      url.searchParams.set("turns", String(turns));
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      const data = (await response.json()) as {
+        source?: string;
+        turns?: { role?: string; text?: string }[];
+        truncated?: boolean;
+        error?: string;
+      };
+      if (!response.ok) {
+        // The endpoint's own refusals name the reason ("no readable transcript
+        // and no tmux pane"); passing one through beats a generic failure.
+        store.actions.showToast(
+          `Copy failed: ${data.error ?? `HTTP ${response.status}`}`,
+          4_000,
+        );
+        return;
+      }
+      const received = data.turns ?? [];
+      const text =
+        turns === 1
+          ? received
+              .map((turn) => turn.text ?? "")
+              .join("\n\n")
+              .trim()
+          : renderTurns(
+              received.map((turn) => ({
+                role: turn.role === "user" ? "user" : "assistant",
+                text: turn.text ?? "",
+              })),
+            );
+      // Trimmed for the TEST only: a multi-turn payload keeps whatever
+      // whitespace the CLI would have printed, byte for byte.
+      if (!text.trim()) {
+        store.actions.showToast("Nothing to copy: no response yet", 3_000);
+        return;
+      }
+      const result = await copyToClipboard(text, {
+        osc52: (payload) => renderer.copyToClipboardOSC52(payload),
+      });
+      if (!result.ok) {
+        store.actions.showToast("Copy failed: no clipboard available", 4_000);
+        return;
+      }
+      // What was copied is not always the whole clean response, and a user who
+      // pastes a screen capture into a peer agent should have been told so
+      // BEFORE they paste: a size guard dropped content, or there was no
+      // transcript to read and this is what the pane happened to be showing.
+      // Source wins over the generic flag: a pane capture is ALWAYS
+      // truncated (the daemon sets both), and "(pane capture)" is the more
+      // informative caveat since it implies incompleteness and names the
+      // reason, so it must not be shadowed by the flag it always sets too.
+      const caveat =
+        data.source === "pane"
+          ? " (pane capture)"
+          : data.truncated
+            ? " (truncated)"
+            : "";
+      // Short enough to stay on ONE line inside the toast's 40-column cap,
+      // caveat and all: the wrap otherwise splits "(pane capture)" across two
+      // lines, which is where a caveat stops reading as one.
+      store.actions.showToast(
+        `Copied ${text.length.toLocaleString()} chars${caveat}`,
+        caveat ? 4_000 : 2_500,
+      );
+    } catch {
+      store.actions.showToast("Copy failed: daemon unreachable", 4_000);
+    }
+  }
+
+  function contextMenuCopyLastResponse() {
+    const cm = store.state.contextMenu;
+    if (!cm) return;
+    const session = store.state.sessions.find((s) => s.id === cm.sessionId);
+    store.actions.hideContextMenu();
+    if (session) store.actions.openCopyDialog(session.id);
+  }
+
+  /** The row the open Copy dialog is copying FROM, or undefined once it has
+   *  left the board (an SSE removal under an open dialog). */
+  function copyDialogSession(): EnrichedSession | undefined {
+    const open = store.state.copyDialog;
+    if (!open) return undefined;
+    return store.state.sessions.find((s) => s.id === open.sessionId);
+  }
+
+  /** Close the Copy dialog and start the copy it was configuring. */
+  function commitCopyDialog(): void {
+    const open = store.state.copyDialog;
+    if (!open) return;
+    const session = copyDialogSession();
+    store.actions.closeCopyDialog();
+    if (!session) {
+      store.actions.showToast("The session being copied is gone", 4_000);
+      return;
+    }
+    void copyLastResponse(session, open.turns);
+  }
+
+  /**
+   * The Copy dialog's key model.
+   *
+   * It owns the turns selector's keys (`turns-selection.ts`: j/k, the arrows
+   * and the digits), Enter and Escape; every other key closes it WITHOUT
+   * copying and without acting on the board. That last half is where it parts
+   * company with the row menu, whose dismissing key goes on to mean what it
+   * always means: the menu is a small popup anchored beside a row, while this
+   * is a modal box over the middle of the list, and a `x` that both dismissed
+   * it and reached the board would be one keystroke from killing the row it
+   * was copying.
+   */
+  function handleCopyDialogKey(
+    event: KeyEvent,
+    open: NonNullable<typeof store.state.copyDialog>,
+  ): void {
+    const key = event.name;
+    event.preventDefault();
+
+    const turns = applyTurnsKey(key, open);
+    if (turns) {
+      store.actions.setCopyDialogTurns(turns.turns, turns.pendingDigit);
+      return;
+    }
+    if (key === "return" || key === "enter") {
+      commitCopyDialog();
+      return;
+    }
+    store.actions.closeCopyDialog();
+  }
+
+  /**
+   * Enter the pick-a-target mode for the row whose menu is open.
+   *
+   * The item is only ever offered when another session is on the board, so
+   * failing here is the race where the last one left between the menu being
+   * drawn and this running. It is reported rather than swallowed, since the
+   * mode visibly does not open.
+   */
+  function contextMenuHandoff() {
+    const cm = store.state.contextMenu;
+    if (!cm) return;
+    const session = store.state.sessions.find((s) => s.id === cm.sessionId);
+    store.actions.hideContextMenu();
+    if (!session) return;
+    if (!store.actions.beginHandoffPick(session.id)) {
+      store.actions.showToast("No other session in view to hand off to", 3_000);
+    }
+  }
+
+  /** The session a pick-mode handoff would come FROM, or undefined once it
+   *  has left the board (an SSE removal under an open pick). */
+  function handoffSource(): EnrichedSession | undefined {
+    const pick = store.state.handoffPick;
+    if (!pick) return undefined;
+    return store.state.sessions.find((s) => s.id === pick.fromSessionId);
+  }
+
+  /** How a session is named while a handoff is being aimed or reported, and
+   *  in the Copy dialog's title. Agent plus project is what tells two rows of
+   *  the same board apart. */
+  function handoffLabel(session: EnrichedSession): string {
+    return session.project
+      ? `${session.agentType} · ${session.project}`
+      : session.agentType;
+  }
+
+  /**
+   * Hand the source's last response to `to`, and say what the daemon did with
+   * it.
+   *
+   * The three outcomes are the endpoint's, reported as they come: DELIVERED
+   * (the target was idle and has the text now), QUEUED (the target was working
+   * and gets it when the turn ends, which the row's own badge then shows), and
+   * REFUSED. A refusal's reason is passed through verbatim rather than
+   * rewritten: the guard stack refuses for reasons the user has to act on (a
+   * target with a permission prompt up, a source with no readable transcript),
+   * and a house-style summary of one of those is a worse sentence than the one
+   * the daemon already wrote.
+   *
+   * An ambiguity refusal cannot happen here. Both ends are sent as session
+   * IDs, which is the resolver's exact tier, so there is never a candidate
+   * list to render: the pick IS the disambiguation.
+   */
+  async function handOffTo(
+    from: EnrichedSession,
+    to: EnrichedSession,
+    turns: number,
+    note: string,
+  ) {
+    const target = handoffLabel(to);
+    store.actions.showToast(`Handing off to ${target}…`, 15_000);
+    try {
+      const response = await fetch(`${getDaemonUrl()}/handoff`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // `turns` is sent even when it is 1 (the endpoint's default), because
+        // what this client promises is the count the dialog was showing, not
+        // whatever the default becomes. A blank note is OMITTED rather than
+        // sent empty: the header drops it either way, and a field that is not
+        // there cannot be misread as one that was cleared.
+        body: JSON.stringify({
+          from: from.id,
+          to: to.id,
+          turns,
+          ...(note.trim() ? { note } : {}),
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      const data = (await response.json()) as {
+        status?: string;
+        chars?: number;
+        truncated?: boolean;
+        error?: string;
+      };
+      if (!response.ok) {
+        store.actions.showToast(
+          `Handoff refused: ${data.error ?? `HTTP ${response.status}`}`,
+          8_000,
+        );
+        return;
+      }
+      const size = `${(data.chars ?? 0).toLocaleString()} chars${
+        data.truncated ? ", truncated" : ""
+      }`;
+      if (data.status === "queued") {
+        store.actions.showToast(
+          `Queued for ${target} (${size}); it lands when the turn ends`,
+          5_000,
+        );
+        return;
+      }
+      store.actions.showToast(`Handed ${size} to ${target}`, 4_000);
+    } catch {
+      store.actions.showToast("Handoff failed: daemon unreachable", 4_000);
+    }
+  }
+
+  /**
+   * Pick the selected row as the handoff target and open the dialog that says
+   * how much to send with it.
+   *
+   * Nothing is delivered here. Aiming settles WHO, and the dialog settles what
+   * they get, which is why the pick mode ends at this point rather than at
+   * delivery: one gesture, one Escape to leave it.
+   *
+   * The two rows the selection can be sitting on that are not a target (a
+   * group header, and the source itself) keep the mode open: leaving it on a
+   * keypress that was aimed at nothing would cost the user the whole gesture.
+   */
+  function commitHandoffPick(): void {
+    const from = handoffSource();
+    if (!from) {
+      store.actions.endHandoffPick();
+      store.actions.showToast("The session being handed off is gone", 4_000);
+      return;
+    }
+    const to = store.selectedSession();
+    if (!to) return;
+    if (to.id === from.id) {
+      store.actions.showToast("A session cannot hand off to itself", 3_000);
+      return;
+    }
+    store.actions.openHandoffDialog(from.id, to.id);
+  }
+
+  /** An end of the open Hand off dialog, or undefined once that row has left
+   *  the board (an SSE removal under an open dialog). */
+  function handoffDialogSession(
+    end: "fromSessionId" | "toSessionId",
+  ): EnrichedSession | undefined {
+    const open = store.state.handoffDialog;
+    if (!open) return undefined;
+    return store.state.sessions.find((s) => s.id === open[end]);
+  }
+
+  /** Close the Hand off dialog and send what it was configuring. */
+  function commitHandoffDialog(): void {
+    const open = store.state.handoffDialog;
+    if (!open) return;
+    const from = handoffDialogSession("fromSessionId");
+    const to = handoffDialogSession("toSessionId");
+    store.actions.closeHandoffDialog();
+    // Either end can leave the board while the dialog is up. Reported rather
+    // than sent by id anyway: the daemon would refuse it, and this says which
+    // half of the gesture is gone before a round trip does.
+    if (!from) {
+      store.actions.showToast("The session being handed off is gone", 4_000);
+      return;
+    }
+    if (!to) {
+      store.actions.showToast("The session being handed off to is gone", 4_000);
+      return;
+    }
+    void handOffTo(from, to, open.turns, open.note);
+  }
+
+  /**
+   * The Hand off dialog's key model.
+   *
+   * Escape cancels the WHOLE handoff (the pick mode is already over by the
+   * time this is open, so one Escape leaves the gesture entirely) and Enter
+   * sends from either row, so the fast path stays the pick plus Enter. Tab is
+   * the only field switch: the turns row binds the arrows to the count, the
+   * same way the Copy dialog does, and rebinding them here would make two
+   * identical-looking rows answer the same key differently. From the note the
+   * keys an input does not consume (down/up, ctrl-n/ctrl-p) move as well,
+   * exactly as they do in the new-session dialog's text fields.
+   *
+   * While the note has focus every remaining key is the input's, `j` and `3`
+   * included; while the turns row has focus every unclaimed key is SWALLOWED
+   * rather than dismissing the dialog (the Copy dialog's rule), because a
+   * stray key next to a text field is far more likely to be someone starting
+   * to type their note on the wrong row than someone asking to leave.
+   */
+  function handleHandoffDialogKey(
+    event: KeyEvent,
+    open: NonNullable<typeof store.state.handoffDialog>,
+  ): void {
+    const key = event.name;
+
+    if (key === "escape") {
+      store.actions.closeHandoffDialog();
+      event.preventDefault();
+      return;
+    }
+    if (key === "return" || key === "enter") {
+      commitHandoffDialog();
+      event.preventDefault();
+      return;
+    }
+    if (key === "tab" || key === "backtab") {
+      store.actions.toggleHandoffDialogField();
+      event.preventDefault();
+      return;
+    }
+
+    if (open.field === "note") {
+      if (key === "down" || (key === "n" && event.ctrl)) {
+        store.actions.setHandoffDialogField("turns");
+        event.preventDefault();
+      } else if (key === "up" || (key === "p" && event.ctrl)) {
+        store.actions.setHandoffDialogField("turns");
+        event.preventDefault();
+      }
+      // Everything else belongs to the input, which needs the key left alone.
+      return;
+    }
+
+    const turns = applyTurnsKey(key, open);
+    if (turns) {
+      store.actions.setHandoffDialogTurns(turns.turns, turns.pendingDigit);
+    }
+    event.preventDefault();
+  }
+
   function sessionMenuItems(): ContextMenuItem[] {
     // Paneless background rows get the launch actions (per-agent attach + the
     // global agent view) plus Kill, which stops the worker through the agent's
@@ -1198,6 +1606,39 @@ export function App(props: AppProps) {
           },
         ]
       : [];
+    const copyItem: ContextMenuItem[] = canCopyLastResponse(session)
+      ? [
+          {
+            // The id stays what it always was: it is identity, not copy, and
+            // the keyboard highlight is stored as one (see `ContextMenuItem`).
+            id: "copy-last-response",
+            // The action it opens asks HOW MUCH to copy, so the item is the
+            // verb alone; the dialog says the rest in full sentences it has
+            // the width for.
+            label: "Copy",
+            hint: "y",
+            color: theme.text,
+            action: contextMenuCopyLastResponse,
+          },
+        ]
+      : [];
+    // Offered on every row that has somewhere to hand off TO, which is the
+    // only half of the question this side can answer. Whether the SOURCE can
+    // be read at all is the daemon's (nine readers, two of which find their
+    // transcript from the cwd with no `logPath` on the row to check), so a
+    // source it refuses is reported in the toast rather than guessed at here.
+    const handoffItem: ContextMenuItem[] =
+      session && store.state.sessions.some((s) => s.id !== session.id)
+        ? [
+            {
+              id: "handoff-to",
+              label: "Hand off",
+              hint: "",
+              color: theme.text,
+              action: contextMenuHandoff,
+            },
+          ]
+        : [];
     const newSessionItem: ContextMenuItem = {
       id: "new-session",
       label: "New session",
@@ -1230,6 +1671,8 @@ export function App(props: AppProps) {
         },
         newSessionItem,
         ...reviewItem,
+        ...copyItem,
+        ...handoffItem,
         // Last here too: the destructive action is the one that must never
         // slide under a pointer (or a highlight) reaching for something else,
         // and the bottom is the only position nothing can be appended below.
@@ -1276,9 +1719,10 @@ export function App(props: AppProps) {
       : [];
     // Ordered by what the actions DO, not by when they arrive: the things
     // that start something (attach, spawn, fork), then the things that read
-    // (review), then the ones that move work about, and the two that end a
-    // session last — Kill at the bottom, where a destructive action is
-    // hardest to hit by accident.
+    // (review the diff, copy the last response, hand that response to another
+    // session), then the ones that move work about, and the two that end a
+    // session last — Kill at the bottom, where a destructive action is hardest
+    // to hit by accident.
     //
     // Two of these come and go under an open menu. "Move changes" appears
     // when the dirty check answers, and Fork disappears on an SSE update that
@@ -1299,6 +1743,8 @@ export function App(props: AppProps) {
       newSessionItem,
       ...forkItem,
       ...reviewItem,
+      ...copyItem,
+      ...handoffItem,
       ...moveChangesItem,
       {
         id: "restart",
@@ -2680,8 +3126,43 @@ export function App(props: AppProps) {
       return;
     }
 
+    // Above the new-session dialog for the same reason the notice is: nothing
+    // opens both, but a key that reached two overlays at once would act on the
+    // one the user cannot see.
+    if (store.state.copyDialog) {
+      handleCopyDialogKey(event, store.state.copyDialog);
+      return;
+    }
+
+    // Beside the Copy dialog, above the new-session dialog, and above the
+    // pick-mode branch below: the pick is over by the time this is open, but
+    // the ordering has to hold even so, or a key would reach a list the user
+    // can no longer see the aim on.
+    if (store.state.handoffDialog) {
+      handleHandoffDialogKey(event, store.state.handoffDialog);
+      return;
+    }
+
     if (store.state.newSession) {
       handleNewSessionKey(event);
+      return;
+    }
+
+    // Aiming a handoff owns the keyboard: the keys that move and choose keep
+    // their meaning (that is the whole point of picking on the list itself)
+    // and every other key is swallowed. Letting them through would put `x`
+    // one keystroke from killing the session the user was pointing at.
+    //
+    // `q` cancels rather than being swallowed with the rest. It is the muscle
+    // memory for leaving this surface, and a `q` that does nothing at all
+    // reads as a hung picker; cancelling puts the user back where the next
+    // `q` quits.
+    if (store.state.handoffPick) {
+      if (key === "j" || key === "down") store.actions.moveSelection(1);
+      else if (key === "k" || key === "up") store.actions.moveSelection(-1);
+      else if (key === "return" || key === "enter") commitHandoffPick();
+      else if (key === "escape" || key === "q") store.actions.endHandoffPick();
+      event.preventDefault();
       return;
     }
 
@@ -2899,6 +3380,31 @@ export function App(props: AppProps) {
         event.preventDefault();
         break;
 
+      case "y": {
+        // The row menu's Copy item on one key, opening the SAME dialog through
+        // the same store action — a shortcut for a read that gets done over and
+        // over, not a second copy path.
+        const sessionToCopy = store.selectedSession();
+        // Silent on a group header, like `r` and `x`; but on a real row with
+        // nothing readable, say why. The menu HIDES its item in that case,
+        // while a key that is advertised unconditionally has to answer.
+        if (!event.shift && sessionToCopy) {
+          if (canCopyLastResponse(sessionToCopy)) {
+            store.actions.openCopyDialog(sessionToCopy.id);
+          } else {
+            store.actions.showToast(
+              "Nothing to copy: no transcript and no pane",
+              3_000,
+            );
+          }
+        }
+        // Shift+Y falls through deliberately, as `N` does: every other capital
+        // in this switch is its own action, so treating `Y` as `y` would claim
+        // a key some later feature wants.
+        event.preventDefault();
+        break;
+      }
+
       case "/":
         store.actions.enterSearchMode();
         event.preventDefault();
@@ -3111,6 +3617,22 @@ export function App(props: AppProps) {
           />
         </Show>
 
+        {/* The mode's only chrome: one line saying whose response is in hand
+            and how to aim it. It sits where the search input does, above the
+            list the pick is being made on, and the sidebar gets the short form
+            because it has no footer to carry the keys. */}
+        <Show when={handoffSource()}>
+          {(from: () => EnrichedSession) => (
+            <box paddingLeft={1} height={1}>
+              <text fg={theme.mauve}>
+                {props.sidebar
+                  ? `${HANDOFF_BADGE} pick target · enter · esc`
+                  : `${HANDOFF_BADGE} Hand off from ${handoffLabel(from())} · pick a target · enter continue · esc cancel`}
+              </text>
+            </box>
+          )}
+        </Show>
+
         <Show when={store.state.error}>
           <box paddingLeft={1} height={1}>
             <text fg={theme.red}>Error: {store.state.error}</text>
@@ -3177,6 +3699,7 @@ export function App(props: AppProps) {
             groupBy={store.state.groupBy}
             newSessionMode={store.state.newSession !== null}
             newSessionOption={newSessionOptionMode()}
+            handoffPickMode={store.state.handoffPick !== null}
             reviewable={reviewEnabled}
           />
         </Show>
@@ -3234,6 +3757,45 @@ export function App(props: AppProps) {
               title={notice().title}
               lines={notice().lines}
               onDismiss={dismissNotice}
+            />
+          )}
+        </Show>
+
+        <Show when={store.state.copyDialog}>
+          {(copy: () => NonNullable<typeof store.state.copyDialog>) => (
+            <CopyDialog
+              // The row can leave the board under an open dialog; the dialog
+              // stays (Enter then reports the loss rather than copying), so
+              // the title falls back to the id it still holds.
+              label={(() => {
+                const session = copyDialogSession();
+                return session ? handoffLabel(session) : copy().sessionId;
+              })()}
+              turns={copy().turns}
+            />
+          )}
+        </Show>
+
+        <Show when={store.state.handoffDialog}>
+          {(handoff: () => NonNullable<typeof store.state.handoffDialog>) => (
+            <HandoffDialog
+              // Either row can leave the board under an open dialog; the
+              // dialog stays (Enter then reports the loss rather than
+              // sending), so a label falls back to the id it still holds.
+              fromLabel={(() => {
+                const session = handoffDialogSession("fromSessionId");
+                return session
+                  ? handoffLabel(session)
+                  : handoff().fromSessionId;
+              })()}
+              toLabel={(() => {
+                const session = handoffDialogSession("toSessionId");
+                return session ? handoffLabel(session) : handoff().toSessionId;
+              })()}
+              turns={handoff().turns}
+              note={handoff().note}
+              field={handoff().field}
+              onNoteInput={store.actions.setHandoffDialogNote}
             />
           )}
         </Show>

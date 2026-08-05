@@ -29,6 +29,8 @@ claude plugin install ccmux@ccmux
 
 The skill triggers when you ask your agent to coordinate, delegate, fan out, or pipeline work across multiple agents (for example, "plan with claude, implement with codex, search with gemini"). It teaches the mechanics of firing, polling, joining, cancelling, and reading worker output, plus where the invoke boundary is: when to hand a long or human-supervised job off to `ccmux spawn` (a live pane) instead of invoking it. You supply the agent-per-task policy in your prompt.
 
+It also covers moving output between sessions that already exist: reading a peer's last response with `ccmux last`, relaying one into another session with `ccmux handoff` (so the payload never passes through the orchestrator's context), and what to do with a `[ccmux handoff]` message when your agent is on the receiving end.
+
 Once installed, the skill is available to your agent as `/ccmux:dispatch` (and triggers automatically from the descriptions above). See [`skills/dispatch/SKILL.md`](skills/dispatch/SKILL.md) for the full skill.
 
 ## Other agents

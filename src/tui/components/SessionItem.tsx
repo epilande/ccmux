@@ -32,6 +32,7 @@ import {
   rowHasPrompt,
   entryRightWidth,
   getAttentionLabel,
+  handoffBadge,
   subagentCountLabel,
   trailingLabelsWidth,
   fitProjectCell,
@@ -691,11 +692,13 @@ function row2LeadingIndent(row1Left: ResolvedEntry[]): number {
 const RowRender: Component<{
   row: ResolvedRow;
   ctx: FieldRenderContext;
-  /** Render the trailing attention/subagent cell after row.left (row 1 only). */
+  /** Render the trailing attention/subagent/handoff cell after row.left
+   *  (row 1 only). */
   showAttention?: boolean;
-  /** This row's own trailing-labels width (attention + subagent count). The
-   * cell is sized to exactly its content, so an unlabeled row reserves 0 and
-   * its prompt runs all the way to the right-side metadata. */
+  /** This row's own trailing-labels width (attention + subagent count +
+   * handoff badge). The cell is sized to exactly its content, so an unlabeled
+   * row reserves 0 and its prompt runs all the way to the right-side
+   * metadata. */
   attentionWidth?: number;
   /** Optional fixed-width spacer prepended after the active indicator. */
   leadingIndent?: number;
@@ -759,6 +762,15 @@ const RowRender: Component<{
             {(label: () => string) => (
               <text fg={props.ctx.dimmed ? theme.border : theme.teal}>
                 {label()}
+              </text>
+            )}
+          </Show>
+          {/* Last of the three, and the only one that is not about what the
+              session is doing: a handoff waiting for this row to go idle. */}
+          <Show when={handoffBadge(props.ctx.session)}>
+            {(badge: () => string) => (
+              <text fg={props.ctx.dimmed ? theme.border : theme.mauve}>
+                {badge()}
               </text>
             )}
           </Show>

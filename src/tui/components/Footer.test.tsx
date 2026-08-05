@@ -19,6 +19,7 @@ async function renderFooter(props: {
   groupBy?: GroupBy;
   newSessionMode?: boolean;
   newSessionOption?: "focused" | "dropdown";
+  handoffPickMode?: boolean;
   reviewable?: boolean;
   width?: number;
 }) {
@@ -33,6 +34,7 @@ async function renderFooter(props: {
         groupBy={props.groupBy}
         newSessionMode={props.newSessionMode}
         newSessionOption={props.newSessionOption}
+        handoffPickMode={props.handoffPickMode}
         reviewable={props.reviewable}
       />
     ),
@@ -154,6 +156,24 @@ describe("Footer", () => {
       searchMode: true,
     });
     expect(frame).toContain("enter spawn");
+    expect(frame).not.toContain("type to search");
+  });
+
+  it("shows what the keys do while a handoff is being aimed", async () => {
+    const frame = await renderFooter({ handoffPickMode: true });
+    expect(frame).toContain("j/k pick target");
+    expect(frame).toContain("enter continue");
+    expect(frame).toContain("esc cancel");
+  });
+
+  it("handoff picking takes priority over search mode", async () => {
+    // Reachable: right-clicking a row while searching offers the handoff, and
+    // the pick then runs over the filtered list with search still on.
+    const frame = await renderFooter({
+      handoffPickMode: true,
+      searchMode: true,
+    });
+    expect(frame).toContain("enter continue");
     expect(frame).not.toContain("type to search");
   });
 

@@ -112,7 +112,10 @@ ccmux setup
 | `ccmux review [id]`                         | Review a session's diff with [hunk](https://github.com/modem-dev/hunk) (defaults to cwd)                                      |
 | `ccmux kill <id>`                           | Kill a session's process                                                                                                      |
 | `ccmux restart <id>`                        | Kill and resume a session                                                                                                     |
+| `ccmux last <session-ref>`                  | Print a session's last response (`--turns <n>`, `--json`) ([docs](docs/handoff.md))                                           |
+| `ccmux handoff <from> <to>`                 | Hand a session's last response to another session (`--turns`, `--note`, `--spawn`) ([docs](docs/handoff.md))                  |
 | `ccmux send <id> <text>`                    | Send text to a session's tmux pane (multiline pastes as one message; `--no-enter` skips submit)                               |
+| `ccmux send <id> --stdin`                   | Same, reading the text from stdin instead of argv                                                                             |
 | `ccmux screen [id]`                         | Capture pane content                                                                                                          |
 | `ccmux screen --grep <pattern>`             | Search across all session panes                                                                                               |
 | `ccmux dismiss <id>`                        | Remove a session from tracking                                                                                                |
@@ -461,6 +464,26 @@ git diff main | ccmux invoke claude "Review this diff"
 Claude runs interactively in a dedicated tmux session and returns clean text parsed from the transcript JSONL. Codex, Cursor, OpenCode, Pi, oh-my-pi, Antigravity, Copilot, and Gemini run as non-interactive subprocesses (`codex exec -o`, `cursor-agent --print`, `opencode run --format json`, `pi -p`, `omp -p`, `agy -p`, `copilot -p --allow-all-tools`, `gemini -p`) and return the agent's clean response text.
 
 For orchestration, name an invocation with `--id <id>`, then use `ccmux invoke list`, `ccmux invoke cancel <id>`, and `ccmux invoke result <id>` to watch, cancel, or read its full captured output by that id. See [`docs/invoke.md`](docs/invoke.md#fire-and-poll---id-list-cancel-result) for the fire-and-poll reference.
+
+### Reading and Handing Off Between Sessions
+
+`ccmux last` prints a session's last response; `ccmux handoff` moves it into another session without the text passing through whoever ran the command. See [`docs/handoff.md`](docs/handoff.md) for the full reference.
+
+```bash
+ccmux last codex                       # print the last response, pipeable
+ccmux last codex --turns 3             # widen to the last three exchanges
+ccmux last <id> | pbcopy
+
+ccmux handoff codex claude --note "this is the failing test, take it from here"
+ccmux handoff self codex               # an agent handing off its own conclusion
+ccmux handoff self --spawn             # ...into a session that does not exist yet
+```
+
+Both take a **session reference**, not just an id: a session id, `%pane`, `session:window.pane`, `self`, an agent type, or a project name. Fuzzy references are scoped by where you are sitting (same window, then same tmux session, then everything), and an ambiguous one is refused with the candidate list rather than guessed at.
+
+A handoff arrives with a provenance header naming the source session, agent, directory, branch, and time, and is **only ever typed into an idle composer**: a target that is mid-turn gets it queued and delivered when the turn ends, and a target with a pending prompt is refused.
+
+In the picker, the row menu's **Copy** opens a small dialog asking how much to take: it starts on the last response, so <kbd>Enter</kbd> copies that straight to your clipboard, while <kbd>j</kbd>/<kbd>k</kbd> or a digit counts up to 20 turns (which brings your own prompts along, formatted exactly as `ccmux last` prints them). **Hand off** starts a pick-target mode: the session list itself becomes the target picker, <kbd>j</kbd>/<kbd>k</kbd> move, and <kbd>Enter</kbd> (or a click) opens a dialog asking how many turns to send and offering a one-line note for the receiving agent. <kbd>Enter</kbd> there sends and <kbd>Esc</kbd> cancels the whole handoff. A queued handoff shows a **⇄** badge on the target row until it lands.
 
 ### Dispatch Skill
 

@@ -23,6 +23,7 @@ const leftGroups = (reviewable?: boolean): Group[] => [
     items: [
       { key: "Enter", desc: "Switch to session" },
       { key: "m", desc: "Row menu (j/k, Enter)" },
+      { key: "y", desc: "Copy last response" },
       { key: "n", desc: "New session" },
       { key: "/", desc: "Search" },
       { key: "f", desc: "Toggle hide idle" },

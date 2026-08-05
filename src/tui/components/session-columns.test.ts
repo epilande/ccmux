@@ -19,6 +19,8 @@ import {
   fitProjectCell,
   getAttentionLabel,
   subagentCountLabel,
+  handoffBadge,
+  HANDOFF_BADGE,
   ATTENTION_LABEL_MAX,
   type ProjectCellDisplay,
 } from "./session-columns";
@@ -954,6 +956,45 @@ describe("trailingLabelsWidth", () => {
     });
     expect(trailingLabelsWidth(s, true)).toBe(1);
     expect(trailingLabelsWidth(mockEnrichedSession(), true)).toBe(0);
+  });
+
+  it("reserves the handoff badge, alone and beside the other labels", () => {
+    const queued = { fromSessionId: "s9", queuedAt: "2024-01-15T12:00:00Z" };
+    const alone = mockEnrichedSession({ pendingHandoff: queued });
+    expect(trailingLabelsWidth(alone, false)).toBe(1);
+    // The badge is the sidebar's one label that does not collapse away.
+    expect(trailingLabelsWidth(alone, true)).toBe(1);
+
+    const withLabels = mockEnrichedSession({
+      status: "waiting",
+      attentionType: "question",
+      subagents: [mockSubagent(), mockSubagent()],
+      pendingHandoff: queued,
+    });
+    // "Question"(8) + gap + "2 Agent"(7) + gap + badge(1)
+    expect(trailingLabelsWidth(withLabels, false)).toBe(8 + 1 + 7 + 1 + 1);
+    // Sidebar: "!"(1) + gap + badge(1), with no subagent count.
+    expect(trailingLabelsWidth(withLabels, true)).toBe(3);
+  });
+});
+
+describe("handoffBadge", () => {
+  it("is the badge exactly when the row carries a pending handoff", () => {
+    expect(handoffBadge(mockEnrichedSession())).toBeNull();
+    expect(
+      handoffBadge(
+        mockEnrichedSession({
+          pendingHandoff: {
+            fromSessionId: "s9",
+            queuedAt: "2024-01-15T12:00:00Z",
+          },
+        }),
+      ),
+    ).toBe(HANDOFF_BADGE);
+  });
+
+  it("draws in one column, which is what the reserve assumes", () => {
+    expect(displayWidth(HANDOFF_BADGE)).toBe(1);
   });
 });
 

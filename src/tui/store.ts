@@ -1,4 +1,4 @@
-import { createStore } from "solid-js/store";
+import { createStore, reconcile } from "solid-js/store";
 import {
   batch,
   createContext,
@@ -36,6 +36,8 @@ import {
   PLACEMENT_OPTIONS,
   UNTRACKED_OPTIONS,
 } from "./new-session-options";
+import { MAX_TURNS } from "../daemon/transcript-read";
+import type { HandoffDialogField } from "./components/HandoffDialog";
 import type { TranscriptMatch } from "../daemon/transcript-search";
 import type { UntrackedMode } from "../daemon/worktree-move-changes";
 // The daemon's own slug rule, imported rather than mirrored: a name the
@@ -418,6 +420,57 @@ interface TUIState {
     y: number;
     highlight: string | null;
   } | null;
+  /**
+   * The row whose last response is being handed off while the user picks a
+   * target, or null when nothing is being handed off.
+   *
+   * A transient MODE over the ordinary list rather than an overlay of its own:
+   * picking a session is what this list already does, so j/k, the rows, the
+   * grouping and the scroll all keep working and the mode costs one banner and
+   * one branch in the key handler. The source is held by ID because the row
+   * itself keeps moving underneath: SSE re-sorts the board while the user is
+   * choosing, and a snapshot of the session would hand off yesterday's row.
+   */
+  handoffPick: { fromSessionId: string } | null;
+  /**
+   * The open Copy dialog, or null. `sessionId` is the row whose response is
+   * being copied, held by ID for the same reason the handoff pick is: SSE
+   * re-sorts the board while the dialog is up.
+   *
+   * `turns` is how much of the conversation to take, 1..MAX_TURNS, and 1 (the
+   * last response on its own) is what it opens on, so the fast path is menu,
+   * Copy, Enter.
+   *
+   * `pendingDigit` is true while a leading `1` or `2` is waiting to see
+   * whether a second digit follows. It lives here rather than as a local
+   * signal because it is part of what the number keys mean, and a half-typed
+   * count that outlived its dialog is not a state this surface can be in.
+   */
+  copyDialog: {
+    sessionId: string;
+    turns: number;
+    pendingDigit: boolean;
+  } | null;
+  /**
+   * The open Hand off dialog, or null. It is what a pick TURNS INTO: the pick
+   * mode ends when this opens, so the source and the target are both settled
+   * and both held by ID, for the same reason the pick's source is (SSE re-sorts
+   * the board, and a snapshot would hand off yesterday's row).
+   *
+   * `turns` and `pendingDigit` are the shared turns selector's state, the same
+   * pair the Copy dialog holds; `note` is the optional one-liner the daemon
+   * folds into the provenance header; `field` is which of the two rows the
+   * keyboard is on, and it scopes the digits, so a `3` typed into a note can
+   * never become a turn count.
+   */
+  handoffDialog: {
+    fromSessionId: string;
+    toSessionId: string;
+    turns: number;
+    pendingDigit: boolean;
+    note: string;
+    field: HandoffDialogField;
+  } | null;
   /** Open new-session dialog, or null when it is closed. */
   newSession: NewSessionDraft | null;
   /** Agent last spawned from the dialog, the default when the selected row
@@ -745,6 +798,9 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     toastMessage: null,
     contextMenu: null,
     groupContextMenu: null,
+    handoffPick: null,
+    copyDialog: null,
+    handoffDialog: null,
     newSession: null,
     lastSpawnAgent: options.lastSpawnAgent ?? null,
     columns: options.columns,
@@ -1386,10 +1442,21 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("sessions", (s) => [...s, session]);
     },
 
+    /**
+     * Replace a row with the daemon's latest payload.
+     *
+     * `reconcile`, not a plain set, because a plain set MERGES: a key the new
+     * payload omits keeps its old value forever. The daemon omits optional
+     * facts rather than nulling them (`pendingHandoff` is only on the wire
+     * while a handoff is actually queued), so merging leaves a row wearing a
+     * badge for something that has already been delivered. Reconciling also
+     * diffs field by field, so an unchanged key does not invalidate whatever
+     * reads it.
+     */
     updateSession(session: EnrichedSession) {
       const idx = state.sessions.findIndex((s) => s.id === session.id);
       if (idx !== -1) {
-        setState("sessions", idx, session);
+        setState("sessions", idx, reconcile(session));
       }
     },
 
@@ -1609,6 +1676,136 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     hideGroupContextMenu() {
       setState("groupContextMenu", null);
+    },
+
+    /**
+     * Start picking a handoff target for `fromSessionId`, moving the selection
+     * onto the nearest row that could actually receive one. Returns false, and
+     * enters nothing, when the board holds no other session: a mode whose only
+     * candidate is the source is a dead end the caller should report instead.
+     *
+     * The selection moves because the menu that opened this sits ON the source
+     * row, so the mode would otherwise start with Enter aimed at the one
+     * session that cannot be the target. It searches FORWARD with a wrap, so
+     * the first candidate is the next row down (the direction the eye is
+     * already travelling) rather than wherever a global scan happens to land.
+     */
+    beginHandoffPick(fromSessionId: string): boolean {
+      const items = flatItems();
+      const start = selectedIndex();
+      for (let step = 1; step <= items.length; step++) {
+        const index = (start + step) % items.length;
+        const item = items[index]!;
+        if (
+          item.type !== "session" ||
+          item.filteredSession.session.id === fromSessionId
+        ) {
+          continue;
+        }
+        batch(() => {
+          setState("handoffPick", { fromSessionId });
+          selectItemAt(index);
+        });
+        return true;
+      }
+      return false;
+    },
+
+    endHandoffPick() {
+      setState("handoffPick", null);
+    },
+
+    /** Open the Copy dialog on a row, asking for the last response. */
+    openCopyDialog(sessionId: string) {
+      setState("copyDialog", { sessionId, turns: 1, pendingDigit: false });
+    },
+
+    /**
+     * Set how many turns the open Copy dialog would take, clamped to the range
+     * the endpoint accepts. Clamped HERE rather than at each caller because
+     * three of them can push past an edge: j/k at both ends, and a typed
+     * second digit.
+     */
+    setCopyDialogTurns(turns: number, pendingDigit = false) {
+      if (!state.copyDialog) return;
+      const clamped = Math.min(MAX_TURNS, Math.max(1, Math.round(turns)));
+      setState("copyDialog", {
+        ...state.copyDialog,
+        turns: clamped,
+        pendingDigit,
+      });
+    },
+
+    closeCopyDialog() {
+      setState("copyDialog", null);
+    },
+
+    /**
+     * Turn a settled pick into the Hand off dialog, ending the pick mode in
+     * the same batch: the two are one gesture, and a board that was still in
+     * pick mode under an open dialog would need two Escapes to leave.
+     *
+     * It opens on the answer most people want (the last response, no note), so
+     * Enter alone is still the whole interaction.
+     */
+    openHandoffDialog(fromSessionId: string, toSessionId: string) {
+      batch(() => {
+        setState("handoffPick", null);
+        setState("handoffDialog", {
+          fromSessionId,
+          toSessionId,
+          turns: 1,
+          pendingDigit: false,
+          note: "",
+          field: "turns",
+        });
+      });
+    },
+
+    /** Set how many turns the open Hand off dialog would send, clamped to the
+     *  range the endpoint accepts (the same clamp the Copy dialog's setter
+     *  applies, and for the same three callers: j/k at both ends, and a typed
+     *  second digit). */
+    setHandoffDialogTurns(turns: number, pendingDigit = false) {
+      if (!state.handoffDialog) return;
+      const clamped = Math.min(MAX_TURNS, Math.max(1, Math.round(turns)));
+      setState("handoffDialog", {
+        ...state.handoffDialog,
+        turns: clamped,
+        pendingDigit,
+      });
+    },
+
+    setHandoffDialogNote(note: string) {
+      if (!state.handoffDialog) return;
+      setState("handoffDialog", { ...state.handoffDialog, note });
+    },
+
+    /** Move the keyboard between the dialog's two rows. A toggle rather than
+     *  an index walk: with two fields, forward and backward are the same
+     *  move, which is why Tab and shift-Tab need no separate handling. */
+    toggleHandoffDialogField() {
+      if (!state.handoffDialog) return;
+      setState("handoffDialog", {
+        ...state.handoffDialog,
+        field: state.handoffDialog.field === "turns" ? "note" : "turns",
+        // A half-typed count does not survive leaving the row it was being
+        // typed into: `1`, Tab, `2` must not become 12.
+        pendingDigit: false,
+      });
+    },
+
+    setHandoffDialogField(field: HandoffDialogField) {
+      if (!state.handoffDialog) return;
+      setState("handoffDialog", {
+        ...state.handoffDialog,
+        field,
+        pendingDigit: false,
+      });
+    },
+
+    closeHandoffDialog() {
+      setState("handoffDialog", null);
     },
 
     /** Light a specific item of whichever menu is open, or nothing. */
