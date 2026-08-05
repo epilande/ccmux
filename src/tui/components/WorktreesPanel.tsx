@@ -356,6 +356,12 @@ export function titleSegments(
 }
 
 /**
+ * The name is the BRIGHT layer of a row: line 1's label renders in the text
+ * colour while the branch beside it and the whole detail line stay dim, so a
+ * full screen reads as "bright = a worktree, dim = facts about it". With
+ * every row in the same subdued grey, names and detail phrases merged into
+ * one undifferentiated column.
+ *
  * Yellow is reserved for the rows where dirt means DANGER: a dirty row under
  * the removable divider, whose uncommitted work a removal would delete.
  *
@@ -365,9 +371,7 @@ export function titleSegments(
  */
 function rowColor(entry: PanelRow, isCursor: boolean): string {
   if (isCursor) return theme.text;
-  return entry.candidate && entry.row.dirty.dirty
-    ? theme.yellow
-    : theme.subtext;
+  return entry.candidate && entry.row.dirty.dirty ? theme.yellow : theme.text;
 }
 
 /**
@@ -851,7 +855,12 @@ export function primarySegments(
       fg: statusColor(leadStatus(row.sessions)),
     });
   } else {
-    segments.push({ text: "  ", fg: theme.overlay });
+    // Never an empty slot: every row's line 1 carries a marker, so the left
+    // edge reads as a legend down the screen (`⌂` main checkout, a status
+    // glyph where someone is working, `·` plain worktree, `[ ]` removable),
+    // and a detail line, which never has one, is structurally
+    // distinguishable from a one-line row instead of only tonally.
+    segments.push({ text: "· ", fg: theme.overlay });
   }
 
   const label = rowLabel(row);
@@ -910,6 +919,21 @@ export function dividerText(count: number, width: number): string {
   const label = `├─ removable · ${count} `;
   const fill = Math.max(0, Math.min(width, DIVIDER_MAX) - displayWidth(label));
   return `${label}${"─".repeat(fill)}`;
+}
+
+/**
+ * The dim rule that trails a repo header, giving a group boundary real
+ * weight without spending a blank line on it (which the layout deliberately
+ * does not have). Same {@link DIVIDER_MAX} cap and for the same reason: a
+ * full-width dash run per repo is the heaviest ink on a wide screen.
+ *
+ * Only the fill: the name itself stays a separate render concern because it
+ * is bold mauve while the rule is muted. Empty when the name leaves no room
+ * for at least the leading space and one dash.
+ */
+export function headerRule(name: string, width: number): string {
+  const fill = Math.min(width, DIVIDER_MAX) - displayWidth(name) - 1;
+  return fill > 0 ? ` ${"─".repeat(fill)}` : "";
 }
 
 /** `1 worktree` / `3 worktrees`, so no sentence has to say `worktree(s)`. */
@@ -2094,23 +2118,29 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                       </box>
                     );
                   };
+                  // `listWidth`, not `contentWidth`: the header renders
+                  // INSIDE the scrollbox, which keeps a column for its bar,
+                  // so a name fitted to the content width overruns it by
+                  // one. The scrollbox takes that column back silently,
+                  // leaving a name that reads as complete with its last
+                  // character gone and no ellipsis to say so (the divider,
+                  // whose fill is one unbreakable word, wrapped away
+                  // entirely instead).
+                  const headerName = () =>
+                    truncateText(repo.repoName, listWidth());
                   return (
                     <box flexDirection="column">
                       <Show when={showsGroupHeaders(merged())}>
                         <box height={1} flexDirection="row">
                           <text fg={theme.mauve}>
-                            {/* `listWidth`, not `contentWidth`: this line
-                                renders INSIDE the scrollbox, which keeps a
-                                column for its bar, so a name fitted to the
-                                content width overruns it by one. The
-                                scrollbox takes that column back silently,
-                                leaving a name that reads as complete with its
-                                last character gone and no ellipsis to say so
-                                (the divider, whose fill is one unbreakable
-                                word, wrapped away entirely instead). */}
-                            <strong>
-                              {truncateText(repo.repoName, listWidth())}
-                            </strong>
+                            <strong>{headerName()}</strong>
+                          </text>
+                          {/* The rule is what makes the boundary scannable
+                              on a tall multi-repo list without spending a
+                              blank line on it; muted so the bold name stays
+                              the loudest thing on the line. */}
+                          <text fg={theme.overlay}>
+                            {headerRule(headerName(), listWidth())}
                           </text>
                         </box>
                       </Show>

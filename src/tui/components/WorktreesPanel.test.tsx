@@ -43,6 +43,7 @@ import {
   scrollTargetFor,
   DIVIDER_MAX,
   dividerText,
+  headerRule,
   sortWorktreeRows,
   showsGroupHeaders,
   splitRemovable,
@@ -1896,8 +1897,10 @@ describe("row line 1", () => {
     expect(
       primaryText(panelRow({ row: row({ sessions: [session()] }) })),
     ).toContain("●");
-    // A quiet worktree spends the slot on alignment rather than on a glyph.
-    expect(primaryText(panelRow())).toStartWith("  ");
+    // A quiet worktree still marks the slot: rows are told apart from detail
+    // lines by the marker column, so an empty slot would leave line 1 the
+    // same shape as the line under it.
+    expect(primaryText(panelRow())).toStartWith("· ");
   });
 
   // Checkboxes appear ONLY under the removable divider, which is what makes
@@ -1937,13 +1940,15 @@ describe("row line 1", () => {
 
   // Yellow means "removal would delete this work". A dirty main checkout is
   // Tuesday, and a panel of glowing names left no colour for the real risk.
-  it("keeps a dirty kept row's name quiet, flags a dirty removable one", () => {
+  // The ordinary colour is the BRIGHT text tone: names are the loud layer of
+  // a row, branches and detail phrases the dim one.
+  it("keeps a dirty kept row's name in the ordinary bright colour, flags a dirty removable one", () => {
     const dirty = { dirty: true, modified: 2, untracked: 0 };
     const labelFg = (entry: PanelRow, isCursor = false) =>
       primarySegments(entry, { isCursor, labelWidth: 0 }).find(
         (s) => s.text === "alpha",
       )?.fg;
-    expect(labelFg(panelRow({ row: row({ dirty }) }))).toBe(theme.subtext);
+    expect(labelFg(panelRow({ row: row({ dirty }) }))).toBe(theme.text);
     const removable = panelRow({
       row: row({ dirty }),
       candidate: candidate({ dirty: true }),
@@ -2335,6 +2340,25 @@ describe("removable section", () => {
     expect(displayWidth(dividerText(6, 200))).toBe(DIVIDER_MAX);
     // A narrower list still rules to its own edge, not past it.
     expect(displayWidth(dividerText(6, 40))).toBe(40);
+  });
+
+  // The header's trailing rule is what makes a group boundary scannable on a
+  // tall multi-repo list without spending a blank line on it.
+  it("rules a repo header out to the divider cap", () => {
+    // A space, then dashes to the width: name + rule together fill it.
+    expect(headerRule("ccmux", 40)).toBe(` ${"─".repeat(34)}`);
+    expect(displayWidth("ccmux" + headerRule("ccmux", 40))).toBe(40);
+    // Same cap as the removable divider, for the same heavy-ink reason.
+    expect(displayWidth("ccmux" + headerRule("ccmux", 200))).toBe(DIVIDER_MAX);
+  });
+
+  it("drops the header rule whole when the name leaves no room", () => {
+    // No room for a space plus at least one dash: no rule, never a negative
+    // repeat. The name itself is fitted by the caller.
+    expect(headerRule("ccmux", 5)).toBe("");
+    expect(headerRule("ccmux", 6)).toBe("");
+    expect(headerRule("ccmux", 7)).toBe(" ─");
+    expect(headerRule("a-name-longer-than-the-width", 10)).toBe("");
   });
 
   // The divider is not a row, but it IS a line: a layout without it puts
