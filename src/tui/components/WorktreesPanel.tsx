@@ -934,7 +934,7 @@ export function showsGroupHeaders(repos: PanelRepo[]): boolean {
  * wraps instead of clipping and a wrapped line in a `height={1}` box vanishes.
  */
 export function dividerText(count: number, width: number): string {
-  return truncateText(`├─ Removable · ${count}`, Math.max(1, width));
+  return truncateText(`├─ removable · ${count}`, Math.max(1, width));
 }
 
 /**
