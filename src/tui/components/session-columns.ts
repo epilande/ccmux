@@ -520,26 +520,54 @@ export function subagentCountLabel(session: EnrichedSession): string | null {
 }
 
 /**
- * Rendered width of row 1's trailing labels (attention + subagent count) for
- * a session. Consumed per-row (see `attentionWidth` in SessionItem): each row
- * reserves a cell sized to exactly its own labels, so an unlabeled row reserves
- * nothing and its prompt runs to the right-side metadata, while a labeled row's
- * prompt/project budgets subtract this width so the `…` truncation lands just
- * before the label. Right-side column alignment is preserved by those columns'
- * fixed widths, not by a uniform trailing cell. Sidebar collapses the attention
- * label to a single "!" and hides the subagent count.
+ * The glyph a row wears while a handoff is queued for it. One column, and the
+ * same mark the pick-target banner leads with, so the thing being aimed and
+ * the row waiting for it read as one feature.
+ */
+export const HANDOFF_BADGE = "⇄";
+
+/**
+ * The handoff badge for a session, or null when nothing is queued for it.
+ *
+ * Driven straight off `pendingHandoff`, which the daemon puts on the row while
+ * a handoff waits for it to go idle and takes off again when it is delivered
+ * or expires. There is no client-side timer: the badge appears and clears with
+ * the SSE update that changed the fact.
+ */
+export function handoffBadge(session: EnrichedSession): string | null {
+  return session.pendingHandoff ? HANDOFF_BADGE : null;
+}
+
+/**
+ * Rendered width of row 1's trailing labels (attention + subagent count +
+ * handoff badge) for a session. Consumed per-row (see `attentionWidth` in
+ * SessionItem): each row reserves a cell sized to exactly its own labels, so an
+ * unlabeled row reserves nothing and its prompt runs to the right-side
+ * metadata, while a labeled row's prompt/project budgets subtract this width so
+ * the `…` truncation lands just before the label. Right-side column alignment
+ * is preserved by those columns' fixed widths, not by a uniform trailing cell.
+ * Sidebar collapses the attention label to a single "!" and hides the subagent
+ * count; the badge is one column either way and survives both.
  */
 export function trailingLabelsWidth(
   session: EnrichedSession,
   sidebar: boolean,
 ): number {
   const attn = getAttentionLabel(session);
-  if (sidebar) return attn ? 1 : 0;
-  const sub = subagentCountLabel(session);
-  const attnW = attn ? Math.min(displayWidth(attn), ATTENTION_LABEL_MAX) : 0;
+  const badge = handoffBadge(session);
+  const badgeW = badge ? displayWidth(badge) : 0;
+  const attnW = attn
+    ? sidebar
+      ? 1
+      : Math.min(displayWidth(attn), ATTENTION_LABEL_MAX)
+    : 0;
+  const sub = sidebar ? null : subagentCountLabel(session);
   const subW = sub ? displayWidth(sub) : 0;
-  const gap = attn && sub ? 1 : 0; // the space between the two labels
-  return attnW + subW + gap;
+  // Summed over the labels this row actually draws, plus the box's one-column
+  // gap between each adjacent pair. Kept as a fold rather than a pair of
+  // hand-written gap terms, which is where a third label would have gone wrong.
+  const widths = [attnW, subW, badgeW].filter((w) => w > 0);
+  return widths.reduce((a, b) => a + b, 0) + Math.max(0, widths.length - 1);
 }
 
 /** Split cwd parts plus branch state, fed to {@link fitProjectCell}. */
