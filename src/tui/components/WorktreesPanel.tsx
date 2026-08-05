@@ -2016,12 +2016,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                         {/* The cursor row carries the session list's
                             selected-row surface highlight, spanning both lines
                             of a two-line row; the cursor bar alone was easy to
-                            miss. The bar takes the RAIL's own column, and the
-                            highlight starts there too (the nested box is what
-                            keeps the column before the rail bare), so bar,
-                            rail, and highlight share one left edge. */}
+                            miss. The bar takes the RAIL's own column, but the
+                            highlight starts on the column AFTER it: `┃` is
+                            centered in its cell, so a highlight that includes
+                            the bar's own cell shows half a cell of surface
+                            poking out LEFT of the stroke. */}
                         <box height={1} width="100%" flexDirection="row">
                           <text> </text>
+                          <text fg={isCursor() ? theme.mauve : theme.overlay}>
+                            {isCursor() ? CURSOR_BAR : RAIL}
+                          </text>
                           <box
                             flexGrow={1}
                             height={1}
@@ -2030,9 +2034,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                               isCursor() ? theme.surface : undefined
                             }
                           >
-                            <text fg={isCursor() ? theme.mauve : theme.overlay}>
-                              {`${isCursor() ? CURSOR_BAR : RAIL} `}
-                            </text>
+                            <text> </text>
                             <For
                               each={fitSegments(
                                 primarySegments(entry, {
@@ -2053,6 +2055,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                         <Show when={detail().length > 0}>
                           <box height={1} width="100%" flexDirection="row">
                             <text> </text>
+                            {/* A detail line always hangs off its own line
+                                1, so it always carries the rail, and it
+                                indents to whatever marker that line 1 used.
+                                The rail column matches line 1's, so a
+                                two-line cursor row wears the bar on both
+                                lines — and, as on line 1, the highlight
+                                starts on the column after it. */}
+                            <text fg={isCursor() ? theme.mauve : theme.overlay}>
+                              {isCursor() ? CURSOR_BAR : RAIL}
+                            </text>
                             <box
                               flexGrow={1}
                               height={1}
@@ -2061,17 +2073,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                                 isCursor() ? theme.surface : undefined
                               }
                             >
-                              {/* A detail line always hangs off its own line
-                                  1, so it always carries the rail, and it
-                                  indents to whatever marker that line 1 used.
-                                  The rail column matches line 1's, so a
-                                  two-line cursor row wears the bar on both
-                                  lines. */}
-                              <text
-                                fg={isCursor() ? theme.mauve : theme.overlay}
-                              >
-                                {isCursor() ? CURSOR_BAR : RAIL}
-                              </text>
                               <text fg={theme.overlay}>
                                 {` ${" ".repeat(
                                   markerWidth(entry.candidate !== null),
