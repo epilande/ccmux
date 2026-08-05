@@ -968,31 +968,63 @@ describe("POST /handoff — concurrent delivery into one target", () => {
 describe("POST /handoff — the wire", () => {
   type WireSession = {
     id: string;
+    status: string;
     pendingHandoff?: { fromSessionId: string; queuedAt: string };
   };
 
   /** A fake SSE client, plus the visibility gate `rebroadcastSession` reads. */
   function watch(internals: Internals, sessionId: string) {
     const frames: string[] = [];
+    const waiters: (() => void)[] = [];
     internals.visibleSessions.add(sessionId);
     internals.sseClients.set("test-client", {
       id: "test-client",
-      controller: { enqueue: (data: string) => frames.push(data) },
+      controller: {
+        enqueue: (data: string) => {
+          frames.push(data);
+          for (const wake of waiters.splice(0)) wake();
+        },
+      },
     });
+    /** Every `session_updated` carrying `sessionId`, oldest first. */
+    const updates = (): WireSession[] =>
+      frames
+        .map(
+          (f) =>
+            JSON.parse(f.slice("data: ".length)) as {
+              type: string;
+              session?: WireSession;
+            },
+        )
+        .filter((e) => e.type === "session_updated")
+        .map((e) => e.session)
+        .filter((s): s is WireSession => s?.id === sessionId);
     return {
-      /** Every `session_updated` carrying `sessionId`, oldest first. */
-      updates(): WireSession[] {
-        return frames
-          .map(
-            (f) =>
-              JSON.parse(f.slice("data: ".length)) as {
-                type: string;
-                session?: WireSession;
-              },
-          )
-          .filter((e) => e.type === "session_updated")
-          .map((e) => e.session)
-          .filter((s): s is WireSession => s?.id === sessionId);
+      updates,
+      /** Forget every frame so far, so what follows is asserted alone. */
+      reset(): void {
+        frames.length = 0;
+      },
+      /**
+       * Resolve once an update matching `predicate` has been enqueued.
+       *
+       * Driven off the client's own `enqueue` rather than off a fixed sleep,
+       * because a rebroadcast is fired and FORGOTTEN (`void
+       * this.rebroadcastSession(...)`) behind an `enrichSession` whose git
+       * read is a cold process spawn: 8-12ms on an idle machine and more
+       * under a full-suite run, against which any sleep short enough to keep
+       * the test quick is a race the broadcast can lose. That is issue #122
+       * — this assertion saw zero frames once under a 175-file run, and
+       * never standalone.
+       *
+       * A predicate that never comes true stalls until bun's per-test
+       * timeout, which is the honest failure for "the broadcast never
+       * happened".
+       */
+      async until(predicate: (s: WireSession) => boolean): Promise<void> {
+        while (!updates().some(predicate)) {
+          await new Promise<void>((resolve) => waiters.push(resolve));
+        }
       },
     };
   }
@@ -1000,12 +1032,20 @@ describe("POST /handoff — the wire", () => {
   it("announces a queued handoff, and the delivery that clears it", async () => {
     const { manager, internals } = createServer();
     pair(manager, "queued conclusion");
-    manager.updateSession("dst", { status: "working" });
     const wire = watch(internals, "dst");
+    manager.updateSession("dst", { status: "working" });
+    // The fixture's OWN broadcasts are still in flight here — enrichment
+    // awaits a git read — and would otherwise land after the handoff is
+    // queued, carrying the badge and standing in for the rebroadcast this
+    // test exists to prove. Wait for the last of them, then forget them, so
+    // every frame from here is the handoff's doing and removing the
+    // rebroadcast fails this test rather than passing on the backlog.
+    await wire.until((s) => s.status === "working");
+    wire.reset();
 
     const response = await post(internals, { from: "src", to: "dst" });
     const { queuedAt } = (await response.json()) as { queuedAt: string };
-    await Bun.sleep(10);
+    await wire.until((s) => Boolean(s.pendingHandoff));
 
     // A queued handoff reaches clients as a field on the TARGET's session,
     // carrying the same `queuedAt` its sender was given. Asserted on content
@@ -1022,9 +1062,15 @@ describe("POST /handoff — the wire", () => {
     }
 
     manager.updateSession("dst", { status: "idle" });
-    await Bun.sleep(20);
-    // The post-delivery rebroadcast takes the badge back off, and is the
-    // last word clients get on the session.
+    // A badge-free frame can only be enriched after the queue was TAKEN, so
+    // waiting for one is waiting for the delivery, not merely for a tick.
+    await wire.until((s) => s.pendingHandoff === undefined);
+    // Delivery takes the badge back off, and a badge-free session is the last
+    // word clients get. WHICH broadcast carries it is deliberately not
+    // pinned: the idle transition's own `session_updated` and the
+    // post-delivery rebroadcast both enrich after the record was taken, and
+    // asserting on their order would reintroduce the race this test just
+    // lost the sleep to.
     const updates = wire.updates();
     expect(updates[updates.length - 1].pendingHandoff).toBeUndefined();
   });
@@ -1247,5 +1293,88 @@ describe("POST /handoff — request validation", () => {
         })
       ).status,
     ).toBe(400);
+  });
+
+  // `Number(true)` is 1 and `Number(["2"])` is 2, so these used to be accepted
+  // as turn counts and quietly send that much of somebody's conversation.
+  it("refuses a 'turns' that is not a count", async () => {
+    const { manager, internals } = createServer();
+    pair(manager);
+    for (const turns of [true, ["2"], "2.5", {}]) {
+      const response = await post(internals, { from: "src", to: "dst", turns });
+      expect(response.status).toBe(400);
+      expect((await response.json()) as { error: string }).toMatchObject({
+        error: expect.stringContaining("Invalid 'turns' field"),
+      });
+    }
+  });
+
+  it("refuses a note that is only whitespace instead of dropping it behind a 200", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    pair(manager);
+    const response = await post(internals, {
+      from: "src",
+      to: "dst",
+      note: "   \n\t ",
+    });
+    expect(response.status).toBe(400);
+    expect((await response.json()) as { error: string }).toMatchObject({
+      error: expect.stringContaining("whitespace"),
+    });
+    expect(sendPromptToPane).not.toHaveBeenCalled();
+  });
+
+  it("trims a note that is otherwise fine", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    pair(manager);
+    const response = await post(internals, {
+      from: "src",
+      to: "dst",
+      note: "  over to you  ",
+    });
+    expect(response.status).toBe(200);
+    const text = (sendPromptToPane.mock.calls[0] as unknown as string[])[1];
+    expect(text.split("\n")[1]).toBe("note: over to you");
+  });
+});
+
+/**
+ * Issue #121. `session.cwd` for a native Claude session can be a
+ * `decodeProjectPath` guess, which cannot tell a `-` in a directory name from
+ * the `/` it encodes. The header quotes that path in backticks and a
+ * receiving agent may `cd` into it, so the live pane cwd wins wherever there
+ * is one.
+ */
+describe("POST /handoff: the header's cwd", () => {
+  it("quotes the pane's live cwd, not the session's decoded one", async () => {
+    const panes = new Map<string, TmuxPane>([
+      ["%1", { ...pane("%1"), currentPath: "/Users/dev/my-project/sub-dir" }],
+      ["%2", pane("%2")],
+    ]);
+    const { manager, internals, sendPromptToPane } = createServer(panes);
+    pair(manager);
+    // What `decodeProjectPath` would have produced for that directory.
+    manager.updateSession("src", { cwd: "/Users/dev/my/project/sub/dir" });
+
+    expect((await post(internals, { from: "src", to: "dst" })).status).toBe(
+      200,
+    );
+    const text = (sendPromptToPane.mock.calls[0] as unknown as string[])[1];
+    expect(text.split("\n")[0]).toContain("`/Users/dev/my-project/sub-dir`");
+    expect(text).not.toContain("/Users/dev/my/project/sub/dir");
+  });
+
+  it("falls back to the session's cwd when the source has no live pane", async () => {
+    const { manager, internals, sendPromptToPane } = createServer();
+    manager.createSession("src", transcript("src.jsonl", "ship it"));
+    manager.updateSession("src", { cwd: "/Users/dev/paneless" });
+    manager.createSession("dst", transcript("dst.jsonl"));
+    manager.setTmuxPane("dst", "%2");
+
+    expect((await post(internals, { from: "src", to: "dst" })).status).toBe(
+      200,
+    );
+    const text = (sendPromptToPane.mock.calls[0] as unknown as string[])[1];
+    expect(text.split("\n")[0]).toContain("`/Users/dev/paneless`");
   });
 });
