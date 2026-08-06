@@ -7,7 +7,7 @@ cases."_
 > outlives the longest worker.** That holds for short and medium steps. But the implement step
 > below uses `--timeout 1800000` (30 min), and most shell tools have a wall-clock limit
 > (~10 min) that would kill the `wait` block mid-run and destroy the redirect (see the
-> redirect-loss warning under Fire-and-poll in SKILL.md). So for a genuinely long step, prefer
+> redirect-loss warning in references/joins.md). So for a genuinely long step, prefer
 > the **push join**: background the _blocking_ invoke as a harness job and let the harness
 > wake you (join shape #1). The `wait` shape shown here is the right shape only when your
 > harness has no background-job/notify mechanism _and_ every worker comfortably finishes
