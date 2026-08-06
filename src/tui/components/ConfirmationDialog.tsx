@@ -1,9 +1,15 @@
 import type { Component } from "solid-js";
 import { createMemo } from "solid-js";
+import { useTerminalDimensions } from "@opentui/solid";
 import { MouseButton } from "@opentui/core";
 import type { Session } from "../../types";
 import type { ConfirmAction } from "../store";
+import { truncateText } from "../utils/format";
 import { theme } from "../theme";
+
+const MAX_WIDTH = 50;
+const MIN_WIDTH = 24;
+const HEIGHT = 7;
 
 interface ConfirmationDialogProps {
   session: Session | null;
@@ -51,15 +57,22 @@ export const ConfirmationDialog: Component<ConfirmationDialogProps> = (
     return props.session.project || props.session.cwd || props.session.id;
   });
 
+  const dims = useTerminalDimensions();
+  const width = () =>
+    Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dims().width - 4));
+  const height = () => Math.min(Math.max(1, dims().height), HEIGHT);
+
   return (
     <box
       position="absolute"
-      top="50%"
-      left="50%"
-      width={50}
-      height={7}
-      marginTop={-3}
-      marginLeft={-25}
+      /* Centered by arithmetic rather than a 50% offset and a negative
+         margin, which disagree by a row when dialog and terminal are both
+         odd-height (see `NoticeDialog`). The width clamp is what keeps this
+         box inside a 30-column sidebar. */
+      top={Math.max(0, Math.floor((dims().height - height()) / 2))}
+      left={Math.max(0, Math.floor((dims().width - width()) / 2))}
+      width={width()}
+      height={height()}
       backgroundColor={theme.base}
       borderStyle="single"
       borderColor={theme.border}
@@ -68,10 +81,12 @@ export const ConfirmationDialog: Component<ConfirmationDialogProps> = (
       alignItems="center"
     >
       <text fg={theme.text}>
-        <strong>{title()}</strong>
+        <strong>{truncateText(title(), Math.max(1, width() - 4))}</strong>
       </text>
       <box height={1} />
-      <text fg={theme.subtext}>{subtitle()}</text>
+      <text fg={theme.subtext}>
+        {truncateText(subtitle(), Math.max(1, width() - 4))}
+      </text>
       <box height={1} />
       <box flexDirection="row">
         <box

@@ -6885,9 +6885,9 @@ describe("App hand off to", () => {
       await pickTarget();
       const frame = squish(setup.captureCharFrame());
       // Both ends named: the target in the title (the irreversible half) and
-      // the source under it.
+      // the source in the From row under the fields.
       expect(frame).toContain("Handofftoclaude·proj2");
-      expect(frame).toContain("fromclaude·proj1");
+      expect(frame).toContain("Fromclaude·proj1");
       expect(frame).toContain("Lastresponse");
       expect(frame).toContain("entersend");
       // The pick ended WITH the dialog opening, so one esc leaves the gesture.

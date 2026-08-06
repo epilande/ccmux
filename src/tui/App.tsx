@@ -3735,6 +3735,8 @@ export function App(props: AppProps) {
             newSessionMode={store.state.newSession !== null}
             newSessionOption={newSessionOptionMode()}
             handoffPickMode={store.state.handoffPick !== null}
+            handoffDialogMode={store.state.handoffDialog !== null}
+            copyDialogMode={store.state.copyDialog !== null}
             reviewable={reviewEnabled}
           />
         </Show>
@@ -3807,6 +3809,9 @@ export function App(props: AppProps) {
                 return session ? handoffLabel(session) : copy().sessionId;
               })()}
               turns={copy().turns}
+              onSubmit={commitCopyDialog}
+              onCancel={store.actions.closeCopyDialog}
+              showKeyHints={props.sidebar === true}
             />
           )}
         </Show>
@@ -3831,6 +3836,10 @@ export function App(props: AppProps) {
               note={handoff().note}
               field={handoff().field}
               onNoteInput={store.actions.setHandoffDialogNote}
+              onFocusField={store.actions.setHandoffDialogField}
+              onSubmit={commitHandoffDialog}
+              onCancel={store.actions.closeHandoffDialog}
+              showKeyHints={props.sidebar === true}
             />
           )}
         </Show>
