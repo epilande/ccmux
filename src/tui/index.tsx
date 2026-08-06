@@ -119,10 +119,17 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
   // Quit paths exit via process.exit(), which skips OpenTUI's `beforeExit`
   // cleanup (its signal handlers do fire, but `process.exit` emits only
   // `exit`), leaving mouse tracking and the alternate screen armed on the
-  // host terminal (issue #125). destroy() is synchronous and idempotent,
-  // so it is safe here even when a signal-driven destroy already ran.
+  // host terminal (issue #125). destroy() is idempotent, so it is safe here
+  // even when a signal-driven destroy already ran, and it restores the
+  // terminal synchronously as long as no frame callback awaits real I/O
+  // (destroy() during a live render pass defers the restore to the render
+  // loop, which never resumes once process.exit is in flight). The catch
+  // matters: destroy() runs every Solid onCleanup before the native restore,
+  // and a throw there would skip the restore and reinstate #125.
   process.on("exit", () => {
-    renderer.destroy();
+    try {
+      renderer.destroy();
+    } catch {}
   });
 
   await render(
