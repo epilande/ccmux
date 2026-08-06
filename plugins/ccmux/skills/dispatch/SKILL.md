@@ -50,7 +50,8 @@ an answer buried in terminal chrome. For multi-turn continuity use invoke's `--s
 
 - **Small N, all quick:** N block-and-wait invokes as N _separate_ Bash tool calls in one
   assistant turn (not N `$(...)` lines in one script, which run serially). Their return is
-  the join, but each call holds a slot for its whole runtime.
+  the join, but each call holds a slot for its whole runtime, and on a harness that
+  serializes tool calls they won't actually overlap.
 - **Large N, or long/uneven runtimes:** fire each with `--id`, then join. See
   "Fire-and-poll" for the three join shapes.
 

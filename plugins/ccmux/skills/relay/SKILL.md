@@ -100,8 +100,9 @@ on context you were not given, instead of guessing or bouncing the question to t
 - **Not every session can be read.** One whose transcript the daemon has not located (a
   pane-tracked agent with no hooks, say) degrades to a pane capture for `last` and is
   _refused_ for `handoff`.
-- **Long payloads truncate tail-first at 65,536 chars** (the composed message), and the
-  outcome line says `truncated`. The tail is kept: a response's conclusion is at its end.
+- **Long payloads are truncated tail-preserving at 65,536 chars** (the composed message):
+  the head is dropped behind a leading `… ` marker and the outcome line says `truncated`.
+  The tail survives because a response's conclusion is at its end.
 - **`--spawn` has a second, tighter budget in bytes (120,832)** because the text goes to
   the new agent in argv. CJK- or emoji-heavy text can sit under the char cap and still
   overrun it; the `too-large` refusal says to retry with fewer `--turns`.
