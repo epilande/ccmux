@@ -1,16 +1,12 @@
 ---
 name: relay
 description: |
-  Read another agent session's output with `ccmux last`, or relay one session's last
-  response straight into another with `ccmux handoff`. Sessions here are live agent
-  sessions the ccmux daemon tracks in tmux panes (claude, codex, cursor, opencode, pi,
-  gemini, or custom agents) that ALREADY exist. Use this skill when asked to read a peer's
-  output ("read what codex just said", "what did claude answer"), to move output between
-  sessions ("give claude's answer to codex", "hand this session's conclusion to another
-  agent", "hand off to codex"), for any request naming `ccmux last` or `ccmux handoff`,
-  or when YOU receive a message beginning `[ccmux handoff]` and need the protocol for
-  handling it. For launching NEW worker agents and collecting their results, use the
-  dispatch skill instead.
+  Read another live agent session's output with `ccmux last`, or relay one session's last
+  response into another with `ccmux handoff`. Use when asked to read a peer's output ("what
+  did codex just say"), to move output between existing sessions ("give claude's answer to
+  codex", "hand off to codex"), for any request naming `ccmux last` or `ccmux handoff`, or
+  when YOU receive a message beginning `[ccmux handoff]`. For launching NEW worker agents
+  and collecting their results, use the dispatch skill instead.
 ---
 
 # Reading and relaying between agent sessions

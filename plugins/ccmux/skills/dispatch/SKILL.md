@@ -1,16 +1,12 @@
 ---
 name: dispatch
 description: |
-  Orchestrate other AI coding agents (Claude Code, Codex, Cursor, OpenCode, Pi, Gemini, or any
-  custom agent) by driving them through `ccmux invoke`. ccmux is the cross-harness substrate;
-  YOU are the router. Use this skill when a prompt asks you to coordinate, delegate, fan out,
-  or pipeline work across multiple agents, e.g. "plan with claude, implement with codex,
-  search with gemini", "run these three agents in parallel and combine the results",
-  "delegate this long implementation to codex while I keep working", "have another agent do
-  X and summarize it back", or any request to use `ccmux invoke` to launch and watch worker
-  agents. The user supplies the agent-per-task policy in their prompt; this skill teaches the
-  mechanics of firing, polling, joining, cancelling, and reading worker output, plus when to
-  hand a job off to `ccmux spawn` (a live, human-driven pane) instead of invoking it.
+  Orchestrate other AI coding agents (claude, codex, cursor, opencode, pi, gemini, or custom)
+  by driving them through `ccmux invoke`: firing, polling, joining, cancelling, and reading
+  worker output, plus when to hand a job to `ccmux spawn` (a live, human-driven pane) instead.
+  Use when asked to coordinate, delegate, fan out, or pipeline work across agents ("plan with
+  claude, implement with codex", "run these three agents in parallel", "delegate this to codex
+  while I keep working"), or for any request to use `ccmux invoke`.
 ---
 
 # Orchestrating agents with `ccmux invoke`
