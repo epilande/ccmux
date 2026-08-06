@@ -1,10 +1,12 @@
 import { describe, it, expect } from "bun:test";
+import { CLAUDE_AGENT_DEF } from "../lib/agents";
 import {
   classifyClaudePromptPane,
   classifyPaneContent,
   classifyPaneTitle,
   isNonAgentCommand,
   isShellCommand,
+  showsIdleClaudeComposer,
 } from "./pane-classify";
 
 describe("classifyPaneTitle", () => {
@@ -304,5 +306,241 @@ describe("isShellCommand", () => {
     expect(isShellCommand("node")).toBe(false);
     expect(isShellCommand(null)).toBe(false);
     expect(isShellCommand("")).toBe(false);
+  });
+});
+
+/**
+ * The evidence that retires a `waiting_permission` marker no hook will ever
+ * update (issue #117). Fixtures are trimmed captures of a real Claude Code
+ * 2.1.222 pane, taken before and after Escape on a live permission prompt.
+ */
+describe("showsIdleClaudeComposer", () => {
+  /** Claude's own glyph pattern, which every real caller passes. */
+  const idleComposer = (
+    text: string,
+    pattern: RegExp | undefined = CLAUDE_AGENT_DEF.readyPattern,
+  ): boolean => showsIdleClaudeComposer(text, pattern);
+
+  const COMPOSER = [
+    "⏺ I'll run that command.",
+    "",
+    "  Ran 1 shell command",
+    "",
+    "✻ Baked for 28s",
+    "",
+    "────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────",
+    "  🤖 Opus 5 │ 🧠 4% │ ⏱️ 0m48s │ 📦 v2.1.222",
+    "  💬 run the bash command: touch probe.txt",
+    "  -- INSERT -- ⏸ manual mode on · ← for agents",
+    "",
+    "",
+  ].join("\n");
+
+  const PERMISSION_PROMPT = [
+    "⏺ I'll run that command.",
+    "",
+    "  Running 1 shell command…",
+    "  ⎿  $ touch /tmp/probe.txt",
+    "",
+    "────────────────────────────────────────────",
+    " Bash command",
+    "",
+    "   touch /tmp/probe.txt",
+    "   Create empty probe file",
+    "",
+    " Do you want to proceed?",
+    " ❯ 1. Yes",
+    "   2. Yes, and always allow access to tmp/ from this project",
+    "   3. No",
+    "",
+    " Esc to cancel · Tab to amend · ctrl+e to explain",
+    "",
+    "",
+  ].join("\n");
+
+  it("accepts an empty composer with only chrome under it", () => {
+    expect(idleComposer(COMPOSER)).toBe(true);
+  });
+
+  // The regression that matters: a live prompt must keep its waiting row.
+  it("refuses a live permission prompt", () => {
+    expect(idleComposer(PERMISSION_PROMPT)).toBe(false);
+  });
+
+  // A permission prompt matches NONE of Claude's terminalRules (verified
+  // live), so this is the case a rules-only test would get wrong.
+  it("refuses a permission prompt rendered below an older composer frame", () => {
+    expect(idleComposer(`${COMPOSER}\n${PERMISSION_PROMPT}`)).toBe(false);
+  });
+
+  it("refuses the AskUserQuestion picker below an older composer frame", () => {
+    const picker = [
+      "What's your favorite color?",
+      "❯ 1. Blue",
+      "  5. Type something.",
+      "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    ].join("\n");
+    expect(idleComposer(`${COMPOSER}\n${picker}`)).toBe(false);
+  });
+
+  it("refuses a plan picker below an older composer frame", () => {
+    const plan = [
+      "Would you like to proceed?",
+      "❯ 1. Yes",
+      "  2. No, keep planning",
+      "Plan saved to /Users/x/.claude/plans/2026-08-05.md",
+    ].join("\n");
+    expect(idleComposer(`${COMPOSER}\n${plan}`)).toBe(false);
+  });
+
+  // Pins reading 1 (`classifyPaneContent`): Claude's startup/session picker
+  // (`terminalRules` matchAll "what would you like to work on" + "enter to
+  // select", src/lib/agents.ts:560) carries no numbered rows at all, so
+  // reading 3's option-row check can't see it, and its wording is nowhere
+  // near `PROMPT_TERMINATOR_RE`, so reading 2 can't either. Only the terminal
+  // rule catches it.
+  it("refuses the startup picker below an older composer frame", () => {
+    const startupPicker = [
+      " What would you like to work on?",
+      "",
+      " ❯ Continue the handoff work",
+      "   Review the open PR",
+      "",
+      " Enter to select · Esc to exit",
+    ].join("\n");
+    expect(idleComposer(`${COMPOSER}\n${startupPicker}`)).toBe(false);
+  });
+
+  // Pins reading 1 (`classifyPaneContent`): a bare approval narrative
+  // (`terminalRules` matchAny "requires approval", src/lib/agents.ts:549)
+  // with no option block below it. Reading 3 finds no numbered row to match.
+  // Reading 2 finds the terminator phrase itself ("requires approval" is one
+  // of `PROMPT_TERMINATOR_RE`'s alternatives) but then finds no option row
+  // beneath it, so `classifyClaudePromptPane` returns null rather than
+  // refusing. Only the terminal rule catches this one.
+  it("refuses a bare approval narrative with no options rendered yet", () => {
+    const narrative = " This command requires approval before it can run.";
+    expect(idleComposer(`${COMPOSER}\n${narrative}`)).toBe(false);
+  });
+
+  // Pins reading 2 (`classifyClaudePromptPane`): the option rows use `⎿`
+  // chrome, which sits outside `OPTION_LINE_RE`'s anchored class, so reading
+  // 3 can't see them, but they still satisfy the unanchored `OPTION_ROW_RE`
+  // that `classifyClaudePromptPane` uses internally. No terminal rule matches
+  // "Do you want to proceed?", so reading 1 stays "active". Only the
+  // terminator-plus-options reading catches this one.
+  it("refuses a permission prompt whose options use unanchored chrome", () => {
+    const boxedOptions = [
+      " Do you want to proceed?",
+      " ⎿ 1. Yes",
+      " ⎿ 2. No",
+    ].join("\n");
+    expect(idleComposer(`${COMPOSER}\n${boxedOptions}`)).toBe(false);
+  });
+
+  /**
+   * The case both of the other readings miss, and the reason the option-row
+   * check is a safety requirement. Verbatim capture of a live Claude Code
+   * 2.1.222 permission prompt at 22 columns: "Do you want to proceed?" wraps
+   * mid-phrase, and `capturePane` omits `-J`, so the terminator arrives split
+   * across two lines and matches nothing. The permission prompt matches no
+   * terminal rule either. Only the option rows survive, and they do so intact
+   * because a wrapped option keeps its number on the first line.
+   */
+  const NARROW_WRAPPED_PROMPT = [
+    "──────────────────────",
+    " Bash command",
+    "",
+    "   touch a-file-wit",
+    "   h-a-fairly-long-",
+    "   name.txt",
+    "   Create an empty",
+    "   file",
+    "",
+    " Do you want to",
+    " proceed?",
+    " ❯ 1. Yes",
+    "   2. Yes, and always",
+    "      allow access to",
+    "      h117b/ from this",
+    "      project",
+    "   3. No",
+    "",
+    " Esc to cancel · Tab",
+    " to amend · ctrl+e to",
+    " explain",
+  ].join("\n");
+
+  it("refuses a live prompt whose terminator wrapped off a narrow pane", () => {
+    const narrowComposer = [
+      "──────────────────────",
+      "❯ ",
+      "──────────────────────",
+    ].join("\n");
+    expect(idleComposer(`${narrowComposer}\n${NARROW_WRAPPED_PROMPT}`)).toBe(
+      false,
+    );
+  });
+
+  // Version drift needs no narrow pane: the terminator is a five-phrase
+  // whitelist, so any wording Claude adds later lands here.
+  it("refuses a prompt whose wording is not in the terminator whitelist", () => {
+    const unlisted = [
+      "Claude wants to run a command outside the workspace.",
+      "Shall I go ahead with this?",
+      " ❯ 1. Yes",
+      "   2. No",
+    ].join("\n");
+    expect(idleComposer(`${COMPOSER}\n${unlisted}`)).toBe(false);
+  });
+
+  // Why the option-row pattern is ANCHORED. The line under an idle composer
+  // is Claude's echo of the last prompt, and a numbered one would otherwise
+  // read as a live picker for as long as that prompt is the last.
+  it("is not fooled by a numbered list in the prompt echo below the composer", () => {
+    const echoed = COMPOSER.replace(
+      "  💬 run the bash command: touch probe.txt",
+      "  💬 1. fix the parser 2. run the tests",
+    );
+    expect(echoed).toContain("💬 1. fix the parser");
+    expect(idleComposer(echoed)).toBe(true);
+  });
+
+  // Scrollback ABOVE the live composer is history, and pinning the row on it
+  // is exactly the lingering-text trap that keeps a spent wait alive.
+  it("ignores residual prompt text above the composer", () => {
+    const residual = [
+      "This command requires approval",
+      "Do you want to proceed?",
+      "  1. Yes",
+      "",
+    ].join("\n");
+    expect(idleComposer(`${residual}${COMPOSER}`)).toBe(true);
+  });
+
+  it("refuses a composer holding typed text", () => {
+    const typed = COMPOSER.replace("❯ ", "❯ check the settings first");
+    expect(idleComposer(typed)).toBe(false);
+  });
+
+  it("refuses a pane with no composer at all", () => {
+    expect(idleComposer("⠂ Baking…\n  running a tool")).toBe(false);
+  });
+
+  it("refuses when the agent has no readyPattern to prove idleness with", () => {
+    expect(showsIdleClaudeComposer(COMPOSER, undefined)).toBe(false);
+  });
+
+  it("honors a user-overridden prompt glyph", () => {
+    const dollarPrompt = COMPOSER.replace("❯ ", "$ ");
+    expect(idleComposer(dollarPrompt, /^\$\s*$/)).toBe(true);
+    expect(idleComposer(dollarPrompt)).toBe(false);
+  });
+
+  it("looks past ANSI styling around the prompt glyph", () => {
+    const styled = COMPOSER.replace("❯ ", "\x1b[36m❯\x1b[0m ");
+    expect(idleComposer(styled)).toBe(true);
   });
 });

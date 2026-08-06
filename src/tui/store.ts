@@ -1274,6 +1274,39 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     });
   }
 
+  /**
+   * Where a move that would land on `index` actually lands while a handoff is
+   * being aimed, or null when the direction holds nothing to land on.
+   *
+   * The source row is hopped over because it is the one session the pick can
+   * never settle on (the self-handoff guard refuses it at send time), so
+   * landing there is a dead stop the user has to press through. The hop
+   * continues in the direction of travel and STOPS at the list edge rather
+   * than wrapping, which is what an ordinary move already does with its clamp:
+   * a source pinned to the last row means `j` from the row above it holds
+   * position instead of jumping the eye back to the top.
+   */
+  function handoffPickLanding(
+    items: FlatItem[],
+    index: number,
+    delta: number,
+  ): number | null {
+    const pick = state.handoffPick;
+    if (!pick) return index;
+    const step = delta < 0 ? -1 : 1;
+    for (let i = index; i >= 0 && i < items.length; i += step) {
+      const item = items[i]!;
+      if (
+        item.type === "session" &&
+        item.filteredSession.session.id === pick.fromSessionId
+      ) {
+        continue;
+      }
+      return i;
+    }
+    return null;
+  }
+
   /** Persist collapsed groups, pruning keys that no longer match active groups */
   function persistCollapsedGroups(collapsed: Set<string>) {
     const activeKeys = new Set(headerGroupKeys(flatItems()));
@@ -1590,7 +1623,12 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
       const curIdx = selectedIndex();
       const newIndex = Math.max(0, Math.min(items.length - 1, curIdx + delta));
-      selectItemAt(newIndex);
+      // Every movement key routes through here, which is why the handoff
+      // source is hopped over HERE rather than in the pick mode's own key
+      // branch: the rule holds for a move made from anywhere.
+      const landing = handoffPickLanding(items, newIndex, delta);
+      if (landing === null) return;
+      selectItemAt(landing);
     },
 
     setSelectedIndex(index: number) {

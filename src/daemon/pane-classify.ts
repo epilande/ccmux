@@ -2,6 +2,7 @@ import type { AttentionType, TmuxPane } from "../types/session";
 import { CLAUDE_AGENT_DEF } from "../lib/agents";
 import { detectTerminalStatus } from "./terminal-detector";
 import { capturePane } from "./pane-io";
+import { stripAnsi } from "../lib/strip-ansi";
 
 type PaneState = "plan_approval" | "working" | "waiting" | "idle" | "active";
 
@@ -99,6 +100,20 @@ export const PROMPT_TERMINATOR_RE =
 const OPTION_ROW_RE = /(^|\s)\d+\.\s/;
 
 /**
+ * The same option row, but ANCHORED at the start of its line. Used where a
+ * match must survive being the ONLY evidence a prompt is live
+ * ({@link showsIdleClaudeComposer}), which the unanchored form is too loose
+ * for: it also matches a number mid-sentence, and the line directly under an
+ * idle composer is Claude's echo of the last prompt ("💬 1. fix the parser"),
+ * which would then read as a live picker forever.
+ *
+ * A wrapped option keeps its number on the FIRST line and indents its
+ * continuation without one (verified live at 22 columns on Claude Code
+ * 2.1.222), so anchoring costs nothing at any pane width.
+ */
+const OPTION_LINE_RE = /^[\s│┃|>❯▶»]*\d{1,2}\.\s/;
+
+/**
  * True when a captured pane looks like Claude's AskUserQuestion picker: a
  * "Type something." choice plus an "Enter to select" footer. Mirrors the
  * `terminalRules` question anchors in `src/lib/agents.ts`. Used delivery-time to
@@ -157,6 +172,80 @@ export function classifyClaudePromptPane(
   // A permission prompt shows its numbered Yes/No options below the terminator.
   if (below.some((line) => OPTION_ROW_RE.test(line))) return "permission";
   return null;
+}
+
+/**
+ * True when a captured Claude pane positively shows an EMPTY, LIVE composer:
+ * a line that is nothing but the prompt glyph, with no prompt of any kind
+ * rendered BELOW it.
+ *
+ * What that proves is NO PROMPT IS UP, which is not the same as "the agent is
+ * idle": Claude keeps the composer on screen while it works (verified live on
+ * 2.1.222), so a caller that needs idle-versus-working must get that from the
+ * log and use this only to retire a wait.
+ *
+ * This is the only evidence that can retire a `waiting_permission` marker no
+ * hook will ever update (Escape fires none), so it is deliberately POSITIVE.
+ * "No permission pattern matched" would not do: Claude's own permission prompt
+ * matches none of its `terminalRules`. It renders "Do you want to proceed?"
+ * plus numbered options and nothing else (verified live on Claude Code
+ * 2.1.222), so a rules-only test reads a live prompt as an idle pane.
+ *
+ * BELOW the LAST composer line, not over the whole capture, for symmetric
+ * reasons. A dismissed prompt is ERASED from the pane while the composer's own
+ * earlier frames stay in scrollback, so residual prompt text above the live
+ * composer is history (the same lingering-text trap the ambiguous-permission
+ * correction documents) and anything prompt-shaped below it outlived the
+ * composer and is live.
+ *
+ * A composer holding typed text does not match the glyph-only pattern, so a
+ * half-written reply keeps the session `waiting`. That is the correct failure
+ * direction throughout: staying `waiting` too long is a slow row, while
+ * clearing a live prompt's attention indicator loses the prompt and leaves a
+ * queued handoff to be typed into it, where the default option is usually Yes.
+ *
+ * `readyPattern` is the caller's, not a default, so an agent config that
+ * carries none says so and gets no downgrade rather than being measured
+ * against a glyph it never renders.
+ */
+export function showsIdleClaudeComposer(
+  paneText: string,
+  readyPattern: RegExp | undefined,
+): boolean {
+  if (!readyPattern) return false;
+  const lines = stripAnsi(paneText).replace(/\n+$/, "").split("\n");
+  let promptIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    // Reset for /g-flagged user overrides; `.test()` is stateful.
+    readyPattern.lastIndex = 0;
+    if (readyPattern.test(lines[i])) {
+      promptIdx = i;
+      break;
+    }
+  }
+  if (promptIdx < 0) return false;
+
+  const belowLines = lines.slice(promptIdx + 1);
+  const below = belowLines.join("\n");
+  // Three independent readings of "a prompt is live below the composer", none
+  // of which covers the others.
+  //
+  // The terminal rules catch the pickers, whose widget strings no other prompt
+  // carries.
+  if (classifyPaneContent(below).state !== "active") return false;
+  // The terminator plus its option block catches the permission and plan
+  // prompts, which match no rule at all.
+  if (classifyClaudePromptPane(below) !== null) return false;
+  // And an option row on its own catches what BOTH of those miss, which is the
+  // case that makes this check a safety requirement rather than a belt: the
+  // terminator is matched per LINE against a five-phrase whitelist, and
+  // `capturePane` deliberately omits `-J`, so a pane narrow enough to wrap "Do
+  // you want to proceed?" mid-phrase (verified live at 22 columns) hides a
+  // fully live prompt from every check above, as would any future prompt
+  // wording Claude adds. Option rows are short, so they survive wrapping at
+  // any plausible width, and every interactive Claude prompt has them. A false
+  // match here only holds the row at `waiting`, which is where it already was.
+  return !belowLines.some((line) => OPTION_LINE_RE.test(line));
 }
 
 /**

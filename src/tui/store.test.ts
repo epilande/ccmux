@@ -3935,6 +3935,76 @@ describe("handoff pick mode", () => {
     // Nothing entered: a mode whose only candidate is the source is a dead end.
     expect(store.state.handoffPick).toBeNull();
   });
+
+  describe("moving the aim", () => {
+    const threeRows = () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", lastUserInputAt: "2024-01-01T13:00:00Z" }),
+        createMockSession({ id: "b", lastUserInputAt: "2024-01-01T12:00:00Z" }),
+        createMockSession({ id: "c", lastUserInputAt: "2024-01-01T11:00:00Z" }),
+      ]);
+      return store;
+    };
+
+    it("hops over the source on the way up", () => {
+      const store = threeRows();
+      store.actions.moveSelection(1);
+      expect(store.actions.beginHandoffPick("b")).toBe(true);
+      expect(store.selectedSession()?.id).toBe("c");
+
+      // "b" is the row the aim can never settle on, so `k` from "c" carries
+      // past it in the same keystroke rather than stopping there.
+      store.actions.moveSelection(-1);
+      expect(store.selectedSession()?.id).toBe("a");
+    });
+
+    it("hops over the source on the way down", () => {
+      const store = threeRows();
+      store.actions.moveSelection(1);
+      store.actions.beginHandoffPick("b");
+      store.actions.moveSelection(-1);
+      expect(store.selectedSession()?.id).toBe("a");
+
+      store.actions.moveSelection(1);
+      expect(store.selectedSession()?.id).toBe("c");
+    });
+
+    it("holds position when the hop runs off the top of the list", () => {
+      const store = threeRows();
+      expect(store.actions.beginHandoffPick("a")).toBe(true);
+      expect(store.selectedSession()?.id).toBe("b");
+
+      // Nothing above the source, and a move that wrapped would throw the aim
+      // to the far end of a list the user is reading downward.
+      store.actions.moveSelection(-1);
+      expect(store.selectedSession()?.id).toBe("b");
+    });
+
+    it("holds position when the hop runs off the bottom of the list", () => {
+      const store = threeRows();
+      store.actions.moveSelection(2);
+      expect(store.actions.beginHandoffPick("c")).toBe(true);
+      // Forward with a wrap, so the aim starts back at the top.
+      expect(store.selectedSession()?.id).toBe("a");
+
+      store.actions.moveSelection(1);
+      expect(store.selectedSession()?.id).toBe("b");
+      store.actions.moveSelection(1);
+      expect(store.selectedSession()?.id).toBe("b");
+    });
+
+    it("leaves ordinary movement alone once the pick is over", () => {
+      const store = threeRows();
+      store.actions.beginHandoffPick("a");
+      store.actions.endHandoffPick();
+
+      store.actions.moveSelection(-1);
+      expect(store.selectedSession()?.id).toBe("a");
+      store.actions.moveSelection(1);
+      expect(store.selectedSession()?.id).toBe("b");
+    });
+  });
 });
 
 describe("handoff dialog state", () => {

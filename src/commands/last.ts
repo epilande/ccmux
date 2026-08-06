@@ -44,7 +44,13 @@ export function resolutionEcho(data: TranscriptResponse): string | null {
 }
 
 /** The candidate listing an ambiguous ref is refused with; it is the
- *  recovery path, so it carries an id and a coordinate to re-ask with. */
+ *  recovery path, so it carries an id and a coordinate to re-ask with.
+ *
+ *  The project name is what the picker calls the session and what a project
+ *  ref matched on in the first place, so it is what makes two same-agent rows
+ *  tellable apart at a glance; it travels in every 409 and used to be dropped
+ *  here. Printed before the cwd, which is the same fact spelled out in full
+ *  and is the widest column on the line. */
 export function renderCandidates(
   ref: string,
   candidates: SessionRefCandidate[],
@@ -54,7 +60,7 @@ export function renderCandidates(
   ];
   for (const c of candidates) {
     lines.push(
-      `  ${c.sessionId}  ${c.coordinate ?? "(no pane)"}  ${c.agentType}  ${c.status}  ${c.cwd}  [${proximityLabel(c.proximity)}]`,
+      `  ${c.sessionId}  ${c.coordinate ?? "(no pane)"}  ${c.agentType}  ${c.status}  ${c.project}  ${c.cwd}  [${proximityLabel(c.proximity)}]`,
     );
   }
   lines.push("Re-run with one of the ids or coordinates above.");

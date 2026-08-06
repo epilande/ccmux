@@ -1496,6 +1496,41 @@ export function App(props: AppProps) {
     store.actions.openHandoffDialog(from.id, to.id);
   }
 
+  /**
+   * End a pick whose gesture has lost its meaning under it, and say why.
+   *
+   * Both reasons arrive as an SSE update with no keypress behind them: the
+   * source leaving the board (killed from a pane, or closed elsewhere), and
+   * the last row that was not the source leaving it. The banner naming the
+   * source disappears with the row either way, while the mode itself would
+   * stay armed and go on swallowing every key until the next Enter or Escape,
+   * which reads as a hung picker. Ending it here is what hands the list back
+   * to the keyboard; the toast is what explains a mode that closed itself.
+   */
+  createEffect(() => {
+    const pick = store.state.handoffPick;
+    if (!pick) return;
+    if (!store.state.sessions.some((s) => s.id === pick.fromSessionId)) {
+      store.actions.endHandoffPick();
+      store.actions.showToast("The session being handed off is gone", 4_000);
+      return;
+    }
+    // Measured over the VISIBLE rows, the same list the pick was opened
+    // against: a target the board is not showing is not one the user can aim
+    // at, so a mode with none left is the dead end `beginHandoffPick` refuses
+    // to open in the first place.
+    const hasTarget = store
+      .flatItems()
+      .some(
+        (item) =>
+          item.type === "session" &&
+          item.filteredSession.session.id !== pick.fromSessionId,
+      );
+    if (hasTarget) return;
+    store.actions.endHandoffPick();
+    store.actions.showToast("No other session left to hand off to", 4_000);
+  });
+
   /** An end of the open Hand off dialog, or undefined once that row has left
    *  the board (an SSE removal under an open dialog). */
   function handoffDialogSession(

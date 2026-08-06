@@ -1,5 +1,6 @@
 import {
   PANE_IDLE_THRESHOLD_MS,
+  STALE_PERMISSION_GRACE_MS,
   SUBAGENT_STALE_TIMEOUT_MS,
 } from "../lib/config";
 import type { AgentDef } from "../lib/agents";
@@ -27,7 +28,7 @@ import { resolveDeadProcessState } from "./status-machine";
 import { matchTerminalRule } from "./terminal-detector";
 import { capturePane } from "./pane-io";
 import { tmuxArgv } from "../lib/tmux-exec";
-import { detectPaneState } from "./pane-classify";
+import { detectPaneState, showsIdleClaudeComposer } from "./pane-classify";
 import { normalizeTty } from "./pane-discovery";
 import type { AttentionTracker } from "./attention-tracker";
 import type { LogAdapter } from "./log-adapter";
@@ -197,18 +198,37 @@ async function reconcileNativeSession(
 
   const marker = deps.hookManager.getMarkerForSession(session);
   const sources = collectNativeSources(session, marker);
-  await applyAmbiguousPermissionCorrection(deps, session, sources);
+  await applyPermissionPaneEvidence(deps, session, sources);
   const resolved = evaluateCascade(sources);
   deps.sessionManager.updateSession(session.id, resolved);
 }
 
 /**
- * AskUserQuestion disambiguation for the native cascade paths, which build
- * only (marker, log) sources — no terminal source. When the marker claims a
- * `permission` wait for an agent flagged `ambiguousPermissionMarker`
- * (Claude), capture the pane once and match ONLY its `question` rules; a
- * picker match is pushed as a source for `correctAmbiguousPermissionMarker`
- * to relabel against. A `permission` rule match is deliberately dropped —
+ * The ONE pane capture the native cascade paths take, and the two corrections
+ * that read it. Both are gated on a marker that claims a `permission` wait,
+ * because that is the only state in which the (marker, log) pair the native
+ * paths build can be wrong in a way nothing else can see:
+ *
+ * 1. AskUserQuestion disambiguation (`correctAmbiguousPermissionMarker`),
+ *    detailed below.
+ * 2. Dismissed-prompt downgrade (`applyDismissedPermissionEvidence`): a
+ *    permission prompt the user ESCAPES fires no hook, so the marker keeps
+ *    claiming the wait, and on the native path nothing can contradict it:
+ *    `nativeLogSource` echoes the stored `waiting` back at the marker's own
+ *    timestamp every tick, so it ties the marker instead of out-freshening
+ *    it, and the tie resolves to the marker. `resolveNativeClaudeStates`
+ *    only pane-checks sessions that are `working`, so this path is not
+ *    covered there either. The row then sits at `waiting` until the next
+ *    real turn, refusing every handoff (issue #117).
+ *
+ * Both corrections mutate `sources` in place; any capture failure is a
+ * fail-open no-op (the marker's `permission` stands).
+ *
+ * AskUserQuestion disambiguation, in full: for an agent flagged
+ * `ambiguousPermissionMarker` (Claude), match ONLY the capture's `question`
+ * rules; a picker match is pushed as a source for
+ * `correctAmbiguousPermissionMarker` to relabel against. A `permission` rule
+ * match is deliberately dropped —
  * Claude's permission rule matches plain narrative text ("requires approval")
  * that lingers in scrollback for the whole next turn after a keyboard
  * approval (no hook fires on approval, so the marker stays
@@ -217,23 +237,41 @@ async function reconcileNativeSession(
  * spent notification's Approve button against a now-working pane. The
  * picker's `matchAll` of two interactive-widget strings does not survive as
  * scrollback, so the pane is consulted only to detect the live picker, never
- * to re-assert a permission wait. The marker+flag gate means the capture runs
- * only while a flagged agent sits at a permission/question prompt (a brief,
- * rare state); every other reconcile stays capture-free. Mutates `sources` in
- * place; any capture failure is a fail-open no-op (the marker's `permission`
- * stands).
+ * to re-assert a permission wait. The marker gate means the capture runs
+ * only while the agent's marker sits at a permission prompt; every other
+ * reconcile stays capture-free.
  */
-async function applyAmbiguousPermissionCorrection(
-  deps: Pick<ReconcilerDeps, "agents">,
+async function applyPermissionPaneEvidence(
+  deps: Pick<ReconcilerDeps, "agents" | "now">,
   session: Session,
   sources: CascadeSource[],
   capture: (paneId: string, lines?: number) => Promise<string> = capturePane,
 ): Promise<void> {
   const agent = deps.agents.find((a) => a.name === session.agentType);
-  if (!agent?.ambiguousPermissionMarker) return;
+  if (!agent) return;
   if (!session.tmuxPane) return;
   const marker = sources.find((s) => s.name === "marker");
   if (!marker || marker.state.attentionType !== "permission") return;
+
+  const now = deps.now();
+  const disambiguates = agent.ambiguousPermissionMarker === true;
+  // Claude-scoped, like the other Claude-only arms in this file: the pane
+  // vocabulary the downgrade reads (`showsIdleClaudeComposer`) is Claude's,
+  // and what a dismissal does to another agent's marker is unverified.
+  //
+  // Only a session the store already shows as WAITING, which is what makes
+  // this one-shot rather than a pin. Claude leaves its composer on screen
+  // while it works (verified live on 2.1.222), so the composer alone does not
+  // separate idle from working. The log does, and where it says `working`
+  // (the post-keyboard-approval case, whose marker is stale in exactly the
+  // same way) it is already right and this must not overrule it. Once the
+  // downgrade lands the session is `idle`, this gate closes, and the log owns
+  // the row again.
+  const downgrades =
+    session.agentType === "claude" &&
+    session.status === "waiting" &&
+    now - marker.timestamp >= STALE_PERMISSION_GRACE_MS;
+  if (!disambiguates && !downgrades) return;
 
   let content: string;
   try {
@@ -241,23 +279,62 @@ async function applyAmbiguousPermissionCorrection(
   } catch {
     return;
   }
-  // `matchTerminalRule` is first-match-wins over all rules, so a permission
-  // phrase in the window (residual scrollback, or prose — Claude's own
-  // release-notes banner literally contains "permission rules") would SHADOW
-  // the question rule exactly when this correction is needed. Filter the
-  // rules, not the result, so the picker stays detectable regardless of what
-  // else is on screen.
-  const questionRules = agent.terminalRules.filter(
-    (r) => r.attentionType === "question",
-  );
-  const ruleMatch = matchTerminalRule(content, {
-    ...agent,
-    terminalRules: questionRules,
-  });
-  if (ruleMatch && ruleMatch.attentionType === "question") {
-    sources.push(terminalSource(ruleMatch, { upgradeOnly: true }));
+
+  if (disambiguates) {
+    // `matchTerminalRule` is first-match-wins over all rules, so a permission
+    // phrase in the window (residual scrollback, or prose — Claude's own
+    // release-notes banner literally contains "permission rules") would SHADOW
+    // the question rule exactly when this correction is needed. Filter the
+    // rules, not the result, so the picker stays detectable regardless of what
+    // else is on screen.
+    const questionRules = agent.terminalRules.filter(
+      (r) => r.attentionType === "question",
+    );
+    const ruleMatch = matchTerminalRule(content, {
+      ...agent,
+      terminalRules: questionRules,
+    });
+    if (ruleMatch && ruleMatch.attentionType === "question") {
+      sources.push(terminalSource(ruleMatch, { upgradeOnly: true }));
+    }
+    correctAmbiguousPermissionMarker(sources, agent.ambiguousPermissionMarker);
   }
-  correctAmbiguousPermissionMarker(sources, agent.ambiguousPermissionMarker);
+
+  if (downgrades) {
+    applyDismissedPermissionEvidence(content, agent, sources, now);
+  }
+}
+
+/**
+ * Retire a `waiting_permission` marker the pane proves is spent: the composer
+ * is back, empty, with no prompt under it, so whatever the marker is waiting
+ * on was answered or dismissed without a hook (issue #117).
+ *
+ * The observation enters the fold as a BASELINE terminal source stamped NOW,
+ * which is the only shape that can win here: an `upgradeOnly` source cannot
+ * downgrade by construction, and a stale marker's `waiting` is echoed back by
+ * `nativeLogSource` at the marker's own timestamp every tick, so it ties the
+ * marker rather than out-freshening it, and the tie resolves to the marker.
+ * Only a source stamped this tick can win. Once it lands, the store holds
+ * `idle` and the log echo carries the correction forward on its own.
+ *
+ * Nothing is written to the marker file: it is the hook scripts' to own, and
+ * the next real turn rewrites it anyway.
+ */
+function applyDismissedPermissionEvidence(
+  content: string,
+  agent: AgentDef,
+  sources: CascadeSource[],
+  now: number,
+): void {
+  if (!showsIdleClaudeComposer(content, agent.readyPattern)) return;
+  sources.push(
+    terminalSource(
+      { status: "idle", attentionType: null, pendingTool: null },
+      { upgradeOnly: false },
+      now,
+    ),
+  );
 }
 
 /**
@@ -681,7 +758,7 @@ async function reconcilePaneTrackedClaudeSession(
       // idle branch below does). Intentional: matches the deleted read-time
       // overlay, which only wrote `status`/`attentionType`/`pendingTool`.
       const sources = collectNativeSources(session, marker);
-      await applyAmbiguousPermissionCorrection(deps, session, sources);
+      await applyPermissionPaneEvidence(deps, session, sources);
       const resolved = evaluateCascade(sources);
       deps.sessionManager.updateSession(session.id, resolved);
       return;
@@ -1013,7 +1090,7 @@ export function collectPaneTrackedSources(
 }
 
 /**
- * The pane-tracked counterpart to `applyAmbiguousPermissionCorrection`: flag a
+ * The pane-tracked counterpart to `applyPermissionPaneEvidence`: flag a
  * `permission` terminal-rule match that would re-pin a wait the LOG has
  * already moved past as SUSPECT, so the caller can withhold it pending a
  * fresh capture (see the discriminator note at the end of this block).
@@ -1032,7 +1109,7 @@ export function collectPaneTrackedSources(
  * Why that is worse than a cosmetic flicker: the notifier retracts a
  * delivered banner when the wait clears and then refuses to renotify for 60s,
  * so a spurious re-pin re-arms a SPENT Approve button against a pane that has
- * already moved on — the same failure mode `applyAmbiguousPermissionCorrection`
+ * already moved on — the same failure mode `applyPermissionPaneEvidence`
  * exists to prevent for Claude, and the same one commit 75fe2f9 guarded on the
  * log side. Claude's guard drops the permission rule outright (its rule text
  * lingers as narrative scrollback, so a match is never evidence of a LIVE

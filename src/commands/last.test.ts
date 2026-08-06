@@ -99,6 +99,14 @@ describe("renderCandidates", () => {
     expect(out).toContain("codex-bbb  (no pane)");
     expect(out).toContain("[global]");
   });
+
+  // It travels in every 409 and is what a project ref matched on, so a
+  // listing that omits it can leave two same-agent rows indistinguishable.
+  it("names each candidate's project", () => {
+    const out = renderCandidates("codex", candidates);
+    expect(out).toContain("codex-aaa  work:1.1  codex  idle  near  /Users/dev/near");
+    expect(out).toContain("far  /Users/dev/far");
+  });
 });
 
 describe("parseTurns", () => {

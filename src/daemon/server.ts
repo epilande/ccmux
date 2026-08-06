@@ -20,9 +20,10 @@ import {
   sendLiteralToPane,
   sendPromptToPane,
 } from "./pane-io";
+import { showsIdleClaudeComposer } from "./pane-classify";
 import { resolveSessionRef } from "./session-ref";
 import type { SessionRefResolution } from "./session-ref";
-import { MAX_TURNS, renderTurns } from "./transcript-read";
+import { MAX_TURNS, parseTurnsField, renderTurns } from "./transcript-read";
 import { readSessionTranscript } from "./transcript-readers";
 import {
   AMBIGUOUS_WAIT_ERROR,
@@ -265,6 +266,10 @@ interface PaneSendDeps {
    *  existing injection site (which predates `/handoff`) still type-checks;
    *  the real `getPaneCurrentCommand` is the fallback. */
   getPaneCommand?: (paneId: string) => Promise<string | null>;
+  /** Pane-content probe for the handoff delivery gate. Optional for the same
+   *  reason as `getPaneCommand`: every injection site that predates it still
+   *  type-checks, and the real `capturePane` is the fallback. */
+  capturePane?: (paneId: string, lines?: number) => Promise<string>;
 }
 
 /** Runs one actionable-notification callback (constructed in `index.ts` with
@@ -2542,9 +2547,21 @@ export class DaemonServer {
     }
 
     const session = resolution.session;
-    const requested = parseInt(url.searchParams.get("turns") ?? "1", 10);
+    // A read CLAMPS a count it can't fully serve (the asymmetry with
+    // `POST /handoff`, which refuses, is explained there), but a value that is
+    // not a count at all was never a request for N turns and is refused rather
+    // than silently read as 1, which `turns=true` used to be.
+    const requested = parseTurnsField(url.searchParams.get("turns"));
+    if (requested.kind === "invalid") {
+      return Response.json(
+        { error: "Invalid 'turns' value (expected a whole number)" },
+        { status: 400, headers },
+      );
+    }
     const turns =
-      isNaN(requested) || requested < 1 ? 1 : Math.min(requested, MAX_TURNS);
+      requested.kind === "absent" || requested.value < 1
+        ? 1
+        : Math.min(requested.value, MAX_TURNS);
 
     const resolved = {
       ref,
@@ -2698,17 +2715,18 @@ export class DaemonServer {
     // else's composer, so a caller who miscounted should learn that from an
     // error rather than from a peer receiving a different amount of context
     // than they asked to send.
-    let turns = 1;
-    if (body.turns != null) {
-      const value = Number(body.turns);
-      if (!Number.isInteger(value) || value < 1 || value > MAX_TURNS) {
-        return Response.json(
-          { error: `Invalid 'turns' field (expected 1-${MAX_TURNS})` },
-          { status: 400, headers },
-        );
-      }
-      turns = value;
+    const requested = parseTurnsField(body.turns);
+    if (
+      requested.kind === "invalid" ||
+      (requested.kind === "ok" &&
+        (requested.value < 1 || requested.value > MAX_TURNS))
+    ) {
+      return Response.json(
+        { error: `Invalid 'turns' field (expected 1-${MAX_TURNS})` },
+        { status: 400, headers },
+      );
     }
+    const turns = requested.kind === "ok" ? requested.value : 1;
 
     let note: string | undefined;
     if (body.note != null) {
@@ -2718,7 +2736,20 @@ export class DaemonServer {
           { status: 400, headers },
         );
       }
-      if (body.note.length > MAX_HANDOFF_NOTE_CHARS) {
+      // Trimmed BEFORE the cap, because the header would have trimmed it
+      // anyway: a note is measured as what actually travels.
+      const trimmed = body.note.trim();
+      // The header folds a note to one line and drops it when nothing is left,
+      // so a note of pure whitespace would travel as no note at all behind a
+      // 200 that says it was sent. Refused instead, at the only moment the
+      // sender is still listening.
+      if (trimmed === "") {
+        return Response.json(
+          { error: "Invalid 'note' field (a note cannot be only whitespace)" },
+          { status: 400, headers },
+        );
+      }
+      if (trimmed.length > MAX_HANDOFF_NOTE_CHARS) {
         return Response.json(
           {
             error: `Note exceeds ${MAX_HANDOFF_NOTE_CHARS} characters (a note is a one-liner; put the detail in the payload)`,
@@ -2726,7 +2757,7 @@ export class DaemonServer {
           { status: 400, headers },
         );
       }
-      note = body.note;
+      note = trimmed;
     }
 
     const callerPane =
@@ -2779,17 +2810,24 @@ export class DaemonServer {
       );
     }
 
+    // The pane's real cwd where there is one, `session.cwd` only as the
+    // fallback. For a native Claude session `session.cwd` can be a
+    // `decodeProjectPath` guess, which cannot tell a `-` in a directory name
+    // from the `/` it encodes, and the receiving agent may `cd` into what
+    // the header quotes (issue #121). Same notion of "where this session lives"
+    // the git/PR enrichment already uses, so the header's cwd and its branch
+    // can never describe two different directories.
+    const sourceCwd = this.effectiveCwd(source, refContext.panes);
     // `session.gitBranch` plus the git cache, never a fresh `git` spawn: the
     // header reports what the daemon already knows and omits the segment when
     // it knows nothing, rather than paying a subprocess for a decoration.
     const branch =
-      this.gitInfoCache.get(this.effectiveCwd(source, refContext.panes))?.info
-        .branch ?? source.gitBranch;
+      this.gitInfoCache.get(sourceCwd)?.info.branch ?? source.gitBranch;
     const header = formatHandoffHeader(
       {
         sessionId: source.id,
         agentType: source.agentType,
-        cwd: source.cwd,
+        cwd: sourceCwd,
         branch,
       },
       new Date(),
@@ -2831,7 +2869,10 @@ export class DaemonServer {
         { from, truncated, chars: text.length },
         {
           agent: spawnRequest.value.agent ?? source.agentType,
-          cwd: spawnRequest.value.cwd ?? source.cwd,
+          // Same live cwd the header quotes: a spawn defaulting to the
+          // source's directory must open where the header says the work is,
+          // not in a decoded guess at it (issue #121).
+          cwd: spawnRequest.value.cwd ?? sourceCwd,
           callerPane,
         },
         headers,
@@ -3168,6 +3209,49 @@ export class DaemonServer {
       };
     }
 
+    // Fresh pane evidence, last and closest to the paste. Every check above
+    // asks about METADATA: a stored flag, a status derived up to a scan tick
+    // ago, the pane's foreground process, the payload's shape. So the re-read
+    // above catches a status that CHANGED and never one that was never right —
+    // and a marker that outlived its prompt (issue #117) is exactly the
+    // second kind. `paste-buffer` is swallowed by a live dialog, but the
+    // trailing Enter still lands on it, selecting the highlighted default
+    // (verified live on 2.1.222: a Write tool approved, the payload lost).
+    //
+    // Same predicate the #117 downgrade uses, in the safe direction: deliver
+    // only where the pane POSITIVELY shows an idle composer. `invoke` already
+    // refuses to type until this glyph appears (`isPromptReady`), so this is
+    // delivery reaching parity with a gate that already ships.
+    //
+    // SHRINKS the window, does not close it: a prompt drawn in the 150ms
+    // before the Enter still receives it. Closing that needs a re-check
+    // between the paste and the submit.
+    //
+    // Claude-scoped like the downgrade arm: the pane vocabulary is Claude's,
+    // and what a paste does to another agent's dialog is unverified. An
+    // unreadable pane returns "" and is a fail-OPEN no-op, matching
+    // `capturePane`'s own contract.
+    if (target.agentType === "claude" && agentDef?.readyPattern) {
+      const capture = this.paneSendDeps.capturePane ?? capturePane;
+      let paneText: string;
+      try {
+        paneText = await capture(target.tmuxPane, 50);
+      } catch {
+        paneText = "";
+      }
+      if (
+        paneText &&
+        !showsIdleClaudeComposer(paneText, agentDef.readyPattern)
+      ) {
+        return {
+          ok: false,
+          code: 409,
+          reason: "pane-not-ready",
+          error: `Session ${target.id} has something other than an empty composer on screen; a handoff is only ever delivered into an idle composer`,
+        };
+      }
+    }
+
     const sent = await this.paneSendDeps.sendPromptToPane(
       target.tmuxPane,
       defuseLeadingTrigger(text),
@@ -3212,9 +3296,12 @@ export class DaemonServer {
    * and is not listening any more. A DETERMINISTIC refusal (unsafe-payload,
    * not-at-agent, target-waiting, ambiguous-wait, no-pane) drops the record
    * and logs why: re-running a check that just said no would only say no
-   * again. A TRANSIENT one (the tmux send failed, or the target turned over
-   * between the readiness check and the paste) puts the record back with its
-   * attempt counted, for the next idle transition to retry, up to
+   * again. A TRANSIENT one (the tmux send failed, the target turned over
+   * between the readiness check and the paste, or `pane-not-ready`: a pane
+   * that is not showing an idle composer right now may well be showing one a
+   * second later, after a redraw or once the user is done mid-keystroke, so
+   * it is a retry and not a verdict) puts the record back with its attempt
+   * counted, for the next idle transition to retry, up to
    * {@link MAX_HANDOFF_ATTEMPTS}. Retries never extend the TTL, so half an
    * hour remains the outer bound either way.
    */
@@ -3233,7 +3320,8 @@ export class DaemonServer {
       );
     } else if (
       result.reason === "send-failed" ||
-      result.reason === "target-busy"
+      result.reason === "target-busy" ||
+      result.reason === "pane-not-ready"
     ) {
       const attempts = (record.attempts ?? 0) + 1;
       const requeued =

@@ -50,8 +50,8 @@ More than one match in the deciding scope is a **refusal carrying the full candi
 ```
 $ ccmux last claude
 Ambiguous session reference "claude" (2 matches):
-  6fb3ae42-636f-4968-833e-8f3121472893  src:2.1  claude  idle  /tmp/hs5-proj  [global]
-  9ff6db28-4392-472e-80b9-2c0caa48f57a  src:1.1  claude  idle  /tmp/hs5-proj  [global]
+  6fb3ae42-636f-4968-833e-8f3121472893  src:2.1  claude  idle  hs5-proj  /tmp/hs5-proj  [global]
+  9ff6db28-4392-472e-80b9-2c0caa48f57a  src:1.1  claude  idle  hs5-proj  /tmp/hs5-proj  [global]
 Re-run with one of the ids or coordinates above.
 ```
 
@@ -187,6 +187,7 @@ Properties, all deliberate:
 - **Greppable stable prefix** `[ccmux handoff]`. This shape is frozen; receiving agents are taught to recognize it.
 - **The genuine header is the only line carrying that prefix at column 0.** A payload can contain its own `[ccmux handoff]` line, whether a peer quoting one back or an outright forgery, so any payload line that would pass for the real one is quoted with `> ` before the text is capped. A receiver identifies the header as the first line of the message and as the only unquoted one; everything below it is payload, including anything that imitates a header.
 - **The cwd is backticked**, and that is load-bearing rather than decorative. Cursor's unsafe-reply guard is `/(^|\s)\/\S/`, which a bare absolute path after a space matches, so an unquoted cwd made ccmux's own header trip the delivery guard and refuse every handoff into a Cursor target. A branch name needs no such quoting, since git refuses a ref beginning with `/`.
+- **The cwd is the pane's live directory** wherever the source has a pane, and the session's recorded cwd only when it does not. For a native Claude session that recorded cwd can be a `decodeProjectPath` guess, which cannot tell a `-` in a directory name from the `/` it encodes, and the receiving agent may `cd` into what the header quotes (issue #121). It is the same directory the branch segment is resolved against, so the two can never describe different places.
 - **Short.** It is a tax paid on every handoff, so no YAML ceremony.
 - **The branch segment is omitted cleanly** when the daemon does not already know one. It is never worth a `git` spawn.
 - **Local time, minutes precision.**
@@ -240,7 +241,7 @@ The queue holds **at most one pending handoff per target**. A second enqueue rep
 
 **A guard that is already decidable refuses up front rather than queueing.** Both inputs to the unsafe-payload check are frozen the moment the text is composed (the composed text itself, and the target agent's own pattern), so a payload that agent can never receive is knowable at enqueue time and comes back as a 409 to a sender who is still listening. Queueing it instead would tell the sender "queued" and then drop the record half an hour later with nobody left to report it to.
 
-**A failure at dequeue splits two ways**, because by then the sender has been told "queued" and is gone. A deterministic refusal (`unsafe-payload`, `not-at-agent`, `target-waiting`, `ambiguous-wait`, `no-pane`) drops the record and logs why: re-running a check that just said no would only say no again. A transient one (the tmux send failed, or the target turned over between the readiness check and the paste) puts the record back with its attempt counted, for the next idle transition to retry, up to **3 attempts**. Retries never extend the TTL, so 30 minutes remains the outer bound either way.
+**A failure at dequeue splits two ways**, because by then the sender has been told "queued" and is gone. A deterministic refusal (`unsafe-payload`, `not-at-agent`, `target-waiting`, `ambiguous-wait`, `no-pane`) drops the record and logs why: re-running a check that just said no would only say no again. A transient one (the tmux send failed, the target turned over between the readiness check and the paste, or `pane-not-ready`: a pane showing something other than an idle composer right now may well be showing one a second later) puts the record back with its attempt counted, for the next idle transition to retry, up to **3 attempts**. Retries never extend the TTL, so 30 minutes remains the outer bound either way.
 
 **The queue is in memory.** A daemon restart drops every queued handoff, including ones whose senders were already told "queued". Nothing is persisted and nothing is reported when it happens, so a handoff that matters across a restart has to be re-sent.
 
@@ -273,6 +274,7 @@ Each one is a refusal on purpose. All are printed verbatim by the CLI.
 | `unsafe-payload` | `The composed handoff contains text <agent>'s composer cannot receive safely` (checked at enqueue as well as at delivery, so a busy target refuses instead of queueing something it could never receive) |
 | `too-large`      | `The composed handoff exceeds the spawn prompt budget (<n> bytes > 120832); retry with fewer --turns` (`--spawn` only)                                                                                   |
 | `target-busy`    | `Session <id> is <status>; a handoff is only ever delivered into an idle composer` (usually a dequeue; a direct request whose target changed status while the source was being read reaches it too)      |
+| `pane-not-ready` | `Session <id> has something other than an empty composer on screen; a handoff is only ever delivered into an idle composer` (Claude targets only; transient, so a dequeue retries it)                    |
 
 The `no-transcript` refusal is the one asymmetry worth calling out: `ccmux last` happily degrades to a pane capture, and a handoff will not. A screen scrape is fine to **read** and useless as a **prompt**: box drawing, spinners and half a composer are noise the receiving agent then has to reason about.
 
@@ -333,11 +335,15 @@ printf 'line one\nline two\n' | ccmux send <id> --stdin --no-enter
 
 `ccmux send` is **not** the gated path. It takes a session id or pane id (not the six-tier reference), and it applies none of the handoff guard stack: no status gate, no liveness check, no unsafe-pattern refusal. Use `ccmux handoff` when you want those.
 
+That split is a decision, not a gap to be closed later. `ccmux send` stays the raw low-level escape hatch (an exact id or pane, no resolver, and none of the handoff guard stack beyond the control-char strip and the paste caps), precisely so there is one path that types exactly what you asked into exactly the pane you named, and `ccmux handoff` is where the guards live.
+
 ## TUI
 
 ### Hand off
 
 The picker's row menu (right-click, or `m` on the selected row) has a **Hand off** item, offered on any row while another session is on the board. It starts a pick-a-target mode rather than opening a second list: the session list itself becomes the target picker, with a banner naming the source (`⇄ Hand off from <agent · project> · pick a target · enter continue · esc cancel`). While aiming, `j`/`k` and the arrows move, `Esc` or `q` cancels, and every other key is swallowed so `x` is never one keystroke from killing the row being pointed at.
+
+The aim starts on the next row down from the source (wrapping past the end of the list if it has to), and the source row is hopped over by every move, in both directions, because it is the one row the pick can never settle on. A hop that runs out of list holds position rather than wrapping, the way an ordinary move stops at the edge. The mode closes itself with a toast if the gesture loses its meaning under it: `The session being handed off is gone` when an SSE update removes the source, `No other session left to hand off to` when the last row that was not the source leaves the board.
 
 `Enter` (or a click on a row) settles WHO and opens the **handoff dialog**, which settles what they get. Nothing has been sent at that point. The dialog names both ends (the target in its title, the source under it) and asks two things:
 
@@ -374,11 +380,11 @@ GET  /sessions/:ref/transcript?turns=N&callerPane=%N
 POST /handoff  {from, to?, turns?, note?, callerPane?, spawn?}
 ```
 
-`GET /sessions/:ref/transcript` answers 200 with the contract above, 404 for an unknown ref, 409 with `candidates` for an ambiguous one, and 400 when there is neither a readable transcript nor a usable pane capture.
+`GET /sessions/:ref/transcript` answers 200 with the contract above, 404 for an unknown ref, 409 with `candidates` for an ambiguous one, and 400 when there is neither a readable transcript nor a usable pane capture, or when `turns` is not a whole number.
 
 `POST /handoff` answers 200 with `{status: "delivered" | "queued" | "spawned", from, to, chars, truncated, ...}`, 400 for a malformed request or a self-handoff, 404 for an unresolvable end, and 409 for every guard refusal (each carrying a `reason`). `spawn` is `true` for the bare form or an object with `agent` / `cwd` overrides, and is mutually exclusive with `to`.
 
-`turns` defaults to 1 and is refused outside 1-`MAX_TURNS` (20). One turn is the last response bare, exactly what every caller that omits the field has always received; more than one is rendered by the same `renderTurns` that `ccmux last --turns N` prints, so a receiver sees what the CLI would have shown for the same count. The payload is composed **before** the target's status is branched on, so a queued handoff holds the finished bytes rather than a request to be re-read when the turn ends, and the cap, the control-char strip and every delivery guard apply identically whatever the count.
+`turns` defaults to 1 and is refused outside 1-`MAX_TURNS` (20), as is a value that is not a count at all: both endpoints validate it as an integer (or an all-digit string) rather than coercing, since `Number(true)` is 1 and would have sent one turn behind a 200 for a caller who sent nonsense. The transcript endpoint still CLAMPS an integer it cannot fully serve: a read gets the most it can have, where a paste refuses so the sender learns their count did not travel. A `note` of pure whitespace is refused for the same reason: the header drops it, and a 200 would say it was sent. One turn is the last response bare, exactly what every caller that omits the field has always received; more than one is rendered by the same `renderTurns` that `ccmux last --turns N` prints, so a receiver sees what the CLI would have shown for the same count. The payload is composed **before** the target's status is branched on, so a queued handoff holds the finished bytes rather than a request to be re-read when the turn ends, and the cap, the control-char strip and every delivery guard apply identically whatever the count.
 
 ## Where to look in the code
 

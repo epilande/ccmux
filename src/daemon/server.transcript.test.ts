@@ -193,6 +193,31 @@ describe("GET /sessions/:ref/transcript", () => {
     expect(data.turns[data.turns.length - 1].text).toBe(`answer ${total}`);
   });
 
+  // The clamp is for a count this endpoint cannot fully serve. A value that
+  // is not a count was never a request for N turns, and `?turns=true` reading
+  // as 1 hid the caller's mistake behind a plausible answer.
+  it("refuses a ?turns that is not a count, where a too-large one clamps", async () => {
+    const { manager, internals } = createServer();
+    manager.createSession("s1", claudeTranscript("s1.jsonl", 4));
+
+    for (const raw of ["true", "2.5", "3abc", "-1", ""]) {
+      const response = await internals.handleSessionTranscript(
+        ...request("s1", `?turns=${raw}`),
+      );
+      expect(response.status).toBe(400);
+      expect((await response.json()) as { error: string }).toMatchObject({
+        error: expect.stringContaining("Invalid 'turns' value"),
+      });
+    }
+
+    // Still clamped, not refused: an integer below the floor is a count.
+    const zero = await internals.handleSessionTranscript(
+      ...request("s1", "?turns=0"),
+    );
+    expect(zero.status).toBe(200);
+    expect(((await zero.json()) as { turns: unknown[] }).turns.length).toBe(1);
+  });
+
   it("falls back to a pane capture when the agent has no reader", async () => {
     const capture = spyOn(paneIo, "capturePane").mockResolvedValue(
       "gemini pane\n[31mred[0m output\n",
