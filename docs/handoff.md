@@ -50,8 +50,8 @@ More than one match in the deciding scope is a **refusal carrying the full candi
 ```
 $ ccmux last claude
 Ambiguous session reference "claude" (2 matches):
-  6fb3ae42-636f-4968-833e-8f3121472893  src:2.1  claude  idle  /tmp/hs5-proj  [global]
-  9ff6db28-4392-472e-80b9-2c0caa48f57a  src:1.1  claude  idle  /tmp/hs5-proj  [global]
+  6fb3ae42-636f-4968-833e-8f3121472893  src:2.1  claude  idle  hs5-proj  /tmp/hs5-proj  [global]
+  9ff6db28-4392-472e-80b9-2c0caa48f57a  src:1.1  claude  idle  hs5-proj  /tmp/hs5-proj  [global]
 Re-run with one of the ids or coordinates above.
 ```
 

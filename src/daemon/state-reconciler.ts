@@ -1090,7 +1090,7 @@ export function collectPaneTrackedSources(
 }
 
 /**
- * The pane-tracked counterpart to `applyAmbiguousPermissionCorrection`: flag a
+ * The pane-tracked counterpart to `applyPermissionPaneEvidence`: flag a
  * `permission` terminal-rule match that would re-pin a wait the LOG has
  * already moved past as SUSPECT, so the caller can withhold it pending a
  * fresh capture (see the discriminator note at the end of this block).
@@ -1109,7 +1109,7 @@ export function collectPaneTrackedSources(
  * Why that is worse than a cosmetic flicker: the notifier retracts a
  * delivered banner when the wait clears and then refuses to renotify for 60s,
  * so a spurious re-pin re-arms a SPENT Approve button against a pane that has
- * already moved on — the same failure mode `applyAmbiguousPermissionCorrection`
+ * already moved on — the same failure mode `applyPermissionPaneEvidence`
  * exists to prevent for Claude, and the same one commit 75fe2f9 guarded on the
  * log side. Claude's guard drops the permission rule outright (its rule text
  * lingers as narrative scrollback, so a match is never evidence of a LIVE

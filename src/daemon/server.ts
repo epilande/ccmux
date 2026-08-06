@@ -3233,7 +3233,12 @@ export class DaemonServer {
     // `capturePane`'s own contract.
     if (target.agentType === "claude" && agentDef?.readyPattern) {
       const capture = this.paneSendDeps.capturePane ?? capturePane;
-      const paneText = await capture(target.tmuxPane, 50);
+      let paneText: string;
+      try {
+        paneText = await capture(target.tmuxPane, 50);
+      } catch {
+        paneText = "";
+      }
       if (
         paneText &&
         !showsIdleClaudeComposer(paneText, agentDef.readyPattern)

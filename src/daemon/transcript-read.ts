@@ -31,8 +31,9 @@ export const MAX_TURNS = 20;
 
 /**
  * The wire `turns` field, from either endpoint: a JSON body value or a raw
- * query-string value. `null` means "the caller said nothing"; `"invalid"`
- * means they said something that is not a count.
+ * query-string value. `undefined`/`null` raw input means the caller said
+ * nothing (returned as `{ kind: "absent" }`); `"invalid"` means they said
+ * something that is not a count.
  *
  * Coercion is the whole point. `Number(true)` is `1` and `Number(["2"])` is
  * `2`, so both endpoints used to accept a boolean or a one-element array as a
@@ -49,7 +50,7 @@ export function parseTurnsField(
 ): { kind: "absent" } | { kind: "invalid" } | { kind: "ok"; value: number } {
   if (raw === undefined || raw === null) return { kind: "absent" };
   if (typeof raw === "number") {
-    return Number.isInteger(raw)
+    return Number.isSafeInteger(raw)
       ? { kind: "ok", value: raw }
       : { kind: "invalid" };
   }
