@@ -2,7 +2,7 @@ import type { Component } from "solid-js";
 import { Show } from "solid-js";
 import { useTerminalDimensions } from "@opentui/solid";
 import { MouseButton } from "@opentui/core";
-import { truncateText } from "../utils/format";
+import { displayWidth, truncateMiddle, truncateText } from "../utils/format";
 import { turnsLabel } from "../turns-selection";
 import { MAX_HANDOFF_NOTE_CHARS } from "../../daemon/handoff";
 import { handoffDialogHintSegments } from "./Footer";
@@ -24,23 +24,24 @@ const CONTROL_GAP = 1;
  *  hint row makes when compact. */
 const COMPACT_HINT_WIDTH = 46;
 
-/** Border (2), the title, the turns row, the note row. Nothing below this is
- *  this dialog: both fields are the question it exists to ask. */
-export const HANDOFF_DIALOG_FLOOR_ROWS = 5;
+/** Border (2), the title, the turns row, the note row, and the To row.
+ *  The fields are the question this dialog exists to ask, and the To row is
+ *  the one fact it can never drop: with a bare mode title, that row is the
+ *  only place the irreversible half of the gesture is named. */
+export const HANDOFF_DIALOG_FLOOR_ROWS = 6;
 
 export type HandoffDialogField = "turns" | "note";
 
 export interface HandoffDialogRows {
   /** The blank rows in the field stack (under the title, between the fields,
-   *  before the source row). Pure air, given up first. */
+   *  before the endpoint rows). Pure air, given up first. */
   spacers: boolean;
   /** The Cancel/Send button row with its leading and trailing blanks — one
    *  droppable unit, the same as the new-session dialog's, and given up for
    *  the same reason: the buttons duplicate Enter and Escape exactly. */
   buttons: boolean;
-  /** The muted row naming the SOURCE, under the fields the way the fork
-   *  dialog's Source row sits under its own. Decoration next to the fields,
-   *  so it goes before the hints. */
+  /** The From row naming the SOURCE, paired directly under the floor's To
+   *  row. Decoration next to the target, so it goes before the hints. */
   source: boolean;
   /** The key-hint row. */
   hint: boolean;
@@ -59,17 +60,18 @@ export interface HandoffDialogRows {
  *
  * `keyHints` follows the new-session dialog's split: the picker's Footer
  * carries this dialog's hints, so only the sidebar (which has no footer)
- * budgets a row for them. Where they ARE drawn, they outlive the source line
+ * budgets a row for them. Where they ARE drawn, they outlive the From row
  * deliberately: which session the response came from is one keypress of
  * context the user just supplied themselves; that Tab reaches the note and
- * Enter sends is not guessable from a box with two rows in it.
+ * Enter sends is not guessable from a box with two rows in it. The To row is
+ * part of the floor and never enters this order at all.
  */
 export function planHandoffDialogRows(
   terminalHeight: number,
   keyHints: boolean,
 ): HandoffDialogRows {
   const hintRows = keyHints ? 1 : 0;
-  // Floor + the three blanks + the source row + the button unit + the hint.
+  // Floor + the three blanks + the From row + the button unit + the hint.
   const withEverything = HANDOFF_DIALOG_FLOOR_ROWS + 3 + 1 + 3 + hintRows;
   if (terminalHeight >= withEverything) {
     return {
@@ -122,11 +124,79 @@ export function planHandoffDialogRows(
   };
 }
 
+/**
+ * One end of the handoff, tokenized the way the session list reads:
+ * project:branch first, then the agent, then the tmux pane. Tokenized rather
+ * than pre-joined because the row colours each part differently, and because
+ * fitting a narrow width means choosing which token to give up.
+ */
+export interface HandoffEndpoint {
+  /** project:branch, the list rows' leading identity; the raw session id
+   *  when the row has left the board (the fallback the labels always had). */
+  context: string;
+  /** The agent's display name, "" when unknown. */
+  agent: string;
+  /** The agent token's brand colour (`agentColorFor`); unread when `agent`
+   *  is empty. */
+  agentColor: string;
+  /** The tmux target (session:window.pane), "" when there is no live pane. */
+  pane: string;
+}
+
+/** Columns the gap between endpoint tokens costs: two columns of air, so the
+ *  colour-separated tokens read as three facts rather than one run, without
+ *  a dotted join spending columns on punctuation. */
+const TOKEN_SEP_WIDTH = 2;
+/** The narrowest a truncated context token is still recognizable at; below
+ *  this the row starts giving up whole tokens instead. */
+const MIN_CONTEXT_WIDTH = 8;
+
+/**
+ * The endpoint's tokens, fitted to `width` columns.
+ *
+ * The context yields first (middle-truncated, the way long paths are cut
+ * everywhere else), then the agent is dropped whole, and the pane goes last:
+ * two sessions on the same agent in the same project differ by nothing BUT
+ * the pane, and naming the physical destination is the row's whole job.
+ * Pure and exported for tests.
+ */
+export function fitHandoffEndpoint(
+  endpoint: HandoffEndpoint,
+  width: number,
+): { context: string; agent: string; pane: string } {
+  const cost = (token: string) =>
+    token ? TOKEN_SEP_WIDTH + displayWidth(token) : 0;
+  const paneCost = cost(endpoint.pane);
+  const agentCost = cost(endpoint.agent);
+  if (displayWidth(endpoint.context) + agentCost + paneCost <= width) {
+    return endpoint;
+  }
+  const withAgent = width - agentCost - paneCost;
+  if (withAgent >= MIN_CONTEXT_WIDTH) {
+    return {
+      ...endpoint,
+      context: truncateMiddle(endpoint.context, withAgent),
+    };
+  }
+  const withoutAgent = width - paneCost;
+  if (withoutAgent >= 1) {
+    return {
+      context: truncateMiddle(endpoint.context, withoutAgent),
+      agent: "",
+      pane: endpoint.pane,
+    };
+  }
+  return {
+    context: "",
+    agent: "",
+    pane: truncateText(endpoint.pane, Math.max(1, width)),
+  };
+}
+
 interface HandoffDialogProps {
-  /** The source and target rows, each named the way the pick banner names
-   *  one (agent · project). */
-  fromLabel: string;
-  toLabel: string;
+  /** The two ends, tokenized; see `HandoffEndpoint`. */
+  from: HandoffEndpoint;
+  to: HandoffEndpoint;
   turns: number;
   note: string;
   field: HandoffDialogField;
@@ -149,10 +219,13 @@ interface HandoffDialogProps {
  * How much to hand off, and what to say about it.
  *
  * The pick has already happened when this opens (the banner and the aimed row
- * are gone), so the box has to name BOTH ends itself: the title carries the
- * target, because that is the irreversible half, and the muted From row under
- * the fields carries the source, the way the fork dialog's Source row names
- * the session being continued.
+ * are gone), so the box has to name BOTH ends itself: the To and From rows
+ * under the fields, each tokenized the way the session list reads
+ * (project:branch, agent, pane). The pane is deliberately part of that:
+ * handoffs mostly stay inside one project, where two rows on the same agent
+ * differ by nothing else, and the pane is where the text will physically be
+ * typed. The title is a bare mode indicator like New session's, which is why
+ * the To row is part of the floor: without it the target is named nowhere.
  *
  * Drawn in the new-session dialog's visual language rather than its own — the
  * `▎` focus marker, the shared control shells, the Cancel/Send buttons, the
@@ -183,6 +256,42 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
    *  field has always done; that is the input's own scrolling, not this.) */
   const notePlaceholder = () =>
     truncateText("note (optional) · sent in the header", controlWidth());
+
+  /**
+   * A derived endpoint row: label cell padded past the marker column (never
+   * focused, like the new-session dialog's Directory row), then the fitted
+   * tokens in the list's own order, told apart by colour alone — context in
+   * subtext, the agent in its brand colour, the pane in the text colour,
+   * because WHERE the text lands is the fact this row exists to name.
+   */
+  const EndpointRow: Component<{ label: string; endpoint: HandoffEndpoint }> = (
+    rowProps,
+  ) => {
+    const fitted = () => fitHandoffEndpoint(rowProps.endpoint, controlWidth());
+    return (
+      <box flexDirection="row" height={1}>
+        <box width={LABEL_WIDTH} paddingLeft={1}>
+          <text fg={theme.overlay}>{rowProps.label}</text>
+        </box>
+        <box width={1 + CONTROL_GAP} />
+        <Show when={fitted().context}>
+          <text fg={theme.subtext}>{fitted().context}</text>
+        </Show>
+        <Show when={fitted().context && fitted().agent}>
+          <box width={TOKEN_SEP_WIDTH} />
+        </Show>
+        <Show when={fitted().agent}>
+          <text fg={rowProps.endpoint.agentColor}>{fitted().agent}</text>
+        </Show>
+        <Show when={fitted().pane && (fitted().context || fitted().agent)}>
+          <box width={TOKEN_SEP_WIDTH} />
+        </Show>
+        <Show when={fitted().pane}>
+          <text fg={theme.text}>{fitted().pane}</text>
+        </Show>
+      </box>
+    );
+  };
 
   /** Whether the hint row keeps its middle segment; the two it sits between
    *  are the dialog's only exits, so they are what a narrow surface keeps. */
@@ -230,10 +339,11 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
       paddingRight={1}
     >
       <box height={1}>
+        {/* A bare mode indicator, the New session title's rule: the endpoints
+          are compound labels, and folding one into a title sentence is what
+          made it read as two unrelated tokens. The To row names the target. */}
         <text fg={theme.text}>
-          <strong>
-            {truncateText(`Hand off to ${props.toLabel}`, contentWidth())}
-          </strong>
+          <strong>Hand off</strong>
         </text>
       </box>
       <Show when={plan().spacers}>
@@ -307,22 +417,14 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
         </box>
       </box>
 
+      <Show when={plan().spacers}>
+        <box height={1} />
+      </Show>
+      {/* The endpoint pair: To in the floor (the irreversible half), From
+        directly under it with no air between — they answer one question. */}
+      <EndpointRow label="To" endpoint={props.to} />
       <Show when={plan().source}>
-        <Show when={plan().spacers}>
-          <box height={1} />
-        </Show>
-        {/* Derived, never focused: drawn like the new-session dialog's
-          Directory row, padded past the marker column to stay aligned with
-          the labels above, its value in the fork Source row's colour. */}
-        <box flexDirection="row" height={1}>
-          <box width={LABEL_WIDTH} paddingLeft={1}>
-            <text fg={theme.overlay}>From</text>
-          </box>
-          <box width={1 + CONTROL_GAP} />
-          <text fg={theme.blue}>
-            {truncateText(props.fromLabel, controlWidth())}
-          </text>
-        </box>
+        <EndpointRow label="From" endpoint={props.from} />
       </Show>
 
       <Show when={plan().buttons}>

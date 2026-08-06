@@ -6813,9 +6813,7 @@ describe("App hand off to", () => {
       setup.mockInput.pressEnter();
       await settle();
       await setup.renderOnce();
-      expect(squish(setup.captureCharFrame())).toContain(
-        "Handofftoclaude·proj1",
-      );
+      expect(squish(setup.captureCharFrame())).toContain("Toproj1Claude");
       expect(posted).toEqual([]);
     } finally {
       restore();
@@ -6884,10 +6882,11 @@ describe("App hand off to", () => {
       await renderRows();
       await pickTarget();
       const frame = squish(setup.captureCharFrame());
-      // Both ends named: the target in the title (the irreversible half) and
-      // the source in the From row under the fields.
-      expect(frame).toContain("Handofftoclaude·proj2");
-      expect(frame).toContain("Fromclaude·proj1");
+      // Both ends named, in the To and From rows under the fields (the
+      // title is a bare mode indicator).
+      expect(frame).toContain("Handoff");
+      expect(frame).toContain("Toproj2Claude");
+      expect(frame).toContain("Fromproj1Claude");
       expect(frame).toContain("Lastresponse");
       expect(frame).toContain("entersend");
       // The pick ended WITH the dialog opening, so one esc leaves the gesture.
@@ -6992,7 +6991,7 @@ describe("App hand off to", () => {
       await setup.renderOnce();
       const frame = squish(setup.captureCharFrame());
       // Neither the dialog nor the pick mode it came from is left behind.
-      expect(frame).not.toContain("Handofftoclaude·proj2");
+      expect(frame).not.toContain("Toproj2Claude");
       expect(frame).not.toContain("esccancel");
       expect(posted).toEqual([]);
     } finally {

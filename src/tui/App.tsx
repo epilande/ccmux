@@ -75,7 +75,12 @@ import {
 import { newSessionOptions } from "./new-session-options";
 import { NoticeDialog } from "./components/NoticeDialog";
 import { CopyDialog } from "./components/CopyDialog";
-import { HandoffDialog } from "./components/HandoffDialog";
+import {
+  HandoffDialog,
+  type HandoffEndpoint,
+} from "./components/HandoffDialog";
+import { agentColorFor } from "./components/SessionItem";
+import { getAgentDisplayName } from "../lib/agents";
 import { applyTurnsKey } from "./turns-selection";
 import { renderTurns } from "../daemon/transcript-read";
 import { slugFromPrompt, slugify } from "../daemon/worktree-create";
@@ -1395,6 +1400,29 @@ export function App(props: AppProps) {
     return session.project
       ? `${session.agentType} · ${session.project}`
       : session.agentType;
+  }
+
+  /**
+   * One end of the Hand off dialog, tokenized the way the session list reads
+   * a row: project:branch, agent, pane. The pane matters most where the rest
+   * matters least — a same-project handoff differs by nothing else. Falls
+   * back to the bare id the dialog still holds when the session has left the
+   * board under it (Enter then reports the loss rather than sending).
+   */
+  function handoffEndpoint(
+    session: EnrichedSession | undefined,
+    fallbackId: string,
+  ): HandoffEndpoint {
+    if (!session) {
+      return { context: fallbackId, agent: "", agentColor: "", pane: "" };
+    }
+    const project = session.project || session.id;
+    return {
+      context: session.gitBranch ? `${project}:${session.gitBranch}` : project,
+      agent: getAgentDisplayName(session.agentType),
+      agentColor: agentColorFor(session.agentType),
+      pane: session.tmuxTarget ?? "",
+    };
   }
 
   /**
@@ -3819,19 +3847,14 @@ export function App(props: AppProps) {
         <Show when={store.state.handoffDialog}>
           {(handoff: () => NonNullable<typeof store.state.handoffDialog>) => (
             <HandoffDialog
-              // Either row can leave the board under an open dialog; the
-              // dialog stays (Enter then reports the loss rather than
-              // sending), so a label falls back to the id it still holds.
-              fromLabel={(() => {
-                const session = handoffDialogSession("fromSessionId");
-                return session
-                  ? handoffLabel(session)
-                  : handoff().fromSessionId;
-              })()}
-              toLabel={(() => {
-                const session = handoffDialogSession("toSessionId");
-                return session ? handoffLabel(session) : handoff().toSessionId;
-              })()}
+              from={handoffEndpoint(
+                handoffDialogSession("fromSessionId"),
+                handoff().fromSessionId,
+              )}
+              to={handoffEndpoint(
+                handoffDialogSession("toSessionId"),
+                handoff().toSessionId,
+              )}
               turns={handoff().turns}
               note={handoff().note}
               field={handoff().field}
