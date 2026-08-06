@@ -208,6 +208,41 @@ describe("LogTreeWatcher (native)", () => {
     expect(unlinked).toContain(gone);
   });
 
+  it("reopens nested gates on a null event when directory signatures collide", async () => {
+    const project = join(root, "proj-a");
+    mkdirSync(project);
+    const gone = join(project, "gone.jsonl");
+    writeFileSync(gone, "x\n");
+    await startWatcher(1);
+
+    const evt = watcher as unknown as Internals;
+    evt.handleEvent(null);
+
+    const fresh = join(project, "fresh.jsonl");
+    writeFileSync(fresh, "x\n");
+    unlinkSync(gone);
+
+    // Model a filesystem whose timestamp granularity lets the rapid pair of
+    // mutations retain a cached child signature. Reopening only the root
+    // gates cannot discover either change below that still-closed child.
+    const current = statSync(project, { bigint: true });
+    const collidingSig = {
+      mtimeNs: current.mtimeNs,
+      ctimeNs: current.ctimeNs,
+    };
+    const projectNode = evt.rootNode.childDirs.get(project) as TreeNode & {
+      walkSig: typeof collidingSig;
+      sweepSig: typeof collidingSig;
+    };
+    projectNode.walkSig = collidingSig;
+    projectNode.sweepSig = collidingSig;
+
+    evt.handleEvent(null);
+
+    expect(added).toContain(fresh);
+    expect(unlinked).toContain(gone);
+  });
+
   it("falls back to chokidar without throwing when the root is missing", async () => {
     // Parity with the pre-native behavior: a missing log dir (fresh
     // machine, agent never run) must construct and reach ready without
