@@ -15,14 +15,9 @@ One uniform CLI launches and observes every harness the same way (claude, codex,
 opencode, pi, omp, gemini, plus custom agents). This skill is the mechanics; the
 agent-per-task policy comes from the user's prompt. ccmux never runs a model itself, so
 digesting a worker's output is your job, and the discipline that keeps an orchestration
-tractable is controlling how much each worker hands back.
-
-## When (not) to use
-
-- Use for a named multi-agent workflow, a fan-out, a long delegation without blocking your
-  own work, or a second agent's independent take (review, verify, alternative take).
-- Not for a single quick turn (just run `ccmux invoke <agent> "..."` once, no machinery),
-  and not for work faster to do yourself: every invoke pays a 5-15s cold start.
+tractable is controlling how much each worker hands back. A single quick turn needs none
+of the machinery below (one `ccmux invoke <agent> "..."` suffices), and work faster to do
+yourself should stay yours: every invoke pays a 5-15s cold start.
 
 ## invoke vs spawn: which tool
 
