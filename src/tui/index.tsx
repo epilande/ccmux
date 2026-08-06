@@ -100,18 +100,30 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
 
   // Sidebar spawned via -d into an unfocused pane needs the focus dance
   // to keep terminal capability probe replies from leaking into the
-  // user's shell. Picker/non-sidebar TUIs run in the user's own focused
-  // pane, so the dance is a no-op there.
-  let rendererOrConfig: CliRenderer | typeof config = config;
+  // user's shell. Focus must be stolen before the renderer exists, since
+  // creating it fires the probes. Picker/non-sidebar TUIs run in the
+  // user's own focused pane, so the dance is a no-op there.
+  let restoreTarget: string | null = null;
   if (options.sidebar && process.env.TMUX_PANE) {
-    const restoreTarget = await findRestorePane();
+    restoreTarget = await findRestorePane();
     if (restoreTarget) {
       await selectPane(process.env.TMUX_PANE);
-      const renderer = await createCliRenderer(config);
-      arrangeSidebarFocusDance(renderer, restoreTarget);
-      rendererOrConfig = renderer;
     }
   }
+
+  const renderer = await createCliRenderer(config);
+  if (restoreTarget) {
+    arrangeSidebarFocusDance(renderer, restoreTarget);
+  }
+
+  // Quit paths exit via process.exit(), which skips OpenTUI's `beforeExit`
+  // cleanup (its signal handlers do fire, but `process.exit` emits only
+  // `exit`), leaving mouse tracking and the alternate screen armed on the
+  // host terminal (issue #125). destroy() is synchronous and idempotent,
+  // so it is safe here even when a signal-driven destroy already ran.
+  process.on("exit", () => {
+    renderer.destroy();
+  });
 
   await render(
     () => (
@@ -136,6 +148,6 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
         forkableAgents={options.forkableAgents}
       />
     ),
-    rendererOrConfig,
+    renderer,
   );
 }
