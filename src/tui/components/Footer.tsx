@@ -21,6 +21,10 @@ interface FooterProps {
   newSessionOption?: "focused" | "dropdown";
   /** A handoff is being aimed at a row, which changes what the keys do. */
   handoffPickMode?: boolean;
+  /** The Hand off dialog is open (the pick already landed). */
+  handoffDialogMode?: boolean;
+  /** The Copy dialog is open. */
+  copyDialogMode?: boolean;
   reviewable?: boolean;
 }
 
@@ -91,6 +95,31 @@ export function newSessionHintSegments(
     { key: "1-9", gloss: "pick" },
     // The opener, taught only where an option field is holding the keys.
     ...(state === "focused" ? [{ key: "space", gloss: "open" }] : []),
+    { key: "esc", gloss: "cancel" },
+  ];
+}
+
+/**
+ * The Hand off dialog's key hints, authored once for both surfaces the same
+ * way `newSessionHintSegments` is: the Footer joins them into one line, and
+ * the sidebar's dialog (which has no footer) renders the same segments with
+ * its own width-drop rules and click targets. First and last are always the
+ * two exits, which is what both renderers lean on.
+ */
+export function handoffDialogHintSegments(): { key: string; gloss: string }[] {
+  return [
+    { key: "enter", gloss: "send" },
+    { key: "j/k", gloss: "turns" },
+    { key: "tab", gloss: "note" },
+    { key: "esc", gloss: "cancel" },
+  ];
+}
+
+/** The Copy dialog's key hints; see `handoffDialogHintSegments`. */
+export function copyDialogHintSegments(): { key: string; gloss: string }[] {
+  return [
+    { key: "enter", gloss: "copy" },
+    { key: "j/k", gloss: "turns" },
     { key: "esc", gloss: "cancel" },
   ];
 }
@@ -170,6 +199,20 @@ export const Footer: Component<FooterProps> = (props) => {
         <Match when={props.newSessionMode}>
           <text fg={theme.overlay}>
             {newSessionHintSegments(props.newSessionOption ?? "text")
+              .map((segment) => `${segment.key} ${segment.gloss}`)
+              .join(HINT_SEPARATOR)}
+          </text>
+        </Match>
+        <Match when={props.handoffDialogMode}>
+          <text fg={theme.overlay}>
+            {handoffDialogHintSegments()
+              .map((segment) => `${segment.key} ${segment.gloss}`)
+              .join(HINT_SEPARATOR)}
+          </text>
+        </Match>
+        <Match when={props.copyDialogMode}>
+          <text fg={theme.overlay}>
+            {copyDialogHintSegments()
               .map((segment) => `${segment.key} ${segment.gloss}`)
               .join(HINT_SEPARATOR)}
           </text>

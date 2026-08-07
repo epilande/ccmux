@@ -87,7 +87,9 @@ export const NoticeDialog: Component<NoticeDialogProps> = (props) => {
       }}
     >
       <box height={1}>
-        <text fg={theme.peach}>
+        {/* The shared title colour: dialog titles say WHAT this box is, and
+          severity lives in the message lines, not the headline. */}
+        <text fg={theme.text}>
           <strong>{truncateText(props.title, contentWidth())}</strong>
         </text>
       </box>

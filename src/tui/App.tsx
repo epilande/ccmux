@@ -75,7 +75,12 @@ import {
 import { newSessionOptions } from "./new-session-options";
 import { NoticeDialog } from "./components/NoticeDialog";
 import { CopyDialog } from "./components/CopyDialog";
-import { HandoffDialog } from "./components/HandoffDialog";
+import {
+  HandoffDialog,
+  type HandoffEndpoint,
+} from "./components/HandoffDialog";
+import { agentColorFor } from "./components/SessionItem";
+import { getAgentDisplayName } from "../lib/agents";
 import { applyTurnsKey } from "./turns-selection";
 import { renderTurns } from "../daemon/transcript-read";
 import { slugFromPrompt, slugify } from "../daemon/worktree-create";
@@ -1001,9 +1006,10 @@ export function App(props: AppProps) {
   /**
    * Keys while a row menu is open.
    *
-   * Only the ones the menu itself answers to are taken; everything else
-   * closes the menu and falls through to its ordinary meaning, which is what
-   * this surface has always done with a menu on screen (a keypress means
+   * Only the ones the menu itself answers to are taken — navigation, Enter,
+   * esc/`m`, and any item's own `key` accelerator; everything else closes
+   * the menu and falls through to its ordinary meaning, which is what this
+   * surface has always done with a menu on screen (a keypress means
    * attention has moved on). Returning true here means the key was the
    * menu's and the caller must stop.
    */
@@ -1038,6 +1044,20 @@ export function App(props: AppProps) {
     if (key === "escape" || key === "m") {
       store.actions.hideContextMenu();
       store.actions.hideGroupContextMenu();
+      return true;
+    }
+    // An item's own accelerator, for actions whose natural key means
+    // something else on the list and so cannot ride the fall-through. Gated
+    // to a bare keypress so a modified chord meant for something else (e.g.
+    // Alt+H resizing the preview pane) doesn't get shadowed by an item whose
+    // accelerator happens to share the same base key.
+    const accelerated =
+      !event.ctrl && !event.meta && !event.shift && !event.option
+        ? items.find((i) => i.key === key)
+        : undefined;
+    if (accelerated) {
+      // The action closes the menu itself, exactly as it does from Enter.
+      accelerated.action();
       return true;
     }
     return false;
@@ -1388,13 +1408,36 @@ export function App(props: AppProps) {
     return store.state.sessions.find((s) => s.id === pick.fromSessionId);
   }
 
-  /** How a session is named while a handoff is being aimed or reported, and
-   *  in the Copy dialog's title. Agent plus project is what tells two rows of
-   *  the same board apart. */
+  /** How a session is named in the handed-off toast, the Copy dialog's
+   *  title, and the pick banner when the source has no pane to point at.
+   *  Agent plus project is what tells two rows of the same board apart. */
   function handoffLabel(session: EnrichedSession): string {
     return session.project
       ? `${session.agentType} · ${session.project}`
       : session.agentType;
+  }
+
+  /**
+   * One end of the Hand off dialog, tokenized the way the session list reads
+   * a row: project:branch, agent, pane. The pane matters most where the rest
+   * matters least — a same-project handoff differs by nothing else. Falls
+   * back to the bare id the dialog still holds when the session has left the
+   * board under it (Enter then reports the loss rather than sending).
+   */
+  function handoffEndpoint(
+    session: EnrichedSession | undefined,
+    fallbackId: string,
+  ): HandoffEndpoint {
+    if (!session) {
+      return { context: fallbackId, agent: "", agentColor: "", pane: "" };
+    }
+    const project = session.project || session.id;
+    return {
+      context: session.gitBranch ? `${project}:${session.gitBranch}` : project,
+      agent: getAgentDisplayName(session.agentType),
+      agentColor: agentColorFor(session.agentType),
+      pane: session.tmuxTarget ?? "",
+    };
   }
 
   /**
@@ -1668,7 +1711,10 @@ export function App(props: AppProps) {
             {
               id: "handoff-to",
               label: "Hand off",
-              hint: "",
+              // Menu-local (`key`), unlike its neighbours' hints: on the
+              // list itself `h` collapses a group.
+              hint: "h",
+              key: "h",
               color: theme.text,
               action: contextMenuHandoff,
             },
@@ -3653,16 +3699,19 @@ export function App(props: AppProps) {
         </Show>
 
         {/* The mode's only chrome: one line saying whose response is in hand
-            and how to aim it. It sits where the search input does, above the
-            list the pick is being made on, and the sidebar gets the short form
-            because it has no footer to carry the keys. */}
+            and what the mode wants aimed. It sits where the search input
+            does, above the list the pick is being made on. The pane alone
+            names the source — the aimed row was just picked FROM this very
+            list, and the dialog that follows names both ends in full — and
+            the keys are the footer's pick arm's; the sidebar has no footer
+            to carry them, so its short form keeps the keys. */}
         <Show when={handoffSource()}>
           {(from: () => EnrichedSession) => (
             <box paddingLeft={1} height={1}>
               <text fg={theme.mauve}>
                 {props.sidebar
                   ? `${HANDOFF_BADGE} pick target · enter · esc`
-                  : `${HANDOFF_BADGE} Hand off from ${handoffLabel(from())} · pick a target · enter continue · esc cancel`}
+                  : `${HANDOFF_BADGE} Hand off from ${from().tmuxTarget ?? handoffLabel(from())} · pick a target`}
               </text>
             </box>
           )}
@@ -3735,6 +3784,8 @@ export function App(props: AppProps) {
             newSessionMode={store.state.newSession !== null}
             newSessionOption={newSessionOptionMode()}
             handoffPickMode={store.state.handoffPick !== null}
+            handoffDialogMode={store.state.handoffDialog !== null}
+            copyDialogMode={store.state.copyDialog !== null}
             reviewable={reviewEnabled}
           />
         </Show>
@@ -3807,6 +3858,9 @@ export function App(props: AppProps) {
                 return session ? handoffLabel(session) : copy().sessionId;
               })()}
               turns={copy().turns}
+              onSubmit={commitCopyDialog}
+              onCancel={store.actions.closeCopyDialog}
+              showKeyHints={props.sidebar === true}
             />
           )}
         </Show>
@@ -3814,23 +3868,22 @@ export function App(props: AppProps) {
         <Show when={store.state.handoffDialog}>
           {(handoff: () => NonNullable<typeof store.state.handoffDialog>) => (
             <HandoffDialog
-              // Either row can leave the board under an open dialog; the
-              // dialog stays (Enter then reports the loss rather than
-              // sending), so a label falls back to the id it still holds.
-              fromLabel={(() => {
-                const session = handoffDialogSession("fromSessionId");
-                return session
-                  ? handoffLabel(session)
-                  : handoff().fromSessionId;
-              })()}
-              toLabel={(() => {
-                const session = handoffDialogSession("toSessionId");
-                return session ? handoffLabel(session) : handoff().toSessionId;
-              })()}
+              from={handoffEndpoint(
+                handoffDialogSession("fromSessionId"),
+                handoff().fromSessionId,
+              )}
+              to={handoffEndpoint(
+                handoffDialogSession("toSessionId"),
+                handoff().toSessionId,
+              )}
               turns={handoff().turns}
               note={handoff().note}
               field={handoff().field}
               onNoteInput={store.actions.setHandoffDialogNote}
+              onFocusField={store.actions.setHandoffDialogField}
+              onSubmit={commitHandoffDialog}
+              onCancel={store.actions.closeHandoffDialog}
+              showKeyHints={props.sidebar === true}
             />
           )}
         </Show>

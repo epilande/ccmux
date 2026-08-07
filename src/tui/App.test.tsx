@@ -6785,14 +6785,51 @@ describe("App hand off to", () => {
   it("opens a pick mode on the list itself, aimed at another row", async () => {
     const { posted, restore } = withDaemon();
     try {
-      await renderRows();
+      await renderRows([{ tmuxTarget: "ccmux:1.1" }, {}]);
       await startPick();
       const frame = squish(setup.captureCharFrame());
-      // The banner names the source and teaches the keys, and the menu is gone.
-      expect(frame).toContain("Handofffromclaude·proj1");
+      // The banner names the source by its pane alone (the dialog that
+      // follows names both ends in full); the keys are the footer's, and
+      // the menu is gone.
+      expect(frame).toContain("Handofffromccmux:1.1·pickatarget");
       expect(frame).toContain("esccancel");
       expect(frame).not.toContain("Handoffto…");
       // Nothing has been sent: the mode is aiming, not firing.
+      expect(posted).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("opens the pick from the menu's h accelerator", async () => {
+    // `h` is menu-local (on the list it collapses a group), so it must act
+    // while the menu is up rather than falling through and dismissing it.
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      await press("h");
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("pickatarget");
+      expect(frame).toContain("esccancel");
+      expect(posted).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not fire the h accelerator on a modified keypress", async () => {
+    // Alt+H arrives as event.meta, which is also the chord that resizes the
+    // preview pane; the accelerator must not shadow that existing binding.
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      setup.mockInput.pressKey("h", { meta: true });
+      await settle();
+      await setup.renderOnce();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).not.toContain("pickatarget");
       expect(posted).toEqual([]);
     } finally {
       restore();
@@ -6813,9 +6850,7 @@ describe("App hand off to", () => {
       setup.mockInput.pressEnter();
       await settle();
       await setup.renderOnce();
-      expect(squish(setup.captureCharFrame())).toContain(
-        "Handofftoclaude·proj1",
-      );
+      expect(squish(setup.captureCharFrame())).toContain("Toproj1Claude");
       expect(posted).toEqual([]);
     } finally {
       restore();
@@ -6884,10 +6919,11 @@ describe("App hand off to", () => {
       await renderRows();
       await pickTarget();
       const frame = squish(setup.captureCharFrame());
-      // Both ends named: the target in the title (the irreversible half) and
-      // the source under it.
-      expect(frame).toContain("Handofftoclaude·proj2");
-      expect(frame).toContain("fromclaude·proj1");
+      // Both ends named, in the To and From rows under the fields (the
+      // title is a bare mode indicator).
+      expect(frame).toContain("Handoff");
+      expect(frame).toContain("Toproj2Claude");
+      expect(frame).toContain("Fromproj1Claude");
       expect(frame).toContain("Lastresponse");
       expect(frame).toContain("entersend");
       // The pick ended WITH the dialog opening, so one esc leaves the gesture.
@@ -6992,7 +7028,7 @@ describe("App hand off to", () => {
       await setup.renderOnce();
       const frame = squish(setup.captureCharFrame());
       // Neither the dialog nor the pick mode it came from is left behind.
-      expect(frame).not.toContain("Handofftoclaude·proj2");
+      expect(frame).not.toContain("Toproj2Claude");
       expect(frame).not.toContain("esccancel");
       expect(posted).toEqual([]);
     } finally {

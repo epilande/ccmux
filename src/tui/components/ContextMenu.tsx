@@ -20,6 +20,15 @@ export interface ContextMenuItem {
   hint: string;
   color: string;
   action: () => void;
+  /**
+   * Menu-local accelerator: pressing this key while the menu is open
+   * activates the item. Most items leave it unset because their hint names a
+   * key the LIST answers to (the keypress falls through, closes the menu,
+   * and acts on the selected row by its ordinary meaning); this is for an
+   * action whose natural key already means something else on the list — `h`
+   * hands off from the menu but collapses a group outside it.
+   */
+  key?: string;
 }
 
 interface ContextMenuProps {
