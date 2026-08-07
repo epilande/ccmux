@@ -133,6 +133,27 @@ describe("makePlugin: eager seed", () => {
     expect(m3).toMatchObject({ state: "working", title: "Gamma" });
   });
 
+  it("writes state_timestamp with sub-second precision from the injected clock", async () => {
+    // Regression guard: floored integer-second timestamps make two sibling
+    // sessions written within the same wall-clock second tie in
+    // aggregate.ts's newest-marker sort. Float seconds keep them ordered.
+    const client = makeClient(
+      [{ id: "s1", directory: "/tmp/a", title: "Alpha" }],
+      { s1: { type: "idle" } },
+    );
+    const plugin = makePlugin({
+      markersDir,
+      version: "1.0.0",
+      now: () => 1_700_000_000_123,
+    });
+    const hooks = await plugin({ client });
+    await awaitSeed(hooks);
+
+    const m1 = readMarker(markersDir, "s1");
+    expect(m1?.state_timestamp).toBeCloseTo(1_700_000_000.123, 3);
+    expect(m1?.timestamp).toBeCloseTo(1_700_000_000.123, 3);
+  });
+
   it("defaults to idle when a session has no status entry", async () => {
     const client = makeClient(
       [{ id: "s1", directory: "/tmp/a", title: "Alpha" }],

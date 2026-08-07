@@ -21,7 +21,10 @@ import { join } from "node:path";
 /**
  * @typedef {object} MarkerState
  * @property {"idle"|"working"|"waiting_permission"} [state]
- * @property {number} [state_timestamp]
+ * @property {number} [state_timestamp] Float epoch seconds (sub-second
+ *   precision, matching the jq-based hook scripts' `now`), so two sibling
+ *   sessions updated within the same wall-clock second still order
+ *   deterministically instead of tying.
  * @property {string} [directory]
  * @property {string} [title]
  * @property {string|null} [pending_tool]
@@ -79,8 +82,10 @@ export function makePlugin({ markersDir, version, now = Date.now }) {
       agent_type: AGENT_TYPE,
       pid: process.pid,
       session_id: sessionId,
-      timestamp: Math.floor(ts / 1000),
-      state_timestamp: Math.floor(ts / 1000),
+      // Float seconds (not floored) so sibling sessions updated within the
+      // same wall-clock second still order deterministically in aggregate.ts.
+      timestamp: ts / 1000,
+      state_timestamp: ts / 1000,
       ...state,
     };
     return JSON.stringify(body);
