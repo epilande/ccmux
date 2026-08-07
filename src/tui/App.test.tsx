@@ -6785,11 +6785,13 @@ describe("App hand off to", () => {
   it("opens a pick mode on the list itself, aimed at another row", async () => {
     const { posted, restore } = withDaemon();
     try {
-      await renderRows();
+      await renderRows([{ tmuxTarget: "ccmux:1.1" }, {}]);
       await startPick();
       const frame = squish(setup.captureCharFrame());
-      // The banner names the source and teaches the keys, and the menu is gone.
-      expect(frame).toContain("Handofffromclaude·proj1");
+      // The banner names the source by its pane alone (the dialog that
+      // follows names both ends in full); the keys are the footer's, and
+      // the menu is gone.
+      expect(frame).toContain("Handofffromccmux:1.1·pickatarget");
       expect(frame).toContain("esccancel");
       expect(frame).not.toContain("Handoffto…");
       // Nothing has been sent: the mode is aiming, not firing.

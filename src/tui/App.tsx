@@ -1393,9 +1393,9 @@ export function App(props: AppProps) {
     return store.state.sessions.find((s) => s.id === pick.fromSessionId);
   }
 
-  /** How a session is named while a handoff is being aimed or reported, and
-   *  in the Copy dialog's title. Agent plus project is what tells two rows of
-   *  the same board apart. */
+  /** How a session is named in the handed-off toast, the Copy dialog's
+   *  title, and the pick banner when the source has no pane to point at.
+   *  Agent plus project is what tells two rows of the same board apart. */
   function handoffLabel(session: EnrichedSession): string {
     return session.project
       ? `${session.agentType} · ${session.project}`
@@ -3681,16 +3681,19 @@ export function App(props: AppProps) {
         </Show>
 
         {/* The mode's only chrome: one line saying whose response is in hand
-            and how to aim it. It sits where the search input does, above the
-            list the pick is being made on, and the sidebar gets the short form
-            because it has no footer to carry the keys. */}
+            and what the mode wants aimed. It sits where the search input
+            does, above the list the pick is being made on. The pane alone
+            names the source — the aimed row was just picked FROM this very
+            list, and the dialog that follows names both ends in full — and
+            the keys are the footer's pick arm's; the sidebar has no footer
+            to carry them, so its short form keeps the keys. */}
         <Show when={handoffSource()}>
           {(from: () => EnrichedSession) => (
             <box paddingLeft={1} height={1}>
               <text fg={theme.mauve}>
                 {props.sidebar
                   ? `${HANDOFF_BADGE} pick target · enter · esc`
-                  : `${HANDOFF_BADGE} Hand off from ${handoffLabel(from())} · pick a target · enter continue · esc cancel`}
+                  : `${HANDOFF_BADGE} Hand off from ${from().tmuxTarget ?? handoffLabel(from())} · pick a target`}
               </text>
             </box>
           )}
