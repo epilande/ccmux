@@ -38,7 +38,10 @@ const PANE_ID = "%9";
 function makeClock(): { now: () => number; advance: (ms: number) => void } {
   let t = 1_700_000_000_000;
   return {
-    now: () => ++t,
+    // Advance a full second per call (not 1ms) so consecutive marker writes
+    // land in distinct integer seconds: aggregate.ts's activity ordering is
+    // no longer sensitive to sub-second precision here.
+    now: () => (t += 1000),
     advance: (ms: number) => {
       t += ms;
     },

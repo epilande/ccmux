@@ -254,4 +254,30 @@ describe("aggregateOpenCodeMarkers", () => {
     ]);
     expect(agg.lastPrompt).toBeNull();
   });
+
+  it("breaks a same-integer-second tie using sub-second state_timestamp precision", () => {
+    // Regression guard: the opencode plugin writes float-second
+    // state_timestamps so two markers landing in the same wall-clock second
+    // still order deterministically instead of tying (which previously fell
+    // back to nondeterministic sort/readdir order).
+    const older = marker({
+      session_id: "old",
+      state: "idle",
+      state_timestamp: 1_700_000_000.001,
+      last_prompt: "old",
+    });
+    const newer = marker({
+      session_id: "new",
+      state: "idle",
+      state_timestamp: 1_700_000_000.002,
+    });
+
+    const ascending = aggregateOpenCodeMarkers([older, newer]);
+    expect(ascending.nativeSessionId).toBe("new");
+    expect(ascending.lastPrompt).toBeNull();
+
+    const descending = aggregateOpenCodeMarkers([newer, older]);
+    expect(descending.nativeSessionId).toBe("new");
+    expect(descending.lastPrompt).toBeNull();
+  });
 });
