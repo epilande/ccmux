@@ -190,17 +190,19 @@ describe("HandoffDialog", () => {
     expect(frame).not.toContain("entersend");
   });
 
-  it("draws the rows in order: title, turns, note, To, From, buttons", async () => {
+  it("draws the rows in order: title, turns, note, From, To, buttons", async () => {
     // By ORDER rather than presence: nothing here clips, so a row the budget
     // did not account for draws OVER its neighbour instead of disappearing.
+    // From sits above To — source above destination, the way the text will
+    // travel.
     const lines = (await render()).split("\n");
     const lineOf = (text: string) =>
       lines.findIndex((line) => squish(line).includes(text));
     expect(lineOf("Handoff")).toBeLessThan(lineOf("Turns"));
     expect(lineOf("Turns")).toBeLessThan(lineOf("Note"));
-    expect(lineOf("Note")).toBeLessThan(lineOf("Toproj2"));
-    expect(lineOf("Toproj2")).toBeLessThan(lineOf("Fromproj1"));
-    expect(lineOf("Fromproj1")).toBeLessThan(lineOf("Cancel"));
+    expect(lineOf("Note")).toBeLessThan(lineOf("Fromproj1"));
+    expect(lineOf("Fromproj1")).toBeLessThan(lineOf("Toproj2"));
+    expect(lineOf("Toproj2")).toBeLessThan(lineOf("Cancel"));
   });
 
   it("says a multi-turn handoff brings the user's own prompts", async () => {

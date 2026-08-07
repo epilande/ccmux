@@ -40,7 +40,7 @@ export interface HandoffDialogRows {
    *  droppable unit, the same as the new-session dialog's, and given up for
    *  the same reason: the buttons duplicate Enter and Escape exactly. */
   buttons: boolean;
-  /** The From row naming the SOURCE, paired directly under the floor's To
+  /** The From row naming the SOURCE, paired directly above the floor's To
    *  row. Decoration next to the target, so it goes before the hints. */
   source: boolean;
   /** The key-hint row. */
@@ -219,7 +219,7 @@ interface HandoffDialogProps {
  * How much to hand off, and what to say about it.
  *
  * The pick has already happened when this opens (the banner and the aimed row
- * are gone), so the box has to name BOTH ends itself: the To and From rows
+ * are gone), so the box has to name BOTH ends itself: the From and To rows
  * under the fields, each tokenized the way the session list reads
  * (project:branch, agent, pane). The pane is deliberately part of that:
  * handoffs mostly stay inside one project, where two rows on the same agent
@@ -420,12 +420,13 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
       <Show when={plan().spacers}>
         <box height={1} />
       </Show>
-      {/* The endpoint pair: To in the floor (the irreversible half), From
-        directly under it with no air between — they answer one question. */}
-      <EndpointRow label="To" endpoint={props.to} />
+      {/* The endpoint pair, source above destination the way the text will
+        travel, with no air between — they answer one question. To is the one
+        in the floor (the irreversible half); From is the droppable row. */}
       <Show when={plan().source}>
         <EndpointRow label="From" endpoint={props.from} />
       </Show>
+      <EndpointRow label="To" endpoint={props.to} />
 
       <Show when={plan().buttons}>
         <box height={1} />
