@@ -220,6 +220,13 @@ describe("planDialogRows", () => {
     expect(given(14).buttons).toBe(false);
     expect(given(14).note).toBe(true);
     expect(given(11).note).toBe(false);
+    // The KEEP side of each threshold, at the boundary rather than above it:
+    // the probes either side of a drop are what pin WHERE it happens. Without
+    // these, a `>` that slipped to `>=` in either guard would drop the row at
+    // the very height it fits (h=21, the full height above, included) and
+    // every other assertion here would still pass.
+    expect(given(15).buttons).toBe(true);
+    expect(given(12).note).toBe(true);
     expect(given(11).spacer).toBe(true);
     expect(given(10).spacer).toBe(false);
     expect(given(10).directory).toBe(true);
@@ -740,6 +747,19 @@ describe("NewSessionDialog", () => {
       .split("\n")
       .find((line) => line.includes("Cancel") && /\bMove\b/.test(line));
     expect(moveRow).toBeDefined();
+  });
+
+  it("draws no button row at a height that cannot afford one", async () => {
+    // The Copy and Hand off dialogs both pin this at their own floors; this
+    // is the new-session dialog's. It guards the plan->render wiring rather
+    // than the plan: `showButtons: false` is already asserted directly, but
+    // nothing else checks the component HONORS it, and a button row drawn
+    // outside the budget lands past the bottom border instead of clipping.
+    const frame = await renderDialog({ height: 11 });
+    // A positive anchor first, so a blank or crashed render cannot pass the
+    // negative below by rendering nothing at all.
+    expect(frame).toContain("Prompt");
+    expect(frame).not.toContain("Cancel");
   });
 });
 

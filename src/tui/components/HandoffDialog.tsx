@@ -185,12 +185,12 @@ interface HandoffDialogProps {
  * typed. The title is a bare mode indicator like New session's, which is why
  * the To row is part of the floor: without it the target is named nowhere.
  *
- * Drawn in the new-session dialog's visual language rather than its own — the
- * `▎` focus marker, the shared control shells, the Cancel/Send buttons, the
- * confirm-first hint row — because this IS that dialog's shape: a short field
- * list with one action behind it. The turns row is the Copy dialog's question
- * with the Copy dialog's keys (one selector, one home: `turns-selection.ts`),
- * and the note row is the one thing this dialog has that Copy does not. The
+ * Drawn in the new-session dialog's visual language rather than its own (the
+ * `▎` focus marker, the shared control shells, the Cancel/Send buttons)
+ * because this IS that dialog's shape: a short field list with one action
+ * behind it. The turns row is the Copy dialog's question with the Copy
+ * dialog's keys (one selector, one home: `turns-selection.ts`), and the note
+ * row is the one thing this dialog has that Copy does not. The
  * note is folded to a single line by the daemon's frozen header, so nothing
  * is done about that here.
  */

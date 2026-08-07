@@ -36,7 +36,7 @@ const BUTTON_ROWS = 3;
  *  MAX_WIDTH is sized to leave exactly this much. */
 const COMPACT_CONTENT_WIDTH = 49;
 /** The sidebar's 30-column rail, where even the short labels are fitted
- *  word by word and the esc hint gives up its gloss. */
+ *  word by word and the placeholders drop to their terse forms. */
 const NARROW_CONTENT_WIDTH = 33;
 /** Columns the text inputs' full-width shell spends on its own padding —
  *  the same run the pills paint, so every control shares one shape. */
@@ -180,8 +180,9 @@ const sumFieldRows = (rows: FieldRows): number =>
 
 /**
  * The shortest the dialog can be drawn and still be a dialog: a border, its
- * title, and one row for every field it has. Everything else — the hints, the
- * move note, the directory, the spacer — can be given up before this point.
+ * title, and one row for every field it has. Everything else — the field
+ * spacers, the button row, the agent error's extra rows, the move note, the
+ * spacer, the directory — can be given up before this point, in that order.
  *
  * Shared with `App.tsx`, which gates the option keys on it: below this height
  * the fields are not on screen, and a `2` that changed an invisible choice
@@ -617,8 +618,9 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     };
   });
 
-  /** The dropdown that is up, if a valid one is; the hint row and the
-   *  overlay both key off this. */
+  /** The dropdown that is up, if a valid one is; the button row keys off
+   *  this to swap its click targets (the overlay reads `overlayOptions()`
+   *  directly). */
   const dropdownOpen = () => overlayOptions() !== null;
 
   const overlayHighlight = () => {
@@ -1095,9 +1097,8 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           {/* Confirm and Cancel, aligned with the controls: pure duplicates
             of Enter and Escape (the same paths, all the same guards), so
             they are click affordances only and deliberately NOT Tab stops.
-            While a dropdown is open they follow the hint row's click
-            contract: confirm commits the highlight, Cancel closes the
-            overlay. */}
+            While a dropdown is open they define the click contract: confirm
+            commits the highlight, Cancel closes the overlay. */}
           <box flexDirection="row" height={1}>
             {/* Right-aligned in the macOS order — quiet Cancel left, the
               primary rightmost, ending flush at the content edge the pills'
