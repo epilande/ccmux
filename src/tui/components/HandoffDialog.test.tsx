@@ -12,72 +12,41 @@ import { squish } from "./test-helpers";
 
 describe("planHandoffDialogRows", () => {
   it("draws everything when the terminal has room", () => {
-    expect(planHandoffDialogRows(24, true)).toEqual({
+    expect(planHandoffDialogRows(24)).toEqual({
       spacers: true,
       buttons: true,
       source: true,
-      hint: true,
-      height: HANDOFF_DIALOG_FLOOR_ROWS + 9,
-    });
-  });
-
-  it("budgets no hint row when the footer carries the hints", () => {
-    expect(planHandoffDialogRows(24, false)).toEqual({
-      spacers: true,
-      buttons: true,
-      source: true,
-      hint: false,
       height: HANDOFF_DIALOG_FLOOR_ROWS + 7,
     });
   });
 
   it("gives up the blank rows first", () => {
-    const plan = planHandoffDialogRows(HANDOFF_DIALOG_FLOOR_ROWS + 7, true);
+    const plan = planHandoffDialogRows(HANDOFF_DIALOG_FLOOR_ROWS + 6);
     expect(plan).toEqual({
       spacers: false,
       buttons: true,
       source: true,
-      hint: true,
-      height: HANDOFF_DIALOG_FLOOR_ROWS + 6,
+      height: HANDOFF_DIALOG_FLOOR_ROWS + 4,
     });
   });
 
   it("gives up the buttons before the From row", () => {
     // The buttons duplicate Enter and Escape exactly; the From row is the
     // one fact the box would otherwise lose.
-    const plan = planHandoffDialogRows(HANDOFF_DIALOG_FLOOR_ROWS + 4, true);
+    const plan = planHandoffDialogRows(HANDOFF_DIALOG_FLOOR_ROWS + 3);
     expect(plan).toEqual({
       spacers: false,
       buttons: false,
       source: true,
-      hint: true,
-      height: HANDOFF_DIALOG_FLOOR_ROWS + 3,
+      height: HANDOFF_DIALOG_FLOOR_ROWS + 1,
     });
   });
 
-  it("gives up the From row before the key hints", () => {
-    // Which session it came from is context the user just supplied; that Tab
-    // reaches the note is not guessable from the box.
-    const plan = planHandoffDialogRows(HANDOFF_DIALOG_FLOOR_ROWS + 2, true);
-    expect(plan.source).toBe(false);
-    expect(plan.hint).toBe(true);
-  });
-
-  it("budgets the hint row's own blank, so it never sits flush", () => {
-    // The hints are a two-row unit (`KEY_HINT_ROWS`), the same as the
-    // new-session dialog's: one row short of it they go entirely rather than
-    // landing against the To row.
-    expect(
-      planHandoffDialogRows(HANDOFF_DIALOG_FLOOR_ROWS + 1, true).hint,
-    ).toBe(false);
-  });
-
   it("keeps the fields and the To row when nothing else fits", () => {
-    expect(planHandoffDialogRows(HANDOFF_DIALOG_FLOOR_ROWS, true)).toEqual({
+    expect(planHandoffDialogRows(HANDOFF_DIALOG_FLOOR_ROWS)).toEqual({
       spacers: false,
       buttons: false,
       source: false,
-      hint: false,
       height: HANDOFF_DIALOG_FLOOR_ROWS,
     });
   });
@@ -85,7 +54,7 @@ describe("planHandoffDialogRows", () => {
   it("never asks for more rows than the terminal has", () => {
     // A box taller than the screen draws its bottom border off it.
     for (const height of [1, 2, 3, 4, 5]) {
-      expect(planHandoffDialogRows(height, true).height).toBe(height);
+      expect(planHandoffDialogRows(height).height).toBe(height);
     }
   });
 });
@@ -165,7 +134,6 @@ describe("HandoffDialog", () => {
       field?: HandoffDialogField;
       width?: number;
       height?: number;
-      showKeyHints?: boolean;
     } = {},
   ) {
     setup = await testRender(
@@ -180,7 +148,6 @@ describe("HandoffDialog", () => {
           onFocusField={() => {}}
           onSubmit={() => {}}
           onCancel={() => {}}
-          showKeyHints={props.showKeyHints}
         />
       ),
       { width: props.width ?? 80, height: props.height ?? 24 },
@@ -196,18 +163,11 @@ describe("HandoffDialog", () => {
     expect(frame).toContain("Fromproj1:mainClaudeccmux:1.1");
     expect(frame).toContain("Lastresponse");
     expect(frame).toContain("note(optional)");
-    expect(frame).toContain("entersend·j/kturns·tabnote·esccancel");
   });
 
   it("shows the Cancel and Send buttons when there is room", async () => {
     const frame = squish(await render());
     expect(frame).toContain("CancelSend");
-  });
-
-  it("draws no hint row of its own when the footer carries the hints", async () => {
-    const frame = squish(await render({ showKeyHints: false }));
-    expect(frame).toContain("CancelSend");
-    expect(frame).not.toContain("entersend");
   });
 
   it("draws the rows in order: title, turns, note, From, To, buttons", async () => {
@@ -258,27 +218,6 @@ describe("HandoffDialog", () => {
     expect(frame).toContain("Toproj2");
     expect(frame).not.toContain("Fromproj1");
     expect(frame).not.toContain("Cancel");
-    expect(frame).not.toContain("entersend");
-  });
-
-  it("keeps a blank row above the hints, under the buttons and without them", async () => {
-    // The new-session dialog's `KEY_HINT_ROWS`: the hint line owns the air
-    // above it, so it reads as a line under the dialog rather than another
-    // row inside it. Under the buttons that stacks with the button unit's
-    // own trailing blank (two rows between), and at the tier where the
-    // buttons are gone the blank is what stops the hints sitting flush
-    // against the To row.
-    const lineOf = (lines: string[], text: string) =>
-      lines.findIndex((line) => squish(line).includes(text));
-
-    const roomy = (await render()).split("\n");
-    expect(lineOf(roomy, "entersend") - lineOf(roomy, "CancelSend")).toBe(3);
-
-    const tight = (
-      await render({ height: HANDOFF_DIALOG_FLOOR_ROWS + 2 })
-    ).split("\n");
-    expect(tight.some((line) => squish(line).includes("Cancel"))).toBe(false);
-    expect(lineOf(tight, "entersend") - lineOf(tight, "Toproj2")).toBe(2);
   });
 
   it("keeps the pane visible at a sidebar's width", async () => {
@@ -288,20 +227,5 @@ describe("HandoffDialog", () => {
     expect(frame).toContain("Last3turns");
     expect(frame).toContain("ccmux:2.2");
     expect(frame).toContain("ccmux:1.1");
-  });
-
-  it("keeps the exits' gloss words at a sidebar's width, dropping only the middle segment", async () => {
-    // A sidebar (40 columns) lands in the compact band but not the narrower
-    // one: the new-session dialog's own two-tier trade, mirrored here so a
-    // compact row still reads as a sentence rather than bare keys.
-    const frame = squish(await render({ width: 40 }));
-    expect(frame).toContain("entersend·esccancel");
-    expect(frame).not.toContain("j/kturns");
-  });
-
-  it("drops the exits' gloss words only once the row is genuinely too narrow for them", async () => {
-    const frame = squish(await render({ width: 26 }));
-    expect(frame).toContain("entersend·esc");
-    expect(frame).not.toContain("esccancel");
   });
 });

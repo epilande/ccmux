@@ -3829,7 +3829,6 @@ export function App(props: AppProps) {
               onWorktreeNameInput={store.actions.setNewSessionWorktreeName}
               onSubmit={() => void submitNewSession()}
               onCancel={cancelNewSession}
-              showKeyHints={props.sidebar === true}
             />
           )}
         </Show>
@@ -3860,7 +3859,6 @@ export function App(props: AppProps) {
               turns={copy().turns}
               onSubmit={commitCopyDialog}
               onCancel={store.actions.closeCopyDialog}
-              showKeyHints={props.sidebar === true}
             />
           )}
         </Show>
@@ -3883,7 +3881,6 @@ export function App(props: AppProps) {
               onFocusField={store.actions.setHandoffDialogField}
               onSubmit={commitHandoffDialog}
               onCancel={store.actions.closeHandoffDialog}
-              showKeyHints={props.sidebar === true}
             />
           )}
         </Show>

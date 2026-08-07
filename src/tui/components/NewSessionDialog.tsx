@@ -20,24 +20,20 @@ import {
 } from "../utils/format";
 import { agentColorFor } from "./SessionItem";
 import { DropdownOverlay, DropdownTrigger } from "./DropdownField";
-import { newSessionHintSegments } from "./Footer";
 import { theme } from "../theme";
 
 /** Width of the label gutter: focus marker (1) + "Placement" (9, the
  *  longest label) + one column of air before the content. */
 const LABEL_WIDTH = 11;
-/** Wide enough for the key-hint row's full middle segment; see
- *  COMPACT_CONTENT_WIDTH. */
+/** Wide enough to leave exactly COMPACT_CONTENT_WIDTH of content after the
+ *  label gutter; see COMPACT_CONTENT_WIDTH. */
 const MAX_WIDTH = 65;
 const MIN_WIDTH = 24;
-/** The blank spacer plus the key-hint row, when the dialog draws its own. */
-const KEY_HINT_ROWS = 2;
 /** The button row with its leading and trailing blanks — one droppable
  *  unit, so the air goes with the buttons. */
 const BUTTON_ROWS = 3;
-/** Content width below which the pills switch to their short labels and the
- *  key-hint line drops its middle segment. MAX_WIDTH is sized to leave
- *  exactly this much. */
+/** Content width below which the pills switch to their short labels.
+ *  MAX_WIDTH is sized to leave exactly this much. */
 const COMPACT_CONTENT_WIDTH = 49;
 /** The sidebar's 30-column rail, where even the short labels are fitted
  *  word by word and the esc hint gives up its gloss. */
@@ -148,7 +144,6 @@ export interface DialogShape extends DialogModeShape {
    *  error's wrapped lines. The only field that can want more than one row —
    *  every option list lives in an overlay outside the budget. */
   agentRows: number;
-  keyHints: boolean;
 }
 
 /** Rows a field is asking for, keyed by the field list itself. */
@@ -217,7 +212,6 @@ export interface DialogRowPlan {
    *  existing worktree is being started in. One flag because it is one row,
    *  given up at one point in the order below. */
   showModeNote: boolean;
-  showKeyHints: boolean;
   agentRows: number;
 }
 
@@ -227,9 +221,8 @@ export interface DialogRowPlan {
  * Order matters and is the whole design: the blank rows between the fields
  * go first (pure air, and all at once — per-gap dropping would read as a
  * layout bug), then the button row (a duplicate of enter/esc), then the
- * agent field's error shrinks back towards one row,
- * then the key hints (the picker repeats them in its footer anyway), then
- * the move note, then the blank row under the title, then the directory.
+ * agent field's error shrinks back towards one row, then the move note,
+ * then the blank row under the title, then the directory.
  * Nothing a user has to ACT on is dropped while anything decorative is
  * still on screen. The option fields never enter this order at all: each is
  * a one-row pill whose list opens in an overlay OUTSIDE the budget.
@@ -254,7 +247,6 @@ export function planDialogRows(
       showButtons: false,
       showDirectory: false,
       showModeNote: false,
-      showKeyHints: false,
       agentRows: 0,
     };
   }
@@ -267,7 +259,6 @@ export function planDialogRows(
     showButtons: true,
     showDirectory: true,
     showModeNote: shape.moveChanges || shape.fork || shape.existingWorktree,
-    showKeyHints: shape.keyHints,
     // A fork has no agent row at all, so it asks for none rather than for the
     // one row `Math.max` would floor an empty list at.
     agentRows: shape.fork ? 0 : Math.max(1, shape.agentRows),
@@ -295,15 +286,13 @@ export function planDialogRows(
     (plan.showTitleSpacer ? 1 : 0) +
     (plan.showDirectory ? 1 : 0) +
     (plan.showModeNote ? 1 : 0) +
-    (plan.showKeyHints ? KEY_HINT_ROWS : 0) +
     (plan.showButtons ? BUTTON_ROWS : 0) +
     fieldGaps() +
     sumFieldRows(fieldRows());
 
   if (total() > height) plan.showFieldSpacers = false;
-  // The buttons next: they duplicate enter/esc exactly — keys that always
-  // work, and that the hint row both teaches and (clickably) provides — so
-  // they are the cheapest functional loss after pure air.
+  // The buttons next: they duplicate enter/esc exactly, keys that always
+  // work — so they are the cheapest functional loss after pure air.
   if (total() > height && plan.showButtons) plan.showButtons = false;
   // The agent error next, since its tail is already summarised by an
   // ellipsis and shrinks without losing anything actionable.
@@ -311,7 +300,6 @@ export function planDialogRows(
   if (over > 0 && plan.agentRows > 1) {
     plan.agentRows -= Math.min(over, plan.agentRows - 1);
   }
-  if (total() > height && plan.showKeyHints) plan.showKeyHints = false;
   if (total() > height && plan.showModeNote) plan.showModeNote = false;
   if (total() > height && plan.showTitleSpacer) plan.showTitleSpacer = false;
   // Last, because in move-changes mode this row names the checkout being
@@ -339,14 +327,6 @@ interface NewSessionDialogProps {
   onWorktreeNameInput: (name: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
-  /**
-   * Draw the dialog's own key-hint row. The picker's Footer switches to a
-   * near-identical line whenever this dialog is open, and showing both puts
-   * the same hints on screen twice; the footer wins there because that is
-   * where the picker's hints always live. The sidebar has no footer at all,
-   * so its dialog carries the row itself.
-   */
-  showKeyHints?: boolean;
 }
 
 export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
@@ -378,8 +358,6 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     if (!narrow()) return compact() ? option.compactLabel : option.label;
     return option.label.length <= room ? option.label : option.compactLabel;
   };
-
-  const showKeyHints = () => props.showKeyHints !== false;
 
   /** Relocating this checkout's uncommitted work, rather than starting fresh
    *  in it. Changes the title, locks the destination, and adds the
@@ -599,7 +577,6 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
         agentRows: showAgentError()
           ? wrapText(agentErrorText(), contentWidth()).length
           : 1,
-        keyHints: showKeyHints(),
       },
       dims().height,
     ),
@@ -676,30 +653,12 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     return Math.max(1, dims().height - anchor - 2);
   };
 
-  /** Commit the highlighted option, the hint row's click-side twin of the
+  /** Commit the highlighted option, the button row's click-side twin of the
    *  Enter/space key path in `App.tsx`. */
   const confirmDropdown = () => {
     const resolved = overlayOptions();
     if (resolved) props.onSelectOption(resolved.field, overlayHighlight());
   };
-
-  /** The shared hint copy, for whichever key set is live right now. */
-  const hintSegments = () =>
-    newSessionHintSegments(
-      dropdownOpen()
-        ? "dropdown"
-        : optionsFor(props.draft.field)
-          ? "focused"
-          : "text",
-    );
-
-  /** Everything between the two exits, as the one dim run a compact width
-   *  gives up whole. */
-  const middleHint = () =>
-    hintSegments()
-      .slice(1, -1)
-      .map((segment) => `· ${segment.key} ${segment.gloss}`)
-      .join(" ");
 
   /**
    * The agent error, pre-wrapped to the content column and capped at the rows
@@ -1180,64 +1139,6 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
             </box>
           </box>
           <box height={1} />
-        </Show>
-
-        <Show when={plan().showKeyHints}>
-          <box height={1} />
-          {/* The same segments the Footer joins into one line
-            (`newSessionHintSegments`); here the first and last are the
-            clickable exits and the middle is what a narrow surface gives
-            up. */}
-          <box flexDirection="row" height={1}>
-            <box
-              flexDirection="row"
-              flexShrink={0}
-              marginRight={1}
-              onMouseDown={(event) => {
-                if (event.button !== MouseButton.LEFT) return;
-                if (dropdownOpen()) confirmDropdown();
-                else props.onSubmit();
-              }}
-            >
-              <text fg={theme.green}>
-                <strong>{hintSegments()[0]!.key}</strong>
-              </text>
-              {/* The overlay's longer key text eats the gloss's columns at
-                the rail, the same trade the esc segment already makes. */}
-              <Show when={!dropdownOpen() || !narrow()}>
-                <box width={1} />
-                <text fg={theme.overlay}>{hintSegments()[0]!.gloss}</text>
-              </Show>
-            </box>
-            {/* The middle hint is the one that goes when there is no room
-              for it: the two it sits between are the dialog's only exits. */}
-            <Show when={!compact()}>
-              <box flexDirection="row" marginRight={1}>
-                <text fg={theme.overlay}>{middleHint()}</text>
-              </box>
-            </Show>
-            <box
-              flexDirection="row"
-              flexShrink={0}
-              onMouseDown={(event) => {
-                if (event.button !== MouseButton.LEFT) return;
-                if (dropdownOpen()) props.onCloseDropdown();
-                else props.onCancel();
-              }}
-            >
-              <text fg={theme.overlay}>·</text>
-              <box width={1} />
-              <text fg={theme.red}>
-                <strong>esc</strong>
-              </text>
-              {/* At the real 30-column rail even this two-hint line overruns
-                the border; Esc needs no gloss, so its word is what goes. */}
-              <Show when={!narrow()}>
-                <box width={1} />
-                <text fg={theme.overlay}>cancel</text>
-              </Show>
-            </box>
-          </box>
         </Show>
 
         {/* The one open dropdown, anchored under whichever field it belongs
