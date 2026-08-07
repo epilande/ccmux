@@ -2234,7 +2234,7 @@ export function App(props: AppProps) {
   /**
    * Commit `field`'s option at `index` and close its dropdown: the ONE write
    * path — the confirm keys, both 1-9 arms, the overlay's row clicks, and
-   * the hint row's confirm all funnel here. An index off the list commits
+   * the button row's confirm all funnel here. An index off the list commits
    * nothing and leaves any open dropdown up, so a `9` in a three-option list
    * stays a no-op.
    */
@@ -3829,7 +3829,6 @@ export function App(props: AppProps) {
               onWorktreeNameInput={store.actions.setNewSessionWorktreeName}
               onSubmit={() => void submitNewSession()}
               onCancel={cancelNewSession}
-              showKeyHints={props.sidebar === true}
             />
           )}
         </Show>
@@ -3860,7 +3859,6 @@ export function App(props: AppProps) {
               turns={copy().turns}
               onSubmit={commitCopyDialog}
               onCancel={store.actions.closeCopyDialog}
-              showKeyHints={props.sidebar === true}
             />
           )}
         </Show>
@@ -3883,7 +3881,6 @@ export function App(props: AppProps) {
               onFocusField={store.actions.setHandoffDialogField}
               onSubmit={commitHandoffDialog}
               onCancel={store.actions.closeHandoffDialog}
-              showKeyHints={props.sidebar === true}
             />
           )}
         </Show>

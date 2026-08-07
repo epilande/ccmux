@@ -70,14 +70,19 @@ export function fitHints(segments: HintSegment[], width: number): string {
 }
 
 /**
- * The new-session dialog's key hints, authored once for both surfaces: the
- * Footer joins them into one line, and the dialog renders the same segments
- * with its own width-drop rules and click targets. First and last are always
- * the two exits (confirm and esc), which is what the dialog's structure
- * leans on. Wording is sized to the DIALOG's 61-column hint row — "tab
- * field" and "1-9 pick", not the longer forms — since the footer has columns
- * to spare and the dialog does not. j/k (cycle a collapsed pill, move the
- * open list) is taught by the dropdown state's own line instead.
+ * The new-session dialog's key hints. The Footer is the ONLY renderer: it
+ * joins them into one line. The dialog itself drew these segments until the
+ * sidebar's hint rows were removed, so the surface that has no footer now
+ * shows no hints at all, deliberately (enter/esc in a dialog is convention,
+ * and the rail has no columns to spend teaching it).
+ *
+ * First and last are the two exits (confirm and esc). Nothing enforces or
+ * consumes that ordering any more, since the Footer joins positionally
+ * indifferently, so treat it as a convention rather than a contract.
+ * Likewise the terse wording ("tab field", "1-9 pick", not the longer forms)
+ * is a leftover of the dialog's old 61-column hint row; the footer has
+ * columns to spare, so these are free to grow. j/k (cycle a collapsed pill,
+ * move the open list) is taught by the dropdown state's own line instead.
  */
 export function newSessionHintSegments(
   state: "text" | "focused" | "dropdown",
@@ -100,11 +105,11 @@ export function newSessionHintSegments(
 }
 
 /**
- * The Hand off dialog's key hints, authored once for both surfaces the same
- * way `newSessionHintSegments` is: the Footer joins them into one line, and
- * the sidebar's dialog (which has no footer) renders the same segments with
- * its own width-drop rules and click targets. First and last are always the
- * two exits, which is what both renderers lean on.
+ * The Hand off dialog's key hints, on the same terms as
+ * `newSessionHintSegments`: the Footer is the only renderer and joins them
+ * into one line. The sidebar has no footer and draws no hints of its own, so
+ * these reach the picker only. First and last are the two exits, by
+ * convention rather than by any contract.
  */
 export function handoffDialogHintSegments(): { key: string; gloss: string }[] {
   return [

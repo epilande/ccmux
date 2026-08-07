@@ -5,7 +5,6 @@ import { MouseButton } from "@opentui/core";
 import { displayWidth, truncateMiddle, truncateText } from "../utils/format";
 import { turnsLabel } from "../turns-selection";
 import { MAX_HANDOFF_NOTE_CHARS } from "../../daemon/handoff";
-import { handoffDialogHintSegments } from "./Footer";
 import { theme } from "../theme";
 
 const MAX_WIDTH = 52;
@@ -18,25 +17,6 @@ const MIN_WIDTH = 24;
 const LABEL_WIDTH = 6;
 /** Columns between a label and its control. */
 const CONTROL_GAP = 1;
-
-/** Content width below which the hint row gives up its middle segment,
- *  keeping both exits' gloss words — the new-session dialog's own two-tier
- *  trade (a separate, narrower drop for the exits), mirrored here instead
- *  of collapsed into one. */
-const COMPACT_HINT_WIDTH = 46;
-/** Content width below which the hint row gives up the exits' gloss words
- *  too, keeping only their keys ("enter" / "esc"). Sized to the exact width
- *  of the compact row: the first segment's key and gloss, plus "· esc
- *  cancel". */
-const NARROW_HINT_WIDTH = 23;
-
-/** The blank spacer plus the key-hint row, when the dialog draws its own —
- *  the new-session dialog's `KEY_HINT_ROWS`, and one unit for the same
- *  reason: the hints are a line under the dialog rather than a row inside it,
- *  so the air above them belongs to them and not to whatever they follow.
- *  Without it the hint row sits flush against the To row at every height
- *  below the button tier. */
-const KEY_HINT_ROWS = 2;
 
 /** Border (2), the title, the turns row, the note row, and the To row.
  *  The fields are the question this dialog exists to ask, and the To row is
@@ -55,82 +35,54 @@ export interface HandoffDialogRows {
    *  the same reason: the buttons duplicate Enter and Escape exactly. */
   buttons: boolean;
   /** The From row naming the SOURCE, paired directly above the floor's To
-   *  row. Decoration next to the target, so it goes before the hints. */
+   *  row. Decoration next to the target, so it goes last. */
   source: boolean;
-  /** The key-hint row with its leading blank — one unit, `KEY_HINT_ROWS`. */
-  hint: boolean;
   height: number;
 }
 
 /**
  * What the dialog can afford at this terminal height, in the fixed order it
  * gives rows up: the blank rows first, then the button row (a duplicate of
- * enter/esc), then the source line, then the key hints.
+ * enter/esc), then the source line.
  *
  * A budget rather than a sum, the same way the Copy and new-session dialogs'
  * are, and for the same reason: a row rendered that the height did not account
  * for draws OVER its neighbour instead of clipping. Pure so it can be tested
- * without a renderer.
- *
- * `keyHints` follows the new-session dialog's split: the picker's Footer
- * carries this dialog's hints, so only the sidebar (which has no footer)
- * budgets a row for them. Where they ARE drawn, they outlive the From row
- * deliberately: which session the response came from is one keypress of
- * context the user just supplied themselves; that Tab reaches the note and
- * Enter sends is not guessable from a box with two rows in it. The To row is
- * part of the floor and never enters this order at all.
+ * without a renderer. The To row is part of the floor and never enters this
+ * order at all: which session the response came from is one keypress of
+ * context the user just supplied themselves, but the target it is going TO
+ * is the one fact the box can never drop.
  */
 export function planHandoffDialogRows(
   terminalHeight: number,
-  keyHints: boolean,
 ): HandoffDialogRows {
-  const hintRows = keyHints ? KEY_HINT_ROWS : 0;
-  // Floor + the three blanks + the From row + the button unit + the hint.
-  const withEverything = HANDOFF_DIALOG_FLOOR_ROWS + 3 + 1 + 3 + hintRows;
+  // Floor + the three blanks + the From row + the button unit.
+  const withEverything = HANDOFF_DIALOG_FLOOR_ROWS + 3 + 1 + 3;
   if (terminalHeight >= withEverything) {
     return {
       spacers: true,
       buttons: true,
       source: true,
-      hint: keyHints,
       height: withEverything,
     };
   }
-  const withButtons = HANDOFF_DIALOG_FLOOR_ROWS + 1 + 3 + hintRows;
+  const withButtons = HANDOFF_DIALOG_FLOOR_ROWS + 1 + 3;
   if (terminalHeight >= withButtons) {
-    return {
-      spacers: false,
-      buttons: true,
-      source: true,
-      hint: keyHints,
-      height: withButtons,
-    };
+    return { spacers: false, buttons: true, source: true, height: withButtons };
   }
-  const withSource = HANDOFF_DIALOG_FLOOR_ROWS + 1 + hintRows;
+  const withSource = HANDOFF_DIALOG_FLOOR_ROWS + 1;
   if (terminalHeight >= withSource) {
     return {
       spacers: false,
       buttons: false,
       source: true,
-      hint: keyHints,
       height: withSource,
-    };
-  }
-  const withHint = HANDOFF_DIALOG_FLOOR_ROWS + KEY_HINT_ROWS;
-  if (keyHints && terminalHeight >= withHint) {
-    return {
-      spacers: false,
-      buttons: false,
-      source: false,
-      hint: true,
-      height: withHint,
     };
   }
   return {
     spacers: false,
     buttons: false,
     source: false,
-    hint: false,
     // A terminal shorter than the floor gets what it has; the picker behind
     // it is unusable at that size anyway, and a box taller than the screen
     // would draw its bottom border off it.
@@ -219,14 +171,6 @@ interface HandoffDialogProps {
   /** Click twins of Enter and Escape: the same paths, all the same guards. */
   onSubmit: () => void;
   onCancel: () => void;
-  /**
-   * Draw the dialog's own key-hint row. The picker's Footer switches to the
-   * same line whenever this dialog is open, and showing both puts the same
-   * hints on screen twice; the footer wins there because that is where the
-   * picker's hints always live. The sidebar has no footer at all, so its
-   * dialog carries the row itself. (The new-session dialog's rule.)
-   */
-  showKeyHints?: boolean;
 }
 
 /**
@@ -241,12 +185,12 @@ interface HandoffDialogProps {
  * typed. The title is a bare mode indicator like New session's, which is why
  * the To row is part of the floor: without it the target is named nowhere.
  *
- * Drawn in the new-session dialog's visual language rather than its own — the
- * `▎` focus marker, the shared control shells, the Cancel/Send buttons, the
- * confirm-first hint row — because this IS that dialog's shape: a short field
- * list with one action behind it. The turns row is the Copy dialog's question
- * with the Copy dialog's keys (one selector, one home: `turns-selection.ts`),
- * and the note row is the one thing this dialog has that Copy does not. The
+ * Drawn in the new-session dialog's visual language rather than its own (the
+ * `▎` focus marker, the shared control shells, the Cancel/Send buttons)
+ * because this IS that dialog's shape: a short field list with one action
+ * behind it. The turns row is the Copy dialog's question with the Copy
+ * dialog's keys (one selector, one home: `turns-selection.ts`), and the note
+ * row is the one thing this dialog has that Copy does not. The
  * note is folded to a single line by the daemon's frozen header, so nothing
  * is done about that here.
  */
@@ -256,8 +200,7 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
   const width = () =>
     Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dims().width - 4));
   const contentWidth = () => Math.max(1, width() - 4);
-  const plan = () =>
-    planHandoffDialogRows(dims().height, props.showKeyHints !== false);
+  const plan = () => planHandoffDialogRows(dims().height);
   /** What a field's control has left once the label cell and the gap are
    *  spent. The input draws its placeholder in full PAST its own box, so this
    *  is what the placeholder is truncated against. */
@@ -306,14 +249,6 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
       </box>
     );
   };
-
-  /** Whether the hint row keeps its middle segment; the two it sits between
-   *  are the dialog's only exits, so they are what a narrow surface keeps. */
-  const compactHints = () => contentWidth() < COMPACT_HINT_WIDTH;
-  /** Whether the hint row keeps the exits' gloss words ("send" / "cancel");
-   *  a narrower, separate drop from the middle segment's, so a compact row
-   *  still reads as a sentence before it thins to bare keys. */
-  const narrowHints = () => contentWidth() < NARROW_HINT_WIDTH;
 
   /**
    * A field's label cell, carrying the new-session dialog's one-character
@@ -486,58 +421,6 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
           </box>
         </box>
         <box height={1} />
-      </Show>
-
-      <Show when={plan().hint}>
-        <box height={1} />
-        {/* The Footer's segments (`handoffDialogHintSegments`), confirm first
-          and Escape last in the new-session hint row's order and colours; the
-          middle is what a narrow surface gives up. */}
-        <box flexDirection="row" height={1}>
-          <box
-            flexDirection="row"
-            flexShrink={0}
-            marginRight={1}
-            onMouseDown={(event) => {
-              if (event.button === MouseButton.LEFT) props.onSubmit();
-            }}
-          >
-            <text fg={theme.green}>
-              <strong>{handoffDialogHintSegments()[0]!.key}</strong>
-            </text>
-            <box width={1} />
-            <text fg={theme.overlay}>
-              {handoffDialogHintSegments()[0]!.gloss}
-            </text>
-          </box>
-          <Show when={!compactHints()}>
-            <box flexDirection="row" marginRight={1}>
-              <text fg={theme.overlay}>
-                {handoffDialogHintSegments()
-                  .slice(1, -1)
-                  .map((segment) => `· ${segment.key} ${segment.gloss}`)
-                  .join(" ")}
-              </text>
-            </box>
-          </Show>
-          <box
-            flexDirection="row"
-            flexShrink={0}
-            onMouseDown={(event) => {
-              if (event.button === MouseButton.LEFT) props.onCancel();
-            }}
-          >
-            <text fg={theme.overlay}>·</text>
-            <box width={1} />
-            <text fg={theme.red}>
-              <strong>esc</strong>
-            </text>
-            <Show when={!narrowHints()}>
-              <box width={1} />
-              <text fg={theme.overlay}>cancel</text>
-            </Show>
-          </box>
-        </box>
       </Show>
     </box>
   );
