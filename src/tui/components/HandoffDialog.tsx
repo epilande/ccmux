@@ -20,9 +20,23 @@ const LABEL_WIDTH = 6;
 const CONTROL_GAP = 1;
 
 /** Content width below which the hint row gives up its middle segment,
- *  keeping only the two exits, the same trade the new-session dialog's
- *  hint row makes when compact. */
+ *  keeping both exits' gloss words — the new-session dialog's own two-tier
+ *  trade (a separate, narrower drop for the exits), mirrored here instead
+ *  of collapsed into one. */
 const COMPACT_HINT_WIDTH = 46;
+/** Content width below which the hint row gives up the exits' gloss words
+ *  too, keeping only their keys ("enter" / "esc"). Sized to the exact width
+ *  of the compact row: the first segment's key and gloss, plus "· esc
+ *  cancel". */
+const NARROW_HINT_WIDTH = 23;
+
+/** The blank spacer plus the key-hint row, when the dialog draws its own —
+ *  the new-session dialog's `KEY_HINT_ROWS`, and one unit for the same
+ *  reason: the hints are a line under the dialog rather than a row inside it,
+ *  so the air above them belongs to them and not to whatever they follow.
+ *  Without it the hint row sits flush against the To row at every height
+ *  below the button tier. */
+const KEY_HINT_ROWS = 2;
 
 /** Border (2), the title, the turns row, the note row, and the To row.
  *  The fields are the question this dialog exists to ask, and the To row is
@@ -43,7 +57,7 @@ export interface HandoffDialogRows {
   /** The From row naming the SOURCE, paired directly above the floor's To
    *  row. Decoration next to the target, so it goes before the hints. */
   source: boolean;
-  /** The key-hint row. */
+  /** The key-hint row with its leading blank — one unit, `KEY_HINT_ROWS`. */
   hint: boolean;
   height: number;
 }
@@ -70,7 +84,7 @@ export function planHandoffDialogRows(
   terminalHeight: number,
   keyHints: boolean,
 ): HandoffDialogRows {
-  const hintRows = keyHints ? 1 : 0;
+  const hintRows = keyHints ? KEY_HINT_ROWS : 0;
   // Floor + the three blanks + the From row + the button unit + the hint.
   const withEverything = HANDOFF_DIALOG_FLOOR_ROWS + 3 + 1 + 3 + hintRows;
   if (terminalHeight >= withEverything) {
@@ -102,7 +116,7 @@ export function planHandoffDialogRows(
       height: withSource,
     };
   }
-  const withHint = HANDOFF_DIALOG_FLOOR_ROWS + 1;
+  const withHint = HANDOFF_DIALOG_FLOOR_ROWS + KEY_HINT_ROWS;
   if (keyHints && terminalHeight >= withHint) {
     return {
       spacers: false,
@@ -189,7 +203,7 @@ export function fitHandoffEndpoint(
   return {
     context: "",
     agent: "",
-    pane: truncateText(endpoint.pane, Math.max(1, width)),
+    pane: truncateMiddle(endpoint.pane, Math.max(1, width)),
   };
 }
 
@@ -296,6 +310,10 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
   /** Whether the hint row keeps its middle segment; the two it sits between
    *  are the dialog's only exits, so they are what a narrow surface keeps. */
   const compactHints = () => contentWidth() < COMPACT_HINT_WIDTH;
+  /** Whether the hint row keeps the exits' gloss words ("send" / "cancel");
+   *  a narrower, separate drop from the middle segment's, so a compact row
+   *  still reads as a sentence before it thins to bare keys. */
+  const narrowHints = () => contentWidth() < NARROW_HINT_WIDTH;
 
   /**
    * A field's label cell, carrying the new-session dialog's one-character
@@ -471,6 +489,7 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
       </Show>
 
       <Show when={plan().hint}>
+        <box height={1} />
         {/* The Footer's segments (`handoffDialogHintSegments`), confirm first
           and Escape last in the new-session hint row's order and colours; the
           middle is what a narrow surface gives up. */}
@@ -513,7 +532,7 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
             <text fg={theme.red}>
               <strong>esc</strong>
             </text>
-            <Show when={!compactHints()}>
+            <Show when={!narrowHints()}>
               <box width={1} />
               <text fg={theme.overlay}>cancel</text>
             </Show>

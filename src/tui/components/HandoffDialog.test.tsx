@@ -17,7 +17,7 @@ describe("planHandoffDialogRows", () => {
       buttons: true,
       source: true,
       hint: true,
-      height: HANDOFF_DIALOG_FLOOR_ROWS + 8,
+      height: HANDOFF_DIALOG_FLOOR_ROWS + 9,
     });
   });
 
@@ -38,7 +38,7 @@ describe("planHandoffDialogRows", () => {
       buttons: true,
       source: true,
       hint: true,
-      height: HANDOFF_DIALOG_FLOOR_ROWS + 5,
+      height: HANDOFF_DIALOG_FLOOR_ROWS + 6,
     });
   });
 
@@ -51,16 +51,25 @@ describe("planHandoffDialogRows", () => {
       buttons: false,
       source: true,
       hint: true,
-      height: HANDOFF_DIALOG_FLOOR_ROWS + 2,
+      height: HANDOFF_DIALOG_FLOOR_ROWS + 3,
     });
   });
 
   it("gives up the From row before the key hints", () => {
     // Which session it came from is context the user just supplied; that Tab
     // reaches the note is not guessable from the box.
-    const plan = planHandoffDialogRows(HANDOFF_DIALOG_FLOOR_ROWS + 1, true);
+    const plan = planHandoffDialogRows(HANDOFF_DIALOG_FLOOR_ROWS + 2, true);
     expect(plan.source).toBe(false);
     expect(plan.hint).toBe(true);
+  });
+
+  it("budgets the hint row's own blank, so it never sits flush", () => {
+    // The hints are a two-row unit (`KEY_HINT_ROWS`), the same as the
+    // new-session dialog's: one row short of it they go entirely rather than
+    // landing against the To row.
+    expect(
+      planHandoffDialogRows(HANDOFF_DIALOG_FLOOR_ROWS + 1, true).hint,
+    ).toBe(false);
   });
 
   it("keeps the fields and the To row when nothing else fits", () => {
@@ -114,6 +123,17 @@ describe("fitHandoffEndpoint", () => {
   it("keeps a paneless endpoint's context at any width", () => {
     const fitted = fitHandoffEndpoint({ ...endpoint, pane: "" }, 10);
     expect(fitted.context.length).toBeGreaterThan(0);
+  });
+
+  it("keeps the pane's window.pane suffix in the last-resort branch", () => {
+    // Narrow enough that even the bare pane token doesn't fit (the sidebar's
+    // controlWidth) — the row must still say WHICH pane, not just that one
+    // was truncated from the front.
+    const fitted = fitHandoffEndpoint(
+      { ...endpoint, pane: "my-long-session-name:7.4" },
+      13,
+    );
+    expect(fitted.pane).toContain(":7.4");
   });
 });
 
@@ -241,6 +261,26 @@ describe("HandoffDialog", () => {
     expect(frame).not.toContain("entersend");
   });
 
+  it("keeps a blank row above the hints, under the buttons and without them", async () => {
+    // The new-session dialog's `KEY_HINT_ROWS`: the hint line owns the air
+    // above it, so it reads as a line under the dialog rather than another
+    // row inside it. Under the buttons that stacks with the button unit's
+    // own trailing blank (two rows between), and at the tier where the
+    // buttons are gone the blank is what stops the hints sitting flush
+    // against the To row.
+    const lineOf = (lines: string[], text: string) =>
+      lines.findIndex((line) => squish(line).includes(text));
+
+    const roomy = (await render()).split("\n");
+    expect(lineOf(roomy, "entersend") - lineOf(roomy, "CancelSend")).toBe(3);
+
+    const tight = (
+      await render({ height: HANDOFF_DIALOG_FLOOR_ROWS + 2 })
+    ).split("\n");
+    expect(tight.some((line) => squish(line).includes("Cancel"))).toBe(false);
+    expect(lineOf(tight, "entersend") - lineOf(tight, "Toproj2")).toBe(2);
+  });
+
   it("keeps the pane visible at a sidebar's width", async () => {
     // The context yields and the agent goes whole; the pane is the token the
     // row exists to show.
@@ -248,5 +288,20 @@ describe("HandoffDialog", () => {
     expect(frame).toContain("Last3turns");
     expect(frame).toContain("ccmux:2.2");
     expect(frame).toContain("ccmux:1.1");
+  });
+
+  it("keeps the exits' gloss words at a sidebar's width, dropping only the middle segment", async () => {
+    // A sidebar (40 columns) lands in the compact band but not the narrower
+    // one: the new-session dialog's own two-tier trade, mirrored here so a
+    // compact row still reads as a sentence rather than bare keys.
+    const frame = squish(await render({ width: 40 }));
+    expect(frame).toContain("entersend·esccancel");
+    expect(frame).not.toContain("j/kturns");
+  });
+
+  it("drops the exits' gloss words only once the row is genuinely too narrow for them", async () => {
+    const frame = squish(await render({ width: 26 }));
+    expect(frame).toContain("entersend·esc");
+    expect(frame).not.toContain("esccancel");
   });
 });

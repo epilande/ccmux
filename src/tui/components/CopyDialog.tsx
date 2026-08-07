@@ -11,22 +11,35 @@ const MAX_WIDTH = 46;
 const MIN_WIDTH = 20;
 
 /** Content width below which the hint row gives up its middle segment,
- *  keeping only the two exits, the same trade the new-session and handoff
- *  dialogs' hint rows make when compact. */
-const COMPACT_HINT_WIDTH = 34;
+ *  keeping both exits' gloss words — the new-session dialog's own two-tier
+ *  trade (a separate, narrower drop for the exits), mirrored here instead
+ *  of collapsed into one. */
+const COMPACT_HINT_WIDTH = 35;
+/** Content width below which the hint row gives up the exits' gloss words
+ *  too, keeping only their keys ("enter" / "esc"). Sized to the exact width
+ *  of the compact row: the first segment's key and gloss, plus "· esc
+ *  cancel". */
+const NARROW_HINT_WIDTH = 23;
+
+/** The blank spacer plus the key-hint row, when the dialog draws its own —
+ *  the new-session dialog's `KEY_HINT_ROWS`, and one unit for the same
+ *  reason: the hints are a line under the dialog rather than a row inside it,
+ *  so the air above them belongs to them and not to whatever they follow. */
+const KEY_HINT_ROWS = 2;
 
 /** Border (2), the title, the turns row. Nothing below this is a dialog. */
 export const COPY_DIALOG_FLOOR_ROWS = 4;
 
 export interface CopyDialogRows {
   /** The blank row under the title. Pure air, given up first; the air around
-   *  the button row is the button unit's own. */
+   *  the button row is the button unit's own, and the blank above the hints
+   *  is theirs. */
   spacers: boolean;
   /** The Cancel/Copy button row with its leading and trailing blanks — one
    *  droppable unit, the same as the new-session and handoff dialogs', and
    *  given up for the same reason: the buttons duplicate Enter and Escape. */
   buttons: boolean;
-  /** The key-hint row. */
+  /** The key-hint row with its leading blank — one unit, `KEY_HINT_ROWS`. */
   hint: boolean;
   height: number;
 }
@@ -49,7 +62,7 @@ export function planCopyDialogRows(
   terminalHeight: number,
   keyHints: boolean,
 ): CopyDialogRows {
-  const hintRows = keyHints ? 1 : 0;
+  const hintRows = keyHints ? KEY_HINT_ROWS : 0;
   const withEverything = COPY_DIALOG_FLOOR_ROWS + 1 + 3 + hintRows;
   if (terminalHeight >= withEverything) {
     return {
@@ -68,7 +81,7 @@ export function planCopyDialogRows(
       height: withButtons,
     };
   }
-  const withHint = COPY_DIALOG_FLOOR_ROWS + 1;
+  const withHint = COPY_DIALOG_FLOOR_ROWS + KEY_HINT_ROWS;
   if (keyHints && terminalHeight >= withHint) {
     return { spacers: false, buttons: false, hint: true, height: withHint };
   }
@@ -198,6 +211,7 @@ export const CopyDialog: Component<CopyDialogProps> = (props) => {
       </Show>
 
       <Show when={plan().hint}>
+        <box height={1} />
         {/* The Footer's segments (`copyDialogHintSegments`), confirm first
           and Escape last in the shared order and colours; the middle is what
           a narrow surface gives up. */}
@@ -238,7 +252,7 @@ export const CopyDialog: Component<CopyDialogProps> = (props) => {
             <text fg={theme.red}>
               <strong>esc</strong>
             </text>
-            <Show when={contentWidth() >= COMPACT_HINT_WIDTH}>
+            <Show when={contentWidth() >= NARROW_HINT_WIDTH}>
               <box width={1} />
               <text fg={theme.overlay}>cancel</text>
             </Show>
