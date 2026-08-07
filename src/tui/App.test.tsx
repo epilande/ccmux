@@ -6818,6 +6818,24 @@ describe("App hand off to", () => {
     }
   });
 
+  it("does not fire the h accelerator on a modified keypress", async () => {
+    // Alt+H arrives as event.meta, which is also the chord that resizes the
+    // preview pane; the accelerator must not shadow that existing binding.
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      setup.mockInput.pressKey("h", { meta: true });
+      await settle();
+      await setup.renderOnce();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).not.toContain("pickatarget");
+      expect(posted).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
   it("carries the aim past the source row", async () => {
     const { posted, restore } = withDaemon();
     try {

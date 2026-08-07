@@ -1047,8 +1047,14 @@ export function App(props: AppProps) {
       return true;
     }
     // An item's own accelerator, for actions whose natural key means
-    // something else on the list and so cannot ride the fall-through.
-    const accelerated = items.find((i) => i.key === key);
+    // something else on the list and so cannot ride the fall-through. Gated
+    // to a bare keypress so a modified chord meant for something else (e.g.
+    // Alt+H resizing the preview pane) doesn't get shadowed by an item whose
+    // accelerator happens to share the same base key.
+    const accelerated =
+      !event.ctrl && !event.meta && !event.shift && !event.option
+        ? items.find((i) => i.key === key)
+        : undefined;
     if (accelerated) {
       // The action closes the menu itself, exactly as it does from Enter.
       accelerated.action();
