@@ -1006,9 +1006,10 @@ export function App(props: AppProps) {
   /**
    * Keys while a row menu is open.
    *
-   * Only the ones the menu itself answers to are taken; everything else
-   * closes the menu and falls through to its ordinary meaning, which is what
-   * this surface has always done with a menu on screen (a keypress means
+   * Only the ones the menu itself answers to are taken — navigation, Enter,
+   * esc/`m`, and any item's own `key` accelerator; everything else closes
+   * the menu and falls through to its ordinary meaning, which is what this
+   * surface has always done with a menu on screen (a keypress means
    * attention has moved on). Returning true here means the key was the
    * menu's and the caller must stop.
    */
@@ -1043,6 +1044,14 @@ export function App(props: AppProps) {
     if (key === "escape" || key === "m") {
       store.actions.hideContextMenu();
       store.actions.hideGroupContextMenu();
+      return true;
+    }
+    // An item's own accelerator, for actions whose natural key means
+    // something else on the list and so cannot ride the fall-through.
+    const accelerated = items.find((i) => i.key === key);
+    if (accelerated) {
+      // The action closes the menu itself, exactly as it does from Enter.
+      accelerated.action();
       return true;
     }
     return false;
@@ -1696,7 +1705,10 @@ export function App(props: AppProps) {
             {
               id: "handoff-to",
               label: "Hand off",
-              hint: "",
+              // Menu-local (`key`), unlike its neighbours' hints: on the
+              // list itself `h` collapses a group.
+              hint: "h",
+              key: "h",
               color: theme.text,
               action: contextMenuHandoff,
             },

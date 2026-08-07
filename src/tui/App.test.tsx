@@ -6801,6 +6801,23 @@ describe("App hand off to", () => {
     }
   });
 
+  it("opens the pick from the menu's h accelerator", async () => {
+    // `h` is menu-local (on the list it collapses a group), so it must act
+    // while the menu is up rather than falling through and dismissing it.
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await press("m");
+      await press("h");
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain("pickatarget");
+      expect(frame).toContain("esccancel");
+      expect(posted).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
   it("carries the aim past the source row", async () => {
     const { posted, restore } = withDaemon();
     try {
