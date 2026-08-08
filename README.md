@@ -262,7 +262,7 @@ Three toggles control what gets scanned: `searchPaneContent`, `searchPaneLines`,
 
 ### Spawning Sessions
 
-<img width="585" height="319" alt="file-2ef81c76776b5e0036d0426e31a5a668" src="https://github.com/user-attachments/assets/bc564279-ce90-4b77-8683-dbaf29f145a3" />
+<img width="460" alt="ccmux new-session dialog" src="https://github.com/user-attachments/assets/bc564279-ce90-4b77-8683-dbaf29f145a3" />
 
 Launch new agent sessions directly from the CLI:
 
@@ -325,9 +325,8 @@ isn't already ignoring that path, and nothing else in the file is touched.
 
 ### Moving Uncommitted Changes
 
-An experiment that turned into a real change has a way of ending up sitting
-dirty on `main`. `--with-changes` relocates that work into the worktree it
-creates, so the new agent starts on top of it and the checkout you left is
+`--with-changes` relocates the checkout's uncommitted work into the worktree
+it creates, so the new agent starts on top of it and the checkout you left is
 clean:
 
 ```bash
@@ -340,33 +339,29 @@ opens the new-session dialog already set to move: the destination is locked to
 a new worktree, an **Untracked** row appears, and the name and prompt stay
 editable.
 
-<img width="585" height="419" alt="file-53dbfd3921815533f41caf74c8812bd8" src="https://github.com/user-attachments/assets/bcea4d0d-6a19-4c7f-80c0-78528d1b57ee" />
+<img width="460" alt="ccmux Move changes to worktree dialog" src="https://github.com/user-attachments/assets/bcea4d0d-6a19-4c7f-80c0-78528d1b57ee" />
 
-Whatever the move leaves you holding, the picker says so and waits for a
-keypress rather than flashing it past: a failure that parked your work in a
-stash (with the command to get it back), a move that completed but could not
-drop its own backup entry, a staged/unstaged split it could not preserve, or a
-spawn that failed after the changes had already moved — naming the worktree
-they moved into. Only refusals that changed nothing (a name already taken,
-nothing to move) are a passing toast, since the fields to fix them are still
-in front of you. The sidebar toasts what a clean move did; the picker jumps
-straight into the new pane, as it does for every other spawn.
+The picker holds any outcome that needs your attention until a keypress: a
+failure that parked your work in a stash (with the command to get it back), a
+move that completed but could not drop its own backup entry, a staged/unstaged
+split it could not preserve, or a spawn that failed after the changes had
+already moved (naming the worktree they moved into). Only refusals that
+changed nothing (a name already taken, nothing to move) are a passing toast,
+since the fields to fix them are still in front of you. The sidebar toasts
+what a clean move did; the picker jumps straight into the new pane, as it does
+for every other spawn.
 
-Untracked files move by default (agents create new files constantly, and
-leaving them behind would strand exactly the work you are relocating).
-`--untracked copy` puts them in both places, `--untracked leave` keeps them
-where they are. Gitignored files are never part of this in any mode — not
-moved, not copied — because a `.env` sitting in an otherwise-new directory is
-not work to relocate; `worktree.symlinkDirectories` and `.worktreeinclude`
-cover those.
+Untracked files move by default (leaving them behind would strand the work
+you are relocating). `--untracked copy` puts them in both places,
+`--untracked leave` keeps them where they are. Gitignored files are never
+moved or copied in any mode; `worktree.symlinkDirectories` and
+`.worktreeinclude` cover those.
 
-The stash is the backup, and it is the first thing that happens. Your changes
-are stashed out of the checkout, the worktree is created, the entry is applied
-into it, and only then is the entry dropped. So there is a window where the
-work lives in a stash and nowhere else, and every failure inside it ends the
-same way: your checkout is put back as it was, and the stash entry holding
-your work is reported by sha whether or not the restore succeeded. Nothing is
-ever dropped before it has landed somewhere else.
+The move is stash-first: your changes are stashed out of the checkout, the
+worktree is created, the entry is applied into it, and only then is the entry
+dropped. If anything fails before the entry is dropped, your checkout is put
+back as it was, and the stash entry holding your work is reported by sha
+whether or not the restore succeeded.
 
 Staged and unstaged changes arrive as you left them where git allows it; if
 the split cannot be preserved, everything still moves and you are told to
@@ -379,11 +374,9 @@ it did not create.
 
 ### Forking Sessions
 
-Sometimes the interesting question is "what if it had gone the other way". Fork
-starts a second session that continues an existing conversation's history, in a
-pane beside the original, and leaves the original running and untouched. The
-agent is heading down path A; fork it and try path B side by side. (A source
-with no pane of its own gets a new window instead.)
+Fork starts a second session that continues an existing conversation's
+history, in a pane beside the original, and leaves the original running and
+untouched. (A source with no pane of its own gets a new window instead.)
 
 <kbd>F</kbd> in the picker, or **Fork** in a session's context menu, opens the
 new-session dialog over the row; Enter on it forks straight away, into a pane
@@ -392,10 +385,9 @@ but places the result like every other `ccmux spawn`, relative to the pane you
 run it from. Either way the new pane is tracked like any other session, with
 its own row, state and id.
 
-<img width="584" height="256" alt="file-d09a396a721fbef67b65b66da3dd0e88" src="https://github.com/user-attachments/assets/3b98af76-a599-4928-bc40-0f97506a92df" />
+<img width="460" alt="ccmux Fork session dialog" src="https://github.com/user-attachments/assets/3b98af76-a599-4928-bc40-0f97506a92df" />
 
-The fork starts in the source's directory by default, because that is where a
-side-by-side fork belongs. It is a default, not a limit: `--cwd` elsewhere is
+The fork starts in the source's directory by default. `--cwd` elsewhere is
 honored, since the fork resumes the source's transcript by path rather than by
 looking a session id up under the current directory.
 
@@ -411,10 +403,10 @@ The picker's version of that is the **Where** row in the dialog <kbd>F</kbd>
 opens. It starts on **This checkout**, so an untouched dialog is the plain fork
 beside the original; move it to **New worktree** and a **Name** row appears,
 previewing the `<branch>-fork` the daemon would derive and taking one of your
-own instead. The name is what tells two forks of a branch apart a week later.
-A **Source** row names the conversation being continued; everything else comes
-off the row. Where the source is not in a git repository the choice is locked
-to its own checkout, since there is nowhere for a linked one to go.
+own instead. A **Source** row names the conversation being continued;
+everything else comes off the row. Where the source is not in a git repository
+the choice is locked to its own checkout, since there is nowhere for a linked
+one to go.
 
 Fork needs two things, and the picker hides the action when either is missing:
 the agent has to declare how it forks (`forkCommand`), and ccmux has to know
@@ -427,7 +419,7 @@ verified. Adding another is one config line once you have checked it yourself
 
 ### Worktrees Panel
 
-Agents create git worktrees faster than anyone cleans them up, and the ones where work actually happened are the ones that stick around. After a branch is merged (and auto-deleted on GitHub), three leftovers stay on your machine: the worktree directory, the local branch, and often a tmux pane with a finished agent in it.
+After a branch is merged (and auto-deleted on GitHub), three leftovers stay on your machine: the worktree directory, the local branch, and often a tmux pane with a finished agent in it.
 
 <kbd>W</kbd> in the picker (or `Worktrees` on a group header) opens the Worktrees panel: every worktree of every repo in scope, main checkout first, with its branch, ahead/behind, uncommitted counts, open PR, and the agent living in it. <kbd>Enter</kbd> jumps to that agent, or starts one in a worktree that has none. <kbd>Tab</kbd> widens from the selected row's repo to all of them, <kbd>y</kbd> copies a path, and <kbd>d</kbd> reviews what the branch changed since it left the default branch (not just what is uncommitted, which is what <kbd>d</kbd> on a session row shows).
 
@@ -934,7 +926,7 @@ ccmux daemon status                        # prints the socket the running daemo
 
 A leading `/` means a socket path, anything else a label. Environment and config are the primary interface because the daemon is usually auto-started for you (it inherits your environment, so both reach it); the flag only applies to a `ccmux daemon start` you run yourself.
 
-Inside tmux, the client half of ccmux ignores the setting and uses the server you are attached to. You are physically on that server, so pointing the picker's pane actions at another one would be nonsense. The daemon always honors it, which is the point.
+Inside tmux, the client half of ccmux ignores the setting and uses the server you are attached to; the daemon always honors it, which is the point of the setting.
 
 > [!NOTE]
 > ccmux tracks exactly one tmux server. Pane ids (`%3`) are unique only within a server, and the daemon's marker directory and log watchers are process-global, so running two daemons against two servers is unsupported.
