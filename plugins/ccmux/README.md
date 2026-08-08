@@ -1,6 +1,6 @@
 # ccmux plugin
 
-A Claude Code plugin whose `dispatch` skill teaches your agent to drive other AI coding agents (Claude Code, Codex, Cursor, OpenCode, Pi, Gemini, or any custom agent) through `ccmux invoke`. Your LLM is the router; ccmux is the cross-harness substrate it dispatches work through.
+A Claude Code plugin whose `dispatch` and `relay` skills teach your agent to drive other AI coding agents (Claude Code, Codex, Cursor, OpenCode, Pi, Gemini, or any custom agent): `dispatch` launches and collects work through `ccmux invoke`, and `relay` moves output between sessions that already exist. Your LLM is the router; ccmux is the cross-harness substrate it dispatches work through.
 
 ## Prerequisite
 
@@ -27,18 +27,19 @@ claude plugin install ccmux@ccmux
 
 ## What it does
 
-The skill triggers when you ask your agent to coordinate, delegate, fan out, or pipeline work across multiple agents (for example, "plan with claude, implement with codex, search with gemini"). It teaches the mechanics of firing, polling, joining, cancelling, and reading worker output, plus where the invoke boundary is: when to hand a long or human-supervised job off to `ccmux spawn` (a live pane) instead of invoking it. You supply the agent-per-task policy in your prompt.
+The `dispatch` skill triggers when you ask your agent to coordinate, delegate, fan out, or pipeline work across multiple agents (for example, "plan with claude, implement with codex, search with gemini"). It teaches the mechanics of firing, polling, joining, cancelling, and reading worker output, plus where the invoke boundary is: when to hand a long or human-supervised job off to `ccmux spawn` (a live pane) instead of invoking it. You supply the agent-per-task policy in your prompt.
 
-It also covers moving output between sessions that already exist: reading a peer's last response with `ccmux last`, relaying one into another session with `ccmux handoff` (so the payload never passes through the orchestrator's context), and what to do with a `[ccmux handoff]` message when your agent is on the receiving end.
+The `relay` skill covers moving output between sessions that already exist: reading a peer's last response with `ccmux last`, relaying one into another session with `ccmux handoff` (so the payload never passes through the orchestrator's context), and what to do with a `[ccmux handoff]` message when your agent is on the receiving end.
 
-Once installed, the skill is available to your agent as `/ccmux:dispatch` (and triggers automatically from the descriptions above). See [`skills/dispatch/SKILL.md`](skills/dispatch/SKILL.md) for the full skill.
+Once installed, the skills are available to your agent as `/ccmux:dispatch` and `/ccmux:relay` (and trigger automatically from the descriptions above). See [`skills/dispatch/SKILL.md`](skills/dispatch/SKILL.md) and [`skills/relay/SKILL.md`](skills/relay/SKILL.md) for the full skills.
 
 ## Other agents
 
-The plugin wrapper is Claude Code specific, but the skill itself is a standard [Agent Skill](https://agentskills.io) written harness-agnostically: it needs only a shell and the ccmux CLI on `PATH`. To use it from another skills-capable agent (Codex, Cursor, OpenCode, and others), copy the skill directory into that agent's skills location, for example:
+The plugin wrapper is Claude Code specific, but the skills themselves are standard [Agent Skills](https://agentskills.io) written harness-agnostically: they need only a shell and the ccmux CLI on `PATH`. To use them from another skills-capable agent (Codex, Cursor, OpenCode, and others), copy the skill directories into that agent's skills location, for example:
 
 ```bash
 cp -r skills/dispatch ~/.codex/skills/dispatch
+cp -r skills/relay ~/.codex/skills/relay
 ```
 
 Check your agent's Agent Skills documentation for where it discovers skills.

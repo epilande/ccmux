@@ -113,7 +113,7 @@ ccmux setup
 | `ccmux kill <id>`                           | Kill a session's process                                                                                                      |
 | `ccmux restart <id>`                        | Kill and resume a session                                                                                                     |
 | `ccmux last <session-ref>`                  | Print a session's last response (`--turns <n>`, `--json`) ([docs](docs/handoff.md))                                           |
-| `ccmux handoff <from> <to>`                 | Hand a session's last response to another session (`--turns`, `--note`, `--spawn`) ([docs](docs/handoff.md))                  |
+| `ccmux handoff <from> [to]`                 | Hand a session's last response to another session (`--turns`, `--note`, `--spawn`, `--agent`, `--cwd`) ([docs](docs/handoff.md)) |
 | `ccmux send <id> <text>`                    | Send text to a session's tmux pane (multiline pastes as one message; `--no-enter` skips submit)                               |
 | `ccmux send <id> --stdin`                   | Same, reading the text from stdin instead of argv                                                                             |
 | `ccmux screen [id]`                         | Capture pane content                                                                                                          |
@@ -485,16 +485,16 @@ A handoff arrives with a provenance header naming the source session, agent, dir
 
 In the picker, the row menu's **Copy** opens a small dialog asking how much to take: it starts on the last response, so <kbd>Enter</kbd> copies that straight to your clipboard, while <kbd>j</kbd>/<kbd>k</kbd> or a digit counts up to 20 turns (which brings your own prompts along, formatted exactly as `ccmux last` prints them). **Hand off** starts a pick-target mode: the session list itself becomes the target picker, <kbd>j</kbd>/<kbd>k</kbd> move, and <kbd>Enter</kbd> (or a click) opens a dialog asking how many turns to send and offering a one-line note for the receiving agent. <kbd>Enter</kbd> there sends and <kbd>Esc</kbd> cancels the whole handoff. A queued handoff shows a **⇄** badge on the target row until it lands.
 
-### Dispatch Skill
+### Agent Skills
 
-This repo ships a `dispatch` [Agent Skill](https://agentskills.io) that teaches your coding agent to orchestrate other agents through `ccmux invoke` (firing, fan-out, joining, cancelling, and reading worker output). For Claude Code it installs as a plugin (this repo doubles as a plugin marketplace):
+This repo ships two [Agent Skills](https://agentskills.io) for your coding agent: `dispatch` teaches it to orchestrate other agents through `ccmux invoke` (firing, fan-out, joining, cancelling, and reading worker output), and `relay` teaches it to read a peer session's output with `ccmux last` and move it into another session with `ccmux handoff`. For Claude Code they install together as one plugin (this repo doubles as a plugin marketplace):
 
 ```
 /plugin marketplace add epilande/ccmux
 /plugin install ccmux@ccmux
 ```
 
-Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the same skill by copying it into their skills directory. The skill is additive glue for the ccmux CLI, which must be installed and on your `PATH`. See [`plugins/ccmux/README.md`](plugins/ccmux/README.md) for details.
+Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the same skills by copying them into their skills directory. Both are additive glue for the ccmux CLI, which must be installed and on your `PATH`. See [`plugins/ccmux/README.md`](plugins/ccmux/README.md) for details.
 
 ## ⌨️ Keyboard Controls
 
@@ -505,6 +505,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Jump to session       | <kbd>1</kbd>–<kbd>9</kbd>                                                          | Switch directly to session N                                                                                           |
 | Switch to session     | <kbd>Enter</kbd>                                                                   | Switch tmux to the selected pane                                                                                       |
 | Row menu              | <kbd>m</kbd>                                                                       | Open the selected row's (or group header's) context menu; <kbd>j</kbd>/<kbd>k</kbd> to move, <kbd>Enter</kbd> to run   |
+| Copy last response    | <kbd>y</kbd>                                                                       | Open the Copy dialog for the selected row: last response, or up to 20 turns                                            |
 | New session           | <kbd>n</kbd>                                                                       | Open the new-session dialog (agent, placement, prompt, worktree + name; directory derived from the selected row)       |
 | Search                | <kbd>/</kbd>                                                                       | Enter fuzzy search mode                                                                                                |
 | Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel                                                                                            |
