@@ -262,25 +262,27 @@ Three toggles control what gets scanned: `searchPaneContent`, `searchPaneLines`,
 
 ### Spawning Sessions
 
+<img width="585" height="319" alt="file-2ef81c76776b5e0036d0426e31a5a668" src="https://github.com/user-attachments/assets/bc564279-ce90-4b77-8683-dbaf29f145a3" />
+
 Launch new agent sessions directly from the CLI:
 
 ```bash
-ccmux spawn                                                  # Spawn claude (default) in a new tmux window
-ccmux spawn codex                                            # Spawn a specific agent
-ccmux spawn --split                                          # Split current pane instead of new window
-ccmux spawn --split h                                        # Split left/right ('v' is the stacked default)
-ccmux spawn --target %12                                     # Split (or place the window next to) a specific pane
-ccmux spawn --detach                                         # Don't switch to the new pane
-ccmux spawn --cwd ~/proj                                     # Set working directory
-ccmux spawn --resume <id>                                    # Resume an existing session
-ccmux spawn --fork <id>                                      # Branch an existing session into a new one
-ccmux spawn --prompt "fix the tests"                         # Send an initial prompt
-ccmux spawn --worktree --prompt "fix flicker"                # Spawn into a git worktree (name derived from the prompt)
-ccmux spawn --worktree fix-flicker                           # Spawn into a named worktree, creating it if needed
-ccmux spawn --worktree --base develop --prompt "fix flicker" # Branch the new worktree from develop
-ccmux spawn --worktree fix-flicker --with-changes            # Move this checkout's uncommitted work into it
+ccmux spawn                                                        # Spawn claude (default) in a new tmux window
+ccmux spawn codex                                                  # Spawn a specific agent
+ccmux spawn --split                                                # Split current pane instead of new window
+ccmux spawn --split h                                              # Split left/right ('v' is the stacked default)
+ccmux spawn --target %12                                           # Split (or place the window next to) a specific pane
+ccmux spawn --detach                                               # Don't switch to the new pane
+ccmux spawn --cwd ~/proj                                           # Set working directory
+ccmux spawn --resume <id>                                          # Resume an existing session
+ccmux spawn --fork <id>                                            # Branch an existing session into a new one
+ccmux spawn --prompt "fix the tests"                               # Send an initial prompt
+ccmux spawn --worktree --prompt "fix flicker"                      # Spawn into a git worktree (name derived from the prompt)
+ccmux spawn --worktree fix-flicker                                 # Spawn into a named worktree, creating it if needed
+ccmux spawn --worktree --base develop --prompt "fix flicker"       # Branch the new worktree from develop
+ccmux spawn --worktree fix-flicker --with-changes                  # Move this checkout's uncommitted work into it
 ccmux spawn --worktree fix-flicker --with-changes --untracked copy # Untracked files land in both
-ccmux spawn --fork <id> --worktree                           # Fork into a fresh worktree off the source's branch
+ccmux spawn --fork <id> --worktree                                 # Fork into a fresh worktree off the source's branch
 ```
 
 Split directions use tmux's own vocabulary: `h` puts the new pane beside the
@@ -338,6 +340,8 @@ opens the new-session dialog already set to move: the destination is locked to
 a new worktree, an **Untracked** row appears, and the name and prompt stay
 editable.
 
+<img width="585" height="419" alt="file-53dbfd3921815533f41caf74c8812bd8" src="https://github.com/user-attachments/assets/bcea4d0d-6a19-4c7f-80c0-78528d1b57ee" />
+
 Whatever the move leaves you holding, the picker says so and waits for a
 keypress rather than flashing it past: a failure that parked your work in a
 stash (with the command to get it back), a move that completed but could not
@@ -388,6 +392,8 @@ but places the result like every other `ccmux spawn`, relative to the pane you
 run it from. Either way the new pane is tracked like any other session, with
 its own row, state and id.
 
+<img width="584" height="256" alt="file-d09a396a721fbef67b65b66da3dd0e88" src="https://github.com/user-attachments/assets/3b98af76-a599-4928-bc40-0f97506a92df" />
+
 The fork starts in the source's directory by default, because that is where a
 side-by-side fork belongs. It is a default, not a limit: `--cwd` elsewhere is
 honored, since the fork resumes the source's transcript by path rather than by
@@ -424,6 +430,8 @@ verified. Adding another is one config line once you have checked it yourself
 Agents create git worktrees faster than anyone cleans them up, and the ones where work actually happened are the ones that stick around. After a branch is merged (and auto-deleted on GitHub), three leftovers stay on your machine: the worktree directory, the local branch, and often a tmux pane with a finished agent in it.
 
 <kbd>W</kbd> in the picker (or `Worktrees` on a group header) opens the Worktrees panel: every worktree of every repo in scope, main checkout first, with its branch, ahead/behind, uncommitted counts, open PR, and the agent living in it. <kbd>Enter</kbd> jumps to that agent, or starts one in a worktree that has none. <kbd>Tab</kbd> widens from the selected row's repo to all of them, <kbd>y</kbd> copies a path, and <kbd>d</kbd> reviews what the branch changed since it left the default branch (not just what is uncommitted, which is what <kbd>d</kbd> on a session row shows).
+
+https://github.com/user-attachments/assets/cc25199b-f563-4cda-8b59-6e95c449a94a
 
 The panel loads in two passes: the list paints immediately from local git state, then the prune classification (which fetches and asks GitHub) merges in and sinks the finished worktrees to the bottom of their group. Those, and only those, become selectable for removal, showing why each one is removable. <kbd>Space</kbd> selects a row, and <kbd>x</kbd> removes what you selected after a confirmation that spells out what goes with it; on a single clean removable row, <kbd>x</kbd> with nothing selected takes that row. `ccmux worktree prune` runs the same classification from the command line:
 
@@ -480,6 +488,8 @@ ccmux handoff self --spawn             # ...into a session that does not exist y
 ```
 
 Both take a **session reference**, not just an id: a session id, `%pane`, `session:window.pane`, `self`, an agent type, or a project name. Fuzzy references are scoped by where you are sitting (same window, then same tmux session, then everything), and an ambiguous one is refused with the candidate list rather than guessed at.
+
+https://github.com/user-attachments/assets/9d73a646-a3cf-4da8-9c8c-2cdb2798e9e2
 
 A handoff arrives with a provenance header naming the source session, agent, directory, branch, and time, and is **only ever typed into an idle composer**: a target that is mid-turn gets it queued and delivered when the turn ends, and a target with a pending prompt is refused.
 
