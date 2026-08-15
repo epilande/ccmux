@@ -235,7 +235,7 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
     >
       <box height={3} flexDirection="column">
         <box flexDirection="row" gap={1}>
-          <text>
+          <text fg={theme.text}>
             <b>{props.header.label}</b>
           </text>
           <text fg={theme.subtext}>({props.header.count} sessions)</text>
