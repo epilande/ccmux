@@ -348,6 +348,16 @@ class NativeLogTreeWatcher extends EventEmitter implements LogTreeWatcher {
 
     if (stat.isDirectory()) {
       const node = this.getOrCreateNode(abs);
+      // The event names this directory: direct evidence its own namespace
+      // may have changed, which outranks a cached signature that a rapid
+      // add/remove pair can leave unchanged on coarse-timestamp
+      // filesystems (see DirSig). Clear only this node's own gates — the
+      // burst model above surfaces a change as the touched file (ungated
+      // branch below), its parent directory (this branch), or the root
+      // (null branch, which clears the whole tree), so deeper levels keep
+      // their gates and the descent stays cheap.
+      node.walkSig = null;
+      node.sweepSig = null;
       this.walk(abs, node, segments);
       this.sweep(abs, node);
       return;

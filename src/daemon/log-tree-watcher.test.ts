@@ -243,6 +243,41 @@ describe("LogTreeWatcher (native)", () => {
     expect(unlinked).toContain(gone);
   });
 
+  it("trusts a named directory event over a colliding cached signature", async () => {
+    const project = join(root, "proj-a");
+    mkdirSync(project);
+    const gone = join(project, "gone.jsonl");
+    writeFileSync(gone, "x\n");
+    await startWatcher(1);
+
+    const evt = watcher as unknown as Internals;
+    evt.handleEvent(null); // populate both gate signatures for proj-a
+
+    const fresh = join(project, "fresh.jsonl");
+    writeFileSync(fresh, "x\n");
+    unlinkSync(gone);
+
+    // Model a filesystem whose timestamp granularity lets the rapid pair of
+    // mutations retain the named directory's cached signature. The event
+    // names proj-a itself, so the gate must yield to that direct evidence.
+    const current = statSync(project, { bigint: true });
+    const collidingSig = {
+      mtimeNs: current.mtimeNs,
+      ctimeNs: current.ctimeNs,
+    };
+    const projectNode = evt.rootNode.childDirs.get(project) as TreeNode & {
+      walkSig: typeof collidingSig;
+      sweepSig: typeof collidingSig;
+    };
+    projectNode.walkSig = collidingSig;
+    projectNode.sweepSig = collidingSig;
+
+    evt.handleEvent("proj-a");
+
+    expect(added).toContain(fresh);
+    expect(unlinked).toContain(gone);
+  });
+
   it("falls back to chokidar without throwing when the root is missing", async () => {
     // Parity with the pre-native behavior: a missing log dir (fresh
     // machine, agent never run) must construct and reach ready without
