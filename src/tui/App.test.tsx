@@ -1189,6 +1189,11 @@ describe("App kill/restart dispatch routing", () => {
       await killSelected();
       expect(calls.some((c) => c.url.includes("/sessions/s1/kill"))).toBe(true);
       expect(calls.some((c) => c.url.includes("/invoke/"))).toBe(false);
+      // The successful kill response removes normal rows immediately instead
+      // of waiting for the daemon's next reconciliation scan.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await setup.renderOnce();
+      expect(squish(setup.captureCharFrame())).not.toContain(squish("myapp"));
     } finally {
       restore();
     }

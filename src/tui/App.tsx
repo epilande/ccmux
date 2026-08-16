@@ -1919,9 +1919,11 @@ export function App(props: AppProps) {
   }
 
   /** Kill a normal session, but cancel an invoke-driven row cleanly
-   *  (see killActionPath). A non-OK response (e.g. the daemon refusing to
-   *  kill a background row with no stop command) surfaces via the same
-   *  action-result toast as the other failure paths above, rather than
+   *  (see killActionPath). Normal rows are removed optimistically after the
+   *  daemon accepts SIGTERM; background and invoke rows keep their own
+   *  asynchronous teardown lifecycle. A non-OK response (e.g. the daemon
+   *  refusing to kill a background row with no stop command) surfaces via the
+   *  same action-result toast as the other failure paths above, rather than
    *  silently dropping the failure. */
   function killOrCancelSession(id: string) {
     const session = store.state.sessions.find((s) => s.id === id);
@@ -1929,12 +1931,18 @@ export function App(props: AppProps) {
     fetch(`${getDaemonUrl()}${path}`, { method: "POST" })
       .then(async (response) => {
         if (response.ok) {
-          // Every other row dies with its pane, which is feedback enough. A
-          // background row is removed only once the supervisor drops it from
-          // the roster, so without this `x` reads as having done nothing and
-          // invites a retry.
+          // A background row is removed only once the supervisor drops it from
+          // the roster, so without this toast `x` reads as having done nothing
+          // and invites a retry.
           if (session?.trackingMode === "background") {
             store.actions.showToast("Stopping agent...");
+            return;
+          }
+          // The daemon's next scan will emit the authoritative removal event,
+          // but hiding a normal row now avoids making the user wait for it.
+          // Invoke-backed rows must remain until their invoker reports teardown.
+          if (session && session.originInvocationId === null) {
+            store.actions.removeSession(id);
           }
           return;
         }
