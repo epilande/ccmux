@@ -29,6 +29,20 @@ export function isCodexPluginHostCwd(cwd: string | null): boolean {
 }
 
 /**
+ * Codex 0.146 starts an internal code-mode host in the agent's cwd. Its
+ * executable contains the standalone word `codex`, so the built-in Codex
+ * process matcher sees it as another agent process. Because it is a child of
+ * the real Codex binary on the same tty, wrapper collapsing would then keep
+ * the host and discard Codex itself. Besides reporting the wrong PID, that
+ * makes the hook marker look dead and removes the authoritative hook state.
+ */
+export function isCodexCodeModeHostCommand(command: string): boolean {
+  const firstToken = command.trim().split(/\s+/)[0] ?? "";
+  const executable = firstToken.replace(/^['"]|['"]$/g, "");
+  return /(?:^|[/\\])codex-code-mode-host(?:\.exe)?$/i.test(executable);
+}
+
+/**
  * Format: [[DD-]HH:]MM:SS
  * Examples: "00:05", "01:30:15", "2-05:30:00"
  */
@@ -331,11 +345,11 @@ export function parsePsOutput(
  * 1. **tty filter** — what keeps daemonized and pipe-stdio processes from
  *    becoming sessions. A subprocess-mode invoke (`codex exec` and friends,
  *    spawned with piped stdio) is dropped here.
- * 2. **plugin-host filter BEFORE `dropWrapperParents`** (see
- *    {@link isCodexPluginHostCwd}): the computer-use host runs on the same
- *    tty as, and is a direct child of, the real codex process, so it matches
- *    the codex agent def and would otherwise evict the real codex as a
- *    "wrapper" via its own ppid link, leaving the pane with no codex entry.
+ * 2. **internal-host filters BEFORE `dropWrapperParents`** (see
+ *    {@link isCodexPluginHostCwd} and {@link isCodexCodeModeHostCommand}):
+ *    these hosts run on the same tty as, and are children of, the real Codex
+ *    process. If retained, they evict the real Codex as a "wrapper" via their
+ *    ppid links.
  */
 export function resolveDiscoveredProcesses(
   matched: MatchedProcess[],
@@ -345,7 +359,11 @@ export function resolveDiscoveredProcesses(
     p.tty ? [{ ...p, tty: p.tty, cwd: lsofByPid.get(p.pid)?.cwd ?? null }] : [],
   );
 
-  const nonPluginHosts = withTty.filter((p) => !isCodexPluginHostCwd(p.cwd));
+  const nonPluginHosts = withTty.filter(
+    (p) =>
+      !isCodexPluginHostCwd(p.cwd) &&
+      !(p.agentType === "codex" && isCodexCodeModeHostCommand(p.command)),
+  );
 
   return dropWrapperParents(nonPluginHosts).map((p) => ({
     pid: p.pid,
