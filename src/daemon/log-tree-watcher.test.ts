@@ -243,6 +243,40 @@ describe("LogTreeWatcher (native)", () => {
     expect(unlinked).toContain(gone);
   });
 
+  it("trusts a named directory event over a colliding cached signature", async () => {
+    const project = join(root, "proj-a");
+    mkdirSync(project);
+    const gone = join(project, "gone.jsonl");
+    writeFileSync(gone, "x\n");
+    await startWatcher(1);
+
+    const evt = watcher as unknown as Internals;
+
+    const fresh = join(project, "fresh.jsonl");
+    writeFileSync(fresh, "x\n");
+    unlinkSync(gone);
+
+    // Model a filesystem whose timestamp granularity lets the rapid pair of
+    // mutations retain the named directory's cached signature. The event
+    // names proj-a itself, so the gate must yield to that direct evidence.
+    const current = statSync(project, { bigint: true });
+    const collidingSig = {
+      mtimeNs: current.mtimeNs,
+      ctimeNs: current.ctimeNs,
+    };
+    const projectNode = evt.rootNode.childDirs.get(project) as TreeNode & {
+      walkSig: typeof collidingSig;
+      sweepSig: typeof collidingSig;
+    };
+    projectNode.walkSig = collidingSig;
+    projectNode.sweepSig = collidingSig;
+
+    evt.handleEvent("proj-a");
+
+    expect(added).toContain(fresh);
+    expect(unlinked).toContain(gone);
+  });
+
   it("falls back to chokidar without throwing when the root is missing", async () => {
     // Parity with the pre-native behavior: a missing log dir (fresh
     // machine, agent never run) must construct and reach ready without
@@ -286,25 +320,34 @@ describe("LogTreeWatcher (native)", () => {
     // Force the collision precisely: make the cached signature's mtime equal
     // the current mtime but its ctime differ. A gate keyed on mtime alone
     // would skip and silently lose the unlink.
-    mkdirSync(join(root, "proj-a"));
-    const a = join(root, "proj-a", "a.jsonl");
-    const b = join(root, "proj-a", "b.jsonl");
+    //
+    // The collision goes on a CHILD of the named directory, not on the named
+    // directory itself: handleEvent clears the named node's own gates before
+    // reconciling it, so a collision injected there would be discarded and
+    // this test would pass without ever consulting the ctime term. Naming the
+    // parent keeps the child's gate live, which is the only path that still
+    // reads it. (This doubles as the one case covering a named intermediate
+    // ancestor whose descendant carries a cached signature.)
+    const sess = join(root, "proj-a", "sess");
+    mkdirSync(sess, { recursive: true });
+    const a = join(sess, "a.jsonl");
+    const b = join(sess, "b.jsonl");
     writeFileSync(a, "x\n");
     writeFileSync(b, "x\n");
-    await startWatcher(1);
+    await startWatcher(2);
 
     const evt = watcher as unknown as Internals;
-    evt.handleEvent("proj-a"); // cache proj-a's sweepSig
-    const projNode = evt.rootNode.childDirs.get(
-      join(root, "proj-a"),
-    ) as unknown as {
+    evt.handleEvent("proj-a"); // cache sess's sweepSig via the descent
+    const sessNode = evt.rootNode.childDirs
+      .get(join(root, "proj-a"))
+      ?.childDirs.get(sess) as unknown as {
       sweepSig: { mtimeNs: bigint; ctimeNs: bigint } | null;
     };
-    expect(projNode.sweepSig).not.toBeNull();
+    expect(sessNode.sweepSig).not.toBeNull();
 
     unlinkSync(b);
-    const cur = statSync(join(root, "proj-a"), { bigint: true });
-    projNode.sweepSig = { mtimeNs: cur.mtimeNs, ctimeNs: cur.ctimeNs - 1n };
+    const cur = statSync(sess, { bigint: true });
+    sessNode.sweepSig = { mtimeNs: cur.mtimeNs, ctimeNs: cur.ctimeNs - 1n };
     evt.handleEvent("proj-a");
 
     expect(unlinked).toContain(b);
