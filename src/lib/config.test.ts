@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "os";
 import { join } from "path";
 import {
   PROJECTS_DIR,
+  getPiAgentDir,
   resolveClaudeProjectDirs,
   resolvedHomeDir,
 } from "./config";
@@ -68,6 +69,48 @@ describe("resolveClaudeProjectDirs", () => {
       PROJECTS_DIR,
       "/a/.claude/projects",
     ]);
+  });
+});
+
+describe("getPiAgentDir", () => {
+  it("uses Pi's default agent directory without an override", () => {
+    expect(getPiAgentDir(undefined)).toBe(join(homedir(), ".pi", "agent"));
+  });
+
+  it("uses PI_CODING_AGENT_DIR verbatim when it is absolute", () => {
+    expect(getPiAgentDir("/tmp/pi-agent")).toBe("/tmp/pi-agent");
+  });
+
+  it("expands a leading tilde like Pi", () => {
+    expect(getPiAgentDir("~/.pi-work/agent")).toBe(
+      join(homedir(), ".pi-work", "agent"),
+    );
+  });
+
+  it("treats an empty override as unset", () => {
+    expect(getPiAgentDir("")).toBe(join(homedir(), ".pi", "agent"));
+  });
+
+  it("initializes the extension path from PI_CODING_AGENT_DIR", () => {
+    const agentDir = "/tmp/ccmux-pi-agent";
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        "--eval",
+        'import { PI_EXTENSION_FILE } from "./src/lib/config.ts"; console.log(PI_EXTENSION_FILE)',
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(new TextDecoder().decode(result.stdout).trim()).toBe(
+      join(agentDir, "extensions", "ccmux.js"),
+    );
   });
 });
 
