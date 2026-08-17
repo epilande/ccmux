@@ -351,11 +351,20 @@ class NativeLogTreeWatcher extends EventEmitter implements LogTreeWatcher {
       // The event names this directory: direct evidence its own namespace
       // may have changed, which outranks a cached signature that a rapid
       // add/remove pair can leave unchanged on coarse-timestamp
-      // filesystems (see DirSig). Clear only this node's own gates — the
-      // burst model above surfaces a change as the touched file (ungated
-      // branch below), its parent directory (this branch), or the root
-      // (null branch, which clears the whole tree), so deeper levels keep
-      // their gates and the descent stays cheap.
+      // filesystems (see DirSig). Clear only this node's own gates, which
+      // covers the reported case: the change is directly inside the named
+      // directory. Deeper levels keep theirs, so the descent stays cheap.
+      //
+      // That is a scoping decision, not a proof of coverage. A burst can
+      // surface as a path outside the file/parent/root trichotomy (the
+      // handleGone comment below documents one: a delete coalescing into a
+      // single too-deep child's event), so an event naming a non-parent
+      // ANCESTOR still descends into gated children and can be swallowed by
+      // a collision below. Only codex reaches that (depth 4); claude and
+      // copilot put a session file's parent directly under the root, so the
+      // named directory is always the parent. Clearing the whole subtree
+      // here would close it, at a cost that scales with the subtree rather
+      // than with the change.
       node.walkSig = null;
       node.sweepSig = null;
       this.walk(abs, node, segments);
