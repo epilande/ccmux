@@ -149,11 +149,13 @@ export const CURSOR_HOOKS_FILE = join(CURSOR_DIR, "hooks.json");
 /**
  * pi's own directory. Read-only except during `ccmux setup --agent pi`,
  * which drops a bundled JS extension into the auto-discovered extensions
- * dir. pi resolves this dir as `~/.pi/agent` unconditionally (no XDG/env
- * override; source: pi `config.ts` `getAgentDir()` -> `join(homedir(),
- * ".pi", "agent")`).
+ * dir. Honors Pi's `PI_CODING_AGENT_DIR` override.
  */
-export const PI_AGENT_DIR = join(homedir(), ".pi", "agent");
+export function getPiAgentDir(agentDir: string | undefined): string {
+  return agentDir ? expandHome(agentDir) : join(homedir(), ".pi", "agent");
+}
+
+export const PI_AGENT_DIR = getPiAgentDir(process.env.PI_CODING_AGENT_DIR);
 export const PI_EXTENSION_DIR = join(PI_AGENT_DIR, "extensions");
 export const PI_EXTENSION_FILE = join(PI_EXTENSION_DIR, "ccmux.js");
 
@@ -162,10 +164,10 @@ export const PI_EXTENSION_FILE = join(PI_EXTENSION_DIR, "ccmux.js");
  * which drops a bundled JS extension into the auto-discovered extensions dir.
  * The `PI_CONFIG_DIR` join below is deliberately BUG-COMPATIBLE with omp,
  * which joins the env value verbatim, so do NOT "fix" this to `resolve()`:
- * that would write the extension somewhere omp never reads. Upstream pi does
- * not honor the env var, so the `PI_*` constants above stay unconditional
- * `~/.pi`. Further omp relocations (profile dirs, XDG state) are deliberately
- * not modeled; evidence in docs/agent-adapters.md#omp-specific-caveats.
+ * that would write the extension somewhere omp never reads. Pi's path is
+ * resolved separately above. Further omp relocations (profile dirs, XDG state)
+ * are deliberately not modeled; evidence in
+ * docs/agent-adapters.md#omp-specific-caveats.
  */
 export const OMP_AGENT_DIR = join(
   homedir(),
