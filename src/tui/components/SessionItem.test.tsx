@@ -1,9 +1,11 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
+import { RGBA, type CapturedFrame } from "@opentui/core";
 import { createSignal } from "solid-js";
 import { SessionItem, abbreviateTarget, alignText } from "./SessionItem";
 import { TickContext } from "../store";
+import { theme } from "../theme";
 import { mockEnrichedSession } from "./test-helpers";
 import { displayWidth } from "../utils/format";
 import { HANDOFF_BADGE } from "./session-columns";
@@ -1349,5 +1351,67 @@ describe("SessionItem right-aligned fields", () => {
       100,
     );
     expect(frame).toContain("予算パイプライン");
+  });
+});
+
+// Regression test for issue #142: the project-name span passed `undefined`
+// as its fg fallback (`dimColor(ctx, undefined)`), and OpenTUI's <text>
+// defaults an undefined fg to opaque white, so the project name rendered
+// white on every theme instead of following theme.text. captureCharFrame()
+// is text-only (see SessionItem.pr-color.test.tsx), so color must be
+// asserted via captureSpans() instead. Width is narrowed to keep the project
+// cell in "dirname" mode (bare "myapp"), below the "full" mode breakpoint
+// that would also draw a separate prefix span.
+describe("SessionItem project name color", () => {
+  function projectSpanFg(
+    frame: CapturedFrame,
+  ): [number, number, number, number] {
+    for (const line of frame.lines) {
+      for (const span of line.spans) {
+        if (span.text.includes("myapp")) return span.fg.toInts();
+      }
+    }
+    throw new Error('project span ("myapp") not found in frame');
+  }
+
+  const hex = (h: string) => RGBA.fromHex(h).toInts();
+
+  it("renders theme.text, not opaque white, for a plain row", async () => {
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionItem
+            session={mockEnrichedSession()}
+            selected={false}
+            index={0}
+            previewWidth={30}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 70, height: 3 },
+    );
+    await setup.renderOnce();
+    expect(projectSpanFg(setup.captureSpans())).toEqual(hex(theme.text));
+  });
+
+  it("keeps a dimmed row muted (theme.border)", async () => {
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionItem
+            session={mockEnrichedSession()}
+            selected={false}
+            index={0}
+            previewWidth={30}
+            dimmed
+          />
+        </TickContext.Provider>
+      ),
+      { width: 70, height: 3 },
+    );
+    await setup.renderOnce();
+    expect(projectSpanFg(setup.captureSpans())).toEqual(hex(theme.border));
   });
 });
