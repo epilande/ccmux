@@ -449,7 +449,7 @@ export const Preview: Component<PreviewProps> = (props) => {
         <box height={4} flexDirection="column">
           <box flexDirection="row">
             <box flexGrow={1}>
-              <text>
+              <text fg={theme.text}>
                 <b>{props.session!.project}</b>
               </text>
             </box>

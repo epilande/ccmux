@@ -34,7 +34,7 @@ export const Header: Component<HeaderProps> = (props) => {
     <box width="100%" height={1} paddingLeft={1} paddingRight={1}>
       <box flexDirection="row" width="100%">
         <text fg={c(dotColor(props.connectionState))}>● </text>
-        <text fg={c(undefined)}>
+        <text fg={c(theme.text)}>
           <b>Sessions</b>
         </text>
         <text fg={c(theme.overlay)}>
