@@ -424,10 +424,6 @@ const FieldCell: Component<{
       // budget even while fitting `maxBranchLen`.
       const highlightUnbounded = () =>
         !!(ctx.highlights?.project || ctx.highlights?.gitBranch);
-      const dirnameColor = () =>
-        ctx.isActiveSession && !ctx.selected
-          ? dimColor(ctx, theme.text)
-          : dimColor(ctx, undefined);
       return (
         // When a prompt shares this row (inline mode), the prompt is the
         // flexible filler and the project must NOT shrink below its fitted
@@ -448,14 +444,14 @@ const FieldCell: Component<{
               <HighlightedText
                 text={ctx.highlights?.project ?? ""}
                 highlightColor={dimColor(ctx, theme.yellow)}
-                baseColor={dimColor(ctx, undefined)}
+                baseColor={dimColor(ctx, theme.text)}
               />
             }
           >
             <Show when={fitted().prefix}>
               <text fg={dimColor(ctx, theme.subtext)}>{fitted().prefix}</text>
             </Show>
-            <text fg={dirnameColor()}>
+            <text fg={dimColor(ctx, theme.text)}>
               <Bold when={ctx.selected || !!ctx.isActiveSession}>
                 {fitted().dirname}
               </Bold>
