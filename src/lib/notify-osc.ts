@@ -6,8 +6,9 @@
  * Dependency-free (like `src/lib/notify.ts`) so the daemon and `ccmux notify`
  * share the builders; every I/O boundary is injectable for tests. Kitty
  * clients get OSC 99, everything else OSC 9, wrapped in tmux passthrough
- * framing, which requires `allow-passthrough on|all` (probed with a
- * once-per-daemon warning in `notify-delivery.ts`).
+ * framing (twice when the attached client is itself tmux/screen), which
+ * requires `allow-passthrough on|all` (probed with a once-per-daemon warning
+ * in `notify-delivery.ts`).
  *
  * Informational rung: `actions`/`reply`/`sound` are never read (a written
  * escape has no back-channel), retraction is a no-op, delivery is
@@ -110,17 +111,41 @@ export function isKittyTermnames(termnames: string): boolean {
     .some((name) => name.toLowerCase().includes("kitty"));
 }
 
+/** True when any attached client's terminfo name marks the client as itself a
+ * terminal multiplexer (`tmux`, `screen`, or a `tmux-`/`screen-` variant like
+ * `tmux-256color`), i.e. the pane's tmux is nested inside another one. Same
+ * input as {@link isKittyTermnames}: the raw stdout of
+ * `tmux list-clients -F '#{client_termname}'` (one per line). */
+export function isMultiplexerTermnames(termnames: string): boolean {
+  return termnames.split("\n").some((line) => {
+    const name = line.trim().toLowerCase();
+    return (
+      name === "tmux" ||
+      name === "screen" ||
+      name.startsWith("tmux-") ||
+      name.startsWith("screen-")
+    );
+  });
+}
+
 /** Composes the final, passthrough-wrapped sequence for a payload, folding the
- * subtitle (event line) into the body via {@link foldSubtitleIntoBody}. */
+ * subtitle (event line) into the body via {@link foldSubtitleIntoBody}.
+ *
+ * `clientIsMultiplexer` means the attached client is another multiplexer, so a
+ * single passthrough layer is consumed by the inner tmux and the bare escape
+ * then dies at the outer one; wrapping twice makes the sequence survive both.
+ * A false negative simply degrades to the single-wrap behavior. */
 export function buildPassthroughSequence(
   payload: NotificationPayload,
   isKitty: boolean,
+  clientIsMultiplexer = false,
 ): string {
   const body = foldSubtitleIntoBody(payload);
   const raw = isKitty
     ? buildOsc99Sequence(payload.sessionId, payload.title, body)
     : buildOsc9Sequence(payload.title, body);
-  return wrapTmuxPassthrough(raw);
+  const wrapped = wrapTmuxPassthrough(raw);
+  return clientIsMultiplexer ? wrapTmuxPassthrough(wrapped) : wrapped;
 }
 
 /** Default tty writer: write-only and non-blocking, so a flow-controlled or
@@ -164,7 +189,8 @@ export function deliverOscNotification(
       : ["list-clients", "-F", "#{client_termname}"],
   );
   const isKitty = termnames ? isKittyTermnames(termnames) : false;
-  const sequence = buildPassthroughSequence(payload, isKitty);
+  const nested = termnames ? isMultiplexerTermnames(termnames) : false;
+  const sequence = buildPassthroughSequence(payload, isKitty, nested);
   const write = deps.writeToTty ?? defaultWriteToTty;
   try {
     write(tty, sequence);
