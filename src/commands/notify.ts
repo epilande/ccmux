@@ -12,6 +12,7 @@ import { DbusNotifier } from "../lib/notify-dbus";
 import {
   deliverOscNotification,
   isKittyTermnames,
+  isMultiplexerTermnames,
   probeAllowPassthrough,
 } from "../lib/notify-osc";
 import { DAEMON_HOST, DAEMON_PORT } from "../lib/config";
@@ -294,7 +295,10 @@ function runOscFlow(
     "#{client_termname}",
   ]);
   const format =
-    termnames && isKittyTermnames(termnames) ? "OSC 99 (kitty)" : "OSC 9";
+    (termnames && isKittyTermnames(termnames) ? "OSC 99 (kitty)" : "OSC 9") +
+    (termnames && isMultiplexerTermnames(termnames)
+      ? " via nested tmux passthrough"
+      : "");
   console.log("Backend: osc");
   console.log(`Pane tty: ${tty}`);
   console.log(`Sequence: ${format}`);
