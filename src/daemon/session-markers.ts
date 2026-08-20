@@ -18,7 +18,7 @@ export interface SessionPidMarker {
   session_id: string;
   transcript_path?: string;
   timestamp: number;
-  state?: "idle" | "working" | "waiting_permission";
+  state?: "idle" | "working" | "waiting_permission" | "waiting_question";
   state_timestamp?: number;
   pending_tool?: string;
   permission_context?: string;

@@ -117,6 +117,49 @@ describe("terminal-detector", () => {
     expect(result.pendingTool).toBe("Command");
   });
 
+  describe("OpenCode question picker (issue #137)", () => {
+    // Verbatim `tmux capture-pane -p` excerpt from a real OpenCode 1.18.15
+    // pane with the question-tool picker open (2026-08-20, right-hand
+    // sidebar columns elided). The picker replaces the composer footer, so
+    // the `esc interrupt` working match disappears exactly when it opens.
+    const QUESTION_PICKER = `  ┃
+  ┃  Which of these three colors do you prefer?
+  ┃
+  ┃  1. Red
+  ┃     Prefer the color red
+  ┃  2. Green
+  ┃     Prefer the color green
+  ┃  3. Blue
+  ┃     Prefer the color blue
+  ┃  4. Type your own answer
+  ┃
+  ┃  ↑↓ select  enter submit  esc dismiss`;
+
+    it("detects the open picker as waiting/question", () => {
+      const result = detectTerminalStatus(QUESTION_PICKER, opencode);
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("question");
+      expect(result.pendingTool).toBeNull();
+    });
+
+    it("'esc dismiss' alone in prose does not match (matchAll pair)", () => {
+      const result = detectTerminalStatus(
+        "the footer says esc dismiss when a question is open",
+        opencode,
+      );
+      expect(result.status).toBe("idle");
+      expect(result.attentionType).toBeNull();
+    });
+
+    it("a permission dialog outranks picker remnants (rule order)", () => {
+      const result = detectTerminalStatus(
+        `Allow once  Allow always  Reject\n  ↑↓ select  enter submit  esc dismiss`,
+        opencode,
+      );
+      expect(result.attentionType).toBe("permission");
+    });
+  });
+
   it("strips ANSI before pattern matching", () => {
     const ansiPrompt = "\u001B[31mAllow command?\u001B[0m";
     const result = detectTerminalStatus(ansiPrompt, codex);

@@ -362,6 +362,13 @@ export function markerStatusState(marker: SessionPidMarker): CascadeState {
       pendingTool: marker.pending_tool ?? null,
     };
   }
+  // OpenCode's question tool (issue #137). Only its plugin writes this state
+  // today, and OpenCode routes through `openCodeMarkerSource`, but the
+  // projection lives here too so the canonical map can't drift from the
+  // aggregate's.
+  if (marker.state === "waiting_question") {
+    return { status: "waiting", attentionType: "question", pendingTool: null };
+  }
   if (marker.state === "working") {
     return { status: "working", attentionType: null, pendingTool: null };
   }

@@ -646,6 +646,23 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         attentionType: "permission",
         pendingTool: "Command",
       },
+      // The question-tool picker (issue #137). Fallback for a question
+      // already open when the plugin loads: the SDK has no `question.list`
+      // (same gap as `permission.list`), so only the pane can surface it.
+      // Anchors captured live from the picker footer on OpenCode 1.18.15
+      // (2026-08-20) and confirmed against the TUI source at that tag:
+      // `esc dismiss` is rendered by the question picker alone in the whole
+      // TUI, and `enter ` precedes its submit/toggle/confirm verb in every
+      // picker variant. The footer replaces the composer while the picker is
+      // up and disappears with it, so the match does not linger as
+      // scrollback. Free-text answer editing swaps in a different footer and
+      // is not matched — the marker path covers that sub-mode.
+      {
+        matchAll: ["esc dismiss", "enter "],
+        status: "waiting",
+        attentionType: "question",
+        pendingTool: null,
+      },
       {
         matchAny: [
           "esc interrupt",
@@ -680,8 +697,12 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // right to Reject, then Enter. Escape is NOT a clean reject — it interrupts
     // the whole turn and leaves the session hung in `working`, so it is not
     // used for Deny and no `permissionReplyPrelude` is offered (a reply would
-    // have no safe cancel-to-composer key). No question detection exists for
-    // OpenCode, so no `answerPrelude`/`replyOnQuestion`. Buttons are
+    // have no safe cancel-to-composer key). Question waits (issue #137) are
+    // detected — plugin `question.*` events plus the picker terminalRule —
+    // but deliberately carry no `answerPrelude`/`replyOnQuestion` either:
+    // Escape REJECTS the open question (a side effect, not a cancel back to
+    // the composer), so a typed reply has no safe abort key and the picker
+    // ignores typed text anyway. Buttons are
     // additionally suppressed at delivery when this row aggregates >1
     // concurrently-waiting server-side session (`Session.ambiguousWait`; see
     // `aggregateOpenCodeMarkers`) — a keystroke lands on the shared pane's

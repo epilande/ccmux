@@ -20,7 +20,7 @@ import { join } from "node:path";
 
 /**
  * @typedef {object} MarkerState
- * @property {"idle"|"working"|"waiting_permission"} [state]
+ * @property {"idle"|"working"|"waiting_permission"|"waiting_question"} [state]
  * @property {number} [state_timestamp] Float epoch seconds (sub-second
  *   precision, matching the jq-based hook scripts' `now`), so two sibling
  *   sessions updated within the same wall-clock second still order
@@ -50,8 +50,9 @@ export function makePlugin({ markersDir, version, now = Date.now }) {
   const writeQueues = new Map();
   /**
    * Last-written marker state per session. Keeps `session.updated` from
-   * clobbering an in-flight `working`/`waiting_permission` back to idle
-   * when a rename event arrives, and lets us suppress no-op writes when
+   * clobbering an in-flight `working`/`waiting_permission`/`waiting_question`
+   * back to idle when a rename event arrives (question asks trigger a title
+   * rename mid-wait, observed live), and lets us suppress no-op writes when
    * a bus event would produce a byte-identical marker.
    * @type {Map<string, MarkerState>}
    */
@@ -271,6 +272,44 @@ export function makePlugin({ markersDir, version, now = Date.now }) {
           }),
         );
       }
+
+      // The `question` tool blocks the turn on a pending deferred exactly
+      // like permissions do, but `session.status` stays `busy` the whole
+      // time (verified live on OpenCode 1.18.15: no status event of any
+      // kind fires at ask time), so without these cases the session pins
+      // at `working` for as long as the picker is open. The unprefixed v1
+      // event names are what the plugin bus publishes; the `question.v2.*`
+      // family never reaches this hook.
+      case "question.asked": {
+        const { sessionID } = properties;
+        if (!sessionID) return;
+        return queueWrite(sessionID, () =>
+          writeMerged(sessionID, {
+            state: "waiting_question",
+            pending_tool: null,
+            permission_context: describeQuestion(properties),
+          }),
+        );
+      }
+
+      // Both resolutions land as `working`, mirroring `permission.replied`:
+      // the turn resumes either way (a reject surfaces as a tool error the
+      // model keeps going from), and the next `session.status` corrects to
+      // `idle`/`busy` within the same second. That status event is also the
+      // self-heal for a missed reply: a stale `waiting_question` marker
+      // survives only until OpenCode next reports status.
+      case "question.replied":
+      case "question.rejected": {
+        const { sessionID } = properties;
+        if (!sessionID) return;
+        return queueWrite(sessionID, () =>
+          writeMerged(sessionID, {
+            state: "working",
+            pending_tool: null,
+            permission_context: null,
+          }),
+        );
+      }
     }
   }
 
@@ -329,6 +368,31 @@ function describePermission(properties) {
   }
   if (typeof properties?.permission === "string") return properties.permission;
   return null;
+}
+
+/**
+ * First question's text for a question.asked event, with a count suffix
+ * when the request carries more than one question. Payload shape verified
+ * live on OpenCode 1.18.15: `properties.questions` is an array of
+ * `{question, header, options}`.
+ *
+ * @param {any} properties
+ * @returns {string|null}
+ */
+function describeQuestion(properties) {
+  const questions = properties?.questions;
+  if (!Array.isArray(questions) || questions.length === 0) return null;
+  const first = questions[0];
+  const text =
+    typeof first?.question === "string"
+      ? first.question
+      : typeof first?.header === "string"
+        ? first.header
+        : null;
+  if (!text) return null;
+  return questions.length > 1
+    ? `${text} (+${questions.length - 1} more)`
+    : text;
 }
 
 const ccmuxPlugin = makePlugin({

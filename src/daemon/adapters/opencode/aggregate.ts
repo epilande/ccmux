@@ -1,6 +1,12 @@
 import type { SessionState } from "../../../types/session";
 import type { SessionPidMarker } from "../../session-markers";
 
+/** The marker states that mean "blocked on the user" in the fold below. */
+const WAITING_STATES: ReadonlySet<SessionPidMarker["state"]> = new Set([
+  "waiting_permission",
+  "waiting_question",
+]);
+
 /**
  * Fold N OpenCode markers (all sharing one server PID) into the single
  * ccmux Session that represents the hosting tmux pane. Status priority
@@ -8,10 +14,16 @@ import type { SessionPidMarker } from "../../session-markers";
  * from the newest waiting or newest-activity marker so the sidebar
  * reflects the most recent user-relevant event.
  *
+ * Two marker states count as waiting: `waiting_permission` (tool approval)
+ * and `waiting_question` (the question-tool picker, issue #137). The
+ * attention type follows whichever the NEWEST waiting marker carries, so a
+ * question and a permission blocking sibling sessions at once surface the
+ * most recent one — and set `ambiguousWait`, same as two permissions would.
+ *
  * `ambiguousWait` is emitted on every fold: true when MORE THAN ONE marker
- * is waiting_permission at once, so the notifier suppresses Approve/Deny
- * buttons (a single keystroke lands on whichever dialog the shared pane
- * renders, which may not be the one the notification described). See
+ * is waiting at once, so the notifier suppresses Approve/Deny buttons (a
+ * single keystroke lands on whichever dialog the shared pane renders,
+ * which may not be the one the notification described). See
  * `Session.ambiguousWait`.
  */
 export function aggregateOpenCodeMarkers(
@@ -26,8 +38,8 @@ export function aggregateOpenCodeMarkers(
     };
   }
 
-  const waitingCount = markers.filter(
-    (m) => m.state === "waiting_permission",
+  const waitingCount = markers.filter((m) =>
+    WAITING_STATES.has(m.state),
   ).length;
   const hasWaiting = waitingCount > 0;
   const hasWorking = markers.some((m) => m.state === "working");
@@ -42,13 +54,15 @@ export function aggregateOpenCodeMarkers(
     (a, b) => activityMs(b) - activityMs(a),
   );
   const newest = byActivityDesc[0];
-  const newestWaiting = byActivityDesc.find(
-    (m) => m.state === "waiting_permission",
-  );
+  const newestWaiting = byActivityDesc.find((m) => WAITING_STATES.has(m.state));
 
   const aggregate: Partial<SessionState> & { nativeSessionId?: string } = {
     status,
-    attentionType: newestWaiting ? "permission" : null,
+    attentionType: newestWaiting
+      ? newestWaiting.state === "waiting_question"
+        ? "question"
+        : "permission"
+      : null,
     pendingTool: newestWaiting?.pending_tool ?? null,
     ambiguousWait: waitingCount > 1,
     lastActivityAt: new Date(activityMs(newest)).toISOString(),

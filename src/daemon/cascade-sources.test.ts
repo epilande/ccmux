@@ -85,6 +85,13 @@ describe("genericMarkerSource", () => {
     expect(built.source.state.pendingTool).toBeNull();
   });
 
+  it("maps marker.state=waiting_question to status: waiting + question", () => {
+    const built = genericMarkerSource(mkMarker({ state: "waiting_question" }));
+    expect(built.source.state.status).toBe("waiting");
+    expect(built.source.state.attentionType).toBe("question");
+    expect(built.source.state.pendingTool).toBeNull();
+  });
+
   it("source.timestamp is state_timestamp * 1000 (ms since epoch)", () => {
     const built = genericMarkerSource(
       mkMarker({ state_timestamp: 1_700_000_500 }),
