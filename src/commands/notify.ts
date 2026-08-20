@@ -270,7 +270,7 @@ function runOscFlow(
     console.error(
       "tmux option allow-passthrough is not enabled; the escape sequence would be swallowed.",
     );
-    console.error("Enable it with: tmux set -g allow-passthrough on");
+    console.error("Enable it with: tmux set -g allow-passthrough all");
     return false;
   }
 

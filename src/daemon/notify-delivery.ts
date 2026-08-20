@@ -285,7 +285,7 @@ export function createNotifyDelivery(deps: DeliveryDeps): {
           probeResults.set("osc", oscOk);
           if (!oscOk) {
             log(
-              'Notifier: backend "osc" needs tmux option allow-passthrough set to "on" or "all" (enable it with `tmux set -g allow-passthrough on`); disabling osc delivery for this daemon run',
+              'Notifier: backend "osc" needs tmux option allow-passthrough set to "on" or "all" (enable it with `tmux set -g allow-passthrough all`); disabling osc delivery for this daemon run',
             );
           }
         }

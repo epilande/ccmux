@@ -951,7 +951,7 @@ ccmux notify                      # test: a banner should appear locally
 
 Use `all` rather than `on`: at `on`, tmux only forwards passthrough sequences from visible panes, and the agent that needs your attention is usually in a window you're not looking at.
 
-Nested tmux (a local tmux, SSH, then a remote tmux where ccmux runs) is detected automatically: the escape is wrapped twice so it survives both layers. Both tmux instances need `allow-passthrough` (the outer one only forwards from the pane you're attached to, so `on` suffices there), and ccmux can only verify the one it runs under, so set it on the local side too. A Kitty terminal behind an outer tmux receives the plain OSC 9 form, since Kitty can't be detected through that outer tmux; the banner still appears, just without per-session grouping.
+Nested tmux (a local tmux, SSH, then a remote tmux where ccmux runs) is detected automatically: the escape is wrapped twice so it survives both layers. Both tmux instances need `allow-passthrough all` (with `on`, the outer tmux drops the sequence whenever the SSH pane sits in a background local window), and ccmux can only verify the one it runs under, so set it on the local side too. A Kitty terminal behind an outer tmux receives the plain OSC 9 form, since Kitty can't be detected through that outer tmux; the banner still appears, just without per-session grouping.
 
 ## 🏗️ Architecture
 
