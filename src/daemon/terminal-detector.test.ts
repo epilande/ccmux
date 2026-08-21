@@ -142,11 +142,9 @@ describe("terminal-detector", () => {
       expect(result.pendingTool).toBeNull();
     });
 
-    // Verbatim from OpenCode 1.18.19 (2026-08-20). The multi-select picker's
-    // Confirm tab (Tab from the option list) drops the arrow hint entirely:
-    // `↑↓ select` is ABSENT here. This fixture exists to fail if anyone
-    // "tightens" the rule's second anchor to the arrows, which reads as more
-    // specific but would silently miss a question sitting on its Confirm tab.
+    // Verbatim from OpenCode 1.18.19. The multi-select Confirm tab drops the
+    // arrow hint entirely, so this fails if anyone "tightens" the rule's
+    // second anchor to `↑↓ select`.
     const MULTISELECT_CONFIRM_TAB = `  ┃  Confirm your selections
   ┃
   ┃  ✓ Red
@@ -158,7 +156,6 @@ describe("terminal-detector", () => {
       const result = detectTerminalStatus(MULTISELECT_CONFIRM_TAB, opencode);
       expect(result.status).toBe("waiting");
       expect(result.attentionType).toBe("question");
-      expect(MULTISELECT_CONFIRM_TAB).not.toContain("↑↓ select");
     });
 
     it("'esc dismiss' alone in prose does not match (matchAll pair)", () => {
@@ -171,11 +168,9 @@ describe("terminal-detector", () => {
     });
 
     it("question text containing 'reject' still reads as a question, not a permission", () => {
-      // The dangerous ordering case: question text is model-authored, and
-      // the permission rule matches the bare word "reject". Classifying this
-      // as a permission wait would attach Approve/Deny notification buttons
-      // whose approve key is a bare Enter — which the picker consumes as
-      // "select the highlighted option". The question rule runs first.
+      // The permission rule matches the bare word "reject", so classifying
+      // this as a permission wait would attach Approve/Deny buttons whose
+      // approve key is a bare Enter, which the picker eats as a selection.
       const result = detectTerminalStatus(
         `  ┃  Should I approve or reject this plan?
   ┃  1. Approve it

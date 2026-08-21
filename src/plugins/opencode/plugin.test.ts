@@ -458,10 +458,8 @@ describe("makePlugin: bus event dispatch", () => {
   });
 
   it("a missed reply self-heals on the next session.status idle", async () => {
-    // The documented recovery path: if `question.replied` never arrives (a
-    // dropped event, or a reply delivered while the plugin was reloading),
-    // the stale `waiting_question` marker survives only until OpenCode next
-    // reports status. Without this the row would sit at `waiting` forever.
+    // The documented recovery path: without it, a dropped `question.replied`
+    // would leave the row at `waiting` forever.
     const { hooks } = await setup();
     await dispatchAll(hooks, [
       {

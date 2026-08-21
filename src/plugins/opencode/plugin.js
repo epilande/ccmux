@@ -293,19 +293,13 @@ export function makePlugin({ markersDir, version, now = Date.now }) {
       }
 
       // Both resolutions land as `working`, mirroring `permission.replied`,
-      // and the next `session.status` corrects within ~100ms. Measured live
-      // on 1.18.19: an ANSWER resumes the turn (`working` +226ms, then the
-      // model reasons on from the answer); a REJECT ends it (`working`
-      // +66ms, `idle` +152ms, no tool error and no further output), so the
-      // `working` write there is a sub-second transient the status event
-      // immediately supersedes rather than a claim that work resumed. Both
-      // settle correctly, which is why one arm serves both.
-      //
-      // That status event is also the self-heal for a missed reply: a stale
-      // `waiting_question` marker survives only until OpenCode next reports
-      // status. Nothing fires DURING the wait (a 2m49s unanswered question
-      // produced no status event at all), so the wait itself is never
-      // clobbered by a heartbeat.
+      // and the next `session.status` corrects within ~100ms. Only an ANSWER
+      // actually resumes the turn; a REJECT ends it, so the `working` write
+      // there is a sub-second transient the status event supersedes rather
+      // than a claim that work resumed. Both settle, hence one arm for both.
+      // That status event is also the self-heal for a missed reply: nothing
+      // fires during the wait itself, so a stale `waiting_question` survives
+      // only until OpenCode next reports status.
       case "question.replied":
       case "question.rejected": {
         const { sessionID } = properties;

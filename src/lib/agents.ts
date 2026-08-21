@@ -640,41 +640,19 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     processMatch: /\bopencode\b/i,
     versionCommand: "opencode --version",
     terminalRules: [
-      // The question-tool picker (issue #137). Fallback for a question
-      // already open when the plugin loads: the SDK has no `question.list`
-      // (same gap as `permission.list`), so only the pane can surface it.
-      // Anchors captured live from the picker footer on OpenCode 1.18.15 and
-      // re-captured byte-exact across all four sub-modes on 1.18.19
-      // (2026-08-20). `esc dismiss` is the anchor doing the work: present in
-      // every sub-mode, and absent from the permission dialog, the ctrl+p
-      // command palette, the `/models` composer autocomplete, and the Tab
-      // agent-switch. `enter ` precedes the verb in all four
-      // (`enter submit` / `enter toggle`), so the pair costs no coverage.
+      // The question-tool picker (issue #137); the SDK has no `question.list`,
+      // so a question already open at plugin-load time is pane-only. Anchors
+      // captured across all four picker sub-modes on 1.18.19; `esc dismiss`
+      // does the discriminating. Do NOT "tighten" the pair to `↑↓ select`:
+      // the multi-select Confirm tab renders no arrow glyphs at all, so that
+      // anchor silently misses it (fixtures in terminal-detector.test.ts).
       //
-      // DO NOT "tighten" this to `↑↓ select`, which looks more specific and
-      // is a REGRESSION: the multi-select Confirm tab (Tab from the option
-      // list) renders `⇆ tab  enter submit  esc dismiss` with NO arrow
-      // glyphs at all, so an arrow anchor silently misses a question sitting
-      // on its Confirm tab. Verified live, see the fixtures in
-      // terminal-detector.test.ts.
-      //
-      // The footer replaces the composer while the picker is up and
-      // disappears with it, so the match does not linger as scrollback. The
-      // free-text ("Type your own answer") sub-mode keeps a byte-identical
-      // footer and is matched too — the editor is inline, replacing the
-      // option's description line rather than swapping the footer.
-      //
-      // ORDER IS LOAD-BEARING: this sits ahead of the permission rule below,
-      // whose `matchAny` includes the bare word "reject". Question text is
-      // model-authored ("Approve or reject this plan?"), so permission-first
-      // would classify a question picker as a permission wait — and on the
-      // pane-only path there is no marker, so `ambiguousWait` is never set
-      // and the notifier attaches live Approve/Deny buttons whose approve
-      // key is a bare Enter, which the picker would consume as "select the
-      // highlighted option". Question-first cannot mis-fire the other way:
-      // `esc dismiss` belongs to the question picker alone, so a real
-      // permission dialog never matches it. If that ever stops holding, this
-      // order fails safe (buttons suppressed) where the other fails live.
+      // MUST stay ahead of the permission rule below, whose `matchAny`
+      // includes the bare word "reject": model-authored question text can
+      // contain it, and a permission misclassification on the pane-only path
+      // attaches Approve/Deny buttons whose approve key is a bare Enter,
+      // which the picker consumes as a selection. See
+      // docs/agent-adapters.md for the full capture.
       {
         matchAll: ["esc dismiss", "enter "],
         status: "waiting",
@@ -722,15 +700,9 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // the whole turn and leaves the session hung in `working`, so it is not
     // used for Deny and no `permissionReplyPrelude` is offered (a reply would
     // have no safe cancel-to-composer key). Question waits (issue #137) are
-    // detected — plugin `question.*` events plus the picker terminalRule —
-    // but deliberately carry no `answerPrelude`/`replyOnQuestion` either:
-    // Escape REJECTS the open question, and a reject ENDS the turn (verified
-    // live on 1.18.19: no tool error, no continuation, the transcript stops
-    // at "Asked 1 question"). So there is no safe cancel-to-composer abort
-    // key for a typed reply. The picker DOES accept typed text, but only
-    // into its "Type your own answer" option, reachable solely by arrowing
-    // down to it — not from a keystroke burst a notification could send.
-    // Buttons are
+    // detected but carry no `answerPrelude`/`replyOnQuestion` either: Escape
+    // REJECTS the open question and ENDS the turn, so a typed reply has no
+    // safe abort key. Buttons are
     // additionally suppressed at delivery when this row aggregates >1
     // concurrently-waiting server-side session (`Session.ambiguousWait`; see
     // `aggregateOpenCodeMarkers`) — a keystroke lands on the shared pane's
