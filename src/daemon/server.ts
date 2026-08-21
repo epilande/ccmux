@@ -2213,7 +2213,19 @@ export class DaemonServer {
     // liveness cleanup owns it from there.
     const exited = await this.waitForExit(pid, 2000);
     if (exited) {
-      this.sessionManager.removeSession(sessionId);
+      // Re-read before removing: the snapshot above fixes which process we
+      // waited on, but the row is addressed by id, and a pane-tracked id
+      // (`derivePaneTrackedSessionId`) survives the process it names —
+      // `createPaneTrackedSession` MUTATES the row in place when a new agent
+      // appears in that pane. A scan tick landing inside the wait can
+      // therefore hand this id a live pid, which is not the death we
+      // observed. Skip only on a DIFFERENT non-null pid: a null pid must
+      // still remove, or a path that clears pid on death would silently
+      // reintroduce the lag this handler exists to fix (#135).
+      const current = this.sessionManager.getSession(sessionId);
+      if (!current || current.pid === null || current.pid === pid) {
+        this.sessionManager.removeSession(sessionId);
+      }
     }
 
     return Response.json({ success: true, killed: exited }, { headers });
@@ -2234,6 +2246,13 @@ export class DaemonServer {
         return true; // Process is gone
       }
       await Bun.sleep(100);
+    }
+    // Probe once more: the loop exits on the deadline, so without this a
+    // process that died during the final sleep is reported as still running.
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
     }
     return false;
   }

@@ -218,4 +218,46 @@ describe("POST /sessions/:id/kill removes the session daemon-side", () => {
       ),
     ).toBe(true);
   });
+  it("keeps a row the reconciler re-pointed at a different live process", async () => {
+    // The row this call is about dies; a DIFFERENT agent lands in the same
+    // pane while the poll is still running. Pane-tracked ids outlive the
+    // process they name (`createPaneTrackedSession` mutates in place), so
+    // removing by id alone would delete a row that now represents something
+    // alive. The mutation is applied synchronously after the handler has
+    // snapshotted the pid and sent SIGTERM, which is exactly the window.
+    const dying = Bun.spawn(["sleep", "30"]);
+    const replacement = Bun.spawn(["sleep", "30"]);
+
+    const { manager, internals, events, frames } = createServer();
+    manager.createSession("kill-replaced", LOG_PATH, "claude");
+    manager.setPid("kill-replaced", dying.pid);
+    expect(
+      await waitFor(() => internals.visibleSessions.has("kill-replaced")),
+    ).toBe(true);
+    events.length = 0;
+    frames.length = 0;
+
+    try {
+      const pending = internals.handleKillSession("kill-replaced", {});
+      manager.setPid("kill-replaced", replacement.pid);
+
+      const response = await pending;
+      const body = (await response.json()) as {
+        success: boolean;
+        killed: boolean;
+      };
+
+      // The process we signalled really did die, so the report is honest...
+      expect(body).toEqual({ success: true, killed: true });
+      // ...but the row now belongs to the replacement and must survive.
+      expect(manager.getSession("kill-replaced")).toBeDefined();
+      expect(manager.getSession("kill-replaced")?.pid).toBe(replacement.pid);
+      expect(events.some((e) => e.type === "removed")).toBe(false);
+      expect(frames.some((f) => f.includes('"session_removed"'))).toBe(false);
+    } finally {
+      replacement.kill("SIGKILL");
+      await replacement.exited;
+      await dying.exited;
+    }
+  });
 });
