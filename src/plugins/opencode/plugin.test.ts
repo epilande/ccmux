@@ -360,6 +360,155 @@ describe("makePlugin: bus event dispatch", () => {
     });
   });
 
+  // Payload shapes below mirror a live capture from OpenCode 1.18.15
+  // (issue #137): `sessionID` top-level, `questions` an array of
+  // {question, header, options}, replies referencing `requestID`.
+  it("question.asked sets waiting_question with the question text as context", async () => {
+    const { hooks } = await setup();
+    await dispatchAll(hooks, [
+      {
+        type: "session.created",
+        properties: { info: { id: "s1", directory: "/r", title: "t" } },
+      },
+      {
+        type: "question.asked",
+        properties: {
+          id: "que_1",
+          sessionID: "s1",
+          questions: [
+            {
+              question: "Which color do you prefer?",
+              header: "Color preference",
+              options: [{ label: "Red", description: "Prefer red" }],
+            },
+          ],
+          tool: { messageID: "msg_1", callID: "call_1" },
+        },
+      },
+    ]);
+    const m = readMarker(markersDir, "s1");
+    expect(m).toMatchObject({
+      state: "waiting_question",
+      pending_tool: null,
+      permission_context: "Which color do you prefer?",
+    });
+  });
+
+  it("multi-question asks annotate the context with the remainder count", async () => {
+    const { hooks } = await setup();
+    await dispatchAll(hooks, [
+      {
+        type: "question.asked",
+        properties: {
+          id: "que_1",
+          sessionID: "s1",
+          questions: [
+            { question: "First?", header: "A", options: [] },
+            { question: "Second?", header: "B", options: [] },
+          ],
+        },
+      },
+    ]);
+    expect(readMarker(markersDir, "s1")?.permission_context).toBe(
+      "First? (+1 more)",
+    );
+  });
+
+  it("question.replied flips to working and clears the context", async () => {
+    const { hooks } = await setup();
+    await dispatchAll(hooks, [
+      {
+        type: "question.asked",
+        properties: {
+          id: "que_1",
+          sessionID: "s1",
+          questions: [{ question: "Which?", header: "H", options: [] }],
+        },
+      },
+      {
+        type: "question.replied",
+        properties: { sessionID: "s1", requestID: "que_1", answers: [["A"]] },
+      },
+    ]);
+    const m = readMarker(markersDir, "s1");
+    expect(m).toMatchObject({
+      state: "working",
+      pending_tool: null,
+      permission_context: null,
+    });
+  });
+
+  it("question.rejected flips to working like a reply", async () => {
+    const { hooks } = await setup();
+    await dispatchAll(hooks, [
+      {
+        type: "question.asked",
+        properties: {
+          id: "que_1",
+          sessionID: "s1",
+          questions: [{ question: "Which?", header: "H", options: [] }],
+        },
+      },
+      {
+        type: "question.rejected",
+        properties: { sessionID: "s1", requestID: "que_1" },
+      },
+    ]);
+    expect(readMarker(markersDir, "s1")?.state).toBe("working");
+  });
+
+  it("a missed reply self-heals on the next session.status idle", async () => {
+    // The documented recovery path: without it, a dropped `question.replied`
+    // would leave the row at `waiting` forever.
+    const { hooks } = await setup();
+    await dispatchAll(hooks, [
+      {
+        type: "question.asked",
+        properties: {
+          id: "que_1",
+          sessionID: "s1",
+          questions: [{ question: "Which?", header: "H", options: [] }],
+        },
+      },
+    ]);
+    expect(readMarker(markersDir, "s1")?.state).toBe("waiting_question");
+
+    await dispatchAll(hooks, [
+      {
+        type: "session.status",
+        properties: { sessionID: "s1", status: { type: "idle" } },
+      },
+    ]);
+    expect(readMarker(markersDir, "s1")?.state).toBe("idle");
+  });
+
+  it("session.updated mid-question preserves waiting_question", async () => {
+    // Observed live: OpenCode renames the session title while the question
+    // picker is open. The `prior?.state` carry in `session.updated` must not
+    // reset the wait.
+    const { hooks } = await setup();
+    await dispatchAll(hooks, [
+      {
+        type: "session.created",
+        properties: { info: { id: "s1", directory: "/r", title: "t" } },
+      },
+      {
+        type: "question.asked",
+        properties: {
+          id: "que_1",
+          sessionID: "s1",
+          questions: [{ question: "Which?", header: "H", options: [] }],
+        },
+      },
+      {
+        type: "session.updated",
+        properties: { info: { id: "s1", directory: "/r", title: "renamed" } },
+      },
+    ]);
+    const m = readMarker(markersDir, "s1");
+    expect(m).toMatchObject({ state: "waiting_question", title: "renamed" });
+  });
+
   it("session.deleted unlinks the marker", async () => {
     const { hooks } = await setup();
     await dispatchAll(hooks, [
@@ -380,11 +529,9 @@ describe("makePlugin: bus event dispatch", () => {
 
   it("ignores unknown event types without throwing", async () => {
     const { hooks } = await setup();
-    await expect(
-      hooks.event({
-        event: { type: "totally.unknown", properties: {} },
-      }),
-    ).resolves.toBeUndefined();
+    await hooks.event({
+      event: { type: "totally.unknown", properties: {} },
+    });
   });
 
   it("ignores malformed events missing required fields", async () => {

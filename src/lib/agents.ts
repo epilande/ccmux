@@ -640,6 +640,25 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     processMatch: /\bopencode\b/i,
     versionCommand: "opencode --version",
     terminalRules: [
+      // The question-tool picker (issue #137); the SDK has no `question.list`,
+      // so a question already open at plugin-load time is pane-only. Anchors
+      // captured across all four picker sub-modes on 1.18.19; `esc dismiss`
+      // does the discriminating. Do NOT "tighten" the pair to `↑↓ select`:
+      // the multi-select Confirm tab renders no arrow glyphs at all, so that
+      // anchor silently misses it (fixtures in terminal-detector.test.ts).
+      //
+      // MUST stay ahead of the permission rule below, whose `matchAny`
+      // includes the bare word "reject": model-authored question text can
+      // contain it, and a permission misclassification on the pane-only path
+      // attaches Approve/Deny buttons whose approve key is a bare Enter,
+      // which the picker consumes as a selection. See
+      // docs/agent-adapters.md for the full capture.
+      {
+        matchAll: ["esc dismiss", "enter "],
+        status: "waiting",
+        attentionType: "question",
+        pendingTool: null,
+      },
       {
         matchAny: ["allow once", "allow always", "reject", "[y/n]", "(y/n)"],
         status: "waiting",
@@ -680,8 +699,10 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // right to Reject, then Enter. Escape is NOT a clean reject — it interrupts
     // the whole turn and leaves the session hung in `working`, so it is not
     // used for Deny and no `permissionReplyPrelude` is offered (a reply would
-    // have no safe cancel-to-composer key). No question detection exists for
-    // OpenCode, so no `answerPrelude`/`replyOnQuestion`. Buttons are
+    // have no safe cancel-to-composer key). Question waits (issue #137) are
+    // detected but carry no `answerPrelude`/`replyOnQuestion` either: Escape
+    // REJECTS the open question and ENDS the turn, so a typed reply has no
+    // safe abort key. Buttons are
     // additionally suppressed at delivery when this row aggregates >1
     // concurrently-waiting server-side session (`Session.ambiguousWait`; see
     // `aggregateOpenCodeMarkers`) — a keystroke lands on the shared pane's

@@ -255,6 +255,65 @@ describe("aggregateOpenCodeMarkers", () => {
     expect(agg.lastPrompt).toBeNull();
   });
 
+  it("one waiting_question marker produces waiting with question attention", () => {
+    const agg = aggregateOpenCodeMarkers([
+      marker({
+        session_id: "s1",
+        state: "waiting_question",
+        state_timestamp: 1_700_000_100,
+      }),
+    ]);
+    expect(agg.status).toBe("waiting");
+    expect(agg.attentionType).toBe("question");
+    expect(agg.pendingTool).toBeNull();
+    expect(agg.ambiguousWait).toBe(false);
+  });
+
+  it("question + working: waiting/question wins over working", () => {
+    const agg = aggregateOpenCodeMarkers([
+      marker({
+        session_id: "a",
+        state: "working",
+        state_timestamp: 1_700_000_200,
+      }),
+      marker({
+        session_id: "b",
+        state: "waiting_question",
+        state_timestamp: 1_700_000_100,
+      }),
+    ]);
+    expect(agg.status).toBe("waiting");
+    expect(agg.attentionType).toBe("question");
+  });
+
+  it("mixed question + permission waits: attention follows the newest waiting marker, ambiguous", () => {
+    const question = marker({
+      session_id: "q",
+      state: "waiting_question",
+      state_timestamp: 1_700_000_200,
+    });
+    const permission = marker({
+      session_id: "p",
+      state: "waiting_permission",
+      pending_tool: "bash",
+      state_timestamp: 1_700_000_100,
+    });
+
+    const questionNewer = aggregateOpenCodeMarkers([question, permission]);
+    expect(questionNewer.status).toBe("waiting");
+    expect(questionNewer.attentionType).toBe("question");
+    expect(questionNewer.pendingTool).toBeNull();
+    expect(questionNewer.ambiguousWait).toBe(true);
+
+    const permissionNewer = aggregateOpenCodeMarkers([
+      { ...question, state_timestamp: 1_700_000_050 },
+      permission,
+    ]);
+    expect(permissionNewer.attentionType).toBe("permission");
+    expect(permissionNewer.pendingTool).toBe("bash");
+    expect(permissionNewer.ambiguousWait).toBe(true);
+  });
+
   it("breaks a same-integer-second tie using sub-second state_timestamp precision", () => {
     // Regression guard: the opencode plugin writes float-second
     // state_timestamps so two markers landing in the same wall-clock second
