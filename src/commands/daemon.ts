@@ -18,6 +18,7 @@ import {
   getDaemonUrl,
 } from "../lib/config";
 import { printDaemonHealth } from "./shared";
+import { daemonBody } from "../lib/daemon-json";
 import type { TmuxSocketError } from "../types";
 
 /**
@@ -60,10 +61,10 @@ async function printTmuxServer(): Promise<void> {
   try {
     const response = await fetch(`${getDaemonUrl()}/server-info`);
     if (!response.ok) return;
-    const info = (await response.json()) as {
+    const info = await daemonBody<{
       socketPath: string | null;
       socketError?: TmuxSocketError | null;
-    };
+    }>(response, "server info");
     if (info.socketPath) {
       console.log(`tmux socket: ${info.socketPath}`);
       return;

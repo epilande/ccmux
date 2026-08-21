@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { getDaemonUrl } from "../lib/config";
+import { daemonBody } from "../lib/daemon-json";
 import { ensureDaemon } from "./shared";
 import {
   getStatusIcon,
@@ -36,9 +37,9 @@ async function emptyMessage(): Promise<string> {
     const response = await fetch(`${getDaemonUrl()}/server-info`);
     if (response.ok) {
       // A daemon predating the field omits it, which reads as "no error".
-      const { socketError } = (await response.json()) as {
+      const { socketError } = await daemonBody<{
         socketError?: TmuxSocketError | null;
-      };
+      }>(response, "server info");
       if (socketError) return socketErrorMessage(socketError.attemptedSocket);
     }
   } catch {
@@ -72,9 +73,10 @@ export function createShowCommand(): Command {
           throw new Error(`HTTP ${response.status}`);
         }
 
-        const { sessions } = (await response.json()) as {
-          sessions: EnrichedSession[];
-        };
+        const { sessions } = await daemonBody<{ sessions: EnrichedSession[] }>(
+          response,
+          "session list",
+        );
 
         if (options.json) {
           console.log(JSON.stringify(sessions, null, 2));

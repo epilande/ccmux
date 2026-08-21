@@ -13,6 +13,7 @@
 
 import { Command } from "commander";
 import { getDaemonUrl } from "../lib/config";
+import { daemonBody } from "../lib/daemon-json";
 import { ensureDaemon } from "./shared";
 import { proximityLabel } from "../daemon/session-ref";
 import type { RefProximity, SessionRefCandidate } from "../daemon/session-ref";
@@ -196,7 +197,7 @@ export function createHandoffCommand(): Command {
           process.exit(1);
         }
 
-        const data = (await response.json()) as HandoffResponse;
+        const data = await daemonBody<HandoffResponse>(response, "handoff");
 
         if (options.json) {
           console.log(JSON.stringify(data, null, 2));

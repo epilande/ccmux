@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { getDaemonUrl } from "../lib/config";
+import { daemonBody } from "../lib/daemon-json";
 import { resolveRepoRoot } from "../lib/git";
 import { HUNK_INSTALL_HINT, spawnHunkDiff } from "../tui/utils/review";
 import { ensureDaemon } from "./shared";
@@ -37,9 +38,9 @@ export function createReviewCommand(): Command {
             throw new Error(`HTTP ${response.status}`);
           }
 
-          const data = (await response.json()) as {
+          const data = await daemonBody<{
             session: { paneCwd: string | null; cwd: string };
-          };
+          }>(response, "session");
           cwd = data.session.paneCwd ?? data.session.cwd;
         } catch (error) {
           console.error("Failed to look up session:", error);

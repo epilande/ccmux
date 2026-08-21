@@ -7,6 +7,7 @@
 
 import { Command } from "commander";
 import { getDaemonUrl } from "../lib/config";
+import { daemonError, daemonBody } from "../lib/daemon-json";
 import { ensureDaemon } from "./shared";
 import { proximityLabel } from "../daemon/session-ref";
 import type { RefProximity, SessionRefCandidate } from "../daemon/session-ref";
@@ -126,14 +127,12 @@ export function createLastCommand(): Command {
       }
 
       if (!response.ok) {
-        const data = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        console.error(data?.error ?? `HTTP ${response.status}`);
+        const error = await daemonError(response);
+        console.error(error ?? `HTTP ${response.status}`);
         process.exit(1);
       }
 
-      const data = (await response.json()) as TranscriptResponse;
+      const data = await daemonBody<TranscriptResponse>(response, "transcript");
 
       const echo = resolutionEcho(data);
       if (echo) console.error(echo);

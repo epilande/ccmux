@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { randomUUID } from "crypto";
 import { getDaemonUrl } from "../lib/config";
+import { daemonBody } from "../lib/daemon-json";
 import { getAgents } from "../lib/agents";
 import { getPreferences } from "../lib/preferences";
 import {
@@ -193,7 +194,7 @@ export function createInvokeCommand(): Command {
             }),
           });
 
-          const data = (await response.json()) as InvokeResponse;
+          const data = await daemonBody<InvokeResponse>(response, "invoke");
           if (data.success && typeof data.text === "string") {
             // Wait for the kernel pipe buffer to drain before exiting:
             // `process.exit(0)` does not flush async stdout, so large
@@ -262,9 +263,9 @@ function createInvokeListCommand(): Command {
       try {
         const response = await fetch(`${getDaemonUrl()}/invocations`);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const { invocations } = (await response.json()) as {
+        const { invocations } = await daemonBody<{
           invocations: InvocationRecord[];
-        };
+        }>(response, "invocation list");
 
         if (options.json) {
           console.log(JSON.stringify(invocations, null, 2));
@@ -298,11 +299,11 @@ function createInvokeCancelCommand(): Command {
         const response = await fetch(`${getDaemonUrl()}/invoke/${id}/cancel`, {
           method: "POST",
         });
-        const data = (await response.json()) as {
+        const data = await daemonBody<{
           success?: boolean;
           state?: "cancelling" | "already_finished" | "not_found";
           message?: string;
-        };
+        }>(response, "cancel");
         if (!data.success && data.message) {
           console.error(data.message);
           process.exit(1);
@@ -350,7 +351,10 @@ function createInvokeResultCommand(): Command {
         const response = await fetch(
           `${getDaemonUrl()}/invocations/${id}/result`,
         );
-        const data = (await response.json()) as InvocationResultResponse;
+        const data = await daemonBody<InvocationResultResponse>(
+          response,
+          "invocation result",
+        );
         if (data.available && typeof data.output === "string") {
           // Flush-then-exit: process.exit does not drain async stdout, so
           // a large captured output would lose its tail without the
