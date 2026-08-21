@@ -30,6 +30,22 @@ export function createKillCommand(): Command {
           throw new Error(`HTTP ${response.status}`);
         }
 
+        // `killed: false` means the process outlived the daemon's wait and is
+        // still running. A background row omits the field, so absent is success.
+        const body: unknown = await response.json();
+
+        if (
+          typeof body === "object" &&
+          body !== null &&
+          "killed" in body &&
+          body.killed === false
+        ) {
+          console.error(
+            `Session ${sessionId} did not exit; the process is still running.`,
+          );
+          process.exit(1);
+        }
+
         console.log(`Killed session: ${sessionId}`);
       } catch (error) {
         console.error("Failed to kill session:", error);
