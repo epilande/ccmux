@@ -32,9 +32,14 @@ export function createKillCommand(): Command {
 
         // `killed: false` means the process outlived the daemon's wait and is
         // still running. A background row omits the field, so absent is success.
-        const data = (await response.json()) as { killed?: boolean };
+        const body: unknown = await response.json();
 
-        if (data.killed === false) {
+        if (
+          typeof body === "object" &&
+          body !== null &&
+          "killed" in body &&
+          body.killed === false
+        ) {
           console.error(
             `Session ${sessionId} did not exit; the process is still running.`,
           );
