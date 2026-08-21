@@ -44,7 +44,8 @@ const LOG_POLL_INTERVAL_MS = 1000;
  * agent's own hook marker rather than from the store.
  *
  * Only a marker that (a) exists for this session, (b) belongs to this
- * session's agent, and (c) currently records `waiting_permission` with a
+ * session's agent, and (c) currently records a WAITING state
+ * (`waiting_permission`, or `waiting_question` per issue #137) with a
  * usable numeric `state_timestamp` (float SECONDS, from jq's `now`) yields a
  * value; every other shape is `undefined`, which sends the adapter back to
  * its `statusChangedAt` fallback.
@@ -52,7 +53,11 @@ const LOG_POLL_INTERVAL_MS = 1000;
 function markerWaitEstablishedAt(session: Session): string | undefined {
   const marker = getSessionPidMarker(session.nativeSessionId ?? session.id);
   if (!marker || marker.agent_type !== session.agentType) return undefined;
-  if (marker.state !== "waiting_permission") return undefined;
+  if (
+    marker.state !== "waiting_permission" &&
+    marker.state !== "waiting_question"
+  )
+    return undefined;
   const seconds = marker.state_timestamp;
   if (typeof seconds !== "number" || !Number.isFinite(seconds))
     return undefined;

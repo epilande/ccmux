@@ -386,6 +386,20 @@ describe("nativeMarkerSource", () => {
     expect(built.source.state.pendingTool).toBe("LogSays");
   });
 
+  it("marker.state=waiting_question yields waiting/question, never a downgrade to idle", () => {
+    // Drift guard (issue #137): no native-tracked agent writes this state
+    // today, but the else-branch would otherwise map it to `idle` — a
+    // DOWNGRADE of a real wait, which is worse than the `working` pin the
+    // question support exists to fix.
+    const built = nativeMarkerSource(
+      mkMarker({ state: "waiting_question" }),
+      mkSession({ pendingTool: "Bash" }),
+    );
+    expect(built.source.state.status).toBe("waiting");
+    expect(built.source.state.attentionType).toBe("question");
+    expect(built.source.state.pendingTool).toBeNull();
+  });
+
   it("marker.state=idle clears attention regardless of session.pendingTool", () => {
     const built = nativeMarkerSource(
       mkMarker({ state: "idle" }),

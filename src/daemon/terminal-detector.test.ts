@@ -142,6 +142,25 @@ describe("terminal-detector", () => {
       expect(result.pendingTool).toBeNull();
     });
 
+    // Verbatim from OpenCode 1.18.19 (2026-08-20). The multi-select picker's
+    // Confirm tab (Tab from the option list) drops the arrow hint entirely:
+    // `↑↓ select` is ABSENT here. This fixture exists to fail if anyone
+    // "tightens" the rule's second anchor to the arrows, which reads as more
+    // specific but would silently miss a question sitting on its Confirm tab.
+    const MULTISELECT_CONFIRM_TAB = `  ┃  Confirm your selections
+  ┃
+  ┃  ✓ Red
+  ┃  ✓ Blue
+  ┃
+  ┃  ⇆ tab  enter submit  esc dismiss`;
+
+    it("detects the multi-select Confirm tab, which has no arrow hint", () => {
+      const result = detectTerminalStatus(MULTISELECT_CONFIRM_TAB, opencode);
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("question");
+      expect(MULTISELECT_CONFIRM_TAB).not.toContain("↑↓ select");
+    });
+
     it("'esc dismiss' alone in prose does not match (matchAll pair)", () => {
       const result = detectTerminalStatus(
         "the footer says esc dismiss when a question is open",
@@ -151,12 +170,32 @@ describe("terminal-detector", () => {
       expect(result.attentionType).toBeNull();
     });
 
-    it("a permission dialog outranks picker remnants (rule order)", () => {
+    it("question text containing 'reject' still reads as a question, not a permission", () => {
+      // The dangerous ordering case: question text is model-authored, and
+      // the permission rule matches the bare word "reject". Classifying this
+      // as a permission wait would attach Approve/Deny notification buttons
+      // whose approve key is a bare Enter — which the picker consumes as
+      // "select the highlighted option". The question rule runs first.
       const result = detectTerminalStatus(
-        `Allow once  Allow always  Reject\n  ↑↓ select  enter submit  esc dismiss`,
+        `  ┃  Should I approve or reject this plan?
+  ┃  1. Approve it
+  ┃  2. Reject it
+  ┃  ↑↓ select  enter submit  esc dismiss`,
         opencode,
       );
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("question");
+      expect(result.pendingTool).toBeNull();
+    });
+
+    it("a permission dialog with no picker footer still reads as permission", () => {
+      const result = detectTerminalStatus(
+        "Allow once  Allow always  Reject",
+        opencode,
+      );
+      expect(result.status).toBe("waiting");
       expect(result.attentionType).toBe("permission");
+      expect(result.pendingTool).toBe("Command");
     });
   });
 

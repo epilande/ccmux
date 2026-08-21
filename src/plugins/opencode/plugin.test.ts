@@ -457,6 +457,33 @@ describe("makePlugin: bus event dispatch", () => {
     expect(readMarker(markersDir, "s1")?.state).toBe("working");
   });
 
+  it("a missed reply self-heals on the next session.status idle", async () => {
+    // The documented recovery path: if `question.replied` never arrives (a
+    // dropped event, or a reply delivered while the plugin was reloading),
+    // the stale `waiting_question` marker survives only until OpenCode next
+    // reports status. Without this the row would sit at `waiting` forever.
+    const { hooks } = await setup();
+    await dispatchAll(hooks, [
+      {
+        type: "question.asked",
+        properties: {
+          id: "que_1",
+          sessionID: "s1",
+          questions: [{ question: "Which?", header: "H", options: [] }],
+        },
+      },
+    ]);
+    expect(readMarker(markersDir, "s1")?.state).toBe("waiting_question");
+
+    await dispatchAll(hooks, [
+      {
+        type: "session.status",
+        properties: { sessionID: "s1", status: { type: "idle" } },
+      },
+    ]);
+    expect(readMarker(markersDir, "s1")?.state).toBe("idle");
+  });
+
   it("session.updated mid-question preserves waiting_question", async () => {
     // Observed live: OpenCode renames the session title while the question
     // picker is open. The `prior?.state` carry in `session.updated` must not

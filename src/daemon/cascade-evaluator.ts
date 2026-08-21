@@ -263,6 +263,10 @@ export function logSource(session: Session): CascadeSource {
  *   JSONL until after approval, so the log-derived value is null during the
  *   wait; the `?? session.pendingTool` fallback covers the post-approval
  *   window and older markers written before this enrichment.
+ * - On `waiting_question` (issue #137): waiting with `question` attention and
+ *   no pending tool, matching `markerStatusState` and the OpenCode aggregate.
+ *   No native-tracked agent writes this state today, but the arm exists so
+ *   the else-branch cannot silently DOWNGRADE a future one to idle.
  * - On `idle`: emits explicit nulls. SessionEnd unlinks the marker
  *   entirely; the `state === "idle"` payload only fires for
  *   `idle_prompt` transitions, which legitimately clear attention.
@@ -282,7 +286,9 @@ export function nativeMarkerSource(
           attentionType: "permission",
           pendingTool: marker.pending_tool ?? session.pendingTool,
         }
-      : { status: "idle", attentionType: null, pendingTool: null };
+      : marker.state === "waiting_question"
+        ? { status: "waiting", attentionType: "question", pendingTool: null }
+        : { status: "idle", attentionType: null, pendingTool: null };
   if (marker.state_timestamp !== undefined) {
     state.lastActivityAt = new Date(
       marker.state_timestamp * 1000,
