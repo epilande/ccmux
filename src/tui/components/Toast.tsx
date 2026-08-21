@@ -1,5 +1,5 @@
 import type { Component } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { theme } from "../theme";
 
 interface ToastProps {
@@ -16,7 +16,7 @@ const MAX_WIDTH = 40;
  * off the left edge in a narrow pane (e.g. the 30-col default sidebar).
  */
 export const Toast: Component<ToastProps> = (props) => {
-  const dims = useTerminalDimensions();
+  const dims = useSharedTerminalDimensions();
   // Border-box width, capped and clamped to leave a 1-col gap on each side.
   const width = () => Math.min(MAX_WIDTH, Math.max(1, dims().width - 2));
 

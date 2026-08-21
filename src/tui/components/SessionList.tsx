@@ -1,7 +1,7 @@
 import type { Component } from "solid-js";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
-import { useTerminalDimensions } from "@opentui/solid";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import type { EnrichedSession, TmuxSocketError } from "../../types";
 import type { IconStyle } from "../../lib/icons";
 import type {
@@ -82,7 +82,7 @@ const ROW_MENU_INDENT = 2;
 export const SessionList: Component<SessionListProps> = (props) => {
   let scrollboxRef: ScrollBoxRenderable | undefined;
   const [scrollboxLayout, setScrollboxLayout] = createSignal(0);
-  const dims = useTerminalDimensions();
+  const dims = useSharedTerminalDimensions();
   const effectiveWidth = () =>
     props.showPreview
       ? Math.floor((dims().width * (100 - props.previewWidth)) / 100)

@@ -1,6 +1,6 @@
 import type { Component } from "solid-js";
 import { Show } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { MouseButton } from "@opentui/core";
 import { truncateText } from "../utils/format";
 import { turnsLabel } from "../turns-selection";
@@ -72,7 +72,7 @@ interface CopyDialogProps {
  * reads the same as the handoff dialog's Turns row.
  */
 export const CopyDialog: Component<CopyDialogProps> = (props) => {
-  const dims = useTerminalDimensions();
+  const dims = useSharedTerminalDimensions();
 
   const width = () =>
     Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dims().width - 4));

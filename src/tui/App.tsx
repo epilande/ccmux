@@ -10,11 +10,7 @@ import {
   createMemo,
   untrack,
 } from "solid-js";
-import {
-  useKeyboard,
-  useRenderer,
-  useTerminalDimensions,
-} from "@opentui/solid";
+import { useKeyboard, useRenderer } from "@opentui/solid";
 import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../types/session";
 import type { TmuxSocketError } from "../types";
@@ -51,6 +47,7 @@ import {
 } from "./utils/tmux";
 import { tmuxArgv } from "../lib/tmux-exec";
 import { isSameServerCached, setDaemonSocketPath } from "./utils/server-guard";
+import { useSharedTerminalDimensions } from "./utils/use-shared-dimensions";
 import { getDaemonUrl, resolvedHomeDir, STATE_FILE } from "../lib/config";
 import { getUIState } from "../lib/state";
 import {
@@ -203,7 +200,7 @@ export function App(props: AppProps) {
   const renderer = useRenderer();
   /** The viewport, for the handful of key handlers that have to agree with
    *  what a component decided it had room to draw. */
-  const appDims = useTerminalDimensions();
+  const appDims = useSharedTerminalDimensions();
   // Probed once at launch (cheap `which`, no need to react to hunk being
   // installed mid-session): gates the footer hint and help row. `d` itself
   // re-probes live so a hunk installed after launch works without restart.
@@ -2995,7 +2992,7 @@ export function App(props: AppProps) {
   // through a debounce; the persister itself tells user drags apart from
   // window resizes (which the window-resized hook re-pins).
   if (props.sidebar) {
-    const dims = useTerminalDimensions();
+    const dims = useSharedTerminalDimensions();
     const persistWidth = createSidebarWidthPersister();
     let widthSettleTimer: Timer | null = null;
     createEffect(

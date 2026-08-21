@@ -1,6 +1,6 @@
 import type { Component } from "solid-js";
 import { createMemo } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { MouseButton } from "@opentui/core";
 import type { Session } from "../../types";
 import type { ConfirmAction } from "../store";
@@ -57,7 +57,7 @@ export const ConfirmationDialog: Component<ConfirmationDialogProps> = (
     return props.session.project || props.session.cwd || props.session.id;
   });
 
-  const dims = useTerminalDimensions();
+  const dims = useSharedTerminalDimensions();
   const width = () =>
     Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dims().width - 4));
   const height = () => Math.min(Math.max(1, dims().height), HEIGHT);

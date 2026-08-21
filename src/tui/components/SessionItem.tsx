@@ -1,7 +1,7 @@
 import type { Component } from "solid-js";
 import { createMemo, For, Show } from "solid-js";
 import { useTick } from "../store";
-import { useTerminalDimensions } from "@opentui/solid";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { MouseButton, type MouseEvent } from "@opentui/core";
 import type { EnrichedSession } from "../../types";
 import type { IconStyle } from "../../lib/icons";
@@ -788,7 +788,7 @@ const RowRender: Component<{
 
 export const SessionItem: Component<SessionItemProps> = (props) => {
   const { tick } = useTick();
-  const dims = useTerminalDimensions();
+  const dims = useSharedTerminalDimensions();
   const effectiveWidth = () =>
     props.showPreview
       ? Math.floor((dims().width * (100 - props.previewWidth)) / 100)

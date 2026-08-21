@@ -8,7 +8,7 @@ import {
   Show,
   onCleanup,
 } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import type {
   StyledText,
   TextRenderable,
@@ -233,7 +233,7 @@ interface PreviewProps {
 }
 
 export const Preview: Component<PreviewProps> = (props) => {
-  const dims = useTerminalDimensions();
+  const dims = useSharedTerminalDimensions();
   const separatorWidth = createMemo(() =>
     Math.max(1, Math.floor((dims().width * props.width) / 100) - 3),
   );

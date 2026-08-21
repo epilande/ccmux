@@ -1,6 +1,6 @@
 import type { Component } from "solid-js";
 import { createEffect, createSignal, For } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { MouseButton } from "@opentui/core";
 import { truncateText } from "../utils/format";
 import { theme } from "../theme";
@@ -91,7 +91,7 @@ function fittedLabel(label: string, hint: string): string {
 }
 
 export const ContextMenu: Component<ContextMenuProps> = (props) => {
-  const dims = useTerminalDimensions();
+  const dims = useSharedTerminalDimensions();
   const [hovered, setHovered] = createSignal<string | null>(null);
   /**
    * Freeze the rows once the pointer enters one of them.

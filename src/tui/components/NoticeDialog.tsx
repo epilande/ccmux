@@ -1,6 +1,6 @@
 import type { Component } from "solid-js";
 import { createMemo, For } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { MouseButton } from "@opentui/core";
 import { truncateText } from "../utils/format";
 import { wrapText } from "./NewSessionDialog";
@@ -33,7 +33,7 @@ interface NoticeDialogProps {
  * the border instead of clipping.
  */
 export const NoticeDialog: Component<NoticeDialogProps> = (props) => {
-  const dims = useTerminalDimensions();
+  const dims = useSharedTerminalDimensions();
 
   const width = () =>
     Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dims().width - 4));

@@ -1,6 +1,6 @@
 import type { Component } from "solid-js";
 import { createMemo, For, Show } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../../types";
 import { WAITING_SUBTYPES, computeStatusSummary } from "../utils/grouping";
@@ -203,7 +203,7 @@ const WorktreeRow: Component<{
 };
 
 export const GroupPreview: Component<GroupPreviewProps> = (props) => {
-  const dims = useTerminalDimensions();
+  const dims = useSharedTerminalDimensions();
   const separatorWidth = createMemo(() =>
     Math.max(1, Math.floor((dims().width * props.width) / 100) - 3),
   );

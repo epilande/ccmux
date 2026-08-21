@@ -8,11 +8,7 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
-import {
-  useKeyboard,
-  useRenderer,
-  useTerminalDimensions,
-} from "@opentui/solid";
+import { useKeyboard, useRenderer } from "@opentui/solid";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
 import { MouseButton } from "@opentui/core";
 import { basename, resolve, sep } from "node:path";
@@ -39,6 +35,7 @@ import type { SessionStatus } from "../../types/session";
 import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
 import { fitHints } from "./Footer";
 import { useStatusIcon } from "../utils/useStatusIcon";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import type { IconStyle } from "../../lib/icons";
 import { theme } from "../theme";
 
@@ -1294,7 +1291,7 @@ function spawnClipboardHelper(argv: string[], text: string): boolean {
 }
 
 export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
-  const dims = useTerminalDimensions();
+  const dims = useSharedTerminalDimensions();
   // Only for `y`: OSC 52 goes out through the terminal the renderer owns.
   const renderer = useRenderer();
   const [phase, setPhase] = createSignal<Phase>("loading");
