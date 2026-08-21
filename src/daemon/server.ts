@@ -2184,20 +2184,58 @@ export class DaemonServer {
       );
     }
 
+    // Read the pid ONCE: `session` is a live reference the reconciler can
+    // mutate during the wait below, and the process this call signalled is
+    // the only one whose death may remove this row.
+    const pid = session.pid;
+
     try {
-      process.kill(session.pid, "SIGTERM");
+      process.kill(pid, "SIGTERM");
     } catch (err: unknown) {
       if (isErrnoException(err) && err.code === "ESRCH") {
-        // Process already dead — not an error
-      } else {
-        return Response.json(
-          { error: `Failed to kill process: ${errorMessage(err)}` },
-          { status: 500, headers },
-        );
+        // Process already dead. Nothing to wait for, and the row is stale by
+        // definition — remove it now so the client's `x` lands instead of
+        // sitting there until the next scan reaps it.
+        this.sessionManager.removeSession(sessionId);
+        return Response.json({ success: true, killed: true }, { headers });
       }
+      return Response.json(
+        { error: `Failed to kill process: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
     }
 
-    return Response.json({ success: true }, { headers });
+    // Removal is DEATH-GATED, not acknowledgement-gated: only once the process
+    // is confirmed gone does the row go, and it goes here (daemon-side) so
+    // every attached client learns about it through the same `session_removed`
+    // broadcast rather than each one guessing locally. A process that outlives
+    // the cap keeps its row and reports `killed: false`; the scan loop's
+    // liveness cleanup owns it from there.
+    const exited = await this.waitForExit(pid, 2000);
+    if (exited) {
+      this.sessionManager.removeSession(sessionId);
+    }
+
+    return Response.json({ success: true, killed: exited }, { headers });
+  }
+
+  /**
+   * Poll a pid's liveness until it exits or `timeoutMs` elapses. Returns true
+   * if the process is gone. Signal 0 is the probe: it throws (ESRCH, or EPERM
+   * once the pid is someone else's) exactly when the process we could signal
+   * is no longer there.
+   */
+  private async waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return true; // Process is gone
+      }
+      await Bun.sleep(100);
+    }
+    return false;
   }
 
   /**
@@ -2236,16 +2274,9 @@ export class DaemonServer {
         }
       }
 
-      // Poll until process exits (up to 5s)
-      const deadline = Date.now() + 5000;
-      while (Date.now() < deadline) {
-        try {
-          process.kill(session.pid, 0);
-        } catch {
-          break; // Process is gone
-        }
-        await Bun.sleep(100);
-      }
+      // Poll until process exits (up to 5s). The outcome is deliberately
+      // ignored: a restart re-sends the resume command either way.
+      await this.waitForExit(session.pid, 5000);
     }
 
     // Resume in the same pane via the stable `%N` id, not the cached

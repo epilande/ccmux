@@ -1511,7 +1511,7 @@ describe("DaemonServer", () => {
       expect(data.error).toBe("Session has no associated process");
     });
 
-    it("should SIGTERM a normal (non-background) session's pid, unchanged from before", async () => {
+    it("should SIGTERM a normal (non-background) session's pid and remove the row once it dies", async () => {
       const { manager, internals } = createServer();
       manager.createSession(
         "s1",
@@ -1519,17 +1519,35 @@ describe("DaemonServer", () => {
       );
       manager.setPid("s1", 999999);
 
-      const killSpy = spyOn(process, "kill").mockImplementation(
-        (() => true) as typeof process.kill,
-      );
+      const killSpy = spyOn(process, "kill").mockImplementation(((
+        _pid: number,
+        signal?: string | number,
+      ) => {
+        // Liveness probe (signal 0): report the process gone, so the
+        // post-SIGTERM wait resolves at once. Real processes are covered by
+        // `server.kill.test.ts`, which spawns them.
+        if (signal === 0) {
+          const err = new Error("no such process") as NodeJS.ErrnoException;
+          err.code = "ESRCH";
+          throw err;
+        }
+        return true; // SIGTERM: pretend it landed
+      }) as typeof process.kill);
 
       try {
         const response = await internals.handleKillSession("s1", {});
-        const data = (await response.json()) as { success: boolean };
+        const data = (await response.json()) as {
+          success: boolean;
+          killed: boolean;
+        };
 
         expect(data.success).toBe(true);
+        expect(data.killed).toBe(true);
         expect(response.status).toBe(200);
         expect(killSpy).toHaveBeenCalledWith(999999, "SIGTERM");
+        // Removal is the daemon's job now, so the `session_removed` broadcast
+        // reaches every client instead of each one removing the row locally.
+        expect(manager.getSession("s1")).toBeUndefined();
       } finally {
         killSpy.mockRestore();
       }
