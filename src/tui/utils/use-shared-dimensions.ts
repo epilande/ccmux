@@ -29,10 +29,12 @@ export function useSharedTerminalDimensions(): Accessor<TerminalDimensions> {
   const renderer = useRenderer();
   let entry = cache.get(renderer);
   if (!entry) {
-    const [dims, setDims] = createSignal<TerminalDimensions>({
-      width: renderer.width,
-      height: renderer.height,
-    });
+    const [dims, setDims] = createSignal<TerminalDimensions>(
+      { width: renderer.width, height: renderer.height },
+      // A resize event reporting unchanged dimensions should not wake every
+      // consumer (each row subscribes), so compare by value, not reference.
+      { equals: (a, b) => a.width === b.width && a.height === b.height },
+    );
     const onResize = (width: number, height: number) =>
       setDims({ width, height });
     renderer.on("resize", onResize);
