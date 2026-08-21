@@ -1,6 +1,6 @@
 import type { Component } from "solid-js";
 import { Switch, Match } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { DEFAULT_GROUP_BY, type GroupBy } from "../../lib/preferences";
 import { theme } from "../theme";
 
@@ -177,7 +177,7 @@ export function defaultHints(props: {
 }
 
 export const Footer: Component<FooterProps> = (props) => {
-  const dims = useTerminalDimensions();
+  const dims = useSharedTerminalDimensions();
   const hints = () =>
     fitHints(defaultHints(props), Math.max(1, dims().width - FOOTER_PADDING));
 

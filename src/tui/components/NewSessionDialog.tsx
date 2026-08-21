@@ -1,6 +1,6 @@
 import type { Component } from "solid-js";
 import { createMemo, For, Show } from "solid-js";
-import { useTerminalDimensions } from "@opentui/solid";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { MouseButton } from "@opentui/core";
 import type { SpawnableAgent } from "../../lib/spawnable-agents";
 import {
@@ -331,7 +331,7 @@ interface NewSessionDialogProps {
 }
 
 export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
-  const dims = useTerminalDimensions();
+  const dims = useSharedTerminalDimensions();
 
   const width = () =>
     Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dims().width - 4));
