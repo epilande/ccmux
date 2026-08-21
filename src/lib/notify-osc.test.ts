@@ -5,6 +5,7 @@ import {
   buildOsc99Sequence,
   wrapTmuxPassthrough,
   isKittyTermnames,
+  isMultiplexerTermnames,
   buildPassthroughSequence,
   probeAllowPassthrough,
   deliverOscNotification,
@@ -137,6 +138,24 @@ describe("isKittyTermnames", () => {
   });
 });
 
+describe("isMultiplexerTermnames", () => {
+  it("detects a multiplexer terminfo name among attached clients", () => {
+    expect(isMultiplexerTermnames("tmux-256color")).toBe(true);
+    expect(isMultiplexerTermnames("screen-256color")).toBe(true);
+    expect(isMultiplexerTermnames("tmux")).toBe(true);
+    expect(isMultiplexerTermnames("xterm-ghostty\ntmux-256color\n")).toBe(true);
+  });
+
+  it("returns false for clients that are real terminals", () => {
+    expect(isMultiplexerTermnames("xterm-kitty")).toBe(false);
+    expect(isMultiplexerTermnames("xterm-256color")).toBe(false);
+    expect(isMultiplexerTermnames("")).toBe(false);
+    // Matching is prefix-based, so an unrelated name merely containing "tmux"
+    // is not a multiplexer client.
+    expect(isMultiplexerTermnames("xterm-tmux")).toBe(false);
+  });
+});
+
 describe("buildPassthroughSequence", () => {
   it("selects generic OSC 9 and folds the subtitle into the message", () => {
     const seq = buildPassthroughSequence(BASE_PAYLOAD, false);
@@ -157,6 +176,34 @@ describe("buildPassthroughSequence", () => {
     const bodyChunk = seq.split("p=body;")[1]!;
     const b64 = bodyChunk.slice(0, bodyChunk.indexOf(ESC));
     expect(decodeB64(b64)).toBe("Needs permission: Bash\nrm -rf build");
+  });
+
+  it("wraps twice for a multiplexer client, in both formats", () => {
+    const folded = "Needs permission: Bash\nrm -rf build";
+    const raw9 = buildOsc9Sequence(BASE_PAYLOAD.title, folded);
+    expect(buildPassthroughSequence(BASE_PAYLOAD, false, true)).toBe(
+      wrapTmuxPassthrough(wrapTmuxPassthrough(raw9)),
+    );
+    const raw99 = buildOsc99Sequence(
+      BASE_PAYLOAD.sessionId,
+      BASE_PAYLOAD.title,
+      folded,
+    );
+    expect(buildPassthroughSequence(BASE_PAYLOAD, true, true)).toBe(
+      wrapTmuxPassthrough(wrapTmuxPassthrough(raw99)),
+    );
+  });
+
+  it("wraps once when the multiplexer flag is omitted", () => {
+    const folded = "Needs permission: Bash\nrm -rf build";
+    expect(buildPassthroughSequence(BASE_PAYLOAD, false)).toBe(
+      wrapTmuxPassthrough(buildOsc9Sequence(BASE_PAYLOAD.title, folded)),
+    );
+    expect(buildPassthroughSequence(BASE_PAYLOAD, true)).toBe(
+      wrapTmuxPassthrough(
+        buildOsc99Sequence(BASE_PAYLOAD.sessionId, BASE_PAYLOAD.title, folded),
+      ),
+    );
   });
 });
 
@@ -184,6 +231,37 @@ describe("deliverOscNotification", () => {
     expect(writes).toHaveLength(1);
     expect(writes[0]!.tty).toBe("/dev/ttys061");
     expect(writes[0]!.data).toContain(`${ESC}Ptmux;`);
+  });
+
+  it("double-wraps when the attached client is itself a multiplexer", () => {
+    const writes: string[] = [];
+    deliverOscNotification(BASE_PAYLOAD, "/dev/ttys061", {
+      runTmux: () => "tmux-256color",
+      writeToTty: (_tty, data) => writes.push(data),
+    });
+    expect(writes[0]).toBe(buildPassthroughSequence(BASE_PAYLOAD, false, true));
+    // The outer wrap doubles the inner frame's leading ESC.
+    expect(writes[0]!.startsWith(`${ESC}Ptmux;${ESC}${ESC}Ptmux;`)).toBe(true);
+  });
+
+  it("stays single-wrapped for a plain terminal client", () => {
+    const writes: string[] = [];
+    deliverOscNotification(BASE_PAYLOAD, "/dev/ttys061", {
+      runTmux: () => "xterm-256color",
+      writeToTty: (_tty, data) => writes.push(data),
+    });
+    expect(writes[0]).toBe(buildPassthroughSequence(BASE_PAYLOAD, false));
+    expect(writes[0]!.startsWith(`${ESC}Ptmux;${ESC}${ESC}]9;`)).toBe(true);
+  });
+
+  it("stays single-wrapped OSC 99 for a kitty client", () => {
+    const writes: string[] = [];
+    deliverOscNotification(BASE_PAYLOAD, "/dev/ttys061", {
+      runTmux: () => "xterm-kitty",
+      writeToTty: (_tty, data) => writes.push(data),
+    });
+    expect(writes[0]).toBe(buildPassthroughSequence(BASE_PAYLOAD, true));
+    expect(writes[0]!.startsWith(`${ESC}Ptmux;${ESC}${ESC}]99;`)).toBe(true);
   });
 
   it("scopes the termname sniff to the payload's pane when set", () => {

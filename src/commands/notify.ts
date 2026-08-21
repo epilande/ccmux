@@ -12,6 +12,7 @@ import { DbusNotifier } from "../lib/notify-dbus";
 import {
   deliverOscNotification,
   isKittyTermnames,
+  isMultiplexerTermnames,
   probeAllowPassthrough,
 } from "../lib/notify-osc";
 import { DAEMON_HOST, DAEMON_PORT } from "../lib/config";
@@ -269,7 +270,7 @@ function runOscFlow(
     console.error(
       "tmux option allow-passthrough is not enabled; the escape sequence would be swallowed.",
     );
-    console.error("Enable it with: tmux set -g allow-passthrough on");
+    console.error("Enable it with: tmux set -g allow-passthrough all");
     return false;
   }
 
@@ -294,7 +295,10 @@ function runOscFlow(
     "#{client_termname}",
   ]);
   const format =
-    termnames && isKittyTermnames(termnames) ? "OSC 99 (kitty)" : "OSC 9";
+    (termnames && isKittyTermnames(termnames) ? "OSC 99 (kitty)" : "OSC 9") +
+    (termnames && isMultiplexerTermnames(termnames)
+      ? " via nested tmux passthrough"
+      : "");
   console.log("Backend: osc");
   console.log(`Pane tty: ${tty}`);
   console.log(`Sequence: ${format}`);

@@ -738,6 +738,45 @@ describe("agent discovery failure semantics (fail-closed)", () => {
     ]);
   });
 
+  it("keeps the real codex process when its code-mode host shares its tty and is its child", async () => {
+    const repo = join(homedir(), "Code", "myrepo");
+
+    mockPsAndLsof(
+      psOutput([
+        {
+          pid: 60,
+          ppid: 50,
+          tty: "ttys077",
+          etime: "04:50",
+          command: "/opt/codex/bin/codex --yolo",
+        },
+        {
+          pid: 61,
+          ppid: 60,
+          tty: "ttys077",
+          etime: "00:10",
+          command: "/opt/codex/bin/codex-code-mode-host",
+        },
+      ]),
+      lsofOutput([
+        { pid: 60, cwd: repo, tty: "ttys077" },
+        { pid: 61, cwd: repo, tty: "ttys077" },
+      ]),
+    );
+
+    const processes = await discoverAgentProcessesOrThrow([CODEX_AGENT_DEF]);
+    expect(processes).toEqual([
+      {
+        pid: 60,
+        command: "/opt/codex/bin/codex --yolo",
+        agentType: "codex",
+        tty: "ttys077",
+        cwd: repo,
+        startTime: expect.any(Number),
+      },
+    ]);
+  });
+
   it("fail-soft discoverAgentProcesses swallows a hard ps failure as []", async () => {
     mockPs({ stdout: "", exitCode: 1 });
     await expect(discoverAgentProcesses([CLAUDE_AGENT_DEF])).resolves.toEqual(

@@ -85,6 +85,13 @@ describe("genericMarkerSource", () => {
     expect(built.source.state.pendingTool).toBeNull();
   });
 
+  it("maps marker.state=waiting_question to status: waiting + question", () => {
+    const built = genericMarkerSource(mkMarker({ state: "waiting_question" }));
+    expect(built.source.state.status).toBe("waiting");
+    expect(built.source.state.attentionType).toBe("question");
+    expect(built.source.state.pendingTool).toBeNull();
+  });
+
   it("source.timestamp is state_timestamp * 1000 (ms since epoch)", () => {
     const built = genericMarkerSource(
       mkMarker({ state_timestamp: 1_700_000_500 }),
@@ -377,6 +384,18 @@ describe("nativeMarkerSource", () => {
       mkSession({ pendingTool: "LogSays" }),
     );
     expect(built.source.state.pendingTool).toBe("LogSays");
+  });
+
+  it("marker.state=waiting_question yields waiting/question, never a downgrade to idle", () => {
+    // Drift guard: no native-tracked agent writes this state today, but the
+    // else-branch would otherwise map it to `idle`, downgrading a real wait.
+    const built = nativeMarkerSource(
+      mkMarker({ state: "waiting_question" }),
+      mkSession({ pendingTool: "Bash" }),
+    );
+    expect(built.source.state.status).toBe("waiting");
+    expect(built.source.state.attentionType).toBe("question");
+    expect(built.source.state.pendingTool).toBeNull();
   });
 
   it("marker.state=idle clears attention regardless of session.pendingTool", () => {

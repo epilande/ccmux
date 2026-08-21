@@ -20,14 +20,11 @@ function isEnoent(error: unknown): boolean {
 }
 
 /**
- * A directory's gate key. `ctimeNs` is part of the key, not decoration:
- * on coarse-mtime filesystems (Linux ext4 with small inodes resolves
- * mtime to the second) two namespace mutations in the same directory
- * within one second share an mtime tick, but ctime advances on every
- * inode metadata change regardless of granularity — and `utimes` cannot
- * reset it. Keying on (mtimeNs, ctimeNs) makes a same-tick add/remove
- * collision (which would silently drop an `add`/`unlink`) unreachable on
- * every local filesystem we target.
+ * A directory's cheap gate key. Node exposes nanoseconds, but both values
+ * retain the filesystem's actual timestamp resolution. Rapid namespace
+ * mutations can therefore leave both unchanged on coarse-resolution
+ * filesystems, so equality is an optimization rather than proof that the
+ * directory did not change.
  */
 interface DirSig {
   mtimeNs: bigint;
@@ -74,6 +71,13 @@ function newDirNode(): DirNode {
     files: new Set(),
     childDirs: new Map(),
   };
+}
+
+/** Reopen every cached gate under `node` for the null-event reconcile. */
+function clearSigs(node: DirNode): void {
+  node.walkSig = null;
+  node.sweepSig = null;
+  for (const child of node.childDirs.values()) clearSigs(child);
 }
 
 /**
@@ -308,6 +312,15 @@ class NativeLogTreeWatcher extends EventEmitter implements LogTreeWatcher {
     // whole subtree (walk for new files, sweep for gone ones) rather
     // than trusting the event to name the exact path that changed.
     if (!relPath) {
+      // A null event carries no path-local evidence, so cached directory
+      // signatures cannot safely close the gates. On filesystems whose
+      // timestamp resolution is coarser than the mutation sequence (HFS+,
+      // legacy ext4 with 128-byte inodes), a rapid add/remove pair can
+      // leave a directory's (mtime, ctime) unchanged. Clear every cached
+      // gate, not just the root: no built-in keeps session files at the
+      // root (claude depth 1, copilot 2, codex 4), so a root-only reset
+      // would miss every .jsonl that matters.
+      clearSigs(this.rootNode);
       this.walk(this.root, this.rootNode, 0);
       this.sweep(this.root, this.rootNode);
       return;
@@ -335,6 +348,25 @@ class NativeLogTreeWatcher extends EventEmitter implements LogTreeWatcher {
 
     if (stat.isDirectory()) {
       const node = this.getOrCreateNode(abs);
+      // The event names this directory: direct evidence its own namespace
+      // may have changed, which outranks a cached signature that a rapid
+      // add/remove pair can leave unchanged on coarse-timestamp
+      // filesystems (see DirSig). Clear only this node's own gates, which
+      // covers the reported case: the change is directly inside the named
+      // directory. Deeper levels keep theirs, so the descent stays cheap.
+      //
+      // That is a scoping decision, not a proof of coverage. A burst can
+      // surface as a path outside the file/parent/root trichotomy (the
+      // handleGone comment below documents one: a delete coalescing into a
+      // single too-deep child's event), so an event naming a non-parent
+      // ANCESTOR still descends into gated children and can be swallowed by
+      // a collision below. Only codex reaches that (depth 4); claude and
+      // copilot put a session file's parent directly under the root, so the
+      // named directory is always the parent. Clearing the whole subtree
+      // here would close it, at a cost that scales with the subtree rather
+      // than with the change.
+      node.walkSig = null;
+      node.sweepSig = null;
       this.walk(abs, node, segments);
       this.sweep(abs, node);
       return;

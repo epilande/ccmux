@@ -117,6 +117,83 @@ describe("terminal-detector", () => {
     expect(result.pendingTool).toBe("Command");
   });
 
+  describe("OpenCode question picker (issue #137)", () => {
+    // Verbatim `tmux capture-pane -p` excerpt from a real OpenCode 1.18.15
+    // pane with the question-tool picker open (2026-08-20, right-hand
+    // sidebar columns elided). The picker replaces the composer footer, so
+    // the `esc interrupt` working match disappears exactly when it opens.
+    const QUESTION_PICKER = `  ┃
+  ┃  Which of these three colors do you prefer?
+  ┃
+  ┃  1. Red
+  ┃     Prefer the color red
+  ┃  2. Green
+  ┃     Prefer the color green
+  ┃  3. Blue
+  ┃     Prefer the color blue
+  ┃  4. Type your own answer
+  ┃
+  ┃  ↑↓ select  enter submit  esc dismiss`;
+
+    it("detects the open picker as waiting/question", () => {
+      const result = detectTerminalStatus(QUESTION_PICKER, opencode);
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("question");
+      expect(result.pendingTool).toBeNull();
+    });
+
+    // Verbatim from OpenCode 1.18.19. The multi-select Confirm tab drops the
+    // arrow hint entirely, so this fails if anyone "tightens" the rule's
+    // second anchor to `↑↓ select`.
+    const MULTISELECT_CONFIRM_TAB = `  ┃  Confirm your selections
+  ┃
+  ┃  ✓ Red
+  ┃  ✓ Blue
+  ┃
+  ┃  ⇆ tab  enter submit  esc dismiss`;
+
+    it("detects the multi-select Confirm tab, which has no arrow hint", () => {
+      const result = detectTerminalStatus(MULTISELECT_CONFIRM_TAB, opencode);
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("question");
+    });
+
+    it("'esc dismiss' alone in prose does not match (matchAll pair)", () => {
+      const result = detectTerminalStatus(
+        "the footer says esc dismiss when a question is open",
+        opencode,
+      );
+      expect(result.status).toBe("idle");
+      expect(result.attentionType).toBeNull();
+    });
+
+    it("question text containing 'reject' still reads as a question, not a permission", () => {
+      // The permission rule matches the bare word "reject", so classifying
+      // this as a permission wait would attach Approve/Deny buttons whose
+      // approve key is a bare Enter, which the picker eats as a selection.
+      const result = detectTerminalStatus(
+        `  ┃  Should I approve or reject this plan?
+  ┃  1. Approve it
+  ┃  2. Reject it
+  ┃  ↑↓ select  enter submit  esc dismiss`,
+        opencode,
+      );
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("question");
+      expect(result.pendingTool).toBeNull();
+    });
+
+    it("a permission dialog with no picker footer still reads as permission", () => {
+      const result = detectTerminalStatus(
+        "Allow once  Allow always  Reject",
+        opencode,
+      );
+      expect(result.status).toBe("waiting");
+      expect(result.attentionType).toBe("permission");
+      expect(result.pendingTool).toBe("Command");
+    });
+  });
+
   it("strips ANSI before pattern matching", () => {
     const ansiPrompt = "\u001B[31mAllow command?\u001B[0m";
     const result = detectTerminalStatus(ansiPrompt, codex);
