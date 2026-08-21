@@ -30,17 +30,11 @@ export function createKillCommand(): Command {
           throw new Error(`HTTP ${response.status}`);
         }
 
-        // The daemon waits for the process to actually die and reports whether
-        // it did. `killed: false` means SIGTERM went unanswered inside the cap
-        // and the process is STILL ALIVE — saying "Killed" there would be a
-        // statement the daemon has already told us is untrue. A background row
-        // omits the field entirely (its teardown is the supervisor's, not
-        // ours), so absent means success.
-        const data = (await response.json().catch(() => null)) as {
-          killed?: boolean;
-        } | null;
+        // `killed: false` means the process outlived the daemon's wait and is
+        // still running. A background row omits the field, so absent is success.
+        const data = (await response.json()) as { killed?: boolean };
 
-        if (data?.killed === false) {
+        if (data.killed === false) {
           console.error(
             `Session ${sessionId} did not exit; the process is still running.`,
           );

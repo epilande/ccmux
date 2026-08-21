@@ -218,6 +218,7 @@ describe("POST /sessions/:id/kill removes the session daemon-side", () => {
       ),
     ).toBe(true);
   });
+
   it("keeps a row the reconciler re-pointed at a different live process", async () => {
     // The row this call is about dies; a DIFFERENT agent lands in the same
     // pane while the poll is still running. Pane-tracked ids outlive the
@@ -247,9 +248,9 @@ describe("POST /sessions/:id/kill removes the session daemon-side", () => {
         killed: boolean;
       };
 
-      // The process we signalled really did die, so the report is honest...
       expect(body).toEqual({ success: true, killed: true });
-      // ...but the row now belongs to the replacement and must survive.
+      // The row now belongs to the replacement, so it must survive the death
+      // of the process this call signalled.
       expect(manager.getSession("kill-replaced")).toBeDefined();
       expect(manager.getSession("kill-replaced")?.pid).toBe(replacement.pid);
       expect(events.some((e) => e.type === "removed")).toBe(false);
