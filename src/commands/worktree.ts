@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
 import { getDaemonUrl } from "../lib/config";
+import { daemonError, daemonBody } from "../lib/daemon-json";
 import { ensureDaemon } from "./shared";
 import type {
   PruneCandidate,
@@ -172,15 +173,13 @@ async function fetchCandidates(
     `${getDaemonUrl()}/worktrees/prune-candidates${query}`,
   );
   if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as {
-      error?: string;
-    };
-    throw new Error(body.error ?? describeHttpFailure(response.status));
+    const error = await daemonError(response);
+    throw new Error(error ?? describeHttpFailure(response.status));
   }
   // Normalized, not cast: a daemon older than the `open` bucket sends a body
   // without it, and a bare cast would hand every reader a field the type
   // promises and the wire does not have.
-  return normalizeScan((await response.json()) as ScanResponse);
+  return normalizeScan(await daemonBody<ScanResponse>(response, "scan"));
 }
 
 async function postPrune(body: {
@@ -213,12 +212,10 @@ async function postPrune(body: {
     body: JSON.stringify({ ...body, source: "cli" }),
   });
   if (!response.ok) {
-    const data = (await response.json().catch(() => ({}))) as {
-      error?: string;
-    };
-    throw new Error(data.error ?? describeHttpFailure(response.status));
+    const error = await daemonError(response);
+    throw new Error(error ?? describeHttpFailure(response.status));
   }
-  return (await response.json()) as PruneRunResult;
+  return await daemonBody<PruneRunResult>(response, "prune");
 }
 
 interface PruneOptions {
@@ -466,12 +463,10 @@ async function fetchWorktrees(options: {
   const query = params.size > 0 ? `?${params}` : "";
   const response = await fetch(`${getDaemonUrl()}/worktrees${query}`);
   if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as {
-      error?: string;
-    };
-    throw new Error(body.error ?? describeHttpFailure(response.status));
+    const error = await daemonError(response);
+    throw new Error(error ?? describeHttpFailure(response.status));
   }
-  return (await response.json()) as WorktreeListResponse;
+  return await daemonBody<WorktreeListResponse>(response, "worktree list");
 }
 
 async function runListCommand(options: { repo?: string }): Promise<void> {

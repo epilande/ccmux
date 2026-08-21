@@ -7,6 +7,7 @@ import {
   getProcessCommand,
 } from "../daemon";
 import { DAEMON_PORT, getDaemonUrl } from "../lib/config";
+import { daemonBody } from "../lib/daemon-json";
 
 /**
  * Evict any zombie on the daemon port, spawn a fresh daemon, wait for health.
@@ -56,11 +57,11 @@ export async function printDaemonHealth(indent = ""): Promise<void> {
   try {
     const response = await fetch(`${getDaemonUrl()}/health`);
     if (response.ok) {
-      const health = (await response.json()) as {
+      const health = await daemonBody<{
         sessions: number;
         clients: number;
         uptime: number;
-      };
+      }>(response, "health");
       console.log(`${indent}Sessions: ${health.sessions}`);
       console.log(`${indent}Connected clients: ${health.clients}`);
       console.log(`${indent}Uptime: ${Math.round(health.uptime)}s`);

@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { getDaemonUrl } from "../lib/config";
+import { daemonBody, readString } from "../lib/daemon-json";
 import { isSameTmuxServer } from "../lib/tmux-server";
 import { tmuxArgv } from "../lib/tmux-exec";
 import { resolveActiveTmuxClientTty } from "../lib/tmux-client";
@@ -24,9 +25,9 @@ export function createSwitchCommand(): Command {
           throw new Error(`HTTP ${response.status}`);
         }
 
-        const data = (await response.json()) as {
+        const data = await daemonBody<{
           session: { tmuxPane: string | null; tmuxTarget: string | null };
-        };
+        }>(response, "session");
 
         // Prefer the stable `%N` pane id over the `session:window.pane`
         // coordinate: the coordinate goes stale when a lower-indexed window
@@ -48,8 +49,7 @@ export function createSwitchCommand(): Command {
         );
         const daemonSocket =
           infoRes && infoRes.ok
-            ? ((await infoRes.json()) as { socketPath: string | null })
-                .socketPath
+            ? readString(await infoRes.json(), "socketPath")
             : null;
         if (!isSameTmuxServer(daemonSocket)) {
           console.error(

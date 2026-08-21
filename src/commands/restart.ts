@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { getDaemonUrl } from "../lib/config";
+import { daemonError } from "../lib/daemon-json";
 import { ensureDaemon } from "./shared";
 
 export function createRestartCommand(): Command {
@@ -21,8 +22,8 @@ export function createRestartCommand(): Command {
         }
 
         if (response.status === 400) {
-          const data = (await response.json()) as { error: string };
-          console.error(data.error);
+          const error = await daemonError(response);
+          console.error(error ?? `HTTP ${response.status}`);
           process.exit(1);
         }
 

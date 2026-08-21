@@ -1,6 +1,7 @@
 import { Command, InvalidArgumentError } from "commander";
 import { resolve } from "node:path";
 import { getDaemonUrl } from "../lib/config";
+import { readString } from "../lib/daemon-json";
 import { ensureDaemon } from "./shared";
 import { PANE_ID_PATTERN, type SpawnSplit } from "../daemon/spawn-command";
 import {
@@ -142,8 +143,8 @@ function resolveSpawnCwd(explicit?: string): string {
 async function daemonTmuxSocket(): Promise<string | null> {
   const res = await fetch(`${getDaemonUrl()}/server-info`).catch(() => null);
   if (!res || !res.ok) return null;
-  const data = (await res.json()) as { socketPath: string | null };
-  return data.socketPath;
+  const body: unknown = await res.json();
+  return readString(body, "socketPath");
 }
 
 export function createSpawnCommand(): Command {

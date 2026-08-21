@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { getDaemonUrl } from "../lib/config";
+import { daemonBody } from "../lib/daemon-json";
 import { getAgents } from "../lib/agents";
 import { getPreferences } from "../lib/preferences";
 import { isDaemonRunningAsync } from "../daemon";
@@ -54,7 +55,10 @@ async function fetchTrackedSessions(): Promise<EnrichedSession[]> {
   try {
     const response = await fetch(`${getDaemonUrl()}/sessions?all=true`);
     if (!response.ok) return [];
-    const data = (await response.json()) as { sessions: EnrichedSession[] };
+    const data = await daemonBody<{ sessions: EnrichedSession[] }>(
+      response,
+      "session list",
+    );
     return data.sessions ?? [];
   } catch {
     return [];

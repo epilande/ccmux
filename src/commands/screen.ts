@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { getDaemonUrl } from "../lib/config";
+import { daemonError, daemonBody } from "../lib/daemon-json";
 import { ensureDaemon } from "./shared";
 import type { EnrichedSession } from "../types";
 
@@ -71,7 +72,7 @@ async function fetchScreen(
       `${daemonUrl}/sessions/${sessionId}/screen?lines=${lines}`,
     );
     if (!response.ok) return null;
-    return (await response.json()) as ScreenResponse;
+    return await daemonBody<ScreenResponse>(response, "screen");
   } catch {
     return null;
   }
@@ -92,8 +93,8 @@ async function handleSingleSession(
   }
 
   if (response.status === 400) {
-    const data = (await response.json()) as { error: string };
-    console.error(data.error);
+    const error = await daemonError(response);
+    console.error(error ?? `HTTP ${response.status}`);
     process.exit(1);
   }
 
@@ -101,7 +102,7 @@ async function handleSingleSession(
     throw new Error(`HTTP ${response.status}`);
   }
 
-  const data = (await response.json()) as ScreenResponse;
+  const data = await daemonBody<ScreenResponse>(response, "screen");
 
   if (!options.grep) {
     if (options.json) {
@@ -125,7 +126,9 @@ async function handleSingleSession(
   }
 
   if (options.json) {
-    console.log(JSON.stringify({ ...data, pattern: options.grep, matches }, null, 2));
+    console.log(
+      JSON.stringify({ ...data, pattern: options.grep, matches }, null, 2),
+    );
   } else {
     for (const m of matches) {
       console.log(`  Line ${m.line}: ${m.text}`);
@@ -143,9 +146,10 @@ async function handleGlobalGrep(options: ScreenOptions): Promise<void> {
     throw new Error(`HTTP ${sessionsRes.status}`);
   }
 
-  const { sessions } = (await sessionsRes.json()) as {
-    sessions: EnrichedSession[];
-  };
+  const { sessions } = await daemonBody<{ sessions: EnrichedSession[] }>(
+    sessionsRes,
+    "session list",
+  );
 
   if (sessions.length === 0) {
     console.log("No active sessions");
@@ -230,7 +234,10 @@ function parseLines(value: string): number {
 export function createScreenCommand(): Command {
   return new Command("screen")
     .description("Capture pane content, or search across all sessions")
-    .argument("[session-id]", "Session ID or pane ID (omit with --grep to search all)")
+    .argument(
+      "[session-id]",
+      "Session ID or pane ID (omit with --grep to search all)",
+    )
     .option("-l, --lines <n>", "Number of lines to capture", "50")
     .option("--json", "Output as JSON with metadata")
     .option("-g, --grep <pattern>", "Search for pattern in pane content")
