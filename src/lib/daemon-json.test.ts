@@ -77,16 +77,16 @@ describe("daemonBody", () => {
   });
 
   it("throws naming the shape when the body is not JSON", async () => {
-    expect(daemonBody(res("<html>"), "transcript")).rejects.toThrow(
+    await expect(daemonBody(res("<html>"), "transcript")).rejects.toThrow(
       "non-JSON transcript",
     );
   });
 
   it("throws when the body is JSON but not an object", async () => {
-    expect(daemonBody(res(JSON.stringify("hi")), "scan")).rejects.toThrow(
+    await expect(daemonBody(res(JSON.stringify("hi")), "scan")).rejects.toThrow(
       "malformed scan",
     );
-    expect(daemonBody(res(JSON.stringify([1])), "scan")).rejects.toThrow(
+    await expect(daemonBody(res(JSON.stringify([1])), "scan")).rejects.toThrow(
       "malformed scan",
     );
   });

@@ -49,7 +49,7 @@ export function createSwitchCommand(): Command {
         );
         const daemonSocket =
           infoRes && infoRes.ok
-            ? readString(await infoRes.json(), "socketPath")
+            ? readString(await infoRes.json().catch(() => null), "socketPath")
             : null;
         if (!isSameTmuxServer(daemonSocket)) {
           console.error(

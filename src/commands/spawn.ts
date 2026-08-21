@@ -143,7 +143,7 @@ function resolveSpawnCwd(explicit?: string): string {
 async function daemonTmuxSocket(): Promise<string | null> {
   const res = await fetch(`${getDaemonUrl()}/server-info`).catch(() => null);
   if (!res || !res.ok) return null;
-  const body: unknown = await res.json();
+  const body: unknown = await res.json().catch(() => null);
   return readString(body, "socketPath");
 }
 
