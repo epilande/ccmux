@@ -346,8 +346,16 @@ Both seed the agent's opening prompt with the title and URL, and your own
 `--prompt` is appended after it. Both refuse rather than guess: a PR that is
 not open, an issue that is closed, a PR whose branch is already checked out in
 another worktree (ccmux names it), and a same-named local branch that is not
-that PR. A local branch that *is* the PR is fast-forwarded, never force-updated.
-If it has diverged, ccmux leaves it alone and says so.
+that PR (a branch counts as the PR's only when its `merge` *and* `remote` config
+both already point at it, so a fork PR cannot ride in on a name collision with
+one of your origin-tracking branches). A local branch that *is* the PR is
+fast-forwarded, never force-updated. If it has diverged, ccmux leaves it alone
+and says so.
+
+ccmux fetches the PR from `origin`, while `gh` resolves the number through its
+own repo selection (`gh repo set-default`, `GH_REPO`, a fork clone's upstream).
+If those name different repositories, ccmux refuses and names both rather than
+checking out a same-numbered PR from the wrong repo.
 
 ### Moving Uncommitted Changes
 

@@ -75,6 +75,7 @@ import {
 import {
   branchCheckedOutAt,
   configurePRBranch,
+  prRepoMismatch,
   lookupIssue,
   lookupPR,
   preparePRBranch,
@@ -4296,6 +4297,8 @@ export class DaemonServer {
     let spawnCwd = cwd;
     let worktreeInfo: WorktreeCreation | undefined;
     let moveInfo: SpawnMoveReport | undefined;
+    /** A `--pr` tracking-config write that failed after the worktree existed. */
+    let prConfigProblem: string | undefined;
     // `pr`/`issue` imply a worktree without one being asked for: the whole
     // point of both flags is a checkout to work in. The synthesized request
     // is empty except for the `base` an `--issue --base` rides in on, which
@@ -4384,6 +4387,14 @@ export class DaemonServer {
       let prBranch: string | undefined;
       let prBase: string | null = null;
       if (prSource) {
+        // Before the branch check and well before the fetch: `gh` resolved
+        // the number through its own repo selection, and the fetch below is
+        // hardcoded to `origin`. If those name different repositories,
+        // everything after this point would be about the wrong PR.
+        const mismatch = await prRepoMismatch(mainRepoRoot, prSource);
+        if (mismatch) {
+          return Response.json({ error: mismatch }, { status: 400, headers });
+        }
         const occupied = await branchCheckedOutAt(
           mainRepoRoot,
           prSource.headRefName,
@@ -4542,13 +4553,21 @@ export class DaemonServer {
         spawnCwd = created.result.path;
         // After creation, and on the reused-branch path too: every write is
         // idempotent, so a branch an older ccmux left half-configured heals.
+        //
+        // A failure is CARRIED rather than returned here, because by now the
+        // worktree exists: it is reported through `setupFailure` below, which
+        // is the convention for everything that goes wrong after setup landed
+        // (the worktree is deliberately not rolled back, and the response has
+        // to name what the user now owns). Declared above the block so this
+        // survives it.
         if (prSource) {
-          await configurePRBranch(
+          const configured = await configurePRBranch(
             mainRepoRoot,
             created.result.branch,
             prSource,
             prBase,
           );
+          if (!configured.ok) prConfigProblem = configured.error;
         }
       }
     }
@@ -4604,6 +4623,18 @@ export class DaemonServer {
       error: withSetupNotes(error),
       ...(moveInfo ? { move: moveInfo } : {}),
     });
+
+    // A `--pr` whose tracking config could not be written in full. Reported
+    // here, through the same notes every post-setup failure uses, and BEFORE
+    // the pane: starting an agent in a worktree whose branch may push to the
+    // wrong repository is the one outcome this must not produce silently.
+    // The worktree stays, as it does for every other failure past this line.
+    if (prConfigProblem) {
+      return Response.json(setupFailure(prConfigProblem), {
+        status: 500,
+        headers,
+      });
+    }
 
     // Create tmux pane
     const spawnArgv = buildTmuxSpawnArgv({

@@ -8071,6 +8071,195 @@ describe("POST /spawn with --pr and --issue", () => {
     }
   });
 
+  /**
+   * THE FORK HIJACK, against real git.
+   *
+   * `git checkout -b <name> origin/<name>` writes exactly
+   * `branch.<name>.merge = refs/heads/<name>` — the same value a branch
+   * belonging to the PR has. A fork PR whose author names their head after
+   * an ordinary origin-tracking branch would therefore pass a merge-only
+   * gate, get fast-forwarded onto the FORK's commits (the non-forced fetch
+   * permits it whenever the local branch is an ancestor), and then have its
+   * remote rewritten to the fork. Requiring the remote to match is what
+   * refuses it, and the assertions below prove nothing moved.
+   */
+  it("refuses a fork PR that collides with an origin-tracking branch, touching nothing", async () => {
+    const repo = makeRepo();
+    // A perfectly ordinary tracking branch, made the way anyone would.
+    runFixtureGit(repo, "fetch", "origin", "main");
+    runFixtureGit(repo, "branch", "fix/flaky-binder", "origin/main");
+    runFixtureGit(
+      repo,
+      "config",
+      "branch.fix/flaky-binder.merge",
+      "refs/heads/fix/flaky-binder",
+    );
+    runFixtureGit(repo, "config", "branch.fix/flaky-binder.remote", "origin");
+    const before = gitOut(repo, "rev-parse", "fix/flaky-binder");
+
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv({
+      ...PR_JSON,
+      isCrossRepository: true,
+      headRepository: { name: "ccmux" },
+      headRepositoryOwner: { login: "attacker" },
+    });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("is not set up to track PR #7");
+      // The expected remote is named, so the refusal is actionable.
+      expect(body.error).toContain("https://github.com/attacker/ccmux.git");
+
+      // The ref did not move, and the tracking config was NOT rewritten to
+      // the fork. Both halves matter: either one alone would be the bug.
+      expect(gitOut(repo, "rev-parse", "fix/flaky-binder")).toBe(before);
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.remote"),
+      ).toBe("origin");
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.pushRemote"),
+      ).toBe("");
+      expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  // The mirror image: a branch that really IS this fork PR's is still reused
+  // rather than refused, so the gate is a discriminator and not a blanket no.
+  it("reuses a branch already tracking the fork PR", async () => {
+    const repo = makeRepo();
+    const url = "https://github.com/LiadOz/ccmux.git";
+    runFixtureGit(repo, "fetch", "origin", "refs/pull/7/head:fix/flaky-binder");
+    runFixtureGit(
+      repo,
+      "config",
+      "branch.fix/flaky-binder.merge",
+      "refs/heads/fix/flaky-binder",
+    );
+    runFixtureGit(repo, "config", "branch.fix/flaky-binder.remote", url);
+
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv({
+      ...PR_JSON,
+      isCrossRepository: true,
+      headRepository: { name: "ccmux" },
+      headRepositoryOwner: { login: "LiadOz" },
+    });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(200);
+      expect(body.worktree?.branch).toBe("fix/flaky-binder");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  /**
+   * A tracking-config write that fails AFTER the worktree exists.
+   *
+   * A stale `.git/config.lock` is both the realistic cause and the only way
+   * to fail exactly these writes: `git worktree add -b` sets no upstream, so
+   * it never takes the config lock, while every `git config` write does.
+   *
+   * The keys are not independent — `remote` landing while `pushRemote` fails
+   * leaves a fork's branch fetching from the fork and PUSHING TO ORIGIN — so
+   * this must be a loud failure. It follows the post-setup convention: the
+   * worktree is deliberately NOT rolled back, and the response says both what
+   * failed and what now exists.
+   */
+  it("reports a failed tracking-config write without rolling the worktree back", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv({
+      ...PR_JSON,
+      isCrossRepository: true,
+      headRepository: { name: "ccmux" },
+      headRepositoryOwner: { login: "LiadOz" },
+    });
+    writeFileSync(join(repo, ".git", "config.lock"), "");
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      // Post-setup failures are 500s carrying the setup notes, not 400s.
+      expect(res.status).toBe(500);
+      expect(body.error).toContain("Could not finish setting up branch");
+      expect(body.error).toContain("branch.fix/flaky-binder.remote");
+      // The note naming what the user now owns, from `withSetupNotes`.
+      expect(body.error).toContain("was created at");
+      expect(body.error).toContain("pr-7-fix-flaky-binder");
+      // Left in place, as every post-setup failure leaves it.
+      expect(
+        existsSync(join(repo, ".claude", "worktrees", "pr-7-fix-flaky-binder")),
+      ).toBe(true);
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  // gh resolves the number through its own repo selection while the fetch is
+  // hardcoded to `origin`. When those disagree, everything downstream would
+  // be about a different PR that happens to share the number.
+  it("refuses when origin is a different repository than the PR's", async () => {
+    const repo = makeRepo();
+    // A real GitHub origin, so both sides of the comparison parse. The PR
+    // JSON's url says junegunn/fzf; this says someone else.
+    runFixtureGit(
+      repo,
+      "remote",
+      "set-url",
+      "origin",
+      "git@github.com:me/fzf.git",
+    );
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv({
+      ...PR_JSON,
+      url: "https://github.com/junegunn/fzf/pull/7",
+    });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("junegunn/fzf");
+      expect(body.error).toContain("me/fzf");
+      // Refused before the fetch, so no PR ref was pulled in either.
+      expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
   it("refuses a PR that is not open, with the state in the message", async () => {
     const repo = makeRepo();
     const { internals } = createServer();
