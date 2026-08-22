@@ -1860,6 +1860,85 @@ describe("App review (d)", () => {
     expect(runHunkReviewSpy.mock.calls[0]?.[1]).toBe("/code/myapp");
   });
 
+  // The two modes and the one key that flips them. `d` follows the row: a
+  // worktree session is an agent working a branch (usually already
+  // committed), everything else is a working tree.
+  const WORKTREE_SESSION = {
+    isWorktree: true,
+    worktreeRoot: "/code/myapp/wt/feature",
+    paneCwd: "/code/myapp/wt/feature/src",
+  };
+
+  /** Lets the merge-base promise chain settle before the review starts. */
+  const settleReview = async () => {
+    await new Promise((r) => setTimeout(r, 0));
+    await setup.renderOnce();
+  };
+
+  it("reviews the working tree, with no target, on a non-worktree session", async () => {
+    await renderWithSession();
+    setup.mockInput.pressKey("d");
+    await settleReview();
+    expect(resolveMergeBaseSpy).not.toHaveBeenCalled();
+    expect(runHunkReviewSpy.mock.calls[0]?.[2]).toEqual({ target: undefined });
+  });
+
+  it("reviews a worktree session against its base by default", async () => {
+    await renderWithSession({}, WORKTREE_SESSION);
+    setup.mockInput.pressKey("d");
+    await settleReview();
+    // The CHECKOUT root, not the pane's cwd: a pane that cd'd into a
+    // subdirectory is still on the branch.
+    expect(resolveMergeBaseSpy.mock.calls[0]?.[0]).toBe(
+      "/code/myapp/wt/feature",
+    );
+    expect(runHunkReviewSpy.mock.calls[0]?.[1]).toBe(
+      "/code/myapp/wt/feature/src",
+    );
+    expect(runHunkReviewSpy.mock.calls[0]?.[2]).toEqual({
+      target: "base-sha",
+    });
+  });
+
+  it("falls back to the working tree when a worktree has no fork point", async () => {
+    resolveMergeBaseSpy.mockImplementation(async () => null);
+    await renderWithSession({}, WORKTREE_SESSION);
+    setup.mockInput.pressKey("d");
+    await settleReview();
+    expect(runHunkReviewSpy.mock.calls[0]?.[2]).toEqual({ target: undefined });
+  });
+
+  // Terminals disagree about how they deliver the capital: as name "D", or
+  // as name "d" with `shift` set. Testing only one spelling left the toggle
+  // unreachable on half of them, which is what the Worktrees panel's own
+  // Shift+D binding was bitten by.
+  const capitalD: [string, () => void][] = [
+    ['as "D"', () => setup.mockInput.pressKey("D")],
+    ['as shift+"d"', () => setup.mockInput.pressKey("d", { shift: true })],
+  ];
+
+  for (const [spelling, press] of capitalD) {
+    it(`D reviews a non-worktree session against its base (${spelling})`, async () => {
+      await renderWithSession();
+      press();
+      await settleReview();
+      expect(resolveMergeBaseSpy.mock.calls[0]?.[0]).toBe("/code/myapp");
+      expect(runHunkReviewSpy.mock.calls[0]?.[2]).toEqual({
+        target: "base-sha",
+      });
+    });
+
+    it(`D reviews a worktree session's working tree (${spelling})`, async () => {
+      await renderWithSession({}, WORKTREE_SESSION);
+      press();
+      await settleReview();
+      expect(resolveMergeBaseSpy).not.toHaveBeenCalled();
+      expect(runHunkReviewSpy.mock.calls[0]?.[2]).toEqual({
+        target: undefined,
+      });
+    });
+  }
+
   it("drops a second d-press while a review is in flight", async () => {
     // Hold runHunkReview pending so reviewInFlight stays true across the
     // second press. A rapid double-d must not race two suspend/spawn/resume

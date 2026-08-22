@@ -428,7 +428,21 @@ export function App(props: AppProps) {
     store.actions.showConfirmDialog(session.id, "send-review");
   }
 
-  function reviewSession(session: EnrichedSession) {
+  /**
+   * The session list's `d`, and `D`, which is the same review in the other
+   * mode.
+   *
+   * `d` asks the question the row is most likely to be asked. A worktree
+   * session is an agent working a branch, and agents commit as they go, so
+   * its working tree is often empty while the branch is the whole point;
+   * every other session reviews what is uncommitted, as `d` always did.
+   * `invert` is the toggle, so a main checkout can still be read against its
+   * base and a worktree against its working tree.
+   *
+   * A branch with no fork point to name falls back to the working-tree
+   * review, exactly as the Worktrees panel's `d` does.
+   */
+  function reviewSession(session: EnrichedSession, invert = false) {
     if (reviewInFlight) return;
     const cwd = sessionCwd(session);
     if (!cwd) {
@@ -442,7 +456,18 @@ export function App(props: AppProps) {
       return;
     }
     reviewInFlight = true;
-    runHunkReview(renderer, cwd)
+    // Resolved before `runHunkReview`, which is what suspends the renderer.
+    // From the CHECKOUT root rather than the pane's cwd: a pane that cd'd
+    // into a subdirectory is still on the branch, and the merge-base is a
+    // property of the checkout.
+    const base =
+      session.isWorktree !== invert
+        ? resolveMergeBase(session.worktreeRoot ?? cwd)
+        : Promise.resolve(null);
+    base
+      .then((target) =>
+        runHunkReview(renderer, cwd, { target: target ?? undefined }),
+      )
       .then((result) => {
         reviewInFlight = false;
         if (!result.ok) {
@@ -463,11 +488,11 @@ export function App(props: AppProps) {
 
   /**
    * The Worktrees panel's `d`, which reviews a BRANCH rather than a working
-   * tree: the base is the merge-base with the repo's default branch, so a
+   * tree: the base is the merge-base with the ref it was cut from, so a
    * worktree whose work is already committed shows what it changed instead of
    * "no changes to review". A worktree with no fork point to name (sitting on
    * the base, orphaned, or in a repo with no recognizable default branch)
-   * falls back to the working-tree review the session list's `d` does.
+   * falls back to the working-tree review the session list's `D` does.
    *
    * The handback is what the row's session buys: notes from an occupied
    * worktree go to that agent exactly as they do from the list. A bare
@@ -3542,18 +3567,24 @@ export function App(props: AppProps) {
         event.preventDefault();
         break;
 
+      case "D":
       case "d":
       case "u":
+        // Ctrl+D/U scroll the preview; a bare `d` reviews, and Shift+D
+        // reviews in the OTHER mode. Both spellings of the capital are
+        // matched because terminals deliver it as name `"d"` with `shift`
+        // set as readily as `"D"`; without the lowercase case the toggle
+        // would be unreachable on half of them.
         if (event.ctrl && previewScrollbox && store.state.showPreview) {
           const halfPage = Math.floor(
             (previewScrollbox.viewport?.height ?? 10) / 2,
           );
-          const delta = key === "d" ? halfPage : -halfPage;
+          const delta = key === "u" ? -halfPage : halfPage;
           previewScrollbox.scrollTo(previewScrollbox.scrollTop + delta);
           event.preventDefault();
-        } else if (key === "d" && !event.ctrl && !props.sidebar) {
+        } else if (key !== "u" && !event.ctrl && !props.sidebar) {
           const session = store.selectedSession();
-          if (session) reviewSession(session);
+          if (session) reviewSession(session, key === "D" || event.shift);
           event.preventDefault();
         }
         break;
