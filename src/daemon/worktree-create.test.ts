@@ -21,6 +21,8 @@ import {
   resolveBase,
   resolveWorktreeName,
   slugForFork,
+  slugForIssue,
+  slugForPR,
   slugFromPrompt,
   slugify,
   withRepoLock,
@@ -1027,5 +1029,110 @@ describe("withRepoLock", () => {
     ]);
 
     expect(order).toEqual(["b", "a"]);
+  });
+});
+
+describe("slugForPR / slugForIssue", () => {
+  it("prefixes with the number and slugifies the label", () => {
+    expect(slugForPR(7, "fix/flaky-binder")).toBe("pr-7-fix-flaky-binder");
+    expect(slugForIssue(45, "spawn: --pr and --issue flags")).toBe(
+      "issue-45-spawn-pr-and-issue-flags",
+    );
+  });
+
+  // Budgeted INSIDE the cap, like `slugForFork`: `resolveWorktreeName`
+  // re-slugifies whatever it is handed, so a name over the cap would be
+  // trimmed there and could lose the prefix that makes it unique.
+  it("budgets the prefix inside the slug cap", () => {
+    const pr = slugForPR(12345, "a".repeat(80));
+    expect(pr.length).toBeLessThanOrEqual(40);
+    expect(pr.startsWith("pr-12345-")).toBe(true);
+    expect(slugify(pr)).toBe(pr);
+
+    const issue = slugForIssue(12345, "b".repeat(80));
+    expect(issue.length).toBeLessThanOrEqual(40);
+    expect(slugify(issue)).toBe(issue);
+  });
+
+  // Claude Code puts its own fetch-only PR checkouts at `pr-<n>`, so bare
+  // `pr-<n>` is the one name this must never produce.
+  it("never collapses to bare pr-<n>", () => {
+    expect(slugForPR(7, "日本語")).toBe("pr-7-head");
+    expect(slugForPR(7, "")).toBe("pr-7-head");
+  });
+
+  it("falls back to bare issue-<n>, which collides with nothing", () => {
+    expect(slugForIssue(45, "!!!")).toBe("issue-45");
+  });
+});
+
+describe("createWorktree with a branch override", () => {
+  // A `--pr` spawn's directory is named after the PR while its branch has to
+  // be the PR's own head ref, so `git push` works out of the box.
+  it("cuts the given branch at the given base, under the given name", async () => {
+    const repo = await makeRepo();
+    const base = await git(repo, ["rev-parse", "HEAD"]);
+
+    const created = await createWorktree(repo, {
+      name: "pr-7-fix-flaky",
+      base,
+      branch: "fix/flaky-binder",
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.name).toBe("pr-7-fix-flaky");
+    expect(created.result.branch).toBe("fix/flaky-binder");
+    expect(created.result.branchCreated).toBe(true);
+    expect(created.result.path).toBe(worktreePathFor(repo, "pr-7-fix-flaky"));
+    expect(
+      await git(created.result.path, ["rev-parse", "--abbrev-ref", "HEAD"]),
+    ).toBe("fix/flaky-binder");
+    expect(await git(created.result.path, ["rev-parse", "HEAD"])).toBe(base);
+  });
+
+  it("checks out an existing branch of that name instead of cutting one", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "fix/flaky-binder"]);
+
+    const created = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.branch).toBe("fix/flaky-binder");
+    // Reused, so nothing was cut and no base may be reported.
+    expect(created.result.branchCreated).toBe(false);
+    expect(created.result.base).toBeUndefined();
+  });
+
+  // A derived name normally refuses any candidate a branch is holding,
+  // because the create path would reuse that branch. With an override the
+  // name is a directory label and nothing else, so that test does not apply.
+  it("does not number past a same-named branch when the branch is overridden", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "pr-7-fix-flaky"]);
+
+    const created = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.name).toBe("pr-7-fix-flaky");
+    expect(created.result.branch).toBe("fix/flaky-binder");
+  });
+
+  it("defaults the branch to the worktree name when no override is given", async () => {
+    const repo = await makeRepo();
+
+    const created = await createWorktree(repo, { name: "plain-name" });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.branch).toBe("plain-name");
   });
 });

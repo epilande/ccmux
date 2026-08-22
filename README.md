@@ -285,6 +285,8 @@ ccmux spawn --worktree --base develop --prompt "fix flicker"       # Branch the 
 ccmux spawn --worktree fix-flicker --with-changes                  # Move this checkout's uncommitted work into it
 ccmux spawn --worktree fix-flicker --with-changes --untracked copy # Untracked files land in both
 ccmux spawn --fork <id> --worktree                                 # Fork into a fresh worktree off the source's branch
+ccmux spawn --pr 154                                               # Check that PR out in a worktree, on its own branch
+ccmux spawn --issue 150                                            # New worktree named after the issue, prompt seeded
 ```
 
 Split directions use tmux's own vocabulary: `h` puts the new pane beside the
@@ -324,6 +326,28 @@ Creating a worktree also adds `**/.claude/worktrees/` to the hosting repo's
 local to your clone, never `.gitignore`), so the worktrees don't show up as
 untracked work in the checkout that hosts them. It is added once, only if git
 isn't already ignoring that path, and nothing else in the file is touched.
+
+### Spawning on a PR or an Issue
+
+`--pr <n>` resolves the pull request with `gh`, fetches `pull/<n>/head`, and
+spawns the agent into a worktree checked out on the PR's **own branch**, set
+up to track it the way `gh pr checkout` would, including a fork PR, whose
+branch is pointed at the fork's clone URL so `git push` updates the PR instead
+of failing. The worktree is named `pr-<n>-<head-ref>`, which deliberately
+never collides with the `pr-<n>` directories Claude Code creates for its own
+fetch-only PR checkouts. `--base` is refused here: the PR's head is the start
+point. ccmux records `origin/<base>` as the branch's review base, so <kbd>d</kbd>
+in the picker shows the PR's actual diff.
+
+`--issue <n>` is an ordinary spawn-from-base worktree named `issue-<n>-<title>`;
+`--base` works as usual.
+
+Both seed the agent's opening prompt with the title and URL, and your own
+`--prompt` is appended after it. Both refuse rather than guess: a PR that is
+not open, an issue that is closed, a PR whose branch is already checked out in
+another worktree (ccmux names it), and a same-named local branch that is not
+that PR. A local branch that *is* the PR is fast-forwarded, never force-updated.
+If it has diverged, ccmux leaves it alone and says so.
 
 ### Moving Uncommitted Changes
 
