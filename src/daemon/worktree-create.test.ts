@@ -613,10 +613,56 @@ describe("createWorktree", () => {
 
     expect(out.ok).toBe(true);
     if (!out.ok) return;
-    // A branch NAME, not the sha it pointed at: the merge-base still lands on
-    // the fork point after the user merges the base back in.
-    expect(await readConfig(repo, CONFIG_KEY("fix-sidebar"))).toBe("main");
+    // A ref NAME, not the sha it pointed at: the merge-base still lands on
+    // the fork point after the user merges the base back in. Fully
+    // qualified, so it cannot be re-read as a tag or a rev expression.
+    expect(await readConfig(repo, CONFIG_KEY("fix-sidebar"))).toBe(
+      "refs/heads/main",
+    );
     expect(out.result.base).toBe("main");
+  });
+
+  // A base whose meaning depends on WHERE it is evaluated is the whole risk:
+  // the record is read back inside the worktree, where HEAD is the branch's
+  // own tip. Stored verbatim, `HEAD~1` reviews the branch against its own
+  // parent — silently, with no error and no fallback.
+  it("pins a HEAD-relative base to the commit it named in the main checkout", async () => {
+    const repo = await makeRepo();
+    writeFileSync(join(repo, "second.txt"), "2\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-m", "second"]);
+    const parent = await git(repo, ["rev-parse", "HEAD~1"]);
+
+    const out = await createWorktree(repo, { name: "off-parent", base: "HEAD~1" });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(await readConfig(repo, CONFIG_KEY("off-parent"))).toBe(parent);
+  });
+
+  // `@` is `HEAD`, which git DOES name here (`refs/heads/main`) while the
+  // main checkout is attached — so the record is that name, and the thing
+  // that matters is what it means from inside the worktree: the base it was
+  // cut from, never the worktree's own head.
+  it("records a base of @ as the ref it names, not the worktree's own head", async () => {
+    const repo = await makeRepo();
+    const mainTip = await git(repo, ["rev-parse", "HEAD"]);
+
+    const out = await createWorktree(repo, { name: "off-at", base: "@" });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const stored = await readConfig(repo, CONFIG_KEY("off-at"));
+    expect(stored).not.toBeNull();
+    // A commit of the worktree's own moves its HEAD off the base; the record
+    // must still resolve to the base.
+    writeFileSync(join(out.result.path, "work.txt"), "w\n");
+    await git(out.result.path, ["add", "-A"]);
+    await git(out.result.path, ["commit", "-m", "agent work"]);
+    expect(await git(out.result.path, ["rev-parse", stored ?? ""])).toBe(
+      mainTip,
+    );
+    expect(await git(out.result.path, ["rev-parse", "HEAD"])).not.toBe(mainTip);
   });
 
   // A reused branch was not cut from the base, so a record would misdescribe

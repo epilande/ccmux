@@ -609,13 +609,21 @@ async function firstFreeDerivedName(
  * deleted with the branch and renamed with a rename, so the record lives
  * exactly as long as the thing it describes and there is no cleanup of ours.
  *
- * A branch NAME is stored as one, deliberately — the merge-base still lands
- * on the fork point after the user merges the base back in, where a pinned
- * sha would drift. `HEAD` is the one value that must not survive: it is what
- * {@link resolveBase} reports for a DETACHED main checkout, and read back
- * from the worktree it would name the worktree's own head, making the
- * merge-base the branch tip itself. It is resolved here instead, and skipped
- * when even that cannot be answered.
+ * A NAME is stored as one, deliberately — the merge-base still lands on the
+ * fork point after the user merges the base back in, where a pinned sha would
+ * drift. What must not survive is anything whose meaning depends on WHERE it
+ * is evaluated, because this is read back from the worktree, where HEAD is
+ * the branch's own tip: `HEAD` and `@` on a detached main checkout, `HEAD~1`
+ * and `HEAD^`, `@{-1}`. Stored verbatim, the first two make the merge-base
+ * the branch tip itself (a review of a fully committed worktree that reports
+ * nothing to review), and the rest silently review the wrong range.
+ *
+ * So the value is what `--symbolic-full-name` NAMES the base, when that is a
+ * real ref: `refs/heads/main` for `main`, and equally for `@{-1}` or
+ * `main@{u}`, which name a ref here and something else, or nothing, in the
+ * worktree. Everything git cannot name that way — a rev expression, a raw
+ * sha, `HEAD` while detached (which names the literal `HEAD`) — is pinned to
+ * its commit instead, and skipped when even that cannot be answered.
  *
  * Best-effort, like the exclude-file append: a config write that will not
  * take costs a later review its accuracy, not this caller their worktree.
@@ -626,14 +634,30 @@ async function recordBranchBase(
   base: string,
   git: GitRun,
 ): Promise<void> {
-  let value = base;
-  if (value === "HEAD") {
-    const head = await git(mainRepoRoot, ["rev-parse", "HEAD"]);
-    const sha = head.stdout.trim();
-    if (head.exitCode !== 0 || !sha) return;
-    value = sha;
+  const key = `branch.${branch}.ccmux-base`;
+  // The exit code decides nothing here: a rev expression git cannot name
+  // (`HEAD~1`, a raw sha) still exits 0, with empty output.
+  const symbolic = await git(mainRepoRoot, [
+    "rev-parse",
+    "--symbolic-full-name",
+    "--verify",
+    "--quiet",
+    base,
+  ]);
+  const ref = symbolic.stdout.trim();
+  if (ref.startsWith("refs/")) {
+    await git(mainRepoRoot, ["config", key, ref]);
+    return;
   }
-  await git(mainRepoRoot, ["config", `branch.${branch}.ccmux-base`, value]);
+  const commit = await git(mainRepoRoot, [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    `${base}^{commit}`,
+  ]);
+  const sha = commit.stdout.trim();
+  if (commit.exitCode !== 0 || !sha) return;
+  await git(mainRepoRoot, ["config", key, sha]);
 }
 
 /**
