@@ -34,7 +34,14 @@ const leftGroups = (reviewable?: boolean): Group[] => [
       { key: "R", desc: "Reconnect" },
       { key: "x / X", desc: "Kill session / all" },
       { key: "W", desc: "Worktrees" },
-      ...(reviewable ? [{ key: "d", desc: "Review diff (hunk)" }] : []),
+      // One row, not two: `d` reviews a worktree row against its base and
+      // everything else against its working tree, and `D` is whichever of
+      // those `d` did not do. The description is at the column's width
+      // budget (COL_WIDTH - KEY_COL_WIDTH), and Actions has no room for
+      // another row (see `keeps the last row visible`).
+      ...(reviewable
+        ? [{ key: "d / D", desc: "Review diff / flip mode" }]
+        : []),
     ],
   },
 ];

@@ -601,6 +601,42 @@ async function firstFreeDerivedName(
 }
 
 /**
+ * Record the ref a new branch was cut from as `branch.<name>.ccmux-base`, so
+ * a later review can ask what the branch changed instead of guessing the
+ * repo's default branch (`resolveMergeBase`, `tui/utils/review.ts`).
+ *
+ * Branch config is the right home because git maintains it: the section is
+ * deleted with the branch and renamed with a rename, so the record lives
+ * exactly as long as the thing it describes and there is no cleanup of ours.
+ *
+ * A branch NAME is stored as one, deliberately — the merge-base still lands
+ * on the fork point after the user merges the base back in, where a pinned
+ * sha would drift. `HEAD` is the one value that must not survive: it is what
+ * {@link resolveBase} reports for a DETACHED main checkout, and read back
+ * from the worktree it would name the worktree's own head, making the
+ * merge-base the branch tip itself. It is resolved here instead, and skipped
+ * when even that cannot be answered.
+ *
+ * Best-effort, like the exclude-file append: a config write that will not
+ * take costs a later review its accuracy, not this caller their worktree.
+ */
+async function recordBranchBase(
+  mainRepoRoot: string,
+  branch: string,
+  base: string,
+  git: GitRun,
+): Promise<void> {
+  let value = base;
+  if (value === "HEAD") {
+    const head = await git(mainRepoRoot, ["rev-parse", "HEAD"]);
+    const sha = head.stdout.trim();
+    if (head.exitCode !== 0 || !sha) return;
+    value = sha;
+  }
+  await git(mainRepoRoot, ["config", `branch.${branch}.ccmux-base`, value]);
+}
+
+/**
  * Create the worktree for a spawn, or open the existing one.
  *
  * For an EXPLICIT name, create-or-open rather than create-or-fail: "spawn an
@@ -746,6 +782,12 @@ export async function createWorktree(
         error: `git ${args.join(" ")} failed: ${added.stderr.trim() || `exited ${added.exitCode}`}`,
       };
     }
+
+    // Only for a branch this request CUT: a reused branch was not cut from
+    // the base, so recording one would misdescribe its history (the same
+    // reason `result.base` is undefined below).
+    if (!reusingBranch)
+      await recordBranchBase(mainRepoRoot, name, based.base, git);
 
     const setup = await fileSetup(mainRepoRoot, path);
     return {
