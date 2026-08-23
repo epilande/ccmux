@@ -8925,13 +8925,17 @@ describe("GET /prs caching", () => {
     const gh = withCountingGh(1);
     try {
       const first = listPRs(internals, repo);
-      // Long enough for the handler's own awaits (session enrichment, repo
-      // resolution) to have run and the entry to be registered, and well
-      // inside `gh`'s one-second sleep.
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      // Read by iteration, not by key: the cache is keyed on the root git
-      // resolves, which need not be the spelling this test passed in.
-      const inFlight = [...internals.prListCache.values()];
+      // POLLED, not slept on. The entry appears after the handler's own
+      // awaits (session enrichment, repo resolution), and a fixed delay tuned
+      // to that is a flake waiting for a loaded machine. `gh` sleeps a second,
+      // so there is a wide window to catch the entry unsettled in.
+      let inFlight: { done: unknown }[] = [];
+      for (let i = 0; i < 100 && inFlight.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        // Read by iteration, not by key: the cache is keyed on the root git
+        // resolves, which need not be the spelling this test passed in.
+        inFlight = [...internals.prListCache.values()];
+      }
       expect(inFlight).toHaveLength(1);
       expect(inFlight[0]?.done).toBeNull();
 
