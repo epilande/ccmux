@@ -1839,9 +1839,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         repoRoot: repo.repoRoot,
         repoName: repo.repoName,
         rows: sortWorktreeRows([...worktrees, ...prRows]),
-        // Shown while the answer is still coming, and afterwards only when
-        // there is something to show: a repo with no open PRs spends no rows
-        // saying so, the same rule the removable divider follows.
+        // The header is ALWAYS drawn; only its text changes. Announcing it
+        // before GitHub answers and then hiding it again would take a row
+        // back and shift every line beneath it, which is the whole reason the
+        // pending state rides the header. `0` and `unavailable` are answers.
+        //
         // `unavailable` covers both shapes of phase-3 failure: the whole
         // request falling over, and THIS repo's own error riding back inside
         // an otherwise fine response. Either way the header stays put and the
@@ -2057,8 +2059,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
 
   /**
    * The list's size, said once on the title line: `N worktrees` when one
-   * repo owns the panel, `N repos · M worktrees` across all of them (M
-   * counts every row, main checkouts included). Counts describe the LOADED
+   * repo owns the panel, `N repos · M worktrees` across all of them (M counts
+   * WORKTREE rows, main checkouts included and PR rows excluded — see the
+   * body). Counts describe the LOADED
    * list, so nothing is said while phase 1 is in flight — `repos()` still
    * holds the PREVIOUS scope's list during a Tab rescope, and a count that
    * flickers from the old scope's number to the new one reads as a glitch.
@@ -2388,8 +2391,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       // build, which the user fixes in another pane and then wants to retry.
       // Without this the only way back is to close and reopen, and on the
       // `done` phase a stale list is exactly what a retry refreshes.
+      //
+      // Same `refresh` as the list phase, and that is the whole point of the
+      // key: `r` was justified on "one key, one meaning, on every phase", and
+      // a done-phase retry that answered the PR section from a 60s cache
+      // would have been the context-sensitive version of it. It is also the
+      // phase whose own comment promises a stale list gets refreshed.
       if (key === "r" || key === "R") {
-        load();
+        load({ refresh: true });
         return;
       }
       if (

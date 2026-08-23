@@ -3779,6 +3779,27 @@ describe("WorktreesPanel r refresh", () => {
     ).toHaveLength(0);
   });
 
+  // The key was justified on "one key, one meaning, on every phase". A retry
+  // from done or error that answered the PR section from a 60s cache would
+  // have been the context-sensitive version of exactly that.
+  it("refreshes the same way from the error phase", async () => {
+    const { keys, frame } = await mountPanel({
+      list: async () => {
+        throw new Error("daemon is down");
+      },
+      scan: async () => json(emptyScan),
+    });
+    expect(await frame()).toContain("daemon is down");
+    const before = requested.length;
+
+    keys.pressKey("r");
+    await frame();
+
+    const prs = requested.slice(before).filter((u) => u.includes("/prs"));
+    expect(prs).toHaveLength(1);
+    expect(prs[0]).toContain("refresh=1");
+  });
+
   it("matches both spellings of the capital", async () => {
     const { keys, frame } = await mountSettled(listOf([mainRow()]));
     const before = requested.length;
