@@ -807,9 +807,13 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const lockedDestinationLabel = () => {
     const [here, worktree] = DESTINATION_OPTIONS;
     const option = moveChanges() ? worktree! : here!;
+    // The locked row renders with the DERIVED indent, like Directory and the
+    // mode note, so it takes the derived width. Missed when the other four
+    // were fixed: in move-changes mode at widths 24 to 28 this rendered
+    // `Worktre` with no ellipsis, the same silent cut.
     return truncateText(
       narrow() ? option.compactLabel : option.label,
-      contentWidth(),
+      derivedWidth(),
     );
   };
 

@@ -1869,6 +1869,29 @@ describe("NewSessionDialog in PR mode", () => {
     expect(note).not.toContain("open-PR list");
   });
 
+  // The fifth derived row, missed when the other four were fixed. The LOCKED
+  // Where row renders with the derived indent too, and at these widths it cut
+  // `Worktree` to `Worktre` with no ellipsis.
+  it("keeps the ellipsis on the locked Where row at narrow widths", async () => {
+    for (const width of [24, 26, 28]) {
+      const frame = await renderDialog({
+        draft: moveDraft(),
+        agents: [agent("claude")],
+        width,
+      });
+      const row = frame
+        .split("\n")
+        .find((line) => line.includes("Where"));
+      expect(row, `no Where row at width ${width}`).toBeDefined();
+      // Either it fits whole, or it SAYS it was cut. Never a bare stub, which
+      // is what fitting it to the field width produced (`Worktre`).
+      expect(
+        row!.includes("Worktree") || row!.includes("…"),
+        `width ${width}: ${row}`,
+      ).toBe(true);
+    }
+  });
+
   // The same row at a width that fits says the whole thing, so the fit above
   // is not just a narrower cap applied unconditionally.
   it("says the whole title when it fits", async () => {
