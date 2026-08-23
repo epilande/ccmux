@@ -329,10 +329,42 @@ interface PanelOptions {
     panelRepo: string | null;
     panelScope: string | null;
   }) => void;
+  /** Whether the stubbed opener reports success; see {@link recordEffects}. */
+  opensUrls?: boolean;
+}
+
+/**
+ * The panel's side effects, recorded instead of performed.
+ *
+ * Every mount goes through here, which is the point: the component's
+ * `effects` prop is REQUIRED, so a test cannot reach the real `open` or
+ * `pbcopy` by forgetting something. It has to be handed a recorder.
+ */
+function recordEffects(opensUrls: boolean) {
+  const openedUrls: string[] = [];
+  const copiedText: string[] = [];
+  return {
+    openedUrls,
+    copiedText,
+    effects: {
+      openUrl: (url: string) => {
+        openedUrls.push(url);
+        return opensUrls;
+      },
+      copyText: (text: string) => {
+        copiedText.push(text);
+        return { osc52: true, local: false };
+      },
+    },
+  };
 }
 
 async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
+  // BEFORE `testRender`, so the component's first `load()` cannot reach a
+  // real daemon. The prune POST it also covers would run a real `git worktree
+  // remove` against this machine.
   installFetch(handlers);
+  const recorder = recordEffects(opts.opensUrls ?? true);
   setup = await testRender(
     () => (
       <WorktreesPanel
@@ -347,12 +379,14 @@ async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
         onSpawn={opts.onSpawn ?? (() => {})}
         onReview={opts.onReview}
         onSpawnFromPR={opts.onSpawnFromPR}
+        effects={recorder.effects}
       />
     ),
     { width: opts.width ?? 90, height: opts.height ?? 24 },
   );
   await setup.renderOnce();
   return {
+    ...recorder,
     keys: createMockKeys(setup.renderer),
     /** Drain every pending microtask, then repaint. */
     frame: async () => {
@@ -3733,8 +3767,14 @@ describe("rowPRUrl", () => {
 });
 
 describe("WorktreesPanel o key", () => {
-  it("opens the row's PR and says so", async () => {
-    const { keys, frame } = await mountSettled(
+  /**
+   * Through the recorder, never the real opener. The first version of this
+   * test called the live default and put real browser windows on the
+   * developer's screen; its assertion was a disjunction that passed either
+   * way, so a green suite said nothing about which had happened.
+   */
+  it("hands the row's PR to the opener and names the URL it opened", async () => {
+    const { keys, frame, openedUrls } = await mountSettled(
       listOf([mainRow()]),
       emptyScan,
       {},
@@ -3743,17 +3783,51 @@ describe("WorktreesPanel o key", () => {
     keys.pressKey("j");
     keys.pressKey("o");
     const shown = await frame();
-    // Either it opened or it said this machine has no opener; both are the
-    // key reporting what happened rather than doing nothing visible.
-    expect(
-      shown.includes("opened https://github.com/o/r/pull/151") ||
-        shown.includes("no browser opener here"),
-    ).toBe(true);
+
+    expect(openedUrls).toEqual(["https://github.com/o/r/pull/151"]);
+    expect(shown).toContain("opened https://github.com/o/r/pull/151");
   });
 
-  it("says so on a row with no PR at all", async () => {
-    const { keys, frame } = await mountSettled(listOf([mainRow(), row()]));
+  // Forced by the stub, so it cannot stand in for the success case above.
+  it("says so when the machine has no opener", async () => {
+    const { keys, frame, openedUrls } = await mountSettled(
+      listOf([mainRow()]),
+      emptyScan,
+      { opensUrls: false },
+      prsOf([openPR()]),
+    );
+    keys.pressKey("j");
+    keys.pressKey("o");
+    const shown = await frame();
+
+    expect(openedUrls).toEqual(["https://github.com/o/r/pull/151"]);
+    expect(shown).toContain("no browser opener here");
+    expect(shown).not.toContain("opened https://");
+  });
+
+  /**
+   * The same hazard on the other key, closed by the same seam. `y` was never
+   * pressed on a worktree row by any test (every other `y` here is the
+   * confirm phase's), so this was latent rather than live — one keypress from
+   * writing to the developer's real clipboard through `pbcopy`.
+   */
+  it("copies through the seam rather than through pbcopy", async () => {
+    const { keys, frame, copiedText } = await mountSettled(
+      listOf([mainRow(), row()]),
+    );
+    keys.pressKey("j");
+    keys.pressKey("y");
+
+    expect(await frame()).toContain("copied alpha");
+    expect(copiedText).toEqual(["/repo/wt/alpha"]);
+  });
+
+  it("says so on a row with no PR at all, without reaching the opener", async () => {
+    const { keys, frame, openedUrls } = await mountSettled(
+      listOf([mainRow(), row()]),
+    );
     keys.pressKey("o");
     expect(await frame()).toContain("no PR on this row");
+    expect(openedUrls).toEqual([]);
   });
 });

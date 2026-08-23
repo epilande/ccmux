@@ -253,6 +253,12 @@ interface WorktreesPanelProps {
     panelRepo: string | null;
     panelScope: string | null;
   }) => void;
+  /**
+   * What the keys that leave this process are allowed to do. Required on
+   * purpose; see {@link PanelEffects}. Production passes {@link liveEffects},
+   * tests pass a recorder.
+   */
+  effects: PanelEffects;
 }
 
 /**
@@ -1616,6 +1622,49 @@ function spawnDetached(argv: string[]): boolean {
   }
 }
 
+/**
+ * Everything the panel does OUTSIDE its own process: the two keys that hand a
+ * URL or some text to another program.
+ *
+ * A REQUIRED prop, and that is the entire point of it. `o` shipped calling
+ * `openInBrowser(url)` with no injected spawner, so a component mounted by
+ * `testRender` plus one simulated keypress ran the real `open` and put real
+ * browser windows on the developer's screen — twice, in a suite that reported
+ * green. The seam already existed one level down ({@link openInBrowser} and
+ * {@link copyToClipboard} both take an injectable spawner); nothing MADE the
+ * component thread it, so it did not.
+ *
+ * Required is what turns that omission into a compile error: a mount cannot
+ * exist without saying what its side effects are, so a test that forgets does
+ * not build rather than reaching the machine. The next key that shells out
+ * has nowhere to put a real default.
+ *
+ * The methods are VERBS, not argv. Which argv each verb runs, and on which
+ * platform, is settled by {@link browserArgv} / {@link clipboardArgv} and
+ * their own tests, which inject a spawner and assert the exact argument list.
+ * A spawn-level seam would have to force two different shapes (the clipboard
+ * helper writes stdin, the browser one does not) through one signature.
+ */
+export interface PanelEffects {
+  /** Hand `url` to the desktop browser. False when there is no way to. */
+  openUrl(url: string): boolean;
+  /**
+   * Put `text` on the clipboard by every channel available. The OSC 52
+   * writer is the renderer, which the component owns, so it is passed in
+   * rather than captured here.
+   */
+  copyText(
+    text: string,
+    writer: Osc52Writer | null,
+  ): { osc52: boolean; local: boolean };
+}
+
+/** The panel's real side effects, for the one place that wants them. */
+export const liveEffects: PanelEffects = {
+  openUrl: (url) => openInBrowser(url),
+  copyText: (text, writer) => copyToClipboard(text, writer),
+};
+
 function spawnClipboardHelper(argv: string[], text: string): boolean {
   try {
     const child = Bun.spawn(argv, {
@@ -2163,7 +2212,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   }
 
   function copyPath(path: string): void {
-    const how = copyToClipboard(path, renderer);
+    const how = props.effects.copyText(path, renderer);
     flash(
       how.osc52 || how.local
         ? `copied ${basename(path)}`
@@ -2184,7 +2233,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       flash("no PR on this row");
       return;
     }
-    flash(openInBrowser(url) ? `opened ${url}` : "no browser opener here");
+    flash(props.effects.openUrl(url) ? `opened ${url}` : "no browser opener here");
   }
 
   function runPrune(): void {

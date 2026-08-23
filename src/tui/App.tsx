@@ -92,7 +92,11 @@ import {
 } from "../lib/move-report";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { HANDOFF_BADGE } from "./components/session-columns";
-import { WorktreesPanel, worktreeHoldsPath } from "./components/WorktreesPanel";
+import {
+  WorktreesPanel,
+  liveEffects,
+  worktreeHoldsPath,
+} from "./components/WorktreesPanel";
 import type { WorktreeSession } from "../daemon/worktree-prune";
 import { HelpOverlay } from "./components/HelpOverlay";
 import type { SpawnableAgent } from "../lib/spawnable-agents";
@@ -3996,6 +4000,7 @@ export function App(props: AppProps) {
               onJump={jumpToWorktreeSession}
               onSpawn={spawnInWorktree}
               onSpawnFromPR={spawnFromPR}
+              effects={liveEffects}
               // Review suspends the renderer into a full-screen tool, which
               // the sidebar has neither the room nor the focus for — the same
               // reason its `d` key is inert on a session row.
