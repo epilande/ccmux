@@ -2654,9 +2654,14 @@ export function App(props: AppProps) {
       if (response.ok) {
         spawned = body ?? {};
       } else {
-        // Leave the dialog open either way: every refusal here (agent can't
-        // take a prompt, cwd is gone, that worktree name is taken) is
+        // Leave the dialog open either way: most refusals here (agent can't
+        // take a prompt, cwd is gone, that worktree name is taken) are
         // something the user can fix in the fields they are still looking at.
+        // A PR spawn is the exception, and deliberately behaves the same: the
+        // daemon re-runs `lookupPR`, so a PR that closed or merged since the
+        // panel listed it refuses with nothing on this dialog to change. Esc
+        // back to the panel is the remedy, and the daemon's own wording says
+        // what happened.
         //
         // What changes is how the message is delivered. A move can fail with
         // the user's work parked in a stash, or after it has already been
