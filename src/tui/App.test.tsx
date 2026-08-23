@@ -91,7 +91,8 @@ const runHunkReviewSpy = mock(
   async (
     ..._args: unknown[]
   ): Promise<
-    { ok: true; notes: typeof reviewNotes } | { ok: false; error: string }
+    | { ok: true; notes: typeof reviewNotes }
+    | { ok: false; error: string; empty?: true }
   > => ({ ok: true, notes: [] }),
 );
 const HUNK_INSTALL_HINT_TEST = realReview.HUNK_INSTALL_HINT;
@@ -1923,19 +1924,29 @@ describe("App review (d)", () => {
     });
 
     it(`D reviews a main checkout's branch (${spelling})`, async () => {
-      await renderWithSession();
+      // The production shape: the daemon fills `worktreeRoot` for a main
+      // checkout too (`--show-toplevel`), so this pins the same
+      // checkout-root-not-pane-cwd rule the worktree case does, instead of
+      // exercising the `?? cwd` fallback.
+      await renderWithSession(
+        {},
+        { worktreeRoot: "/code/myapp", paneCwd: "/code/myapp/src" },
+      );
       press();
       await settleReview();
       expect(resolveMergeBaseSpy.mock.calls[0]?.[0]).toBe("/code/myapp");
+      expect(runHunkReviewSpy.mock.calls[0]?.[1]).toBe("/code/myapp/src");
       expect(runHunkReviewSpy.mock.calls[0]?.[2]).toEqual({
         target: "base-sha",
       });
     });
   }
 
-  // What makes `D` safe to press on a checkout that never forked: no fork
-  // point resolves, and the review falls back to the working tree rather
-  // than opening an empty one. `D` on a main checkout on `main` is `d`.
+  // What makes `D` safe to press on a checkout carrying no commits of its
+  // own beyond its base: no fork point resolves, and the review falls back
+  // to the working tree rather than opening an empty one. (A main checkout
+  // with unpushed commits DOES have a fork point against `origin/main`, and
+  // `D` there is meant to show them.)
   it("D falls back to the working tree when there is no fork point", async () => {
     resolveMergeBaseSpy.mockImplementation(async () => null);
     await renderWithSession();
@@ -2029,6 +2040,60 @@ describe("App review (d)", () => {
     await new Promise((r) => setTimeout(r, 0));
     await setup.renderOnce();
     expect(setup.captureCharFrame()).toContain("Review failed: boom");
+  });
+
+  // The dead end the fixed pair creates, on the row it lands on most: an
+  // agent that committed everything has nothing uncommitted, so `d` refuses.
+  // The refusal has to say where the diff went, or this is exactly the
+  // papercut the branch review was built to remove.
+  it("points at D when d finds nothing uncommitted", async () => {
+    runHunkReviewSpy.mockImplementation(async () => ({
+      ok: false,
+      error: "no changes to review",
+      empty: true,
+    }));
+    await renderWithSession({}, WORKTREE_SESSION);
+    setup.mockInput.pressKey("d");
+    await settleReview();
+    await new Promise((r) => setTimeout(r, 0));
+    await setup.renderOnce();
+    expect(squish(setup.captureCharFrame())).toContain(
+      squish("no changes to review (D reviews the branch)"),
+    );
+  });
+
+  // Already in branch mode: there is no other key to point at, and the hint
+  // would be advice to press the key just pressed.
+  it("does not point at D when D itself finds nothing", async () => {
+    runHunkReviewSpy.mockImplementation(async () => ({
+      ok: false,
+      error: "no changes to review",
+      empty: true,
+    }));
+    await renderWithSession({}, WORKTREE_SESSION);
+    setup.mockInput.pressKey("D");
+    await settleReview();
+    await new Promise((r) => setTimeout(r, 0));
+    await setup.renderOnce();
+    const frame = squish(setup.captureCharFrame());
+    expect(frame).toContain(squish("no changes to review"));
+    expect(frame).not.toContain(squish("D reviews the branch"));
+  });
+
+  // A real failure is not the empty case, so it never carries the hint.
+  it("does not point at D on a refusal that is not the empty one", async () => {
+    runHunkReviewSpy.mockImplementation(async () => ({
+      ok: false,
+      error: "not a git repository",
+    }));
+    await renderWithSession({}, WORKTREE_SESSION);
+    setup.mockInput.pressKey("d");
+    await settleReview();
+    await new Promise((r) => setTimeout(r, 0));
+    await setup.renderOnce();
+    const frame = squish(setup.captureCharFrame());
+    expect(frame).toContain(squish("Review failed: not a git repository"));
+    expect(frame).not.toContain(squish("D reviews the branch"));
   });
 
   it("recovers when runHunkReview rejects unexpectedly", async () => {
@@ -7468,6 +7533,27 @@ describe("App worktrees panel (W)", () => {
       expect(shown).toContain(squish("New session in worktree"));
       expect(shown).toContain("feature");
       expect(switchToPaneSpy).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  // The picker's `d` points an empty working-tree review at `D`. The panel
+  // has no `D` (Shift+D is its dirty-row opt-in) and its `d` is already the
+  // branch review, so the hint must not reach its refusal.
+  it("does not point at D when the panel's own review finds nothing", async () => {
+    runHunkReviewSpy.mockImplementation(async () => ({
+      ok: false,
+      error: "no changes to review",
+      empty: true,
+    }));
+    const { restore, frame } = await openPanel([WORKTREE_ROW]);
+    try {
+      setup.mockInput.pressKey("d");
+      await frame();
+      const shown = squish(await frame());
+      expect(shown).toContain(squish("Review failed: no changes to review"));
+      expect(shown).not.toContain(squish("D reviews the branch"));
     } finally {
       restore();
     }

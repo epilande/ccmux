@@ -42,7 +42,19 @@ export interface HunkReviewNote {
 
 export type ReviewResult =
   | { ok: true; notes: HunkReviewNote[] }
-  | { ok: false; error: string };
+  | {
+      ok: false;
+      error: string;
+      /**
+       * The refusal was "there is nothing here to review", not a failure:
+       * the pre-flight found the diff this review would have opened empty.
+       *
+       * A flag rather than a caller-side test on `error`, because the only
+       * caller that acts on it (the picker's `d`, which points at `D`) would
+       * otherwise be matching user-facing prose, and prose gets reworded.
+       */
+      empty?: true;
+    };
 
 type SpawnHunk = (
   cmd: string[],
@@ -623,7 +635,8 @@ export async function runHunkReview(
   const changes = target
     ? await gitDiffNames(root, target)
     : await gitStatus(root);
-  if (changes === "") return { ok: false, error: "no changes to review" };
+  if (changes === "")
+    return { ok: false, error: "no changes to review", empty: true };
 
   // Resolve our tty while fd 0 is still the interactive terminal (before
   // suspend). This is the discovery fallback when there's no paneId to match,

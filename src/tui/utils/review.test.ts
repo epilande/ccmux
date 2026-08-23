@@ -95,6 +95,9 @@ describe("runHunkReview", () => {
       paneId: "",
     });
     expect(result).toEqual({ ok: false, error: HUNK_INSTALL_HINT });
+    // Not the empty case: a missing binary is a failure, and the picker's
+    // "try D" hint must not ride along on it.
+    expect(result.ok === false && result.empty).toBeUndefined();
     expect(renderer.suspend).not.toHaveBeenCalled();
   });
 
@@ -194,7 +197,13 @@ describe("runHunkReview", () => {
       paneId: "",
       spawn,
     });
-    expect(result).toEqual({ ok: false, error: "no changes to review" });
+    // `empty` and not the wording is what the picker's `d` reads to know
+    // it can point the user at `D`.
+    expect(result).toEqual({
+      ok: false,
+      error: "no changes to review",
+      empty: true,
+    });
     expect(renderer.suspend).not.toHaveBeenCalled();
     expect(spawn).not.toHaveBeenCalled();
   });
@@ -694,7 +703,13 @@ describe("runHunkReview with a target", () => {
       target: "abc123",
       paneId: "",
     });
-    expect(result).toEqual({ ok: false, error: "no changes to review" });
+    // `empty` and not the wording is what the picker's `d` reads to know
+    // it can point the user at `D`.
+    expect(result).toEqual({
+      ok: false,
+      error: "no changes to review",
+      empty: true,
+    });
     expect(renderer.suspend).not.toHaveBeenCalled();
   });
 

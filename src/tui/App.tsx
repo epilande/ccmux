@@ -435,11 +435,13 @@ export function App(props: AppProps) {
    * the row can be read off for, and a key that means different things on
    * different rows is one the user has to check the row before pressing.
    *
-   * `D` needs no case for a checkout that never forked. `resolveMergeBase`
-   * returns null on one sitting on its own base, and null falls back to the
-   * working-tree review — so `D` on a main checkout on `main` simply behaves
-   * like `d`, and the two keys separate exactly where there is something to
-   * separate.
+   * `D` needs no case for a checkout carrying no commits of its own beyond
+   * its base: the merge-base IS its HEAD, `resolveMergeBase` returns null,
+   * and null falls back to the working-tree review, so `D` there behaves
+   * like `d`. The base is normally `origin/main` (`resolveBaseRefs` asks
+   * `origin/HEAD` first), so a main checkout with UNPUSHED commits is not
+   * that case, and `D` showing them alongside the working tree is the point
+   * rather than an edge of it.
    */
   function reviewSession(session: EnrichedSession, branchMode = false) {
     if (reviewInFlight) return;
@@ -470,7 +472,16 @@ export function App(props: AppProps) {
       .then((result) => {
         reviewInFlight = false;
         if (!result.ok) {
-          store.actions.showToast(`Review failed: ${result.error}`);
+          // The dead end the fixed pair creates, and the one row it lands on
+          // most: an agent that has committed everything has nothing
+          // uncommitted, and `d` alone would say so and stop. Keyed off the
+          // MODE and the result's own `empty` flag rather than its wording,
+          // and added here rather than in `runHunkReview`, whose other two
+          // callers (the Worktrees panel, `ccmux review`) have no `D` to
+          // point at.
+          const hint =
+            !branchMode && result.empty ? " (D reviews the branch)" : "";
+          store.actions.showToast(`Review failed: ${result.error}${hint}`);
           return;
         }
         if (result.notes.length === 0) return;
