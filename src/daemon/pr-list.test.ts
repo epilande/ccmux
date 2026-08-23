@@ -217,6 +217,36 @@ describe("listOpenPRs", () => {
   });
 
   /**
+   * The CLASS, not a list. A hand-written set of bidi controls missed U+061C,
+   * which sits alone in the Arabic block nowhere near the rest, so this asks
+   * Unicode which codepoints carry `Bidi_Control` and asserts none survive.
+   * A future Unicode revision adding one fails here rather than in the wild.
+   */
+  it("strips every codepoint Unicode calls a bidi control", async () => {
+    const controls: string[] = [];
+    for (let cp = 0; cp < 0x110000; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const ch = String.fromCodePoint(cp);
+      if (/\p{Bidi_Control}/u.test(ch)) controls.push(ch);
+    }
+    expect(controls.length).toBeGreaterThan(0);
+
+    const found = await listOpenPRs(
+      "/repo",
+      ghAnswering({
+        stdout: JSON.stringify([
+          { ...PR_ROW, title: `a${controls.join("")}b` },
+        ]),
+      }),
+    );
+
+    expect(found.ok).toBe(true);
+    if (!found.ok) return;
+    const title = found.value[0]?.title ?? "";
+    expect(controls.filter((ch) => title.includes(ch))).toEqual([]);
+  });
+
+  /**
    * Deliberately KEPT. ZWNJ and ZWJ carry meaning in Persian, Arabic and
    * Indic scripts, and ZWJ is what joins an emoji sequence, so stripping them
    * corrupts titles that are merely written in another language. Neither can

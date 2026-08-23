@@ -771,7 +771,10 @@ export function stripControlChars(text: string): string {
  * - C0, DEL and C1 (`\x00-\x1f\x7f-\x9f`). The C1 block matters as much as
  *   C0: a raw 0x9b is a one-byte CSI, so a title carrying one puts an escape
  *   sequence into whatever renders it.
- * - Bidi controls (LRM/RLM, the embedding and override block, the isolates).
+ * - Bidi controls: ALM (U+061C), LRM/RLM, the embedding and override block,
+ *   and the isolates. That is every codepoint carrying `Bidi_Control`, swept
+ *   rather than listed from memory. U+061C is the easy one to miss: it sits
+ *   alone in the Arabic block, nowhere near the others.
  *   These make a string DISPLAY as something other than what it says, which
  *   is the Trojan Source class, and a PR title is written by whoever opened
  *   the PR — on a fork, that is anyone.
@@ -788,7 +791,7 @@ export function stripControlChars(text: string): string {
  * the other two classes are here for.
  */
 const CONTROL_CHARS =
-  /[\x00-\x1f\x7f-\x9f\u200b\u200e\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]+/g;
+  /[\x00-\x1f\x7f-\x9f\u061c\u200b\u200e\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]+/g;
 
 export function seedPrompt(
   label: string,
