@@ -58,7 +58,12 @@ import {
   describeChecks,
   describeReview,
   openInBrowser,
-  prDividerText,
+  prStatusText,
+  viewTabSegments,
+  initialView,
+  PRS_TAB,
+  PRS_TAB_SHORT,
+  WORKTREES_TAB,
   prRowKey,
   rowPRUrl,
   type PanelRepo,
@@ -1138,7 +1143,9 @@ describe("WorktreesPanel structure", () => {
     // The header line that would repeat it directly underneath is gone.
     const lines = settled.split("\n");
     const title = lines.findIndex((l) => l.includes("Worktrees · repo"));
-    expect(lines[title + 1]).toContain("main checkout");
+    // The view tabs take the line between them, and nothing else does.
+    expect(lines[title + 1]).toContain(PRS_TAB);
+    expect(lines[title + 2]).toContain("main checkout");
   });
 
   it("keeps a header per repo once there are several", async () => {
@@ -2593,12 +2600,11 @@ describe("removable section", () => {
       panelRepo("/r2", "r2", [other]),
     ];
     const layout = visualLayout(repos, () => 1);
-    // Every repo group also ends with the open-PR header, which is always a
-    // line: header(0) a(1) divider(2) b(3) prHeader(4) | header(5) c(6)
-    // prHeader(7).
+    // The Worktrees view draws no PR line at all, which is the whole line it
+    // reclaimed per repo: header(0) a(1) divider(2) b(3) | header(4) c(5).
     expect(layout.get("/a")).toEqual({ line: 1, height: 1 });
     expect(layout.get("/b")).toEqual({ line: 3, height: 1 });
-    expect(layout.get("/c")).toEqual({ line: 6, height: 1 });
+    expect(layout.get("/c")).toEqual({ line: 5, height: 1 });
   });
 
   it("drops the group header line when there is only one repo", () => {
@@ -2654,12 +2660,11 @@ describe("visual scrolling", () => {
       ],
       (entry) => rowVisualHeight(entry, false),
     );
-    // header(0) a(1) divider(2) b(3,4) prHeader(5) | header(6) c(7)
-    // prHeader(8). `b` is classified, so it sits under its group's removable
-    // divider; every group ends with the always-present open-PR header.
+    // header(0) a(1) divider(2) b(3,4) | header(5) c(6). `b` is classified,
+    // so it sits under its group's removable divider.
     expect(layout.get("/a")).toEqual({ line: 1, height: 1 });
     expect(layout.get("/b")).toEqual({ line: 3, height: 2 });
-    expect(layout.get("/c")).toEqual({ line: 7, height: 1 });
+    expect(layout.get("/c")).toEqual({ line: 6, height: 1 });
   });
 
   it("scrolls only when the row is not already fully visible", () => {
@@ -3467,23 +3472,93 @@ describe("PR row presentation", () => {
     expect(phrases[phrases.length - 1]?.text).toBe("checked out in pr-151");
   });
 
-  // The pending state rides the header rather than taking a row it would
-  // later give back, which is what moves the list under the reader.
-  it("carries the pending state on the section header", () => {
-    expect(prDividerText({ kind: "pending" }, "◐", 40)).toBe(
-      "├─ open PRs · ◐ checking GitHub",
+  // The PR view's stand-in line, which is drawn only where a repo produced
+  // no rows. `0` is the answer that view exists to give, so it takes a line
+  // there where the Worktrees view says nothing at all.
+  it("says what a repo with no PR rows has to say", () => {
+    expect(prStatusText({ kind: "pending" }, "◐", 40)).toBe(
+      "◐ checking GitHub",
     );
-    expect(prDividerText({ kind: "ready", count: 3 }, "◐", 40)).toBe(
-      "├─ open PRs · 3",
+    expect(prStatusText({ kind: "ready", count: 0 }, "◐", 40)).toBe(
+      "no open PRs",
     );
-    // A repo with no open PRs still ANSWERS. Hiding the header again would
-    // take back a row the pending state had already claimed.
-    expect(prDividerText({ kind: "ready", count: 0 }, "◐", 40)).toBe(
-      "├─ open PRs · 0",
+    // The cause travels with the failure, because the line sits under the
+    // repo it applies to and a shared line below the list cannot say which.
+    expect(
+      prStatusText({ kind: "unavailable", reason: "gh is logged out" }, "◐", 60),
+    ).toBe("unavailable: gh is logged out");
+    expect(prStatusText({ kind: "unavailable", reason: null }, "◐", 40)).toBe(
+      "unavailable",
     );
-    expect(prDividerText({ kind: "unavailable" }, "◐", 40)).toBe(
-      "├─ open PRs · unavailable",
+  });
+
+  // OpenTUI wraps rather than clipping, and a wrapped line in a `height={1}`
+  // box vanishes, so the line is truncated rather than trusted to fit.
+  it("truncates its line rather than letting it wrap away", () => {
+    const text = prStatusText(
+      { kind: "unavailable", reason: "a very long explanation indeed" },
+      "◐",
+      20,
     );
+    expect(text.length).toBeLessThanOrEqual(20);
+    expect(text.endsWith("…")).toBe(true);
+  });
+});
+
+describe("view tabs", () => {
+  it("brightens the active view and dims the other", () => {
+    const worktrees = viewTabSegments("worktrees", " · 7", 60);
+    expect(worktrees[0]).toEqual({ text: WORKTREES_TAB, fg: theme.text });
+    expect(worktrees[2]).toEqual({ text: PRS_TAB, fg: theme.overlay });
+    const prs = viewTabSegments("prs", " · 7", 60);
+    expect(prs[0]?.fg).toBe(theme.overlay);
+    expect(prs[2]).toEqual({ text: PRS_TAB, fg: theme.text });
+  });
+
+  it("carries the PR count on the tab, whichever view is up", () => {
+    expect(
+      viewTabSegments("worktrees", " · 7", 60)
+        .map((s) => s.text)
+        .join(""),
+    ).toBe("Worktrees │ Pull Requests · 7");
+  });
+
+  // The pending state rides the LABEL, the same answer-replaces-text-in-place
+  // idiom the title's scanning suffix uses, so nothing takes a row and hands
+  // it back when GitHub answers.
+  it("carries the pending spinner in place of the count", () => {
+    expect(
+      viewTabSegments("worktrees", " · ◓", 60)
+        .map((s) => s.text)
+        .join(""),
+    ).toBe("Worktrees │ Pull Requests · ◓");
+  });
+
+  // Dropped WHOLE, like `titleSegments`'s suffix: a `Pull Request…` cut
+  // mid-word would spend the columns that carry the count.
+  it("degrades to the short label before it truncates anything", () => {
+    const narrow = viewTabSegments("prs", " · 7", 22);
+    expect(narrow.map((s) => s.text).join("")).toBe("Worktrees │ PRs · 7");
+    expect(narrow[2]?.text).toBe(PRS_TAB_SHORT);
+  });
+
+  it("fits the short form rather than overrunning its box", () => {
+    const width = 12;
+    const fitted = viewTabSegments("prs", " · 7", width);
+    const used = fitted.reduce((n, s) => n + displayWidth(s.text), 0);
+    expect(used).toBeLessThanOrEqual(width);
+  });
+});
+
+describe("initialView", () => {
+  // One derivation covers all three return paths (a review reopen, a
+  // spawn-from-PR cursor, a cancelled dialog) without any of them growing a
+  // prop.
+  it("opens the PR view only for a PR cursor", () => {
+    expect(initialView(prRowKey("/repo", 151))).toBe("prs");
+    expect(initialView("/repo/wt/alpha")).toBe("worktrees");
+    expect(initialView(null)).toBe("worktrees");
+    expect(initialView(undefined)).toBe("worktrees");
   });
 });
 
@@ -3517,44 +3592,126 @@ describe("PR section layout", () => {
     expect(split.prs.map((e) => e.key)).toEqual(["pr:/repo#151"]);
   });
 
-  // The header is a LINE the cursor never lands on, exactly like the
-  // removable divider: a layout that skipped it puts every PR row one off.
-  it("counts the section header as a line, in every state", () => {
-    const wt = panelRow({ row: row({ path: "/a", name: "a" }) });
-    const pr = prRow();
-    const withSection = visualLayout(
-      [panelRepo("/r", "r", [wt, pr], { kind: "ready", count: 1 })],
+  // The line each repo used to spend on an always-drawn PR header is the
+  // whole reason the section became a view: thirteen repos meant thirteen
+  // lines of a forty-five-line viewport spent mostly saying `0`.
+  it("places no PR line at all in the worktrees view", () => {
+    const a = panelRow({ row: row({ path: "/a", name: "a" }) });
+    const b = panelRow({ row: row({ path: "/b", name: "b" }) });
+    const layout = visualLayout(
+      [
+        panelRepo("/r1", "r1", [a, prRow()], { kind: "ready", count: 1 }),
+        panelRepo("/r2", "r2", [b], { kind: "ready", count: 0 }),
+      ],
       () => 1,
+      "worktrees",
     );
-    // a(0) | header(1) | pr(2)
-    expect(withSection.get("/a")).toEqual({ line: 0, height: 1 });
-    expect(withSection.get(pr.key)).toEqual({ line: 2, height: 1 });
+    // header(0) a(1) | header(2) b(3) — no third section anywhere.
+    expect(layout.get("/a")).toEqual({ line: 1, height: 1 });
+    expect(layout.get("/b")).toEqual({ line: 3, height: 1 });
+    expect(layout.get(prRow().key)).toBeUndefined();
   });
 
-  // The header is a fixed line, so nothing under it moves as phase 3 goes
-  // from pending to an answer, INCLUDING an answer of zero or a failure.
-  // Every earlier shape hid the header on those two and shifted the list.
-  it("puts a repo's rows on the same lines in every PR-section state", () => {
+  // The PR view counts repo headers plus either the rows or the ONE line
+  // standing in for them, and it places only PR rows: a layout that measured
+  // both views' lines would put every row after the first group out of true.
+  it("counts a repo's PR rows, or the one line that stands in", () => {
     const wt = panelRow({ row: row({ path: "/a", name: "a" }) });
+    const pr = prRow();
+    const layout = visualLayout(
+      [
+        panelRepo("/r1", "r1", [wt, pr], { kind: "ready", count: 1 }),
+        panelRepo("/r2", "r2", [
+          panelRow({ row: row({ path: "/b", name: "b" }) }),
+        ]),
+      ],
+      () => 1,
+      "prs",
+    );
+    // header(0) pr(1) | header(2) "no open PRs"(3)
+    expect(layout.get(pr.key)).toEqual({ line: 1, height: 1 });
+    expect(layout.get("/a")).toBeUndefined();
+    expect(layout.get("/b")).toBeUndefined();
+  });
+
+  // Whichever answer phase 3 gives, a repo with no rows spends exactly one
+  // line on saying so, so the groups below it do not move as it resolves.
+  it("spends one line on every rowless PR-section state", () => {
+    const pr = prRow({ pr: openPR({ number: 9 }), repoRoot: "/r2" });
     const states: PanelRepo["prSection"][] = [
       { kind: "pending" },
       { kind: "ready", count: 0 },
-      { kind: "unavailable" },
+      { kind: "unavailable", reason: "gh is logged out" },
     ];
     const lines = states.map(
       (prSection) =>
-        visualLayout([panelRepo("/r", "r", [wt], prSection)], () => 1).get(
-          "/a",
-        )?.line,
+        visualLayout(
+          [
+            panelRepo("/r1", "r1", [], prSection),
+            panelRepo("/r2", "r2", [pr], { kind: "ready", count: 1 }),
+          ],
+          () => 1,
+          "prs",
+        ).get(pr.key)?.line,
     );
-    expect(lines).toEqual([0, 0, 0]);
+    // header(0) status(1) | header(2) pr(3), in all three.
+    expect(lines).toEqual([3, 3, 3]);
   });
 });
 
-describe("WorktreesPanel PR section", () => {
+describe("WorktreesPanel PR view", () => {
   const onePR = prsOf([openPR()]);
 
-  it("paints the header before GitHub answers, then the PRs under it", async () => {
+  // The whole reason the section became a view: the Worktrees view is exactly
+  // what it was before phase 3 existed, and every line it used to spend on a
+  // per-repo PR header is back.
+  it("shows no trace of the PR section in the worktrees view", async () => {
+    const { settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    expect(settled).toContain("main checkout");
+    expect(settled).not.toContain("open PRs");
+    expect(settled).not.toContain("#151");
+  });
+
+  it("swaps the rows for the repo's PRs on l, and back on h", async () => {
+    const { keys, frame, settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    expect(settled).toContain("main checkout");
+
+    keys.pressKey("l");
+    const prs = await frame();
+    expect(prs).toContain("#151 Worktrees panel: open-PR list");
+    expect(prs).not.toContain("main checkout");
+
+    keys.pressKey("h");
+    const back = await frame();
+    expect(back).toContain("main checkout");
+    expect(back).not.toContain("#151");
+  });
+
+  // The count is the PANEL's, not the active view's: the inactive tab has to
+  // state the other view's number, which is what it is there for.
+  it("carries the live PR count on the tab from the worktrees view", async () => {
+    const { settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      prsOf([openPR(), openPR({ number: 150 })]),
+    );
+    expect(settled).toContain("Pull Requests · 2");
+  });
+
+  // The spinner rides the LABEL rather than a row, so nothing takes a line
+  // and gives it back when GitHub answers.
+  it("spins on the tab while phase 3 is in flight", async () => {
     let answer: ((r: Response) => void) | null = null;
     const { frame } = await mountPanel({
       list: async () => json(listOf([mainRow(), row()])),
@@ -3563,46 +3720,53 @@ describe("WorktreesPanel PR section", () => {
     });
 
     const pending = await frame();
-    expect(pending).toContain("open PRs");
-    expect(pending).toContain("checking GitHub");
-    // The worktrees are already usable throughout that window.
+    expect(pending).toContain("Pull Requests · ");
+    expect(pending).not.toContain("Pull Requests · 0");
+    // The worktrees are usable throughout that window, unchanged.
     expect(pending).toContain("main checkout");
-    expect(pending).not.toContain("#151");
 
     answer!(json(onePR));
-    const settled = await frame();
-    expect(settled).toContain("#151 Worktrees panel: open-PR list");
-    expect(settled).not.toContain("checking GitHub");
-    // Below every worktree row, which is the section's whole placement rule.
-    const [main, pr] = orderOf(settled, "main checkout", "#151");
-    expect(main).toBeLessThan(pr!);
+    expect(await frame()).toContain("Pull Requests · 1");
   });
 
-  // NOT the removable divider's rule, deliberately. The header announces
-  // itself before GitHub answers, so hiding it again on a repo with no open
-  // PRs would take back a row and shift every line beneath it.
-  it("answers zero rather than taking the header's row back", async () => {
-    const { settled } = await mountSettled(listOf([mainRow(), row()]));
-    expect(settled).toContain("open PRs · 0");
+  // The reversal that is the point: `0` is noise in the Worktrees view and
+  // the ANSWER in this one, so it gets a line here and none there.
+  it("says a repo has no open PRs, in the PR view only", async () => {
+    const { keys, frame, settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+    );
+    expect(settled).not.toContain("no open PRs");
+
+    keys.pressKey("l");
+    expect(await frame()).toContain("no open PRs");
   });
 
-  // Worse than the empty case: every repo's header would vanish AND the
-  // error line appear, two shifts from one event.
-  it("keeps the header, marked unavailable, when the PR list fails", async () => {
-    const { frame } = await mountPanel({
+  // The cause travels with the failure and is said under the repo it applies
+  // to. There is deliberately no second error line below the list: with
+  // thirteen repos and one dead daemon, "which repo" is the only question a
+  // shared line cannot answer.
+  it("names the cause under the repo when the whole request fails", async () => {
+    const { keys, frame } = await mountPanel({
       list: async () => json(listOf([mainRow(), row()])),
       scan: async () => json(emptyScan),
       prs: async () => {
         throw new Error("gh is logged out");
       },
     });
-    expect(await frame()).toContain("open PRs · unavailable");
+    const worktrees = await frame();
+    expect(worktrees).toContain("Pull Requests · unavailable");
+    // Nothing leaks into the Worktrees view, which has no PR presence at all.
+    expect(worktrees).not.toContain("gh is logged out");
+    expect(worktrees).toContain("main checkout");
+
+    keys.pressKey("l");
+    expect(await frame()).toContain("unavailable: gh is logged out");
   });
 
   // A repo's own error rides inside an otherwise fine response, so only that
-  // repo's header is marked.
+  // repo's line is marked and the others still answer.
   it("marks only the repo whose own PR lookup failed", async () => {
-    const { frame } = await mountPanel({
+    const { keys, frame } = await mountPanel({
       list: async () => json(listOf([mainRow(), row()])),
       scan: async () => json(emptyScan),
       prs: async () =>
@@ -3613,10 +3777,12 @@ describe("WorktreesPanel PR section", () => {
           ],
         }),
     });
-    expect(await frame()).toContain("open PRs · unavailable");
+    keys.pressKey("l");
+    expect(await frame()).toContain("unavailable: no GitHub remote");
   });
 
-  // Degrades like phase 2: one line, panel stays usable, never an error state.
+  // Degrades like phase 2: the panel never reaches its error phase, and the
+  // worktrees are still the thing the user came for.
   it("keeps the panel usable when the PR list fails", async () => {
     const { frame } = await mountPanel({
       list: async () => json(listOf([mainRow(), row()])),
@@ -3626,28 +3792,10 @@ describe("WorktreesPanel PR section", () => {
       },
     });
     const shown = await frame();
-    expect(shown).toContain("Open PRs failed: gh is logged out");
     expect(shown).toContain("main checkout");
     expect(shown).toContain("enter open");
     // Not the error phase: `r retry · q close` is what that renders.
     expect(shown).not.toContain("r retry");
-  });
-
-  // A repo's own failure rides inside a successful response, so the others
-  // still render. The line has to say which repo could not answer.
-  it("names the repo behind a per-repo failure", async () => {
-    const { frame } = await mountPanel({
-      list: async () => json(listOf([mainRow(), row()])),
-      scan: async () => json(emptyScan),
-      prs: async () =>
-        json({
-          repos: [],
-          errors: [
-            { repoRoot: "/repo", repoName: "repo", error: "no GitHub remote" },
-          ],
-        }),
-    });
-    expect(await frame()).toContain("Open PRs (repo): no GitHub remote");
   });
 
   it("marks a PR whose head is a local branch tip as checked out", async () => {
@@ -3657,28 +3805,149 @@ describe("WorktreesPanel PR section", () => {
       branch: "feat/pr-list-panel",
       tip: "sha-151",
     });
-    const { settled } = await mountSettled(
+    const { keys, frame } = await mountSettled(
       listOf([mainRow(), held]),
       emptyScan,
       {},
       onePR,
     );
-    expect(settled).toContain("checked out in pr-151");
+    keys.pressKey("l");
+    expect(await frame()).toContain("checked out in pr-151");
   });
 
-  it("walks the cursor from a worktree row onto a PR row", async () => {
+  // On switch the cursor reseeds to the view's FIRST row, because the key it
+  // held names a row this view does not have. Deliberately not remembered per
+  // view: one rule, and the row it lands on is always on screen.
+  it("reseeds the cursor onto the new view's first row", async () => {
+    const { keys, frame } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      prsOf([openPR(), openPR({ number: 150 })]),
+    );
+    keys.pressKey("l");
+    const prs = await frame();
+    // The cursor bar sits in the rail's column on the row it is on.
+    expect(lineWith(prs, "#151")).toContain(CURSOR_BAR);
+
+    keys.pressKey("j");
+    expect(lineWith(await frame(), "#150")).toContain(CURSOR_BAR);
+
+    keys.pressKey("h");
+    expect(lineWith(await frame(), "main checkout")).toContain(CURSOR_BAR);
+  });
+
+  // j/k walk the ACTIVE view's rows and nothing else. A consumer left on the
+  // unfiltered list is a key acting on a row that is not on screen.
+  it("never walks the cursor off the active view's rows", async () => {
     const { keys, frame } = await mountSettled(
       listOf([mainRow(), row()]),
       emptyScan,
       {},
       onePR,
     );
-    keys.pressKey("j");
-    keys.pressKey("j");
+    for (let i = 0; i < 6; i++) keys.pressKey("j");
     const shown = await frame();
-    // The cursor bar sits in the rail's column on the row it is on.
-    expect(lineWith(shown, "#151")).toContain(CURSOR_BAR);
-    expect(lineWith(shown, "main checkout")).not.toContain(CURSOR_BAR);
+    expect(shown).not.toContain("#151");
+    // Still on a worktree row, and the last one at that.
+    expect(lineWith(shown, "alpha")).toContain(CURSOR_BAR);
+  });
+});
+
+describe("WorktreesPanel PR view safety gate", () => {
+  const removable = () => {
+    const gone = row({ path: "/repo/wt/gone", name: "gone" });
+    return {
+      list: listOf([mainRow(), gone]),
+      scan: {
+        candidates: [candidate({ path: "/repo/wt/gone", name: "gone" })],
+        skipped: [],
+      } as ScanResponse,
+    };
+  };
+
+  // The one way this panel could delete something the user cannot see. `x`
+  // acts on the SELECTION, not on the cursor, so a selection made in the
+  // Worktrees view is still live after `l` — the view is what has to gate it.
+  it("refuses x in the PR view with a non-empty selection", async () => {
+    const { list, scan } = removable();
+    const { keys, frame } = await mountSettled(
+      list,
+      scan,
+      {},
+      prsOf([openPR()]),
+    );
+    // Select the removable row.
+    keys.pressKey("j");
+    keys.pressKey("space");
+    expect(await frame()).toContain("x remove 1");
+
+    keys.pressKey("l");
+    keys.pressKey("x");
+    const shown = await frame();
+    // The confirm never opened: its headline is what the phase renders.
+    expect(shown).not.toContain("Delete 1 worktree");
+    expect(shown).toContain("removal lives in the worktrees view");
+  });
+
+  // The selection is deliberately NOT cleared by a view switch: the gate is
+  // the only thing that changed, so `h` gets the selection back intact.
+  it("keeps the selection across a view round trip", async () => {
+    const { list, scan } = removable();
+    const { keys, frame } = await mountSettled(
+      list,
+      scan,
+      {},
+      prsOf([openPR()]),
+    );
+    keys.pressKey("j");
+    keys.pressKey("space");
+    keys.pressKey("l");
+    keys.pressKey("h");
+    expect(await frame()).toContain("x remove 1");
+
+    keys.pressKey("x");
+    expect(await frame()).toContain("Delete 1 worktree");
+  });
+
+  it("makes space, a and D inert in the PR view", async () => {
+    const { list, scan } = removable();
+    const { keys, frame } = await mountSettled(
+      list,
+      scan,
+      {},
+      prsOf([openPR()]),
+    );
+    keys.pressKey("l");
+    keys.pressKey("space");
+    keys.pressKey("a");
+    keys.pressKey("D");
+    await frame();
+
+    keys.pressKey("h");
+    const shown = await frame();
+    // Nothing was selected while the PR view was up, so the hint still reads
+    // the bare `x remove` it does with an empty selection.
+    expect(shown).not.toContain("x remove 1");
+  });
+
+  // The footer teaches the keys that are live, and only those.
+  it("drops the removal keys from the PR view's hint line", async () => {
+    const { list, scan } = removable();
+    const { keys, frame } = await mountSettled(
+      list,
+      scan,
+      {},
+      prsOf([openPR()]),
+    );
+    keys.pressKey("l");
+    const shown = await frame();
+    expect(shown).toContain("enter checkout");
+    expect(shown).toContain("h worktrees");
+    expect(shown).not.toContain("space select");
+    expect(shown).not.toContain("x remove");
+    expect(shown).not.toContain("y copy");
+    expect(shown).not.toContain("d review");
   });
 });
 
@@ -3690,7 +3959,7 @@ describe("PR section title and cursor", () => {
   // to 4 when phase 3 answered - the exact flicker the loading gate exists
   // to prevent.
   it("counts worktrees in the title, never PR rows", async () => {
-    const { settled } = await mountSettled(
+    const { keys, frame, settled } = await mountSettled(
       listOf([mainRow(), row()]),
       emptyScan,
       {},
@@ -3698,6 +3967,12 @@ describe("PR section title and cursor", () => {
     );
     expect(settled).toContain("2 worktrees");
     expect(settled).not.toContain("4 worktrees");
+
+    // The count is the PANEL's and not the active view's, so the title says
+    // the same thing in both. Counting `flatRows()` here said `0 worktrees`
+    // under the PR view.
+    keys.pressKey("l");
+    expect(await frame()).toContain("2 worktrees");
   });
 
   // Phase 1 is local git and phase 3 is a `gh` round trip, so phase 1 lands
@@ -3714,27 +3989,55 @@ describe("PR section title and cursor", () => {
       { initialCursor: prRowKey("/repo", 151) },
     );
 
-    // Phase 1 has painted and the seeded row does not exist yet. The
-    // HIGHLIGHT sits on the first row meanwhile, since `cursorIndex` falls
-    // back to 0 for a key it cannot find; what must survive is the seeded
-    // KEY, and the frame after phase 3 is what proves it did.
-    expect(await frame()).toContain("main checkout");
+    // A PR cursor opens the PR VIEW, which is the only one that can show it.
+    // Phase 1 has painted and the seeded row does not exist yet; what must
+    // survive is the seeded KEY, and the frame after phase 3 proves it did.
+    const pending = await frame();
+    expect(pending).toContain("checking GitHub");
+    expect(pending).not.toContain("main checkout");
 
     answer!(json(onePR));
     const settled = await frame();
     expect(lineWith(settled, "#151")).toContain(CURSOR_BAR);
   });
 
+  // The hold is scoped to the PR VIEW as well as to the key. In the
+  // Worktrees view the row can never arrive however long phase 3 takes, so
+  // holding there would leave `cursorPath` naming a row the list does not
+  // have while the highlight sat on row 0 — the disagreement the re-seed
+  // exists to repair.
+  it("re-seeds when a held PR cursor is carried into the worktrees view", async () => {
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(listOf([mainRow(), row()])),
+        scan: async () => json(emptyScan),
+        prs: () => new Promise<Response>(() => {}),
+      },
+      { initialCursor: prRowKey("/repo", 151) },
+    );
+    await frame();
+
+    keys.pressKey("h");
+    const shown = await frame();
+    expect(lineWith(shown, "main checkout")).toContain(CURSOR_BAR);
+  });
+
   // The hold is scoped to "phase 3 has not answered". A PR that merged
   // between the two opens is genuinely gone, and the cursor falls back.
-  it("falls back to the first row once phase 3 says the PR is gone", async () => {
-    const { settled } = await mountSettled(
+  it("says so once phase 3 reports the seeded PR is gone", async () => {
+    const { keys, frame, settled } = await mountSettled(
       listOf([mainRow(), row()]),
       emptyScan,
       { initialCursor: prRowKey("/repo", 151) },
       noPRs,
     );
-    expect(lineWith(settled, "main checkout")).toContain(CURSOR_BAR);
+    // The view stays where it was asked to open and ANSWERS. Silently
+    // switching views would move the panel under a user who is looking at it
+    // for a reason.
+    expect(settled).toContain("no open PRs");
+
+    keys.pressKey("h");
+    expect(lineWith(await frame(), "main checkout")).toContain(CURSOR_BAR);
   });
 
   it("classifies a key without needing its row", () => {
@@ -3817,8 +4120,8 @@ describe("PR row keys", () => {
       opts,
       prs,
     );
-    // main checkout, then the PR.
-    harness.keys.pressKey("j");
+    // The PR view's first row, which the cursor re-seeds onto.
+    harness.keys.pressKey("l");
     await harness.frame();
     return harness;
   }
@@ -3862,8 +4165,7 @@ describe("PR row keys", () => {
       { onSpawn: (t) => spawns.push(t), onSpawnFromPR: (t) => fromPR.push(t) },
       prsOf([openPR()]),
     );
-    harness.keys.pressKey("j");
-    harness.keys.pressKey("j");
+    harness.keys.pressKey("l");
     harness.keys.pressEnter();
     await harness.frame();
 
@@ -3893,10 +4195,10 @@ describe("PR row keys", () => {
     keys.pressKey("space");
     keys.pressKey("x");
     const shown = await frame();
-    // No checkbox appeared, and `x` fell through to its "nothing selected"
-    // message rather than opening a confirm.
+    // No checkbox appeared, and `x` named the view that owns removal rather
+    // than opening a confirm over rows that are not on screen.
     expect(shown).not.toContain("[x]");
-    expect(shown).toContain("nothing selected");
+    expect(shown).toContain("removal lives in the worktrees view");
   });
 });
 
@@ -3968,7 +4270,7 @@ describe("WorktreesPanel o key", () => {
       {},
       prsOf([openPR()]),
     );
-    keys.pressKey("j");
+    keys.pressKey("l");
     keys.pressKey("o");
     const shown = await frame();
 
@@ -3984,7 +4286,7 @@ describe("WorktreesPanel o key", () => {
       { opensUrls: false },
       prsOf([openPR()]),
     );
-    keys.pressKey("j");
+    keys.pressKey("l");
     keys.pressKey("o");
     const shown = await frame();
 

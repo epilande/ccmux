@@ -34,7 +34,6 @@ import type {
 import type {
   OpenPR,
   PRListBody,
-  PRListError,
   PRListResponse,
 } from "../../daemon/pr-list";
 import { normalizePRList } from "../../daemon/pr-list";
@@ -166,41 +165,70 @@ export function isPRRowKey(key: string): boolean {
   return key.startsWith("pr:");
 }
 
+/**
+ * The panel's two views (issue #151).
+ *
+ * A second AXIS, orthogonal to the Tab scope: all four combinations are
+ * meaningful, and the tab line names the views while the title names the
+ * scope. The PR list started life as a third section appended to every repo
+ * group and that shape lost on its own terms — one always-drawn header per
+ * repo cost a line each across a thirteen-repo view, and the one repo the
+ * user actually works in had its PRs below the fold before a key was
+ * pressed. Reordering could not fix it either: phase 3 lands after phase 1
+ * has painted, so PRs at the TOP would shove already-visible worktree rows
+ * down mid-interaction, which is the exact shift the pending-rides-the-header
+ * idiom exists to prevent. A view costs one line for the whole panel and can
+ * arrive whenever it likes.
+ */
+export type PanelView = "worktrees" | "prs";
+
+/**
+ * Which view an open starts on, derived from the row it was asked to land on.
+ *
+ * A derivation and not a prop, because every return path into the panel (the
+ * review round trip, a cancelled spawn dialog, a spawn-from-PR) already
+ * carries the cursor it wants, and a PR key can only be shown by the PR view.
+ * One rule covers all three call sites and none of them learns a new
+ * argument.
+ */
+export function initialView(cursor: string | null | undefined): PanelView {
+  return cursor != null && isPRRowKey(cursor) ? "prs" : "worktrees";
+}
+
 /** One repo's rows, in display order. */
 export interface PanelRepo {
   repoRoot: string;
   repoName: string;
   rows: PanelRow[];
   /**
-   * What the open-PR section's header line says.
+   * What phase 3 has to say about this repo.
    *
    * Derived onto the group rather than passed to the render, for the reason
    * `showsGroupHeaders` is derived: `visualLayout` has to count the same
    * lines the render draws, and two independent conditions eventually
    * disagree.
    *
-   * The header is ALWAYS drawn, which is NOT the rule the removable divider
-   * follows, and the difference is deliberate. The divider never announces
-   * itself before it knows its count, so it can appear once and stay. This
-   * header is painted before GitHub has answered, so hiding it again on a
-   * repo that turns out to have no open PRs would take its row BACK and shift
-   * every line beneath it, which is the exact thing the pending state rides
-   * the header to avoid. Announcing costs an answer, and `0` and
-   * `unavailable` are answers.
+   * Note the reversal against the Worktrees view, which is deliberate. There
+   * a repo with no open PRs says NOTHING — the view's subject is directories
+   * and a `0` per repo is thirteen lines of noise. Here `0` is the answer the
+   * view exists to give, so it takes a line under the repo header, and so
+   * does `unavailable`, and so does the wait for GitHub.
    */
   prSection: PRSectionStatus;
 }
 
 /**
- * The open-PR header's three states.
+ * What phase 3 has to say about one repo.
  *
  * A union rather than a count plus flags, so "still waiting" and "answered
- * zero" cannot be confused. A nullable count invited exactly that.
+ * zero" cannot be confused. A nullable count invited exactly that. The
+ * failure carries its own CAUSE, because the PR view says it under the repo
+ * it applies to rather than in one line below a list of many.
  */
 export type PRSectionStatus =
   | { kind: "pending" }
   | { kind: "ready"; count: number }
-  | { kind: "unavailable" };
+  | { kind: "unavailable"; reason: string | null };
 
 interface WorktreesPanelProps {
   /** Main checkout to scope to; null lists every known repo. */
@@ -517,6 +545,54 @@ export function titleSegments(
     ];
   }
   return fitSegments([{ text: title, fg: theme.text }], width);
+}
+
+/** The tab line's labels and the separator between them. */
+export const WORKTREES_TAB = "Worktrees";
+export const PRS_TAB = "Pull Requests";
+/** What the PR tab degrades to at sidebar widths, where the long label plus
+ *  a count does not fit beside `Worktrees`. */
+export const PRS_TAB_SHORT = "PRs";
+const TAB_SEPARATOR = " │ ";
+
+/**
+ * The view tabs: one line, directly under the title, naming both views with
+ * the inactive one dimmed.
+ *
+ * Budgeted against `contentWidth()` and not `listWidth()`, because it renders
+ * OUTSIDE the scrollbox and so does not pay for the scrollbar's column. It
+ * still has to be fitted: OpenTUI wraps rather than clips, and a wrapped line
+ * inside a `height={1}` box vanishes instead of overflowing.
+ *
+ * The degradation is one deliberate step before that fitting — the long label
+ * is swapped WHOLE for a short one, the way `titleSegments` drops its suffix
+ * whole — because a `Pull Request…` truncated mid-word costs the count that
+ * follows it, which is the half a narrow panel most needs.
+ */
+export function viewTabSegments(
+  view: PanelView,
+  suffix: string,
+  width: number,
+): RowSegment[] {
+  const build = (prLabel: string): RowSegment[] => {
+    const segments: RowSegment[] = [
+      {
+        text: WORKTREES_TAB,
+        fg: view === "worktrees" ? theme.text : theme.overlay,
+      },
+      { text: TAB_SEPARATOR, fg: theme.overlay },
+      { text: prLabel, fg: view === "prs" ? theme.text : theme.overlay },
+    ];
+    if (suffix) segments.push({ text: suffix, fg: theme.overlay });
+    return segments;
+  };
+  const total = (segments: RowSegment[]): number =>
+    segments.reduce((n, segment) => n + displayWidth(segment.text), 0);
+  const full = build(PRS_TAB);
+  if (total(full) <= width) return full;
+  const short = build(PRS_TAB_SHORT);
+  if (total(short) <= width) return short;
+  return fitSegments(short, width);
 }
 
 /**
@@ -1233,27 +1309,34 @@ export function dividerText(count: number, width: number): string {
 }
 
 /**
- * The label that opens a group's open-PR section, in the removable divider's
- * own language (a tee the rail runs into, a `·`-separated suffix, no rule).
+ * What the PR view puts under a repo that has no rows to show.
  *
- * The pending state rides THIS line rather than taking a row of its own, for
- * the reason the title's `scanning` suffix does: a row that states a fact and
- * then takes its row back moves the whole list at the exact moment the new
- * rows arrive, which is the glitch the suffix idiom exists to prevent. Here
- * the header is already on screen, so the answer replaces text in place.
+ * Called ONLY where the repo contributed no PR rows, which is why `ready`
+ * needs no count: it is zero by construction. Both halves of the panel derive
+ * that condition the same way (`prs.length === 0`), so the line arithmetic
+ * and the render cannot disagree about whether this line exists.
+ *
+ * The wait rides this line rather than blanking the section, for the reason
+ * the title's `scanning` suffix rides the title: an empty run of repo headers
+ * reads as broken, and an answer that REPLACES text in place moves nothing.
+ * The cause is stated here, under the repo it applies to, rather than in one
+ * line below a list of many — with thirteen repos and one dead daemon, "which
+ * repo" is the only question a single line cannot answer.
  */
-export function prDividerText(
+export function prStatusText(
   status: PRSectionStatus,
   spinner: string,
   width: number,
 ): string {
-  const suffix =
+  const text =
     status.kind === "pending"
       ? `${spinner} checking GitHub`
       : status.kind === "unavailable"
-        ? "unavailable"
-        : String(status.count);
-  return truncateText(`├─ open PRs · ${suffix}`, Math.max(1, width));
+        ? status.reason
+          ? `unavailable: ${status.reason}`
+          : "unavailable"
+        : "no open PRs";
+  return truncateText(text, Math.max(1, width));
 }
 
 /**
@@ -1485,19 +1568,25 @@ export function rowVisualHeight(entry: PanelRow, compact = false): number {
 export type VisualLayout = Map<string, { line: number; height: number }>;
 
 /**
- * Lay the whole list out in visual lines: repo headers, the removable divider
- * and the open-PR header each take one, and a row takes whatever
- * {@link rowVisualHeight} says.
+ * Lay the ACTIVE view out in visual lines: repo headers and the removable
+ * divider each take one, a status line stands in for a repo with no PRs to
+ * show, and a row takes whatever {@link rowVisualHeight} says.
  *
  * The divider is not a row and the cursor never lands on it, but it is a LINE,
  * and a scroll target computed without it puts every row below the divider one
  * line off. Keyed by PATH for the same reason the cursor is: phase 2 re-sorts
  * the list, and a layout keyed by position would describe the arrangement the
  * cursor just left.
+ *
+ * Per VIEW, because the two draw different lines from the same groups. Only
+ * the rows the active view renders are placed at all — a layout that measured
+ * both would put every row after the first group out of true by exactly the
+ * lines the other view owns.
  */
 export function visualLayout(
   repos: PanelRepo[],
   heightOf: (entry: PanelRow) => number,
+  view: PanelView = "worktrees",
 ): VisualLayout {
   const layout: VisualLayout = new Map();
   let line = 0;
@@ -1510,16 +1599,17 @@ export function visualLayout(
   for (const repo of repos) {
     if (headers) line += 1; // the repo header
     const { kept, removable, prs } = splitRemovable(repo.rows);
+    if (view === "prs") {
+      // Either the rows or the ONE line that stands in for them
+      // ({@link prStatusText}), decided by the same test the render uses, so
+      // the arithmetic cannot drift from what is drawn.
+      if (prs.length > 0) prs.forEach(place);
+      else line += 1;
+      continue;
+    }
     kept.forEach(place);
     if (removable.length > 0) line += 1; // the removable divider
     removable.forEach(place);
-    // The open-PR header is a LINE the cursor never lands on, exactly like
-    // the removable divider, and a layout that skipped it would put every PR
-    // row one line out of true. Unconditional, because the header is: that is
-    // what holds the arithmetic, and the rows on screen, still across phase
-    // 3 resolving.
-    line += 1;
-    prs.forEach(place);
   }
   return layout;
 }
@@ -1752,6 +1842,18 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const [scoped, setScoped] = createSignal(
     props.repo !== null && props.startWidened !== true,
   );
+  /**
+   * Which view is up; `h`/`l` flip it, and it is ORTHOGONAL to `scoped`.
+   *
+   * Seeded from the cursor the open was asked to land on ({@link
+   * initialView}), which is what lets every return path — the review round
+   * trip, a cancelled spawn dialog, a cancelled spawn-from-PR — reopen in the
+   * view that can actually show its row without any of them learning a new
+   * prop.
+   */
+  const [view, setView] = createSignal<PanelView>(
+    initialView(props.initialCursor),
+  );
   const [note, setNote] = createSignal<string | null>(null);
   /** A fully successful removal's title-line notice; the next load wipes it. */
   const [titleNotice, setTitleNotice] = createSignal<string | null>(null);
@@ -1782,7 +1884,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const prPending = (): boolean => prs() === null && prError() === null;
 
   /**
-   * Whether phase 3 failed for this repo, either wholesale or on its own.
+   * Why phase 3 has nothing for this repo, or null when it has an answer.
+   *
+   * The whole request falling over and THIS repo's own error riding back
+   * inside an otherwise fine response are the same fact to a reader, so they
+   * produce the same line. There is deliberately no second error line under
+   * the list any more: one cause, said once, under the repo it applies to,
+   * where "which repo" is a question a single shared line cannot answer.
    *
    * Declared ABOVE `merged`, which is a `createMemo` and therefore runs on
    * creation. It survived below only because the first evaluation is always
@@ -1790,9 +1898,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * phase 3 the way a return-open seeds phase 2 would have turned that into a
    * temporal-dead-zone crash at mount.
    */
-  const prFailedFor = (repoRoot: string): boolean => {
-    if (prError() !== null) return true;
-    return (prs()?.errors ?? []).some((e) => e.repoRoot === repoRoot);
+  const prReasonFor = (repoRoot: string): string | null => {
+    const failed = prError();
+    if (failed !== null) return failed;
+    return (
+      (prs()?.errors ?? []).find((e) => e.repoRoot === repoRoot)?.error ?? null
+    );
   };
 
   /** Repo filter currently in force, which is what both requests carry. */
@@ -1835,41 +1946,58 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           };
         },
       );
+      // `unavailable` covers both shapes of phase-3 failure: the whole
+      // request falling over, and THIS repo's own error riding back inside an
+      // otherwise fine response. Either way the PR view says so under this
+      // repo, with the cause.
+      const prReason = pending ? null : prReasonFor(repo.repoRoot);
       return {
         repoRoot: repo.repoRoot,
         repoName: repo.repoName,
         rows: sortWorktreeRows([...worktrees, ...prRows]),
-        // The header is ALWAYS drawn; only its text changes. Announcing it
-        // before GitHub answers and then hiding it again would take a row
-        // back and shift every line beneath it, which is the whole reason the
-        // pending state rides the header. `0` and `unavailable` are answers.
-        //
-        // `unavailable` covers both shapes of phase-3 failure: the whole
-        // request falling over, and THIS repo's own error riding back inside
-        // an otherwise fine response. Either way the header stays put and the
-        // line under the list carries the actionable cause.
         prSection: pending
           ? { kind: "pending" as const }
-          : prFailedFor(repo.repoRoot)
-            ? { kind: "unavailable" as const }
+          : prReason !== null
+            ? { kind: "unavailable" as const, reason: prReason }
             : { kind: "ready" as const, count: prRows.length },
       };
     });
   });
 
-  /** Every row in display order, which is what the cursor walks. */
-  const flatRows = createMemo(() => merged().flatMap((repo) => repo.rows));
+  /**
+   * Every row of every repo, both kinds, in display order.
+   *
+   * The panel-WIDE measurements read this rather than the active view's list,
+   * so the label column and the title counts describe the same panel whichever
+   * view is up and nothing jogs when `h`/`l` is pressed.
+   */
+  const allRows = createMemo(() => merged().flatMap((repo) => repo.rows));
+
+  /**
+   * The rows the CURSOR walks: the active view's, and only those.
+   *
+   * Everything that MOVES or ACTS reads this — `cursorIndex`, `cursorRow`, the
+   * re-seed effect, `moveCursor`, the empty-state gate — because a consumer
+   * left on the unfiltered list is a key acting on a row that is not on
+   * screen. The rows themselves are unchanged and unsorted here: the view is a
+   * filter over one list, not two lists.
+   */
+  const flatRows = createMemo(() =>
+    allRows().filter((entry) =>
+      view() === "prs" ? entry.kind === "pr" : entry.kind === "worktree",
+    ),
+  );
 
   /** One label column for the whole panel, so the branches form a single
    *  straight line across repo groups instead of re-aligning per group. */
-  const labelWidth = createMemo(() => labelColumnWidth(flatRows()));
+  const labelWidth = createMemo(() => labelColumnWidth(allRows()));
 
   /** The panel's widest marker slot: 4 the moment any checkbox exists, else
    *  2. The branch column pads against this rather than each row's own
    *  marker, so it cannot jog by two at the removable divider. */
   const markerBase = createMemo(() =>
     markerWidth(
-      flatRows().some(
+      allRows().some(
         (entry) => entry.kind === "worktree" && entry.candidate !== null,
       ),
     ),
@@ -1936,7 +2064,21 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     // the restoration `initialCursor` exists for. Held only while phase 3 is
     // still in flight, so a PR that has genuinely gone (merged between the
     // two opens) still falls back to the first row the moment we know.
-    if (!live && path !== null && isPRRowKey(path) && prPending()) return;
+    // Gated on the VIEW as well, and not only on the key. Held in the PR
+    // view, where the row can still arrive; NOT held in the Worktrees view,
+    // which will never show a PR row however long phase 3 takes, so a hold
+    // there would leave `cursorPath` naming a row the list does not have
+    // while `cursorIndex` fell back to 0 — the exact disagreement this
+    // re-seed exists to repair. That is the `l`-then-`h`-while-pending path.
+    if (
+      !live &&
+      path !== null &&
+      view() === "prs" &&
+      isPRRowKey(path) &&
+      prPending()
+    ) {
+      return;
+    }
     if (first && !live) setCursorPath(first.key);
   });
 
@@ -1957,8 +2099,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const path = cursorPath();
     if (!listBox || !path) return;
     const target = scrollTargetFor(
-      visualLayout(merged(), (entry) =>
-        rowVisualHeight(entry, props.compact === true),
+      visualLayout(
+        merged(),
+        (entry) => rowVisualHeight(entry, props.compact === true),
+        view(),
       ),
       path,
       listBox.scrollTop,
@@ -2019,26 +2163,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const scanning = (): boolean => scan() === null && scanError() === null;
 
 
-  /**
-   * Phase 3's failure as one line, or null when there is nothing to say.
-   *
-   * Degrades exactly like phase 2: one line under the list, the panel stays
-   * fully usable, and the phase NEVER reaches `setPhase("error")`. A repo's
-   * own failure is named with the repo, since on the multi-repo view the
-   * others rendered fine and the line has to say which one did not.
-   */
-  const prErrorLine = (): string | null => {
-    const failed = prError();
-    if (failed) return `Open PRs failed: ${failed}`;
-    const errors: PRListError[] = prs()?.errors ?? [];
-    const first = errors[0];
-    if (!first) return null;
-    if (errors.length === 1) {
-      return `Open PRs (${first.repoName}): ${first.error}`;
-    }
-    return `Open PRs unavailable for ${errors.length} repos: ${first.error}`;
-  };
-
   // The PR header's own spinner, released the moment phase 3 lands.
   const prIcon = useStatusIcon(
     () => (prPending() ? "working" : "idle"),
@@ -2070,11 +2194,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     if (phase() === "loading") return null;
     const groups = merged();
     if (groups.length === 0) return null;
-    // WORKTREE rows only. `flatRows()` has held PR rows since the section
-    // landed, so counting it said `4 worktrees` for two worktrees and two
-    // PRs, and the number JUMPED when phase 3 arrived — the exact flicker the
-    // loading gate above exists to prevent. `markerBase` filters the same way.
-    const worktrees = flatRows().filter(
+    // WORKTREE rows of the WHOLE panel, not of the active view. Counting the
+    // view's own list said `0 worktrees` under the PR view, and counting the
+    // unfiltered list unfiltered said `4 worktrees` for two worktrees and two
+    // PRs, with the number JUMPING when phase 3 arrived — the exact flicker
+    // the loading gate above exists to prevent. `markerBase` filters the same
+    // way.
+    const worktrees = allRows().filter(
       (entry) => entry.kind === "worktree",
     ).length;
     const rows = plural(worktrees, "worktree", "worktrees");
@@ -2102,6 +2228,39 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const titleLine = createMemo(() =>
     titleSegments(panelTitle(), titleSuffix(), contentWidth()),
   );
+
+  /**
+   * What trails `Pull Requests` on the tab line: the live count, the spinner
+   * while GitHub is being asked, or `unavailable` when the whole request
+   * fell over.
+   *
+   * Counted from `allRows()` so it is the PANEL's number and not the active
+   * view's — the inactive tab has to state the other view's count, which is
+   * the whole reason `merged()` stays unfiltered. A whole-request failure
+   * says so rather than reporting the `0` rows that failure produced; a
+   * per-REPO failure does not appear here at all, because the PR view names
+   * it under the repo it belongs to.
+   */
+  const prTabSuffix = (): string => {
+    if (prPending()) return ` · ${prIcon()}`;
+    if (prError() !== null) return " · unavailable";
+    return ` · ${allRows().filter((entry) => entry.kind === "pr").length}`;
+  };
+
+  const viewTabs = createMemo(() =>
+    viewTabSegments(view(), prTabSuffix(), contentWidth()),
+  );
+
+  /**
+   * Whether the active view has anything to draw.
+   *
+   * Not the same question in both views. The PR view draws a line per repo
+   * even where there is not one open PR anywhere, so its emptiness is the
+   * REPO list's and not the row list's; asking `flatRows()` there would put
+   * "no worktrees found" over a panel that has plenty.
+   */
+  const hasContent = () =>
+    view() === "prs" ? merged().length > 0 : flatRows().length > 0;
 
   function flash(message: string): void {
     setNote(message);
@@ -2422,7 +2581,32 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     }
 
     const entry = cursorRow();
+    /**
+     * Whether the removal keys are live.
+     *
+     * The VIEW, not the cursor row, because `x` acts on the SELECTION and
+     * `a` on every candidate in scope — neither reads the cursor at all. With
+     * rows selected in the Worktrees view, an `x` pressed after `l` would
+     * open the confirm over worktrees that are not on screen, which is the
+     * one way this panel could delete something the user cannot see. The
+     * selection itself is deliberately left alone across a view switch, so
+     * `h` gets it back untouched.
+     */
+    const canRemove = view() === "worktrees";
     switch (key) {
+      // The two views, on the two keys the panel had left. `Tab` is NOT one
+      // of them: scope and view are orthogonal axes and each keeps its own.
+      // In the session list `h`/`l` collapse and expand a group, but the
+      // panel owns every key while it is up, and panel-local divergence has
+      // precedent (`d` reviews a branch here and a working tree there).
+      case "h":
+      case "left":
+        setView("worktrees");
+        break;
+      case "l":
+      case "right":
+        setView("prs");
+        break;
       case "j":
       case "down":
         moveCursor(1);
@@ -2433,6 +2617,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         break;
       case "space":
       case " ":
+        if (!canRemove) break;
         // Only a classified candidate is selectable: the main checkout, a
         // held row and a healthy one have no removal to opt into, and a
         // checkbox on them would promise one.
@@ -2444,6 +2629,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       // should not silently do nothing.
       case "a":
       case "A":
+        if (!canRemove) break;
         // "All" means all CLEAN rows: a bulk key must never be the thing that
         // opts a dirty worktree in. Clearing the opt-ins matters as much as
         // the selection — a stale `dirtyOk` left behind would silently re-arm
@@ -2465,6 +2651,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       case "D":
       case "d": {
         if (key === "D" || event.shift) {
+          if (!canRemove) break;
           if (entry?.kind === "worktree" && entry.candidate) {
             toggleDirtyOk(entry.candidate);
           }
@@ -2492,6 +2679,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       // the same place rather than a new one to learn.
       case "x":
       case "X": {
+        if (!canRemove) {
+          // Never silent, by the same rule the empty-selection cases below
+          // follow — and here the silence would be worse than a dead key,
+          // since a selection made in the other view is still counted and
+          // still real.
+          flash("removal lives in the worktrees view: h");
+          break;
+        }
         if (effective().length > 0) {
           setPhase("confirm");
           break;
@@ -2575,6 +2770,27 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * than clipping the line mid-word. Same machinery the footer uses.
    */
   const hintLine = () => {
+    if (view() === "prs") {
+      // A shorter line, because the keys really are fewer: the removal keys
+      // are gated off with the rows they act on, and `y` and `d` have nothing
+      // to answer — a PR has no directory to copy and no working tree to
+      // review until one is cut from it. `l` is not advertised either; it is
+      // the key that got here.
+      return fitHints(
+        [
+          { text: "j/k move", rank: 3 },
+          { text: "enter checkout", rank: 4 },
+          { text: "o github", rank: 2 },
+          { text: "r refresh", rank: 1 },
+          { text: "h worktrees", rank: 3 },
+          ...(props.repo !== null
+            ? [{ text: scoped() ? "tab all repos" : "tab this repo", rank: 2 }]
+            : []),
+          { text: "q close", rank: 5 },
+        ],
+        contentWidth(),
+      );
+    }
     // The removal keys are taught where they apply: on a row under the
     // removable divider, or once something is already selected (so the count
     // and the way to act on it never disappear mid-selection). Everywhere
@@ -2612,6 +2828,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         // what `r` at a higher rank did to `D include dirty`.
         { text: "o github", rank: 1 },
         { text: "r refresh", rank: 1 },
+        // Lowest rank, and LAST among them, so it is the first hint dropped
+        // and displaces nothing that was already fitting. It can afford to
+        // be: the tab line above names both views on every frame, so the
+        // only thing this hint adds is the key, and a narrow panel that has
+        // to choose is better off keeping `D include dirty`.
+        { text: "l pull requests", rank: 1 },
         ...(props.repo !== null
           ? [{ text: scoped() ? "tab all repos" : "tab this repo", rank: 2 }]
           : []),
@@ -2650,6 +2872,27 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         </Show>
       </box>
 
+      {/* The two views, one line for the whole panel, directly under the
+          title: the title says which repos, this says which of their two
+          subjects. It renders OUTSIDE the scrollbox, so it is fitted against
+          `contentWidth()` and pays nothing for the scrollbar column. Drawn
+          from the loading phase onwards rather than appearing with the list,
+          which would step the whole body down one line at exactly the moment
+          the rows land. */}
+      <Show
+        when={
+          phase() === "loading" || phase() === "list" || phase() === "confirm"
+        }
+      >
+        <box width="100%" height={1} flexDirection="row">
+          <For each={viewTabs()}>
+            {(segment: RowSegment) => (
+              <text fg={segment.fg}>{segment.text}</text>
+            )}
+          </For>
+        </box>
+      </Show>
+
       {/* One always-present growing body. A `flexGrow` scrollbox that only
           exists inside a <Show> never resolves a height, which drops the
           footer to the top of the panel and paints the list under it. */}
@@ -2671,10 +2914,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
 
         <Show when={phase() === "list" || phase() === "confirm"}>
           <Show
-            when={flatRows().length > 0}
+            when={hasContent()}
             fallback={
               <box paddingTop={1}>
-                <text fg={theme.subtext}>No worktrees found.</text>
+                <text fg={theme.subtext}>
+                  {view() === "prs" ? "No repos found." : "No worktrees found."}
+                </text>
               </box>
             }
           >
@@ -2855,47 +3100,68 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                           </text>
                         </box>
                       </Show>
-                      <For each={split().kept}>
-                        {(entry) => renderRow(entry)}
-                      </For>
-                      {/* Everything below this line can be deleted, and only
-                          things below it carry checkboxes. The label starts
-                          with a tee, so the rail runs into it. */}
-                      <Show when={split().removable.length > 0}>
-                        <box height={1} flexDirection="row">
-                          <text fg={theme.overlay}> </text>
-                          <text fg={theme.overlay}>
-                            {dividerText(
-                              split().removable.length,
-                              listWidth() - 1,
-                            )}
-                          </text>
-                        </box>
+                      {/* One group, two views. The repo header above is
+                          shared — it names the repo either way — and only
+                          what hangs under it changes. */}
+                      <Show
+                        when={view() === "prs"}
+                        fallback={
+                          <box flexDirection="column">
+                            <For each={split().kept}>
+                              {(entry) => renderRow(entry)}
+                            </For>
+                            {/* Everything below this line can be deleted, and
+                                only things below it carry checkboxes. The
+                                label starts with a tee, so the rail runs into
+                                it. */}
+                            <Show when={split().removable.length > 0}>
+                              <box height={1} flexDirection="row">
+                                <text fg={theme.overlay}> </text>
+                                <text fg={theme.overlay}>
+                                  {dividerText(
+                                    split().removable.length,
+                                    listWidth() - 1,
+                                  )}
+                                </text>
+                              </box>
+                            </Show>
+                            <For each={split().removable}>
+                              {(entry) => renderRow(entry)}
+                            </For>
+                          </box>
+                        }
+                      >
+                        {/* The repo's open pull requests, or the ONE line
+                            that stands in for them. `prs.length === 0` is the
+                            same test `visualLayout` makes, which is what
+                            keeps the scroll arithmetic and the render
+                            agreeing about whether that line exists. Shaped
+                            like a detail line — the rail, then the marker
+                            slot's indent — so a repo with nothing to report
+                            still reads as part of its group. */}
+                        <Show
+                          when={split().prs.length > 0}
+                          fallback={
+                            <box height={1} flexDirection="row">
+                              <text> </text>
+                              <text fg={theme.overlay}>{RAIL}</text>
+                              <text fg={theme.overlay}>
+                                {` ${" ".repeat(
+                                  markerWidth(false),
+                                )}${prStatusText(
+                                  repo.prSection,
+                                  prIcon(),
+                                  detailWidth(false),
+                                )}`}
+                              </text>
+                            </box>
+                          }
+                        >
+                          <For each={split().prs}>
+                            {(entry) => renderRow(entry)}
+                          </For>
+                        </Show>
                       </Show>
-                      <For each={split().removable}>
-                        {(entry) => renderRow(entry)}
-                      </For>
-                      {/* The repo's open pull requests, last: the sections
-                          above are directories on disk, which is the panel's
-                          subject, and this one is what is waiting on GitHub.
-                          Drawn while phase 3 is in flight so the header lands
-                          with the first paint and the PRs fill in under it —
-                          which is also why the pending state rides the header
-                          instead of taking a row that would later be given
-                          back. */}
-                      <box height={1} flexDirection="row">
-                        <text fg={theme.overlay}> </text>
-                        <text fg={theme.overlay}>
-                          {prDividerText(
-                            repo.prSection,
-                            prIcon(),
-                            listWidth() - 1,
-                          )}
-                        </text>
-                      </box>
-                      <For each={split().prs}>
-                        {(entry) => renderRow(entry)}
-                      </For>
                     </box>
                   );
                 }}
@@ -2920,19 +3186,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             </box>
           </Show>
 
-          {/* Phase 3 degrades exactly like phase 2: one line, and the panel
-              stays navigable, selectable and actionable. It never becomes the
-              panel's error phase — the worktrees are on screen and are still
-              the thing the user came for. */}
-          <Show when={prErrorLine()}>
-            {(line: () => string) => (
-              <box height={1}>
-                <text fg={theme.yellow}>
-                  {truncateText(line(), contentWidth())}
-                </text>
-              </box>
-            )}
-          </Show>
         </Show>
 
         <Show when={phase() === "running"}>
