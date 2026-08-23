@@ -45,6 +45,15 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return res.stdout.trim();
 }
 
+/** Where a branch's recorded base lives; see `recordBranchBase`. */
+const CONFIG_KEY = (branch: string) => `branch.${branch}.ccmux-base`;
+
+/** A config value, or null for a key that is not set (git exits non-zero). */
+async function readConfig(repo: string, key: string): Promise<string | null> {
+  const res = await runGit(repo, ["config", "--get", key]);
+  return res.exitCode === 0 ? res.stdout.trim() : null;
+}
+
 /** `lstatSync` throws on an absent path, and absent is an answer here. */
 function lstatIsSymlink(path: string): boolean {
   try {
@@ -592,6 +601,96 @@ describe("createWorktree", () => {
     expect(out.result.created).toBe(true);
     expect(out.result.branchCreated).toBe(false);
     expect(out.result.base).toBeUndefined();
+  });
+
+  // The picker's branch review asks git where the branch came from rather
+  // than guessing the repo's default branch, which is only possible if the
+  // answer was written down at the one moment it is known.
+  it("records the base the branch was cut from in branch config", async () => {
+    const repo = await makeRepo();
+
+    const out = await createWorktree(repo, { name: "fix-sidebar" });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    // A ref NAME, not the sha it pointed at: the merge-base still lands on
+    // the fork point after the user merges the base back in. Fully
+    // qualified, so it cannot be re-read as a tag or a rev expression.
+    expect(await readConfig(repo, CONFIG_KEY("fix-sidebar"))).toBe(
+      "refs/heads/main",
+    );
+    expect(out.result.base).toBe("main");
+  });
+
+  // A base whose meaning depends on WHERE it is evaluated is the whole risk:
+  // the record is read back inside the worktree, where HEAD is the branch's
+  // own tip. Stored verbatim, `HEAD~1` reviews the branch against its own
+  // parent — silently, with no error and no fallback.
+  it("pins a HEAD-relative base to the commit it named in the main checkout", async () => {
+    const repo = await makeRepo();
+    writeFileSync(join(repo, "second.txt"), "2\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-m", "second"]);
+    const parent = await git(repo, ["rev-parse", "HEAD~1"]);
+
+    const out = await createWorktree(repo, { name: "off-parent", base: "HEAD~1" });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(await readConfig(repo, CONFIG_KEY("off-parent"))).toBe(parent);
+  });
+
+  // `@` is `HEAD`, which git DOES name here (`refs/heads/main`) while the
+  // main checkout is attached — so the record is that name, and the thing
+  // that matters is what it means from inside the worktree: the base it was
+  // cut from, never the worktree's own head.
+  it("records a base of @ as the ref it names, not the worktree's own head", async () => {
+    const repo = await makeRepo();
+    const mainTip = await git(repo, ["rev-parse", "HEAD"]);
+
+    const out = await createWorktree(repo, { name: "off-at", base: "@" });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const stored = await readConfig(repo, CONFIG_KEY("off-at"));
+    expect(stored).not.toBeNull();
+    // A commit of the worktree's own moves its HEAD off the base; the record
+    // must still resolve to the base.
+    writeFileSync(join(out.result.path, "work.txt"), "w\n");
+    await git(out.result.path, ["add", "-A"]);
+    await git(out.result.path, ["commit", "-m", "agent work"]);
+    expect(await git(out.result.path, ["rev-parse", stored ?? ""])).toBe(
+      mainTip,
+    );
+    expect(await git(out.result.path, ["rev-parse", "HEAD"])).not.toBe(mainTip);
+  });
+
+  // A reused branch was not cut from the base, so a record would misdescribe
+  // where its history comes from - the same reason `result.base` is undefined.
+  it("records nothing when it reuses an existing branch", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "already-there"]);
+
+    const out = await createWorktree(repo, { name: "already-there" });
+
+    expect(out.ok).toBe(true);
+    expect(await readConfig(repo, CONFIG_KEY("already-there"))).toBeNull();
+  });
+
+  // A DETACHED main checkout resolves its base as the literal "HEAD", which
+  // read back from the worktree would name the worktree's own head and make
+  // the merge-base the branch tip itself. The sha is stored instead.
+  it("stores a sha rather than the literal HEAD for a detached base", async () => {
+    const repo = await makeRepo();
+    const head = await git(repo, ["rev-parse", "HEAD"]);
+    await git(repo, ["checkout", "-q", "--detach"]);
+
+    const out = await createWorktree(repo, { name: "off-detached" });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.result.base).toBe("HEAD");
+    expect(await readConfig(repo, CONFIG_KEY("off-detached"))).toBe(head);
   });
 
   // Two tasks that open the same way derive one slug, and there is no name

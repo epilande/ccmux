@@ -34,7 +34,13 @@ const leftGroups = (reviewable?: boolean): Group[] => [
       { key: "R", desc: "Reconnect" },
       { key: "x / X", desc: "Kill session / all" },
       { key: "W", desc: "Worktrees" },
-      ...(reviewable ? [{ key: "d", desc: "Review diff (hunk)" }] : []),
+      // One row, not two: the keys are a fixed pair (`d` what is
+      // uncommitted, `D` what the branch changed), so naming the two diffs
+      // in key order says it without a second row - which Actions has no
+      // height for anyway (see `keeps the last row visible`). The
+      // description sits inside the column's budget, COL_WIDTH minus
+      // KEY_COL_WIDTH.
+      ...(reviewable ? [{ key: "d / D", desc: "Working tree / branch" }] : []),
     ],
   },
 ];
