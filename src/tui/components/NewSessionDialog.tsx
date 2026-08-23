@@ -135,6 +135,11 @@ export interface DialogModeShape {
    *  and so drops the destination row along with the name and untracked
    *  rows that the other two modes hide on their own terms. */
   existingWorktree: boolean;
+  /** Cutting a worktree from a pull request's head (issue #151). It CREATES
+   *  one, unlike the mode above, and still drops the destination and name
+   *  rows: the daemon derives both from the PR, and `POST /spawn` refuses a
+   *  request that names either alongside `pr`. */
+  pr: boolean;
 }
 
 /** What a draft needs from the row budget, without any of the width-dependent
@@ -169,7 +174,7 @@ function floorFieldRows(shape: DialogModeShape): FieldRows {
     // A locked one-row restatement where the destination is fixed (a move, a
     // fork), the choice otherwise — and nothing at all where the session is
     // going into a checkout that already exists, which is neither.
-    destination: shape.existingWorktree ? 0 : 1,
+    destination: shape.existingWorktree || shape.pr ? 0 : 1,
     worktreeName: shape.namesAWorktree ? 1 : 0,
     untracked: shape.moveChanges ? 1 : 0,
   };
@@ -259,7 +264,8 @@ export function planDialogRows(
     showFieldSpacers: true,
     showButtons: true,
     showDirectory: true,
-    showModeNote: shape.moveChanges || shape.fork || shape.existingWorktree,
+    showModeNote:
+      shape.moveChanges || shape.fork || shape.existingWorktree || shape.pr,
     // A fork has no agent row at all, so it asks for none rather than for the
     // one row `Math.max` would floor an empty list at.
     agentRows: shape.fork ? 0 : Math.max(1, shape.agentRows),
@@ -374,10 +380,13 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    *  about creating a worktree is gone. */
   const existingWorktree = () => props.draft.existingWorktree;
 
+  /** The pull request this spawn cuts a worktree from (issue #151). */
+  const prSource = () => props.draft.pr;
+
   /** Whether the Where row exists at all. The same condition
    *  `newSessionFields` filters on and the budget counts zero rows for: a row
    *  drawn past the budget lands on its neighbour rather than clipping. */
-  const showDestination = () => existingWorktree() === null;
+  const showDestination = () => existingWorktree() === null && !prSource();
 
   /**
    * What to call the worktree a session is being started in: the last segment
@@ -560,6 +569,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     fork: forking() !== null,
     namesAWorktree: namesAWorktree(),
     existingWorktree: existingWorktree() !== null,
+    pr: prSource() !== null,
   }));
 
   /**
@@ -792,6 +802,16 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    *  existing worktree names the worktree, which the path above only spells
    *  out. */
   const modeNote = (): { label: string; text: string; color: string } => {
+    const pr = prSource();
+    if (pr) {
+      // The number AND the title: the number is what the request carries and
+      // the title is the only thing that says what it is.
+      return {
+        label: "PR",
+        text: truncateText(`#${pr.number} ${pr.title}`, contentWidth()),
+        color: theme.mauve,
+      };
+    }
     if (existingWorktree()) {
       return {
         label: "Worktree",
@@ -889,9 +909,11 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 ? "Fork session"
                 : moveChanges()
                   ? truncateText("Move changes to worktree", width() - 4)
-                  : existingWorktree()
-                    ? truncateText("New session in worktree", width() - 4)
-                    : "New session"}
+                  : prSource()
+                    ? truncateText("New session on PR", width() - 4)
+                    : existingWorktree()
+                      ? truncateText("New session in worktree", width() - 4)
+                      : "New session"}
             </strong>
           </text>
         </box>

@@ -132,6 +132,8 @@ import {
 } from "./worktree-prune";
 import { fetchPrune, listWorktrees, normalizePath } from "./worktree-git";
 import { listAllWorktrees } from "./worktree-list";
+import { listOpenPRs, type PRListResponse } from "./pr-list";
+import { mapWithConcurrency } from "../lib/concurrency";
 import {
   moveChangesToWorktree,
   readUncommitted,
@@ -376,6 +378,33 @@ const PR_SWEEP_INTERVAL_MS = 2 * 60_000;
  */
 const WORKTREE_FETCH_TTL_MS = 60_000;
 
+/**
+ * How long one repo's open-PR list is served from cache.
+ *
+ * Modelled on `worktreeFetchedAt` above, but it caches the ANSWER rather than
+ * rate-limiting a side effect: `GET /prs` has nothing to do but the `gh` call,
+ * so a hit has to be able to reply without one. That is what makes a Tab
+ * rescope and a return-open free, which is why the TTL lives here and the
+ * panel keeps no cache of its own.
+ */
+const PR_LIST_TTL_MS = 60_000;
+
+/**
+ * A failed PR list is held for a SHORT window, deliberately shorter than a
+ * success.
+ *
+ * `pr-resolver.ts` backs failures off HARDER than successes, and is right to:
+ * it refreshes in the background, where a doomed retry costs a spawn and buys
+ * nothing. This one is in front of someone who is looking at the error and
+ * fixing it (`gh auth login` in another pane), and their next open of the
+ * panel is the retry. Long enough that a Tab or a reopen a second later does
+ * not re-spawn a doomed `gh`; short enough that the fix shows.
+ */
+const PR_LIST_FAILURE_TTL_MS = 15_000;
+
+/** How many repos are asked about at once, matching `worktree-list.ts`. */
+const PR_REPO_CONCURRENCY = 3;
+
 /** Upper bound on worktrees one prune request may name. Far above any real
  *  repo's worktree count; exists so a malformed body can't ask the daemon to
  *  normalize an unbounded list. */
@@ -568,6 +597,14 @@ export class DaemonServer {
   private getScanHealth: () => DaemonHealth;
   /** When each repo last had `git fetch --prune` run for a prune scan. */
   private worktreeFetchedAt = new Map<string, number>();
+  /**
+   * One repo's open-PR answer, with when it was fetched. Holds the RESULT,
+   * successes and failures alike, so a hit replies without touching `gh`.
+   */
+  private prListCache = new Map<
+    string,
+    { at: number; result: Awaited<ReturnType<typeof listOpenPRs>> }
+  >();
   /**
    * Home directory, for the `project` $HOME-boundary guard (S4). A plain
    * field rather than a constructor param, so a test can stub it directly
@@ -1154,6 +1191,10 @@ export class DaemonServer {
       return await this.handleSearch(url, corsHeaders);
     }
 
+    if (path === "/prs" && req.method === "GET") {
+      return await this.handlePRList(url, corsHeaders);
+    }
+
     if (path === "/worktrees" && req.method === "GET") {
       return await this.handleWorktreeList(url, corsHeaders);
     }
@@ -1594,6 +1635,71 @@ export class DaemonServer {
         { status: 500, headers },
       );
     }
+  }
+
+  /**
+   * `GET /prs` — every open pull request of every repo in scope.
+   *
+   * `repo` and `cwd` mean exactly what they mean on `GET /worktrees` and the
+   * prune scan, and go through the SAME `worktreeRepoRoots`: the panel merges
+   * all three answers into one list, so a repo one of them can see and
+   * another cannot is a section attached to nothing.
+   *
+   * A repo's failure is reported per repo and never fails the response. The
+   * commonest one is structural (a checkout with no GitHub remote sitting
+   * beside one that has), and taking every other repo's list down with it
+   * would empty most of the multi-repo view over a fact about one row.
+   */
+  private async handlePRList(
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    try {
+      const sessions = await this.enrichSessions(
+        this.sessionManager.getSessions(),
+      );
+      const repoRoots = await this.worktreeRepoRoots(
+        sessions,
+        url.searchParams.get("repo"),
+        url.searchParams.get("cwd"),
+      );
+      const response: PRListResponse = { repos: [], errors: [] };
+      const answers = await mapWithConcurrency(
+        repoRoots,
+        PR_REPO_CONCURRENCY,
+        async (repoRoot) => ({
+          repoRoot,
+          result: await this.openPRsFor(repoRoot),
+        }),
+      );
+      for (const { repoRoot, result } of answers) {
+        const repoName = basename(repoRoot);
+        if (result.ok) {
+          response.repos.push({ repoRoot, repoName, prs: result.value });
+        } else {
+          response.errors.push({ repoRoot, repoName, error: result.error });
+        }
+      }
+      response.repos.sort((a, b) => a.repoName.localeCompare(b.repoName));
+      return Response.json(response, { headers });
+    } catch (err) {
+      return Response.json(
+        { error: `Failed to list PRs: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
+    }
+  }
+
+  /** One repo's open PRs, from cache when it is fresh enough. */
+  private async openPRsFor(
+    repoRoot: string,
+  ): Promise<Awaited<ReturnType<typeof listOpenPRs>>> {
+    const cached = this.prListCache.get(repoRoot);
+    const ttl = cached?.result.ok ? PR_LIST_TTL_MS : PR_LIST_FAILURE_TTL_MS;
+    if (cached && Date.now() - cached.at < ttl) return cached.result;
+    const result = await listOpenPRs(repoRoot);
+    this.prListCache.set(repoRoot, { at: Date.now(), result });
+    return result;
   }
 
   private async handlePruneCandidates(

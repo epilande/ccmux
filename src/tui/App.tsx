@@ -21,6 +21,7 @@ import {
   type NewSessionDraft,
   type NewSessionField,
   type NewSessionFork,
+  type NewSessionPR,
   type NewSessionPlacement,
 } from "./store";
 import { killActionPath, restartActionPath } from "./utils/invoke-actions";
@@ -644,6 +645,45 @@ export function App(props: AppProps) {
         repo: target.panelRepo,
         scope: target.panelScope,
         cursor: worktree ?? target.cwd,
+      },
+    });
+  }
+
+  /**
+   * The Worktrees panel's Enter on an open PR that is NOT checked out here
+   * (issue #151): open the dialog that cuts a worktree from its head.
+   *
+   * No revalidation of its own, unlike `spawnInWorktree`: the fact that could
+   * have changed is whether the PR is still open, and only GitHub knows.
+   * `POST /spawn` re-runs `lookupPR` and refuses a non-OPEN one, so a stale
+   * row fails safe with the daemon's own message instead of this client's
+   * guess about a state it cannot see.
+   *
+   * `cwd` is the repo root: `gh` resolves the PR from the directory the
+   * request names, and the worktree is cut under that repo.
+   */
+  function spawnFromPR(target: {
+    number: number;
+    title: string;
+    repoRoot: string;
+    cursor: string;
+    panelRepo: string | null;
+    panelScope: string | null;
+  }) {
+    store.actions.hideWorktrees();
+    openNewSession({
+      cwd: target.repoRoot,
+      pr: {
+        number: target.number,
+        title: target.title,
+        repoRoot: target.repoRoot,
+      },
+      // The PR row's own synthetic key, so a cancel lands the cursor back on
+      // the row it was opened from rather than on the top of the list.
+      returnToWorktrees: {
+        repo: target.panelRepo,
+        scope: target.panelScope,
+        cursor: target.cursor,
       },
     });
   }
@@ -2143,6 +2183,9 @@ export function App(props: AppProps) {
      *  Worktrees panel's own entry point; it is the working directory too, so
      *  `cwd` may simply repeat it. */
     existingWorktree?: string;
+    /** Cut a worktree from this pull request's head (issue #151). The
+     *  Worktrees panel's Enter on a PR row that is not checked out here. */
+    pr?: NewSessionPR;
     /** Origin marker set ONLY by the Worktrees panel's Enter: a cancel of
      *  this dialog returns to the panel, cursor on `cursor`, scoped to the
      *  live filter the panel had (`scope`, null when Tab had widened it). */
@@ -2180,6 +2223,7 @@ export function App(props: AppProps) {
       moveChanges: context.moveChanges,
       fork: context.fork,
       existingWorktree: context.existingWorktree,
+      pr: context.pr,
       returnToWorktrees: context.returnToWorktrees,
     });
   }
@@ -2240,6 +2284,7 @@ export function App(props: AppProps) {
           fork: draft.fork !== null,
           namesAWorktree: namesAWorktree(draft),
           existingWorktree: draft.existingWorktree !== null,
+          pr: draft.pr !== null,
         }),
     });
   }
@@ -2511,8 +2556,15 @@ export function App(props: AppProps) {
     // says so ahead of the destination: that mode has no Where row to have
     // set it, so a `worktree` block built from a stale value would ask the
     // daemon to make a second checkout next to the one that was chosen.
+    // A PR spawn is excluded even though it creates a worktree: the daemon
+    // derives its name and its base from the PR, and `POST /spawn` refuses
+    // `pr` alongside `worktree.name`, `worktree.base` and
+    // `worktree.withChanges`. There is nothing for a `worktree` block to
+    // carry that would not be a 400.
     const toWorktree =
-      draft.existingWorktree === null && draft.destination === "worktree";
+      draft.existingWorktree === null &&
+      draft.pr === null &&
+      draft.destination === "worktree";
     // The name the request will carry. Empty means an untouched field: let
     // the daemon derive one.
     const worktreeName = toWorktree ? draftWorktreeName(draft) : "";
@@ -2565,6 +2617,13 @@ export function App(props: AppProps) {
           callerPane: callerPane ?? undefined,
           prompt: prompt || undefined,
           detach,
+          // The whole of a PR spawn's request: the daemon re-runs `lookupPR`,
+          // refuses a PR that is no longer OPEN, derives the worktree name
+          // with `slugForPR` and seeds the prompt under its own header. No
+          // openness is proved here on purpose — a row seconds out of date
+          // then fails with the daemon's own message rather than this
+          // client's guess.
+          pr: draft.pr?.number,
           // A name is sent only when one was TYPED. Left out, the daemon
           // derives it from the prompt by the same rule the row previews and
           // numbers it past a collision; sent, it means that worktree
@@ -3936,6 +3995,7 @@ export function App(props: AppProps) {
               onClose={store.actions.hideWorktrees}
               onJump={jumpToWorktreeSession}
               onSpawn={spawnInWorktree}
+              onSpawnFromPR={spawnFromPR}
               // Review suspends the renderer into a full-screen tool, which
               // the sidebar has neither the room nor the focus for — the same
               // reason its `d` key is inert on a session row.

@@ -206,3 +206,43 @@ function nestedString(value: unknown, key: string): string | null {
   if (typeof value !== "object" || value === null) return null;
   return readString(value as Record<string, unknown>, key);
 }
+
+/** One repo's open PRs, as `GET /prs` reports them. */
+export interface PRRepo {
+  repoRoot: string;
+  repoName: string;
+  prs: OpenPR[];
+}
+
+/**
+ * A repo whose PRs could not be read.
+ *
+ * Per repo rather than per response, so one broken checkout (no GitHub
+ * remote, a repo `gh` is not authenticated for) costs its own section and
+ * nothing else. A single top-level error would take every other repo's list
+ * down with it, which on the multi-repo view is most of the panel.
+ */
+export interface PRListError {
+  repoRoot: string;
+  repoName: string;
+  error: string;
+}
+
+/** Body of `GET /prs`. */
+export interface PRListResponse {
+  repos: PRRepo[];
+  errors: PRListError[];
+}
+
+/**
+ * What a client actually receives, which is not the same type: the daemon is
+ * a long-lived process that may PREDATE this build, so every field is
+ * optional on the wire. Same guard `ScanResponse`/`normalizeScan` puts on the
+ * prune scan, and it lives beside the response for the same reason — so the
+ * two cannot drift apart as the response gains fields.
+ */
+export type PRListBody = Partial<PRListResponse>;
+
+export function normalizePRList(data: PRListBody): PRListResponse {
+  return { repos: data.repos ?? [], errors: data.errors ?? [] };
+}

@@ -47,6 +47,7 @@ import {
   invocationEventToSSE,
 } from "./server";
 import type { InvocationRecord } from "./invocation-manager";
+import type { PRListResponse } from "./pr-list";
 import { SessionManager } from "./sessions";
 import type { SessionEvent } from "./sessions";
 import type { SSEEvent, DaemonHealth } from "../types";
@@ -7845,14 +7846,22 @@ describe("POST /spawn with --pr and --issue", () => {
    * the process env, and a developer's global config (a rewrite rule, a
    * default branch, a hook) would otherwise decide whether this passes.
    */
-  function withStubbedEnv(pr: object = PR_JSON, issue: object = ISSUE_JSON) {
+  function withStubbedEnv(
+    pr: object = PR_JSON,
+    issue: object = ISSUE_JSON,
+    prList: object[] = [PR_JSON],
+  ) {
     const bin = join(root, "bin");
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "pr.json"), JSON.stringify(pr));
     writeFileSync(join(bin, "issue.json"), JSON.stringify(issue));
+    writeFileSync(join(bin, "pr-list.json"), JSON.stringify(prList));
+    // Branches on `$2` as well as `$1`: `pr view` and `pr list` are both
+    // `gh pr ...`, so a stub that reads only the first word answers a list
+    // request with a single object and the caller refuses it as not-an-array.
     writeFileSync(
       join(bin, "gh"),
-      `#!/bin/sh\nif [ "$1" = "pr" ]; then cat '${join(bin, "pr.json")}'; else cat '${join(bin, "issue.json")}'; fi\n`,
+      `#!/bin/sh\nif [ "$1" = "pr" ] && [ "$2" = "list" ]; then cat '${join(bin, "pr-list.json")}'; elif [ "$1" = "pr" ]; then cat '${join(bin, "pr.json")}'; else cat '${join(bin, "issue.json")}'; fi\n`,
       { mode: 0o755 },
     );
     const previous = {
@@ -8643,6 +8652,162 @@ describe("POST /spawn with --pr and --issue", () => {
       }
     } finally {
       restoreTmux();
+    }
+  });
+});
+
+/**
+ * `GET /prs`, end to end against a real repo and the same PATH-stubbed `gh`
+ * the spawn tests use — which is why that stub had to learn to tell `pr list`
+ * from `pr view`.
+ */
+describe("GET /prs", () => {
+  let root: string;
+
+  const LIST_ROW = {
+    number: 151,
+    title: "Worktrees panel: open-PR list",
+    url: "https://github.com/o/r/pull/151",
+    author: { login: "epilande" },
+    isDraft: false,
+    reviewDecision: "APPROVED",
+    statusCheckRollup: [
+      { __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" },
+    ],
+    headRefName: "feat/pr-list-panel",
+    headRefOid: "sha-151",
+  };
+
+  function makeRepo(): string {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-prs-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    return repo;
+  }
+
+  /** A `gh` on PATH that answers `pr list` from `body`. */
+  function withStubbedGh(body: unknown, exitCode = 0) {
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "prs.json"), JSON.stringify(body));
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/bin/sh\ncat '${join(bin, "prs.json")}'\nexit ${exitCode}\n`,
+      { mode: 0o755 },
+    );
+    const previous = process.env.PATH;
+    process.env.PATH = `${bin}:${previous ?? ""}`;
+    return () => {
+      if (previous === undefined) delete process.env.PATH;
+      else process.env.PATH = previous;
+    };
+  }
+
+  async function listPRs(
+    internals: ServerInternals,
+    query: string,
+  ): Promise<Response> {
+    return internals.handleRequest(
+      new Request(`http://127.0.0.1:2269/prs?${query}`),
+    );
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("answers with the repo's open PRs, flattened", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh([LIST_ROW]);
+    try {
+      const res = await listPRs(internals, `repo=${encodeURIComponent(repo)}`);
+      const body = (await res.json()) as PRListResponse;
+
+      expect(res.status).toBe(200);
+      expect(body.errors).toEqual([]);
+      expect(body.repos).toHaveLength(1);
+      expect(body.repos[0]?.repoName).toBe("repo");
+      expect(body.repos[0]?.prs[0]).toMatchObject({
+        number: 151,
+        author: "epilande",
+        reviewDecision: "APPROVED",
+        ciStatus: "passing",
+        headRefOid: "sha-151",
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  // The same resolver `GET /worktrees` and the prune scan take, so all three
+  // surfaces agree on scope — a repo one can see and another cannot is a
+  // section attached to nothing.
+  it("takes `repo` as a resolved filter and `cwd` as additive", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh([LIST_ROW]);
+    try {
+      const byCwd = await listPRs(
+        internals,
+        `cwd=${encodeURIComponent(repo)}`,
+      );
+      expect(
+        ((await byCwd.json()) as PRListResponse).repos[0]?.repoRoot,
+      ).toContain("repo");
+
+      // A directory that is not a repo scans nothing rather than falling back
+      // to every repo.
+      const nowhere = await listPRs(
+        internals,
+        `repo=${encodeURIComponent(root)}`,
+      );
+      expect(((await nowhere.json()) as PRListResponse).repos).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  // The distinction the module exists for: a repo that could not answer is
+  // an ERROR row, never an empty PR list, and it costs only its own section.
+  it("reports a repo's failure per repo, with a 200", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh({ message: "not authenticated" }, 1);
+    try {
+      const res = await listPRs(internals, `repo=${encodeURIComponent(repo)}`);
+      const body = (await res.json()) as PRListResponse;
+
+      expect(res.status).toBe(200);
+      expect(body.repos).toEqual([]);
+      expect(body.errors[0]?.repoName).toBe("repo");
+      expect(body.errors[0]?.error).toContain("gh pr list exited 1");
+    } finally {
+      restore();
+    }
+  });
+
+  // The TTL holds the ANSWER, not a timestamp: a hit has to reply without
+  // touching gh at all, which is what makes a Tab rescope free.
+  it("serves a repeat read from cache without running gh again", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh([LIST_ROW]);
+    try {
+      await listPRs(internals, `repo=${encodeURIComponent(repo)}`);
+      // gh is gone now; a cache miss would surface as an error row.
+      rmSync(join(root, "bin", "gh"));
+      const res = await listPRs(internals, `repo=${encodeURIComponent(repo)}`);
+      const body = (await res.json()) as PRListResponse;
+
+      expect(body.errors).toEqual([]);
+      expect(body.repos[0]?.prs[0]?.number).toBe(151);
+    } finally {
+      restore();
     }
   });
 });
