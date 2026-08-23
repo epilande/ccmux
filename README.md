@@ -683,6 +683,9 @@ Pass an empty string to clear a side: `ccmux config set columns.row2.left ""`.
 | `cwd`     | —                     | —            | Working directory                                                                        |
 | `branch`  | —                     | —            | Git branch, suffixed `+` in a worktree                                                   |
 | `pr`      | `short`/`full`        | `full`       | Open PRs for the branch (`#25`/`PR #25`)                                                 |
+| `title`   | —                     | —            | The agent's own summary of the session, from its tmux pane title (truncated)             |
+
+`title` shows what the agent says it is doing: Claude Code keeps its tmux pane title updated with a generated summary of the session, and the column renders that with the leading status glyph stripped (the `status` column already draws that state). Agents that do not set a pane title leave the cell empty, and it is hidden rather than rendered blank. Like `prompt` it flexes to fill its row, so the two share one budget — put at most one of them on a row.
 
 The `project` cell reads `path:branch`, and a session running in a git worktree marks it twice: the branch gains a trailing `+` (also on the standalone `branch` column), and the path is replaced by `<repo>/<worktree>` — `ccmux/parking` rather than the `worktrees/parking` the directory happens to spell, so worktrees of different repos stay distinguishable. Both survive the `dirname` mode, since they are identity rather than path context; when the cell is too narrow for both, the repo yields before the worktree's own name does.
 
