@@ -12,6 +12,7 @@ import { MouseButtons } from "@opentui/core/testing";
 import type { SSECallbacks } from "./utils/sse";
 import * as clipboard from "./utils/clipboard";
 import { mockEnrichedSession, squish } from "./components/test-helpers";
+import { liveEffects } from "./components/WorktreesPanel";
 import { HANDOFF_BADGE } from "./components/session-columns";
 import { MAX_TURNS, renderTurns } from "../daemon/transcript-read";
 import { realpathSync } from "node:fs";
@@ -7412,6 +7413,17 @@ describe("App worktrees panel (W)", () => {
     extraSessions: Record<string, unknown>[] = [],
   ) {
     const restore = mockWorktreeFetch(rows);
+    // App hard-codes `effects={liveEffects}`, which is right for production
+    // and means an App-level test reaches the REAL `open` and `pbcopy`: the
+    // panel's required-prop guarantee stops at its own mount site, and this
+    // is the other side of it. `o` and `y` on a panel row are one keypress
+    // from a browser window, so the seam is stubbed here as well. spyOn, not
+    // mock.module, which leaks across files.
+    const openSpy = spyOn(liveEffects, "openUrl").mockReturnValue(true);
+    const copySpy = spyOn(liveEffects, "copyText").mockReturnValue({
+      osc52: true,
+      local: false,
+    });
     await renderApp(120, 24, { groupBy: "none" });
     sseCallbacks!.onInit(
       [
@@ -7440,7 +7452,13 @@ describe("App worktrees panel (W)", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await setup.renderOnce();
     return {
-      restore,
+      restore: () => {
+        openSpy.mockRestore();
+        copySpy.mockRestore();
+        restore();
+      },
+      openSpy,
+      copySpy,
       frame: async () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
         await setup.renderOnce();
@@ -7448,6 +7466,32 @@ describe("App worktrees panel (W)", () => {
       },
     };
   }
+
+  /**
+   * The other side of `381680b`. The panel's `effects` prop is required, so a
+   * PANEL test cannot reach the real `open` or `pbcopy` by forgetting; App
+   * hard-codes `liveEffects`, so an APP test could. Nothing pressed `o` or
+   * `y` here, which made it latent rather than live, and latent is how the
+   * first one shipped.
+   */
+  it("cannot reach the real opener or clipboard from an App mount", async () => {
+    const { restore, frame, openSpy, copySpy } = await openPanel([
+      WORKTREE_ROW,
+    ]);
+    try {
+      setup.mockInput.pressKey("y");
+      await frame();
+      expect(copySpy).toHaveBeenCalled();
+
+      setup.mockInput.pressKey("o");
+      await frame();
+      // No PR on this row, so the opener is correctly never asked; the point
+      // is that the seam is the stub either way.
+      expect(openSpy).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
 
   it("opens over the selected row's repo", async () => {
     const { restore, frame } = await openPanel([WORKTREE_ROW]);
@@ -7723,15 +7767,24 @@ describe("App worktrees panel (W)", () => {
     const { restore, frame } = await openPanel([WORKTREE_ROW]);
     try {
       setup.mockInput.pressKey("d");
-      const shown = squish(await frame());
-      // Head and tail separately, not the whole sentence. The toast wraps it
-      // across two rows and `squish` concatenates EVERY row, so whatever the
-      // panel draws on the row in between lands inside the phrase. Each of
-      // these sits on one row, so neither depends on the wrap point or on
-      // what else is on screen beside it.
-      expect(shown).toContain(squish("1 review note captured"));
-      expect(shown).toContain(squish("send to)"));
-      expect(shown).not.toContain(squish("Send review comments"));
+      const raw = await frame();
+      // Per LINE, not over the squished whole frame. Two constraints collide
+      // here. `squish` concatenates every row, so the panel's own rows land
+      // inside the toast's wrapped sentence and break any multi-word match.
+      // But the discriminating word is `agent`: the tail `send to)` is shared
+      // with `captured (no pane to send to)`, the PANELESS-session message, so
+      // asserting the tail let a regression that bound a stray session to this
+      // row stay green. Matching one line keeps both.
+      const lines = raw.split("\n").map((line) => squish(line));
+      expect(
+        lines.some((line) => line.includes(squish("captured (no agent to"))),
+      ).toBe(true);
+      // The message this test is NOT about, named so the two cannot be
+      // confused again.
+      expect(lines.some((line) => line.includes(squish("no pane to")))).toBe(
+        false,
+      );
+      expect(squish(raw)).not.toContain(squish("Send review comments"));
     } finally {
       restore();
     }
