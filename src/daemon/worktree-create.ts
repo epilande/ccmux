@@ -649,6 +649,66 @@ async function firstFreeDerivedName(
 }
 
 /**
+ * Record the ref a new branch was cut from as `branch.<name>.ccmux-base`, so
+ * a later review can ask what the branch changed instead of guessing the
+ * repo's default branch (`resolveMergeBase`, `tui/utils/review.ts`).
+ *
+ * Branch config is the right home because git maintains it: the section is
+ * deleted with the branch and renamed with a rename, so the record lives
+ * exactly as long as the thing it describes and there is no cleanup of ours.
+ *
+ * A NAME is stored as one, deliberately — the merge-base still lands on the
+ * fork point after the user merges the base back in, where a pinned sha would
+ * drift. What must not survive is anything whose meaning depends on WHERE it
+ * is evaluated, because this is read back from the worktree, where HEAD is
+ * the branch's own tip: `HEAD` and `@` on a detached main checkout, `HEAD~1`
+ * and `HEAD^`, `@{-1}`. Stored verbatim, the first two make the merge-base
+ * the branch tip itself (a review of a fully committed worktree that reports
+ * nothing to review), and the rest silently review the wrong range.
+ *
+ * So the value is what `--symbolic-full-name` NAMES the base, when that is a
+ * real ref: `refs/heads/main` for `main`, and equally for `@{-1}` or
+ * `main@{u}`, which name a ref here and something else, or nothing, in the
+ * worktree. Everything git cannot name that way — a rev expression, a raw
+ * sha, `HEAD` while detached (which names the literal `HEAD`) — is pinned to
+ * its commit instead, and skipped when even that cannot be answered.
+ *
+ * Best-effort, like the exclude-file append: a config write that will not
+ * take costs a later review its accuracy, not this caller their worktree.
+ */
+async function recordBranchBase(
+  mainRepoRoot: string,
+  branch: string,
+  base: string,
+  git: GitRun,
+): Promise<void> {
+  const key = `branch.${branch}.ccmux-base`;
+  // The exit code decides nothing here: a rev expression git cannot name
+  // (`HEAD~1`, a raw sha) still exits 0, with empty output.
+  const symbolic = await git(mainRepoRoot, [
+    "rev-parse",
+    "--symbolic-full-name",
+    "--verify",
+    "--quiet",
+    base,
+  ]);
+  const ref = symbolic.stdout.trim();
+  if (ref.startsWith("refs/")) {
+    await git(mainRepoRoot, ["config", key, ref]);
+    return;
+  }
+  const commit = await git(mainRepoRoot, [
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    `${base}^{commit}`,
+  ]);
+  const sha = commit.stdout.trim();
+  if (commit.exitCode !== 0 || !sha) return;
+  await git(mainRepoRoot, ["config", key, sha]);
+}
+
+/**
  * Create the worktree for a spawn, or open the existing one.
  *
  * For an EXPLICIT name, create-or-open rather than create-or-fail: "spawn an
@@ -818,6 +878,12 @@ export async function createWorktree(
         error: `git ${args.join(" ")} failed: ${added.stderr.trim() || `exited ${added.exitCode}`}`,
       };
     }
+
+    // Only for a branch this request CUT: a reused branch was not cut from
+    // the base, so recording one would misdescribe its history (the same
+    // reason `result.base` is undefined below).
+    if (!reusingBranch)
+      await recordBranchBase(mainRepoRoot, name, based.base, git);
 
     const setup = await fileSetup(mainRepoRoot, path);
     return {

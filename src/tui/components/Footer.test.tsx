@@ -111,12 +111,12 @@ describe("Footer", () => {
 
   it("shows the review hint when reviewable", async () => {
     const frame = await renderFooter({ reviewable: true });
-    expect(frame).toContain("d review");
+    expect(frame).toContain("d/D review");
   });
 
   it("omits the review hint when not reviewable", async () => {
     const frame = await renderFooter({ reviewable: false });
-    expect(frame).not.toContain("d review");
+    expect(frame).not.toContain("d/D review");
   });
 
   it("shows the new-session hints in newSessionMode", async () => {
@@ -246,7 +246,7 @@ describe("fitHints", () => {
     // `r` and `x` are named on the row itself by the `m` menu, so the footer
     // stops teaching them before it gives up a mode with no other home
     // (`/ search`) or the only advertisement the review integration has
-    // (`d review`). Widths, not ranks, because the rank scale is an
+    // (`d/D review`). Widths, not ranks, because the rank scale is an
     // implementation detail and the drop ORDER is the behaviour.
     const dropped = (width: number) =>
       hints()
@@ -264,7 +264,7 @@ describe("fitHints", () => {
     // Both gone while everything they were ranked against is still there.
     const line = fitHints(hints(), 106);
     expect(line).toContain("/ search");
-    expect(line).toContain("d review");
+    expect(line).toContain("d/D review");
     expect(line).toContain("P preview");
     expect(line).toContain("b group:project");
   });
@@ -272,7 +272,10 @@ describe("fitHints", () => {
   it("keeps the two view toggles longer than the two menu-backed actions", () => {
     // The tie-break inside rank 1 is positional, so this is the assertion
     // that would catch a reshuffle of `defaultHints` silently reversing it.
-    const line = fitHints(hints(), 100);
+    // The width is the narrowest that still holds the two toggles, so it
+    // tracks the line's length: it moved from 100 when `d review` became
+    // `d/D review`.
+    const line = fitHints(hints(), 102);
     expect(line).not.toContain("x kill");
     expect(line).not.toContain("r restart");
     expect(line).toContain("P preview");

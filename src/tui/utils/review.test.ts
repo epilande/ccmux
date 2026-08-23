@@ -95,6 +95,9 @@ describe("runHunkReview", () => {
       paneId: "",
     });
     expect(result).toEqual({ ok: false, error: HUNK_INSTALL_HINT });
+    // Not the empty case: a missing binary is a failure, and the picker's
+    // "try D" hint must not ride along on it.
+    expect(result.ok === false && result.empty).toBeUndefined();
     expect(renderer.suspend).not.toHaveBeenCalled();
   });
 
@@ -194,7 +197,13 @@ describe("runHunkReview", () => {
       paneId: "",
       spawn,
     });
-    expect(result).toEqual({ ok: false, error: "no changes to review" });
+    // `empty` and not the wording is what the picker's `d` reads to know
+    // it can point the user at `D`.
+    expect(result).toEqual({
+      ok: false,
+      error: "no changes to review",
+      empty: true,
+    });
     expect(renderer.suspend).not.toHaveBeenCalled();
     expect(spawn).not.toHaveBeenCalled();
   });
@@ -694,7 +703,13 @@ describe("runHunkReview with a target", () => {
       target: "abc123",
       paneId: "",
     });
-    expect(result).toEqual({ ok: false, error: "no changes to review" });
+    // `empty` and not the wording is what the picker's `d` reads to know
+    // it can point the user at `D`.
+    expect(result).toEqual({
+      ok: false,
+      error: "no changes to review",
+      empty: true,
+    });
     expect(renderer.suspend).not.toHaveBeenCalled();
   });
 
@@ -780,6 +795,91 @@ describe("resolveMergeBase", () => {
     const { git } = fakeGit({});
     const base = await resolveMergeBase("/wt", {
       baseRefs: async () => [],
+      git,
+    });
+    expect(base).toBeNull();
+  });
+
+  // The recorded base is the only source that KNOWS where a branch was cut;
+  // everything else in this function is a guess at the default branch.
+  it("prefers the base recorded in branch config over the heuristic", async () => {
+    const { git } = fakeGit({
+      "rev-parse --abbrev-ref HEAD": { stdout: "feat-x\n" },
+      "config --get branch.feat-x.ccmux-base": { stdout: "release-9\n" },
+      "merge-base release-9 HEAD": { stdout: "cut111\n" },
+      "merge-base origin/main HEAD": { stdout: "guess222\n" },
+      "rev-parse HEAD": { stdout: "head999\n" },
+    });
+    let heuristicConsulted = false;
+    const base = await resolveMergeBase("/wt", {
+      baseRefs: async () => {
+        heuristicConsulted = true;
+        return ["origin/main"];
+      },
+      git,
+    });
+    expect(base).toBe("cut111");
+    // Listing the heuristic's candidates costs a `rev-parse` per name, which
+    // a review would sit through for an answer it already has.
+    expect(heuristicConsulted).toBe(false);
+  });
+
+  it("falls back to the heuristic when no base was recorded", async () => {
+    const { git } = fakeGit({
+      "rev-parse --abbrev-ref HEAD": { stdout: "feat-x\n" },
+      "merge-base origin/main HEAD": { stdout: "guess222\n" },
+      "rev-parse HEAD": { stdout: "head999\n" },
+    });
+    const base = await resolveMergeBase("/wt", {
+      baseRefs: async () => ["origin/main"],
+      git,
+    });
+    expect(base).toBe("guess222");
+  });
+
+  // The base branch was deleted after the worktree was cut, so the record
+  // names a ref git can no longer resolve.
+  it("falls back to the heuristic when the recorded ref no longer resolves", async () => {
+    const { git } = fakeGit({
+      "rev-parse --abbrev-ref HEAD": { stdout: "feat-x\n" },
+      "config --get branch.feat-x.ccmux-base": { stdout: "gone-branch\n" },
+      "merge-base origin/main HEAD": { stdout: "guess222\n" },
+      "rev-parse HEAD": { stdout: "head999\n" },
+    });
+    const base = await resolveMergeBase("/wt", {
+      baseRefs: async () => ["origin/main"],
+      git,
+    });
+    expect(base).toBe("guess222");
+  });
+
+  // A detached HEAD has no branch to key the record off, so the lookup is
+  // skipped rather than asked with the literal "HEAD" as a branch name.
+  it("skips the recorded base on a detached HEAD", async () => {
+    const { git, calls } = fakeGit({
+      "rev-parse --abbrev-ref HEAD": { stdout: "HEAD\n" },
+      "merge-base origin/main HEAD": { stdout: "guess222\n" },
+      "rev-parse HEAD": { stdout: "head999\n" },
+    });
+    const base = await resolveMergeBase("/wt", {
+      baseRefs: async () => ["origin/main"],
+      git,
+    });
+    expect(base).toBe("guess222");
+    expect(calls.some((args) => args[0] === "config")).toBe(false);
+  });
+
+  // A recorded base the branch is sitting ON is still the right answer: the
+  // caller wants the working-tree fallback, not the default branch's guess.
+  it("is null when HEAD is the recorded base itself", async () => {
+    const { git } = fakeGit({
+      "rev-parse --abbrev-ref HEAD": { stdout: "feat-x\n" },
+      "config --get branch.feat-x.ccmux-base": { stdout: "release-9\n" },
+      "merge-base release-9 HEAD": { stdout: "same111\n" },
+      "rev-parse HEAD": { stdout: "same111\n" },
+    });
+    const base = await resolveMergeBase("/wt", {
+      baseRefs: async () => ["origin/main"],
       git,
     });
     expect(base).toBeNull();

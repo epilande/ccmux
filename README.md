@@ -37,7 +37,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 📂 **Session Grouping**: Collapsible project groups with reordering and pinning
 - 🌿 **Git & PR Aware**: Branch and worktree detection, open PRs with live CI and review status
 - 🌱 **Worktree Workflow**: Spawn or fork sessions into fresh git worktrees, move uncommitted changes out of a dirty checkout, and prune leftovers from the Worktrees panel
-- 📝 **Diff Review**: Press <kbd>d</kbd> to review a session's working-tree diff with [hunk](https://github.com/modem-dev/hunk), right in the pane
+- 📝 **Diff Review**: Press <kbd>d</kbd> to review a session's working-tree diff with [hunk](https://github.com/modem-dev/hunk), right in the pane, or <kbd>D</kbd> for everything the branch changed since it forked
 - 🤖 **Background Agents & Subagents**: Claude Code background agents get rows too; running subagents show as `agents` with a live list in the preview
 - 🎛️ **Session Control**: Spawn, fork, kill, and restart sessions from the TUI; `ccmux invoke` for scripted one-shot agent turns
 - 🤝 **Session Handoff**: Send a session's last response to another agent, from the CLI, the row menu, or agent-to-agent via the bundled relay skill
@@ -150,6 +150,8 @@ https://github.com/user-attachments/assets/7e0d42b3-4e7b-43b8-8d06-72a2d69dd694
 ### Diff Review with Hunk
 
 [hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's working-tree diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the row menu (<kbd>m</kbd>, or right-click). If the working tree has no changes, ccmux reports that instead of opening an empty review.
+
+<kbd>Shift+D</kbd> reviews the other diff: everything the checkout has changed **since it forked**, not just what is uncommitted. That is the question worth asking about an agent working in a worktree, which commits as it goes and often has an empty working tree while the branch is the whole point. The base it compares against is whatever `ccmux spawn --worktree` recorded when it cut the branch, falling back to the merge-base with the repo's default branch for checkouts ccmux did not create. A checkout carrying no commits of its own beyond that base has no fork point to compare against, so <kbd>D</kbd> there shows the working tree, the same as <kbd>d</kbd>; a main checkout with unpushed commits does have one, and <kbd>D</kbd> shows those too.
 
 To send review feedback back to the agent:
 
@@ -457,7 +459,7 @@ verified. Adding another is one config line once you have checked it yourself
 
 After a branch is merged (and auto-deleted on GitHub), three leftovers stay on your machine: the worktree directory, the local branch, and often a tmux pane with a finished agent in it.
 
-<kbd>W</kbd> in the picker (or `Worktrees` on a group header) opens the Worktrees panel: every worktree of every repo in scope, main checkout first, with its branch, ahead/behind, uncommitted counts, open PR, and the agent living in it. <kbd>Enter</kbd> jumps to that agent, or starts one in a worktree that has none. <kbd>Tab</kbd> widens from the selected row's repo to all of them, <kbd>y</kbd> copies a path, and <kbd>d</kbd> reviews what the branch changed since it left the default branch (not just what is uncommitted, which is what <kbd>d</kbd> on a session row shows).
+<kbd>W</kbd> in the picker (or `Worktrees` on a group header) opens the Worktrees panel: every worktree of every repo in scope, main checkout first, with its branch, ahead/behind, uncommitted counts, open PR, and the agent living in it. <kbd>Enter</kbd> jumps to that agent, or starts one in a worktree that has none. <kbd>Tab</kbd> widens from the selected row's repo to all of them, <kbd>y</kbd> copies a path, and <kbd>d</kbd> reviews what the branch changed since it left its base (not just what is uncommitted, which is what <kbd>d</kbd> on a session row shows).
 
 https://github.com/user-attachments/assets/cc25199b-f563-4cda-8b59-6e95c449a94a
 
@@ -556,7 +558,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions                                                                                              |
 | Fork session          | <kbd>F</kbd>                                                                       | Branch the conversation into a pane of its own, leaving the original running                                           |
 | Worktrees             | <kbd>W</kbd>                                                                       | Open the Worktrees panel: jump, start an agent, copy a path, review, or prune (multi-select, confirmation)             |
-| Review and hand back  | <kbd>d</kbd>                                                                       | Review with [hunk](https://github.com/modem-dev/hunk), then offer to send notes to the agent (requires `hunk` on PATH) |
+| Review and hand back  | <kbd>d</kbd> / <kbd>D</kbd>                                                        | Review with [hunk](https://github.com/modem-dev/hunk), then offer to send notes to the agent (requires `hunk` on PATH) |
 | Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state                                                                                           |
 | Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)                                                                                    |
 | Move group top/bottom | <kbd><</kbd> / <kbd>></kbd>                                                        | Pin group to top / bottom                                                                                              |

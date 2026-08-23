@@ -428,7 +428,22 @@ export function App(props: AppProps) {
     store.actions.showConfirmDialog(session.id, "send-review");
   }
 
-  function reviewSession(session: EnrichedSession) {
+  /**
+   * The session list's `d` (what is UNCOMMITTED) and `D` (everything this
+   * checkout has changed since it forked). A fixed pair, not a default and
+   * an override: which of the two questions the user wants is not something
+   * the row can be read off for, and a key that means different things on
+   * different rows is one the user has to check the row before pressing.
+   *
+   * `D` needs no case for a checkout carrying no commits of its own beyond
+   * its base: the merge-base IS its HEAD, `resolveMergeBase` returns null,
+   * and null falls back to the working-tree review, so `D` there behaves
+   * like `d`. The base is normally `origin/main` (`resolveBaseRefs` asks
+   * `origin/HEAD` first), so a main checkout with UNPUSHED commits is not
+   * that case, and `D` showing them alongside the working tree is the point
+   * rather than an edge of it.
+   */
+  function reviewSession(session: EnrichedSession, branchMode = false) {
     if (reviewInFlight) return;
     const cwd = sessionCwd(session);
     if (!cwd) {
@@ -442,11 +457,31 @@ export function App(props: AppProps) {
       return;
     }
     reviewInFlight = true;
-    runHunkReview(renderer, cwd)
+    // Resolved before `runHunkReview`, which is what suspends the renderer.
+    // From the CHECKOUT root rather than the pane's cwd: a pane that cd'd
+    // into a subdirectory is still on the branch, and the merge-base is a
+    // property of the checkout. `worktreeRoot` is that root for a linked
+    // worktree and for a main checkout alike.
+    const base = branchMode
+      ? resolveMergeBase(session.worktreeRoot ?? cwd)
+      : Promise.resolve(null);
+    base
+      .then((target) =>
+        runHunkReview(renderer, cwd, { target: target ?? undefined }),
+      )
       .then((result) => {
         reviewInFlight = false;
         if (!result.ok) {
-          store.actions.showToast(`Review failed: ${result.error}`);
+          // The dead end the fixed pair creates, and the one row it lands on
+          // most: an agent that has committed everything has nothing
+          // uncommitted, and `d` alone would say so and stop. Keyed off the
+          // MODE and the result's own `empty` flag rather than its wording,
+          // and added here rather than in `runHunkReview`, whose other two
+          // callers (the Worktrees panel, `ccmux review`) have no `D` to
+          // point at.
+          const hint =
+            !branchMode && result.empty ? " (D reviews the branch)" : "";
+          store.actions.showToast(`Review failed: ${result.error}${hint}`);
           return;
         }
         if (result.notes.length === 0) return;
@@ -463,7 +498,7 @@ export function App(props: AppProps) {
 
   /**
    * The Worktrees panel's `d`, which reviews a BRANCH rather than a working
-   * tree: the base is the merge-base with the repo's default branch, so a
+   * tree: the base is the merge-base with the ref it was cut from, so a
    * worktree whose work is already committed shows what it changed instead of
    * "no changes to review". A worktree with no fork point to name (sitting on
    * the base, orphaned, or in a repo with no recognizable default branch)
@@ -3542,18 +3577,24 @@ export function App(props: AppProps) {
         event.preventDefault();
         break;
 
+      case "D":
       case "d":
       case "u":
+        // Ctrl+D/U scroll the preview; a bare `d` reviews the working
+        // tree, Shift+D the branch. Both spellings of the capital are
+        // matched because terminals deliver it as name `"d"` with `shift`
+        // set as readily as `"D"`; without the lowercase case the branch
+        // review would be unreachable on half of them.
         if (event.ctrl && previewScrollbox && store.state.showPreview) {
           const halfPage = Math.floor(
             (previewScrollbox.viewport?.height ?? 10) / 2,
           );
-          const delta = key === "d" ? halfPage : -halfPage;
+          const delta = key === "u" ? -halfPage : halfPage;
           previewScrollbox.scrollTo(previewScrollbox.scrollTop + delta);
           event.preventDefault();
-        } else if (key === "d" && !event.ctrl && !props.sidebar) {
+        } else if (key !== "u" && !event.ctrl && !props.sidebar) {
           const session = store.selectedSession();
-          if (session) reviewSession(session);
+          if (session) reviewSession(session, key === "D" || event.shift);
           event.preventDefault();
         }
         break;
