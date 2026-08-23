@@ -68,8 +68,20 @@ import {
   existingWorktreeFor,
   readCheckoutHead,
   slugForFork,
+  slugForIssue,
+  slugForPR,
   type WorktreeCreation,
 } from "./worktree-create";
+import {
+  branchCheckedOutAt,
+  configurePRBranch,
+  prRepoMismatch,
+  lookupIssue,
+  lookupPR,
+  preparePRBranch,
+  seedPrompt,
+  type PRSource,
+} from "./gh-spawn-source";
 import { getAgents, type AgentDef } from "../lib/agents";
 import { listSpawnableAgents, spawnBinaryFor } from "../lib/spawnable-agents";
 import {
@@ -133,6 +145,26 @@ import type {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Validate a wire `pr`/`issue` field. Absent stays absent; anything present
+ * must be a positive whole number, because it goes straight into a `gh` argv
+ * and into a directory name.
+ */
+function normalizeIssueNumber(
+  value: unknown,
+  field: string,
+): BuildResult<number | undefined> {
+  if (value === undefined || value === null)
+    return { ok: true, value: undefined };
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    return {
+      ok: false,
+      error: `Invalid '${field}' field: expected a positive whole number`,
+    };
+  }
+  return { ok: true, value };
 }
 
 /**
@@ -3853,6 +3885,8 @@ export class DaemonServer {
       callerTty?: unknown;
       detach?: unknown;
       worktree?: unknown;
+      pr?: unknown;
+      issue?: unknown;
     };
     try {
       body = (await req.json()) as typeof body;
@@ -4020,6 +4054,60 @@ export class DaemonServer {
       );
     }
 
+    const prResult = normalizeIssueNumber(body.pr, "pr");
+    if (!prResult.ok) {
+      return Response.json({ error: prResult.error }, { status: 400, headers });
+    }
+    const issueResult = normalizeIssueNumber(body.issue, "issue");
+    if (!issueResult.ok) {
+      return Response.json(
+        { error: issueResult.error },
+        { status: 400, headers },
+      );
+    }
+    // The CLI refuses each of these too, and each is repeated here for the
+    // usual reason: the endpoint is public, the picker will grow its own way
+    // in (issue #151), and every one of them would otherwise be honored
+    // half-way — a name that loses to the derived one, a base that loses to
+    // the PR head, a fork whose source decides the agent AND the checkout.
+    const sourceFlag =
+      prResult.value !== undefined
+        ? "pr"
+        : issueResult.value !== undefined
+          ? "issue"
+          : undefined;
+    if (prResult.value !== undefined && issueResult.value !== undefined) {
+      return Response.json(
+        {
+          error:
+            "'pr' and 'issue' cannot both be set: each brings its own worktree",
+        },
+        { status: 400, headers },
+      );
+    }
+    if (sourceFlag) {
+      const conflict = forkSource
+        ? "fork"
+        : resume != null
+          ? "resume"
+          : worktreeRequest.value?.name !== undefined
+            ? "worktree.name"
+            : worktreeRequest.value?.withChanges
+              ? "worktree.withChanges"
+              : prResult.value !== undefined &&
+                  worktreeRequest.value?.base !== undefined
+                ? "worktree.base"
+                : undefined;
+      if (conflict) {
+        return Response.json(
+          {
+            error: `'${sourceFlag}' cannot be combined with '${conflict}': ${sourceFlag} decides the worktree, its name and where it starts from`,
+          },
+          { status: 400, headers },
+        );
+      }
+    }
+
     // Resolve agent definition (custom agents from config are also valid)
     const agent = this.getAgentByType(agentName);
     if (!agent) {
@@ -4040,6 +4128,65 @@ export class DaemonServer {
       );
       if (problem) {
         return Response.json({ error: problem }, { status: 400, headers });
+      }
+    }
+
+    // Resolving the PR or issue HERE, before the command is built, is what
+    // lets its title and URL become the agent's opening prompt: the command
+    // is one string built once, and the worktree block below runs after it.
+    // Both lookups are read-only `gh` calls, so a refusal at this point has
+    // left nothing behind.
+    let prSource: PRSource | undefined;
+    let sourceWorktreeName: string | undefined;
+    let spawnPrompt = prompt;
+    if (sourceFlag) {
+      // Seeded only when the agent can actually be spawned with a prompt.
+      // Every built-in can; a custom agent without `promptCommand` would
+      // otherwise have `--pr` refused outright for a prompt it never asked
+      // for, when the checkout is most of what it wanted. A user-supplied
+      // prompt is left to hit that refusal unchanged.
+      const canSeed = agent.promptCommand !== undefined || prompt !== undefined;
+      if (prResult.value !== undefined) {
+        const found = await lookupPR(cwd, prResult.value);
+        if (!found.ok) {
+          return Response.json(
+            { error: found.error },
+            { status: 400, headers },
+          );
+        }
+        prSource = found.value;
+        sourceWorktreeName = slugForPR(
+          found.value.number,
+          found.value.headRefName,
+        );
+        if (canSeed) {
+          spawnPrompt = seedPrompt(
+            `PR #${found.value.number}`,
+            found.value.title,
+            found.value.url,
+            prompt,
+          );
+        }
+      } else if (issueResult.value !== undefined) {
+        const found = await lookupIssue(cwd, issueResult.value);
+        if (!found.ok) {
+          return Response.json(
+            { error: found.error },
+            { status: 400, headers },
+          );
+        }
+        sourceWorktreeName = slugForIssue(
+          found.value.number,
+          found.value.title,
+        );
+        if (canSeed) {
+          spawnPrompt = seedPrompt(
+            `Issue #${found.value.number}`,
+            found.value.title,
+            found.value.url,
+            prompt,
+          );
+        }
       }
     }
 
@@ -4065,7 +4212,7 @@ export class DaemonServer {
           agent,
           binary: cmd,
           resume,
-          prompt,
+          prompt: spawnPrompt,
         });
     if (!commandResult.ok) {
       return Response.json(
@@ -4150,7 +4297,17 @@ export class DaemonServer {
     let spawnCwd = cwd;
     let worktreeInfo: WorktreeCreation | undefined;
     let moveInfo: SpawnMoveReport | undefined;
-    if (worktreeRequest.value) {
+    /** A `--pr` tracking-config write that failed after the worktree existed. */
+    let prConfigProblem: string | undefined;
+    /** Non-fatal notes from a successful spawn, echoed to the caller. */
+    const warnings: string[] = [];
+    // `pr`/`issue` imply a worktree without one being asked for: the whole
+    // point of both flags is a checkout to work in. The synthesized request
+    // is empty except for the `base` an `--issue --base` rides in on, which
+    // `normalizeWorktreeRequest` has already validated.
+    const worktreeValue =
+      worktreeRequest.value ?? (sourceFlag ? {} : undefined);
+    if (worktreeValue) {
       const gitInfo = await this.getGitInfo(cwd);
       if (!gitInfo.mainRepoRoot) {
         return Response.json(
@@ -4159,7 +4316,7 @@ export class DaemonServer {
         );
       }
       const mainRepoRoot = gitInfo.mainRepoRoot;
-      const { withChanges, untracked, ...creation } = worktreeRequest.value;
+      const { withChanges, untracked, ...creation } = worktreeValue;
 
       // A FORK's destination takes both its name and its start point from the
       // source checkout's HEAD, because neither default fits one:
@@ -4216,6 +4373,56 @@ export class DaemonServer {
             { status: 400, headers },
           );
         }
+      }
+
+      // A `--pr` spawn checks out the PR's OWN head ref, so its branch is
+      // decided here rather than by the worktree's name. Two steps, in this
+      // order, because the first is the last thing that can refuse before
+      // anything is written:
+      //
+      // 1. The branch already being checked out somewhere is OUR refusal,
+      //    naming the directory, rather than git's at the end of a create.
+      //    Ahead of `ensureWorktreesExcluded`, which writes to the repo.
+      // 2. The fetch and the branch decision, which `preparePRBranch` runs
+      //    under the repo lock and releases before returning — it must not
+      //    still hold it when `createWorktree` takes the same lock below.
+      let prBranch: string | undefined;
+      let prBase: string | null = null;
+      if (prSource) {
+        // Before the branch check and well before the fetch: `gh` resolved
+        // the number through its own repo selection, and the fetch below is
+        // hardcoded to `origin`. If those name different repositories,
+        // everything after this point would be about the wrong PR.
+        const mismatch = await prRepoMismatch(mainRepoRoot, prSource);
+        if (mismatch) {
+          return Response.json({ error: mismatch }, { status: 400, headers });
+        }
+        const occupied = await branchCheckedOutAt(
+          mainRepoRoot,
+          prSource.headRefName,
+        );
+        if (occupied) {
+          return Response.json(
+            {
+              error:
+                `PR #${prSource.number}'s branch '${prSource.headRefName}' is already checked out ` +
+                `at ${occupied}. Spawn an agent there instead, or remove that worktree first.`,
+            },
+            { status: 400, headers },
+          );
+        }
+        const prepared = await preparePRBranch(mainRepoRoot, prSource);
+        if (!prepared.ok) {
+          return Response.json(
+            { error: prepared.error },
+            { status: 400, headers },
+          );
+        }
+        prBranch = prSource.headRefName;
+        // The SHA, never `FETCH_HEAD`: the base-branch fetch inside the prep
+        // has already overwritten that ref.
+        creation.base = prepared.value.head;
+        prBase = prepared.value.baseRemoteRef;
       }
 
       // Here rather than only inside the creation engine, because ORDER
@@ -4329,8 +4536,19 @@ export class DaemonServer {
       } else {
         const created = await createWorktree(mainRepoRoot, {
           ...creation,
-          prompt: prompt ?? undefined,
-          derivedName,
+          // No prompt on the pr/issue paths, deliberately:
+          // `resolveWorktreeName` PREFERS a prompt over a derived name, so
+          // threading the seeded one through would silently rename the
+          // worktree after the PR's title and lose the `pr-<n>-` prefix that
+          // keeps it clear of Claude Code's own `pr-<n>` directories.
+          prompt: sourceFlag ? undefined : (prompt ?? undefined),
+          derivedName: sourceWorktreeName ?? derivedName,
+          // No base recorded on the PR path, deliberately: `creation.base` is
+          // the PR's own head sha, so the record would make the branch its
+          // own review base. `configurePRBranch` writes that key here with
+          // the branch the PR targets, and when it cannot, no key is what
+          // lets the picker's `D` fall back to its heuristic base.
+          ...(prBranch ? { branch: prBranch, recordBase: false } : {}),
         });
         if (!created.ok) {
           return Response.json(
@@ -4340,6 +4558,29 @@ export class DaemonServer {
         }
         worktreeInfo = created.result;
         spawnCwd = created.result.path;
+        // After creation, and on the reused-branch path too: every write is
+        // idempotent, so a branch an older ccmux left half-configured heals.
+        //
+        // A failure is CARRIED rather than returned here, because by now the
+        // worktree exists: it is reported through `setupFailure` below, which
+        // is the convention for everything that goes wrong after setup landed
+        // (the worktree is deliberately not rolled back, and the response has
+        // to name what the user now owns). Declared above the block so this
+        // survives it.
+        if (prSource) {
+          const configured = await configurePRBranch(
+            mainRepoRoot,
+            created.result.branch,
+            prSource,
+            prBase,
+          );
+          if (!configured.ok) prConfigProblem = configured.error;
+          // A key that could not be written but does not decide where a push
+          // goes. Reported, never fatal; see `configurePRBranch`.
+          else if (configured.value.baseNote) {
+            warnings.push(configured.value.baseNote);
+          }
+        }
       }
     }
 
@@ -4394,6 +4635,18 @@ export class DaemonServer {
       error: withSetupNotes(error),
       ...(moveInfo ? { move: moveInfo } : {}),
     });
+
+    // A `--pr` whose tracking config could not be written in full. Reported
+    // here, through the same notes every post-setup failure uses, and BEFORE
+    // the pane: starting an agent in a worktree whose branch may push to the
+    // wrong repository is the one outcome this must not produce silently.
+    // The worktree stays, as it does for every other failure past this line.
+    if (prConfigProblem) {
+      return Response.json(setupFailure(prConfigProblem), {
+        status: 500,
+        headers,
+      });
+    }
 
     // Create tmux pane
     const spawnArgv = buildTmuxSpawnArgv({
@@ -4519,6 +4772,9 @@ export class DaemonServer {
           command,
           worktree: worktreeInfo,
           move: moveInfo,
+          // Things that went wrong without making the spawn wrong. Omitted
+          // when empty so an ordinary spawn's body is unchanged.
+          ...(warnings.length > 0 ? { warnings } : {}),
         },
         { headers },
       );

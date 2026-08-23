@@ -21,6 +21,8 @@ import {
   resolveBase,
   resolveWorktreeName,
   slugForFork,
+  slugForIssue,
+  slugForPR,
   slugFromPrompt,
   slugify,
   withRepoLock,
@@ -633,7 +635,10 @@ describe("createWorktree", () => {
     await git(repo, ["commit", "-m", "second"]);
     const parent = await git(repo, ["rev-parse", "HEAD~1"]);
 
-    const out = await createWorktree(repo, { name: "off-parent", base: "HEAD~1" });
+    const out = await createWorktree(repo, {
+      name: "off-parent",
+      base: "HEAD~1",
+    });
 
     expect(out.ok).toBe(true);
     if (!out.ok) return;
@@ -1126,5 +1131,152 @@ describe("withRepoLock", () => {
     ]);
 
     expect(order).toEqual(["b", "a"]);
+  });
+});
+
+describe("slugForPR / slugForIssue", () => {
+  it("prefixes with the number and slugifies the label", () => {
+    expect(slugForPR(7, "fix/flaky-binder")).toBe("pr-7-fix-flaky-binder");
+    expect(slugForIssue(45, "spawn: --pr and --issue flags")).toBe(
+      "issue-45-spawn-pr-and-issue-flags",
+    );
+  });
+
+  // Budgeted INSIDE the cap, like `slugForFork`: `resolveWorktreeName`
+  // re-slugifies whatever it is handed, so a name over the cap would be
+  // trimmed there and could lose the prefix that makes it unique.
+  it("budgets the prefix inside the slug cap", () => {
+    const pr = slugForPR(12345, "a".repeat(80));
+    expect(pr.length).toBeLessThanOrEqual(40);
+    expect(pr.startsWith("pr-12345-")).toBe(true);
+    expect(slugify(pr)).toBe(pr);
+
+    const issue = slugForIssue(12345, "b".repeat(80));
+    expect(issue.length).toBeLessThanOrEqual(40);
+    expect(slugify(issue)).toBe(issue);
+  });
+
+  // Claude Code puts its own fetch-only PR checkouts at `pr-<n>`, so bare
+  // `pr-<n>` is the one name this must never produce.
+  it("never collapses to bare pr-<n>", () => {
+    expect(slugForPR(7, "日本語")).toBe("pr-7-head");
+    expect(slugForPR(7, "")).toBe("pr-7-head");
+  });
+
+  it("falls back to bare issue-<n>, which collides with nothing", () => {
+    expect(slugForIssue(45, "!!!")).toBe("issue-45");
+  });
+});
+
+describe("createWorktree with a branch override", () => {
+  // A `--pr` spawn's directory is named after the PR while its branch has to
+  // be the PR's own head ref, so `git push` works out of the box.
+  it("cuts the given branch at the given base, under the given name", async () => {
+    const repo = await makeRepo();
+    const base = await git(repo, ["rev-parse", "HEAD"]);
+
+    const created = await createWorktree(repo, {
+      name: "pr-7-fix-flaky",
+      base,
+      branch: "fix/flaky-binder",
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.name).toBe("pr-7-fix-flaky");
+    expect(created.result.branch).toBe("fix/flaky-binder");
+    expect(created.result.branchCreated).toBe(true);
+    expect(created.result.path).toBe(worktreePathFor(repo, "pr-7-fix-flaky"));
+    expect(
+      await git(created.result.path, ["rev-parse", "--abbrev-ref", "HEAD"]),
+    ).toBe("fix/flaky-binder");
+    expect(await git(created.result.path, ["rev-parse", "HEAD"])).toBe(base);
+  });
+
+  it("checks out an existing branch of that name instead of cutting one", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "fix/flaky-binder"]);
+
+    const created = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.branch).toBe("fix/flaky-binder");
+    // Reused, so nothing was cut and no base may be reported.
+    expect(created.result.branchCreated).toBe(false);
+    expect(created.result.base).toBeUndefined();
+  });
+
+  // A derived name normally refuses any candidate a branch is holding,
+  // because the create path would reuse that branch. With an override the
+  // name is a directory label and nothing else, so that test does not apply.
+  it("does not number past a same-named branch when the branch is overridden", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "pr-7-fix-flaky"]);
+
+    const created = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.name).toBe("pr-7-fix-flaky");
+    expect(created.result.branch).toBe("fix/flaky-binder");
+  });
+
+  it("defaults the branch to the worktree name when no override is given", async () => {
+    const repo = await makeRepo();
+
+    const created = await createWorktree(repo, { name: "plain-name" });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.branch).toBe("plain-name");
+  });
+
+  // The record is keyed by BRANCH, and an override is exactly the case where
+  // the directory name is not it. Keyed by the name, the picker's branch
+  // review looks up a branch nothing ever created, finds no base and falls
+  // back to guessing the default one - silently, against the wrong base.
+  it("records the base under the branch, not the worktree name", async () => {
+    const repo = await makeRepo();
+
+    const created = await createWorktree(repo, {
+      name: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(await readConfig(repo, CONFIG_KEY("fix/flaky-binder"))).toBe(
+      "refs/heads/main",
+    );
+    expect(await readConfig(repo, CONFIG_KEY("pr-7-fix-flaky"))).toBeNull();
+  });
+
+  // A `--pr` spawn cuts the branch at the PR's own tip, so a record here
+  // would name the branch as its own review base and the picker's `D` would
+  // diff it against itself. Both keys are checked so this cannot pass by
+  // having recorded it under the other one.
+  it("records nothing under either key when the caller opts out", async () => {
+    const repo = await makeRepo();
+    const tip = await git(repo, ["rev-parse", "HEAD"]);
+
+    const created = await createWorktree(repo, {
+      name: "pr-7-fix-flaky",
+      base: tip,
+      branch: "fix/flaky-binder",
+      recordBase: false,
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.branchCreated).toBe(true);
+    expect(await readConfig(repo, CONFIG_KEY("fix/flaky-binder"))).toBeNull();
+    expect(await readConfig(repo, CONFIG_KEY("pr-7-fix-flaky"))).toBeNull();
   });
 });

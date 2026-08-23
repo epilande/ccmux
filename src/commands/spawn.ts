@@ -34,6 +34,8 @@ interface SpawnResponse {
   };
   /** Present only when `--with-changes` relocated uncommitted work. */
   move?: MoveReport;
+  /** Things that went wrong without making the spawn wrong. */
+  warnings?: string[];
 }
 
 /**
@@ -67,6 +69,24 @@ function parseSplit(value: string): SpawnSplit {
   throw new InvalidArgumentError(
     `Expected 'h' (left/right) or 'v' (stacked).${hint}`,
   );
+}
+
+/**
+ * A `--pr`/`--issue` number. `#123` is accepted because that is how GitHub
+ * writes one everywhere a user might copy it from, and the `#` is stripped
+ * rather than tolerated further in: the value ends up in a `gh` argv and in a
+ * branch name, so only digits may survive.
+ */
+function parseNumber(flag: string): (value: string) => number {
+  return (value: string) => {
+    const digits = value.startsWith("#") ? value.slice(1) : value;
+    if (!/^\d+$/.test(digits) || Number(digits) < 1) {
+      throw new InvalidArgumentError(
+        `Expected a ${flag} number, such as 123 or #123.`,
+      );
+    }
+    return Number(digits);
+  };
 }
 
 /** `--untracked`'s value, rejected at parse time so a typo never reaches the
@@ -190,6 +210,16 @@ export function createSpawnCommand(): Command {
       `What --with-changes does with untracked files (${UNTRACKED_MODES.join(", ")}; default ${UNTRACKED_MODES[0]})`,
       parseUntracked,
     )
+    .option(
+      "--pr <number>",
+      "Spawn into a worktree checked out on this pull request's branch (resolved with gh)",
+      parseNumber("PR"),
+    )
+    .option(
+      "--issue <number>",
+      "Spawn into a new worktree named after this issue, with its title and URL as the prompt",
+      parseNumber("issue"),
+    )
     .action(
       async (
         agent: string,
@@ -205,8 +235,57 @@ export function createSpawnCommand(): Command {
           base?: string;
           withChanges?: boolean;
           untracked?: UntrackedMode;
+          pr?: number;
+          issue?: number;
         },
       ) => {
+        // Every check in this block is pure argument validation, and every
+        // one of them runs before `ensureDaemon` for the reason spelled out
+        // below: rejecting a typo must not leave a daemon behind.
+        //
+        // `--pr` and `--issue` each bring their own worktree, their own name
+        // and (for a PR) their own branch and start point, so each flag that
+        // would decide one of those is a contradiction rather than a
+        // refinement. Refused pairwise so the message names the actual pair.
+        if (options.pr !== undefined && options.issue !== undefined) {
+          console.error(
+            "--pr and --issue cannot be used together: each brings its own worktree",
+          );
+          process.exit(1);
+        }
+        const source =
+          options.pr !== undefined
+            ? "--pr"
+            : options.issue !== undefined
+              ? "--issue"
+              : undefined;
+        if (source) {
+          const conflict =
+            options.worktree !== undefined
+              ? "--worktree"
+              : options.withChanges
+                ? "--with-changes"
+                : options.fork
+                  ? "--fork"
+                  : options.resume
+                    ? "--resume"
+                    : undefined;
+          if (conflict) {
+            console.error(
+              `${source} cannot be used with ${conflict}: ${source} decides the worktree, its name and where it starts from`,
+            );
+            process.exit(1);
+          }
+          // Allowed with `--issue`, which branches from a base like any other
+          // spawn, and refused with `--pr`, whose start point IS the PR head.
+          if (options.base !== undefined && options.pr !== undefined) {
+            console.error(
+              "--base cannot be used with --pr: the pull request's own head is what gets checked out",
+            );
+            process.exit(1);
+          }
+        }
+
         // `--base` alone is inert, and silently ignoring a flag someone typed
         // costs a confused debugging session. Unlike `--split` without a
         // target, which still does something sensible, this expresses an
@@ -216,8 +295,12 @@ export function createSpawnCommand(): Command {
         // must not start a background process: rejecting a typo used to leave
         // a daemon behind on the shared port, which the CLI's own test then
         // did to whoever ran it.
-        if (options.base !== undefined && options.worktree === undefined) {
-          console.error("--base requires --worktree");
+        if (
+          options.base !== undefined &&
+          options.worktree === undefined &&
+          options.issue === undefined
+        ) {
+          console.error("--base requires --worktree or --issue");
           process.exit(1);
         }
         // Same rule, same reason, and the same "before ensureDaemon" placement:
@@ -256,9 +339,15 @@ export function createSpawnCommand(): Command {
 
         // `--worktree` bare is `true` from commander, `--worktree x` is the
         // string. Both become an object, since the daemon accepts one shape.
+        //
+        // `--issue --base` rides the same object rather than a second
+        // top-level field: an issue spawn creates an ordinary worktree, so
+        // its start point is the one the daemon already validates here.
         const worktree =
           options.worktree === undefined
-            ? undefined
+            ? options.issue !== undefined && options.base !== undefined
+              ? { base: options.base }
+              : undefined
             : {
                 name:
                   typeof options.worktree === "string"
@@ -311,6 +400,8 @@ export function createSpawnCommand(): Command {
                   : undefined,
               detach,
               worktree,
+              pr: options.pr,
+              issue: options.issue,
             }),
           });
         } catch (error) {
@@ -419,6 +510,13 @@ export function createSpawnCommand(): Command {
               : `Spawned ${agent} in pane ${data.paneId}: ${data.command}`,
           );
 
+          // On stderr because they are problems, but the exit stays 0: the
+          // session is running and correct, and one unwritten optional key
+          // must not make a working spawn look failed to a script.
+          for (const warning of data.warnings ?? []) {
+            console.error(`Warning: ${warning}`);
+          }
+
           // Reported last, after everything that DID happen, and as a
           // failure. A daemon predating `--with-changes` drops the keys it
           // does not know and answers a perfectly ordinary 200, so the agent
@@ -426,6 +524,23 @@ export function createSpawnCommand(): Command {
           // original checkout. The absent `move` is the only evidence there
           // is, and exiting 0 on it would make a silent no-op look like a
           // completed move.
+          // Same class of mismatch as `--with-changes` below: a daemon
+          // predating these flags drops the fields it does not know and
+          // answers an ordinary 200, so the agent comes up in the current
+          // checkout with no worktree and nothing says why. The absent
+          // `worktree` is the only evidence there is.
+          if (
+            (options.pr !== undefined || options.issue !== undefined) &&
+            !data.worktree
+          ) {
+            console.error(
+              `The running ccmux daemon is an older build that does not support ` +
+                `${options.pr !== undefined ? "--pr" : "--issue"}, so the agent started in ` +
+                `${resolveSpawnCwd(options.cwd)} instead of a worktree. Restart it with ` +
+                `'ccmux daemon restart' and try again.`,
+            );
+            process.exit(1);
+          }
           if (options.withChanges && !data.move) {
             console.error(
               `The running ccmux daemon is an older build that does not support --with-changes, ` +

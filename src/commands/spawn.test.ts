@@ -31,6 +31,8 @@ interface SpawnBody {
     withChanges?: boolean;
     untracked?: string;
   };
+  pr?: number;
+  issue?: number;
 }
 
 /**
@@ -56,6 +58,19 @@ function withFetchCapture(socketPath: string | null = null) {
         // A 200 with no `move` means a daemon too old to have honored
         // `--with-changes`, which the CLI treats as a failure, so a stub that
         // never sent one would make every `--with-changes` case exit.
+        // Same reason for `pr`/`issue`: both imply a worktree, and the CLI
+        // reads a 200 without one as "the daemon is too old for this flag".
+        ...(body.pr !== undefined || body.issue !== undefined
+          ? {
+              worktree: {
+                name: "pr-1-x",
+                path: "/repo/.claude/worktrees/pr-1-x",
+                branch: "x",
+                created: true,
+                branchCreated: true,
+              },
+            }
+          : {}),
         ...(body.worktree?.withChanges
           ? {
               move: {
@@ -1218,6 +1233,194 @@ describe("ccmux spawn --fork", () => {
     } finally {
       restoreEnv();
       restore();
+    }
+  });
+});
+
+describe("ccmux spawn --pr/--issue argument parsing", () => {
+  // `#123` is how GitHub writes a number everywhere a user might copy one
+  // from, and the value ends up in a `gh` argv and in a directory name, so
+  // only digits may survive the parse.
+  it("accepts a bare number and a #-prefixed one, sending both as integers", async () => {
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture();
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn(["claude", "--pr", "123"]);
+      await runSpawn(["claude", "--pr", "#456"]);
+      await runSpawn(["claude", "--issue", "#45"]);
+
+      expect(bodies[0]?.pr).toBe(123);
+      expect(bodies[0]?.issue).toBeUndefined();
+      expect(bodies[1]?.pr).toBe(456);
+      expect(bodies[2]?.issue).toBe(45);
+      expect(bodies[2]?.pr).toBeUndefined();
+      // Both ride at the TOP level, not inside `worktree`.
+      expect(bodies[0]?.worktree).toBeUndefined();
+    } finally {
+      restoreEnv();
+      restore();
+    }
+  });
+
+  it("refuses a non-numeric value at parse time", async () => {
+    for (const value of ["abc", "12a", "#", "-1", "0"]) {
+      const command = createSpawnCommand().exitOverride();
+      await expect(
+        command.parseAsync(["node", "spawn", "claude", "--pr", value]),
+      ).rejects.toThrow(/number/);
+    }
+  });
+
+  // `--issue --base` rides the existing `worktree` object rather than a
+  // second top-level field: an issue spawn cuts an ordinary branch from a
+  // base, which the daemon already validates there.
+  it("carries --issue --base in the worktree object", async () => {
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture();
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn(["claude", "--issue", "45", "--base", "develop"]);
+      expect(bodies[0]?.issue).toBe(45);
+      expect(bodies[0]?.worktree).toStrictEqual({ base: "develop" });
+    } finally {
+      restoreEnv();
+      restore();
+    }
+  });
+});
+
+describe("ccmux spawn --pr/--issue conflict validation", () => {
+  // Same rule and same placement as every other spawn validation: pure
+  // argument validation must not start a daemon on the shared port, so
+  // `ensureDaemonCalls` is asserted alongside every message.
+  async function expectRefusal(
+    argv: string[],
+    fragment: string,
+  ): Promise<void> {
+    const errors: string[] = [];
+    console.error = (line: string) => errors.push(line);
+    ensureDaemonCalls = 0;
+    const restoreFetch = withNoFetch();
+    try {
+      const code = await runSpawnExpectingExit(argv);
+      expect(code).toBe(1);
+      expect(errors.join("\n")).toContain(fragment);
+      expect(ensureDaemonCalls).toBe(0);
+    } finally {
+      restoreFetch();
+    }
+  }
+
+  it("refuses --pr with --issue", async () => {
+    await expectRefusal(
+      ["claude", "--pr", "1", "--issue", "2"],
+      "--pr and --issue cannot be used together",
+    );
+  });
+
+  it("refuses --pr with each flag that would decide the worktree", async () => {
+    await expectRefusal(
+      ["claude", "--pr", "1", "--worktree", "x"],
+      "--pr cannot be used with --worktree",
+    );
+    await expectRefusal(
+      ["claude", "--pr", "1", "--fork", "abc"],
+      "--pr cannot be used with --fork",
+    );
+    await expectRefusal(
+      ["claude", "--pr", "1", "--resume", "abc"],
+      "--pr cannot be used with --resume",
+    );
+    await expectRefusal(
+      ["claude", "--pr", "1", "--with-changes"],
+      "--pr cannot be used with --with-changes",
+    );
+  });
+
+  it("refuses --issue with each flag that would decide the worktree", async () => {
+    await expectRefusal(
+      ["claude", "--issue", "1", "--worktree", "x"],
+      "--issue cannot be used with --worktree",
+    );
+    await expectRefusal(
+      ["claude", "--issue", "1", "--fork", "abc"],
+      "--issue cannot be used with --fork",
+    );
+    await expectRefusal(
+      ["claude", "--issue", "1", "--resume", "abc"],
+      "--issue cannot be used with --resume",
+    );
+    await expectRefusal(
+      ["claude", "--issue", "1", "--with-changes"],
+      "--issue cannot be used with --with-changes",
+    );
+  });
+
+  // Allowed with `--issue`, refused with `--pr`: a PR's start point IS its
+  // own head, so a base would be a second answer to a settled question.
+  it("refuses --base with --pr but allows it with --issue", async () => {
+    await expectRefusal(
+      ["claude", "--pr", "1", "--base", "main"],
+      "--base cannot be used with --pr",
+    );
+
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture();
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn(["claude", "--issue", "1", "--base", "main"]);
+      expect(bodies[0]?.worktree?.base).toBe("main");
+    } finally {
+      restoreEnv();
+      restore();
+    }
+  });
+
+  // A daemon predating these flags drops them and answers an ordinary 200,
+  // so the agent comes up in the current checkout with no worktree. The
+  // absent `worktree` is the only evidence there is.
+  it("blames a stale daemon for a 200 with no worktree", async () => {
+    const errors: string[] = [];
+    console.error = (line: string) => errors.push(line);
+    console.log = () => {};
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL) => {
+      const href = typeof url === "string" ? url : url.toString();
+      if (href.endsWith("/server-info")) {
+        return new Response(JSON.stringify({ socketPath: null }), {
+          status: 200,
+        });
+      }
+      return new Response(
+        JSON.stringify({ success: true, paneId: "%9", command: "claude" }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+
+    try {
+      const code = await runSpawnExpectingExit(["claude", "--pr", "1"]);
+      expect(code).toBe(1);
+      const err = errors.join("\n");
+      expect(err).toContain("older build");
+      expect(err).toContain("--pr");
+      expect(err).toContain("ccmux daemon restart");
+    } finally {
+      restoreEnv();
+      globalThis.fetch = original;
     }
   });
 });

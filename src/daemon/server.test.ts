@@ -7785,3 +7785,864 @@ describe("subagent worktree attribution", () => {
     expect(worktree).toContain("agent-aabc123");
   });
 });
+
+/**
+ * `POST /spawn` with `pr` / `issue`, end to end against REAL git and a
+ * PATH-stubbed `gh`.
+ *
+ * The origin is a real bare repo carrying a real `refs/pull/7/head`, because
+ * the whole point of the `--pr` path is that `git fetch origin pull/7/head`
+ * works and the branch it produces is set up to push back. A stubbed git
+ * would assert none of that. tmux is stubbed (nothing here is about panes);
+ * `gh` is stubbed through PATH rather than through the `Bun.spawn` stub,
+ * since that stub deliberately passes non-tmux argv to the real spawn.
+ */
+describe("POST /spawn with --pr and --issue", () => {
+  let root: string;
+
+  const PR_JSON = {
+    number: 7,
+    title: "Fix the flaky binder test",
+    url: "https://github.com/o/r/pull/7",
+    state: "OPEN",
+    headRefName: "fix/flaky-binder",
+    baseRefName: "main",
+    isCrossRepository: false,
+  };
+  const ISSUE_JSON = {
+    number: 45,
+    title: "spawn: --pr and --issue flags",
+    url: "https://github.com/o/r/issues/45",
+    state: "OPEN",
+  };
+
+  function withTmuxOnlyStub() {
+    const original = Bun.spawn;
+    Bun.spawn = ((spawned: string[], opts?: unknown) => {
+      if (spawned[0] !== "tmux") {
+        return (original as (a: string[], b?: unknown) => unknown)(
+          spawned,
+          opts,
+        );
+      }
+      return {
+        exited: Promise.resolve(0),
+        stdout: new Blob(["%99\n"]).stream(),
+        stderr: new Blob([""]).stream(),
+      };
+    }) as unknown as typeof Bun.spawn;
+    return () => (Bun.spawn = original);
+  }
+
+  /**
+   * Put a `gh` that answers from canned JSON on PATH.
+   *
+   * PATH, not an injected runner: this exercises `runGh`'s own explicit
+   * `env` pass-through, which is the thing that makes `gh` reachable from a
+   * test at all (see `worktree-prune.ts` for the same trick).
+   *
+   * `GIT_CONFIG_GLOBAL` goes with it because the daemon's git calls inherit
+   * the process env, and a developer's global config (a rewrite rule, a
+   * default branch, a hook) would otherwise decide whether this passes.
+   */
+  function withStubbedEnv(pr: object = PR_JSON, issue: object = ISSUE_JSON) {
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "pr.json"), JSON.stringify(pr));
+    writeFileSync(join(bin, "issue.json"), JSON.stringify(issue));
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/bin/sh\nif [ "$1" = "pr" ]; then cat '${join(bin, "pr.json")}'; else cat '${join(bin, "issue.json")}'; fi\n`,
+      { mode: 0o755 },
+    );
+    const previous = {
+      PATH: process.env.PATH,
+      GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
+      GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM,
+    };
+    process.env.PATH = `${bin}:${previous.PATH ?? ""}`;
+    process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+    process.env.GIT_CONFIG_NOSYSTEM = "1";
+    return () => {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    };
+  }
+
+  /** A checkout with a real `origin` carrying a real `refs/pull/7/head`. */
+  function makeRepo(): string {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-spawn-pr-"));
+    const origin = join(root, "origin.git");
+    runFixtureGit(root, "init", "--bare", "--initial-branch=main", origin);
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    runFixtureGit(repo, "config", "core.excludesFile", "/dev/null");
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    runFixtureGit(repo, "remote", "add", "origin", origin);
+    runFixtureGit(repo, "push", "origin", "main");
+
+    // The PR's head: one commit published under `refs/pull/7/head` and
+    // nowhere else, exactly as GitHub exposes one.
+    runFixtureGit(repo, "checkout", "-b", "pr-head-tmp");
+    writeFileSync(join(repo, "feature.txt"), "pr work\n");
+    runFixtureGit(repo, "add", "feature.txt");
+    runFixtureGit(repo, "commit", "-m", "pr work");
+    runFixtureGit(repo, "push", "origin", "HEAD:refs/pull/7/head");
+    runFixtureGit(repo, "checkout", "main");
+    runFixtureGit(repo, "branch", "-D", "pr-head-tmp");
+    return repo;
+  }
+
+  function gitOut(cwd: string, ...args: string[]): string {
+    const proc = Bun.spawnSync(["git", "-C", cwd, ...args], {
+      env: GIT_FIXTURE_ENV,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return proc.stdout.toString().trim();
+  }
+
+  async function spawnInto(
+    internals: ServerInternals,
+    body: Record<string, unknown>,
+  ): Promise<Response> {
+    return internals.handleRequest(
+      new Request("http://127.0.0.1:2269/spawn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  interface SpawnBody {
+    error?: string;
+    command?: string;
+    warnings?: string[];
+    worktree?: { name: string; path: string; branch: string; created: boolean };
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("checks the PR head out on its own branch, in a pr-<n>- worktree", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(200);
+      // Named after the PR, never bare `pr-7`: Claude Code's own fetch-only
+      // PR checkouts live at `.claude/worktrees/pr-7`.
+      expect(body.worktree?.name).toBe("pr-7-fix-flaky-binder");
+      expect(body.worktree?.path).toContain("/.claude/worktrees/pr-7-");
+      // The branch is the PR's OWN head ref, so `git push` works out of the
+      // box; the directory name has no say in it.
+      expect(body.worktree?.branch).toBe("fix/flaky-binder");
+
+      const wt = body.worktree?.path ?? "";
+      expect(gitOut(wt, "rev-parse", "--abbrev-ref", "HEAD")).toBe(
+        "fix/flaky-binder",
+      );
+      // The commit that only ever existed under refs/pull/7/head.
+      expect(existsSync(join(wt, "feature.txt"))).toBe(true);
+
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.remote"),
+      ).toBe("origin");
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.merge"),
+      ).toBe("refs/heads/fix/flaky-binder");
+      // The REMOTE base ref, not a bare `main`, which a fresh clone may not
+      // have locally. This is what the picker's `D` branch review diffs against.
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.ccmux-base"),
+      ).toBe("origin/main");
+
+      // Seeded with the PR's title and URL.
+      expect(body.command).toContain("PR #7: Fix the flaky binder test");
+      expect(body.command).toContain("https://github.com/o/r/pull/7");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  it("points a fork PR's branch at the fork for fetch and push", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv({
+      ...PR_JSON,
+      isCrossRepository: true,
+      headRepository: { name: "ccmux" },
+      headRepositoryOwner: { login: "LiadOz" },
+    });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(200);
+      expect(body.worktree?.branch).toBe("fix/flaky-binder");
+      const url = "https://github.com/LiadOz/ccmux.git";
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.remote"),
+      ).toBe(url);
+      // gh adds no named remote for a fork, so the push target is the URL.
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.pushRemote"),
+      ).toBe(url);
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.merge"),
+      ).toBe("refs/heads/fix/flaky-binder");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  // OUR refusal naming the directory, rather than git's "already used by
+  // worktree at" at the end of a create — and raised before anything is
+  // fetched or written.
+  it("refuses when the PR's branch is already checked out elsewhere", async () => {
+    const repo = makeRepo();
+    const elsewhere = join(root, "elsewhere");
+    runFixtureGit(repo, "worktree", "add", "-b", "fix/flaky-binder", elsewhere);
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("already checked out at");
+      expect(body.error).toContain(elsewhere);
+      expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  // The upstream config is the only evidence a same-named branch is THIS PR.
+  // Without it the spawn would start on unrelated history under a name that
+  // says otherwise.
+  it("refuses an unrelated local branch of the head ref's name", async () => {
+    const repo = makeRepo();
+    runFixtureGit(repo, "branch", "fix/flaky-binder");
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("already exists");
+      expect(body.error).toContain("gh pr checkout 7");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  /**
+   * THE FORK HIJACK, against real git.
+   *
+   * `git checkout -b <name> origin/<name>` writes exactly
+   * `branch.<name>.merge = refs/heads/<name>` — the same value a branch
+   * belonging to the PR has. A fork PR whose author names their head after
+   * an ordinary origin-tracking branch would therefore pass a merge-only
+   * gate, get fast-forwarded onto the FORK's commits (the non-forced fetch
+   * permits it whenever the local branch is an ancestor), and then have its
+   * remote rewritten to the fork. Requiring the remote to match is what
+   * refuses it, and the assertions below prove nothing moved.
+   */
+  it("refuses a fork PR that collides with an origin-tracking branch, touching nothing", async () => {
+    const repo = makeRepo();
+    // A perfectly ordinary tracking branch, made the way anyone would.
+    runFixtureGit(repo, "fetch", "origin", "main");
+    runFixtureGit(repo, "branch", "fix/flaky-binder", "origin/main");
+    runFixtureGit(
+      repo,
+      "config",
+      "branch.fix/flaky-binder.merge",
+      "refs/heads/fix/flaky-binder",
+    );
+    runFixtureGit(repo, "config", "branch.fix/flaky-binder.remote", "origin");
+    const before = gitOut(repo, "rev-parse", "fix/flaky-binder");
+
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv({
+      ...PR_JSON,
+      isCrossRepository: true,
+      headRepository: { name: "ccmux" },
+      headRepositoryOwner: { login: "attacker" },
+    });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("is not set up to track PR #7");
+      // The expected remote is named, so the refusal is actionable.
+      expect(body.error).toContain("https://github.com/attacker/ccmux.git");
+
+      // The ref did not move, and the tracking config was NOT rewritten to
+      // the fork. Both halves matter: either one alone would be the bug.
+      expect(gitOut(repo, "rev-parse", "fix/flaky-binder")).toBe(before);
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.remote"),
+      ).toBe("origin");
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.pushRemote"),
+      ).toBe("");
+      expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  /**
+   * The false refusal the remote gate introduced, against real git.
+   *
+   * `git remote add fork <url>; git checkout -b foo fork/foo` is the plain-git
+   * way to work on a fork PR, and it leaves `branch.foo.remote = fork` — a
+   * NAME, which does not parse as a URL. Comparing strings refused the branch
+   * that genuinely IS the PR's and told the user to rename or delete it.
+   *
+   * The hijack test above is the control: there `origin` resolves to the BASE
+   * repository, so name resolution does not reopen it.
+   */
+  it("reuses a branch whose remote is a NAME pointing at the fork", async () => {
+    const repo = makeRepo();
+    const url = "https://github.com/LiadOz/ccmux.git";
+    // Never fetched from; it exists only so the name resolves to a URL.
+    runFixtureGit(repo, "remote", "add", "fork", url);
+    runFixtureGit(repo, "fetch", "origin", "refs/pull/7/head:fix/flaky-binder");
+    runFixtureGit(
+      repo,
+      "config",
+      "branch.fix/flaky-binder.merge",
+      "refs/heads/fix/flaky-binder",
+    );
+    runFixtureGit(repo, "config", "branch.fix/flaky-binder.remote", "fork");
+
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv({
+      ...PR_JSON,
+      isCrossRepository: true,
+      headRepository: { name: "ccmux" },
+      headRepositoryOwner: { login: "LiadOz" },
+    });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(200);
+      expect(body.worktree?.branch).toBe("fix/flaky-binder");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  /**
+   * A same-repo PR must REMOVE a stale `pushRemote`, not ignore it.
+   *
+   * git treats `branch.<n>.pushRemote` as overriding `branch.<n>.remote` for
+   * pushing, so a leftover one (from an earlier fork PR on the same branch
+   * name, or from the user) would send the push somewhere else while every
+   * key the setup checks reported success.
+   */
+  it("clears a stale pushRemote on the same-repo path", async () => {
+    const repo = makeRepo();
+    runFixtureGit(repo, "fetch", "origin", "refs/pull/7/head:fix/flaky-binder");
+    runFixtureGit(
+      repo,
+      "config",
+      "branch.fix/flaky-binder.merge",
+      "refs/heads/fix/flaky-binder",
+    );
+    runFixtureGit(repo, "config", "branch.fix/flaky-binder.remote", "origin");
+    runFixtureGit(
+      repo,
+      "config",
+      "branch.fix/flaky-binder.pushRemote",
+      "https://github.com/somewhere/else.git",
+    );
+
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      expect(res.status).toBe(200);
+
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.pushRemote"),
+      ).toBe("");
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.remote"),
+      ).toBe("origin");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  // The mirror image: a branch that really IS this fork PR's is still reused
+  // rather than refused, so the gate is a discriminator and not a blanket no.
+  it("reuses a branch already tracking the fork PR", async () => {
+    const repo = makeRepo();
+    const url = "https://github.com/LiadOz/ccmux.git";
+    runFixtureGit(repo, "fetch", "origin", "refs/pull/7/head:fix/flaky-binder");
+    runFixtureGit(
+      repo,
+      "config",
+      "branch.fix/flaky-binder.merge",
+      "refs/heads/fix/flaky-binder",
+    );
+    runFixtureGit(repo, "config", "branch.fix/flaky-binder.remote", url);
+
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv({
+      ...PR_JSON,
+      isCrossRepository: true,
+      headRepository: { name: "ccmux" },
+      headRepositoryOwner: { login: "LiadOz" },
+    });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(200);
+      expect(body.worktree?.branch).toBe("fix/flaky-binder");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  /**
+   * The OPTIONAL key failing must not 500 an otherwise-correct spawn.
+   *
+   * `preparePRBranch` already declines to fail when the base ref cannot be
+   * RESOLVED, so failing on the WRITE of the same key would contradict it and
+   * throw away a good worktree over a hint for the picker's diff base.
+   *
+   * A pre-seeded multi-valued key is the deterministic way to fail exactly
+   * this one write: git refuses to overwrite multiple values with a single
+   * one (exit 5), and nothing else in the setup touches that key.
+   */
+  it("warns but succeeds when only the ccmux-base key cannot be written", async () => {
+    const repo = makeRepo();
+    runFixtureGit(
+      repo,
+      "config",
+      "--add",
+      "branch.fix/flaky-binder.ccmux-base",
+      "one",
+    );
+    runFixtureGit(
+      repo,
+      "config",
+      "--add",
+      "branch.fix/flaky-binder.ccmux-base",
+      "two",
+    );
+
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      // The spawn STANDS: pane, worktree and branch are all correct.
+      expect(res.status).toBe(200);
+      expect(body.worktree?.branch).toBe("fix/flaky-binder");
+      // And the caller is told what did not get recorded.
+      expect(body.warnings?.join("\n")).toContain("review base");
+      expect(body.warnings?.join("\n")).toContain("origin/main");
+
+      // The keys that decide where a push goes all landed.
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.remote"),
+      ).toBe("origin");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  /**
+   * The base ref not resolving must leave NO key rather than a bad one.
+   *
+   * The creation engine cuts this branch at the PR's own head, so a base it
+   * recorded would say the branch is its own review base and the picker's
+   * `D` would diff it against itself — silently, since a merge-base equal to
+   * HEAD settles the lookup and never reaches the heuristic fallback. With
+   * no key at all the fallback runs, which is what the warning promises.
+   *
+   * A base branch that does not exist on origin is the deterministic way in:
+   * the base fetch is best-effort and the `rev-parse` that gates the key
+   * fails, so `configurePRBranch` never gets a ref to write.
+   */
+  it("records no review base when the PR's base ref cannot be resolved", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv({
+      ...PR_JSON,
+      baseRefName: "release/never-pushed",
+    });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      // The spawn still STANDS: the key is a hint, not a requirement.
+      expect(res.status).toBe(200);
+      expect(body.worktree?.branch).toBe("fix/flaky-binder");
+      // Absent, not the PR head sha: `--get` exits non-zero on a key that is
+      // not there, which `gitOut` reports as empty output.
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.ccmux-base"),
+      ).toBe("");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  /**
+   * A tracking-config write that fails AFTER the worktree exists.
+   *
+   * A stale `.git/config.lock` is both the realistic cause and the only way
+   * to fail exactly these writes: `git worktree add -b` sets no upstream, so
+   * it never takes the config lock, while every `git config` write does.
+   *
+   * The keys are not independent — `remote` landing while `pushRemote` fails
+   * leaves a fork's branch fetching from the fork and PUSHING TO ORIGIN — so
+   * this must be a loud failure. It follows the post-setup convention: the
+   * worktree is deliberately NOT rolled back, and the response says both what
+   * failed and what now exists.
+   */
+  it("reports a failed tracking-config write without rolling the worktree back", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv({
+      ...PR_JSON,
+      isCrossRepository: true,
+      headRepository: { name: "ccmux" },
+      headRepositoryOwner: { login: "LiadOz" },
+    });
+    writeFileSync(join(repo, ".git", "config.lock"), "");
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      // Post-setup failures are 500s carrying the setup notes, not 400s.
+      expect(res.status).toBe(500);
+      expect(body.error).toContain("Could not finish setting up branch");
+      expect(body.error).toContain("branch.fix/flaky-binder.remote");
+      // The note naming what the user now owns, from `withSetupNotes`.
+      expect(body.error).toContain("was created at");
+      expect(body.error).toContain("pr-7-fix-flaky-binder");
+      // Left in place, as every post-setup failure leaves it.
+      expect(
+        existsSync(join(repo, ".claude", "worktrees", "pr-7-fix-flaky-binder")),
+      ).toBe(true);
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  // gh resolves the number through its own repo selection while the fetch is
+  // hardcoded to `origin`. When those disagree, everything downstream would
+  // be about a different PR that happens to share the number.
+  it("refuses when origin is a different repository than the PR's", async () => {
+    const repo = makeRepo();
+    // A real GitHub origin, so both sides of the comparison parse. The PR
+    // JSON's url says junegunn/fzf; this says someone else.
+    runFixtureGit(
+      repo,
+      "remote",
+      "set-url",
+      "origin",
+      "git@github.com:me/fzf.git",
+    );
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv({
+      ...PR_JSON,
+      url: "https://github.com/junegunn/fzf/pull/7",
+    });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("junegunn/fzf");
+      expect(body.error).toContain("me/fzf");
+      // Refused before the fetch, so no PR ref was pulled in either.
+      expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  it("refuses a PR that is not open, with the state in the message", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv({ ...PR_JSON, state: "MERGED" });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("MERGED");
+      expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  // PINS THE TRAP: `resolveWorktreeName` PREFERS a prompt over a derived
+  // name, so threading the seeded prompt into `createWorktree` would rename
+  // the worktree after the PR title and lose the `pr-<n>-` prefix.
+  it("keeps the derived name when a prompt is seeded", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+        prompt: "completely different opening words",
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(200);
+      expect(body.worktree?.name).toBe("pr-7-fix-flaky-binder");
+      // The user's own prompt still reaches the agent, after the provenance.
+      expect(body.command).toContain("completely different opening words");
+      expect(body.command).toContain("PR #7:");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  it("names an issue's worktree and branch after the issue", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        issue: 45,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(200);
+      expect(body.worktree?.name).toBe("issue-45-spawn-pr-and-issue-flags");
+      // No branch override here: an issue spawn is an ordinary branch cut
+      // from a base, so branch and name are deliberately the same.
+      expect(body.worktree?.branch).toBe("issue-45-spawn-pr-and-issue-flags");
+      expect(body.command).toContain(
+        "Issue #45: spawn: --pr and --issue flags",
+      );
+      expect(body.command).toContain("https://github.com/o/r/issues/45");
+      // Nothing PR-shaped: no tracking rewrite for an issue.
+      expect(
+        gitOut(
+          repo,
+          "config",
+          "--get",
+          "branch.issue-45-spawn-pr-and-issue-flags.remote",
+        ),
+      ).toBe("");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  it("cuts an issue's branch from an explicit worktree.base", async () => {
+    const repo = makeRepo();
+    runFixtureGit(repo, "branch", "develop");
+    const developSha = gitOut(repo, "rev-parse", "develop");
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        issue: 45,
+        worktree: { base: "develop" },
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(200);
+      expect(gitOut(body.worktree?.path ?? "", "rev-parse", "HEAD")).toBe(
+        developSha,
+      );
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  it("refuses a closed issue", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv(PR_JSON, {
+      ...ISSUE_JSON,
+      state: "CLOSED",
+    });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        issue: 45,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("closed");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  // Mirrored daemon-side because the endpoint is public and the picker will
+  // grow its own way in; each would otherwise be honored half-way.
+  it("refuses the combinations the CLI refuses, before touching the repo", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv();
+    try {
+      for (const [extra, fragment] of [
+        [{ issue: 45 }, "cannot both be set"],
+        [{ worktree: { name: "mine" } }, "worktree.name"],
+        [{ worktree: { withChanges: true } }, "worktree.withChanges"],
+        [{ worktree: { base: "main" } }, "worktree.base"],
+        [{ resume: "abc-123" }, "resume"],
+      ] as Array<[Record<string, unknown>, string]>) {
+        const res = await spawnInto(internals, {
+          agent: "claude",
+          cwd: repo,
+          pr: 7,
+          ...extra,
+        });
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as SpawnBody).error).toContain(fragment);
+      }
+      expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  it("refuses a pr/issue field that is not a positive whole number", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    try {
+      for (const value of ["7", 0, -1, 1.5]) {
+        const res = await spawnInto(internals, {
+          agent: "claude",
+          cwd: repo,
+          pr: value,
+        });
+        expect(res.status).toBe(400);
+        expect(((await res.json()) as SpawnBody).error).toContain(
+          "positive whole number",
+        );
+      }
+    } finally {
+      restoreTmux();
+    }
+  });
+});
