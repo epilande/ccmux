@@ -314,6 +314,12 @@ export interface EnrichedSession extends Session {
   tmuxTarget: string | null;
   /** The pane's current working directory (preferred over log-derived cwd) */
   paneCwd: string | null;
+  /**
+   * The tmux pane title. Claude Code sets this to its generated summary of
+   * the session, prefixed with a status glyph (a braille spinner while
+   * working, U+2733 otherwise). Surfaced by the `title` column.
+   */
+  paneTitle: string | null;
   /** Whether the session's cwd is a linked git worktree */
   isWorktree: boolean;
   /**

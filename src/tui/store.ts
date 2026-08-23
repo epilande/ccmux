@@ -778,6 +778,7 @@ export function fabricateInvokeSession(
     prompts: [],
     tmuxTarget: null,
     paneCwd: null,
+    paneTitle: null,
     isWorktree: event.isWorktree ?? false,
     mainRepoRoot: event.mainRepoRoot ?? null,
     worktreeRoot: event.worktreeRoot ?? null,
