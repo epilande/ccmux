@@ -7967,7 +7967,7 @@ describe("POST /spawn with --pr and --issue", () => {
         gitOut(repo, "config", "--get", "branch.fix/flaky-binder.merge"),
       ).toBe("refs/heads/fix/flaky-binder");
       // The REMOTE base ref, not a bare `main`, which a fresh clone may not
-      // have locally. This is what the picker's `d` review diffs against.
+      // have locally. This is what the picker's `D` branch review diffs against.
       expect(
         gitOut(repo, "config", "--get", "branch.fix/flaky-binder.ccmux-base"),
       ).toBe("origin/main");

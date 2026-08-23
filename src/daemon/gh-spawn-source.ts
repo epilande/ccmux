@@ -498,7 +498,7 @@ export interface PRBranchPrep {
   branchExisted: boolean;
   /**
    * `origin/<baseRefName>`, or null when it could not be made to resolve.
-   * Null only costs the `ccmux-base` key (the picker's `d` review falls back
+   * Null only costs the `ccmux-base` key (the picker's `D` branch review falls back
    * to its own default), so it is not worth failing a spawn over. The WRITE
    * of that key is non-fatal for the same reason; see {@link configurePRBranch}.
    */
@@ -644,7 +644,7 @@ export async function preparePRBranch(
  * add a named remote for it). Either way `git push` from the new worktree
  * updates the PR instead of failing or, worse, opening a second one.
  *
- * `ccmux-base` is ccmux's own key: it is what the picker's `d` review diffs
+ * `ccmux-base` is ccmux's own key: it is what the picker's `D` branch review diffs
  * against, and for a PR the useful base is the branch the PR targets rather
  * than whatever the repo's HEAD happened to be. Written as the REMOTE ref,
  * which is what a fresh clone actually has.
