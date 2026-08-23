@@ -428,6 +428,18 @@ export function prLabel(session: EnrichedSession, mode?: string): string {
   return mode === "short" ? ids : `PR ${ids}`;
 }
 
+/**
+ * The displayable part of a tmux pane title. Claude Code writes its generated
+ * session summary here behind a status glyph — a braille spinner (U+2800–
+ * U+28FF) while working, U+2733 otherwise — which ccmux already renders as the
+ * `status` column, so it is stripped rather than shown twice. Returns "" when
+ * nothing legible is left.
+ */
+export function paneTitleText(title: string | null | undefined): string {
+  if (!title) return "";
+  return title.replace(/^[\u2733\u2800-\u28FF\s]+/, "").trim();
+}
+
 /** Whether a single field has displayable data on this session. */
 export function hasFieldData(
   session: EnrichedSession,
@@ -456,6 +468,8 @@ export function hasFieldData(
       return !!session.gitBranch;
     case "pr":
       return sessionPRs(session).length > 0;
+    case "title":
+      return paneTitleText(session.paneTitle) !== "";
   }
 }
 
@@ -474,11 +488,20 @@ export function rowHasContent(
   return row.left.some(counts) || row.right.some(counts);
 }
 
-/** Whether the prompt cell lands on this resolved row (either side). */
-export function rowHasPrompt(row: ResolvedRow): boolean {
+/**
+ * Fields that flex to fill their row rather than occupying a fixed width:
+ * free text of unbounded length, truncated to whatever the row has left.
+ * They share one budget, so a row should carry at most one of them.
+ */
+export function isFlexTextField(field: ColumnField): boolean {
+  return field === "prompt" || field === "title";
+}
+
+/** Whether a flexible text cell lands on this resolved row (either side). */
+export function rowHasFlexText(row: ResolvedRow): boolean {
   return (
-    row.left.some((e) => e.field === "prompt") ||
-    row.right.some((e) => e.field === "prompt")
+    row.left.some((e) => isFlexTextField(e.field)) ||
+    row.right.some((e) => isFlexTextField(e.field))
   );
 }
 

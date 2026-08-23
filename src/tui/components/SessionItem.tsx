@@ -28,8 +28,10 @@ import {
   prColorState,
   hasFieldData,
   normalizePrompt,
+  paneTitleText,
   rowHasContent,
-  rowHasPrompt,
+  rowHasFlexText,
+  isFlexTextField,
   entryRightWidth,
   getAttentionLabel,
   handoffBadge,
@@ -632,6 +634,27 @@ const FieldCell: Component<{
         </box>
       );
     }
+    case "title": {
+      // The agent's own summary of what it is doing: Claude Code keeps the
+      // tmux pane title updated with one, and `paneTitleText` drops the
+      // status glyph the `status` column already renders.
+      //
+      // Thunk, not a const, for the same reason as `branch` below: rows stay
+      // mounted across SSE deltas, so a const would freeze the cell at its
+      // mount-time title and never track the agent's next turn.
+      //
+      // Shares the prompt's budget and flex behaviour — both are the row's
+      // flexible filler.
+      // ponytail: `title` and `prompt` on the SAME row both claim
+      // maxPromptLen and will overrun each other; put one or the other on a
+      // row. Split the budget if that combination ever needs to work.
+      const label = () => truncateText(paneTitleText(ctx.session.paneTitle), ctx.maxPromptLen);
+      return (
+        <box flexGrow={1} flexShrink={1} flexDirection="row">
+          <text fg={dimColor(ctx, theme.overlay)}>{label()}</text>
+        </box>
+      );
+    }
     case "cwd":
       return (
         <text fg={dimColor(ctx, theme.overlay)}>
@@ -702,7 +725,7 @@ const RowRender: Component<{
   // A prompt on this row is the flexible filler (its cell grows into the gap),
   // so the standalone spacer would double up and split the space. Drop it, and
   // tell the project cell to give up its own flex-grow.
-  const hasPrompt = createMemo(() => rowHasPrompt(props.row));
+  const hasPrompt = createMemo(() => rowHasFlexText(props.row));
   // The project cell also flex-grows (when no prompt shares its row), so it is
   // the filler and the standalone spacer is redundant. Rendering both splits
   // the slack and squeezes the project cell by ~1 column, which drops its `…`.
@@ -846,6 +869,18 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   // up space. Bounded by the prompt's own width so a short one reserves less.
   const PROMPT_MIN = 16;
 
+  // The text the row's flexible cell will actually render, so the floor above
+  // reserves against the real content rather than assuming `prompt`. Empty
+  // when the row has no flexible cell (or it has nothing to show).
+  const flexTextOnRow = (row: ResolvedRow): string => {
+    const entry = [...row.left, ...row.right].find((e) =>
+      isFlexTextField(e.field),
+    );
+    if (!entry) return "";
+    if (entry.field === "title") return paneTitleText(props.session.paneTitle);
+    return normalizePrompt(props.session.lastPrompt ?? "");
+  };
+
   // Budget for the project cell's `…` truncation. Full width minus the item
   // padding, every row-1 sibling except project (and the prompt, budgeted via
   // its floor below), the reserved attention cell, and a small margin. Reads
@@ -853,9 +888,9 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   // maxPromptLen can depend on the fitted project width without a cycle.
   const maxProjectLen = createMemo(() => {
     const cols = columns();
-    const promptOnRow1 = rowHasPrompt(cols.row1);
+    const promptOnRow1 = rowHasFlexText(cols.row1);
     const siblings = [...cols.row1.left, ...cols.row1.right].filter(
-      (e) => e.field !== "project" && e.field !== "prompt",
+      (e) => e.field !== "project" && !isFlexTextField(e.field),
     );
     const cells = siblings.reduce((acc, e) => {
       const w =
@@ -865,13 +900,10 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
       return acc + (w > 0 ? w + 1 : 0); // +1 for the inter-cell gap
     }, 0);
     const attn = attentionWidth();
-    const promptFloor =
-      promptOnRow1 && hasFieldData(props.session, "prompt")
-        ? Math.min(
-            displayWidth(normalizePrompt(props.session.lastPrompt ?? "")),
-            PROMPT_MIN,
-          ) + 1
-        : 0;
+    const promptFloor = promptOnRow1
+      ? Math.min(displayWidth(flexTextOnRow(cols.row1)), PROMPT_MIN) +
+        (flexTextOnRow(cols.row1) ? 1 : 0)
+      : 0;
     const reserved =
       2 + // item paddingLeft/paddingRight
       cells +
@@ -891,10 +923,10 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   // show something identifiable.
   const maxPromptLen = createMemo(() => {
     const cols = columns();
-    const onRow1 = rowHasPrompt(cols.row1);
+    const onRow1 = rowHasFlexText(cols.row1);
     const row = onRow1 ? cols.row1 : cols.row2;
     const siblings = [...row.left, ...row.right].filter(
-      (e) => e.field !== "prompt",
+      (e) => !isFlexTextField(e.field),
     );
     const cells = siblings.reduce((acc, e) => {
       const w =
@@ -1091,6 +1123,7 @@ function visibleField(session: EnrichedSession, field: ColumnField): boolean {
     case "cwd":
     case "branch":
     case "pr":
+    case "title":
       return hasFieldData(session, field);
     default:
       return true;
