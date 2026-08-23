@@ -31,6 +31,13 @@ import type {
   WorktreeListResponse,
   WorktreeRow,
 } from "../../daemon/worktree-list";
+import type {
+  OpenPR,
+  PRListBody,
+  PRListError,
+  PRListResponse,
+} from "../../daemon/pr-list";
+import { normalizePRList } from "../../daemon/pr-list";
 import type { SessionStatus } from "../../types/session";
 import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
 import { fitHints } from "./Footer";
@@ -77,6 +84,8 @@ type Phase = "loading" | "list" | "confirm" | "running" | "done" | "error";
 const LIST_TIMEOUT_MS = 20_000;
 const SCAN_TIMEOUT_MS = 60_000;
 const RUN_TIMEOUT_MS = 10 * 60_000;
+/** Phase 3, one `gh pr list` per repo behind a daemon-side TTL. */
+const PR_TIMEOUT_MS = 30_000;
 
 /** How long a `y` copy confirmation stays on the hint line. */
 const COPY_NOTE_MS = 2_000;
@@ -85,14 +94,12 @@ const COPY_NOTE_MS = 2_000;
  * One worktree as the panel knows it: what exists (phase 1) plus whatever
  * phase 2 had to say about it, which is nothing at all for a healthy row.
  */
-export interface PanelRow {
+export interface WorktreePanelRow {
+  kind: "worktree";
   /**
    * What the cursor, the scroll layout and the selection sets key by.
    *
-   * The worktree's own absolute path today; a separate field rather than a
-   * reach into `row` because the list is about to hold rows that are not
-   * worktrees at all, and every one of those consumers wants "which row is
-   * this" rather than "which directory".
+   * The worktree's own absolute path.
    */
   key: string;
   row: WorktreeRow;
@@ -104,11 +111,65 @@ export interface PanelRow {
   pr: PRState | null;
 }
 
+/** One open pull request of the repo, from phase 3 (issue #151). */
+export interface PRPanelRow {
+  kind: "pr";
+  /** {@link prRowKey}. */
+  key: string;
+  repoRoot: string;
+  pr: OpenPR;
+  /**
+   * The local worktree holding this PR's head commit, or null.
+   *
+   * Proven by SHA (`headRefOid` equal to the branch tip), never by branch
+   * NAME: `gh pr list --head patch-1` on `cli/cli` answers with 25 PRs from
+   * 25 different forks, which is the namesake trap `selectPRForBranch`
+   * documents. Where either side does not resolve the row stays unmarked
+   * rather than guessing.
+   */
+  checkedOutPath: string | null;
+  /** That worktree's display name, for the phrase that names it. */
+  checkedOutName: string | null;
+}
+
+/**
+ * A row of the list, which is no longer only worktrees.
+ *
+ * A discriminated union rather than a worktree row with optional PR fields,
+ * because the difference is not decoration: `space`, `x` and `D` act on a
+ * removal a PR row has no notion of, and `y` and `d` act on a directory it
+ * does not have. Narrowing on `kind` is what makes the compiler ask every one
+ * of those what it means here — including a key added later, which is the
+ * case a runtime guard would miss.
+ */
+export type PanelRow = WorktreePanelRow | PRPanelRow;
+
+/**
+ * The cursor/layout key for a PR row.
+ *
+ * Synthetic, and it cannot collide with a worktree's: every worktree key is
+ * an absolute path, so it starts with `/`.
+ */
+export function prRowKey(repoRoot: string, number: number): string {
+  return `pr:${repoRoot}#${number}`;
+}
+
 /** One repo's rows, in display order. */
 export interface PanelRepo {
   repoRoot: string;
   repoName: string;
   rows: PanelRow[];
+  /**
+   * The open-PR section's header line: whether it draws at all, and whether
+   * it is still waiting on GitHub.
+   *
+   * Derived onto the group rather than passed to the render, for the reason
+   * `showsGroupHeaders` is derived: `visualLayout` has to count the same
+   * lines the render draws, and two independent conditions eventually
+   * disagree. A section with no PRs and nothing in flight does not draw — the
+   * same rule the removable divider follows.
+   */
+  prSection: { shown: boolean; pending: boolean };
 }
 
 interface WorktreesPanelProps {
@@ -174,6 +235,24 @@ interface WorktreesPanelProps {
     panelRepo: string | null;
     panelScope: string | null;
   }) => void;
+  /**
+   * Enter on an open PR that is NOT checked out here: cut a worktree from its
+   * head (issue #151).
+   *
+   * A verb of its own rather than a flag on `onSpawn`, because the daemon
+   * derives the worktree's NAME and its base from the PR — `POST /spawn`
+   * refuses `pr` alongside `worktree.name` and `worktree.base` — so the
+   * dialog it opens has different rows. A PR that IS checked out goes through
+   * `onSpawn` instead, which is the existing revalidated jump.
+   */
+  onSpawnFromPR?: (target: {
+    number: number;
+    title: string;
+    repoRoot: string;
+    cursor: string;
+    panelRepo: string | null;
+    panelScope: string | null;
+  }) => void;
 }
 
 /**
@@ -233,6 +312,33 @@ export function worktreeHoldsPath(
 }
 
 /**
+ * The local worktree holding `pr`'s head commit, or null.
+ *
+ * Identity is the SHA and nothing else. `headRefOid` equal to a branch tip is
+ * what defeats name reuse and the fork noise `gh pr list --head` returns; a
+ * match on the branch NAME would mark a PR as checked out because someone
+ * else's fork happens to use the same word. Where either side does not
+ * resolve — an old daemon that sends no `tip`, a detached worktree, a gh that
+ * withheld `headRefOid` — the row stays UNMARKED, which costs a convenience
+ * where a wrong mark would send Enter into the wrong directory.
+ *
+ * Among several worktrees at the same commit (a checkout just cut from this
+ * branch shares its tip) the one whose branch is also the PR's head wins.
+ * That is a tie-break between rows the SHA has already proven, never a way in
+ * for a name to prove anything by itself.
+ */
+export function checkoutHolding(
+  pr: OpenPR,
+  worktrees: WorktreeRow[],
+): WorktreeRow | null {
+  if (!pr.headRefOid) return null;
+  const matches = worktrees.filter((row) => row.tip === pr.headRefOid);
+  return (
+    matches.find((row) => row.branch === pr.headRefName) ?? matches[0] ?? null
+  );
+}
+
+/**
  * Where a row sits within its repo group.
  *
  * The order encodes what the panel is FOR: the main checkout anchors the
@@ -242,6 +348,10 @@ export function worktreeHoldsPath(
  * lands, instead of settling twice.
  */
 function rowBucket(entry: PanelRow): number {
+  // PRs are the group's last section, below even the removable one: they
+  // describe work on GitHub rather than a directory on disk, and the panel's
+  // subject is the directories.
+  if (entry.kind === "pr") return 4;
   if (entry.row.isMain) return 0;
   if (entry.candidate) return 3;
   return entry.row.sessions.length > 0 ? 1 : 2;
@@ -249,6 +359,7 @@ function rowBucket(entry: PanelRow): number {
 
 /** Rows an agent is actively in sort above rows whose agent is parked. */
 function sessionRank(entry: PanelRow): number {
+  if (entry.kind === "pr") return 0;
   const sessions = entry.row.sessions;
   if (sessions.some((s) => s.status === "working" || s.status === "waiting")) {
     return 0;
@@ -261,12 +372,15 @@ function sessionRank(entry: PanelRow): number {
  * contract, and the single re-sort is the thing worth testing.
  */
 export function sortWorktreeRows(rows: PanelRow[]): PanelRow[] {
-  return [...rows].sort(
-    (a, b) =>
-      rowBucket(a) - rowBucket(b) ||
-      sessionRank(a) - sessionRank(b) ||
-      a.row.name.localeCompare(b.row.name),
-  );
+  return [...rows].sort((a, b) => {
+    const byBucket = rowBucket(a) - rowBucket(b) || sessionRank(a) - sessionRank(b);
+    if (byBucket !== 0) return byBucket;
+    // Both PRs, since the buckets above already separated the two kinds.
+    // Newest first — gh's own order, restated so a future gh cannot change it.
+    if (a.kind === "pr" && b.kind === "pr") return b.pr.number - a.pr.number;
+    if (a.kind === "pr" || b.kind === "pr") return 0;
+    return a.row.name.localeCompare(b.row.name);
+  });
 }
 
 /**
@@ -377,6 +491,11 @@ export function titleSegments(
  */
 function rowColor(entry: PanelRow, isCursor: boolean): string {
   if (isCursor) return theme.text;
+  // A draft is dimmer than the rest of its section: it is on GitHub but not
+  // asking for anything yet, and the section exists to point at what is.
+  if (entry.kind === "pr") {
+    return entry.pr.isDraft ? theme.subtext : theme.text;
+  }
   return entry.candidate && entry.row.dirty.dirty ? theme.yellow : theme.text;
 }
 
@@ -577,6 +696,52 @@ export function describeSessions(sessions: WorktreeSession[]): string {
   return `${sessions.length} agents, ${sharing} ${status}`;
 }
 
+/**
+ * What a PR's review state says, in the words GitHub uses for it.
+ *
+ * `REVIEW_REQUIRED` is deliberately silent: it is the DEFAULT state of every
+ * PR on a protected branch, so a phrase for it would appear on nearly every
+ * row and say nothing about that row in particular.
+ */
+export function describeReview(pr: OpenPR): Phrase | null {
+  switch (pr.reviewDecision) {
+    case "APPROVED":
+      return { text: "approved", fg: theme.green };
+    case "CHANGES_REQUESTED":
+      return { text: "changes requested", fg: theme.peach };
+    case "REVIEW_REQUIRED":
+      return null;
+    // `BranchPR` types this nullable AND optional, so both spellings of
+    // "GitHub said nothing" are cases here rather than a default.
+    case null:
+    case undefined:
+      return null;
+    default:
+      return unhandled(pr.reviewDecision, null);
+  }
+}
+
+/**
+ * What a PR's checks say.
+ *
+ * `none` is silent rather than green: an un-CI'd PR has nothing to report,
+ * and `foldChecks` keeps it out of `passing` for exactly that reason.
+ */
+export function describeChecks(pr: OpenPR): Phrase | null {
+  switch (pr.ciStatus) {
+    case "passing":
+      return { text: "checks pass", fg: theme.green };
+    case "failing":
+      return { text: "checks fail", fg: theme.red };
+    case "pending":
+      return { text: "checks running", fg: theme.yellow };
+    case "none":
+      return null;
+    default:
+      return unhandled(pr.ciStatus, null);
+  }
+}
+
 /** A phrase on the detail line, with the colour it carries. */
 export interface Phrase {
   text: string;
@@ -594,6 +759,7 @@ export function detailPhrases(
   entry: PanelRow,
   opts: { dirtyOk: boolean; compact?: boolean },
 ): Phrase[] {
+  if (entry.kind === "pr") return prDetailPhrases(entry, opts);
   const phrases: Phrase[] = [];
   const candidate = entry.candidate;
   const row = entry.row;
@@ -703,6 +869,47 @@ export function detailPhrases(
   return phrases;
 }
 
+/**
+ * A PR row's detail line: its head branch, who opened it, and only the states
+ * that are news.
+ *
+ * The branch leads because it is what a checkout would be named after, and it
+ * is the fact that connects the row to the worktrees above it. Draft, review
+ * and checks each stay silent in their unremarkable state, by the same rule
+ * the worktree rows follow: a phrase that appears on every row is noise that
+ * pushes the ones that differ off a narrow panel.
+ *
+ * `checked out` comes LAST and is the loudest thing on the line, because it
+ * changes what Enter does.
+ */
+function prDetailPhrases(
+  entry: PRPanelRow,
+  opts: { compact?: boolean },
+): Phrase[] {
+  const pr = entry.pr;
+  const phrases: Phrase[] = [];
+  if (pr.headRefName) {
+    phrases.push({ text: pr.headRefName, fg: theme.overlay });
+  }
+  // The author is the first thing to go on a narrow surface: on a repo you
+  // work in, most PRs are yours, and the branch is the useful half.
+  if (pr.author && opts.compact !== true) {
+    phrases.push({ text: `@${pr.author}`, fg: theme.overlay });
+  }
+  if (pr.isDraft) phrases.push({ text: "draft", fg: theme.subtext });
+  const review = describeReview(pr);
+  if (review) phrases.push(review);
+  const checks = describeChecks(pr);
+  if (checks) phrases.push(checks);
+  if (entry.checkedOutName) {
+    phrases.push({
+      text: `checked out in ${entry.checkedOutName}`,
+      fg: theme.green,
+    });
+  }
+  return phrases;
+}
+
 /** The separator between detail phrases, muted so the facts carry the line. */
 const PHRASE_SEPARATOR = " · ";
 
@@ -733,6 +940,15 @@ export const RAIL = "│";
  * belongs ON the rail, even at `┃`'s lighter weight.
  */
 export const CURSOR_BAR = "┃";
+
+/**
+ * The PR rows' marker, in the same one-column slot the other markers use.
+ *
+ * A glyph of its own rather than a reused one: the slot is read as a legend
+ * down the left edge, and a PR row is not any of the four things already
+ * spelled there.
+ */
+export const PR_MARKER = "⊙";
 
 /** Columns before line 1's content: a space, the rail (which the cursor bar
  *  overlays on the cursor row), and a space. The marker slot is inside
@@ -781,8 +997,13 @@ export function detailSegments(
  * The main checkout says what it IS rather than repeating the directory name,
  * which the repo header directly above has already said.
  */
-export function rowLabel(row: WorktreeRow): string {
-  return row.isMain ? "main checkout" : row.name;
+export function rowLabel(entry: PanelRow): string {
+  // `#151 Worktrees panel: open-PR list` — the number and the title are one
+  // label, on line 1 where the bright layer is. Splitting them across the two
+  // columns would put the only thing that identifies the PR to a human on the
+  // dim line.
+  if (entry.kind === "pr") return `#${entry.pr.number} ${entry.pr.title}`;
+  return entry.row.isMain ? "main checkout" : entry.row.name;
 }
 
 /**
@@ -799,9 +1020,13 @@ export function rowLabel(row: WorktreeRow): string {
  * is `develop` but whose main checkout sits on `main` wrongly hides it. That
  * failure only hides a true name; it can never show a wrong one.
  */
-export function rowBranch(row: WorktreeRow): string {
+export function rowBranch(entry: PanelRow): string {
+  // A PR's head ref goes on the detail line instead. Its label is already the
+  // full width of a title, so a second column beside it has nowhere to start.
+  if (entry.kind === "pr") return "";
+  const row = entry.row;
   if (row.detached || !row.branch) return "detached";
-  if (row.branch === rowLabel(row)) return "";
+  if (row.branch === rowLabel(entry)) return "";
   if (row.isMain && (row.branch === "main" || row.branch === "master")) {
     return "";
   }
@@ -818,7 +1043,11 @@ export function rowBranch(row: WorktreeRow): string {
 export function labelColumnWidth(rows: PanelRow[], max = 28): number {
   let width = 0;
   for (const entry of rows) {
-    width = Math.max(width, displayWidth(rowLabel(entry.row)));
+    // PR rows are deliberately not measured. Their label is a title, so a
+    // long one would push the branch column of every worktree in the panel to
+    // the cap — over a row that has no branch column of its own to align to.
+    if (entry.kind === "pr") continue;
+    width = Math.max(width, displayWidth(rowLabel(entry)));
   }
   return Math.min(width, max);
 }
@@ -845,8 +1074,19 @@ export function primarySegments(
     statusIcon?: string;
   },
 ): RowSegment[] {
-  const row = entry.row;
   const segments: RowSegment[] = [];
+  if (entry.kind === "pr") {
+    // Its own marker, so the left edge stays a legend: `⌂` main checkout, a
+    // status glyph where an agent is, `·` a plain worktree, `[ ]` removable,
+    // `⊙` a pull request.
+    segments.push({ text: `${PR_MARKER} `, fg: theme.mauve });
+    segments.push({
+      text: rowLabel(entry),
+      fg: rowColor(entry, opts.isCursor),
+    });
+    return segments;
+  }
+  const row = entry.row;
   if (entry.candidate) {
     // The only rows with checkboxes are the ones under the removable
     // divider, which is what makes an unexplained checkbox impossible.
@@ -877,8 +1117,8 @@ export function primarySegments(
     segments.push({ text: "· ", fg: theme.overlay });
   }
 
-  const label = rowLabel(row);
-  const branch = rowBranch(entry.row);
+  const label = rowLabel(entry);
+  const branch = rowBranch(entry);
   segments.push({ text: label, fg: rowColor(entry, opts.isCursor) });
   if (branch) {
     // Padded against the PANEL's widest marker, not the row's own: kept rows
@@ -908,12 +1148,17 @@ export function primarySegments(
  * section starts.
  */
 export function splitRemovable(rows: PanelRow[]): {
-  kept: PanelRow[];
-  removable: PanelRow[];
+  kept: WorktreePanelRow[];
+  removable: WorktreePanelRow[];
+  prs: PRPanelRow[];
 } {
+  const worktrees = rows.filter(
+    (entry): entry is WorktreePanelRow => entry.kind === "worktree",
+  );
   return {
-    kept: rows.filter((entry) => !entry.candidate),
-    removable: rows.filter((entry) => entry.candidate),
+    kept: worktrees.filter((entry) => !entry.candidate),
+    removable: worktrees.filter((entry) => entry.candidate),
+    prs: rows.filter((entry): entry is PRPanelRow => entry.kind === "pr"),
   };
 }
 
@@ -941,6 +1186,25 @@ export function showsGroupHeaders(repos: PanelRepo[]): boolean {
  */
 export function dividerText(count: number, width: number): string {
   return truncateText(`├─ removable · ${count}`, Math.max(1, width));
+}
+
+/**
+ * The label that opens a group's open-PR section, in the removable divider's
+ * own language (a tee the rail runs into, a `·`-separated suffix, no rule).
+ *
+ * The pending state rides THIS line rather than taking a row of its own, for
+ * the reason the title's `scanning` suffix does: a row that states a fact and
+ * then takes its row back moves the whole list at the exact moment the new
+ * rows arrive, which is the glitch the suffix idiom exists to prevent. Here
+ * the header is already on screen, so the answer replaces text in place.
+ */
+export function prDividerText(
+  count: number | null,
+  spinner: string,
+  width: number,
+): string {
+  const suffix = count === null ? `${spinner} checking GitHub` : String(count);
+  return truncateText(`├─ open PRs · ${suffix}`, Math.max(1, width));
 }
 
 /**
@@ -1172,9 +1436,9 @@ export function rowVisualHeight(entry: PanelRow, compact = false): number {
 export type VisualLayout = Map<string, { line: number; height: number }>;
 
 /**
- * Lay the whole list out in visual lines: repo headers and the removable
- * divider each take one, and a row takes whatever {@link rowVisualHeight}
- * says.
+ * Lay the whole list out in visual lines: repo headers, the removable divider
+ * and the open-PR header each take one, and a row takes whatever
+ * {@link rowVisualHeight} says.
  *
  * The divider is not a row and the cursor never lands on it, but it is a LINE,
  * and a scroll target computed without it puts every row below the divider one
@@ -1196,10 +1460,16 @@ export function visualLayout(
   const headers = showsGroupHeaders(repos);
   for (const repo of repos) {
     if (headers) line += 1; // the repo header
-    const { kept, removable } = splitRemovable(repo.rows);
+    const { kept, removable, prs } = splitRemovable(repo.rows);
     kept.forEach(place);
     if (removable.length > 0) line += 1; // the removable divider
     removable.forEach(place);
+    // The open-PR header is a LINE the cursor never lands on, exactly like
+    // the removable divider, and a layout that skipped it would put every PR
+    // row one line out of true. Read off the group rather than re-derived, so
+    // it cannot disagree with what the render draws.
+    if (repo.prSection.shown) line += 1;
+    prs.forEach(place);
   }
   return layout;
 }
@@ -1240,6 +1510,29 @@ export function clipboardArgv(
   platform: NodeJS.Platform = process.platform,
 ): string[] | null {
   return platform === "darwin" ? ["pbcopy"] : null;
+}
+
+/**
+ * argv that hands `url` to the desktop's browser, or null where there is no
+ * standard way to.
+ *
+ * The two answers every desktop agrees on. `open` is always present on macOS;
+ * `xdg-open` is the freedesktop entry point every Linux desktop installs,
+ * which is a weaker guarantee than `pbcopy`'s but the only one there is, so a
+ * missing one is reported rather than guessed around.
+ *
+ * Known limit, and it has no fix of `y`'s kind: over ssh this opens a browser
+ * on the REMOTE machine. `y` covers that case by ALSO writing OSC 52, which
+ * reaches the terminal the user is looking at; there is no escape sequence
+ * for "open this URL", so the honest thing is to say so rather than pretend.
+ */
+export function browserArgv(
+  url: string,
+  platform: NodeJS.Platform = process.platform,
+): string[] | null {
+  if (platform === "darwin") return ["open", url];
+  if (platform === "win32") return null;
+  return ["xdg-open", url];
 }
 
 /** What {@link copyToClipboard} needs from the renderer, named so tests can
@@ -1285,6 +1578,44 @@ export function copyToClipboard(
   return { osc52, local };
 }
 
+/**
+ * The pull request a row points at, whichever kind of row it is.
+ *
+ * ONE meaning for `o` on every row, which is the rule the panel's keys follow
+ * (`d` reviews, `y` copies, `x` removes — none of them read the row to decide
+ * what they are). A PR row IS a pull request; a worktree row has one when the
+ * scan found it, open or merged. A row with neither says so rather than
+ * silently doing nothing.
+ */
+export function rowPRUrl(entry: PanelRow): string | null {
+  if (entry.kind === "pr") return entry.pr.url;
+  return entry.pr?.url ?? entry.candidate?.pr?.url ?? null;
+}
+
+/** Hand `url` to the desktop browser. False when there is no way to, or the
+ *  helper could not be started. */
+export function openInBrowser(
+  url: string,
+  spawn: (argv: string[]) => boolean = spawnDetached,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const argv = browserArgv(url, platform);
+  return argv !== null && spawn(argv);
+}
+
+function spawnDetached(argv: string[]): boolean {
+  try {
+    const child = Bun.spawn(argv, {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    void child.exited;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function spawnClipboardHelper(argv: string[], text: string): boolean {
   try {
     const child = Bun.spawn(argv, {
@@ -1308,6 +1639,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const [scan, setScan] = createSignal<PruneScan | null>(null);
   /** Phase 2's failure, which leaves the panel usable read-only. */
   const [scanError, setScanError] = createSignal<string | null>(null);
+  /** Phase 3 (issue #151): the repos' open PRs, null until GitHub answers. */
+  const [prs, setPrs] = createSignal<PRListResponse | null>(null);
+  /** Phase 3's whole-request failure. Per-REPO failures ride inside a
+   *  successful response, so one broken repo costs only its own section. */
+  const [prError, setPrError] = createSignal<string | null>(null);
   const [cursorPath, setCursorPath] = createSignal<string | null>(
     props.initialCursor ?? null,
   );
@@ -1342,6 +1678,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     if (noteTimer) clearTimeout(noteTimer);
   });
 
+  /**
+   * Whether phase 3 is still in flight. Derived from its own inputs for the
+   * same reason `scanning` is: the generation counter then covers it for free.
+   */
+  const prPending = (): boolean => prs() === null && prError() === null;
+
   /** Repo filter currently in force, which is what both requests carry. */
   const repoFilter = (): string | null => (scoped() ? props.repo : null);
 
@@ -1350,22 +1692,48 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const candidates = new Map(data?.candidates.map((c) => [c.path, c]) ?? []);
     const skips = new Map(data?.skipped.map((s) => [s.path, s]) ?? []);
     const openPRs = new Map((data?.open ?? []).map((o) => [o.path, o.pr]));
-    return orderRepos(repos(), props.repo).map((repo) => ({
-      repoRoot: repo.repoRoot,
-      repoName: repo.repoName,
-      rows: sortWorktreeRows(
-        repo.worktrees.map((row) => {
-          const candidate = candidates.get(row.path) ?? null;
+    const prsByRepo = new Map(
+      (prs()?.repos ?? []).map((repo) => [repo.repoRoot, repo.prs]),
+    );
+    const pending = prPending();
+    return orderRepos(repos(), props.repo).map((repo) => {
+      const worktrees: PanelRow[] = repo.worktrees.map((row) => {
+        const candidate = candidates.get(row.path) ?? null;
+        return {
+          kind: "worktree" as const,
+          key: row.path,
+          row,
+          candidate,
+          skip: skips.get(row.path) ?? null,
+          pr: openPRs.get(row.path) ?? candidate?.pr ?? null,
+        };
+      });
+      const prRows: PanelRow[] = (prsByRepo.get(repo.repoRoot) ?? []).map(
+        (pr) => {
+          const held = checkoutHolding(pr, repo.worktrees);
           return {
-            key: row.path,
-            row,
-            candidate,
-            skip: skips.get(row.path) ?? null,
-            pr: openPRs.get(row.path) ?? candidate?.pr ?? null,
+            kind: "pr" as const,
+            key: prRowKey(repo.repoRoot, pr.number),
+            repoRoot: repo.repoRoot,
+            pr,
+            checkedOutPath: held?.path ?? null,
+            // The worktree's own display name, the one the row above it
+            // shows — not a basename recomputed here, which is the same
+            // string only until the two disagree.
+            checkedOutName: held?.name ?? null,
           };
-        }),
-      ),
-    }));
+        },
+      );
+      return {
+        repoRoot: repo.repoRoot,
+        repoName: repo.repoName,
+        rows: sortWorktreeRows([...worktrees, ...prRows]),
+        // Shown while the answer is still coming, and afterwards only when
+        // there is something to show: a repo with no open PRs spends no rows
+        // saying so, the same rule the removable divider follows.
+        prSection: { shown: pending || prRows.length > 0, pending },
+      };
+    });
   });
 
   /** Every row in display order, which is what the cursor walks. */
@@ -1379,7 +1747,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    *  2. The branch column pads against this rather than each row's own
    *  marker, so it cannot jog by two at the removable divider. */
   const markerBase = createMemo(() =>
-    markerWidth(flatRows().some((entry) => entry.candidate !== null)),
+    markerWidth(
+      flatRows().some(
+        (entry) => entry.kind === "worktree" && entry.candidate !== null,
+      ),
+    ),
   );
 
   const candidates = (): PruneCandidate[] => scan()?.candidates ?? [];
@@ -1516,6 +1888,34 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    */
   const scanning = (): boolean => scan() === null && scanError() === null;
 
+
+  /**
+   * Phase 3's failure as one line, or null when there is nothing to say.
+   *
+   * Degrades exactly like phase 2: one line under the list, the panel stays
+   * fully usable, and the phase NEVER reaches `setPhase("error")`. A repo's
+   * own failure is named with the repo, since on the multi-repo view the
+   * others rendered fine and the line has to say which one did not.
+   */
+  const prErrorLine = (): string | null => {
+    const failed = prError();
+    if (failed) return `Open PRs failed: ${failed}`;
+    const errors: PRListError[] = prs()?.errors ?? [];
+    const first = errors[0];
+    if (!first) return null;
+    if (errors.length === 1) {
+      return `Open PRs (${first.repoName}): ${first.error}`;
+    }
+    return `Open PRs unavailable for ${errors.length} repos: ${first.error}`;
+  };
+
+  // The PR header's own spinner, released the moment phase 3 lands.
+  const prIcon = useStatusIcon(
+    () => (prPending() ? "working" : "idle"),
+    () => null,
+    () => props.iconStyle ?? "dot",
+  );
+
   // Purely decorative, and gated on `scanning()` so the shared spinner
   // interval is released the moment the scan lands. Nothing keys off it: the
   // list is fully navigable, selectable and actionable throughout phase 1.
@@ -1583,6 +1983,8 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     setPhase("loading");
     setScan(null);
     setScanError(null);
+    setPrs(null);
+    setPrError(null);
     // A removal notice describes the run that led HERE; any further load
     // (Tab, `r`, a reopen) is news that supersedes it. The success path sets
     // its notice AFTER calling load(), so the one reload it rides survives.
@@ -1603,6 +2005,28 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         if (generation !== loadGeneration) return;
         setError(err instanceof Error ? err.message : String(err));
         setPhase("error");
+      });
+
+    // Phase 3 is INDEPENDENT of both: a third request on the same generation,
+    // with its own timeout, so a slow GitHub cannot hold up the list and a
+    // failure costs one line rather than the panel. Deliberately not seeded
+    // from the prune scan's cached PRs — that scan answers about worktrees,
+    // so it knows nothing about a PR no checkout here has ever held, which is
+    // most of what this section is for. A return-open simply refetches; the
+    // daemon's per-repo TTL is what makes that cheap.
+    const prUrl = new URL(`${getDaemonUrl()}/prs`);
+    if (filter) prUrl.searchParams.set("repo", filter);
+    if (props.cwd) prUrl.searchParams.set("cwd", props.cwd);
+    fetch(prUrl, { signal: AbortSignal.timeout(PR_TIMEOUT_MS) })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(describeHttpFailure(response.status));
+        const data = normalizePRList((await response.json()) as PRListBody);
+        if (generation !== loadGeneration) return;
+        setPrs(data);
+      })
+      .catch((err: unknown) => {
+        if (generation !== loadGeneration) return;
+        setPrError(err instanceof Error ? err.message : String(err));
       });
 
     // A return-open reuses the scan the user just watched complete instead
@@ -1700,6 +2124,29 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * deliberately not a thing this panel offers.
    */
   function activateRow(entry: PanelRow): void {
+    const origin = { panelRepo: props.repo, panelScope: repoFilter() };
+    if (entry.kind === "pr") {
+      // A PR already checked out here is not a spawn question at all: it is
+      // the worktree that holds it, so Enter routes through the SAME verb a
+      // worktree row's Enter takes, which revalidates against the live
+      // session list and jumps if an agent moved in since the list was read.
+      if (entry.checkedOutPath) {
+        props.onSpawn({
+          cwd: entry.checkedOutPath,
+          existingWorktree: entry.checkedOutPath,
+          ...origin,
+        });
+        return;
+      }
+      props.onSpawnFromPR?.({
+        number: entry.pr.number,
+        title: entry.pr.title,
+        repoRoot: entry.repoRoot,
+        cursor: entry.key,
+        ...origin,
+      });
+      return;
+    }
     const session = entry.row.sessions[0];
     if (session) {
       props.onJump(session);
@@ -1708,7 +2155,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     // The opening repo AND the live filter travel with the action: Tab's
     // rescope is panel-local, so a return that read the store instead would
     // land on the narrow view the user had already widened away from.
-    const origin = { panelRepo: props.repo, panelScope: repoFilter() };
     props.onSpawn(
       entry.row.isMain
         ? { cwd: entry.row.repoRoot, existingWorktree: null, ...origin }
@@ -1723,6 +2169,22 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         ? `copied ${basename(path)}`
         : "copy needs OSC 52 or pbcopy",
     );
+  }
+
+  /**
+   * `o`: open this row's pull request on GitHub.
+   *
+   * The same verb on every row (see {@link rowPRUrl}), and it always says
+   * what happened — the browser opens in another application, so a key that
+   * silently did nothing would be indistinguishable from one that worked.
+   */
+  function openRowPR(entry: PanelRow | null): void {
+    const url = entry ? rowPRUrl(entry) : null;
+    if (!url) {
+      flash("no PR on this row");
+      return;
+    }
+    flash(openInBrowser(url) ? `opened ${url}` : "no browser opener here");
   }
 
   function runPrune(): void {
@@ -1827,7 +2289,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         // Only a classified candidate is selectable: the main checkout, a
         // held row and a healthy one have no removal to opt into, and a
         // checkbox on them would promise one.
-        if (entry?.candidate) toggleSelected(entry.candidate.path);
+        if (entry?.kind === "worktree" && entry.candidate) {
+          toggleSelected(entry.candidate.path);
+        }
         break;
       // `A` too, matching x/X, y/Y and D/d below: a shift held a beat too long
       // should not silently do nothing.
@@ -1854,7 +2318,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       case "D":
       case "d": {
         if (key === "D" || event.shift) {
-          if (entry?.candidate) toggleDirtyOk(entry.candidate);
+          if (entry?.kind === "worktree" && entry.candidate) {
+            toggleDirtyOk(entry.candidate);
+          }
+          break;
+        }
+        // Explicitly guarded rather than left to fall through: `d` reviews a
+        // DIFF of a checkout, and a PR row is not one. Saying so beats a key
+        // that reads as broken.
+        if (entry?.kind === "pr") {
+          flash("d reviews a worktree; enter opens this PR");
           break;
         }
         if (entry && props.onReview) {
@@ -1879,14 +2352,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         // With nothing selected, `x` used to do nothing at all, which reads as
         // a broken key. It now either acts on the row under the cursor or says
         // what is missing.
-        if (entry?.candidate && !entry.candidate.dirty) {
+        if (entry?.kind === "worktree" && entry.candidate && !entry.candidate.dirty) {
           // Single-target: the cursor IS the selection anyone would have made,
           // and the confirm still stands between it and the deletion.
           toggleSelected(entry.candidate.path);
           setPhase("confirm");
           break;
         }
-        if (entry?.candidate) {
+        if (entry?.kind === "worktree" && entry.candidate) {
           // A dirty row selected on its own still removes nothing, so sending
           // it to a "delete 0 worktrees" confirm would be the same dead end
           // wearing a dialog. Name the key that unblocks it instead.
@@ -1910,7 +2383,21 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         break;
       case "y":
       case "Y":
+        // Guarded for the same reason `d` is: `y` copies a PATH, and a PR row
+        // has no directory until one is cut from it.
+        if (entry?.kind === "pr") {
+          flash("no directory yet: enter cuts a worktree from this PR");
+          break;
+        }
         if (entry) copyPath(entry.row.path);
+        break;
+      // Both spellings of the capital, like x/X, a/A and D/d above: terminals
+      // disagree about whether a shifted letter arrives as `"O"` or as `"o"`
+      // with `shift` set, and testing only one made a binding unreachable on
+      // half of them once already.
+      case "o":
+      case "O":
+        openRowPR(entry);
         break;
       case "tab":
         // Inert with nothing to scope to: the panel is already showing every
@@ -1935,7 +2422,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     // removable divider, or once something is already selected (so the count
     // and the way to act on it never disappear mid-selection). Everywhere
     // else they are noise about an action the cursor cannot take.
-    const inRemovable = cursorRow()?.candidate != null;
+    const cursor = cursorRow();
+    const inRemovable =
+      cursor?.kind === "worktree" && cursor.candidate !== null;
     const removing = inRemovable || selected().size > 0;
     return fitHints(
       [
@@ -1959,6 +2448,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           : []),
         { text: "y copy", rank: 1 },
         ...(props.onReview ? [{ text: "d review", rank: 1 }] : []),
+        // Lowest rank, and last among its peers: `o` opens something in
+        // another application, so it is the first hint a narrow panel can
+        // afford to lose — never ahead of the keys that act on the list.
+        { text: "o github", rank: 1 },
         ...(props.repo !== null
           ? [{ text: scoped() ? "tab all repos" : "tab this repo", rank: 2 }]
           : []),
@@ -2065,6 +2558,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                       () => cursorKey() === entry.key,
                     );
                     const isSelected = () => selected().has(entry.key);
+                    // The marker slot's width, which is what the detail line
+                    // indents to. A PR row never carries a checkbox.
+                    const hasCheckbox =
+                      entry.kind === "worktree" && entry.candidate !== null;
                     // Read twice per render (once to decide the line exists,
                     // once to fit it), so it is computed once.
                     const detail = createMemo(() =>
@@ -2078,7 +2575,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                     // the shared spinner interval is acquired and released
                     // with the row.
                     const statusIcon = useStatusIcon(
-                      () => leadStatus(entry.row.sessions),
+                      () =>
+                        entry.kind === "worktree"
+                          ? leadStatus(entry.row.sessions)
+                          : "idle",
                       () => null,
                       // Defaulted here because the two halves of the icon API
                       // disagree: `getStatusIcon` treats an unset style as
@@ -2151,14 +2651,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                               }
                             >
                               <text fg={theme.overlay}>
-                                {` ${" ".repeat(
-                                  markerWidth(entry.candidate !== null),
-                                )}`}
+                                {` ${" ".repeat(markerWidth(hasCheckbox))}`}
                               </text>
                               <For
                                 each={fitSegments(
                                   detail(),
-                                  detailWidth(entry.candidate !== null),
+                                  detailWidth(hasCheckbox),
                                 )}
                               >
                                 {(segment) => (
@@ -2217,6 +2715,31 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                       <For each={split().removable}>
                         {(entry) => renderRow(entry)}
                       </For>
+                      {/* The repo's open pull requests, last: the sections
+                          above are directories on disk, which is the panel's
+                          subject, and this one is what is waiting on GitHub.
+                          Drawn while phase 3 is in flight so the header lands
+                          with the first paint and the PRs fill in under it —
+                          which is also why the pending state rides the header
+                          instead of taking a row that would later be given
+                          back. */}
+                      <Show when={repo.prSection.shown}>
+                        <box height={1} flexDirection="row">
+                          <text fg={theme.overlay}> </text>
+                          <text fg={theme.overlay}>
+                            {prDividerText(
+                              repo.prSection.pending
+                                ? null
+                                : split().prs.length,
+                              prIcon(),
+                              listWidth() - 1,
+                            )}
+                          </text>
+                        </box>
+                      </Show>
+                      <For each={split().prs}>
+                        {(entry) => renderRow(entry)}
+                      </For>
                     </box>
                   );
                 }}
@@ -2239,6 +2762,20 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                 )}
               </text>
             </box>
+          </Show>
+
+          {/* Phase 3 degrades exactly like phase 2: one line, and the panel
+              stays navigable, selectable and actionable. It never becomes the
+              panel's error phase — the worktrees are on screen and are still
+              the thing the user came for. */}
+          <Show when={prErrorLine()}>
+            {(line: () => string) => (
+              <box height={1}>
+                <text fg={theme.yellow}>
+                  {truncateText(line(), contentWidth())}
+                </text>
+              </box>
+            )}
           </Show>
         </Show>
 

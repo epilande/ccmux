@@ -12,6 +12,7 @@ import type {
   WorktreeListResponse,
   WorktreeRow,
 } from "../../daemon/worktree-list";
+import type { OpenPR, PRListResponse } from "../../daemon/pr-list";
 import {
   WorktreesPanel,
   clipboardArgv,
@@ -48,7 +49,21 @@ import {
   splitRemovable,
   visualLayout,
   worktreeHoldsPath,
+  browserArgv,
+  checkoutHolding,
+  CURSOR_BAR,
+  detailPhrases,
+  PR_MARKER,
+  describeChecks,
+  describeReview,
+  openInBrowser,
+  prDividerText,
+  prRowKey,
+  rowPRUrl,
+  type PanelRepo,
   type PanelRow,
+  type PRPanelRow,
+  type WorktreePanelRow,
 } from "./WorktreesPanel";
 import { theme } from "../theme";
 import { displayWidth } from "../utils/format";
@@ -141,12 +156,75 @@ function candidate(overrides: Partial<PruneCandidate> = {}): PruneCandidate {
   };
 }
 
-function panelRow(overrides: Partial<PanelRow> = {}): PanelRow {
-  const base = { row: row(), candidate: null, skip: null, pr: null };
+function panelRow(
+  overrides: Partial<WorktreePanelRow> = {},
+): WorktreePanelRow {
+  const base = {
+    kind: "worktree" as const,
+    row: row(),
+    candidate: null,
+    skip: null,
+    pr: null,
+  };
   const merged = { ...base, ...overrides };
   // The key follows the row unless a test names one, which is what every
   // caller means: `panelRow({ row: row({ path: "/x" }) })` is a row at `/x`.
   return { key: overrides.key ?? merged.row.path, ...merged };
+}
+
+function openPR(overrides: Partial<OpenPR> = {}): OpenPR {
+  return {
+    number: 151,
+    title: "Worktrees panel: open-PR list",
+    url: "https://github.com/o/r/pull/151",
+    author: "epilande",
+    isDraft: false,
+    reviewDecision: null,
+    ciStatus: "none",
+    headRefName: "feat/pr-list-panel",
+    headRefOid: "sha-151",
+    ...overrides,
+  };
+}
+
+function prRow(overrides: Partial<PRPanelRow> = {}): PRPanelRow {
+  const base = {
+    kind: "pr" as const,
+    repoRoot: "/repo",
+    pr: openPR(),
+    checkedOutPath: null,
+    checkedOutName: null,
+  };
+  const merged = { ...base, ...overrides };
+  return {
+    key: overrides.key ?? prRowKey(merged.repoRoot, merged.pr.number),
+    ...merged,
+  };
+}
+
+/** One `GET /prs` body, grouping every PR under one repo. */
+function prsOf(prs: OpenPR[], repoRoot = "/repo"): PRListResponse {
+  return {
+    repos: [{ repoRoot, repoName: repoRoot.split("/").pop() ?? "", prs }],
+    errors: [],
+  };
+}
+
+const noPRs: PRListResponse = { repos: [], errors: [] };
+
+/** What a sorted row is called, whichever kind it is. */
+function sortedName(entry: PanelRow): string {
+  return entry.kind === "pr" ? `#${entry.pr.number}` : entry.row.name;
+}
+
+/** A repo group for the pure layout helpers, PR section off by default. */
+function panelRepo(
+  repoRoot: string,
+  repoName: string,
+  rows: PanelRow[],
+  prSection: PanelRepo["prSection"] = { shown: false, pending: false },
+): PanelRepo {
+  return { repoRoot, repoName, rows, prSection };
 }
 
 function outcome(overrides: Partial<PruneOutcome> = {}): PruneOutcome {
@@ -193,6 +271,8 @@ function json(body: unknown): Response {
 interface Handlers {
   list: () => Promise<Response>;
   scan: () => Promise<Response>;
+  /** Phase 3; defaults to a repo with no open PRs. */
+  prs?: () => Promise<Response>;
   prune?: () => Promise<Response>;
 }
 
@@ -212,6 +292,9 @@ function installFetch(handlers: Handlers): void {
     if (url.includes("/worktrees/prune")) {
       return handlers.prune?.() ?? json({ outcomes: [] });
     }
+    // Before the `/worktrees` fallback, and `/prs` shares no substring with
+    // it, so the ordering here is not the trap `prune-candidates` is.
+    if (url.includes("/prs")) return handlers.prs?.() ?? json(noPRs);
     return handlers.list();
   }) as unknown as typeof fetch);
 }
@@ -238,6 +321,14 @@ interface PanelOptions {
     panelRepo: string | null;
     panelScope: string | null;
   }) => void;
+  onSpawnFromPR?: (t: {
+    number: number;
+    title: string;
+    repoRoot: string;
+    cursor: string;
+    panelRepo: string | null;
+    panelScope: string | null;
+  }) => void;
 }
 
 async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
@@ -255,6 +346,7 @@ async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
         onJump={opts.onJump ?? (() => {})}
         onSpawn={opts.onSpawn ?? (() => {})}
         onReview={opts.onReview}
+        onSpawnFromPR={opts.onSpawnFromPR}
       />
     ),
     { width: opts.width ?? 90, height: opts.height ?? 24 },
@@ -276,9 +368,14 @@ async function mountSettled(
   list: WorktreeListResponse,
   scan: ScanResponse = emptyScan,
   opts: PanelOptions = {},
+  prs: PRListResponse = noPRs,
 ) {
   const harness = await mountPanel(
-    { list: async () => json(list), scan: async () => json(scan) },
+    {
+      list: async () => json(list),
+      scan: async () => json(scan),
+      prs: async () => json(prs),
+    },
     opts,
   );
   return { ...harness, settled: await harness.frame() };
@@ -1490,16 +1587,17 @@ describe("WorktreesPanel keys", () => {
     );
 
     await frame();
-    expect(requested).toHaveLength(2);
+    // Three phases now: the local list, the open-PR list and the prune scan.
+    expect(requested).toHaveLength(3);
     expect(requested.every((url) => url.includes("repo=%2Frepo"))).toBe(true);
     expect(await frame()).toContain("tab all repos");
 
     keys.pressTab();
     const widened = await frame();
-    expect(requested).toHaveLength(4);
-    expect(requested.slice(2).some((url) => url.includes("repo="))).toBe(false);
+    expect(requested).toHaveLength(6);
+    expect(requested.slice(3).some((url) => url.includes("repo="))).toBe(false);
     // Discovery by cwd is additive and survives the widening.
-    expect(requested.slice(2).every((url) => url.includes("cwd=%2Frepo"))).toBe(
+    expect(requested.slice(3).every((url) => url.includes("cwd=%2Frepo"))).toBe(
       true,
     );
     expect(widened).toContain("tab this repo");
@@ -1800,7 +1898,7 @@ describe("sortWorktreeRows", () => {
       panelRow({ row: mainRow() }),
     ];
 
-    expect(sortWorktreeRows(rows).map((r) => r.row.name)).toEqual([
+    expect(sortWorktreeRows(rows).map(sortedName)).toEqual([
       "main checkout",
       "active",
       "idle",
@@ -1814,7 +1912,7 @@ describe("sortWorktreeRows", () => {
       panelRow({ row: row({ name: "zulu" }) }),
       panelRow({ row: row({ name: "alpha" }) }),
     ];
-    expect(sortWorktreeRows(rows).map((r) => r.row.name)).toEqual([
+    expect(sortWorktreeRows(rows).map(sortedName)).toEqual([
       "alpha",
       "zulu",
     ]);
@@ -1931,30 +2029,30 @@ describe("row line 1", () => {
   // The loudest thing on the old screen was a worktree named after its branch
   // saying both, twice per row, for rows that had nothing else to report.
   it("omits a branch that only repeats the worktree name", () => {
-    expect(rowBranch(row({ name: "fix-codex", branch: "fix-codex" }))).toBe("");
+    expect(rowBranch(panelRow({ row: row({ name: "fix-codex", branch: "fix-codex" }) }))).toBe("");
     expect(
-      rowBranch(row({ name: "worktree-panel", branch: "feat/worktree-panel" })),
+      rowBranch(panelRow({ row: row({ name: "worktree-panel", branch: "feat/worktree-panel" }) })),
     ).toBe("feat/worktree-panel");
   });
 
   it("names the main checkout for what it is, not for its directory", () => {
-    expect(rowLabel(mainRow())).toBe("main checkout");
-    expect(rowLabel(row())).toBe("alpha");
+    expect(rowLabel(panelRow({ row: mainRow() }))).toBe("main checkout");
+    expect(rowLabel(panelRow({ row: row() }))).toBe("alpha");
   });
 
   // `main checkout  main` in every repo group said nothing. The branch is
   // news only when the main checkout sits somewhere unexpected.
   it("hides the main checkout's default branch, keeps an unexpected one", () => {
-    expect(rowBranch(mainRow())).toBe("");
-    expect(rowBranch(mainRow({ branch: "master" }))).toBe("");
-    expect(rowBranch(mainRow({ branch: "feat/overlay" }))).toBe("feat/overlay");
+    expect(rowBranch(panelRow({ row: mainRow() }))).toBe("");
+    expect(rowBranch(panelRow({ row: mainRow({ branch: "master" }) }))).toBe("");
+    expect(rowBranch(panelRow({ row: mainRow({ branch: "feat/overlay" }) }))).toBe("feat/overlay");
     // The heuristic is scoped to the main checkout: a WORKTREE sitting on
     // main is unusual enough to say so.
-    expect(rowBranch(row({ name: "wt-a", branch: "main" }))).toBe("main");
+    expect(rowBranch(panelRow({ row: row({ name: "wt-a", branch: "main" }) }))).toBe("main");
   });
 
   it("says detached rather than leaving the branch blank", () => {
-    expect(rowBranch(row({ branch: null, detached: true }))).toBe("detached");
+    expect(rowBranch(panelRow({ row: row({ branch: null, detached: true }) }))).toBe("detached");
   });
 
   it("gives the main checkout a home icon and an agent row a dot", () => {
@@ -2456,8 +2554,8 @@ describe("removable section", () => {
     });
     const other = panelRow({ row: row({ path: "/c", name: "c" }) });
     const repos = [
-      { repoRoot: "/r1", repoName: "r1", rows: [kept, gone] },
-      { repoRoot: "/r2", repoName: "r2", rows: [other] },
+      panelRepo("/r1", "r1", [kept, gone]),
+      panelRepo("/r2", "r2", [other]),
     ];
     const layout = visualLayout(repos, () => 1);
     // header(0) | a(1) | divider(2) | b(3) | header(4) | c(5)
@@ -2468,7 +2566,7 @@ describe("removable section", () => {
 
   it("drops the group header line when there is only one repo", () => {
     const only = panelRow({ row: row({ path: "/a", name: "a" }) });
-    const one = [{ repoRoot: "/r", repoName: "r", rows: [only] }];
+    const one = [panelRepo("/r", "r", [only])];
     expect(showsGroupHeaders(one)).toBe(false);
     expect(visualLayout(one, () => 1).get("/a")).toEqual({
       line: 0,
@@ -2476,11 +2574,7 @@ describe("removable section", () => {
     });
     const two = [
       ...one,
-      {
-        repoRoot: "/r2",
-        repoName: "r2",
-        rows: [panelRow({ row: row({ path: "/b", name: "b" }) })],
-      },
+      panelRepo("/r2", "r2", [panelRow({ row: row({ path: "/b", name: "b" }) })]),
     ];
     expect(showsGroupHeaders(two)).toBe(true);
     expect(visualLayout(two, () => 1).get("/a")).toEqual({
@@ -2518,8 +2612,8 @@ describe("visual scrolling", () => {
     const next = panelRow({ row: row({ path: "/c", name: "c" }) });
     const layout = visualLayout(
       [
-        { repoRoot: "/r1", repoName: "r1", rows: [plain, tall] },
-        { repoRoot: "/r2", repoName: "r2", rows: [next] },
+        panelRepo("/r1", "r1", [plain, tall]),
+        panelRepo("/r2", "r2", [next]),
       ],
       (entry) => rowVisualHeight(entry, false),
     );
@@ -2558,7 +2652,7 @@ describe("visual scrolling", () => {
       }),
     );
     const layout = visualLayout(
-      [{ repoRoot: "/r", repoName: "r", rows }],
+      [panelRepo("/r", "r", rows)],
       (entry) => rowVisualHeight(entry, false),
     );
     const viewport = 10;
@@ -2584,7 +2678,7 @@ describe("visual scrolling", () => {
       panelRow({ row: row({ path: `/w/${i}`, name: `w${i}` }) }),
     );
     const before = visualLayout(
-      [{ repoRoot: "/r", repoName: "r", rows }],
+      [panelRepo("/r", "r", rows)],
       () => 1,
     );
     // Cursor on the first row, viewport at the top: nothing to scroll.
@@ -2592,7 +2686,7 @@ describe("visual scrolling", () => {
     // Classification sinks it to the bottom, as a prunable candidate does.
     const resorted = [...rows.slice(1), rows[0]!];
     const after = visualLayout(
-      [{ repoRoot: "/r", repoName: "r", rows: resorted }],
+      [panelRepo("/r", "r", resorted)],
       () => 1,
     );
     // One repo, so no header line: eleven rows above it, and its own line is
@@ -3215,5 +3309,451 @@ describe("WorktreesPanel dirty gate", () => {
     } finally {
       if (original !== undefined) process.env.TMUX_PANE = original;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The open-PR section (issue #151)
+// ---------------------------------------------------------------------------
+
+describe("PR row identity", () => {
+  // Real keys are absolute paths, so a synthetic one starting with `pr:`
+  // cannot collide with a worktree's.
+  it("keys a PR row on its repo and number", () => {
+    expect(prRowKey("/repo", 151)).toBe("pr:/repo#151");
+    expect(prRowKey("/repo", 151).startsWith("/")).toBe(false);
+  });
+
+  // The whole point of carrying a tip: a branch NAME match would mark a PR as
+  // checked out because someone else's fork reuses the word.
+  it("marks a PR checked out only when the head SHA is a local tip", () => {
+    const held = row({ path: "/wt/pr", branch: "feat/x", tip: "sha-a" });
+    const other = row({ path: "/wt/other", branch: "feat/y", tip: "sha-b" });
+    const pr = openPR({ headRefName: "feat/x", headRefOid: "sha-a" });
+
+    expect(checkoutHolding(pr, [other, held])?.path).toBe("/wt/pr");
+    // Same branch NAME, different commit: not this PR.
+    expect(
+      checkoutHolding(openPR({ headRefName: "feat/x", headRefOid: "sha-z" }), [
+        held,
+      ]),
+    ).toBeNull();
+  });
+
+  // Both directions of "cannot tell" leave the row unmarked rather than
+  // guessing: an old daemon sends no tip, and gh can withhold headRefOid.
+  it("leaves the row unmarked when either side does not resolve", () => {
+    const noTip = row({ path: "/wt/pr", branch: "feat/x" });
+    delete noTip.tip;
+    expect(checkoutHolding(openPR({ headRefOid: "sha-a" }), [noTip])).toBeNull();
+    expect(
+      checkoutHolding(openPR({ headRefOid: null }), [
+        row({ tip: "sha-a", branch: "feat/x" }),
+      ]),
+    ).toBeNull();
+  });
+
+  // A worktree just cut from the branch shares its tip. Both are SHA-proven,
+  // so the branch name is only a tie-break between them.
+  it("prefers the branch that is actually the PR's head among tied tips", () => {
+    const fresh = row({ path: "/wt/fresh", branch: "scratch", tip: "sha-a" });
+    const real = row({ path: "/wt/real", branch: "feat/x", tip: "sha-a" });
+    const pr = openPR({ headRefName: "feat/x", headRefOid: "sha-a" });
+    expect(checkoutHolding(pr, [fresh, real])?.path).toBe("/wt/real");
+  });
+});
+
+describe("PR row presentation", () => {
+  it("puts the number and title on line 1 and drops the branch column", () => {
+    const entry = prRow();
+    expect(rowLabel(entry)).toBe("#151 Worktrees panel: open-PR list");
+    // The head ref goes on the detail line: the label is already a title.
+    expect(rowBranch(entry)).toBe("");
+  });
+
+  // A long PR title would otherwise push every worktree's branch column to
+  // the cap, over a row that has no branch column of its own.
+  it("keeps PR titles out of the worktree label column", () => {
+    const long = prRow({
+      pr: openPR({ title: "a".repeat(60) }),
+    });
+    const rows = [panelRow({ row: row({ name: "alpha" }) }), long];
+    expect(labelColumnWidth(rows)).toBe(displayWidth("alpha"));
+  });
+
+  it("gives a PR row its own marker so the left edge stays a legend", () => {
+    const segments = primarySegments(prRow(), {
+      isCursor: false,
+      labelWidth: 10,
+      markerBase: 2,
+    });
+    expect(segments[0]?.text).toBe(`${PR_MARKER} `);
+    // Not any of the four markers already spelled in that slot.
+    expect([`⌂ `, `· `, `[ ] `, `[x] `]).not.toContain(segments[0]?.text);
+  });
+
+  it("says the branch, the author and only the states that are news", () => {
+    const quiet = detailPhrases(prRow(), { dirtyOk: false }).map((p) => p.text);
+    expect(quiet).toEqual(["feat/pr-list-panel", "@epilande"]);
+
+    const loud = detailPhrases(
+      prRow({
+        pr: openPR({
+          isDraft: true,
+          reviewDecision: "CHANGES_REQUESTED",
+          ciStatus: "failing",
+        }),
+      }),
+      { dirtyOk: false },
+    ).map((p) => p.text);
+    expect(loud).toContain("draft");
+    expect(loud).toContain("changes requested");
+    expect(loud).toContain("checks fail");
+  });
+
+  // Both would appear on nearly every row and say nothing about that row.
+  it("stays silent on REVIEW_REQUIRED and on a PR with no checks", () => {
+    expect(describeReview(openPR({ reviewDecision: "REVIEW_REQUIRED" }))).toBeNull();
+    expect(describeReview(openPR({ reviewDecision: null }))).toBeNull();
+    expect(describeChecks(openPR({ ciStatus: "none" }))).toBeNull();
+    expect(describeChecks(openPR({ ciStatus: "passing" }))?.text).toBe(
+      "checks pass",
+    );
+  });
+
+  it("names the worktree a checked-out PR lives in, last on the line", () => {
+    const phrases = detailPhrases(
+      prRow({ checkedOutPath: "/wt/pr-151", checkedOutName: "pr-151" }),
+      { dirtyOk: false },
+    );
+    expect(phrases[phrases.length - 1]?.text).toBe("checked out in pr-151");
+  });
+
+  // The pending state rides the header rather than taking a row it would
+  // later give back, which is what moves the list under the reader.
+  it("carries the pending state on the section header", () => {
+    expect(prDividerText(null, "◐", 40)).toBe("├─ open PRs · ◐ checking GitHub");
+    expect(prDividerText(3, "◐", 40)).toBe("├─ open PRs · 3");
+  });
+});
+
+describe("PR section layout", () => {
+  it("sorts PRs below every worktree, newest first", () => {
+    const rows: PanelRow[] = [
+      prRow({ pr: openPR({ number: 7 }) }),
+      panelRow({ row: row({ name: "alpha" }) }),
+      prRow({ pr: openPR({ number: 151 }) }),
+      panelRow({ row: mainRow() }),
+    ];
+    expect(sortWorktreeRows(rows).map(sortedName)).toEqual([
+      "main checkout",
+      "alpha",
+      "#151",
+      "#7",
+    ]);
+  });
+
+  it("splits PR rows out of the worktree sections", () => {
+    const split = splitRemovable([
+      panelRow({ row: row({ path: "/a" }) }),
+      panelRow({
+        row: row({ path: "/b" }),
+        candidate: candidate({ path: "/b" }),
+      }),
+      prRow(),
+    ]);
+    expect(split.kept.map((e) => e.key)).toEqual(["/a"]);
+    expect(split.removable.map((e) => e.key)).toEqual(["/b"]);
+    expect(split.prs.map((e) => e.key)).toEqual(["pr:/repo#151"]);
+  });
+
+  // The header is a LINE the cursor never lands on, exactly like the
+  // removable divider: a layout that skipped it puts every PR row one off.
+  it("counts the section header as a line", () => {
+    const wt = panelRow({ row: row({ path: "/a", name: "a" }) });
+    const pr = prRow();
+    const withSection = visualLayout(
+      [panelRepo("/r", "r", [wt, pr], { shown: true, pending: false })],
+      () => 1,
+    );
+    // a(0) | header(1) | pr(2)
+    expect(withSection.get("/a")).toEqual({ line: 0, height: 1 });
+    expect(withSection.get(pr.key)).toEqual({ line: 2, height: 1 });
+
+    const without = visualLayout(
+      [panelRepo("/r", "r", [wt, pr], { shown: false, pending: false })],
+      () => 1,
+    );
+    expect(without.get(pr.key)).toEqual({ line: 1, height: 1 });
+  });
+});
+
+describe("WorktreesPanel PR section", () => {
+  const onePR = prsOf([openPR()]);
+
+  it("paints the header before GitHub answers, then the PRs under it", async () => {
+    let answer: ((r: Response) => void) | null = null;
+    const { frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => json(emptyScan),
+      prs: () => new Promise<Response>((resolve) => (answer = resolve)),
+    });
+
+    const pending = await frame();
+    expect(pending).toContain("open PRs");
+    expect(pending).toContain("checking GitHub");
+    // The worktrees are already usable throughout that window.
+    expect(pending).toContain("main checkout");
+    expect(pending).not.toContain("#151");
+
+    answer!(json(onePR));
+    const settled = await frame();
+    expect(settled).toContain("#151 Worktrees panel: open-PR list");
+    expect(settled).not.toContain("checking GitHub");
+    // Below every worktree row, which is the section's whole placement rule.
+    const [main, pr] = orderOf(settled, "main checkout", "#151");
+    expect(main).toBeLessThan(pr!);
+  });
+
+  // Same rule the removable divider follows: a section with nothing in it
+  // spends no rows saying so.
+  it("drops the section when the repo has no open PRs", async () => {
+    const { settled } = await mountSettled(listOf([mainRow(), row()]));
+    expect(settled).not.toContain("open PRs");
+  });
+
+  // Degrades like phase 2: one line, panel stays usable, never an error state.
+  it("keeps the panel usable when the PR list fails", async () => {
+    const { frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => json(emptyScan),
+      prs: async () => {
+        throw new Error("gh is logged out");
+      },
+    });
+    const shown = await frame();
+    expect(shown).toContain("Open PRs failed: gh is logged out");
+    expect(shown).toContain("main checkout");
+    expect(shown).toContain("enter open");
+    // Not the error phase: `r retry · q close` is what that renders.
+    expect(shown).not.toContain("r retry");
+  });
+
+  // A repo's own failure rides inside a successful response, so the others
+  // still render. The line has to say which repo could not answer.
+  it("names the repo behind a per-repo failure", async () => {
+    const { frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => json(emptyScan),
+      prs: async () =>
+        json({
+          repos: [],
+          errors: [
+            { repoRoot: "/repo", repoName: "repo", error: "no GitHub remote" },
+          ],
+        }),
+    });
+    expect(await frame()).toContain("Open PRs (repo): no GitHub remote");
+  });
+
+  it("marks a PR whose head is a local branch tip as checked out", async () => {
+    const held = row({
+      path: "/repo/wt/pr",
+      name: "pr-151",
+      branch: "feat/pr-list-panel",
+      tip: "sha-151",
+    });
+    const { settled } = await mountSettled(
+      listOf([mainRow(), held]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    expect(settled).toContain("checked out in pr-151");
+  });
+
+  it("walks the cursor from a worktree row onto a PR row", async () => {
+    const { keys, frame } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    keys.pressKey("j");
+    keys.pressKey("j");
+    const shown = await frame();
+    // The cursor bar sits in the rail's column on the row it is on.
+    expect(lineWith(shown, "#151")).toContain(CURSOR_BAR);
+    expect(lineWith(shown, "main checkout")).not.toContain(CURSOR_BAR);
+  });
+});
+
+describe("PR row keys", () => {
+  async function onPRRow(opts: PanelOptions = {}, prs = prsOf([openPR()])) {
+    const harness = await mountSettled(
+      listOf([mainRow()]),
+      emptyScan,
+      opts,
+      prs,
+    );
+    // main checkout, then the PR.
+    harness.keys.pressKey("j");
+    await harness.frame();
+    return harness;
+  }
+
+  it("cuts a worktree from a PR that is not checked out", async () => {
+    const spawns: unknown[] = [];
+    const fromPR: unknown[] = [];
+    const { keys, frame } = await onPRRow({
+      repo: "/repo",
+      onSpawn: (t) => spawns.push(t),
+      onSpawnFromPR: (t) => fromPR.push(t),
+    });
+    keys.pressEnter();
+    await frame();
+
+    expect(spawns).toHaveLength(0);
+    expect(fromPR[0]).toMatchObject({
+      number: 151,
+      title: "Worktrees panel: open-PR list",
+      repoRoot: "/repo",
+      cursor: "pr:/repo#151",
+      panelRepo: "/repo",
+      panelScope: "/repo",
+    });
+  });
+
+  // Not a second jump path: a checked-out PR IS the worktree holding it, so
+  // Enter takes the existing revalidated verb.
+  it("routes a checked-out PR through the ordinary worktree spawn", async () => {
+    const held = row({
+      path: "/repo/wt/pr",
+      name: "pr-151",
+      branch: "feat/pr-list-panel",
+      tip: "sha-151",
+    });
+    const spawns: unknown[] = [];
+    const fromPR: unknown[] = [];
+    const harness = await mountSettled(
+      listOf([mainRow(), held]),
+      emptyScan,
+      { onSpawn: (t) => spawns.push(t), onSpawnFromPR: (t) => fromPR.push(t) },
+      prsOf([openPR()]),
+    );
+    harness.keys.pressKey("j");
+    harness.keys.pressKey("j");
+    harness.keys.pressEnter();
+    await harness.frame();
+
+    expect(fromPR).toHaveLength(0);
+    expect(spawns[0]).toMatchObject({
+      cwd: "/repo/wt/pr",
+      existingWorktree: "/repo/wt/pr",
+    });
+  });
+
+  // Explicitly guarded, not left to fall through: both act on a directory a
+  // PR row does not have, and a silent key reads as broken.
+  it("guards y and d on a PR row and says why", async () => {
+    const reviewed: unknown[] = [];
+    const { keys, frame } = await onPRRow({ onReview: (t) => reviewed.push(t) });
+
+    keys.pressKey("y");
+    expect(await frame()).toContain("no directory yet");
+
+    keys.pressKey("d");
+    expect(await frame()).toContain("d reviews a worktree");
+    expect(reviewed).toHaveLength(0);
+  });
+
+  it("leaves the removal keys inert on a PR row", async () => {
+    const { keys, frame } = await onPRRow();
+    keys.pressKey("space");
+    keys.pressKey("x");
+    const shown = await frame();
+    // No checkbox appeared, and `x` fell through to its "nothing selected"
+    // message rather than opening a confirm.
+    expect(shown).not.toContain("[x]");
+    expect(shown).toContain("nothing selected");
+  });
+});
+
+describe("rowPRUrl", () => {
+  // ONE meaning on every row is the rule; `o` never reads the row to decide
+  // what it does.
+  it("answers with the PR a row points at, whichever kind it is", () => {
+    expect(rowPRUrl(prRow())).toBe("https://github.com/o/r/pull/151");
+    expect(
+      rowPRUrl(
+        panelRow({
+          pr: { number: 9, url: "https://github.com/o/r/pull/9", state: "OPEN" },
+        }),
+      ),
+    ).toBe("https://github.com/o/r/pull/9");
+    // A merged PR arrives on the candidate rather than on the row.
+    expect(
+      rowPRUrl(
+        panelRow({
+          candidate: candidate({
+            pr: {
+              number: 8,
+              url: "https://github.com/o/r/pull/8",
+              state: "MERGED",
+            },
+          }),
+        }),
+      ),
+    ).toBe("https://github.com/o/r/pull/8");
+    expect(rowPRUrl(panelRow())).toBeNull();
+  });
+
+  it("picks the platform's opener, and reports where there is none", () => {
+    expect(browserArgv("https://x", "darwin")).toEqual(["open", "https://x"]);
+    expect(browserArgv("https://x", "linux")).toEqual([
+      "xdg-open",
+      "https://x",
+    ]);
+    expect(browserArgv("https://x", "win32")).toBeNull();
+
+    const argv: string[][] = [];
+    expect(
+      openInBrowser(
+        "https://x",
+        (a) => {
+          argv.push(a);
+          return true;
+        },
+        "darwin",
+      ),
+    ).toBe(true);
+    expect(argv).toEqual([["open", "https://x"]]);
+    expect(openInBrowser("https://x", () => true, "win32")).toBe(false);
+  });
+});
+
+describe("WorktreesPanel o key", () => {
+  it("opens the row's PR and says so", async () => {
+    const { keys, frame } = await mountSettled(
+      listOf([mainRow()]),
+      emptyScan,
+      {},
+      prsOf([openPR()]),
+    );
+    keys.pressKey("j");
+    keys.pressKey("o");
+    const shown = await frame();
+    // Either it opened or it said this machine has no opener; both are the
+    // key reporting what happened rather than doing nothing visible.
+    expect(
+      shown.includes("opened https://github.com/o/r/pull/151") ||
+        shown.includes("no browser opener here"),
+    ).toBe(true);
+  });
+
+  it("says so on a row with no PR at all", async () => {
+    const { keys, frame } = await mountSettled(listOf([mainRow(), row()]));
+    keys.pressKey("o");
+    expect(await frame()).toContain("no PR on this row");
   });
 });
