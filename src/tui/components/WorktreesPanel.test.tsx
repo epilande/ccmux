@@ -142,7 +142,11 @@ function candidate(overrides: Partial<PruneCandidate> = {}): PruneCandidate {
 }
 
 function panelRow(overrides: Partial<PanelRow> = {}): PanelRow {
-  return { row: row(), candidate: null, skip: null, pr: null, ...overrides };
+  const base = { row: row(), candidate: null, skip: null, pr: null };
+  const merged = { ...base, ...overrides };
+  // The key follows the row unless a test names one, which is what every
+  // caller means: `panelRow({ row: row({ path: "/x" }) })` is a row at `/x`.
+  return { key: overrides.key ?? merged.row.path, ...merged };
 }
 
 function outcome(overrides: Partial<PruneOutcome> = {}): PruneOutcome {

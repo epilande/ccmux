@@ -86,6 +86,15 @@ const COPY_NOTE_MS = 2_000;
  * phase 2 had to say about it, which is nothing at all for a healthy row.
  */
 export interface PanelRow {
+  /**
+   * What the cursor, the scroll layout and the selection sets key by.
+   *
+   * The worktree's own absolute path today; a separate field rather than a
+   * reach into `row` because the list is about to hold rows that are not
+   * worktrees at all, and every one of those consumers wants "which row is
+   * this" rather than "which directory".
+   */
+  key: string;
   row: WorktreeRow;
   /** Set only when the scan proved a removal reason. Gates prune selection. */
   candidate: PruneCandidate | null;
@@ -1181,7 +1190,7 @@ export function visualLayout(
   let line = 0;
   const place = (entry: PanelRow) => {
     const height = heightOf(entry);
-    layout.set(entry.row.path, { line, height });
+    layout.set(entry.key, { line, height });
     line += height;
   };
   const headers = showsGroupHeaders(repos);
@@ -1348,6 +1357,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         repo.worktrees.map((row) => {
           const candidate = candidates.get(row.path) ?? null;
           return {
+            key: row.path,
             row,
             candidate,
             skip: skips.get(row.path) ?? null,
@@ -1384,7 +1394,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const cursorIndex = createMemo((): number => {
     const path = cursorPath();
     const rows = flatRows();
-    const found = path ? rows.findIndex((r) => r.row.path === path) : -1;
+    const found = path ? rows.findIndex((r) => r.key === path) : -1;
     return found >= 0 ? found : 0;
   });
   const cursorRow = createMemo((): PanelRow | null => {
@@ -1398,7 +1408,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * `isCursor` memo hold its value, so a keypress re-renders the two rows
    * whose boolean actually flipped instead of all of them.
    */
-  const cursorKey = createMemo(() => cursorRow()?.row.path ?? null);
+  const cursorKey = createMemo(() => cursorRow()?.key ?? null);
 
   // Seed the cursor the moment there is a row to sit on. Leaving it null and
   // falling back to index 0 looks identical until phase 2 re-sorts, at which
@@ -1424,8 +1434,8 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const rows = flatRows();
     const first = rows[0];
     const path = cursorPath();
-    const live = path !== null && rows.some((r) => r.row.path === path);
-    if (first && !live) setCursorPath(first.row.path);
+    const live = path !== null && rows.some((r) => r.key === path);
+    if (first && !live) setCursorPath(first.key);
   });
 
   /**
@@ -1676,7 +1686,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const rows = flatRows();
     if (rows.length === 0) return;
     const next = Math.min(Math.max(cursorIndex() + delta, 0), rows.length - 1);
-    setCursorPath(rows[next]!.row.path);
+    setCursorPath(rows[next]!.key);
     // Scrolling is an EFFECT of where the cursor is, not of the keypress that
     // moved it: the phase-2 re-sort moves rows under a cursor nobody touched,
     // and only an effect keeps that row on screen too.
@@ -2052,15 +2062,15 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                     // child in the list. Held here, the value only changes for
                     // the row being left and the row being entered.
                     const isCursor = createMemo(
-                      () => cursorKey() === entry.row.path,
+                      () => cursorKey() === entry.key,
                     );
-                    const isSelected = () => selected().has(entry.row.path);
+                    const isSelected = () => selected().has(entry.key);
                     // Read twice per render (once to decide the line exists,
                     // once to fit it), so it is computed once.
                     const detail = createMemo(() =>
                       detailSegments(entry, {
                         compact: props.compact === true,
-                        dirtyOk: dirtyOk().has(entry.row.path),
+                        dirtyOk: dirtyOk().has(entry.key),
                       }),
                     );
                     // The session list's own icon, spinner and all. Called
