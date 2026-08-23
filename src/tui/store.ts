@@ -1454,8 +1454,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         // a worktree off — there the lock is the other way round. A spawn into
         // a worktree that already exists has no destination row at all, and a
         // write that reached one anyway would put the Name row back with it.
+        // A PR spawn is the same shape for a different reason: the daemon
+        // derives its worktree from the PR, and `POST /spawn` refuses `pr`
+        // alongside a name. Unreachable today, and enumerated because this
+        // comment names every other mode and the omission is what a later
+        // mode-aware change would trip over.
         if (draft.moveChanges) return;
         if (draft.existingWorktree !== null) return;
+        if (draft.pr !== null) return;
         if (draft.fork && !draft.fork.canWorktree) return;
         batch(() => {
           setState("newSession", "destination", option.value);
