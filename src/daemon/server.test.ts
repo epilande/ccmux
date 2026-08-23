@@ -8822,9 +8822,15 @@ describe("GET /prs", () => {
  * The open-PR cache is a LOCK as well as a cache.
  *
  * A result-only cache is written on completion, so it can only deduplicate
- * calls that start after one finishes. The panel's `r` reaches `load()` with
- * no in-flight guard of its own, so key-repeat against a hung `gh` left one
- * process alive per keypress.
+ * calls that start after one finishes: a picker and a sidebar with the panel
+ * open at once, a Tab rescope, a close and reopen on a cold or expired entry,
+ * the panel's `r`, and any direct caller of the endpoint each spawned their
+ * own `gh pr list`.
+ *
+ * `r` is here for completeness, not as the original motivation: it did not
+ * exist when this was written, and now that it does it JOINS a live call like
+ * any other caller. What it can still do is drive the RATE, which is why the
+ * refresh bypass is gated on a fresh SUCCESS rather than on any fresh entry.
  */
 describe("GET /prs caching", () => {
   let root: string;

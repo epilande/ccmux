@@ -621,7 +621,8 @@ export class DaemonServer {
    * after one finishes: N concurrent misses for one repo each spawned their
    * own `gh pr list`. The concurrent misses are real and ordinary: a picker
    * and a sidebar with the panel open at once, a Tab rescope, a close and
-   * reopen on a cold or expired entry, and any direct caller of the endpoint.
+   * reopen on a cold or expired entry, the panel's `r` (which became a real
+   * path two commits after this was written), and any direct caller.
    *
    * Sharing the promise also removes the write-ordering hazard rather than
    * guarding against it. Two calls for one repo can no longer overlap, so a
