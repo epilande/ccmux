@@ -89,6 +89,12 @@ type ServerInternals = {
   sweepOffset: number;
   /** Exposed so a test can expire git facts the way the TTL does. */
   gitInfoCache: Map<string, unknown>;
+  /** Same, for the open-PR cache: it also holds the in-flight promise, so a
+   *  test can watch a concurrent miss join rather than start a second call. */
+  prListCache: Map<
+    string,
+    { answer: Promise<unknown>; done: { at: number; result: unknown } | null }
+  >;
   onBranchPRsChanged(cwd: string, branch: string): Promise<void>;
   visibleSessions: Set<string>;
   lastSidebarState: {
@@ -8810,4 +8816,178 @@ describe("GET /prs", () => {
       restore();
     }
   });
+});
+
+/**
+ * The open-PR cache is a LOCK as well as a cache.
+ *
+ * A result-only cache is written on completion, so it can only deduplicate
+ * calls that start after one finishes. The panel's `r` reaches `load()` with
+ * no in-flight guard of its own, so key-repeat against a hung `gh` left one
+ * process alive per keypress.
+ */
+describe("GET /prs caching", () => {
+  let root: string;
+
+  const ROW = {
+    number: 151,
+    title: "Worktrees panel: open-PR list",
+    url: "https://github.com/o/r/pull/151",
+    author: { login: "epilande" },
+    isDraft: false,
+    reviewDecision: null,
+    statusCheckRollup: [],
+    headRefName: "feat/pr-list-panel",
+    headRefOid: "sha-151",
+  };
+
+  function makeRepo(): string {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-prs-cache-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    return repo;
+  }
+
+  /**
+   * A `gh` that COUNTS its invocations in a file and can be made slow, so a
+   * concurrent miss has a window to arrive in.
+   */
+  function withCountingGh(sleepSeconds = 0, exitCode = 0) {
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "prs.json"), JSON.stringify([ROW]));
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/bin/sh\necho x >> '${join(bin, "calls")}'\nsleep ${sleepSeconds}\ncat '${join(bin, "prs.json")}'\nexit ${exitCode}\n`,
+      { mode: 0o755 },
+    );
+    writeFileSync(join(bin, "calls"), "");
+    const previous = process.env.PATH;
+    process.env.PATH = `${bin}:${previous ?? ""}`;
+    return {
+      calls: () =>
+        readFileSync(join(bin, "calls"), "utf8").split("\n").filter(Boolean)
+          .length,
+      restore: () => {
+        if (previous === undefined) delete process.env.PATH;
+        else process.env.PATH = previous;
+      },
+    };
+  }
+
+  async function listPRs(
+    internals: ServerInternals,
+    repo: string,
+  ): Promise<PRListResponse> {
+    const res = await internals.handleRequest(
+      new Request(
+        `http://127.0.0.1:2269/prs?repo=${encodeURIComponent(repo)}`,
+      ),
+    );
+    return (await res.json()) as PRListResponse;
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("shares one gh invocation across concurrent misses for a repo", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh(1);
+    try {
+      // Four requests in flight at once, all missing. Without the in-flight
+      // entry each starts its own `gh pr list`.
+      const answers = await Promise.all(
+        [0, 1, 2, 3].map(() => listPRs(internals, repo)),
+      );
+
+      expect(gh.calls()).toBe(1);
+      for (const body of answers) {
+        expect(body.errors).toEqual([]);
+        expect(body.repos[0]?.prs[0]?.number).toBe(151);
+      }
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
+
+  // The write-ordering hazard is removed rather than guarded: two calls for
+  // one repo can no longer overlap, so a slow one cannot land after a fast
+  // one and stamp its stale answer fresh.
+  it("never has two calls in flight for the same repo", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh(1);
+    try {
+      const first = listPRs(internals, repo);
+      // Long enough for the handler's own awaits (session enrichment, repo
+      // resolution) to have run and the entry to be registered, and well
+      // inside `gh`'s one-second sleep.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      // Read by iteration, not by key: the cache is keyed on the root git
+      // resolves, which need not be the spelling this test passed in.
+      const inFlight = [...internals.prListCache.values()];
+      expect(inFlight).toHaveLength(1);
+      expect(inFlight[0]?.done).toBeNull();
+
+      // Arriving mid-flight, it must join rather than start a second `gh`.
+      const second = listPRs(internals, repo);
+      await Promise.all([first, second]);
+      expect(gh.calls()).toBe(1);
+      expect([...internals.prListCache.values()][0]?.done).not.toBeNull();
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
+
+  // A failure is held for a SHORT window, deliberately inverted from
+  // `pr-resolver`'s backoff: the reader is looking at the error and fixing
+  // it, and their next open of the panel is the retry.
+  it("holds a failure for less time than a success", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh(0, 1);
+    try {
+      expect((await listPRs(internals, repo)).errors).toHaveLength(1);
+      expect(gh.calls()).toBe(1);
+
+      // Inside the failure TTL: served from cache, no second `gh`.
+      await listPRs(internals, repo);
+      expect(gh.calls()).toBe(1);
+
+      // Rewound past the FAILURE ttl but well inside the SUCCESS one. A
+      // cache that used one TTL for both would still be serving this.
+      const entry = internals.prListCache.get(repo);
+      expect(entry?.done).not.toBeNull();
+      entry!.done!.at = Date.now() - 30_000;
+      await listPRs(internals, repo);
+      expect(gh.calls()).toBe(2);
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
+
+  it("holds a success across the window a failure would have expired in", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh();
+    try {
+      await listPRs(internals, repo);
+      expect(gh.calls()).toBe(1);
+
+      const entry = internals.prListCache.get(repo);
+      entry!.done!.at = Date.now() - 30_000;
+      await listPRs(internals, repo);
+      // Still one: 30s is past the 15s failure TTL and inside the 60s
+      // success one.
+      expect(gh.calls()).toBe(1);
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
 });

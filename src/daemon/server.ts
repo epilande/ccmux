@@ -402,6 +402,21 @@ const PR_LIST_TTL_MS = 60_000;
  */
 const PR_LIST_FAILURE_TTL_MS = 15_000;
 
+/** What one `listOpenPRs` call answers with. */
+type PRListAnswer = Awaited<ReturnType<typeof listOpenPRs>>;
+
+/**
+ * One repo's slot in the open-PR cache.
+ *
+ * `answer` exists from the moment the call STARTS; `done` is filled in when
+ * it settles and is what the TTL is measured from. The two together let one
+ * entry be both the lock and the cache.
+ */
+interface PRCacheEntry {
+  answer: Promise<PRListAnswer>;
+  done: { at: number; result: PRListAnswer } | null;
+}
+
 /** How many repos are asked about at once, matching `worktree-list.ts`. */
 const PR_REPO_CONCURRENCY = 3;
 
@@ -598,13 +613,23 @@ export class DaemonServer {
   /** When each repo last had `git fetch --prune` run for a prune scan. */
   private worktreeFetchedAt = new Map<string, number>();
   /**
-   * One repo's open-PR answer, with when it was fetched. Holds the RESULT,
-   * successes and failures alike, so a hit replies without touching `gh`.
+   * One repo's open-PR answer, keyed by repo root.
+   *
+   * Holds the in-flight PROMISE, not just the settled result, and that is
+   * what makes the entry a lock as well as a cache. A result-only cache is
+   * written on COMPLETION, so it can only ever deduplicate calls that start
+   * after one finishes: N concurrent misses for one repo each spawned their
+   * own `gh pr list`, and the panel's `r` reaches `load()` with no in-flight
+   * guard, so key-repeat against a hung `gh` left a process per keypress.
+   *
+   * Sharing the promise also removes the write-ordering hazard rather than
+   * guarding against it. Two calls for one repo can no longer overlap, so a
+   * slow one cannot land after a fast one and stamp its stale answer fresh.
+   *
+   * Exposed to tests through `ServerInternals`, the way `gitInfoCache` is, so
+   * a TTL boundary can be reached without waiting for one.
    */
-  private prListCache = new Map<
-    string,
-    { at: number; result: Awaited<ReturnType<typeof listOpenPRs>> }
-  >();
+  private prListCache = new Map<string, PRCacheEntry>();
   /**
    * Home directory, for the `project` $HOME-boundary guard (S4). A plain
    * field rather than a constructor param, so a test can stub it directly
@@ -1690,16 +1715,42 @@ export class DaemonServer {
     }
   }
 
-  /** One repo's open PRs, from cache when it is fresh enough. */
-  private async openPRsFor(
-    repoRoot: string,
-  ): Promise<Awaited<ReturnType<typeof listOpenPRs>>> {
-    const cached = this.prListCache.get(repoRoot);
-    const ttl = cached?.result.ok ? PR_LIST_TTL_MS : PR_LIST_FAILURE_TTL_MS;
-    if (cached && Date.now() - cached.at < ttl) return cached.result;
-    const result = await listOpenPRs(repoRoot);
-    this.prListCache.set(repoRoot, { at: Date.now(), result });
-    return result;
+  /**
+   * One repo's open PRs: the cached answer if it is fresh, the in-flight call
+   * if there is one, and only otherwise a new `gh`.
+   */
+  private openPRsFor(repoRoot: string): Promise<PRListAnswer> {
+    const entry = this.prListCache.get(repoRoot);
+    if (entry) {
+      // Still running. Join it rather than starting a second `gh`: the TTL
+      // cannot help here, because it is only written when a call COMPLETES.
+      if (!entry.done) return entry.answer;
+      const ttl = entry.done.result.ok
+        ? PR_LIST_TTL_MS
+        : PR_LIST_FAILURE_TTL_MS;
+      if (Date.now() - entry.done.at < ttl) return entry.answer;
+    }
+
+    const answer = listOpenPRs(repoRoot);
+    const fresh: PRCacheEntry = { answer, done: null };
+    // Registered BEFORE the first await, so a caller arriving in the same
+    // tick finds the entry rather than starting its own call.
+    this.prListCache.set(repoRoot, fresh);
+    void answer.then(
+      (result) => {
+        fresh.done = { at: Date.now(), result };
+      },
+      () => {
+        // `listOpenPRs` reports every failure it knows about as `ok: false`
+        // and does not throw, so this is the unforeseen case. Drop the entry
+        // rather than leave the repo permanently "in flight", which would
+        // wedge it for the daemon's whole life.
+        if (this.prListCache.get(repoRoot) === fresh) {
+          this.prListCache.delete(repoRoot);
+        }
+      },
+    );
+    return answer;
   }
 
   private async handlePruneCandidates(
