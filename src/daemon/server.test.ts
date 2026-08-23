@@ -9003,6 +9003,39 @@ describe("GET /prs caching", () => {
     }
   }, 20_000);
 
+  // The bypass is for a SUCCESS going stale on its own. A failure has no such
+  // argument, and the backoff exists so a rapid reopen does not re-spawn a
+  // doomed `gh` — which key-repeat on `r` would otherwise do, once per press.
+  it("does not let a refresh defeat the failure backoff", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh(0, 1);
+    try {
+      expect((await listPRs(internals, repo)).errors).toHaveLength(1);
+      expect(gh.calls()).toBe(1);
+
+      for (let i = 0; i < 4; i++) {
+        const res = await internals.handleRequest(
+          new Request(
+            `http://127.0.0.1:2269/prs?repo=${encodeURIComponent(repo)}&refresh=1`,
+          ),
+        );
+        expect(res.status).toBe(200);
+      }
+      // Still one: the backoff holds against every one of them.
+      expect(gh.calls()).toBe(1);
+
+      // And it is a BACKOFF, not a lockout: past the failure TTL a refresh
+      // retries like any other read.
+      const entry = [...internals.prListCache.values()][0];
+      entry!.done!.at = Date.now() - 30_000;
+      await listPRs(internals, repo);
+      expect(gh.calls()).toBe(2);
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
+
   // The lock is a property of the entry, not of the TTL, so a refresh cannot
   // be used to start a second `gh` alongside a live one.
   it("still joins a live call rather than racing it", async () => {

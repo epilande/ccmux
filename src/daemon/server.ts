@@ -1735,10 +1735,18 @@ export class DaemonServer {
       // Ahead of the `refresh` check on purpose, so a refresh JOINS a live
       // call instead of racing a second one against it.
       if (!entry.done) return entry.answer;
+      // A refresh skips a fresh SUCCESS and never a fresh failure. The
+      // argument for the bypass is entirely about success going stale on its
+      // own ("a PR merged a moment ago still reads open"); a failed lookup has
+      // no equivalent, and the failure TTL exists precisely so that a rapid
+      // reopen does not re-spawn a doomed `gh`. Without this, key-repeat on
+      // the panel's `r` serial-spawns one `gh` per press for as fast as it can
+      // fail. Someone who just fixed `gh auth login` waits at most 15s.
+      const bypass = refresh && entry.done.result.ok;
       const ttl = entry.done.result.ok
         ? PR_LIST_TTL_MS
         : PR_LIST_FAILURE_TTL_MS;
-      if (!refresh && Date.now() - entry.done.at < ttl) return entry.answer;
+      if (!bypass && Date.now() - entry.done.at < ttl) return entry.answer;
     }
 
     const answer = listOpenPRs(repoRoot);
