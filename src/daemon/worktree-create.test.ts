@@ -1234,4 +1234,24 @@ describe("createWorktree with a branch override", () => {
     if (!created.ok) return;
     expect(created.result.branch).toBe("plain-name");
   });
+
+  // The record is keyed by BRANCH, and an override is exactly the case where
+  // the directory name is not it. Keyed by the name, the picker's branch
+  // review looks up a branch nothing ever created, finds no base and falls
+  // back to guessing the default one - silently, against the wrong base.
+  it("records the base under the branch, not the worktree name", async () => {
+    const repo = await makeRepo();
+
+    const created = await createWorktree(repo, {
+      name: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(await readConfig(repo, CONFIG_KEY("fix/flaky-binder"))).toBe(
+      "refs/heads/main",
+    );
+    expect(await readConfig(repo, CONFIG_KEY("pr-7-fix-flaky"))).toBeNull();
+  });
 });

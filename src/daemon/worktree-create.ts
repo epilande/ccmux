@@ -883,7 +883,7 @@ export async function createWorktree(
     // the base, so recording one would misdescribe its history (the same
     // reason `result.base` is undefined below).
     if (!reusingBranch)
-      await recordBranchBase(mainRepoRoot, name, based.base, git);
+      await recordBranchBase(mainRepoRoot, branchName, based.base, git);
 
     const setup = await fileSetup(mainRepoRoot, path);
     return {
