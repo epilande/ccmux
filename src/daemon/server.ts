@@ -619,8 +619,9 @@ export class DaemonServer {
    * what makes the entry a lock as well as a cache. A result-only cache is
    * written on COMPLETION, so it can only ever deduplicate calls that start
    * after one finishes: N concurrent misses for one repo each spawned their
-   * own `gh pr list`, and the panel's `r` reaches `load()` with no in-flight
-   * guard, so key-repeat against a hung `gh` left a process per keypress.
+   * own `gh pr list`. The concurrent misses are real and ordinary: a picker
+   * and a sidebar with the panel open at once, a Tab rescope, a close and
+   * reopen on a cold or expired entry, and any direct caller of the endpoint.
    *
    * Sharing the promise also removes the write-ordering hazard rather than
    * guarding against it. Two calls for one repo can no longer overlap, so a
