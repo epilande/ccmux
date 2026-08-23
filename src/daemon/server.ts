@@ -4543,7 +4543,12 @@ export class DaemonServer {
           // keeps it clear of Claude Code's own `pr-<n>` directories.
           prompt: sourceFlag ? undefined : (prompt ?? undefined),
           derivedName: sourceWorktreeName ?? derivedName,
-          ...(prBranch ? { branch: prBranch } : {}),
+          // No base recorded on the PR path, deliberately: `creation.base` is
+          // the PR's own head sha, so the record would make the branch its
+          // own review base. `configurePRBranch` writes that key here with
+          // the branch the PR targets, and when it cannot, no key is what
+          // lets the picker's `D` fall back to its heuristic base.
+          ...(prBranch ? { branch: prBranch, recordBase: false } : {}),
         });
         if (!created.ok) {
           return Response.json(

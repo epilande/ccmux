@@ -635,7 +635,10 @@ describe("createWorktree", () => {
     await git(repo, ["commit", "-m", "second"]);
     const parent = await git(repo, ["rev-parse", "HEAD~1"]);
 
-    const out = await createWorktree(repo, { name: "off-parent", base: "HEAD~1" });
+    const out = await createWorktree(repo, {
+      name: "off-parent",
+      base: "HEAD~1",
+    });
 
     expect(out.ok).toBe(true);
     if (!out.ok) return;
@@ -1252,6 +1255,28 @@ describe("createWorktree with a branch override", () => {
     expect(await readConfig(repo, CONFIG_KEY("fix/flaky-binder"))).toBe(
       "refs/heads/main",
     );
+    expect(await readConfig(repo, CONFIG_KEY("pr-7-fix-flaky"))).toBeNull();
+  });
+
+  // A `--pr` spawn cuts the branch at the PR's own tip, so a record here
+  // would name the branch as its own review base and the picker's `D` would
+  // diff it against itself. Both keys are checked so this cannot pass by
+  // having recorded it under the other one.
+  it("records nothing under either key when the caller opts out", async () => {
+    const repo = await makeRepo();
+    const tip = await git(repo, ["rev-parse", "HEAD"]);
+
+    const created = await createWorktree(repo, {
+      name: "pr-7-fix-flaky",
+      base: tip,
+      branch: "fix/flaky-binder",
+      recordBase: false,
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.branchCreated).toBe(true);
+    expect(await readConfig(repo, CONFIG_KEY("fix/flaky-binder"))).toBeNull();
     expect(await readConfig(repo, CONFIG_KEY("pr-7-fix-flaky"))).toBeNull();
   });
 });

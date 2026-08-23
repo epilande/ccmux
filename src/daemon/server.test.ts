@@ -8327,6 +8327,49 @@ describe("POST /spawn with --pr and --issue", () => {
   });
 
   /**
+   * The base ref not resolving must leave NO key rather than a bad one.
+   *
+   * The creation engine cuts this branch at the PR's own head, so a base it
+   * recorded would say the branch is its own review base and the picker's
+   * `D` would diff it against itself — silently, since a merge-base equal to
+   * HEAD settles the lookup and never reaches the heuristic fallback. With
+   * no key at all the fallback runs, which is what the warning promises.
+   *
+   * A base branch that does not exist on origin is the deterministic way in:
+   * the base fetch is best-effort and the `rev-parse` that gates the key
+   * fails, so `configurePRBranch` never gets a ref to write.
+   */
+  it("records no review base when the PR's base ref cannot be resolved", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv({
+      ...PR_JSON,
+      baseRefName: "release/never-pushed",
+    });
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await res.json()) as SpawnBody;
+
+      // The spawn still STANDS: the key is a hint, not a requirement.
+      expect(res.status).toBe(200);
+      expect(body.worktree?.branch).toBe("fix/flaky-binder");
+      // Absent, not the PR head sha: `--get` exits non-zero on a key that is
+      // not there, which `gitOut` reports as empty output.
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.ccmux-base"),
+      ).toBe("");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  /**
    * A tracking-config write that fails AFTER the worktree exists.
    *
    * A stale `.git/config.lock` is both the realistic cause and the only way

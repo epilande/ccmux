@@ -730,7 +730,7 @@ export async function configurePRBranch(
       return {
         ok: true,
         value: {
-          baseNote: `could not record ${baseRemoteRef} as the review base for '${branch}' (${problem}); the picker's 'd' review will fall back to its default base`,
+          baseNote: `could not record ${baseRemoteRef} as the review base for '${branch}' (${problem}); the picker's 'D' branch review will fall back to its default base`,
         },
       };
     }

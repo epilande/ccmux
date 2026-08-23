@@ -840,6 +840,10 @@ describe("configurePRBranch", () => {
     if (!result.ok) return;
     expect(result.value.baseNote).toContain("origin/main");
     expect(result.value.baseNote).toContain("could not lock config file");
+    // `D`, not `d`: a bare `d` always reviews the working tree and never
+    // reads this key, so naming it would send the user to a surface the
+    // missing record has no effect on.
+    expect(result.value.baseNote).toContain("'D' branch review");
     expect(result.value.baseNote).toContain("fall back");
   });
 

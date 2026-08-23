@@ -742,6 +742,24 @@ export async function createWorktree(
     derivedName?: string;
     /** The branch to check out, when it must differ from the name. */
     branch?: string;
+    /**
+     * Whether to write `branch.<branch>.ccmux-base` for a branch this cut.
+     * Defaults to true; only a caller whose base is NOT a review base opts
+     * out.
+     *
+     * A `--pr` spawn is that caller: its cut point is the PR head itself, so
+     * the record would name the branch as its own base and the picker's `D`
+     * review would diff it against itself — a merge-base equal to HEAD,
+     * which settles the lookup and never reaches the heuristic fallback.
+     * `configurePRBranch` owns that key on this path and writes the branch
+     * the PR actually targets; when it cannot, no key is better than a
+     * poison one, because absence is what makes the fallback run.
+     *
+     * Explicit rather than inferred from `branch`: a branch override happens
+     * to be the only opt-out caller today, but a future one with no second
+     * writer wants the record, and inference would silently deny it.
+     */
+    recordBase?: boolean;
   },
   options: CreateWorktreeOptions = {},
 ): Promise<
@@ -881,8 +899,9 @@ export async function createWorktree(
 
     // Only for a branch this request CUT: a reused branch was not cut from
     // the base, so recording one would misdescribe its history (the same
-    // reason `result.base` is undefined below).
-    if (!reusingBranch)
+    // reason `result.base` is undefined below). And only when the caller
+    // wants it recorded at all; see `recordBase`.
+    if (!reusingBranch && (request.recordBase ?? true))
       await recordBranchBase(mainRepoRoot, branchName, based.base, git);
 
     const setup = await fileSetup(mainRepoRoot, path);
