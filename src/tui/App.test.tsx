@@ -1860,9 +1860,10 @@ describe("App review (d)", () => {
     expect(runHunkReviewSpy.mock.calls[0]?.[1]).toBe("/code/myapp");
   });
 
-  // The two modes and the one key that flips them. `d` follows the row: a
-  // worktree session is an agent working a branch (usually already
-  // committed), everything else is a working tree.
+  // The two keys are a FIXED pair, not a default and an override: `d` is
+  // always what is uncommitted and `D` always what the checkout changed
+  // since it forked, on every row. A worktree row is here to prove it is
+  // not consulted, not because it is treated differently.
   const WORKTREE_SESSION = {
     isWorktree: true,
     worktreeRoot: "/code/myapp/wt/feature",
@@ -1875,7 +1876,7 @@ describe("App review (d)", () => {
     await setup.renderOnce();
   };
 
-  it("reviews the working tree, with no target, on a non-worktree session", async () => {
+  it("d reviews the working tree, with no target, on a main checkout", async () => {
     await renderWithSession();
     setup.mockInput.pressKey("d");
     await settleReview();
@@ -1883,42 +1884,45 @@ describe("App review (d)", () => {
     expect(runHunkReviewSpy.mock.calls[0]?.[2]).toEqual({ target: undefined });
   });
 
-  it("reviews a worktree session against its base by default", async () => {
+  // The row a context-sensitive `d` would have branch-reviewed. It gets the
+  // working tree like every other row, which is what makes the key mean one
+  // thing the user can press without reading the row first.
+  it("d reviews the working tree on a worktree session too", async () => {
     await renderWithSession({}, WORKTREE_SESSION);
     setup.mockInput.pressKey("d");
     await settleReview();
-    // The CHECKOUT root, not the pane's cwd: a pane that cd'd into a
-    // subdirectory is still on the branch.
-    expect(resolveMergeBaseSpy.mock.calls[0]?.[0]).toBe(
-      "/code/myapp/wt/feature",
-    );
-    expect(runHunkReviewSpy.mock.calls[0]?.[1]).toBe(
-      "/code/myapp/wt/feature/src",
-    );
-    expect(runHunkReviewSpy.mock.calls[0]?.[2]).toEqual({
-      target: "base-sha",
-    });
-  });
-
-  it("falls back to the working tree when a worktree has no fork point", async () => {
-    resolveMergeBaseSpy.mockImplementation(async () => null);
-    await renderWithSession({}, WORKTREE_SESSION);
-    setup.mockInput.pressKey("d");
-    await settleReview();
+    expect(resolveMergeBaseSpy).not.toHaveBeenCalled();
     expect(runHunkReviewSpy.mock.calls[0]?.[2]).toEqual({ target: undefined });
   });
 
   // Terminals disagree about how they deliver the capital: as name "D", or
-  // as name "d" with `shift` set. Testing only one spelling left the toggle
-  // unreachable on half of them, which is what the Worktrees panel's own
-  // Shift+D binding was bitten by.
+  // as name "d" with `shift` set. Testing only one spelling left the branch
+  // review unreachable on half of them, which is what the Worktrees panel's
+  // own Shift+D binding was bitten by.
   const capitalD: [string, () => void][] = [
     ['as "D"', () => setup.mockInput.pressKey("D")],
     ['as shift+"d"', () => setup.mockInput.pressKey("d", { shift: true })],
   ];
 
   for (const [spelling, press] of capitalD) {
-    it(`D reviews a non-worktree session against its base (${spelling})`, async () => {
+    it(`D reviews a worktree session's branch (${spelling})`, async () => {
+      await renderWithSession({}, WORKTREE_SESSION);
+      press();
+      await settleReview();
+      // The CHECKOUT root, not the pane's cwd: a pane that cd'd into a
+      // subdirectory is still on the branch.
+      expect(resolveMergeBaseSpy.mock.calls[0]?.[0]).toBe(
+        "/code/myapp/wt/feature",
+      );
+      expect(runHunkReviewSpy.mock.calls[0]?.[1]).toBe(
+        "/code/myapp/wt/feature/src",
+      );
+      expect(runHunkReviewSpy.mock.calls[0]?.[2]).toEqual({
+        target: "base-sha",
+      });
+    });
+
+    it(`D reviews a main checkout's branch (${spelling})`, async () => {
       await renderWithSession();
       press();
       await settleReview();
@@ -1927,17 +1931,19 @@ describe("App review (d)", () => {
         target: "base-sha",
       });
     });
-
-    it(`D reviews a worktree session's working tree (${spelling})`, async () => {
-      await renderWithSession({}, WORKTREE_SESSION);
-      press();
-      await settleReview();
-      expect(resolveMergeBaseSpy).not.toHaveBeenCalled();
-      expect(runHunkReviewSpy.mock.calls[0]?.[2]).toEqual({
-        target: undefined,
-      });
-    });
   }
+
+  // What makes `D` safe to press on a checkout that never forked: no fork
+  // point resolves, and the review falls back to the working tree rather
+  // than opening an empty one. `D` on a main checkout on `main` is `d`.
+  it("D falls back to the working tree when there is no fork point", async () => {
+    resolveMergeBaseSpy.mockImplementation(async () => null);
+    await renderWithSession();
+    setup.mockInput.pressKey("D");
+    await settleReview();
+    expect(resolveMergeBaseSpy).toHaveBeenCalled();
+    expect(runHunkReviewSpy.mock.calls[0]?.[2]).toEqual({ target: undefined });
+  });
 
   it("drops a second d-press while a review is in flight", async () => {
     // Hold runHunkReview pending so reviewInFlight stays true across the

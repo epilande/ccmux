@@ -37,7 +37,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 📂 **Session Grouping**: Collapsible project groups with reordering and pinning
 - 🌿 **Git & PR Aware**: Branch and worktree detection, open PRs with live CI and review status
 - 🌱 **Worktree Workflow**: Spawn or fork sessions into fresh git worktrees, move uncommitted changes out of a dirty checkout, and prune leftovers from the Worktrees panel
-- 📝 **Diff Review**: Press <kbd>d</kbd> to review a session's diff with [hunk](https://github.com/modem-dev/hunk), right in the pane: a worktree's branch against its base, anything else's working tree
+- 📝 **Diff Review**: Press <kbd>d</kbd> to review a session's working-tree diff with [hunk](https://github.com/modem-dev/hunk), right in the pane, or <kbd>D</kbd> for everything the branch changed since it forked
 - 🤖 **Background Agents & Subagents**: Claude Code background agents get rows too; running subagents show as `agents` with a live list in the preview
 - 🎛️ **Session Control**: Spawn, fork, kill, and restart sessions from the TUI; `ccmux invoke` for scripted one-shot agent turns
 - 🤝 **Session Handoff**: Send a session's last response to another agent, from the CLI, the row menu, or agent-to-agent via the bundled relay skill
@@ -149,9 +149,9 @@ https://github.com/user-attachments/assets/7e0d42b3-4e7b-43b8-8d06-72a2d69dd694
 
 ### Diff Review with Hunk
 
-[hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the row menu (<kbd>m</kbd>, or right-click). If there is nothing to review, ccmux reports that instead of opening an empty review.
+[hunk](https://github.com/modem-dev/hunk) is a terminal diff reviewer. With `hunk` on your `PATH`, press <kbd>d</kbd> in the picker to review the selected session's working-tree diff without leaving ccmux: the picker suspends, `hunk diff --watch` takes over the pane in the session's repository root, and the picker resumes when hunk exits. The same action is available from the row menu (<kbd>m</kbd>, or right-click). If the working tree has no changes, ccmux reports that instead of opening an empty review.
 
-<kbd>d</kbd> picks the mode that fits the row. A session in a git worktree reviews its **branch against the ref it was cut from** (agents in worktrees commit as they go, so their working tree is usually empty while the branch is the point); every other session reviews its **working tree**, as before. <kbd>Shift+D</kbd> is the same review in the other mode, so a main checkout can still be read against its base and a worktree against its uncommitted changes. The base is whatever `ccmux spawn --worktree` recorded when it cut the branch, and falls back to the merge-base with the repo's default branch for worktrees ccmux did not create.
+<kbd>Shift+D</kbd> reviews the other diff: everything the checkout has changed **since it forked**, not just what is uncommitted. That is the question worth asking about an agent working in a worktree, which commits as it goes and often has an empty working tree while the branch is the whole point. The base it compares against is whatever `ccmux spawn --worktree` recorded when it cut the branch, falling back to the merge-base with the repo's default branch for checkouts ccmux did not create. A checkout that never forked (your main checkout sitting on `main`) has no fork point to compare against, so <kbd>D</kbd> there simply shows the working tree, the same as <kbd>d</kbd>.
 
 To send review feedback back to the agent:
 
@@ -425,7 +425,7 @@ verified. Adding another is one config line once you have checked it yourself
 
 After a branch is merged (and auto-deleted on GitHub), three leftovers stay on your machine: the worktree directory, the local branch, and often a tmux pane with a finished agent in it.
 
-<kbd>W</kbd> in the picker (or `Worktrees` on a group header) opens the Worktrees panel: every worktree of every repo in scope, main checkout first, with its branch, ahead/behind, uncommitted counts, open PR, and the agent living in it. <kbd>Enter</kbd> jumps to that agent, or starts one in a worktree that has none. <kbd>Tab</kbd> widens from the selected row's repo to all of them, <kbd>y</kbd> copies a path, and <kbd>d</kbd> reviews what the branch changed since it left its base (not just what is uncommitted), the same review <kbd>d</kbd> gives a worktree session in the list.
+<kbd>W</kbd> in the picker (or `Worktrees` on a group header) opens the Worktrees panel: every worktree of every repo in scope, main checkout first, with its branch, ahead/behind, uncommitted counts, open PR, and the agent living in it. <kbd>Enter</kbd> jumps to that agent, or starts one in a worktree that has none. <kbd>Tab</kbd> widens from the selected row's repo to all of them, <kbd>y</kbd> copies a path, and <kbd>d</kbd> reviews what the branch changed since it left its base (not just what is uncommitted, which is what <kbd>d</kbd> on a session row shows).
 
 https://github.com/user-attachments/assets/cc25199b-f563-4cda-8b59-6e95c449a94a
 

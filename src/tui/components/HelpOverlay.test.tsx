@@ -165,7 +165,7 @@ describe("HelpOverlay reviewable", () => {
     });
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("Review diff / flip mode");
+    expect(frame).toContain("Working tree / branch");
   });
 
   it("keeps the last row visible with every Actions row present", async () => {
@@ -194,6 +194,6 @@ describe("HelpOverlay reviewable", () => {
     });
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
-    expect(frame).not.toContain("Review diff / flip mode");
+    expect(frame).not.toContain("Working tree / branch");
   });
 });

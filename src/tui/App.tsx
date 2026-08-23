@@ -429,20 +429,19 @@ export function App(props: AppProps) {
   }
 
   /**
-   * The session list's `d`, and `D`, which is the same review in the other
-   * mode.
+   * The session list's `d` (what is UNCOMMITTED) and `D` (everything this
+   * checkout has changed since it forked). A fixed pair, not a default and
+   * an override: which of the two questions the user wants is not something
+   * the row can be read off for, and a key that means different things on
+   * different rows is one the user has to check the row before pressing.
    *
-   * `d` asks the question the row is most likely to be asked. A worktree
-   * session is an agent working a branch, and agents commit as they go, so
-   * its working tree is often empty while the branch is the whole point;
-   * every other session reviews what is uncommitted, as `d` always did.
-   * `invert` is the toggle, so a main checkout can still be read against its
-   * base and a worktree against its working tree.
-   *
-   * A branch with no fork point to name falls back to the working-tree
-   * review, exactly as the Worktrees panel's `d` does.
+   * `D` needs no case for a checkout that never forked. `resolveMergeBase`
+   * returns null on one sitting on its own base, and null falls back to the
+   * working-tree review — so `D` on a main checkout on `main` simply behaves
+   * like `d`, and the two keys separate exactly where there is something to
+   * separate.
    */
-  function reviewSession(session: EnrichedSession, invert = false) {
+  function reviewSession(session: EnrichedSession, branchMode = false) {
     if (reviewInFlight) return;
     const cwd = sessionCwd(session);
     if (!cwd) {
@@ -459,11 +458,11 @@ export function App(props: AppProps) {
     // Resolved before `runHunkReview`, which is what suspends the renderer.
     // From the CHECKOUT root rather than the pane's cwd: a pane that cd'd
     // into a subdirectory is still on the branch, and the merge-base is a
-    // property of the checkout.
-    const base =
-      session.isWorktree !== invert
-        ? resolveMergeBase(session.worktreeRoot ?? cwd)
-        : Promise.resolve(null);
+    // property of the checkout. `worktreeRoot` is that root for a linked
+    // worktree and for a main checkout alike.
+    const base = branchMode
+      ? resolveMergeBase(session.worktreeRoot ?? cwd)
+      : Promise.resolve(null);
     base
       .then((target) =>
         runHunkReview(renderer, cwd, { target: target ?? undefined }),
@@ -492,7 +491,7 @@ export function App(props: AppProps) {
    * worktree whose work is already committed shows what it changed instead of
    * "no changes to review". A worktree with no fork point to name (sitting on
    * the base, orphaned, or in a repo with no recognizable default branch)
-   * falls back to the working-tree review the session list's `D` does.
+   * falls back to the working-tree review the session list's `d` does.
    *
    * The handback is what the row's session buys: notes from an occupied
    * worktree go to that agent exactly as they do from the list. A bare
@@ -3570,11 +3569,11 @@ export function App(props: AppProps) {
       case "D":
       case "d":
       case "u":
-        // Ctrl+D/U scroll the preview; a bare `d` reviews, and Shift+D
-        // reviews in the OTHER mode. Both spellings of the capital are
+        // Ctrl+D/U scroll the preview; a bare `d` reviews the working
+        // tree, Shift+D the branch. Both spellings of the capital are
         // matched because terminals deliver it as name `"d"` with `shift`
-        // set as readily as `"D"`; without the lowercase case the toggle
-        // would be unreachable on half of them.
+        // set as readily as `"D"`; without the lowercase case the branch
+        // review would be unreachable on half of them.
         if (event.ctrl && previewScrollbox && store.state.showPreview) {
           const halfPage = Math.floor(
             (previewScrollbox.viewport?.height ?? 10) / 2,
