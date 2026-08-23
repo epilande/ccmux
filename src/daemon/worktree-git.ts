@@ -628,8 +628,12 @@ export async function readBranchTips(
 ): Promise<Map<string, string>> {
   const tips = new Map<string, string>();
   const res = await git(repoRoot, [
+    // `lstrip=2`, never `%(refname:short)`. Short is CONTEXTUAL: a branch that
+    // shares its name with a tag disambiguates to `heads/feat-x`, so the tip
+    // lands under a key no caller looks up and the PR is silently never
+    // marked checked out. `lstrip=2` always drops exactly `refs/heads/`.
     "for-each-ref",
-    "--format=%(refname:short)%09%(objectname)",
+    "--format=%(refname:lstrip=2)%09%(objectname)",
     "refs/heads",
   ]);
   if (res.exitCode !== 0) return tips;

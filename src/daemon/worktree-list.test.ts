@@ -152,6 +152,21 @@ describe("listRepoWorktrees", () => {
     expect(rowFor(rows, "detached-tip").tip).toBeNull();
   });
 
+  // `%(refname:short)` is CONTEXTUAL: a branch sharing its name with a tag
+  // disambiguates to `heads/<name>`, so the tip landed under a key nothing
+  // looks up and the PR was silently never marked checked out.
+  it("reports a tip for a branch whose name collides with a tag", async () => {
+    const repo = await makeRepo("proj");
+    const wt = await addWorktree(repo, "feat-collide");
+    await git(repo, ["tag", "feat-collide", "main"]);
+
+    const rows = (await listRepoWorktrees(repo))?.worktrees ?? [];
+
+    expect(rowFor(rows, "feat-collide").tip).toBe(
+      await git(wt, ["rev-parse", "HEAD"]),
+    );
+  });
+
   it("counts modified and untracked files separately", async () => {
     const repo = await makeRepo("proj");
     const wt = await addWorktree(repo, "feat/dirty");
