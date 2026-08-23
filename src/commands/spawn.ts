@@ -34,6 +34,8 @@ interface SpawnResponse {
   };
   /** Present only when `--with-changes` relocated uncommitted work. */
   move?: MoveReport;
+  /** Things that went wrong without making the spawn wrong. */
+  warnings?: string[];
 }
 
 /**
@@ -507,6 +509,13 @@ export function createSpawnCommand(): Command {
               ? `Forked ${options.fork} into pane ${data.paneId}: ${data.command}`
               : `Spawned ${agent} in pane ${data.paneId}: ${data.command}`,
           );
+
+          // On stderr because they are problems, but the exit stays 0: the
+          // session is running and correct, and one unwritten optional key
+          // must not make a working spawn look failed to a script.
+          for (const warning of data.warnings ?? []) {
+            console.error(`Warning: ${warning}`);
+          }
 
           // Reported last, after everything that DID happen, and as a
           // failure. A daemon predating `--with-changes` drops the keys it

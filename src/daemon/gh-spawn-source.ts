@@ -197,7 +197,19 @@ export async function lookupPR(
     }
   }
 
-  const isCrossRepository = row.isCrossRepository === true;
+  // Refused rather than defaulted when it is not a boolean. A missing or
+  // malformed field read as `false` sets the expected remote to `origin`,
+  // which is precisely the fork hijack the reuse gate below exists to close:
+  // failing OPEN on the field that says "this is a fork" would undo it.
+  // Unreachable through today's gh (it errors on an unknown --json field),
+  // and one line of defense on the property this module is built around.
+  if (typeof row.isCrossRepository !== "boolean") {
+    return {
+      ok: false,
+      error: `gh pr view ${number} did not say whether PR #${number} comes from a fork (isCrossRepository), so ccmux cannot tell which repository its branch should push to. Check it out with 'gh pr checkout ${number}' instead.`,
+    };
+  }
+  const isCrossRepository = row.isCrossRepository;
   let headRemoteUrl: string | undefined;
   if (isCrossRepository) {
     // Only a fork needs these, and only a fork can be refused for missing
@@ -319,6 +331,19 @@ export interface RepoSlug {
  * A local path, a non-GitHub-shaped URL, and an empty string all answer null:
  * this function proves a match, never a mismatch by absence.
  */
+/**
+ * Hosts that are one forge under two names.
+ *
+ * GitHub documents `ssh://git@ssh.github.com:443/owner/repo.git` as the way
+ * through a firewall that blocks port 22, so a clone URL naming it is the
+ * SAME repository as one naming github.com. Without this the host comparison
+ * fails and {@link prRepoMismatch} refuses with a message that reads as
+ * nonsense: "belongs to o/r, but this clone's 'origin' is o/r".
+ */
+const HOST_ALIASES: Record<string, string> = {
+  "ssh.github.com": "github.com",
+};
+
 export function parseRepoSlug(url: string): RepoSlug | null {
   const trimmed = url.trim();
   if (!trimmed) return null;
@@ -350,11 +375,17 @@ export function parseRepoSlug(url: string): RepoSlug | null {
   if (segments.length < 2 || !host) return null;
   const repo = (segments[1] ?? "").replace(/\.git$/i, "");
   if (!segments[0] || !repo) return null;
+  const lowerHost = host.toLowerCase();
   return {
-    host: host.toLowerCase(),
+    host: HOST_ALIASES[lowerHost] ?? lowerHost,
     owner: segments[0].toLowerCase(),
     repo: repo.toLowerCase(),
   };
+}
+
+/** `owner/repo on host`, the form the mismatch message names a side with. */
+function describeSlug(slug: RepoSlug): string {
+  return `${slug.owner}/${slug.repo} on ${slug.host}`;
 }
 
 /** Whether two URLs name the same repository. Null on either side is false. */
@@ -393,11 +424,46 @@ export async function prRepoMismatch(
   const originSlug = parseRepoSlug(remote.stdout.trim());
   if (!originSlug) return null;
   if (sameRepo(prSlug, originSlug)) return null;
+  // The HOST is named as well as owner/repo, because a host-only mismatch
+  // (a GitHub Enterprise clone of a repo that also exists on github.com)
+  // would otherwise print the same slug on both sides and read as nonsense.
   return (
-    `PR #${pr.number} belongs to ${prSlug.owner}/${prSlug.repo}, but this clone's 'origin' is ` +
-    `${originSlug.owner}/${originSlug.repo}. ccmux fetches the PR from 'origin', so it would ` +
+    `PR #${pr.number} belongs to ${describeSlug(prSlug)}, but this clone's 'origin' is ` +
+    `${describeSlug(originSlug)}. ccmux fetches the PR from 'origin', so it would ` +
     `check out the wrong code. Point 'origin' at the base repository, or fetch the PR by hand.`
   );
+}
+
+/**
+ * The repository a `branch.<b>.remote` value points at, or null.
+ *
+ * That value is either a URL or the NAME of a remote, and both spellings are
+ * ordinary: ccmux writes a URL for a fork and the name `origin` for a
+ * same-repo PR, while plain git writes whatever name the user configured
+ * (`git remote add fork <url>; git checkout -b foo fork/foo` leaves `fork`).
+ * Comparing the raw strings therefore refuses branches that genuinely ARE
+ * the PR's, so a name is resolved through `remote.<name>.url` and both sides
+ * are compared as repositories.
+ *
+ * This does NOT reopen the hijack: for a fork PR the expected side is the
+ * fork's URL, while a hijacking branch's `origin` resolves to the BASE
+ * repository, so the two still differ.
+ */
+async function remoteSlug(
+  mainRepoRoot: string,
+  value: string,
+  git: GitRun,
+): Promise<RepoSlug | null> {
+  if (!value) return null;
+  const direct = parseRepoSlug(value);
+  if (direct) return direct;
+  const url = await git(mainRepoRoot, [
+    "config",
+    "--get",
+    `remote.${value}.url`,
+  ]);
+  if (url.exitCode !== 0) return null;
+  return parseRepoSlug(url.stdout.trim());
 }
 
 /**
@@ -418,6 +484,12 @@ export async function branchCheckedOutAt(
   return null;
 }
 
+/** What {@link configurePRBranch} could not finish, though the spawn is fine. */
+export interface PRBranchConfig {
+  /** Set when the OPTIONAL `ccmux-base` key could not be written. */
+  baseNote?: string;
+}
+
 /** What {@link preparePRBranch} settled, for the create that follows it. */
 export interface PRBranchPrep {
   /** The PR head's sha, to cut a new branch from. */
@@ -427,7 +499,8 @@ export interface PRBranchPrep {
   /**
    * `origin/<baseRefName>`, or null when it could not be made to resolve.
    * Null only costs the `ccmux-base` key (the picker's `d` review falls back
-   * to its own default), so it is not worth failing a spawn over.
+   * to its own default), so it is not worth failing a spawn over. The WRITE
+   * of that key is non-fatal for the same reason; see {@link configurePRBranch}.
    */
   baseRemoteRef: string | null;
 }
@@ -520,12 +593,16 @@ export async function preparePRBranch(
         git(mainRepoRoot, ["config", "--get", `branch.${branch}.remote`]),
       ]);
       const configured = remote.stdout.trim();
+      // Compared as REPOSITORIES, not as strings: either side may be a URL
+      // or a remote name, and `remoteSlug` resolves a name through
+      // `remote.<name>.url` so the two spellings of one repository match.
+      // A repository neither side can be resolved to stays a refusal.
       const remoteMatches =
         configured === expectedRemote ||
-        // A branch may spell the same repository as a URL where ccmux writes
-        // a name, or the other way round. Only ever loosens between two
-        // parseable GitHub URLs, never between a URL and the name `origin`.
-        sameRepo(parseRepoSlug(configured), parseRepoSlug(expectedRemote));
+        sameRepo(
+          await remoteSlug(mainRepoRoot, configured, git),
+          await remoteSlug(mainRepoRoot, expectedRemote, git),
+        );
       if (merge.stdout.trim() !== `refs/heads/${branch}` || !remoteMatches) {
         return {
           ok: false as const,
@@ -562,10 +639,10 @@ export async function preparePRBranch(
 /**
  * Point the checked-out branch at the PR, the way `gh pr checkout` does.
  *
- * Same-repo PRs track `origin`; a fork's branch tracks the fork's clone URL
- * (as both `remote` and `pushRemote`, since gh does not add a named remote
- * for it), so `git push` from the new worktree updates the PR instead of
- * failing or, worse, opening a second one.
+ * Same-repo PRs track `origin` and carry NO `pushRemote`; a fork's branch
+ * tracks the fork's clone URL as both `remote` and `pushRemote` (gh does not
+ * add a named remote for it). Either way `git push` from the new worktree
+ * updates the PR instead of failing or, worse, opening a second one.
  *
  * `ccmux-base` is ccmux's own key: it is what the picker's `d` review diffs
  * against, and for a PR the useful base is the branch the PR targets rather
@@ -575,13 +652,27 @@ export async function preparePRBranch(
  * Re-asserted on a reused branch too, since every write here is idempotent,
  * so a branch created by an older ccmux (or by hand) heals on the next spawn.
  *
- * Every write is CHECKED, and a failure is reported rather than swallowed.
- * These keys are not independent: `remote` landing while `pushRemote` fails
- * leaves a fork's branch fetching from the fork and PUSHING TO ORIGIN, which
- * is how someone opens a second PR (or pushes to a repo they did not mean
- * to) without ever seeing an error. Every key is still attempted, because a
- * partial write is what has to be described accurately, and stopping early
- * would leave more of it unset for no gain.
+ * The three TRACKING keys are checked, and a failure is reported rather
+ * than swallowed. They are not independent: `remote` landing while
+ * `pushRemote` fails leaves a fork's branch fetching from the fork and
+ * PUSHING TO ORIGIN, which is how someone opens a second PR (or pushes to a
+ * repo they did not mean to) without ever seeing an error.
+ *
+ * That is also why the same-repo path UNSETS `pushRemote` rather than
+ * leaving it alone: git documents `branch.<name>.pushRemote` as overriding
+ * `branch.<name>.remote` for pushing, so a stale one left on a reused branch
+ * would send the push elsewhere while every key checked here reported
+ * success. `--unset` exits 5 when the key is absent, which is the state
+ * being asked for, not a failure.
+ *
+ * `ccmux-base` is deliberately NOT fatal. It is a hint for the picker's diff
+ * base, and {@link preparePRBranch} already declines to fail a spawn when the
+ * ref it would name cannot be resolved; failing on the WRITE of the same
+ * optional key would contradict that and 500 an otherwise-correct spawn
+ * (worktree and all) over a diff-base hint. It is reported as a note instead.
+ *
+ * Every op is still attempted, because a partial write is what has to be
+ * described accurately, and stopping early would leave more of it unset.
  */
 export async function configurePRBranch(
   mainRepoRoot: string,
@@ -589,29 +680,38 @@ export async function configurePRBranch(
   pr: PRSource,
   baseRemoteRef: string | null,
   git: GitRun = runGit,
-): Promise<SourceResult<void>> {
-  const remote = pr.headRemoteUrl ?? "origin";
-  const writes: Array<[string, string]> = [
-    [`branch.${branch}.remote`, remote],
-    ...(pr.headRemoteUrl
-      ? ([[`branch.${branch}.pushRemote`, pr.headRemoteUrl]] as Array<
-          [string, string]
-        >)
-      : []),
-    [`branch.${branch}.merge`, `refs/heads/${pr.headRefName}`],
-    ...(baseRemoteRef
-      ? ([[`branch.${branch}.ccmux-base`, baseRemoteRef]] as Array<
-          [string, string]
-        >)
-      : []),
+): Promise<SourceResult<PRBranchConfig>> {
+  /** One `git config` write, or the removal of a key that must not persist. */
+  type ConfigOp =
+    | { key: string; value: string }
+    | { key: string; unset: true };
+
+  const run = async (op: ConfigOp): Promise<string | null> => {
+    const res =
+      "unset" in op
+        ? await git(mainRepoRoot, ["config", "--unset", op.key])
+        : await git(mainRepoRoot, ["config", op.key, op.value]);
+    // Exit 5 from `--unset` means the key was not there, which is the state
+    // being asked for. Treating it as a failure would report every ordinary
+    // same-repo spawn as broken.
+    if (res.exitCode === 0 || ("unset" in op && res.exitCode === 5)) {
+      return null;
+    }
+    return `${op.key} (${res.stderr.trim() || `exited ${res.exitCode}`})`;
+  };
+
+  const tracking: ConfigOp[] = [
+    { key: `branch.${branch}.remote`, value: pr.headRemoteUrl ?? "origin" },
+    pr.headRemoteUrl
+      ? { key: `branch.${branch}.pushRemote`, value: pr.headRemoteUrl }
+      : { key: `branch.${branch}.pushRemote`, unset: true },
+    { key: `branch.${branch}.merge`, value: `refs/heads/${pr.headRefName}` },
   ];
 
   const failed: string[] = [];
-  for (const [key, value] of writes) {
-    const res = await git(mainRepoRoot, ["config", key, value]);
-    if (res.exitCode !== 0) {
-      failed.push(`${key} (${res.stderr.trim() || `exited ${res.exitCode}`})`);
-    }
+  for (const op of tracking) {
+    const problem = await run(op);
+    if (problem) failed.push(problem);
   }
   if (failed.length > 0) {
     return {
@@ -619,7 +719,23 @@ export async function configurePRBranch(
       error: `Could not finish setting up branch '${branch}' to track PR #${pr.number}: ${failed.join("; ")}. Until that is fixed, 'git push' from this worktree may not go where you expect; 'gh pr checkout ${pr.number}' inside it will reset the tracking config.`,
     };
   }
-  return { ok: true, value: undefined };
+
+  // Optional, and never fatal; see this function's doc comment.
+  if (baseRemoteRef) {
+    const problem = await run({
+      key: `branch.${branch}.ccmux-base`,
+      value: baseRemoteRef,
+    });
+    if (problem) {
+      return {
+        ok: true,
+        value: {
+          baseNote: `could not record ${baseRemoteRef} as the review base for '${branch}' (${problem}); the picker's 'd' review will fall back to its default base`,
+        },
+      };
+    }
+  }
+  return { ok: true, value: {} };
 }
 
 /**

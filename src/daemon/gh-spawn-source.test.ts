@@ -70,6 +70,24 @@ describe("lookupPR", () => {
     );
   });
 
+  // Failing OPEN on the field that says "this is a fork" would set the
+  // expected remote to `origin` and restore the hijack the reuse gate
+  // exists to close.
+  it("refuses when isCrossRepository is missing or not a boolean", async () => {
+    for (const value of [undefined, null, "true", 1]) {
+      const row: Record<string, unknown> = { ...OPEN_PR };
+      if (value === undefined) delete row.isCrossRepository;
+      else row.isCrossRepository = value;
+      const found = await lookupPR(
+        "/repo",
+        7,
+        ghAnswering({ stdout: JSON.stringify(row) }),
+      );
+      expect(found.ok).toBe(false);
+      if (!found.ok) expect(found.error).toContain("isCrossRepository");
+    }
+  });
+
   it("refuses a fork PR whose repository gh did not name", async () => {
     const run = ghAnswering({
       stdout: JSON.stringify({ ...OPEN_PR, isCrossRepository: true }),
@@ -272,6 +290,22 @@ describe("parseRepoSlug / sameRepo", () => {
     }
   });
 
+  // GitHub documents ssh.github.com:443 as the way through a firewall that
+  // blocks port 22, so it is the same forge under a second name. Without the
+  // alias the host comparison fails and the mismatch message prints the same
+  // slug on both sides.
+  it("treats ssh.github.com as github.com", () => {
+    expect(parseRepoSlug("ssh://git@ssh.github.com:443/junegunn/fzf.git")).toEqual(
+      { host: "github.com", owner: "junegunn", repo: "fzf" },
+    );
+    expect(
+      sameRepo(
+        parseRepoSlug("ssh://git@ssh.github.com:443/junegunn/fzf.git"),
+        parseRepoSlug("https://github.com/junegunn/fzf.git"),
+      ),
+    ).toBe(true);
+  });
+
   it("answers null for anything it cannot prove is a repo URL", () => {
     for (const url of ["", "   ", "/local/path/repo", "file:///tmp/repo.git"]) {
       expect(parseRepoSlug(url)).toBeNull();
@@ -318,11 +352,29 @@ describe("prRepoMismatch", () => {
     expect(problem).toContain("me/fzf");
   });
 
+  // A host-only mismatch (a GHE clone of a repo that also lives on
+  // github.com) would otherwise print the same slug twice and read as
+  // nonsense: "belongs to o/r, but this clone's 'origin' is o/r".
+  it("names the host, so a host-only mismatch is legible", async () => {
+    const git = gitAnswering([
+      ["remote get-url origin", { stdout: "https://ghe.corp/o/r.git\n" }],
+    ]);
+    const problem = await prRepoMismatch(
+      "/repo",
+      { ...OPEN_PR, url: "https://github.com/o/r/pull/7" },
+      git,
+    );
+
+    expect(problem).toContain("o/r on github.com");
+    expect(problem).toContain("o/r on ghe.corp");
+  });
+
   it("passes when origin is the PR's own repo, however it is spelled", async () => {
     for (const url of [
       "https://github.com/junegunn/fzf.git",
       "git@github.com:junegunn/fzf",
       "ssh://git@github.com/JuneGunn/fzf.git",
+      "ssh://git@ssh.github.com:443/junegunn/fzf.git",
     ]) {
       const git = gitAnswering([["remote get-url origin", { stdout: url }]]);
       expect(
@@ -467,6 +519,91 @@ describe("preparePRBranch", () => {
     );
   });
 
+  // FALSE REFUSAL, closed. A branch set up the plain-git way
+  // (`git remote add fork <url>; git checkout -b foo fork/foo`) has
+  // `branch.foo.remote = fork`, a NAME. Comparing strings refused the branch
+  // that genuinely IS the PR's and told the user to delete it.
+  it("reuses a branch whose remote is the NAME of a remote pointing at the fork", async () => {
+    const forkPR: PRSource = {
+      ...OPEN_PR,
+      isCrossRepository: true,
+      headRemoteUrl: "https://github.com/LiadOz/ccmux.git",
+    };
+    const git = gitAnswering([
+      ["rev-parse FETCH_HEAD", { stdout: "cafe\n" }],
+      ["rev-parse --verify --quiet refs/heads/", { stdout: "dead\n" }],
+      [
+        "config --get branch.fix/flaky-binder.merge",
+        { stdout: "refs/heads/fix/flaky-binder\n" },
+      ],
+      ["config --get branch.fix/flaky-binder.remote", { stdout: "fork\n" }],
+      [
+        "config --get remote.fork.url",
+        { stdout: "git@github.com:LiadOz/ccmux.git\n" },
+      ],
+    ]);
+    const prepared = await preparePRBranch("/repo", forkPR, git);
+
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(prepared.value.branchExisted).toBe(true);
+  });
+
+  // AND THE HIJACK STAYS CLOSED with name resolution in place: the branch's
+  // `origin` resolves to the BASE repo, never to the fork.
+  it("still refuses the hijack once names resolve to URLs", async () => {
+    const forkPR: PRSource = {
+      ...OPEN_PR,
+      isCrossRepository: true,
+      headRemoteUrl: "https://github.com/attacker/ccmux.git",
+    };
+    const git = gitAnswering([
+      ["rev-parse FETCH_HEAD", { stdout: "cafe\n" }],
+      ["rev-parse --verify --quiet refs/heads/", { stdout: "dead\n" }],
+      [
+        "config --get branch.fix/flaky-binder.merge",
+        { stdout: "refs/heads/fix/flaky-binder\n" },
+      ],
+      ["config --get branch.fix/flaky-binder.remote", { stdout: "origin\n" }],
+      // origin is the BASE repository, which is the whole point.
+      [
+        "config --get remote.origin.url",
+        { stdout: "https://github.com/epilande/ccmux.git\n" },
+      ],
+    ]);
+    const prepared = await preparePRBranch("/repo", forkPR, git);
+
+    expect(prepared.ok).toBe(false);
+    if (prepared.ok) return;
+    expect(prepared.error).toContain("is not set up to track PR #7");
+  });
+
+  // The symmetric false refusal: a SAME-REPO PR whose branch spells origin
+  // as a URL where ccmux writes the name.
+  it("reuses a same-repo branch whose remote is spelled as origin's URL", async () => {
+    const git = gitAnswering([
+      ["rev-parse FETCH_HEAD", { stdout: "cafe\n" }],
+      ["rev-parse --verify --quiet refs/heads/", { stdout: "dead\n" }],
+      [
+        "config --get branch.fix/flaky-binder.merge",
+        { stdout: "refs/heads/fix/flaky-binder\n" },
+      ],
+      [
+        "config --get branch.fix/flaky-binder.remote",
+        { stdout: "https://github.com/epilande/ccmux.git\n" },
+      ],
+      [
+        "config --get remote.origin.url",
+        { stdout: "git@github.com:epilande/ccmux.git\n" },
+      ],
+    ]);
+    const prepared = await preparePRBranch("/repo", { ...OPEN_PR }, git);
+
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(prepared.value.branchExisted).toBe(true);
+  });
+
   // The mirror image: a branch that really is this fork PR's is still reused.
   it("reuses a branch whose remote is the fork's own URL", async () => {
     const forkPR: PRSource = {
@@ -592,8 +729,13 @@ describe("configurePRBranch", () => {
     expect(joined).toContain(
       "config branch.fix/flaky-binder.ccmux-base origin/main",
     );
-    // Only a fork needs an explicit push target.
-    expect(joined.join("\n")).not.toContain("pushRemote");
+    // A same-repo PR pushes to origin, so any STALE pushRemote has to be
+    // REMOVED rather than left: git treats `branch.<n>.pushRemote` as
+    // overriding `branch.<n>.remote` for pushing, so leaving one would send
+    // the push elsewhere while every checked key reported success.
+    expect(joined).toContain(
+      "config --unset branch.fix/flaky-binder.pushRemote",
+    );
   });
 
   it("points a fork PR's branch at the fork for both fetch and push", async () => {
@@ -648,6 +790,23 @@ describe("configurePRBranch", () => {
     );
   });
 
+  // `git config --unset` exits 5 when the key is not there, which is the
+  // state being asked for. Treating that as a failure would report every
+  // ordinary same-repo spawn as broken.
+  it("treats an absent pushRemote (exit 5) as success", async () => {
+    const result = await configurePRBranch(
+      "/repo",
+      "b",
+      { ...OPEN_PR },
+      "origin/main",
+      gitAnswering([
+        ["config --unset branch.b.pushRemote", { exitCode: 5, stderr: "" }],
+      ]),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.baseNote).toBeUndefined();
+  });
+
   it("succeeds when every write lands", async () => {
     const result = await configurePRBranch(
       "/repo",
@@ -657,6 +816,46 @@ describe("configurePRBranch", () => {
       gitAnswering([]),
     );
     expect(result.ok).toBe(true);
+  });
+
+  // `preparePRBranch` already declines to fail a spawn when the base ref
+  // cannot be RESOLVED, so failing on the WRITE of that same optional key
+  // would contradict it and 500 an otherwise-correct spawn (worktree and
+  // all) over a hint for the picker's diff base.
+  it("reports a failed ccmux-base write as a note, not a failure", async () => {
+    const result = await configurePRBranch(
+      "/repo",
+      "b",
+      { ...OPEN_PR },
+      "origin/main",
+      gitAnswering([
+        [
+          "config branch.b.ccmux-base",
+          { exitCode: 4, stderr: "could not lock config file" },
+        ],
+      ]),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.baseNote).toContain("origin/main");
+    expect(result.value.baseNote).toContain("could not lock config file");
+    expect(result.value.baseNote).toContain("fall back");
+  });
+
+  // The other half of the same rule: a key that DOES decide where a push
+  // goes stays fatal.
+  it("keeps a failed tracking-key write fatal", async () => {
+    const result = await configurePRBranch(
+      "/repo",
+      "b",
+      { ...OPEN_PR },
+      "origin/main",
+      gitAnswering([
+        ["config branch.b.merge", { exitCode: 4, stderr: "locked" }],
+      ]),
+    );
+    expect(result.ok).toBe(false);
   });
 
   it("writes no ccmux-base when the remote base never resolved", async () => {

@@ -348,9 +348,11 @@ not open, an issue that is closed, a PR whose branch is already checked out in
 another worktree (ccmux names it), and a same-named local branch that is not
 that PR (a branch counts as the PR's only when its `merge` *and* `remote` config
 both already point at it, so a fork PR cannot ride in on a name collision with
-one of your origin-tracking branches). A local branch that *is* the PR is
-fast-forwarded, never force-updated. If it has diverged, ccmux leaves it alone
-and says so.
+one of your origin-tracking branches). The remote is compared as a repository,
+not as text, so a branch you set up yourself with `git remote add fork <url>`
+and `git checkout -b <branch> fork/<branch>` is recognized as the PR's. A local
+branch that *is* the PR is fast-forwarded, never force-updated. If it has
+diverged, ccmux leaves it alone and says so.
 
 ccmux fetches the PR from `origin`, while `gh` resolves the number through its
 own repo selection (`gh repo set-default`, `GH_REPO`, a fork clone's upstream).

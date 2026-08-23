@@ -4299,6 +4299,8 @@ export class DaemonServer {
     let moveInfo: SpawnMoveReport | undefined;
     /** A `--pr` tracking-config write that failed after the worktree existed. */
     let prConfigProblem: string | undefined;
+    /** Non-fatal notes from a successful spawn, echoed to the caller. */
+    const warnings: string[] = [];
     // `pr`/`issue` imply a worktree without one being asked for: the whole
     // point of both flags is a checkout to work in. The synthesized request
     // is empty except for the `base` an `--issue --base` rides in on, which
@@ -4568,6 +4570,11 @@ export class DaemonServer {
             prBase,
           );
           if (!configured.ok) prConfigProblem = configured.error;
+          // A key that could not be written but does not decide where a push
+          // goes. Reported, never fatal; see `configurePRBranch`.
+          else if (configured.value.baseNote) {
+            warnings.push(configured.value.baseNote);
+          }
         }
       }
     }
@@ -4760,6 +4767,9 @@ export class DaemonServer {
           command,
           worktree: worktreeInfo,
           move: moveInfo,
+          // Things that went wrong without making the spawn wrong. Omitted
+          // when empty so an ordinary spawn's body is unchanged.
+          ...(warnings.length > 0 ? { warnings } : {}),
         },
         { headers },
       );
