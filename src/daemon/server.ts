@@ -1689,13 +1689,20 @@ export class DaemonServer {
         url.searchParams.get("repo"),
         url.searchParams.get("cwd"),
       );
+      // An EXPLICIT user refresh skips the freshness check, because a refresh
+      // key that answers from a 60s cache is a key that does nothing for the
+      // one thing on this panel that goes stale on its own: a PR merged a
+      // moment ago still reads open. It cannot stampede, because a live call
+      // is still JOINED rather than duplicated, and that is a property of the
+      // entry rather than of the TTL.
+      const refresh = url.searchParams.get("refresh") === "1";
       const response: PRListResponse = { repos: [], errors: [] };
       const answers = await mapWithConcurrency(
         repoRoots,
         PR_REPO_CONCURRENCY,
         async (repoRoot) => ({
           repoRoot,
-          result: await this.openPRsFor(repoRoot),
+          result: await this.openPRsFor(repoRoot, refresh),
         }),
       );
       for (const { repoRoot, result } of answers) {
@@ -1720,16 +1727,18 @@ export class DaemonServer {
    * One repo's open PRs: the cached answer if it is fresh, the in-flight call
    * if there is one, and only otherwise a new `gh`.
    */
-  private openPRsFor(repoRoot: string): Promise<PRListAnswer> {
+  private openPRsFor(repoRoot: string, refresh = false): Promise<PRListAnswer> {
     const entry = this.prListCache.get(repoRoot);
     if (entry) {
       // Still running. Join it rather than starting a second `gh`: the TTL
       // cannot help here, because it is only written when a call COMPLETES.
+      // Ahead of the `refresh` check on purpose, so a refresh JOINS a live
+      // call instead of racing a second one against it.
       if (!entry.done) return entry.answer;
       const ttl = entry.done.result.ok
         ? PR_LIST_TTL_MS
         : PR_LIST_FAILURE_TTL_MS;
-      if (Date.now() - entry.done.at < ttl) return entry.answer;
+      if (!refresh && Date.now() - entry.done.at < ttl) return entry.answer;
     }
 
     const answer = listOpenPRs(repoRoot);

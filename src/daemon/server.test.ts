@@ -8976,6 +8976,60 @@ describe("GET /prs caching", () => {
     }
   }, 20_000);
 
+  // An explicit user refresh must actually refresh: the whole reason the
+  // panel has a refresh key is that a PR merges on GitHub with nothing local
+  // to show for it, and a 60s cache would make the key a lie.
+  it("skips a fresh cache entry for an explicit refresh", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh();
+    try {
+      await listPRs(internals, repo);
+      expect(gh.calls()).toBe(1);
+
+      // Inside the TTL: an ordinary read is still served from cache.
+      await listPRs(internals, repo);
+      expect(gh.calls()).toBe(1);
+
+      const res = await internals.handleRequest(
+        new Request(
+          `http://127.0.0.1:2269/prs?repo=${encodeURIComponent(repo)}&refresh=1`,
+        ),
+      );
+      expect(res.status).toBe(200);
+      expect(gh.calls()).toBe(2);
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
+
+  // The lock is a property of the entry, not of the TTL, so a refresh cannot
+  // be used to start a second `gh` alongside a live one.
+  it("still joins a live call rather than racing it", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh(1);
+    try {
+      const first = listPRs(internals, repo);
+      let inFlight: { done: unknown }[] = [];
+      for (let i = 0; i < 100 && inFlight.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight = [...internals.prListCache.values()];
+      }
+      expect(inFlight[0]?.done).toBeNull();
+
+      const refreshed = internals.handleRequest(
+        new Request(
+          `http://127.0.0.1:2269/prs?repo=${encodeURIComponent(repo)}&refresh=1`,
+        ),
+      );
+      await Promise.all([first, refreshed]);
+      expect(gh.calls()).toBe(1);
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
+
   it("holds a success across the window a failure would have expired in", async () => {
     const repo = makeRepo();
     const { internals } = createServer();

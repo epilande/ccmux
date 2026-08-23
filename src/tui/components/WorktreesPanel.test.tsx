@@ -379,7 +379,7 @@ async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
         onJump={opts.onJump ?? (() => {})}
         onSpawn={opts.onSpawn ?? (() => {})}
         onReview={opts.onReview}
-        onSpawnFromPR={opts.onSpawnFromPR}
+        onSpawnFromPR={opts.onSpawnFromPR ?? (() => {})}
         effects={recorder.effects}
       />
     ),
@@ -3741,6 +3741,50 @@ describe("PR section title and cursor", () => {
     expect(isPRRowKey(prRowKey("/repo", 151))).toBe(true);
     // Every worktree key is an absolute path, so the prefix cannot collide.
     expect(isPRRowKey("/repo/wt/alpha")).toBe(false);
+  });
+});
+
+describe("WorktreesPanel r refresh", () => {
+  // `r` already meant reload on the done and error phases and simply never
+  // reached the list, where the panel spends all its time.
+  it("refetches all three phases from the list phase", async () => {
+    const { keys, frame } = await mountSettled(listOf([mainRow(), row()]));
+    const before = requested.length;
+
+    keys.pressKey("r");
+    await frame();
+
+    const after = requested.slice(before);
+    expect(after).toHaveLength(3);
+    expect(after.some((url) => url.includes("/worktrees?"))).toBe(true);
+    expect(after.some((url) => url.includes("prune-candidates"))).toBe(true);
+    expect(after.some((url) => url.includes("/prs"))).toBe(true);
+  });
+
+  // A refresh key that answers from a 60s cache does nothing for the one
+  // thing here that goes stale on its own, so the explicit press says so.
+  it("asks the daemon to skip the PR cache, and only on an explicit press", async () => {
+    const { keys, frame } = await mountSettled(listOf([mainRow()]));
+    // The opening load is an ordinary one: the TTL is what makes a reopen and
+    // a Tab rescope cheap.
+    expect(requested.filter((u) => u.includes("refresh=1"))).toHaveLength(0);
+
+    keys.pressKey("r");
+    await frame();
+    const prs = requested.filter((u) => u.includes("/prs"));
+    expect(prs[prs.length - 1]).toContain("refresh=1");
+    // Only the PR read: the other two have no cache to skip.
+    expect(
+      requested.filter((u) => u.includes("refresh=1") && !u.includes("/prs")),
+    ).toHaveLength(0);
+  });
+
+  it("matches both spellings of the capital", async () => {
+    const { keys, frame } = await mountSettled(listOf([mainRow()]));
+    const before = requested.length;
+    keys.pressKey("R");
+    await frame();
+    expect(requested.length).toBeGreaterThan(before);
   });
 });
 

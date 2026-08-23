@@ -283,7 +283,7 @@ interface WorktreesPanelProps {
    * dialog it opens has different rows. A PR that IS checked out goes through
    * `onSpawn` instead, which is the existing revalidated jump.
    */
-  onSpawnFromPR?: (target: {
+  onSpawnFromPR: (target: {
     number: number;
     title: string;
     repoRoot: string;
@@ -1906,21 +1906,22 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   // point "index 0" is a different worktree and the cursor has silently
   // jumped to whatever took the top slot.
   //
-  // Re-seeded when the path is GONE for the same reason. A Tab re-scope or an
-  // `r` reload can drop the row the cursor was on, and the two halves of the
-  // cursor then disagree: `cursorIndex` falls back to 0, so the highlight and
-  // every key that acts move to the top row, while `cursorPath` still names a
-  // worktree that is not in the list, which the scroll effect looks up, does
-  // not find, and gives up on.
+  // Re-seeded when the key is GONE for the same reason. A Tab re-scope, an `r`
+  // reload or a reopen can drop the row the cursor was on, and the two halves
+  // of the cursor then disagree: `cursorIndex` falls back to 0, so the
+  // highlight and every key that acts move to the top row, while `cursorPath`
+  // still names a row that is not in the list, which the scroll effect looks
+  // up, does not find, and gives up on.
   //
-  // Today that disagreement is invisible: a reload passes through the loading
-  // phase, so the scrollbox remounts at the top, where the row the fallback
-  // picked already is. It is repaired anyway because the PATH is what the
-  // panel treats as the cursor (that is the whole reason it is not an index),
-  // and one of the two halves quietly describing a row that no longer exists
-  // is the state every other rule here assumes cannot happen.
+  // That disagreement is NOT invisible, and used not to be understood. Phase 1
+  // and phase 3 are two independent promise chains, and Solid flushes effects
+  // BETWEEN their setters, so on every reopen seeded with a PR key this ran
+  // once against a list holding worktrees only. It is not a race that a fast
+  // daemon wins: with `/prs` answering instantly the seed was still thrown
+  // away before phase 3 could deliver its row. Hence the hold below, and hence
+  // repairing the disagreement at all rather than treating it as cosmetic.
   //
-  // The phase-2 re-sort does not trip this: it reorders the same paths.
+  // The phase-2 re-sort does not trip this: it reorders the same keys.
   createEffect(() => {
     const rows = flatRows();
     const first = rows[0];
@@ -2111,7 +2112,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * to GitHub, so waiting for one to start the other would cost the whole
    * point of splitting them.
    */
-  function load(): void {
+  function load(opts: { refresh?: boolean } = {}): void {
     const generation = ++loadGeneration;
     const filter = repoFilter();
     setPhase("loading");
@@ -2151,6 +2152,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const prUrl = new URL(`${getDaemonUrl()}/prs`);
     if (filter) prUrl.searchParams.set("repo", filter);
     if (props.cwd) prUrl.searchParams.set("cwd", props.cwd);
+    // Only an explicit `r`. Every other load (open, Tab, a finished prune)
+    // is happy with the daemon's TTL, which is what keeps a rescope free.
+    if (opts.refresh) prUrl.searchParams.set("refresh", "1");
     fetch(prUrl, { signal: AbortSignal.timeout(PR_TIMEOUT_MS) })
       .then(async (response) => {
         if (!response.ok) throw new Error(describeHttpFailure(response.status));
@@ -2272,7 +2276,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         });
         return;
       }
-      props.onSpawnFromPR?.({
+      props.onSpawnFromPR({
         number: entry.pr.number,
         title: entry.pr.title,
         repoRoot: entry.repoRoot,
@@ -2533,6 +2537,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       case "O":
         openRowPR(entry);
         break;
+      // `r` already means reload on the done and error phases; it simply
+      // never reached the list, where the panel spends all its time. One key,
+      // one meaning, on every phase. It matters more since the PR section
+      // arrived: the worktree scan is local and only changes when the user
+      // does something, while a PR merges on GitHub with nothing local to
+      // show for it, and close-and-reopen was the only way to find out.
+      case "r":
+      case "R":
+        load({ refresh: true });
+        break;
       case "tab":
         // Inert with nothing to scope to: the panel is already showing every
         // repo it knows about.
@@ -2582,10 +2596,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           : []),
         { text: "y copy", rank: 1 },
         ...(props.onReview ? [{ text: "d review", rank: 1 }] : []),
-        // Lowest rank, and last among its peers: `o` opens something in
-        // another application, so it is the first hint a narrow panel can
-        // afford to lose — never ahead of the keys that act on the list.
+        // Lowest rank, and last among their peers: `o` opens something in
+        // another application and `r` only re-reads what is already correct,
+        // so they are the first hints a narrow panel can afford to lose. They
+        // must never displace a key that ACTS on the list, which is exactly
+        // what `r` at a higher rank did to `D include dirty`.
         { text: "o github", rank: 1 },
+        { text: "r refresh", rank: 1 },
         ...(props.repo !== null
           ? [{ text: scoped() ? "tab all repos" : "tab this repo", rank: 2 }]
           : []),
