@@ -178,6 +178,66 @@ describe("listOpenPRs", () => {
     expect(found.value[0]?.title).toBe("before [31m after");
   });
 
+  /**
+   * A title is written by whoever opened the PR, on a fork by anyone, and it
+   * lands in a TUI row. Bidi controls make a string display as something
+   * other than what it says; the invisible ones break width arithmetic.
+   */
+  it("strips bidi controls and invisible padding out of a title", async () => {
+    const found = await listOpenPRs(
+      "/repo",
+      ghAnswering({
+        stdout: JSON.stringify([
+          {
+            ...PR_ROW,
+            // RLO, PDF, an isolate pair, ZWSP, BOM and a line separator.
+            title:
+              "fix\u202egnp.txt\u202c a\u2066b\u2069c\u200bd\ufeffe\u2028f",
+          },
+        ]),
+      }),
+    );
+
+    expect(found.ok).toBe(true);
+    if (!found.ok) return;
+    const title = found.value[0]?.title ?? "";
+    for (const bad of [
+      "\u202e",
+      "\u202c",
+      "\u2066",
+      "\u2069",
+      "\u200b",
+      "\ufeff",
+      "\u2028",
+    ]) {
+      expect(title).not.toContain(bad);
+    }
+    expect(title).toContain("fix");
+    expect(title).toContain("gnp.txt");
+  });
+
+  /**
+   * Deliberately KEPT. ZWNJ and ZWJ carry meaning in Persian, Arabic and
+   * Indic scripts, and ZWJ is what joins an emoji sequence, so stripping them
+   * corrupts titles that are merely written in another language. Neither can
+   * reorder text or introduce an escape sequence.
+   */
+  it("keeps the zero-width joiners that are ordinary text", async () => {
+    const found = await listOpenPRs(
+      "/repo",
+      ghAnswering({
+        stdout: JSON.stringify([
+          { ...PR_ROW, title: "family \ud83d\udc68\u200d\ud83d\udc69 and \u200cnb" },
+        ]),
+      }),
+    );
+
+    expect(found.ok).toBe(true);
+    if (!found.ok) return;
+    expect(found.value[0]?.title).toContain("\u200d");
+    expect(found.value[0]?.title).toContain("\u200c");
+  });
+
   it("drops a row it cannot identify rather than failing the whole list", async () => {
     const found = await listOpenPRs(
       "/repo",

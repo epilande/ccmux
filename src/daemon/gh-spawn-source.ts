@@ -760,8 +760,35 @@ export async function configurePRBranch(
  * has to remember.
  */
 export function stripControlChars(text: string): string {
-  return text.replace(/[\x00-\x1f\x7f-\x9f]+/g, " ").trim();
+  return text.replace(CONTROL_CHARS, " ").trim();
 }
+
+/**
+ * Characters that must not survive into anything ccmux renders or types.
+ *
+ * Three classes, and the reason each is here:
+ *
+ * - C0, DEL and C1 (`\x00-\x1f\x7f-\x9f`). The C1 block matters as much as
+ *   C0: a raw 0x9b is a one-byte CSI, so a title carrying one puts an escape
+ *   sequence into whatever renders it.
+ * - Bidi controls (LRM/RLM, the embedding and override block, the isolates).
+ *   These make a string DISPLAY as something other than what it says, which
+ *   is the Trojan Source class, and a PR title is written by whoever opened
+ *   the PR — on a fork, that is anyone.
+ * - Invisible padding and separators (ZWSP, BOM, word joiner, LS, PS). They
+ *   contribute no glyph, so a display-width calculation and a terminal can
+ *   disagree about how wide the string is; LS and PS can break a row that is
+ *   rendered as one line.
+ *
+ * Deliberately NOT stripped: ZWNJ (U+200C) and ZWJ (U+200D). Both are
+ * ordinary letters' worth of meaning in Persian, Arabic and Indic scripts,
+ * and ZWJ is what joins an emoji sequence, so removing them corrupts titles
+ * that are simply written in another language or contain a family emoji. They
+ * cannot reorder text and cannot introduce an escape sequence, which is what
+ * the other two classes are here for.
+ */
+const CONTROL_CHARS =
+  /[\x00-\x1f\x7f-\x9f\u200b\u200e\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]+/g;
 
 export function seedPrompt(
   label: string,
