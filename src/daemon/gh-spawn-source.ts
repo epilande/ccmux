@@ -82,7 +82,7 @@ function message(err: unknown): string {
 }
 
 /** The failure a `gh` run reports, or null when it produced output to parse. */
-function ghProblem(what: string, run: GhRunResult): string | null {
+export function ghProblem(what: string, run: GhRunResult): string | null {
   if (run.spawnError) {
     return `gh could not be run: ${run.spawnError}. Install the GitHub CLI (https://cli.github.com) and run 'gh auth login'.`;
   }
@@ -121,7 +121,10 @@ export type SourceResult<T> =
   | { ok: true; value: T }
   | { ok: false; error: string };
 
-function readString(row: Record<string, unknown>, key: string): string | null {
+export function readString(
+  row: Record<string, unknown>,
+  key: string,
+): string | null {
   const value = row[key];
   return typeof value === "string" && value !== "" ? value : null;
 }
@@ -747,16 +750,26 @@ export async function configurePRBranch(
  * can be any length and contain anything, and it travels into a
  * single-quoted shell argument.
  */
+/**
+ * Text from GitHub with every control character replaced by a space.
+ *
+ * C0, DEL and C1. The C1 block (U+0080-U+009F) matters as much as C0: a raw
+ * 0x9B is a one-byte CSI, so a title carrying one puts an escape sequence
+ * into whatever renders it — a prompt typed into a terminal, or a TUI row.
+ * Applied at the boundary where GitHub's text ENTERS ccmux, so no consumer
+ * has to remember.
+ */
+export function stripControlChars(text: string): string {
+  return text.replace(/[\x00-\x1f\x7f-\x9f]+/g, " ").trim();
+}
+
 export function seedPrompt(
   label: string,
   title: string,
   url: string,
   userPrompt: string | undefined,
 ): string {
-  // C0, DEL and C1. The C1 block (U+0080-U+009F) matters as much as C0: a
-  // raw 0x9B is a one-byte CSI, so a title carrying one puts an escape
-  // sequence into a prompt that gets typed into a terminal.
-  const clean = title.replace(/[\x00-\x1f\x7f-\x9f]+/g, " ").trim();
+  const clean = stripControlChars(title);
   const capped =
     clean.length > MAX_TITLE_CHARS
       ? `${clean.slice(0, MAX_TITLE_CHARS - 1).trimEnd()}…`

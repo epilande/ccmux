@@ -134,6 +134,24 @@ describe("listRepoWorktrees", () => {
     });
   });
 
+  // The tip is what proves a pull request is checked out HERE: matching the
+  // branch NAME instead answers with every fork's namesake.
+  it("reports each branch's tip commit, and null for a detached worktree", async () => {
+    const repo = await makeRepo("proj");
+    const wt = await addWorktree(repo, "feat/tips");
+    const head = await git(repo, ["rev-parse", "HEAD"]);
+    const detached = join(root, "wt", "detached-tip");
+    await git(repo, ["worktree", "add", "--detach", detached, head]);
+
+    const rows = (await listRepoWorktrees(repo))?.worktrees ?? [];
+
+    expect(rowFor(rows, "feat-tips").tip).toBe(
+      await git(wt, ["rev-parse", "HEAD"]),
+    );
+    expect(rowFor(rows, "proj").tip).toBe(head);
+    expect(rowFor(rows, "detached-tip").tip).toBeNull();
+  });
+
   it("counts modified and untracked files separately", async () => {
     const repo = await makeRepo("proj");
     const wt = await addWorktree(repo, "feat/dirty");
