@@ -1841,4 +1841,42 @@ describe("NewSessionDialog in PR mode", () => {
     expect(frame).not.toContain("Where");
     expect(frame).not.toContain("Name");
   });
+
+  /**
+   * The mode note and the Directory row are indented one column further than
+   * a field row, so fitting them to the field width overflows by one. OpenTUI
+   * WRAPS rather than clipping, and a wrapped line inside a `height={1}` box
+   * disappears along with its ellipsis: at width 46 this rendered
+   * `#151 Worktrees panel:` with nothing to say the title was cut, on the one
+   * row that identifies which PR is about to be checked out.
+   *
+   * Pre-existing (the fork Source note and Directory truncate identically),
+   * but the PR note is the first whose text is long and arbitrary.
+   */
+  it("keeps the ellipsis on a PR note too long for the row", async () => {
+    const frame = await renderDialog({
+      draft: prDraft(),
+      agents: [agent("claude")],
+      width: 46,
+    });
+
+    const note = frame
+      .split("\n")
+      .find((line) => line.includes("#151"));
+    expect(note).toBeDefined();
+    // Cut, and SAYING it was cut.
+    expect(note).toContain("…");
+    expect(note).not.toContain("open-PR list");
+  });
+
+  // The same row at a width that fits says the whole thing, so the fit above
+  // is not just a narrower cap applied unconditionally.
+  it("says the whole title when it fits", async () => {
+    const frame = await renderDialog({
+      draft: prDraft(),
+      agents: [agent("claude")],
+      width: 70,
+    });
+    expect(frame).toContain("#151 Worktrees panel: open-PR list");
+  });
 });

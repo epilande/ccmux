@@ -343,6 +343,23 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dims().width - 4));
   const contentWidth = () =>
     Math.max(1, width() - LABEL_WIDTH - CONTROL_GAP - 4);
+
+  /**
+   * What a DERIVED row's value may occupy: the Directory row and the mode
+   * note, which are not fields.
+   *
+   * One column narrower than {@link contentWidth}, because they are indented
+   * one column further: a field row spends `LABEL_WIDTH + CONTROL_GAP` before
+   * its control, while these spend `LABEL_WIDTH + 1 + CONTROL_GAP` so their
+   * text lines up with the controls above rather than with the labels.
+   *
+   * Fitting them to the field width is not a cosmetic overflow. OpenTUI wraps
+   * rather than clipping, and a wrapped line inside a `height={1}` box
+   * DISAPPEARS, taking the ellipsis with it: at width 46 the PR note rendered
+   * `#151 Worktrees panel:` with no marker to say anything was missing, which
+   * on the one row identifying which PR this is reads as the whole title.
+   */
+  const derivedWidth = () => Math.max(1, contentWidth() - 1);
   const compact = () => contentWidth() < COMPACT_CONTENT_WIDTH;
   const narrow = () => contentWidth() < NARROW_CONTENT_WIDTH;
 
@@ -776,7 +793,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   };
 
   const cwdLabel = () =>
-    truncateText(shortenCwd(props.draft.cwd), contentWidth());
+    truncateText(shortenCwd(props.draft.cwd), derivedWidth());
 
   /**
    * The locked destination row's text. Only where the session is going: the
@@ -808,14 +825,14 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
       // the title is the only thing that says what it is.
       return {
         label: "PR",
-        text: truncateText(`#${pr.number} ${pr.title}`, contentWidth()),
+        text: truncateText(`#${pr.number} ${pr.title}`, derivedWidth()),
         color: theme.mauve,
       };
     }
     if (existingWorktree()) {
       return {
         label: "Worktree",
-        text: truncateText(existingWorktreeName(), contentWidth()),
+        text: truncateText(existingWorktreeName(), derivedWidth()),
         color: theme.green,
       };
     }
@@ -823,7 +840,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     if (fork) {
       return {
         label: "Source",
-        text: truncateText(fork.label, contentWidth()),
+        text: truncateText(fork.label, derivedWidth()),
         color: theme.blue,
       };
     }
@@ -831,7 +848,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
       label: "Changes",
       text: truncateText(
         narrow() ? "Moved out" : "Moved out of this checkout",
-        contentWidth(),
+        derivedWidth(),
       ),
       color: theme.peach,
     };
