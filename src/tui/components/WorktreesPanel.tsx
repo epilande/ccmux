@@ -154,23 +154,53 @@ export function prRowKey(repoRoot: string, number: number): string {
   return `pr:${repoRoot}#${number}`;
 }
 
+/**
+ * Whether `key` names a PR row rather than a worktree.
+ *
+ * Cheap and total: a worktree's key is an absolute path, so the prefix can
+ * never be ambiguous. Used where a key has to be classified WITHOUT the row
+ * in hand, which is precisely the case that matters — a cursor pointing at a
+ * row phase 3 has not delivered yet.
+ */
+export function isPRRowKey(key: string): boolean {
+  return key.startsWith("pr:");
+}
+
 /** One repo's rows, in display order. */
 export interface PanelRepo {
   repoRoot: string;
   repoName: string;
   rows: PanelRow[];
   /**
-   * The open-PR section's header line: whether it draws at all, and whether
-   * it is still waiting on GitHub.
+   * What the open-PR section's header line says.
    *
    * Derived onto the group rather than passed to the render, for the reason
    * `showsGroupHeaders` is derived: `visualLayout` has to count the same
    * lines the render draws, and two independent conditions eventually
-   * disagree. A section with no PRs and nothing in flight does not draw — the
-   * same rule the removable divider follows.
+   * disagree.
+   *
+   * The header is ALWAYS drawn, which is NOT the rule the removable divider
+   * follows, and the difference is deliberate. The divider never announces
+   * itself before it knows its count, so it can appear once and stay. This
+   * header is painted before GitHub has answered, so hiding it again on a
+   * repo that turns out to have no open PRs would take its row BACK and shift
+   * every line beneath it, which is the exact thing the pending state rides
+   * the header to avoid. Announcing costs an answer, and `0` and
+   * `unavailable` are answers.
    */
-  prSection: { shown: boolean; pending: boolean };
+  prSection: PRSectionStatus;
 }
+
+/**
+ * The open-PR header's three states.
+ *
+ * A union rather than a count plus flags, so "still waiting" and "answered
+ * zero" cannot be confused. A nullable count invited exactly that.
+ */
+export type PRSectionStatus =
+  | { kind: "pending" }
+  | { kind: "ready"; count: number }
+  | { kind: "unavailable" };
 
 interface WorktreesPanelProps {
   /** Main checkout to scope to; null lists every known repo. */
@@ -190,10 +220,18 @@ interface WorktreesPanelProps {
    *  session list draws for that status. */
   iconStyle?: IconStyle;
   /**
-   * Seed the cursor on this row's path, for a reopen that should land where
-   * the user left (the review round-trip, a cancelled spawn dialog). A path
-   * the fetched list does not hold falls back to the first row through the
-   * re-seed effect, exactly like a row that vanished under the cursor.
+   * Seed the cursor on this row's KEY, for a reopen that should land where
+   * the user left (the review round-trip, a cancelled spawn dialog).
+   *
+   * A key, not a path: since the list gained PR rows it can be a worktree's
+   * absolute path or a synthetic `pr:<repoRoot>#<n>`, and a cancelled PR
+   * spawn dialog sends the latter.
+   *
+   * A key no phase ever delivers falls back to the first row through the
+   * re-seed effect, like a row that vanished under the cursor. "Not delivered
+   * yet" is deliberately not that case: the effect holds a PR key while phase
+   * 3 is in flight, because phase 1 lands first with worktrees only and would
+   * otherwise clobber the seed before its row could exist.
    */
   initialCursor?: string | null;
   /**
@@ -1205,11 +1243,16 @@ export function dividerText(count: number, width: number): string {
  * the header is already on screen, so the answer replaces text in place.
  */
 export function prDividerText(
-  count: number | null,
+  status: PRSectionStatus,
   spinner: string,
   width: number,
 ): string {
-  const suffix = count === null ? `${spinner} checking GitHub` : String(count);
+  const suffix =
+    status.kind === "pending"
+      ? `${spinner} checking GitHub`
+      : status.kind === "unavailable"
+        ? "unavailable"
+        : String(status.count);
   return truncateText(`├─ open PRs · ${suffix}`, Math.max(1, width));
 }
 
@@ -1472,9 +1515,10 @@ export function visualLayout(
     removable.forEach(place);
     // The open-PR header is a LINE the cursor never lands on, exactly like
     // the removable divider, and a layout that skipped it would put every PR
-    // row one line out of true. Read off the group rather than re-derived, so
-    // it cannot disagree with what the render draws.
-    if (repo.prSection.shown) line += 1;
+    // row one line out of true. Unconditional, because the header is: that is
+    // what holds the arithmetic, and the rows on screen, still across phase
+    // 3 resolving.
+    line += 1;
     prs.forEach(place);
   }
   return layout;
@@ -1595,7 +1639,11 @@ export function copyToClipboard(
  */
 export function rowPRUrl(entry: PanelRow): string | null {
   if (entry.kind === "pr") return entry.pr.url;
-  return entry.pr?.url ?? entry.candidate?.pr?.url ?? null;
+  // One arm, not two: the merge in `merged()` already folds a candidate's PR
+  // into `entry.pr` (`openPRs.get(path) ?? candidate?.pr ?? null`), so a
+  // second `?? entry.candidate?.pr?.url` here was unreachable and read as if
+  // the two could differ.
+  return entry.pr?.url ?? null;
 }
 
 /** Hand `url` to the desktop browser. False when there is no way to, or the
@@ -1780,7 +1828,15 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         // Shown while the answer is still coming, and afterwards only when
         // there is something to show: a repo with no open PRs spends no rows
         // saying so, the same rule the removable divider follows.
-        prSection: { shown: pending || prRows.length > 0, pending },
+        // `unavailable` covers both shapes of phase-3 failure: the whole
+        // request falling over, and THIS repo's own error riding back inside
+        // an otherwise fine response. Either way the header stays put and the
+        // line under the list carries the actionable cause.
+        prSection: pending
+          ? { kind: "pending" as const }
+          : prFailedFor(repo.repoRoot)
+            ? { kind: "unavailable" as const }
+            : { kind: "ready" as const, count: prRows.length },
       };
     });
   });
@@ -1856,6 +1912,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const first = rows[0];
     const path = cursorPath();
     const live = path !== null && rows.some((r) => r.key === path);
+    // A PR key that is not in the list yet is NOT a row that vanished. Phase
+    // 1 is local git and phase 3 is a `gh` round trip, so on a reopen phase 1
+    // essentially always lands first, with worktrees only; re-seeding here
+    // would drop the cursor before the row it names could arrive, defeating
+    // the restoration `initialCursor` exists for. Held only while phase 3 is
+    // still in flight, so a PR that has genuinely gone (merged between the
+    // two opens) still falls back to the first row the moment we know.
+    if (!live && path !== null && isPRRowKey(path) && prPending()) return;
     if (first && !live) setCursorPath(first.key);
   });
 
@@ -1946,6 +2010,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * own failure is named with the repo, since on the multi-repo view the
    * others rendered fine and the line has to say which one did not.
    */
+  /** Whether phase 3 failed for this repo, either wholesale or on its own. */
+  const prFailedFor = (repoRoot: string): boolean => {
+    if (prError() !== null) return true;
+    return (prs()?.errors ?? []).some((e) => e.repoRoot === repoRoot);
+  };
+
   const prErrorLine = (): string | null => {
     const failed = prError();
     if (failed) return `Open PRs failed: ${failed}`;
@@ -1988,7 +2058,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     if (phase() === "loading") return null;
     const groups = merged();
     if (groups.length === 0) return null;
-    const rows = plural(flatRows().length, "worktree", "worktrees");
+    // WORKTREE rows only. `flatRows()` has held PR rows since the section
+    // landed, so counting it said `4 worktrees` for two worktrees and two
+    // PRs, and the number JUMPED when phase 3 arrived — the exact flicker the
+    // loading gate above exists to prevent. `markerBase` filters the same way.
+    const worktrees = flatRows().filter(
+      (entry) => entry.kind === "worktree",
+    ).length;
+    const rows = plural(worktrees, "worktree", "worktrees");
     if (groups.length === 1) return rows;
     return `${plural(groups.length, "repo", "repos")} · ${rows}`;
   };
@@ -2772,20 +2849,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                           which is also why the pending state rides the header
                           instead of taking a row that would later be given
                           back. */}
-                      <Show when={repo.prSection.shown}>
-                        <box height={1} flexDirection="row">
-                          <text fg={theme.overlay}> </text>
-                          <text fg={theme.overlay}>
-                            {prDividerText(
-                              repo.prSection.pending
-                                ? null
-                                : split().prs.length,
-                              prIcon(),
-                              listWidth() - 1,
-                            )}
-                          </text>
-                        </box>
-                      </Show>
+                      <box height={1} flexDirection="row">
+                        <text fg={theme.overlay}> </text>
+                        <text fg={theme.overlay}>
+                          {prDividerText(
+                            repo.prSection,
+                            prIcon(),
+                            listWidth() - 1,
+                          )}
+                        </text>
+                      </box>
                       <For each={split().prs}>
                         {(entry) => renderRow(entry)}
                       </For>

@@ -52,6 +52,7 @@ import {
   browserArgv,
   checkoutHolding,
   CURSOR_BAR,
+  isPRRowKey,
   detailPhrases,
   PR_MARKER,
   describeChecks,
@@ -222,7 +223,7 @@ function panelRepo(
   repoRoot: string,
   repoName: string,
   rows: PanelRow[],
-  prSection: PanelRepo["prSection"] = { shown: false, pending: false },
+  prSection: PanelRepo["prSection"] = { kind: "ready", count: 0 },
 ): PanelRepo {
   return { repoRoot, repoName, rows, prSection };
 }
@@ -2592,10 +2593,12 @@ describe("removable section", () => {
       panelRepo("/r2", "r2", [other]),
     ];
     const layout = visualLayout(repos, () => 1);
-    // header(0) | a(1) | divider(2) | b(3) | header(4) | c(5)
+    // Every repo group also ends with the open-PR header, which is always a
+    // line: header(0) a(1) divider(2) b(3) prHeader(4) | header(5) c(6)
+    // prHeader(7).
     expect(layout.get("/a")).toEqual({ line: 1, height: 1 });
     expect(layout.get("/b")).toEqual({ line: 3, height: 1 });
-    expect(layout.get("/c")).toEqual({ line: 5, height: 1 });
+    expect(layout.get("/c")).toEqual({ line: 6, height: 1 });
   });
 
   it("drops the group header line when there is only one repo", () => {
@@ -2651,11 +2654,12 @@ describe("visual scrolling", () => {
       ],
       (entry) => rowVisualHeight(entry, false),
     );
-    // header(0) | a(1) | divider(2) | b(3,4) | header(5) | c(6). `b` is
-    // classified, so it sits under its group's removable divider.
+    // header(0) a(1) divider(2) b(3,4) prHeader(5) | header(6) c(7)
+    // prHeader(8). `b` is classified, so it sits under its group's removable
+    // divider; every group ends with the always-present open-PR header.
     expect(layout.get("/a")).toEqual({ line: 1, height: 1 });
     expect(layout.get("/b")).toEqual({ line: 3, height: 2 });
-    expect(layout.get("/c")).toEqual({ line: 6, height: 1 });
+    expect(layout.get("/c")).toEqual({ line: 7, height: 1 });
   });
 
   it("scrolls only when the row is not already fully visible", () => {
@@ -3466,8 +3470,20 @@ describe("PR row presentation", () => {
   // The pending state rides the header rather than taking a row it would
   // later give back, which is what moves the list under the reader.
   it("carries the pending state on the section header", () => {
-    expect(prDividerText(null, "◐", 40)).toBe("├─ open PRs · ◐ checking GitHub");
-    expect(prDividerText(3, "◐", 40)).toBe("├─ open PRs · 3");
+    expect(prDividerText({ kind: "pending" }, "◐", 40)).toBe(
+      "├─ open PRs · ◐ checking GitHub",
+    );
+    expect(prDividerText({ kind: "ready", count: 3 }, "◐", 40)).toBe(
+      "├─ open PRs · 3",
+    );
+    // A repo with no open PRs still ANSWERS. Hiding the header again would
+    // take back a row the pending state had already claimed.
+    expect(prDividerText({ kind: "ready", count: 0 }, "◐", 40)).toBe(
+      "├─ open PRs · 0",
+    );
+    expect(prDividerText({ kind: "unavailable" }, "◐", 40)).toBe(
+      "├─ open PRs · unavailable",
+    );
   });
 });
 
@@ -3503,22 +3519,35 @@ describe("PR section layout", () => {
 
   // The header is a LINE the cursor never lands on, exactly like the
   // removable divider: a layout that skipped it puts every PR row one off.
-  it("counts the section header as a line", () => {
+  it("counts the section header as a line, in every state", () => {
     const wt = panelRow({ row: row({ path: "/a", name: "a" }) });
     const pr = prRow();
     const withSection = visualLayout(
-      [panelRepo("/r", "r", [wt, pr], { shown: true, pending: false })],
+      [panelRepo("/r", "r", [wt, pr], { kind: "ready", count: 1 })],
       () => 1,
     );
     // a(0) | header(1) | pr(2)
     expect(withSection.get("/a")).toEqual({ line: 0, height: 1 });
     expect(withSection.get(pr.key)).toEqual({ line: 2, height: 1 });
+  });
 
-    const without = visualLayout(
-      [panelRepo("/r", "r", [wt, pr], { shown: false, pending: false })],
-      () => 1,
+  // The header is a fixed line, so nothing under it moves as phase 3 goes
+  // from pending to an answer, INCLUDING an answer of zero or a failure.
+  // Every earlier shape hid the header on those two and shifted the list.
+  it("puts a repo's rows on the same lines in every PR-section state", () => {
+    const wt = panelRow({ row: row({ path: "/a", name: "a" }) });
+    const states: PanelRepo["prSection"][] = [
+      { kind: "pending" },
+      { kind: "ready", count: 0 },
+      { kind: "unavailable" },
+    ];
+    const lines = states.map(
+      (prSection) =>
+        visualLayout([panelRepo("/r", "r", [wt], prSection)], () => 1).get(
+          "/a",
+        )?.line,
     );
-    expect(without.get(pr.key)).toEqual({ line: 1, height: 1 });
+    expect(lines).toEqual([0, 0, 0]);
   });
 });
 
@@ -3549,11 +3578,42 @@ describe("WorktreesPanel PR section", () => {
     expect(main).toBeLessThan(pr!);
   });
 
-  // Same rule the removable divider follows: a section with nothing in it
-  // spends no rows saying so.
-  it("drops the section when the repo has no open PRs", async () => {
+  // NOT the removable divider's rule, deliberately. The header announces
+  // itself before GitHub answers, so hiding it again on a repo with no open
+  // PRs would take back a row and shift every line beneath it.
+  it("answers zero rather than taking the header's row back", async () => {
     const { settled } = await mountSettled(listOf([mainRow(), row()]));
-    expect(settled).not.toContain("open PRs");
+    expect(settled).toContain("open PRs · 0");
+  });
+
+  // Worse than the empty case: every repo's header would vanish AND the
+  // error line appear, two shifts from one event.
+  it("keeps the header, marked unavailable, when the PR list fails", async () => {
+    const { frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => json(emptyScan),
+      prs: async () => {
+        throw new Error("gh is logged out");
+      },
+    });
+    expect(await frame()).toContain("open PRs · unavailable");
+  });
+
+  // A repo's own error rides inside an otherwise fine response, so only that
+  // repo's header is marked.
+  it("marks only the repo whose own PR lookup failed", async () => {
+    const { frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => json(emptyScan),
+      prs: async () =>
+        json({
+          repos: [],
+          errors: [
+            { repoRoot: "/repo", repoName: "repo", error: "no GitHub remote" },
+          ],
+        }),
+    });
+    expect(await frame()).toContain("open PRs · unavailable");
   });
 
   // Degrades like phase 2: one line, panel stays usable, never an error state.
@@ -3619,6 +3679,68 @@ describe("WorktreesPanel PR section", () => {
     // The cursor bar sits in the rail's column on the row it is on.
     expect(lineWith(shown, "#151")).toContain(CURSOR_BAR);
     expect(lineWith(shown, "main checkout")).not.toContain(CURSOR_BAR);
+  });
+});
+
+describe("PR section title and cursor", () => {
+  const onePR = prsOf([openPR()]);
+
+  // `flatRows()` has held PR rows since the section landed, so the title said
+  // `4 worktrees` for two worktrees and two PRs, and the number JUMPED from 2
+  // to 4 when phase 3 answered - the exact flicker the loading gate exists
+  // to prevent.
+  it("counts worktrees in the title, never PR rows", async () => {
+    const { settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      prsOf([openPR(), openPR({ number: 150 })]),
+    );
+    expect(settled).toContain("2 worktrees");
+    expect(settled).not.toContain("4 worktrees");
+  });
+
+  // Phase 1 is local git and phase 3 is a `gh` round trip, so phase 1 lands
+  // first with worktrees only. Re-seeding on that frame threw away the cursor
+  // restoration a cancelled PR-spawn dialog depends on.
+  it("holds a PR cursor seed until phase 3 can deliver its row", async () => {
+    let answer: ((r: Response) => void) | null = null;
+    const { frame } = await mountPanel(
+      {
+        list: async () => json(listOf([mainRow(), row()])),
+        scan: async () => json(emptyScan),
+        prs: () => new Promise<Response>((resolve) => (answer = resolve)),
+      },
+      { initialCursor: prRowKey("/repo", 151) },
+    );
+
+    // Phase 1 has painted and the seeded row does not exist yet. The
+    // HIGHLIGHT sits on the first row meanwhile, since `cursorIndex` falls
+    // back to 0 for a key it cannot find; what must survive is the seeded
+    // KEY, and the frame after phase 3 is what proves it did.
+    expect(await frame()).toContain("main checkout");
+
+    answer!(json(onePR));
+    const settled = await frame();
+    expect(lineWith(settled, "#151")).toContain(CURSOR_BAR);
+  });
+
+  // The hold is scoped to "phase 3 has not answered". A PR that merged
+  // between the two opens is genuinely gone, and the cursor falls back.
+  it("falls back to the first row once phase 3 says the PR is gone", async () => {
+    const { settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      { initialCursor: prRowKey("/repo", 151) },
+      noPRs,
+    );
+    expect(lineWith(settled, "main checkout")).toContain(CURSOR_BAR);
+  });
+
+  it("classifies a key without needing its row", () => {
+    expect(isPRRowKey(prRowKey("/repo", 151))).toBe(true);
+    // Every worktree key is an absolute path, so the prefix cannot collide.
+    expect(isPRRowKey("/repo/wt/alpha")).toBe(false);
   });
 });
 
@@ -3725,17 +3847,18 @@ describe("rowPRUrl", () => {
         }),
       ),
     ).toBe("https://github.com/o/r/pull/9");
-    // A merged PR arrives on the candidate rather than on the row.
+    // A merged PR reaches the row through `merged()`, which folds the
+    // candidate's PR into `entry.pr` — so it is the SAME field, not a second
+    // one to fall back to.
     expect(
       rowPRUrl(
         panelRow({
-          candidate: candidate({
-            pr: {
-              number: 8,
-              url: "https://github.com/o/r/pull/8",
-              state: "MERGED",
-            },
-          }),
+          pr: {
+            number: 8,
+            url: "https://github.com/o/r/pull/8",
+            state: "MERGED",
+          },
+          candidate: candidate(),
         }),
       ),
     ).toBe("https://github.com/o/r/pull/8");
