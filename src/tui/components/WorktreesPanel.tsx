@@ -555,44 +555,88 @@ export const PRS_TAB = "Pull Requests";
 export const PRS_TAB_SHORT = "PRs";
 const TAB_SEPARATOR = " │ ";
 
+/** The key that leaves `view`, which is the key its INACTIVE tab wears. */
+export function tabKey(view: PanelView): string {
+  return view === "worktrees" ? "l" : "h";
+}
+
 /**
  * The view tabs: one line, directly under the title, naming both views with
- * the inactive one dimmed.
+ * the inactive one dimmed and wearing the key that reaches it.
+ *
+ * The key lives HERE and not on the hint line, which is where this panel
+ * teaches every other key, and the reason is a width sweep. Ranked among the
+ * hints it survived to 90 columns and vanished at 80 — the commonest default
+ * terminal width, with the sidebar narrower still — so at the width most
+ * people actually run, nothing on screen named the key to the other view.
+ * That is the discoverability the two-view shape exists to provide, so it
+ * cannot be the first thing a narrow panel drops. This line always renders.
+ *
+ * One key on one tab, not two on both: it costs four columns instead of
+ * eight on the line that has to survive to sidebar widths, and it says
+ * something the two-key version does not. The key sits on the thing it takes
+ * you TO; the active tab wears none, because there is nowhere to go.
  *
  * Budgeted against `contentWidth()` and not `listWidth()`, because it renders
  * OUTSIDE the scrollbox and so does not pay for the scrollbar's column. It
  * still has to be fitted: OpenTUI wraps rather than clips, and a wrapped line
  * inside a `height={1}` box vanishes instead of overflowing.
  *
- * The degradation is one deliberate step before that fitting — the long label
- * is swapped WHOLE for a short one, the way `titleSegments` drops its suffix
- * whole — because a `Pull Request…` truncated mid-word costs the count that
- * follows it, which is the half a narrow panel most needs.
+ * The degradation is a ladder of WHOLE swaps, the way `titleSegments` drops
+ * its suffix whole rather than truncating into nonsense, and the KEY is what
+ * every rung preserves:
+ *
+ * 1. `Worktrees │ [l] Pull Requests · 7`
+ * 2. `Worktrees │ [l] PRs · 7`          — the long label, swapped whole
+ * 3. `Worktrees │ [l] PRs`              — the count, which the body restates
+ * 4. `[l] PRs`                          — the active tab, which the rows say
+ *
+ * Rung 4 is seven columns, so the key survives far below any width the panel
+ * is usable at; the sidebar's ~34 sits comfortably on rung 2 or 3. Dropping
+ * the ACTIVE tab last but before the key is deliberate: which view is up is
+ * already legible from what the list is full of, while the key is legible
+ * from nothing else.
  */
 export function viewTabSegments(
   view: PanelView,
   suffix: string,
   width: number,
 ): RowSegment[] {
-  const build = (prLabel: string): RowSegment[] => {
-    const segments: RowSegment[] = [
-      {
-        text: WORKTREES_TAB,
-        fg: view === "worktrees" ? theme.text : theme.overlay,
-      },
-      { text: TAB_SEPARATOR, fg: theme.overlay },
-      { text: prLabel, fg: view === "prs" ? theme.text : theme.overlay },
+  const onWorktrees = view === "worktrees";
+  const build = (
+    prLabel: string,
+    tail: string,
+    both: boolean,
+  ): RowSegment[] => {
+    const key: RowSegment = { text: `[${tabKey(view)}] `, fg: theme.mauve };
+    const worktrees: RowSegment[] = [
+      { text: WORKTREES_TAB, fg: onWorktrees ? theme.text : theme.overlay },
     ];
-    if (suffix) segments.push({ text: suffix, fg: theme.overlay });
-    return segments;
+    const prs: RowSegment[] = [
+      { text: prLabel, fg: onWorktrees ? theme.overlay : theme.text },
+    ];
+    if (tail) prs.push({ text: tail, fg: theme.overlay });
+    (onWorktrees ? prs : worktrees).unshift(key);
+    const inactive = onWorktrees ? prs : worktrees;
+    if (!both) return inactive;
+    return [
+      ...worktrees,
+      { text: TAB_SEPARATOR, fg: theme.overlay },
+      ...prs,
+    ];
   };
   const total = (segments: RowSegment[]): number =>
     segments.reduce((n, segment) => n + displayWidth(segment.text), 0);
-  const full = build(PRS_TAB);
-  if (total(full) <= width) return full;
-  const short = build(PRS_TAB_SHORT);
-  if (total(short) <= width) return short;
-  return fitSegments(short, width);
+  const ladder = [
+    build(PRS_TAB, suffix, true),
+    build(PRS_TAB_SHORT, suffix, true),
+    build(PRS_TAB_SHORT, "", true),
+    build(PRS_TAB_SHORT, "", false),
+  ];
+  for (const rung of ladder) {
+    if (total(rung) <= width) return rung;
+  }
+  return fitSegments(ladder[ladder.length - 1]!, width);
 }
 
 /**
@@ -2810,15 +2854,15 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       // A shorter line, because the keys really are fewer: the removal keys
       // are gated off with the rows they act on, and `y` and `d` have nothing
       // to answer — a PR has no directory to copy and no working tree to
-      // review until one is cut from it. `l` is not advertised either; it is
-      // the key that got here.
+      // review until one is cut from it. Neither view key appears here at
+      // all: the tab line above wears the one that leaves, at every width,
+      // which is one teaching location instead of two.
       return fitHints(
         [
           { text: "j/k move", rank: 3 },
           { text: "enter checkout", rank: 4 },
           { text: "o github", rank: 2 },
           { text: "r refresh", rank: 1 },
-          { text: "h worktrees", rank: 3 },
           ...(props.repo !== null
             ? [{ text: scoped() ? "tab all repos" : "tab this repo", rank: 2 }]
             : []),
@@ -2864,20 +2908,15 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         // what `r` at a higher rank did to `D include dirty`.
         { text: "o github", rank: 1 },
         { text: "r refresh", rank: 1 },
+        // No view key here. It lived on this line for one revision and a
+        // width sweep killed it: ranked anywhere that did not displace
+        // `D include dirty` it was gone by 80 columns, the commonest default
+        // width. It rides the INACTIVE TAB instead, which renders at every
+        // width, and this line is back to exactly the hints — and exactly the
+        // drop order — it had before the views existed.
         ...(props.repo !== null
           ? [{ text: scoped() ? "tab all repos" : "tab this repo", rank: 2 }]
           : []),
-        // The SHORT label, and ranked with `tab`, which is the pair it
-        // belongs to: they are the panel's two axes. At rank 1 the long form
-        // was the first thing a 90-column panel dropped, which left nothing
-        // on screen naming the key that reaches the other view — the tab
-        // line above names both VIEWS on every frame but never the key, and
-        // discoverability is what this whole shape exists to fix. Short
-        // enough (`PRS_TAB_SHORT`, the tab line's own degradation) to fit in
-        // the slack left after the rank-1 hints have gone, so it displaces
-        // nothing that was already fitting. Last among its rank, so it is
-        // still the first of the pair to go when even that runs out.
-        { text: `l ${PRS_TAB_SHORT}`, rank: 2 },
         { text: "q close", rank: 5 },
       ],
       contentWidth(),

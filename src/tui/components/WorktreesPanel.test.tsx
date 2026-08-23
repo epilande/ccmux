@@ -60,6 +60,7 @@ import {
   openInBrowser,
   prStatusText,
   viewTabSegments,
+  tabKey,
   initialView,
   PRS_TAB,
   PRS_TAB_SHORT,
@@ -3506,47 +3507,79 @@ describe("PR row presentation", () => {
 });
 
 describe("view tabs", () => {
+  const tabText = (view: "worktrees" | "prs", suffix: string, width: number) =>
+    viewTabSegments(view, suffix, width)
+      .map((s) => s.text)
+      .join("");
+
   it("brightens the active view and dims the other", () => {
     const worktrees = viewTabSegments("worktrees", " · 7", 60);
     expect(worktrees[0]).toEqual({ text: WORKTREES_TAB, fg: theme.text });
-    expect(worktrees[2]).toEqual({ text: PRS_TAB, fg: theme.overlay });
+    expect(worktrees[3]).toEqual({ text: PRS_TAB, fg: theme.overlay });
     const prs = viewTabSegments("prs", " · 7", 60);
-    expect(prs[0]?.fg).toBe(theme.overlay);
-    expect(prs[2]).toEqual({ text: PRS_TAB, fg: theme.text });
+    expect(prs[1]).toEqual({ text: WORKTREES_TAB, fg: theme.overlay });
+    expect(prs[3]).toEqual({ text: PRS_TAB, fg: theme.text });
   });
 
-  it("carries the PR count on the tab, whichever view is up", () => {
-    expect(
-      viewTabSegments("worktrees", " · 7", 60)
-        .map((s) => s.text)
-        .join(""),
-    ).toBe("Worktrees │ Pull Requests · 7");
+  // The key sits on the thing it takes you TO. The active tab wears none,
+  // because there is nowhere to go — which is also what makes one key cost
+  // four columns where two would cost eight.
+  it("puts the key on the inactive tab only", () => {
+    expect(tabText("worktrees", " · 7", 60)).toBe(
+      "Worktrees │ [l] Pull Requests · 7",
+    );
+    expect(tabText("prs", " · 7", 60)).toBe(
+      "[h] Worktrees │ Pull Requests · 7",
+    );
+    expect(tabKey("worktrees")).toBe("l");
+    expect(tabKey("prs")).toBe("h");
   });
 
   // The pending state rides the LABEL, the same answer-replaces-text-in-place
   // idiom the title's scanning suffix uses, so nothing takes a row and hands
   // it back when GitHub answers.
   it("carries the pending spinner in place of the count", () => {
-    expect(
-      viewTabSegments("worktrees", " · ◓", 60)
-        .map((s) => s.text)
-        .join(""),
-    ).toBe("Worktrees │ Pull Requests · ◓");
+    expect(tabText("worktrees", " · ◓", 60)).toBe(
+      "Worktrees │ [l] Pull Requests · ◓",
+    );
   });
 
-  // Dropped WHOLE, like `titleSegments`'s suffix: a `Pull Request…` cut
-  // mid-word would spend the columns that carry the count.
-  it("degrades to the short label before it truncates anything", () => {
-    const narrow = viewTabSegments("prs", " · 7", 22);
-    expect(narrow.map((s) => s.text).join("")).toBe("Worktrees │ PRs · 7");
-    expect(narrow[2]?.text).toBe(PRS_TAB_SHORT);
+  // A ladder of WHOLE swaps, like `titleSegments`'s suffix: a `Pull Request…`
+  // cut mid-word would spend the columns that carry everything after it.
+  it("degrades one whole rung at a time", () => {
+    expect(tabText("worktrees", " · 7", 33)).toBe(
+      "Worktrees │ [l] Pull Requests · 7",
+    );
+    expect(tabText("worktrees", " · 7", 32)).toBe("Worktrees │ [l] PRs · 7");
+    expect(tabText("worktrees", " · 7", 32)).toContain(PRS_TAB_SHORT);
+    expect(tabText("worktrees", " · 7", 22)).toBe("Worktrees │ [l] PRs");
+    expect(tabText("worktrees", " · 7", 18)).toBe("[l] PRs");
+    expect(tabText("prs", " · 7", 18)).toBe("[h] Worktrees");
   });
 
-  it("fits the short form rather than overrunning its box", () => {
-    const width = 12;
-    const fitted = viewTabSegments("prs", " · 7", width);
-    const used = fitted.reduce((n, s) => n + displayWidth(s.text), 0);
-    expect(used).toBeLessThanOrEqual(width);
+  // The requirement the width sweep produced: whatever else goes, the KEY
+  // survives, because nothing else on screen carries it. Every rung below is
+  // narrower than any width the panel is usable at.
+  it("keeps the key at every width down to the sidebar and below", () => {
+    for (const width of [30, 26, 20, 12, 8]) {
+      expect(tabText("worktrees", " · unavailable", width)).toContain("[l]");
+      expect(tabText("prs", " · unavailable", width)).toContain("[h]");
+    }
+  });
+
+  // The sidebar's own width, which is the one the ladder exists for.
+  it("keeps the key and the count at sidebar width", () => {
+    expect(tabText("worktrees", " · 7", 30)).toBe("Worktrees │ [l] PRs · 7");
+  });
+
+  it("fits the last rung rather than overrunning its box", () => {
+    for (const width of [12, 8, 4]) {
+      const used = viewTabSegments("prs", " · 7", width).reduce(
+        (n, s) => n + displayWidth(s.text),
+        0,
+      );
+      expect(used).toBeLessThanOrEqual(width);
+    }
   });
 });
 
@@ -3970,18 +4003,32 @@ describe("WorktreesPanel PR view safety gate", () => {
     expect(shown).not.toContain("x remove 1");
   });
 
-  // At 90 columns — a split window, a wide sidebar — the long `l pull
-  // requests` was the FIRST hint dropped, which left nothing on screen naming
-  // the key that reaches the other view. The tab line names both views at
-  // every width but never the key, and the key is the whole point.
-  it("keeps the view key in the footer at 90 columns", async () => {
+  // A width sweep is what settled this. On the hint line the key survived to
+  // 90 columns and was gone at 80 — the commonest default width — so it moved
+  // to the tab line, which always renders. The footer is back to exactly the
+  // hints it had before the views existed.
+  it("teaches the view key on the tab line at 80 columns", async () => {
+    const { list, scan } = removable();
+    const { settled } = await mountSettled(list, scan, {
+      repo: "/repo",
+      width: 80,
+      onReview: () => {},
+    });
+    expect(settled).toContain("[l] Pull Requests");
+    // And nowhere else: one teaching location, not two.
+    expect(settled).not.toContain("l PRs");
+    expect(settled).not.toContain("l pull requests");
+  });
+
+  it("teaches it on the tab line at 90 columns too", async () => {
     const { list, scan } = removable();
     const { settled } = await mountSettled(list, scan, {
       repo: "/repo",
       width: 90,
       onReview: () => {},
     });
-    expect(settled).toContain("l PRs");
+    expect(settled).toContain("[l] Pull Requests");
+    expect(settled).not.toContain("l PRs");
   });
 
   // The footer teaches the keys that are live, and only those.
@@ -3996,7 +4043,9 @@ describe("WorktreesPanel PR view safety gate", () => {
     keys.pressKey("l");
     const shown = await frame();
     expect(shown).toContain("enter checkout");
-    expect(shown).toContain("h worktrees");
+    // The way back rides the inactive tab, not this line.
+    expect(shown).toContain("[h] Worktrees");
+    expect(shown).not.toContain("h worktrees");
     expect(shown).not.toContain("space select");
     expect(shown).not.toContain("x remove");
     expect(shown).not.toContain("y copy");
