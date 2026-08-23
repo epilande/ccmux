@@ -297,25 +297,34 @@ export function buildFlatItems(
   return items;
 }
 
-/** Predicate returning true if a session row has a subtitle (2 lines) vs collapsed (1 line). */
-type SessionHasSubtitle = (session: EnrichedSession) => boolean;
+/**
+ * How many terminal lines a session row occupies.
+ *
+ * A count rather than the has-a-subtitle boolean it replaced: a row is no
+ * longer either one or two lines, because the wrapped prompt block adds a
+ * variable number more. Every consumer here derives scroll and menu geometry
+ * from this one answer, and the SAME function feeds the renderer, so a row
+ * cannot be measured as one height and drawn at another.
+ */
+type SessionLineCount = (session: EnrichedSession) => number;
 
 /**
  * Compute the visual height of a flat item.
  * Non-first headers occupy 2 lines (divider + header).
- * Session items occupy 2 lines when a subtitle is rendered, 1 line otherwise.
+ * Session items ask `lineCount`; without one they are assumed to be 2 lines.
  * First header occupies 1 line.
  */
 export function itemVisualHeight(
   items: FlatItem[],
   index: number,
-  hasSubtitle?: SessionHasSubtitle,
+  lineCount?: SessionLineCount,
 ): number {
   const item = items[index];
   if (item.type === "header" && index > 0) return 2;
   if (item.type === "session") {
-    if (!hasSubtitle) return 2;
-    return hasSubtitle(item.filteredSession.session) ? 2 : 1;
+    if (!lineCount) return 2;
+    // A row always draws its identity line, whatever the caller computes.
+    return Math.max(1, lineCount(item.filteredSession.session));
   }
   return 1;
 }
@@ -328,11 +337,11 @@ export function itemVisualHeight(
 export function toVisualLine(
   items: FlatItem[],
   index: number,
-  hasSubtitle?: SessionHasSubtitle,
+  lineCount?: SessionLineCount,
 ): number {
   let line = 0;
   for (let i = 0; i < index; i++) {
-    line += itemVisualHeight(items, i, hasSubtitle);
+    line += itemVisualHeight(items, i, lineCount);
   }
   return line;
 }
@@ -346,10 +355,10 @@ export function scrollTarget(
   index: number,
   scrollTop: number,
   viewportHeight: number,
-  hasSubtitle?: SessionHasSubtitle,
+  lineCount?: SessionLineCount,
 ): number | null {
-  const visualLine = toVisualLine(items, index, hasSubtitle);
-  const lastLine = visualLine + itemVisualHeight(items, index, hasSubtitle) - 1;
+  const visualLine = toVisualLine(items, index, lineCount);
+  const lastLine = visualLine + itemVisualHeight(items, index, lineCount) - 1;
 
   if (visualLine < scrollTop) {
     return visualLine;

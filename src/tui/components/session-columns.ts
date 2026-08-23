@@ -505,6 +505,41 @@ export function rowHasFlexText(row: ResolvedRow): boolean {
   );
 }
 
+/**
+ * Drop every `prompt` cell from both rows, leaving the rest of each row
+ * intact — unlike `stripPrompt`, which also clears row 2 wholesale because
+ * `promptDisplay: "off"` means "no prompt anywhere, collapse the row".
+ *
+ * Used when the wrapped prompt block is on: the block IS the prompt, so a
+ * `prompt` column alongside it would print the same text twice.
+ */
+export function withoutPrompt(cols: ResolvedColumns): ResolvedColumns {
+  const drop = (entries: ResolvedEntry[]) =>
+    entries.filter((e) => e.field !== "prompt");
+  return {
+    row1: { left: drop(cols.row1.left), right: drop(cols.row1.right) },
+    row2: { left: drop(cols.row2.left), right: drop(cols.row2.right) },
+  };
+}
+
+/** Columns the wrapped prompt block is inset from the row's left edge, so it
+ *  reads as belonging to the row above rather than as a row of its own. */
+export const PROMPT_BLOCK_INDENT = 2;
+
+/**
+ * Usable width for the wrapped prompt block at a given row width.
+ *
+ * Shared so the wrap and the box it is drawn in cannot be computed from two
+ * different ideas of the geometry — a disagreement here is an off-by-one in
+ * the row height, which the scroll math would then carry into every row
+ * below it.
+ */
+export function promptBlockWidth(totalWidth: number): number {
+  const PADDING = 2; // the item's own paddingLeft + paddingRight
+  const SCROLLBAR = 3; // the scrollbox gutter the terminal width hides
+  return Math.max(8, totalWidth - PADDING - PROMPT_BLOCK_INDENT - SCROLLBAR);
+}
+
 /** Max rendered width of an attention label before it is ellipsized. */
 export const ATTENTION_LABEL_MAX = 12;
 

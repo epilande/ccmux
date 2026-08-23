@@ -728,8 +728,8 @@ describe("scrollTarget", () => {
   });
 });
 
-describe("itemVisualHeight with hasSubtitle", () => {
-  it("returns 2 when hasSubtitle is undefined (backward compat)", () => {
+describe("itemVisualHeight with lineCount", () => {
+  it("returns 2 when lineCount is undefined (backward compat)", () => {
     const items = buildFlatItems(
       [toFiltered(mockSession({ id: "a", lastPrompt: null }))],
       "none",
@@ -739,27 +739,27 @@ describe("itemVisualHeight with hasSubtitle", () => {
     expect(itemVisualHeight(items, 0)).toBe(2);
   });
 
-  it("returns 1 when hasSubtitle returns false", () => {
+  it("returns 1 when lineCount returns 1", () => {
     const items = buildFlatItems(
       [toFiltered(mockSession({ id: "a", lastPrompt: null }))],
       "none",
       new Set(),
       false,
     );
-    expect(itemVisualHeight(items, 0, () => false)).toBe(1);
+    expect(itemVisualHeight(items, 0, () => 1)).toBe(1);
   });
 
-  it("returns 2 when hasSubtitle returns true", () => {
+  it("returns 2 when lineCount returns 2", () => {
     const items = buildFlatItems(
       [toFiltered(mockSession({ id: "a", lastPrompt: "hello" }))],
       "none",
       new Set(),
       false,
     );
-    expect(itemVisualHeight(items, 0, () => true)).toBe(2);
+    expect(itemVisualHeight(items, 0, () => 2)).toBe(2);
   });
 
-  it("varies height per session based on predicate", () => {
+  it("varies height per session based on the count", () => {
     const items = buildFlatItems(
       [
         toFiltered(mockSession({ id: "a", lastPrompt: "work" })),
@@ -769,12 +769,12 @@ describe("itemVisualHeight with hasSubtitle", () => {
       new Set(),
       false,
     );
-    const hasSubtitle = (s: EnrichedSession) => !!s.lastPrompt;
-    expect(itemVisualHeight(items, 0, hasSubtitle)).toBe(2);
-    expect(itemVisualHeight(items, 1, hasSubtitle)).toBe(1);
+    const lineCount = (s: EnrichedSession) => (s.lastPrompt ? 2 : 1);
+    expect(itemVisualHeight(items, 0, lineCount)).toBe(2);
+    expect(itemVisualHeight(items, 1, lineCount)).toBe(1);
   });
 
-  it("ignores hasSubtitle for header items", () => {
+  it("ignores lineCount for header items", () => {
     const items = buildFlatItems(
       [
         toFiltered(mockSession({ id: "a", project: "alpha" })),
@@ -785,8 +785,8 @@ describe("itemVisualHeight with hasSubtitle", () => {
       false,
     );
     // items: [header(alpha), session(a), header(beta), session(b)]
-    expect(itemVisualHeight(items, 0, () => false)).toBe(1); // first header
-    expect(itemVisualHeight(items, 2, () => false)).toBe(2); // second header
+    expect(itemVisualHeight(items, 0, () => 1)).toBe(1); // first header
+    expect(itemVisualHeight(items, 2, () => 1)).toBe(2); // second header
   });
 });
 
@@ -802,10 +802,10 @@ describe("toVisualLine with mixed session heights", () => {
       new Set(),
       false,
     );
-    const hasSubtitle = () => false;
-    expect(toVisualLine(items, 0, hasSubtitle)).toBe(0);
-    expect(toVisualLine(items, 1, hasSubtitle)).toBe(1);
-    expect(toVisualLine(items, 2, hasSubtitle)).toBe(2);
+    const lineCount = () => 1;
+    expect(toVisualLine(items, 0, lineCount)).toBe(0);
+    expect(toVisualLine(items, 1, lineCount)).toBe(1);
+    expect(toVisualLine(items, 2, lineCount)).toBe(2);
   });
 
   it("mixes 1-line and 2-line sessions", () => {
@@ -819,11 +819,11 @@ describe("toVisualLine with mixed session heights", () => {
       new Set(),
       false,
     );
-    const hasSubtitle = (s: EnrichedSession) => !!s.lastPrompt;
+    const lineCount = (s: EnrichedSession) => (s.lastPrompt ? 2 : 1);
     // visual: 0-1(a=2), 2(b=1), 3-4(c=2)
-    expect(toVisualLine(items, 0, hasSubtitle)).toBe(0);
-    expect(toVisualLine(items, 1, hasSubtitle)).toBe(2);
-    expect(toVisualLine(items, 2, hasSubtitle)).toBe(3);
+    expect(toVisualLine(items, 0, lineCount)).toBe(0);
+    expect(toVisualLine(items, 1, lineCount)).toBe(2);
+    expect(toVisualLine(items, 2, lineCount)).toBe(3);
   });
 
   it("accounts for header divider lines with 1-line sessions", () => {
@@ -840,11 +840,11 @@ describe("toVisualLine with mixed session heights", () => {
     );
     // items: [header(alpha), session(a), header(beta), session(b)]
     // visual: 0(header), 1(a=1), 2-3(header beta), 4(b=1)
-    const hasSubtitle = () => false;
-    expect(toVisualLine(items, 0, hasSubtitle)).toBe(0);
-    expect(toVisualLine(items, 1, hasSubtitle)).toBe(1);
-    expect(toVisualLine(items, 2, hasSubtitle)).toBe(2);
-    expect(toVisualLine(items, 3, hasSubtitle)).toBe(4);
+    const lineCount = () => 1;
+    expect(toVisualLine(items, 0, lineCount)).toBe(0);
+    expect(toVisualLine(items, 1, lineCount)).toBe(1);
+    expect(toVisualLine(items, 2, lineCount)).toBe(2);
+    expect(toVisualLine(items, 3, lineCount)).toBe(4);
   });
 });
 
@@ -861,17 +861,17 @@ describe("scrollTarget with mixed session heights", () => {
     new Set(),
     false,
   );
-  const hasSubtitleAlways = () => false;
+  const lineCountAlways = () => 1;
 
   it("fits more 1-line items in the same viewport", () => {
     // viewport of height 3 fits all 3 one-line sessions
-    expect(scrollTarget(items1Line, 2, 0, 3, hasSubtitleAlways)).toBeNull();
+    expect(scrollTarget(items1Line, 2, 0, 3, lineCountAlways)).toBeNull();
   });
 
   it("scrolls by 1 line when next 1-line item is just below viewport", () => {
     // viewport shows line 0 only, selecting session(b) at visual line 1
     // lastLine = 1, scrollTop = 1 - 1 + 1 = 1
-    expect(scrollTarget(items1Line, 1, 0, 1, hasSubtitleAlways)).toBe(1);
+    expect(scrollTarget(items1Line, 1, 0, 1, lineCountAlways)).toBe(1);
   });
 
   it("scrolls based on actual mixed heights", () => {
@@ -886,15 +886,15 @@ describe("scrollTarget with mixed session heights", () => {
       new Set(),
       false,
     );
-    const hasSubtitle = (s: EnrichedSession) => !!s.lastPrompt;
+    const lineCount = (s: EnrichedSession) => (s.lastPrompt ? 2 : 1);
     // viewport shows line 0 only, selecting session(b) at visual line 2
     // lastLine = 2, scrollTop = 2 - 1 + 1 = 2
-    expect(scrollTarget(items, 1, 0, 1, hasSubtitle)).toBe(2);
+    expect(scrollTarget(items, 1, 0, 1, lineCount)).toBe(2);
   });
 
   it("returns null when selected 1-line item already fits", () => {
     // viewport shows lines 0-2, selecting session(c) at visual line 2
-    expect(scrollTarget(items1Line, 2, 0, 3, hasSubtitleAlways)).toBeNull();
+    expect(scrollTarget(items1Line, 2, 0, 3, lineCountAlways)).toBeNull();
   });
 });
 

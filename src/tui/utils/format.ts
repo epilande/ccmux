@@ -172,3 +172,86 @@ export function truncateHighlighted(markup: string, maxLen: number): string {
   const trail = postSlice.length < post.length ? "…" : "";
   return `${lead}${preSlice}<b>${span}</b>${postSlice}${trail}`;
 }
+
+/**
+ * Greedy word-wrap into lines of at most `width` columns, breaking a word
+ * that cannot fit on a line of its own.
+ *
+ * Callers wrap text themselves rather than handing a long string to the
+ * renderer, because their height budget has to know the row count
+ * BEFORE layout and the renderer's own wrapping cannot be predicted from
+ * here (it breaks mid-word at the tail of a line, and a space landing on the
+ * boundary moves to the next row). Lines produced here already fit, so
+ * nothing can wrap a second time and the budget cannot be wrong.
+ *
+ * Widths are display columns (`displayWidth`), so a line of wide glyphs (CJK,
+ * emoji) fits its column like an ASCII one does, and mid-word breaks land on
+ * grapheme boundaries (issue #91).
+ */
+export function wrapText(text: string, width: number): string[] {
+  if (width <= 0) return [text];
+  const lines: string[] = [];
+  let line = "";
+  let lineWidth = 0;
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    let rest = word;
+    // Longer than the whole column: it can only be broken mid-word.
+    while (displayWidth(rest) > width) {
+      if (line) {
+        lines.push(line);
+        line = "";
+        lineWidth = 0;
+      }
+      const head = sliceToWidth(rest, width);
+      if (!head) {
+        // A single cluster wider than the whole column (a wide glyph at
+        // width 1): nothing can be split off it, so let the word overflow
+        // rather than slice a cluster or spin on an empty head.
+        lines.push(rest);
+        rest = "";
+        break;
+      }
+      lines.push(head);
+      rest = rest.slice(head.length);
+    }
+    if (!rest) continue;
+    const restWidth = displayWidth(rest);
+    if (!line) {
+      line = rest;
+      lineWidth = restWidth;
+    } else if (lineWidth + 1 + restWidth <= width) {
+      line += ` ${rest}`;
+      lineWidth += 1 + restWidth;
+    } else {
+      lines.push(line);
+      line = rest;
+      lineWidth = restWidth;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.length > 0 ? lines : [""];
+}
+
+/**
+ * {@link wrapText}, capped at `maxLines`. The last kept line is ellipsized
+ * when text was dropped, so a clipped block never passes for a complete one.
+ *
+ * Returns the lines rather than a string: the caller's row height IS the
+ * array length, which is the whole reason wrapping happens here instead of
+ * in the renderer.
+ */
+export function wrapToLines(
+  text: string,
+  width: number,
+  maxLines: number,
+): string[] {
+  if (maxLines <= 0 || width <= 0 || !text) return [];
+  const lines = wrapText(text, width);
+  if (lines.length <= maxLines) return lines;
+  const kept = lines.slice(0, maxLines);
+  const last = kept[maxLines - 1];
+  // `truncateText` only ellipsizes when it has to clip, and `last` already
+  // fits the column by construction — so make room for the marker first.
+  kept[maxLines - 1] = truncateText(last + " …", width);
+  return kept;
+}

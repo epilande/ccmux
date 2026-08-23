@@ -689,6 +689,17 @@ Pass an empty string to clear a side: `ccmux config set columns.row2.left ""`.
 
 The `project` cell reads `path:branch`, and a session running in a git worktree marks it twice: the branch gains a trailing `+` (also on the standalone `branch` column), and the path is replaced by `<repo>/<worktree>` — `ccmux/parking` rather than the `worktrees/parking` the directory happens to spell, so worktrees of different repos stay distinguishable. Both survive the `dirname` mode, since they are identity rather than path context; when the cell is too narrow for both, the repo yields before the worktree's own name does.
 
+### Wrapped prompt block
+
+`promptLines` renders the last prompt as a wrapped block of up to N lines, between the identity row and row 2 — the same text the one-line `prompt` column shows, given room to actually be read.
+
+```bash
+ccmux config set promptLines 3          # picker and sidebar
+ccmux config set sidebar.promptLines 4  # sidebar only
+```
+
+`0` (the default) disables it; the cap is 10. Turning it on removes the `prompt` cell from both rows rather than printing the same text twice, and `promptDisplay: "off"` (the <kbd>p</kbd> key) still hides it. A session with no prompt gets no extra lines. The block is wrapped and measured before layout, so a row's reported height and its drawn lines are always the same number — the scroll and row-menu geometry stay exact at any height.
+
 Defaults: `row1.left` is `index, status, project` (status badge widens icon→short→full as the terminal grows). `row1.right` cascades by breakpoint: just `pane` below `xs`, then `agent:short, pane` at `xs`, `agent:short, pane, time` at `sm`, and `agent:full, version, pane, time` at `md`+. The `prompt` and `pr` cells are configured on `row2`, but `promptDisplay` (default `inline`, cycled live by <kbd>p</kbd>) controls how they render: `inline` flattens them onto `row1` so each session stays a single line, `row2` gives the prompt its own line with `pr` at the right edge, and `off` hides both. Sessions with no prompt stay single-line in `inline` mode; in `row2` mode the second line still appears when another row-2 field (such as an open PR) has data.
 
 Sidebar defaults differ to fit the narrow rail: `row1` is `status, project` with `pr:short, agent:short` on the right (PR stays visible even with the prompt hidden), and `row2` is `prompt` / `time` (a lone `time` never earns the row; it rides along when some other field has data). The 30-col rail has no room to inline, so the sidebar always uses the two-row layout (`inline` behaves like `row2`). Override these under the `sidebar.columns` key in `~/.config/ccmux/ccmux.json` (e.g. `"sidebar": { "columns": { "row2": { "left": ["pane"] } } }` to bring the pane target back).

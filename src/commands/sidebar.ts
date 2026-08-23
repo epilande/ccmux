@@ -160,6 +160,7 @@ export function createSidebarCommand(): Command {
           initialPreview: false,
           iconStyle: prefs.iconStyle ?? "dot",
           columns: prefs.sidebar?.columns ?? prefs.columns,
+          promptLines: prefs.sidebar?.promptLines ?? prefs.promptLines,
           breakpoints: prefs.breakpoints,
           searchPaneContent: prefs.searchPaneContent,
           searchPaneLines: prefs.searchPaneLines,

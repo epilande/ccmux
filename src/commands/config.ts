@@ -8,6 +8,7 @@ import {
   VALID_REVIEW_HANDBACK,
   BREAKPOINT_NAMES,
   COLUMN_FIELDS,
+  MAX_PROMPT_LINES,
   VALID_NOTIFICATION_BACKENDS,
   VALID_NOTIFICATION_EVENTS,
   type BreakpointConfig,
@@ -63,6 +64,11 @@ export const KNOWN_KEYS: Record<
     validate: (v) => (VALID_PROMPT_DISPLAYS as readonly string[]).includes(v),
     parse: (v) => v,
     description: `Prompt display mode (${VALID_PROMPT_DISPLAYS.join(", ")}; default inline)`,
+  },
+  promptLines: {
+    validate: (v) => isPromptLines(v),
+    parse: (v) => Number(v),
+    description: `Wrapped prompt block height in lines (0-${MAX_PROMPT_LINES}; 0 disables, the default). Replaces the one-line \`prompt\` column.`,
   },
   backgroundAgents: {
     validate: (v) => v === "true" || v === "false",
@@ -137,6 +143,12 @@ export const KNOWN_KEYS: Record<
     note: "Takes effect on next picker/sidebar launch. For per-key overrides, edit theme as an object in ccmux.json (see ccmux config themes).",
   },
 };
+
+/** Shared by the top-level `promptLines` key and the `sidebar.` override. */
+function isPromptLines(v: string): boolean {
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 0 && n <= MAX_PROMPT_LINES;
+}
 
 const ROW_NAMES = ["row1", "row2"] as const;
 const SIDE_NAMES = ["left", "right"] as const;
@@ -323,9 +335,20 @@ export function createConfigCommand(): Command {
           await setPreferences({
             sidebar: { ...prefs.sidebar, position: value },
           });
+        } else if (sidebarKey === "promptLines") {
+          if (!isPromptLines(value)) {
+            console.error(
+              `Invalid sidebar promptLines (must be integer 0-${MAX_PROMPT_LINES})`,
+            );
+            process.exit(1);
+          }
+          const prefs = await getPreferences();
+          await setPreferences({
+            sidebar: { ...prefs.sidebar, promptLines: Number(value) },
+          });
         } else {
           console.error(`Unknown sidebar key: ${sidebarKey}`);
-          console.error("Valid sidebar keys: width, position");
+          console.error("Valid sidebar keys: width, position, promptLines");
           process.exit(1);
         }
         console.log(`${key} = ${value}`);

@@ -22,7 +22,11 @@ import {
   resolveLayout,
   applyPromptDisplay,
   rowHasContent,
+  normalizePrompt,
+  promptBlockWidth,
+  withoutPrompt,
 } from "./session-columns";
+import { wrapToLines } from "../utils/format";
 import { theme } from "../theme";
 import { socketErrorMessage } from "../../lib/tmux-socket";
 
@@ -40,6 +44,8 @@ interface SessionListProps {
   sidebar?: boolean;
   /** Prompt display mode (cycled by the `p` key): inline, own row, or off. */
   promptDisplay?: PromptDisplay;
+  /** Height of the wrapped prompt block, in lines. 0 (the default) is off. */
+  promptLines?: number;
   loading?: boolean;
   /** Set when the daemon cannot reach its tmux server; replaces the empty
    *  state, which would otherwise read as "no agents are running". */
@@ -99,15 +105,36 @@ export const SessionList: Component<SessionListProps> = (props) => {
       props.columns,
       props.breakpoints,
     );
-    return applyPromptDisplay(
+    const cols = applyPromptDisplay(
       resolved,
       props.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
       !!props.sidebar,
     );
+    // The block renders the same text a `prompt` cell would, so the cell goes.
+    return (props.promptLines ?? 0) > 0 ? withoutPrompt(cols) : cols;
   });
 
-  const hasSubtitle = (session: EnrichedSession) =>
-    rowHasContent(session, layout().row2);
+  /**
+   * The wrapped prompt block, resolved HERE rather than in the row, for the
+   * same reason `layout` is: the scroll math below and the renderer must
+   * agree on the row's height, and the only way they cannot disagree is to
+   * derive both from one array. The row draws exactly these lines; the row
+   * is exactly this many lines tall.
+   */
+  const promptBlock = (session: EnrichedSession): string[] => {
+    const max = props.promptLines ?? 0;
+    // `promptDisplay: "off"` means no prompt anywhere, and the `p` key cycles
+    // it live — so it hides the block too rather than leaving one prompt
+    // surface the toggle cannot reach.
+    if (max <= 0 || props.promptDisplay === "off") return [];
+    const text = normalizePrompt(session.lastPrompt ?? "");
+    return wrapToLines(text, promptBlockWidth(effectiveWidth()), max);
+  };
+
+  const sessionLines = (session: EnrichedSession) =>
+    1 +
+    (rowHasContent(session, layout().row2) ? 1 : 0) +
+    promptBlock(session).length;
 
   createEffect(() => {
     // Re-run once the scrollbox gets real dimensions (and on later resizes).
@@ -125,7 +152,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
       index,
       scrollboxRef.scrollTop,
       viewportHeight,
-      hasSubtitle,
+      sessionLines,
     );
     if (target !== null) {
       scrollboxRef.scrollTo(target);
@@ -151,7 +178,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
     if (!item) return null;
     const divider = item.type === "header" && index > 0 ? 1 : 0;
     const line =
-      toVisualLine(props.items, index, hasSubtitle) -
+      toVisualLine(props.items, index, sessionLines) -
       scrollbox.scrollTop +
       divider;
     return {
@@ -216,6 +243,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
           item.filteredSession.session.id === props.activeSessionId
         }
         layout={layout()}
+        promptBlock={promptBlock(item.filteredSession.session)}
         dimmed={props.dimmed}
         sidebar={props.sidebar}
         onActivate={onActivate}

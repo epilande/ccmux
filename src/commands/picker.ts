@@ -87,6 +87,7 @@ export function createPickerCommand(): Command {
           iconStyle,
           previewWidth,
           columns: prefs.columns,
+          promptLines: prefs.promptLines,
           breakpoints: prefs.breakpoints,
           searchPaneContent: prefs.searchPaneContent,
           searchPaneLines: prefs.searchPaneLines,

@@ -4,11 +4,10 @@ import {
   NewSessionDialog,
   newSessionFloorRows,
   planDialogRows,
-  wrapText,
 } from "./NewSessionDialog";
 import { optionWindow } from "./DropdownField";
 import { expectFrameIntegrity, squish } from "./test-helpers";
-import { displayWidth } from "../utils/format";
+import { displayWidth, wrapText } from "../utils/format";
 import type { SpawnableAgent } from "../../lib/spawnable-agents";
 import type { NewSessionDraft } from "../store";
 
