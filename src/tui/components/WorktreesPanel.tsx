@@ -1781,6 +1781,20 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    */
   const prPending = (): boolean => prs() === null && prError() === null;
 
+  /**
+   * Whether phase 3 failed for this repo, either wholesale or on its own.
+   *
+   * Declared ABOVE `merged`, which is a `createMemo` and therefore runs on
+   * creation. It survived below only because the first evaluation is always
+   * pending and short-circuits past this call; a later change that seeded
+   * phase 3 the way a return-open seeds phase 2 would have turned that into a
+   * temporal-dead-zone crash at mount.
+   */
+  const prFailedFor = (repoRoot: string): boolean => {
+    if (prError() !== null) return true;
+    return (prs()?.errors ?? []).some((e) => e.repoRoot === repoRoot);
+  };
+
   /** Repo filter currently in force, which is what both requests carry. */
   const repoFilter = (): string | null => (scoped() ? props.repo : null);
 
@@ -2010,12 +2024,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * own failure is named with the repo, since on the multi-repo view the
    * others rendered fine and the line has to say which one did not.
    */
-  /** Whether phase 3 failed for this repo, either wholesale or on its own. */
-  const prFailedFor = (repoRoot: string): boolean => {
-    if (prError() !== null) return true;
-    return (prs()?.errors ?? []).some((e) => e.repoRoot === repoRoot);
-  };
-
   const prErrorLine = (): string | null => {
     const failed = prError();
     if (failed) return `Open PRs failed: ${failed}`;
