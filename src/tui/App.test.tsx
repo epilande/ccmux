@@ -7724,7 +7724,13 @@ describe("App worktrees panel (W)", () => {
     try {
       setup.mockInput.pressKey("d");
       const shown = squish(await frame());
-      expect(shown).toContain(squish("no agent to send to"));
+      // Head and tail separately, not the whole sentence. The toast wraps it
+      // across two rows and `squish` concatenates EVERY row, so whatever the
+      // panel draws on the row in between lands inside the phrase. Each of
+      // these sits on one row, so neither depends on the wrap point or on
+      // what else is on screen beside it.
+      expect(shown).toContain(squish("1 review note captured"));
+      expect(shown).toContain(squish("send to)"));
       expect(shown).not.toContain(squish("Send review comments"));
     } finally {
       restore();
