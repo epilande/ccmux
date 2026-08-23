@@ -3741,13 +3741,27 @@ describe("WorktreesPanel PR view", () => {
     expect(await frame()).toContain("no open PRs");
   });
 
-  // The cause travels with the failure and is said under the repo it applies
-  // to. There is deliberately no second error line below the list: with
-  // thirteen repos and one dead daemon, "which repo" is the only question a
-  // shared line cannot answer.
-  it("names the cause under the repo when the whole request fails", async () => {
+  // ONE cause for every repo, so it is said ONCE and the groups go with it.
+  // Under each repo it filled the whole viewport with copies of the same
+  // sentence, and that is the FIRST-RUN state for every existing user, whose
+  // daemon predates `/prs` until they restart it. Bare headers over the line
+  // would be the same noise in a different shape: in this view a repo whose
+  // PRs are entirely unknown carries no information.
+  it("says a whole-request failure once, without the repo groups", async () => {
     const { keys, frame } = await mountPanel({
-      list: async () => json(listOf([mainRow(), row()])),
+      list: async () =>
+        json({
+          repos: [
+            { repoRoot: "/repo", repoName: "repo", worktrees: [mainRow()] },
+            {
+              repoRoot: "/other",
+              repoName: "other",
+              worktrees: [
+                row({ path: "/other/wt/d", repoRoot: "/other", repoName: "other" }),
+              ],
+            },
+          ],
+        }),
       scan: async () => json(emptyScan),
       prs: async () => {
         throw new Error("gh is logged out");
@@ -3758,27 +3772,52 @@ describe("WorktreesPanel PR view", () => {
     // Nothing leaks into the Worktrees view, which has no PR presence at all.
     expect(worktrees).not.toContain("gh is logged out");
     expect(worktrees).toContain("main checkout");
+    // Both repo headers are there, since the Worktrees view still has rows.
+    expect(worktrees).toContain("other ─");
 
     keys.pressKey("l");
-    expect(await frame()).toContain("unavailable: gh is logged out");
+    const prs = await frame();
+    expect(prs).toContain("Open PRs unavailable: gh is logged out");
+    // Said once, and the groups are gone with it.
+    expect(prs.match(/gh is logged out/g)).toHaveLength(1);
+    expect(prs).not.toContain("other ─");
+    expect(prs).not.toContain("no open PRs");
   });
 
   // A repo's own error rides inside an otherwise fine response, so only that
-  // repo's line is marked and the others still answer.
+  // repo's line is marked and the others still answer. This is the steady
+  // state with a current daemon, and it keeps the per-repo line the
+  // whole-request case gives up.
   it("marks only the repo whose own PR lookup failed", async () => {
     const { keys, frame } = await mountPanel({
-      list: async () => json(listOf([mainRow(), row()])),
+      list: async () =>
+        json({
+          repos: [
+            { repoRoot: "/repo", repoName: "repo", worktrees: [mainRow()] },
+            {
+              repoRoot: "/other",
+              repoName: "other",
+              worktrees: [
+                row({ path: "/other/wt/d", repoRoot: "/other", repoName: "other" }),
+              ],
+            },
+          ],
+        }),
       scan: async () => json(emptyScan),
       prs: async () =>
         json({
-          repos: [],
+          repos: [{ repoRoot: "/other", repoName: "other", prs: [] }],
           errors: [
             { repoRoot: "/repo", repoName: "repo", error: "no GitHub remote" },
           ],
         }),
     });
     keys.pressKey("l");
-    expect(await frame()).toContain("unavailable: no GitHub remote");
+    const shown = await frame();
+    // The groups survive here, because they are what tells the two apart.
+    expect(shown).toContain("unavailable: no GitHub remote");
+    expect(shown).toContain("no open PRs");
+    expect(shown).toContain("other ─");
   });
 
   // Degrades like phase 2: the panel never reaches its error phase, and the
@@ -3929,6 +3968,20 @@ describe("WorktreesPanel PR view safety gate", () => {
     // Nothing was selected while the PR view was up, so the hint still reads
     // the bare `x remove` it does with an empty selection.
     expect(shown).not.toContain("x remove 1");
+  });
+
+  // At 90 columns — a split window, a wide sidebar — the long `l pull
+  // requests` was the FIRST hint dropped, which left nothing on screen naming
+  // the key that reaches the other view. The tab line names both views at
+  // every width but never the key, and the key is the whole point.
+  it("keeps the view key in the footer at 90 columns", async () => {
+    const { list, scan } = removable();
+    const { settled } = await mountSettled(list, scan, {
+      repo: "/repo",
+      width: 90,
+      onReview: () => {},
+    });
+    expect(settled).toContain("l PRs");
   });
 
   // The footer teaches the keys that are live, and only those.

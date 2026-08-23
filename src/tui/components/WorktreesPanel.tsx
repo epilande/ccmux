@@ -1319,9 +1319,10 @@ export function dividerText(count: number, width: number): string {
  * The wait rides this line rather than blanking the section, for the reason
  * the title's `scanning` suffix rides the title: an empty run of repo headers
  * reads as broken, and an answer that REPLACES text in place moves nothing.
- * The cause is stated here, under the repo it applies to, rather than in one
- * line below a list of many — with thirteen repos and one dead daemon, "which
- * repo" is the only question a single line cannot answer.
+ * The cause is stated here, under the repo it applies to, which is what a
+ * single shared line cannot do. Reached only for a per-REPO failure: a
+ * whole-request one has the same cause for every repo and takes the whole
+ * view instead (`prWholeFailure`), rather than printing itself once per repo.
  */
 export function prStatusText(
   status: PRSectionStatus,
@@ -1886,11 +1887,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   /**
    * Why phase 3 has nothing for this repo, or null when it has an answer.
    *
-   * The whole request falling over and THIS repo's own error riding back
-   * inside an otherwise fine response are the same fact to a reader, so they
-   * produce the same line. There is deliberately no second error line under
-   * the list any more: one cause, said once, under the repo it applies to,
-   * where "which repo" is a question a single shared line cannot answer.
+   * Both shapes of failure reach `prSection`, so the tab line and the union
+   * stay truthful either way, but only ONE of them is ever drawn per repo. A
+   * per-REPO error is, under the repo it names, because "which repo" is the
+   * question a single shared line cannot answer. A whole-request failure is
+   * not: it is one cause for every repo, so `prWholeFailure` takes the whole
+   * view and these per-repo lines are never reached.
    *
    * Declared ABOVE `merged`, which is a `createMemo` and therefore runs on
    * creation. It survived below only because the first evaluation is always
@@ -2252,6 +2254,25 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   );
 
   /**
+   * What the PR view says INSTEAD of a list when phase 3 failed wholesale.
+   *
+   * One line, and no repo groups at all. The per-repo line is right for a
+   * per-repo failure — with thirteen repos, "which one" is the only question
+   * a shared line cannot answer — but a whole-request failure has ONE cause
+   * for every repo, and saying it under each of them filled the entire
+   * viewport with thirteen copies of the same sentence. That is not an edge
+   * case either: it is the FIRST-RUN state for every existing user, whose
+   * daemon predates `/prs` until they restart it.
+   *
+   * The groups go with it rather than standing over the line as bare
+   * headers. In this view a repo name whose PRs are entirely unknown carries
+   * no information, and thirteen empty headers is the same noise wearing a
+   * different shape.
+   */
+  const prWholeFailure = (): string | null =>
+    view() === "prs" ? prError() : null;
+
+  /**
    * Whether the active view has anything to draw.
    *
    * Not the same question in both views. The PR view draws a line per repo
@@ -2260,7 +2281,22 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * "no worktrees found" over a panel that has plenty.
    */
   const hasContent = () =>
-    view() === "prs" ? merged().length > 0 : flatRows().length > 0;
+    view() === "prs"
+      ? prWholeFailure() === null && merged().length > 0
+      : flatRows().length > 0;
+
+  /** The line that stands in for the list, and the colour that says whether
+   *  it is a fact or a failure. */
+  const emptyState = (): RowSegment => {
+    const failure = prWholeFailure();
+    if (failure !== null) {
+      return { text: `Open PRs unavailable: ${failure}`, fg: theme.yellow };
+    }
+    return {
+      text: view() === "prs" ? "No repos found." : "No worktrees found.",
+      fg: theme.subtext,
+    };
+  };
 
   function flash(message: string): void {
     setNote(message);
@@ -2828,15 +2864,20 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         // what `r` at a higher rank did to `D include dirty`.
         { text: "o github", rank: 1 },
         { text: "r refresh", rank: 1 },
-        // Lowest rank, and LAST among them, so it is the first hint dropped
-        // and displaces nothing that was already fitting. It can afford to
-        // be: the tab line above names both views on every frame, so the
-        // only thing this hint adds is the key, and a narrow panel that has
-        // to choose is better off keeping `D include dirty`.
-        { text: "l pull requests", rank: 1 },
         ...(props.repo !== null
           ? [{ text: scoped() ? "tab all repos" : "tab this repo", rank: 2 }]
           : []),
+        // The SHORT label, and ranked with `tab`, which is the pair it
+        // belongs to: they are the panel's two axes. At rank 1 the long form
+        // was the first thing a 90-column panel dropped, which left nothing
+        // on screen naming the key that reaches the other view — the tab
+        // line above names both VIEWS on every frame but never the key, and
+        // discoverability is what this whole shape exists to fix. Short
+        // enough (`PRS_TAB_SHORT`, the tab line's own degradation) to fit in
+        // the slack left after the rank-1 hints have gone, so it displaces
+        // nothing that was already fitting. Last among its rank, so it is
+        // still the first of the pair to go when even that runs out.
+        { text: `l ${PRS_TAB_SHORT}`, rank: 2 },
         { text: "q close", rank: 5 },
       ],
       contentWidth(),
@@ -2917,8 +2958,8 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             when={hasContent()}
             fallback={
               <box paddingTop={1}>
-                <text fg={theme.subtext}>
-                  {view() === "prs" ? "No repos found." : "No worktrees found."}
+                <text fg={emptyState().fg}>
+                  {truncateText(emptyState().text, contentWidth())}
                 </text>
               </box>
             }
