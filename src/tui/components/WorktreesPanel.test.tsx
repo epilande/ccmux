@@ -23,7 +23,6 @@ import {
   describeSessions,
   describeSkip,
   detailSegments,
-  fitSegments,
   headerLayout,
   headerParts,
   fitTabs,
@@ -44,7 +43,6 @@ import {
   rowBranch,
   rowLabel,
   rowVisualHeight,
-  scrollTargetFor,
   dividerText,
   headerRule,
   sortWorktreeRows,
@@ -53,16 +51,10 @@ import {
   visualLayout,
   worktreeHoldsPath,
   browserArgv,
-  checkoutHolding,
   CURSOR_BAR,
-  isPRRowKey,
   detailPhrases,
-  PR_MARKER,
-  describeChecks,
-  describeReview,
   openInBrowser,
   prStatusText,
-  oneLine,
   prStatusRowKey,
   prStatusRowRepo,
   type HeaderLayout,
@@ -71,13 +63,21 @@ import {
   PRS_TAB,
   WORKTREES_TAB,
   PRS_TAB_SHORT,
-  prRowKey,
   rowPRUrl,
   type PanelRepo,
   type PanelRow,
   type PRPanelRow,
   type WorktreePanelRow,
 } from "./WorktreesPanel";
+import { fitSegments, oneLine, scrollTargetFor } from "./row-segments";
+import {
+  PR_MARKER,
+  checkoutHolding,
+  describeChecks,
+  describeReview,
+  isPRRowKey,
+  prRowKey,
+} from "./pr-rows";
 import { theme } from "../theme";
 import { displayWidth } from "../utils/format";
 import { DOT_SPINNER_FRAMES, getStatusIcon } from "../../lib/icons";
