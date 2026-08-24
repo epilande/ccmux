@@ -223,8 +223,8 @@ export function prStatusRowRepo(key: string): string | null {
  * The panel's two views (issue #151).
  *
  * A second AXIS, orthogonal to the Tab scope: all four combinations are
- * meaningful, and the tab line names the views while the title names the
- * scope. The PR list started life as a third section appended to every repo
+ * meaningful, and one header line carries both: a scope lead, then a chip
+ * per view. The PR list started life as a third section appended to every repo
  * group and that shape lost on its own terms — one always-drawn header per
  * repo cost a line each across a thirteen-repo view, and the one repo the
  * user actually works in had its PRs below the fold before a key was
@@ -589,7 +589,7 @@ export function fitSegments(
   return kept;
 }
 
-/** The tab line's labels. */
+/** The view chips' labels. */
 export const WORKTREES_TAB = "Worktrees";
 export const PRS_TAB = "Pull Requests";
 /** What the PR tab degrades to at sidebar widths, where the long label plus
@@ -643,7 +643,14 @@ function tabsWidth(tabs: ViewTab[]): number {
 }
 
 /**
- * Fit a rung that is already too wide, chip by chip from the left.
+ * Fit a strip that is already too wide, chip by chip from the left.
+ *
+ * The ladder's last rung hands this ONE chip, so the multi-chip walk below
+ * is unreachable from `headerLayout` today. It is kept general on purpose: a
+ * third view would restore it immediately, and trimming a correct loop down
+ * to today's only call site trades working code for a line count. It is
+ * tested directly rather than through `headerLayout`, which cannot reach the
+ * behaviour it is being asked to prove.
  *
  * Each chip is fitted against what the ones before it left over, and a chip
  * with nothing left ends the line rather than rendering an empty filled
@@ -652,7 +659,7 @@ function tabsWidth(tabs: ViewTab[]): number {
  * background makes that failure visible instead of merely odd — an empty
  * two-column chip of colour, sitting where a label should be.
  */
-function fitTabs(tabs: ViewTab[], width: number): ViewTab[] {
+export function fitTabs(tabs: ViewTab[], width: number): ViewTab[] {
   const fitted: ViewTab[] = [];
   let remaining = width;
   for (const tab of tabs) {
@@ -780,9 +787,9 @@ function headerWidth(layout: HeaderLayout): number {
  * the list.
  */
 export type HeaderPart =
-  | { kind: "lead"; key: string; text: string }
-  | { kind: "text"; key: string; text: string }
-  | { kind: "chip"; key: string; tab: ViewTab };
+  | { kind: "lead"; text: string }
+  | { kind: "text"; text: string }
+  | { kind: "chip"; tab: ViewTab };
 
 /** The header line as the drawn pieces it is made of, in order. */
 export function headerParts(layout: HeaderLayout): HeaderPart[] {
@@ -793,21 +800,21 @@ export function headerParts(layout: HeaderLayout): HeaderPart[] {
   // `headerWidth` measures as zero and OpenTUI draws as one. Nothing here
   // ever emits an empty string.
   if (layout.lead !== null && layout.lead !== "") {
-    parts.push({ kind: "lead", key: "lead", text: layout.lead });
-    parts.push({ kind: "text", key: "lead-gap", text: ZONE_GAP });
+    parts.push({ kind: "lead", text: layout.lead });
+    parts.push({ kind: "text", text: ZONE_GAP });
   }
   layout.tabs.forEach((tab, index) => {
     // The gap is its OWN piece and not padding on the chip: padding inside a
     // background paints the gap in the chip's colour, which fuses two
     // adjacent chips into one block.
     if (index > 0) {
-      parts.push({ kind: "text", key: `gap-${tab.view}`, text: TAB_GAP });
+      parts.push({ kind: "text", text: TAB_GAP });
     }
-    parts.push({ kind: "chip", key: `chip-${tab.view}`, tab });
+    parts.push({ kind: "chip", tab });
   });
   if (layout.tail !== null && layout.tail !== "") {
-    parts.push({ kind: "text", key: "tail-gap", text: ZONE_GAP });
-    parts.push({ kind: "text", key: "tail", text: layout.tail });
+    parts.push({ kind: "text", text: ZONE_GAP });
+    parts.push({ kind: "text", text: layout.tail });
   }
   return parts;
 }
@@ -1349,7 +1356,7 @@ const PHRASE_SEPARATOR = " · ";
  * had nothing to say drew no second line, so the connector appeared and
  * vanished down the list and read as a broken rail rather than as one group.
  * Continuous means CONTINUOUS: one-line rows carry it too. The only bare line
- * is the one above the group that the rail hangs from: the panel title in
+ * is the one above the group that the rail hangs from: the header line in
  * the scoped view, the repo header in the multi-repo view.
  */
 export const RAIL = "│";
@@ -1653,7 +1660,7 @@ export function dividerText(count: number, width: number): string {
  * line arithmetic separately.
  *
  * The wait is said here rather than leaving the section blank, for the reason
- * the title's `scanning` suffix rides the title: an empty run of repo headers
+ * the scanning announcement rides the header's tail: an empty run of repo headers
  * reads as broken, and an answer that REPLACES text in place moves nothing.
  * The cause is said under the repo it applies to, which is what a single
  * shared line cannot do; reached only for a per-REPO failure, since a
@@ -1716,7 +1723,7 @@ export function pruneFullySucceeded(result: PruneRunResult): boolean {
   );
 }
 
-/** The title-line notice a fully successful removal leaves behind. */
+/** The header-tail notice a fully successful removal leaves behind. */
 export function removalNotice(count: number): string {
   return `removed ${plural(count, "worktree", "worktrees")}`;
 }
@@ -2243,8 +2250,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     }
   }
   const [note, setNote] = createSignal<string | null>(null);
-  /** A fully successful removal's title-line notice; the next load wipes it. */
-  const [titleNotice, setTitleNotice] = createSignal<string | null>(null);
+  /** A fully successful removal's note on the header's tail; the next load
+   *  wipes it. */
+  const [headerNotice, setHeaderNotice] = createSignal<string | null>(null);
   let listBox: ScrollBoxRenderable | undefined;
   /** One-shot: only a return-open's FIRST load may seed from the cache, so
    *  `r` and Tab inside the same mount still rescan for real. */
@@ -2274,7 +2282,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   /**
    * Why phase 3 has nothing for this repo, or null when it has an answer.
    *
-   * Both shapes of failure reach `prSection`, so the tab line and the union
+   * Both shapes of failure reach `prSection`, so the PR chip and the union
    * stay truthful either way, but only ONE of them is ever drawn per repo. A
    * per-REPO error is, under the repo it names, because "which repo" is the
    * question a single shared line cannot answer. A whole-request failure is
@@ -2400,7 +2408,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * Every row of every repo, both kinds, in display order.
    *
    * The panel-WIDE measurements read this rather than the active view's list,
-   * so the label column and the title counts describe the same panel whichever
+   * so the label column and the chips' counts describe the same panel whichever
    * view is up and nothing jogs when `h`/`l` is pressed.
    */
   const allRows = createMemo(() => merged().flatMap((repo) => repo.rows));
@@ -2728,7 +2736,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    */
   const headerTail = (): string | null => {
     const parts: string[] = [];
-    const notice = titleNotice();
+    const notice = headerNotice();
     if (notice) parts.push(notice);
     if (scanning()) parts.push(`${scanIcon()} scanning`);
     return parts.length > 0 ? parts.join(" · ") : null;
@@ -2855,7 +2863,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     // A removal notice describes the run that led HERE; any further load
     // (Tab, `r`, a reopen) is news that supersedes it. The success path sets
     // its notice AFTER calling load(), so the one reload it rides survives.
-    setTitleNotice(null);
+    setHeaderNotice(null);
 
     const listUrl = new URL(`${getDaemonUrl()}/worktrees`);
     if (filter) listUrl.searchParams.set("repo", filter);
@@ -2901,7 +2909,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
 
     // A return-open reuses the scan the user just watched complete instead
     // of re-firing it. The seed goes through `setScan` exactly like a live
-    // completion, so the merge, the single re-sort and the title suffix all
+    // completion, so the merge, the single re-sort and the header's tail all
     // behave identically, and nothing is in flight for this generation, so
     // nothing can clobber it. Phase 1 above still re-ran: it is local and
     // instant, and a review may have changed the dirty counts it reports.
@@ -3114,7 +3122,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           setSelected(new Set<string>());
           setDirtyOk(new Set<string>());
           load();
-          setTitleNotice(removalNotice(data.outcomes.length));
+          setHeaderNotice(removalNotice(data.outcomes.length));
           return;
         }
         setResult(data);
@@ -3431,9 +3439,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         // they are the panel's two axes — and LAST among that rank, so it is
         // the first of the pair to go and displaces nothing that already fit.
         // A known and accepted cost: this line is fuller than the PR view's,
-        // so the hint survives to 90 columns and is gone by 80. The tab line
-        // above still names both views at every width; only the key goes.
-        // Buying it back was tried, on the tab line as a `[l]` badge, and
+        // so the hint survives to 90 columns and is gone by 80. The header
+        // above still names both views wherever both chips fit; only the key
+        // goes. Buying it back was tried, as a `[l]` badge on the inactive
+        // chip, and
         // rejected — keyboard notation inside a label reads as documentation
         // leaking into the interface.
         { text: `l ${PRS_TAB_SHORT}`, rank: 2 },
@@ -3588,7 +3597,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                      whether it carries a checkbox. */
                   /**
                    * One row. The rail is continuous over EVERY row line; the
-                   * bare line above it (the panel title in the scoped view,
+                   * bare line above it (the header line in the scoped view,
                    * the repo header in the multi-repo view) is what it hangs
                    * from. Leaving the first row's line 1 bare as an "anchor"
                    * just read as a hole in the rail.
@@ -3793,12 +3802,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             </scrollbox>
           </Show>
 
-          {/* The in-flight scan is announced on the TITLE line and nowhere
+          {/* The in-flight scan is announced on the HEADER line and nowhere
               else. It used to have its own row here, which stated the fact a
               second time and, worse, took its row back when the scan landed:
               the whole list stepped down one line in the same frame the
-              re-sort moved rows around, which is the "glitch" the title
-              suffix exists to replace. */}
+              re-sort moved rows around, which is the "glitch" the header's
+              tail exists to replace. */}
           <Show when={scanError()}>
             <box height={1}>
               <text fg={theme.yellow}>

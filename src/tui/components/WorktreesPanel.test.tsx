@@ -26,6 +26,7 @@ import {
   fitSegments,
   headerLayout,
   headerParts,
+  fitTabs,
   dirtyPhrases,
   formatTracking,
   isLivenessSkip,
@@ -488,7 +489,7 @@ describe("WorktreesPanel loading", () => {
     const shown = await frame();
     expect(shown).toContain("main checkout");
     expect(shown).toContain("alpha");
-    // The in-flight scan is said once, on the title line above the list.
+    // The in-flight scan is said once, on the header line above the list.
     const [scanningAt, mainAt, alphaAt] = orderOf(
       shown,
       "scanning",
@@ -583,7 +584,7 @@ describe("WorktreesPanel scanning indicator", () => {
   /** A landed scan that moves `alpha` into the removable section. */
   const merged: ScanResponse = { candidates: [candidate()], skipped: [] };
 
-  it("carries the suffix on the title line while the scan is pending", async () => {
+  it("carries the announcement on the header while the scan is pending", async () => {
     const pending = deferred<Response>();
     const { frame } = await mountPanel({
       list: async () => json(twoRows),
@@ -687,8 +688,8 @@ describe("WorktreesPanel scanning indicator", () => {
     expect(after).not.toBe(before);
   });
 
-  // At sidebar widths the title is the thing worth keeping. OpenTUI wraps
-  // rather than clips, so an overlong title line does not truncate, it
+  // At sidebar widths the chips are the thing worth keeping. OpenTUI wraps
+  // rather than clips, so an overlong header line does not truncate, it
   // vanishes out of its `height={1}` box.
   it("drops the suffix rather than the title when it cannot fit", async () => {
     const pending = deferred<Response>();
@@ -736,9 +737,9 @@ describe("WorktreesPanel scanning indicator", () => {
 });
 
 /**
- * The muted count on the title line: the list's size, said once, where the
- * scoped view's repo name already lives. Counts describe the LOADED list, so
- * phase 1 in flight says nothing rather than a number about to change.
+ * The count on the `Worktrees` chip: the list's size, said once and on the
+ * chip that names its subject. Counts describe the LOADED list, so a load
+ * in flight says nothing rather than a number about to change.
  */
 describe("WorktreesPanel header counts", () => {
   it("wears one repo's worktree count on its own chip", async () => {
@@ -3887,9 +3888,27 @@ describe("view tabs", () => {
   // it below about fifteen columns. A chip carries a BACKGROUND, so the same
   // shortfall would paint an empty block of colour where a label belongs.
   // `fitTabs` drops the chip it cannot fill instead.
+  //
+  // Called DIRECTLY, not through `headerLayout`. The ladder's last rung hands
+  // it a single chip, so a test that goes through the layout cannot reach the
+  // multi-chip walk at all: its `toHaveLength(1)` would be true no matter
+  // what this function did. That is how this test quietly stopped proving
+  // anything when the last rung changed.
   it("drops a chip it cannot fill rather than painting an empty one", () => {
+    const strip = (width: number) =>
+      fitTabs(
+        headerLayout({
+          view: "worktrees",
+          lead: "all repos",
+          worktrees: "",
+          prs: "",
+          tail: null,
+          width: 200,
+        }).tabs,
+        width,
+      );
     for (const width of [17, 16, 14, 12, 8, 4]) {
-      for (const tab of tabsOf("worktrees", "7", width)) {
+      for (const tab of strip(width)) {
         const text = tab.segments.map((s) => s.text).join("");
         // A chip fitted down to padding and an ellipsis is the same failure
         // wearing a character: on the active fill it is a block of colour
@@ -3897,7 +3916,11 @@ describe("view tabs", () => {
         expect(text.replace(/[\s…]/gu, "")).not.toBe("");
       }
     }
-    expect(tabsOf("worktrees", "7", 12)).toHaveLength(1);
+    // Two chips need seventeen columns; below that the second is dropped
+    // whole rather than fitted into a block of colour with no label in it.
+    expect(strip(17)).toHaveLength(2);
+    expect(strip(14)).toHaveLength(1);
+    expect(strip(12)).toHaveLength(1);
   });
 });
 
@@ -3947,7 +3970,7 @@ describe("view tabs on screen", () => {
   function cellOf(frame: string, needle: string): { x: number; y: number } {
     const y = tabRow(frame);
     const x = frame.split("\n")[y]!.indexOf(needle);
-    if (x < 0) throw new Error(`"${needle}" is not on the tab line`);
+    if (x < 0) throw new Error(`"${needle}" is not on the header line`);
     return { x, y };
   }
 
@@ -4108,12 +4131,19 @@ describe("view tabs on screen", () => {
     }
   });
 
-  // The zones are drawn as SIBLINGS of a `<For>` in one row box, and a zone
-  // that unmounts and comes back does not necessarily come back where it
-  // was: dropped at a narrow width and restored on the way out, the scope
-  // lead reappeared at the END of the row, reading `Worktrees 16   Pull
-  // Requests 2 ccmux`. Every zone therefore renders unconditionally and goes
-  // EMPTY rather than absent, and this is what holds that line.
+  // The zones were once drawn as SIBLINGS of a `<For>`, and a `<Show>`
+  // sibling that unmounts does not necessarily come back where it was:
+  // dropped at a narrow width and restored on the way out, the scope lead
+  // reappeared at the END of the row, reading `Worktrees 16   Pull Requests
+  // 2   ccmux`.
+  //
+  // What holds that line now is ONE `<For>` over a flat parts list, where a
+  // zone with nothing to say is simply ABSENT. Emptying the zones instead
+  // was tried first and is wrong: an empty `<text>` occupies one column in
+  // OpenTUI, so three emptied zones put the line three columns over what
+  // `headerWidth` measured, and a line that overruns wraps and then vanishes
+  // out of its `height={1}` box. Do not "simplify" this back toward always
+  // rendering every zone.
   it("keeps the zones in order across a width round trip", async () => {
     const { frame, resize } = await mountSettled(
       listOf([mainRow(), row()]),
@@ -4977,7 +5007,7 @@ describe("WorktreesPanel PR view safety gate", () => {
     expect(shown).not.toContain("x remove 1");
   });
 
-  // The keys are taught on the hint line, never on the tab line. The `[l]`
+  // The keys are taught on the hint line, never on the chips. The `[l]`
   // badge that briefly lived there was rejected in live use.
   it("teaches the view key in the footer, and never on the tab", async () => {
     const { list, scan } = removable();
