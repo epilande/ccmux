@@ -378,6 +378,24 @@ export interface NewSessionDraft {
    * it), which the reopen re-establishes, since the rescope is panel-local
    * state nothing else remembers.
    */
+  /**
+   * Where a CANCEL returns when the SOURCE PICKER opened this dialog, or null
+   * (issue #151). A separate nullable sibling of `returnToWorktrees` and not
+   * a second shape of it, because the two return to different surfaces and a
+   * draft that could name both would have to be asked which it meant.
+   *
+   * Same contract as its sibling: an origin marker, never a mode. It reaches
+   * no policy function, no field keys off it, and submit ignores it, since a
+   * spawn hands the board to the new session. It carries the picker's own
+   * cursor key and its live filter text, because a return that dropped the
+   * query would put the user back in front of the whole list they had just
+   * narrowed.
+   */
+  returnToSources: {
+    repo: string | null;
+    cursor: string;
+    filter: string;
+  } | null;
   returnToWorktrees: {
     repo: string | null;
     scope: string | null;
@@ -445,6 +463,27 @@ interface TUIState {
     initialCursor: string | null;
     isReturn: boolean;
     startWidened: boolean;
+  } | null;
+  /**
+   * The source picker, or null when closed (issue #151).
+   *
+   * `repo` scopes it exactly as the panel's does, and everything the picker
+   * fetches is local to the component for the same reason. What travels
+   * through the store is only what a REOPEN needs: `initialCursor` and
+   * `initialFilter` put the user back where they were after a cancelled
+   * dialog, and `origin` is the Worktrees panel that opened it, so Esc
+   * reopens that panel on the row it was opened from instead of dropping the
+   * user on the session list two surfaces away.
+   */
+  sourcePicker: {
+    repo: string | null;
+    initialCursor: string | null;
+    initialFilter: string;
+    origin: {
+      panelRepo: string | null;
+      panelScope: string | null;
+      panelCursor: string;
+    } | null;
   } | null;
   /**
    * A message that waits to be acknowledged, or null.
@@ -865,6 +904,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     previewFocused: false,
     showHelp: false,
     worktrees: null,
+    sourcePicker: null,
     notice: null,
     iconStyle: options.iconStyle ?? "dot",
     previewWidth: options.previewWidth ?? 40,
@@ -2001,6 +2041,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
        *  named after this issue and seeded with it. Same rows gone as PR
        *  mode, and for the same reason: the daemon decides all of them. */
       issue?: NewSessionIssue;
+      /** Origin marker for a dialog the SOURCE PICKER opened: cancel returns
+       *  there, with its filter and cursor. See
+       *  {@link NewSessionDraft.returnToSources}. */
+      returnToSources?: {
+        repo: string | null;
+        cursor: string;
+        filter: string;
+      };
       /** Origin marker for a dialog the Worktrees panel opened: cancel
        *  returns there. See {@link NewSessionDraft.returnToWorktrees}. */
       returnToWorktrees?: {
@@ -2072,6 +2120,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           existingWorktree,
           pr,
           issue,
+          returnToSources: init.returnToSources ?? null,
           returnToWorktrees: init.returnToWorktrees ?? null,
           field: newSessionFields({
             moveChanges,
@@ -2299,6 +2348,30 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     hideWorktrees() {
       setState("worktrees", null);
+    },
+
+    showSourcePicker(
+      repo: string | null,
+      opts: {
+        initialCursor?: string | null;
+        initialFilter?: string;
+        origin?: {
+          panelRepo: string | null;
+          panelScope: string | null;
+          panelCursor: string;
+        } | null;
+      } = {},
+    ) {
+      setState("sourcePicker", {
+        repo,
+        initialCursor: opts.initialCursor ?? null,
+        initialFilter: opts.initialFilter ?? "",
+        origin: opts.origin ?? null,
+      });
+    },
+
+    hideSourcePicker() {
+      setState("sourcePicker", null);
     },
 
     resizePreview(delta: number) {

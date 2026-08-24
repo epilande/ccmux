@@ -30,7 +30,6 @@ import {
   formatTracking,
   isLivenessSkip,
   cachedScanFor,
-  orderRepos,
   partitionSelection,
   pruneFullySucceeded,
   removalDetails,
@@ -69,7 +68,12 @@ import {
   type PRPanelRow,
   type WorktreePanelRow,
 } from "./WorktreesPanel";
-import { fitSegments, oneLine, scrollTargetFor } from "./row-segments";
+import {
+  fitSegments,
+  oneLine,
+  orderRepos,
+  scrollTargetFor,
+} from "./row-segments";
 import {
   PR_MARKER,
   checkoutHolding,

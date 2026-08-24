@@ -37,6 +37,7 @@ import { displayWidth, truncateText } from "../utils/format";
 import {
   fitSegments,
   oneLine,
+  orderRepos,
   scrollTargetFor,
   unhandled,
   type Phrase,
@@ -350,6 +351,19 @@ interface WorktreesPanelProps {
    * dialog it opens has different rows. A PR that IS checked out goes through
    * `onSpawn` instead, which is the existing revalidated jump.
    */
+  /**
+   * `n`: open the source picker over this panel's live scope (issue #151).
+   *
+   * The panel is where a user already is when they think "what else could I
+   * start", so the picker is one key away from it rather than only from the
+   * session list. The origin travels so Esc comes back HERE, on the row they
+   * left, in the view they left it in.
+   */
+  onStartFromSource?: (target: {
+    panelRepo: string | null;
+    panelScope: string | null;
+    cursor: string;
+  }) => void;
   onSpawnFromPR: (target: {
     number: number;
     title: string;
@@ -471,27 +485,6 @@ export function sortWorktreeRows(rows: PanelRow[]): PanelRow[] {
     if (a.kind !== "worktree" || b.kind !== "worktree") return 0;
     return a.row.name.localeCompare(b.row.name);
   });
-}
-
-/**
- * Repos alphabetically, except that the one the panel was OPENED over leads.
- *
- * Widening with Tab should not make the repo the user was looking at jump to
- * wherever the alphabet puts it; the group they came from stays where their
- * eyes already are, and everything else falls in behind it.
- */
-export function orderRepos<T extends { repoRoot: string; repoName: string }>(
-  repos: T[],
-  home: string | null,
-): T[] {
-  const sorted = [...repos].sort((a, b) =>
-    a.repoName.localeCompare(b.repoName),
-  );
-  if (!home) return sorted;
-  const index = sorted.findIndex((repo) => repo.repoRoot === home);
-  if (index <= 0) return sorted;
-  const [first] = sorted.splice(index, 1);
-  return first ? [first, ...sorted] : sorted;
 }
 
 /** The view chips' labels. */
@@ -3054,6 +3047,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         flash("nothing selected: space selects a worktree under `removable`");
         break;
       }
+      case "n":
+        // Ungated by view and by row: it opens another surface rather than
+        // acting on anything here, so there is nothing for a row kind to
+        // make it wrong about. The cursor rides along so Esc returns to it.
+        props.onStartFromSource?.({
+          panelRepo: props.repo,
+          panelScope: repoFilter(),
+          cursor: cursorKey() ?? "",
+        });
+        break;
       case "return":
       case "enter":
         if (entry) activateRow(entry);

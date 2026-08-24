@@ -43,6 +43,7 @@ const draft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft => ({
   existingWorktree: null,
   pr: null,
   issue: null,
+  returnToSources: null,
   returnToWorktrees: null,
   field: "agent",
   dropdown: null,
