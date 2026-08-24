@@ -25,6 +25,7 @@ import {
   detailSegments,
   fitSegments,
   headerLayout,
+  headerParts,
   dirtyPhrases,
   formatTracking,
   isLivenessSkip,
@@ -795,13 +796,11 @@ describe("WorktreesPanel header counts", () => {
     );
   });
 
-  // `r`, a post-prune reload and a reopen all set the phase back to loading
-  // over a list that STAYS on screen. Blanking the count there narrows the
-  // chip by the width of its own number and drags the PR chip left and back
-  // under a pointer that may already be reaching for it. A same-scope reload
-  // is not a rescope, so the number holds — and it goes on agreeing with the
-  // rows still being shown.
-  it("holds the count across a refresh, which is not a rescope", async () => {
+  // A count CAN go stale where a scope name cannot: `load()` is what a
+  // finished prune calls, so a held number states `Worktrees 2` for a panel
+  // that has just removed one of the two. The rows are not on screen to
+  // contradict it either — the loading body reads `Reading worktrees...`.
+  it("blanks the count while any reload is in flight", async () => {
     let lists = 0;
     const { keys, frame } = await mountPanel({
       list: async () =>
@@ -813,9 +812,32 @@ describe("WorktreesPanel header counts", () => {
     const settled = await frame();
     expect(lineWith(settled, WORKTREES_TAB)).toContain("Worktrees 2");
     keys.pressKey("r");
-    const refreshing = await frame();
     expect(lists).toBe(2);
-    expect(lineWith(refreshing, WORKTREES_TAB)).toContain("Worktrees 2");
+    expect(lineWith(await frame(), WORKTREES_TAB)).not.toMatch(/Worktrees \d/);
+  });
+
+  // The same rule, at the moment it actually costs something: the reload a
+  // successful prune fires is the one where the old number is WRONG.
+  it("never states the pre-prune count while the reload is in flight", async () => {
+    let lists = 0;
+    const { keys, frame } = await mountPanel({
+      list: async () =>
+        ++lists === 1
+          ? json(listOf([mainRow(), row()]))
+          : await new Promise<Response>(() => {}),
+      scan: async () => json({ candidates: [candidate()], skipped: [] }),
+      prune: async () => json(runResult([outcome()])),
+    });
+    await frame();
+    keys.pressKey("j");
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    await frame();
+    keys.pressKey("y");
+    await frame();
+    const after = await frame();
+    expect(after).toContain("removed 1 worktree");
+    expect(lineWith(after, WORKTREES_TAB)).not.toContain("Worktrees 2");
   });
 
   // A Tab IS a rescope: the rows on screen now answer a different question,
@@ -3835,10 +3857,12 @@ describe("view tabs", () => {
     expect(tabText("prs", "7", 12)).toStartWith(" PRs");
   });
 
-  // Each rung is the first one that FITS, so a rung no narrower than the one
-  // above it can never be chosen. With no tail to drop, or no counts to drop,
-  // two rungs otherwise collapse into the same layout and one becomes dead.
-  it("never builds a rung that cannot be reached", () => {
+  // Narrowing the panel may never WIDEN the header, and no width may produce
+  // a header that overflows it. (The ladder also refuses to BUILD a rung no
+  // narrower than its predecessor, which nothing here can see: an unreachable
+  // rung is unreachable, so its absence and its presence look identical from
+  // out here. That guard is construction safety, not tested behaviour.)
+  it("never widens as the panel narrows, and never overflows", () => {
     for (const tail of [null, "◐ scanning"]) {
       for (const counts of [
         { worktrees: "42", prs: "7" },
@@ -4042,6 +4066,38 @@ describe("view tabs on screen", () => {
           }),
         ).replace(/\s+$/u, "");
         expect({ width, view, drawn }).toEqual({ width, view, drawn: expected });
+
+        // The same equality for the shapes the mount above cannot produce:
+        // a tail present, and a lead that spells nothing (`basename("/")`).
+        // Both are ways to smuggle an unmeasured column onto the line.
+        for (const shape of [
+          { lead: "repo", tail: "◐ scanning" },
+          { lead: "", tail: null as string | null },
+          { lead: "", tail: "◐ scanning" as string | null },
+        ]) {
+          const layout = headerLayout({
+            view,
+            worktrees: "2",
+            prs: "1",
+            width: Math.max(8, width - 4),
+            ...shape,
+          });
+          for (const part of headerParts(layout)) {
+            if (part.kind !== "chip") expect(part.text).not.toBe("");
+          }
+          const spelled = headerParts(layout)
+            .map((part) =>
+              part.kind === "chip"
+                ? part.tab.segments.map((seg) => seg.text).join("")
+                : part.text,
+            )
+            .join("");
+          expect({ width, view, over: displayWidth(spelled) > width }).toEqual({
+            width,
+            view,
+            over: false,
+          });
+        }
         // Each width gets its own renderer; the shared afterEach only ever
         // reaches the last one this loop mounted.
         setup?.renderer.destroy();
@@ -4063,16 +4119,17 @@ describe("view tabs on screen", () => {
       { width: 90 },
       prsOf([openPR({ title: "a pull request" })]),
     );
-    const leads = (line: string) =>
-      line.replace(/^[│\s]+/u, "").startsWith("repo");
-    expect(leads(lineWith(await frame(), WORKTREES_TAB))).toBe(true);
+    const before = lineWith(await frame(), WORKTREES_TAB);
+    expect(before.replace(/^[│\s]+/u, "")).toStartWith("repo");
     // Narrow enough that the ladder drops the lead entirely...
     resize(24, 24);
     const narrow = await frame();
     expect(lineWith(narrow, WORKTREES_TAB)).not.toContain("repo ");
-    // ...and wide again, where it has to come back to the FRONT.
+    // ...and wide again, where every zone has to come back where it was.
+    // Compared WHOLE, not just by the lead's position: a chip or the tail
+    // landing out of order is the same bug wearing a different zone.
     resize(90, 24);
-    expect(leads(lineWith(await frame(), WORKTREES_TAB))).toBe(true);
+    expect(lineWith(await frame(), WORKTREES_TAB)).toBe(before);
   });
 
   // The affordance: a filled block that answers nothing until it is clicked

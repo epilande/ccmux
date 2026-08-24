@@ -787,7 +787,12 @@ export type HeaderPart =
 /** The header line as the drawn pieces it is made of, in order. */
 export function headerParts(layout: HeaderLayout): HeaderPart[] {
   const parts: HeaderPart[] = [];
-  if (layout.lead !== null) {
+  // An EMPTY part is the same one-column leak as an emptied zone, arriving
+  // by a different road: `basename("/")` is `""`, so a repo rooted at `/`
+  // hands this a lead that is non-null and yet spells nothing, which
+  // `headerWidth` measures as zero and OpenTUI draws as one. Nothing here
+  // ever emits an empty string.
+  if (layout.lead !== null && layout.lead !== "") {
     parts.push({ kind: "lead", key: "lead", text: layout.lead });
     parts.push({ kind: "text", key: "lead-gap", text: ZONE_GAP });
   }
@@ -800,7 +805,7 @@ export function headerParts(layout: HeaderLayout): HeaderPart[] {
     }
     parts.push({ kind: "chip", key: `chip-${tab.view}`, tab });
   });
-  if (layout.tail !== null) {
+  if (layout.tail !== null && layout.tail !== "") {
     parts.push({ kind: "text", key: "tail-gap", text: ZONE_GAP });
     parts.push({ kind: "text", key: "tail", text: layout.tail });
   }
@@ -2685,19 +2690,25 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * worktrees and two PRs, with the number JUMPING when phase 3 arrived.
    * `markerBase` filters the same way.
    *
-   * Gated on the SCOPE the rows were loaded under, not on the phase. A count
-   * that ticked from thirteen repos' worth to one repo's would read as a
-   * glitch, so a rescope blanks it — but `r`, a post-prune reload and a
-   * reopen are not rescopes, and blanking there narrows this chip by the
-   * width of its own number and drags the PR chip three columns left and
-   * back while the user may be reaching for it. A chip is a click target;
-   * the phase gate was moving one for reasons the user never asked about.
-   * Across a same-scope reload the number therefore HOLDS, which also keeps
-   * it agreeing with the rows still on screen — `repos()` deliberately holds
-   * those too.
+   * Blanked while ANY load is in flight, and that is deliberately not what
+   * the scope LEAD does, because the two can go wrong in different ways.
+   * A repo's identity cannot be stale — it is the same repo before and after
+   * the reload — so the lead holds and keeps both chips still. A COUNT can:
+   * `load()` is what a finished prune calls, so holding the old number
+   * across it states `Worktrees 2` for a panel that has just removed one of
+   * the two. `repos()` is retained across a reload, but the loading branch
+   * does not DRAW it — the body reads `Reading worktrees...` — so a held
+   * count is not even agreeing with rows on screen; there are none.
+   *
+   * The cost is that this chip narrows by the width of its own number while
+   * the panel reloads, and the PR chip beside it moves with it. That is a
+   * click target moving, which is a real cost and the reason the lead is
+   * handled the other way. It is accepted HERE because the alternative is
+   * stating a number we have reason to believe is wrong, and because the
+   * body is visibly reloading while it happens.
    */
   const worktreeCount = (): string => {
-    if (loadedFilter() !== repoFilter()) return "";
+    if (phase() === "loading") return "";
     if (merged().length === 0) return "";
     return String(
       allRows().filter((entry) => entry.kind === "worktree").length,
