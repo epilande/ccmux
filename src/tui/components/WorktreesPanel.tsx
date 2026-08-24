@@ -589,33 +589,6 @@ export function fitSegments(
   return kept;
 }
 
-/**
- * The title line: the panel's name, plus the scanning suffix when phase 2 is
- * still in flight.
- *
- * The suffix rides the title so the indicator costs no rows at all, and it is
- * ALL OR NOTHING rather than fitted alongside the title. `fitSegments` would
- * happily hand back `Worktrees · rep… · ◐ scan…`, which spends the columns
- * that name the repo on a word it then truncates into nonsense; at sidebar
- * widths the title is the thing worth keeping, so the suffix is dropped whole
- * the moment both do not fit. The title itself is still fitted, because
- * OpenTUI wraps rather than clips and a wrapped line in a `height={1}` box
- * disappears entirely.
- */
-export function titleSegments(
-  title: string,
-  suffix: string | null,
-  width: number,
-): RowSegment[] {
-  if (suffix !== null && displayWidth(title) + displayWidth(suffix) <= width) {
-    return [
-      { text: title, fg: theme.text },
-      { text: suffix, fg: theme.overlay },
-    ];
-  }
-  return fitSegments([{ text: title, fg: theme.text }], width);
-}
-
 /** The tab line's labels. */
 export const WORKTREES_TAB = "Worktrees";
 export const PRS_TAB = "Pull Requests";
@@ -633,6 +606,17 @@ export const PRS_TAB_SHORT = "PRs";
  */
 const TAB_PAD = " ";
 const TAB_GAP = " ";
+/**
+ * What separates the header's three zones: the scope label, the chip strip,
+ * and the muted status tail.
+ *
+ * Two columns rather than one, because a chip already carries `TAB_PAD`
+ * inside its own background: one column of gap would put the scope label a
+ * single column from a chip's EDGE while the two chips sit three columns
+ * apart from each other, and the strip would read as three tabs with the
+ * first one unstyled.
+ */
+const ZONE_GAP = "  ";
 
 /**
  * One tab on the view line: which view it selects, whether it is the one
@@ -679,7 +663,15 @@ function fitTabs(tabs: ViewTab[], width: number): ViewTab[] {
     }
     const segments = fitSegments(tab.segments, remaining);
     const used = segments.reduce((n, s) => n + displayWidth(s.text), 0);
-    if (used === 0) break;
+    // Not merely "wider than nothing": a chip fitted down to its padding and
+    // an ellipsis carries no label at all, and on the active chip's fill that
+    // is a block of colour saying only that something was here. A chip earns
+    // its columns by keeping at least one character of what it is called.
+    const label = segments
+      .map((segment) => segment.text)
+      .join("")
+      .replace(/[\s…]/gu, "");
+    if (used === 0 || label === "") break;
     fitted.push({ ...tab, segments });
     remaining -= used;
   }
@@ -687,78 +679,136 @@ function fitTabs(tabs: ViewTab[], width: number): ViewTab[] {
 }
 
 /**
- * The view tabs: one line, directly under the title, naming both views as
- * filled chips with the active one raised.
+ * How the header line resolves at the width it has: the scope label, the two
+ * chips, and the muted status tail.
  *
- * The colour does the work a browser tab's shape does. Three grounds read as
- * three levels because the palette already separates them: the panel sits on
- * `base`, an inactive chip on `surface`, the active chip on `border` — the
- * same raised-on-recessed pair `ContextMenu` uses for its highlighted item,
- * so a filled block already means "this one" everywhere else in the TUI.
- * It stays ONE line. A real tab strip wants a rule under it and that rule
- * costs a row of list, which is the tax this whole panel exists to refuse.
+ * ONE line for all three. The panel used to spend two — a bold `Worktrees`
+ * title over a tab line whose first chip also said `Worktrees`, with the
+ * title's own suffix saying `42 worktrees` a third time. The tabs NAME the
+ * views, so a title above them can only repeat whichever one is showing; what
+ * a title was actually carrying that the tabs were not is the SCOPE, and that
+ * is the one thing kept.
  *
- * Both chips are clickable, and clicking the active one is a no-op because
- * `switchView` returns early on its own view.
+ * The zones, left to right:
  *
- * It carries NO key. One revision put a `[l]` badge on the inactive tab and
- * live use rejected it: keyboard notation inside a label reads as
+ * - The scope lead. `all repos`, or the repo's own name when Tab has narrowed
+ *   the panel to one. Derived from the scope FLAG and `props.repo`, never
+ *   from the loaded rows, so it is right in the first frame and changes only
+ *   when the user changes it. A lead that arrived with the data would shift
+ *   both chips rightwards mid-open, and a chip is a click target.
+ * - The chips. Each carries its OWN count, which is what let the counts stop
+ *   naming their subject: `Worktrees 42` says once what `Worktrees` and
+ *   `· 42 worktrees` said twice. No `·` between a label and its number —
+ *   in this TUI that dot divides peers (`9 untracked · 1 waiting`), and
+ *   gluing a count to its own label with it made the pair read as two things.
+ * - The tail: the removal notice and the scanning announcement, dividing
+ *   dots and all, because those ARE peers.
+ *
+ * The colour does the work a browser tab's shape does: exactly one chip is
+ * filled, on `border`, the ground `ContextMenu` already uses for its
+ * highlighted item. The other takes the panel's own `base`. A second, dimmer
+ * fill was the first cut and is not portable — `border` is DARKER than
+ * `surface` in dracula and rose-pine, which draws the active chip recessed
+ * and the inactive one raised. With one fill there is nothing to invert.
+ *
+ * It stays ONE line. A rule under the strip would read more like a browser's
+ * tabs and costs a row of list, which is the tax this panel exists to refuse.
+ *
+ * The chips carry NO key. One revision put a `[l]` badge on the inactive tab
+ * and live use rejected it: keyboard notation inside a label reads as
  * documentation leaking into the interface, whatever it buys in
- * discoverability. The keys are taught where this panel teaches every other
- * key, on the hint line, and the known cost of that is recorded there.
+ * discoverability. The keys are taught on the hint line like every other key.
  *
  * Budgeted against `contentWidth()` and not `listWidth()`, because it renders
  * OUTSIDE the scrollbox and so does not pay for the scrollbar's column. It
  * still has to be fitted: OpenTUI wraps rather than clips, and a wrapped line
  * inside a `height={1}` box vanishes instead of overflowing.
  *
- * The degradation is a ladder of WHOLE swaps, the way `titleSegments` drops
- * its suffix whole rather than truncating a label into nonsense:
+ * The degradation is a ladder of WHOLE swaps, each rung both NARROWER and
+ * poorer than the one above it:
  *
- * 1. ` Worktrees   Pull Requests · 7 `
- * 2. ` Worktrees   PRs · 7 `   — the long label, swapped whole
- * 3. ` Worktrees   PRs `       — the count, which the body restates anyway
+ * 1. `all repos   Worktrees 42   Pull Requests 7   · ◐ scanning`
+ * 2. the tail, which is transient and restates a spinner the chip may show
+ * 3. `Pull Requests` swapped whole for `PRs`
+ * 4. the counts, which the body restates anyway
+ * 5. the scope lead
  *
- * Below that `fitTabs` takes over, and what it guarantees is the FIRST chip,
- * which is always `Worktrees` — the ACTIVE tab in the Worktrees view and the
- * INACTIVE one in the PR view. It is not "the tab that says where you are";
- * saying so would be wrong in one of the two views.
+ * The counts go before the lead deliberately. A count whose scope is unknown
+ * is not a smaller truth, it is a misleading one: `42` means something very
+ * different across thirteen repos than inside one.
+ *
+ * Below the last rung `fitTabs` takes over, and what it guarantees is the
+ * FIRST chip, which is always `Worktrees` — the ACTIVE tab in the Worktrees
+ * view and the INACTIVE one in the PR view. It is not "the tab that says
+ * where you are"; saying so would be wrong in one of the two views.
  */
-export function viewTabs(
-  view: PanelView,
-  suffix: string,
-  width: number,
-): ViewTab[] {
+export interface HeaderLayout {
+  /** Null once the ladder has dropped it. */
+  lead: string | null;
+  tabs: ViewTab[];
+  /** Null once the ladder has dropped it. */
+  tail: string | null;
+}
+
+/** Columns a whole rung occupies, gaps between zones included. */
+function headerWidth(layout: HeaderLayout): number {
+  const gap = displayWidth(ZONE_GAP);
+  return (
+    (layout.lead === null ? 0 : displayWidth(layout.lead) + gap) +
+    tabsWidth(layout.tabs) +
+    (layout.tail === null ? 0 : gap + displayWidth(layout.tail))
+  );
+}
+
+export function headerLayout(opts: {
+  view: PanelView;
+  lead: string;
+  /** The panel's worktree count, or "" while it is not known yet. */
+  worktrees: string;
+  /** The PR count, the pending spinner, or `unavailable`. */
+  prs: string;
+  tail: string | null;
+  width: number;
+}): HeaderLayout {
   const chip = (
     tabView: PanelView,
     label: string,
-    tail: string,
+    count: string,
   ): ViewTab => {
-    const active = tabView === view;
+    const active = tabView === opts.view;
     const fg = active ? theme.text : theme.overlay;
     const segments: RowSegment[] = [{ text: TAB_PAD + label, fg }];
     // The count is the dim layer INSIDE the chip, one step down from its
     // label rather than the flat `overlay` it wore on the bare line: on the
     // active chip's lighter ground `overlay` reads as noise.
-    if (tail) {
-      segments.push({ text: tail, fg: active ? theme.subtext : theme.overlay });
+    if (count) {
+      segments.push({
+        text: ` ${count}`,
+        fg: active ? theme.subtext : theme.overlay,
+      });
     }
     segments.push({ text: TAB_PAD, fg });
     return { view: tabView, active, segments };
   };
-  const build = (prLabel: string, tail: string): ViewTab[] => [
-    chip("worktrees", WORKTREES_TAB, ""),
-    chip("prs", prLabel, tail),
+  const build = (prLabel: string, counts: boolean): ViewTab[] => [
+    chip("worktrees", WORKTREES_TAB, counts ? opts.worktrees : ""),
+    chip("prs", prLabel, counts ? opts.prs : ""),
   ];
-  const ladder = [
-    build(PRS_TAB, suffix),
-    build(PRS_TAB_SHORT, suffix),
-    build(PRS_TAB_SHORT, ""),
+  const ladder: HeaderLayout[] = [
+    { lead: opts.lead, tabs: build(PRS_TAB, true), tail: opts.tail },
+    { lead: opts.lead, tabs: build(PRS_TAB, true), tail: null },
+    { lead: opts.lead, tabs: build(PRS_TAB_SHORT, true), tail: null },
+    { lead: opts.lead, tabs: build(PRS_TAB_SHORT, false), tail: null },
+    { lead: null, tabs: build(PRS_TAB_SHORT, false), tail: null },
   ];
   for (const rung of ladder) {
-    if (tabsWidth(rung) <= width) return rung;
+    if (headerWidth(rung) <= opts.width) return rung;
   }
-  return fitTabs(ladder[ladder.length - 1]!, width);
+  return {
+    lead: null,
+    tabs: fitTabs(build(PRS_TAB_SHORT, false), opts.width),
+    tail: null,
+  };
 }
 
 /**
@@ -2481,13 +2531,35 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     Math.max(4, listWidth() - detailGutter(hasCheckbox));
 
   /**
-   * The panel's title. A single repo puts its name here, which is what lets
-   * the list drop the group header line that would otherwise repeat it.
+   * The header's leading label: WHICH repos the panel is showing. A single
+   * repo puts its name here, which is what lets the list drop the group
+   * header line that would otherwise repeat it.
+   *
+   * Read from the scope flag and `props.repo`, never from the loaded rows.
+   * Two things follow, and both are the point. It is right in the FIRST
+   * frame, so the chips beside it do not slide rightwards when phase 1 lands
+   * — they are click targets, and a target that moves after the panel opens
+   * is a target the user can miss. And on a Tab rescope it flips
+   * IMMEDIATELY, in the same frame as the keypress, where the rows behind it
+   * are deliberately the previous scope's until the reload answers: the
+   * label states what the panel is now fetching, which is the question Tab
+   * just asked. `basename` is exactly what the daemon derives `repoName`
+   * from, so the scoped label matches the group header it replaces.
    */
-  const panelTitle = (): string => {
-    const repos = merged();
-    const only = repos.length === 1 ? repos[0] : undefined;
-    return only ? `Worktrees · ${only.repoName}` : "Worktrees";
+  const headerLead = (): string => {
+    // Scoped: from the FLAG and the prop, so Tab flips the label in the same
+    // frame as the keypress and no reload can be caught saying the old
+    // scope's name. `basename` is exactly what the daemon derives `repoName`
+    // from, so this matches the group header it stands in for.
+    if (scoped() && props.repo !== null) return basename(props.repo);
+    // Unscoped, but only one repo answered: it still has to be named here,
+    // because `showsGroupHeaders` draws no header for a lone group and the
+    // name would otherwise appear nowhere in the panel. Gated on the phase
+    // as well as the count — `repos()` holds the PREVIOUS scope's list while
+    // a rescope is in flight, and a Tab that widens the panel would go on
+    // naming the repo the user just widened away from.
+    const repos = phase() === "loading" ? [] : merged();
+    return repos.length === 1 ? repos[0]!.repoName : "all repos";
   };
 
   /**
@@ -2522,57 +2594,58 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   );
 
   /**
-   * The list's size, said once on the title line: `N worktrees` when one
-   * repo owns the panel, `N repos · M worktrees` across all of them (M counts
-   * WORKTREE rows, main checkouts included and PR rows excluded — see the
-   * body). Counts describe the LOADED
-   * list, so nothing is said while phase 1 is in flight — `repos()` still
-   * holds the PREVIOUS scope's list during a Tab rescope, and a count that
-   * flickers from the old scope's number to the new one reads as a glitch.
+   * The panel's worktree count, worn by the `Worktrees` chip, or "" while it
+   * is not known.
+   *
+   * A bare number, because the chip it sits in already names its subject.
+   * The old title said `Worktrees` and then `· 42 worktrees` beside it, which
+   * is where two of the word's three appearances came from.
+   *
+   * WORKTREE rows of the WHOLE panel, not of the active view: the inactive
+   * chip has to state the other view's count, which is the whole reason
+   * `merged()` stays unfiltered. Counting the view's own list said `0` under
+   * the PR view, and counting the unfiltered list unfiltered said `4` for two
+   * worktrees and two PRs, with the number JUMPING when phase 3 arrived.
+   * `markerBase` filters the same way.
+   *
+   * Nothing is said while phase 1 is in flight, rather than the previous
+   * scope's number: `repos()` deliberately holds the old list across a Tab
+   * rescope, and a count that ticks from thirteen repos' worth to one repo's
+   * reads as a glitch. The chip narrows by the width of the number while it
+   * reloads, which moves the PR chip beside it — accepted because the only
+   * alternatives are stating a number for a scope the user just left or
+   * padding the chip to a width no content asked for.
    */
-  const titleCounts = (): string | null => {
-    if (phase() === "loading") return null;
-    const groups = merged();
-    if (groups.length === 0) return null;
-    // WORKTREE rows of the WHOLE panel, not of the active view. Counting the
-    // view's own list said `0 worktrees` under the PR view, and counting the
-    // unfiltered list unfiltered said `4 worktrees` for two worktrees and two
-    // PRs, with the number JUMPING when phase 3 arrived — the exact flicker
-    // the loading gate above exists to prevent. `markerBase` filters the same
-    // way.
-    const worktrees = allRows().filter(
-      (entry) => entry.kind === "worktree",
-    ).length;
-    const rows = plural(worktrees, "worktree", "worktrees");
-    if (groups.length === 1) return rows;
-    return `${plural(groups.length, "repo", "repos")} · ${rows}`;
+  const worktreeCount = (): string => {
+    if (phase() === "loading") return "";
+    if (merged().length === 0) return "";
+    return String(
+      allRows().filter((entry) => entry.kind === "worktree").length,
+    );
   };
 
   /**
-   * The muted tail on the title line, or null when there is nothing to say.
-   * Counts lead (they extend the title's own subject), then the removal
-   * notice, then the scanning announcement. A removal notice and the
-   * scanning announcement can coexist: a fully successful prune reloads in
-   * place, so its notice rides the very rescan it triggered.
+   * The muted tail: the removal notice, then the scanning announcement, or
+   * null when there is nothing to say. They can coexist — a fully successful
+   * prune reloads in place, so its notice rides the very rescan it triggered
+   * — which is what the dividing `·` is for. It divides PEERS here, the one
+   * job that dot has in this panel now that no count is glued to its label.
    */
-  const titleSuffix = (): string | null => {
+  const headerTail = (): string | null => {
     const parts: string[] = [];
-    const counts = titleCounts();
-    if (counts) parts.push(` · ${counts}`);
     const notice = titleNotice();
-    if (notice) parts.push(` · ${notice}`);
-    if (scanning()) parts.push(` · ${scanIcon()} scanning`);
-    return parts.length > 0 ? parts.join("") : null;
+    if (notice) parts.push(notice);
+    if (scanning()) parts.push(`${scanIcon()} scanning`);
+    return parts.length > 0 ? parts.join(" · ") : null;
   };
 
-  const titleLine = createMemo(() =>
-    titleSegments(panelTitle(), titleSuffix(), contentWidth()),
-  );
-
   /**
-   * What trails `Pull Requests` on the tab line: the live count, the spinner
-   * while GitHub is being asked, or `unavailable` when the whole request
-   * fell over.
+   * What the `Pull Requests` chip wears: the live count, the spinner while
+   * GitHub is being asked, or `unavailable` when the whole request fell over.
+   *
+   * A bare token with no `·` in front of it. `Pull Requests unavailable`
+   * reads as the sentence it is, where `Pull Requests · unavailable` read as
+   * two separate facts.
    *
    * Counted from `allRows()` so it is the PANEL's number and not the active
    * view's — the inactive tab has to state the other view's count, which is
@@ -2582,12 +2655,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * it under the repo it belongs to.
    */
   const prTabSuffix = (): string => {
-    if (prPending()) return ` · ${prIcon()}`;
+    if (prPending()) return prIcon();
     const count = allRows().filter((entry) => entry.kind === "pr").length;
     // Read off the SECTIONS the body is drawn from, not a second look at
     // `errors`, so the tab and the lines under it can never tell different
     // stories. Per-repo failures arrive as HTTP 200 with `repos: []`, so
-    // `prError()` is null and a fresh count is 0 — the tab asserted `· 0`
+    // `prError()` is null and a fresh count is 0 — the tab asserted `0`
     // while every line beneath it said the answer was unknown, and in the
     // Worktrees view, which has no lines, the fabricated `0` was all you saw.
     //
@@ -2596,7 +2669,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     // could not answer for is not a count at all, so it reads `unavailable`
     // — which deliberately overstates the mixed case (one repo errored,
     // twelve truthfully zero). A NON-zero count is shown as-is even when a
-    // repo failed: `· 1` alongside an unavailable repo is a lower bound
+    // repo failed: `1` alongside an unavailable repo is a lower bound
     // presented as a total, and that is a known overstatement in the other
     // direction, accepted because the alternative is hiding every count the
     // moment any repo is unreachable. Do not read "never assert a number we
@@ -2610,13 +2683,20 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     // its repo set per request, but closing it means changing what an absent
     // repo means, which many tests currently bake in as the lenient reading.
     if (count === 0 && merged().some((r) => r.prSection.kind === "unavailable")) {
-      return " · unavailable";
+      return "unavailable";
     }
-    return ` · ${count}`;
+    return String(count);
   };
 
-  const tabs = createMemo(() =>
-    viewTabs(view(), prTabSuffix(), contentWidth()),
+  const header = createMemo(() =>
+    headerLayout({
+      view: view(),
+      lead: headerLead(),
+      worktrees: worktreeCount(),
+      prs: prTabSuffix(),
+      tail: headerTail(),
+      width: contentWidth(),
+    }),
   );
   /**
    * The tab the pointer is over, so an inactive chip answers a hover before
@@ -3282,24 +3362,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       paddingLeft={1}
       paddingRight={1}
     >
-      {/* No justifyContent here: with flexDirection="row" it would center the
-          title horizontally, where the pre-scanning-suffix box only centered
-          vertically (a height-1 no-op) and the header has always read as
-          left-aligned like every other dialog's. */}
-      <box width="100%" height={1} flexDirection="row">
-        <text fg={titleLine()[0]?.fg ?? theme.text}>
-          <strong>{titleLine()[0]?.text ?? ""}</strong>
-        </text>
-        <Show when={titleLine()[1]}>
-          {(segment: () => RowSegment) => (
-            <text fg={segment().fg}>{segment().text}</text>
-          )}
-        </Show>
-      </box>
+      {/* The whole header, one line: which repos, which of their two
+          subjects, and whatever is in flight. No justifyContent — with
+          flexDirection="row" it would center the line, and this header has
+          always read as left-aligned like every other dialog's.
 
-      {/* The two views, one line for the whole panel, directly under the
-          title: the title says which repos, this says which of their two
-          subjects. It renders OUTSIDE the scrollbox, so it is fitted against
+          It renders OUTSIDE the scrollbox, so it is budgeted against
           `contentWidth()` and pays nothing for the scrollbar column. Drawn
           from the loading phase onwards rather than appearing with the list,
           which would step the whole body down one line at exactly the moment
@@ -3310,7 +3378,19 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         }
       >
         <box width="100%" height={1} flexDirection="row">
-          <For each={tabs()}>
+          {/* The scope leads, in the panel's brightest ink: it is the
+              subject the chips beside it are two views OF. */}
+          <Show when={header().lead}>
+            {(lead: () => string) => (
+              <>
+                <text fg={theme.text}>
+                  <strong>{lead()}</strong>
+                </text>
+                <text fg={theme.overlay}>{ZONE_GAP}</text>
+              </>
+            )}
+          </Show>
+          <For each={header().tabs}>
             {(tab: ViewTab, index) => (
               <>
                 {/* The gap is its OWN element and not padding on the chip:
@@ -3360,6 +3440,18 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
               </>
             )}
           </For>
+          {/* The tail trails the chips rather than leading them, because it
+              is the zone that GROWS and shrinks on its own: a spinner
+              arriving to the LEFT of a chip would shove that chip sideways
+              under the pointer. */}
+          <Show when={header().tail}>
+            {(tail: () => string) => (
+              <>
+                <text fg={theme.overlay}>{ZONE_GAP}</text>
+                <text fg={theme.overlay}>{tail()}</text>
+              </>
+            )}
+          </Show>
         </box>
       </Show>
 
