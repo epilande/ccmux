@@ -2288,17 +2288,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   /** Repo filter currently in force, which is what both requests carry. */
   const repoFilter = (): string | null => (scoped() ? props.repo : null);
 
-  /**
-   * The filter the rows on screen were loaded UNDER, or `undefined` before
-   * anything has loaded. What it exists for is telling a RESCOPE apart from a
-   * plain reload, which the phase alone cannot: `r`, a post-prune reload and
-   * a Tab all set the phase back to `loading` over a list that stays on
-   * screen, and only one of the three has made that list belong to another
-   * question.
-   */
-  const [loadedFilter, setLoadedFilter] = createSignal<string | null | undefined>(
-    undefined,
-  );
 
   const merged = createMemo<PanelRepo[]>(() => {
     const data = scan();
@@ -2633,14 +2622,19 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     if (scoped() && props.repo !== null) return basename(props.repo);
     // Unscoped, but only one repo answered: it still has to be named here,
     // because `showsGroupHeaders` draws no header for a lone group and the
-    // name would otherwise appear nowhere in the panel. Gated on the SCOPE
-    // the rows were loaded under, exactly as the count is and for both of
-    // the same reasons — `repos()` holds the PREVIOUS scope's list while a
-    // rescope is in flight, so a Tab that widens the panel would go on
-    // naming the repo it just left; and a plain `r`, which is not a rescope,
-    // must not drop the name and put it back, since this label's width is
-    // what positions both chips.
-    const repos = loadedFilter() === repoFilter() ? merged() : [];
+    // name would otherwise appear nowhere in the panel.
+    //
+    // THIS branch is gated on the phase and the one above is not, and the
+    // split is the same one the count makes. Above, the label is `props.repo`
+    // and a flag: no request can change it, so it holds and both chips stay
+    // put. Here it is read off the rows, and what it actually reports is how
+    // many repos ANSWERED — so a reload that is about to return a second
+    // repo makes the held name wrong, exactly as a reload that is about to
+    // return one fewer worktree makes a held count wrong. Blanking to `all
+    // repos` costs a shift in this one case (unscoped, single repo) and is
+    // never untrue: the panel IS unscoped, and the name is only standing in
+    // for the group header the lone group does not draw.
+    const repos = phase() === "loading" ? [] : merged();
     return repos.length === 1 ? repos[0]!.repoName : "all repos";
   };
 
@@ -2862,7 +2856,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         const data = (await response.json()) as WorktreeListResponse;
         if (generation !== loadGeneration) return;
         setRepos(data.repos);
-        setLoadedFilter(filter);
         setPhase("list");
       })
       .catch((err: unknown) => {

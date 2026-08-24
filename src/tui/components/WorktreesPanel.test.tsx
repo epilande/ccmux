@@ -862,9 +862,10 @@ describe("WorktreesPanel header counts", () => {
     expect(lineWith(rescoping, WORKTREES_TAB)).not.toMatch(/Worktrees \d/);
   });
 
-  // The lead's width is what positions both chips, so it holds across the
-  // same reload for the same reason, and flips on the Tab that changed it.
-  it("holds the lead across a refresh and flips it on a rescope", async () => {
+  // The SCOPED lead is `props.repo` and a flag, so no request can change it:
+  // it holds across a reload and both chips stay where the user aimed. This
+  // is the half of the split that can make that promise.
+  it("holds a scoped lead across a refresh", async () => {
     let lists = 0;
     const { keys, frame } = await mountPanel(
       {
@@ -882,12 +883,13 @@ describe("WorktreesPanel header counts", () => {
     expect(lineWith(await frame(), WORKTREES_TAB)).toContain("repo ");
   });
 
-  // The UNSCOPED lone-repo lead is the one that reads loaded rows, so it is
-  // the one a reload can blank. `showsGroupHeaders` draws no header for a
-  // single group, which makes this label the only place that repo is named
-  // — dropping it and putting it back moves both chips and un-names the
-  // panel for as long as the reload takes.
-  it("holds an unscoped lone repo's name across a refresh", async () => {
+  // The UNSCOPED lone-repo lead is the one derived from ROWS, and what it
+  // really reports is how many repos answered — so a reload about to return
+  // a second repo makes a held name wrong, exactly as a reload about to
+  // return one fewer worktree makes a held count wrong. It blanks to `all
+  // repos`, which is never untrue: the panel IS unscoped, and the name only
+  // stands in for the group header a lone group does not draw.
+  it("blanks an unscoped lone repo's name while reloading", async () => {
     let lists = 0;
     const { keys, frame } = await mountPanel({
       list: async () =>
@@ -899,9 +901,7 @@ describe("WorktreesPanel header counts", () => {
     expect(lineWith(await frame(), WORKTREES_TAB)).toContain("repo ");
     keys.pressKey("r");
     expect(lists).toBe(2);
-    const refreshing = lineWith(await frame(), WORKTREES_TAB);
-    expect(refreshing).toContain("repo ");
-    expect(refreshing).not.toContain("all repos");
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("all repos");
   });
 
   it("flips the lead on the rescope, in the frame Tab produced", async () => {
@@ -4082,6 +4082,9 @@ describe("view tabs on screen", () => {
             width: Math.max(8, width - 4),
             ...shape,
           });
+          // Measured against the BUDGET handed to the layout, not the
+          // terminal width: the four columns of border and padding between
+          // them are free slack an overflow could hide in.
           for (const part of headerParts(layout)) {
             if (part.kind !== "chip") expect(part.text).not.toBe("");
           }
@@ -4092,11 +4095,10 @@ describe("view tabs on screen", () => {
                 : part.text,
             )
             .join("");
-          expect({ width, view, over: displayWidth(spelled) > width }).toEqual({
-            width,
-            view,
-            over: false,
-          });
+          const budget = Math.max(8, width - 4);
+          expect({ width, view, over: displayWidth(spelled) > budget }).toEqual(
+            { width, view, over: false },
+          );
         }
         // Each width gets its own renderer; the shared afterEach only ever
         // reaches the last one this loop mounted.
