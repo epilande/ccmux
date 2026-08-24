@@ -2306,6 +2306,7 @@ export function App(props: AppProps) {
           namesAWorktree: namesAWorktree(draft),
           existingWorktree: draft.existingWorktree !== null,
           pr: draft.pr !== null,
+          issue: draft.issue !== null,
         }),
     });
   }
@@ -2585,6 +2586,9 @@ export function App(props: AppProps) {
     const toWorktree =
       draft.existingWorktree === null &&
       draft.pr === null &&
+      // An issue spawn is excluded on the same terms: `POST /spawn` refuses
+      // `issue` alongside `worktree.name`, and derives the name itself.
+      draft.issue === null &&
       draft.destination === "worktree";
     // The name the request will carry. Empty means an untouched field: let
     // the daemon derive one.
@@ -2645,6 +2649,11 @@ export function App(props: AppProps) {
           // then fails with the daemon's own message rather than this
           // client's guess.
           pr: draft.pr?.number,
+          // The whole of an issue spawn's request, for the same reason: the
+          // daemon re-runs `lookupIssue`, refuses one that has been closed
+          // since the list was read, derives the worktree name with
+          // `slugForIssue` and seeds the prompt under its own header.
+          issue: draft.issue?.number,
           // A name is sent only when one was TYPED. Left out, the daemon
           // derives it from the prompt by the same rule the row previews and
           // numbers it past a collision; sent, it means that worktree

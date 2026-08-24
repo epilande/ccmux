@@ -183,12 +183,34 @@ export interface NewSessionPR {
   repoRoot: string;
 }
 
+/**
+ * The issue a dialog is cutting a worktree from (issue #151).
+ *
+ * The exact mirror of {@link NewSessionPR}, and separate from it because the
+ * two are not the same request: a PR has a HEAD to check out, so the daemon
+ * fetches it and configures tracking, while an issue has only a number and a
+ * title, so the worktree is cut from the repo's default branch and the issue
+ * survives only as the derived name and the seeded prompt.
+ *
+ * What they share is why the field exists: the daemon derives the name
+ * (`slugForIssue`) and `POST /spawn` refuses `issue` alongside
+ * `worktree.name`, so a dialog that offered one would be offering a 400.
+ */
+export interface NewSessionIssue {
+  number: number;
+  /** What the note row calls it. */
+  title: string;
+  /** The repo the issue belongs to, which is also the request's `cwd`. */
+  repoRoot: string;
+}
+
 export interface NewSessionShape {
   moveChanges: boolean;
   destination: NewSessionDestination;
   fork: NewSessionFork | null;
   existingWorktree: string | null;
   pr: NewSessionPR | null;
+  issue: NewSessionIssue | null;
 }
 
 /**
@@ -215,6 +237,10 @@ export function namesAWorktree(draft: NewSessionShape): boolean {
   // together with `worktree.name`. A Name row here would post one and earn a
   // 400 on a dialog whose fields all looked answerable.
   if (draft.pr !== null) return false;
+  // An issue spawn names nothing for the same reason and by the same rule:
+  // `slugForIssue` derives `issue-144-<slug>` daemon-side, and `POST /spawn`
+  // refuses `issue` together with `worktree.name`.
+  if (draft.issue !== null) return false;
   return draft.destination === "worktree" || draft.moveChanges;
 }
 
@@ -254,6 +280,9 @@ export function newSessionFields(
         // name: the worktree is cut from its head, so "here" is not an option
         // the request has.
         draft.pr === null &&
+        // Nor does an issue: its worktree is cut from the repo's default
+        // branch, so "here" is not an option the request has either.
+        draft.issue === null &&
         (draft.fork === null || draft.fork.canWorktree)
       );
     }
@@ -328,6 +357,16 @@ export interface NewSessionDraft {
    * row about the worktree, which the daemon derives from the PR itself.
    */
   pr: NewSessionPR | null;
+  /**
+   * The open issue this spawn cuts a worktree from, or null (issue #151).
+   * Set only by the source picker.
+   *
+   * Keeps the agent, the placement and the prompt, exactly as a PR does — a
+   * typed prompt is APPENDED under the daemon's own issue header by
+   * `seedPrompt` — and drops every row about the worktree, which the daemon
+   * derives from the issue itself.
+   */
+  issue: NewSessionIssue | null;
   /**
    * Where a CANCEL returns, or null for a dialog the Worktrees panel did not
    * open (issue #102 follow-up). An origin marker, deliberately NOT a mode:
@@ -1958,6 +1997,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
        *  destination, the name and the untracked choice are all the daemon's
        *  to decide, so none of their rows appear. */
       pr?: NewSessionPR;
+      /** Open in issue mode: cut a worktree from the repo's default branch,
+       *  named after this issue and seeded with it. Same rows gone as PR
+       *  mode, and for the same reason: the daemon decides all of them. */
+      issue?: NewSessionIssue;
       /** Origin marker for a dialog the Worktrees panel opened: cancel
        *  returns there. See {@link NewSessionDraft.returnToWorktrees}. */
       returnToWorktrees?: {
@@ -1976,10 +2019,22 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       // decides the destination AND the name, so a draft claiming it plus a
       // move or a fork is not a state any consumer should have to answer for.
       const pr = existingWorktree === null ? (init.pr ?? null) : null;
+      // An issue is normalized after the PR and yields to it: both derive the
+      // same fields from different sources, so a draft claiming two would be
+      // asking the daemon to name one worktree twice. No caller sends both;
+      // the order is what makes that unrepresentable rather than merely
+      // unlikely.
+      const issue =
+        existingWorktree === null && pr === null ? (init.issue ?? null) : null;
+      const derivesWorktree = pr !== null || issue !== null;
       const moveChanges =
-        existingWorktree === null && pr === null && init.moveChanges === true;
+        existingWorktree === null &&
+        !derivesWorktree &&
+        init.moveChanges === true;
       const fork =
-        existingWorktree === null && pr === null ? (init.fork ?? null) : null;
+        existingWorktree === null && !derivesWorktree
+          ? (init.fork ?? null)
+          : null;
       // A move exists to put the changes somewhere new; everything else
       // defaults to the directory it was opened over, a fork included — the
       // key that opens it used to fork in place with no dialog at all, and
@@ -1988,7 +2043,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       // A PR's worktree is as forced as a move's; the row is gone either way,
       // and the value has to say the true thing for anything that reads it.
       const destination: NewSessionDestination =
-        moveChanges || pr ? "worktree" : "here";
+        moveChanges || derivesWorktree ? "worktree" : "here";
       batch(() => {
         setState("contextMenu", null);
         setState("groupContextMenu", null);
@@ -2016,6 +2071,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           fork,
           existingWorktree,
           pr,
+          issue,
           returnToWorktrees: init.returnToWorktrees ?? null,
           field: newSessionFields({
             moveChanges,
@@ -2023,6 +2079,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
             fork,
             existingWorktree,
             pr,
+            issue,
           })[0]!,
           dropdown: null,
         });

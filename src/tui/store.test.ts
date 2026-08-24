@@ -3093,6 +3093,7 @@ describe("store", () => {
         // Worktrees panel's own way in.
         existingWorktree: null,
         pr: null,
+        issue: null,
         returnToWorktrees: null,
         field: "agent",
         dropdown: null,
@@ -3158,6 +3159,7 @@ describe("store", () => {
         fork: null,
         existingWorktree: null,
         pr: null,
+        issue: null,
         returnToWorktrees: null,
         field: "prompt",
         dropdown: null,
@@ -3237,6 +3239,7 @@ describe("store", () => {
         fork: null,
         existingWorktree: null,
         pr: null,
+        issue: null,
         returnToWorktrees: null,
         field: "agent",
         dropdown: null,
@@ -3352,6 +3355,7 @@ describe("store", () => {
           fork: FORK,
           existingWorktree: null,
           pr: null,
+          issue: null,
           // Not `agent`: the fork continues the source's agent, so that row
           // does not exist and focus cannot start on it.
           returnToWorktrees: null,
@@ -3479,6 +3483,7 @@ describe("store", () => {
           fork: null,
           existingWorktree: PATH,
           pr: null,
+          issue: null,
           returnToWorktrees: null,
           field: "agent",
           dropdown: null,
@@ -3584,6 +3589,7 @@ describe("store", () => {
             fork: null,
             existingWorktree: null,
             pr: null,
+            issue: null,
           }),
         ).toBe(true);
       });
@@ -3596,6 +3602,7 @@ describe("store", () => {
             fork: null,
             existingWorktree: null,
             pr: null,
+            issue: null,
           }),
         ).toBe(true);
       });
@@ -3612,6 +3619,7 @@ describe("store", () => {
             fork: null,
             existingWorktree: "/repo/.claude/worktrees/panel",
             pr: null,
+            issue: null,
           }),
         ).toBe(false);
       });
@@ -3632,6 +3640,7 @@ describe("store", () => {
             },
             existingWorktree: null,
             pr: null,
+            issue: null,
           }),
         ).toBe(false);
       });
@@ -3644,6 +3653,7 @@ describe("store", () => {
             fork: null,
             existingWorktree: null,
             pr: null,
+            issue: null,
           }),
         ).toBe(false);
       });
@@ -4240,5 +4250,100 @@ describe("new-session dialog in PR mode (issue #151)", () => {
     });
     expect(store.state.newSession!.pr).toBeNull();
     expect(store.state.newSession!.existingWorktree).toBe("/repo/wt/a");
+  });
+});
+
+describe("new-session dialog in issue mode (issue #151)", () => {
+  const ISSUE = {
+    number: 144,
+    title: "Notifications are swallowed inside nested tmux",
+    repoRoot: "/repo",
+  };
+  const PR = {
+    number: 151,
+    title: "Worktrees panel: open-PR list",
+    repoRoot: "/repo",
+  };
+
+  it("keeps the agent, placement and prompt, and nothing else", () => {
+    const store = createTUIStore();
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      issue: ISSUE,
+    });
+
+    const draft = store.state.newSession!;
+    expect(draft.issue).toEqual(ISSUE);
+    // Forced, and it has to SAY the true thing for whatever reads it, even
+    // though no row shows it: an issue's worktree comes off the repo's
+    // default branch, so "here" is not an option the request has.
+    expect(draft.destination).toBe("worktree");
+    expect(newSessionFields(draft)).toEqual(["agent", "placement", "prompt"]);
+  });
+
+  // `POST /spawn` refuses `issue` alongside `worktree.name`; a Name row here
+  // would post one and earn a 400 on a dialog whose fields all looked
+  // answerable.
+  it("names no worktree, whatever the destination says", () => {
+    const store = createTUIStore();
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      issue: ISSUE,
+    });
+    expect(namesAWorktree(store.state.newSession!)).toBe(false);
+  });
+
+  it("is exclusive with every other mode", () => {
+    const store = createTUIStore();
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      issue: ISSUE,
+      moveChanges: true,
+      fork: {
+        sessionId: "s1",
+        label: "claude",
+        branch: "feat/x",
+        canWorktree: true,
+        pane: "%1",
+      },
+    });
+    const draft = store.state.newSession!;
+    expect(draft.issue).toEqual(ISSUE);
+    expect(draft.moveChanges).toBe(false);
+    expect(draft.fork).toBeNull();
+
+    // An existing worktree is where the session STARTS, so it wins over an
+    // issue that exists to create one.
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      issue: ISSUE,
+      existingWorktree: "/repo/wt/a",
+    });
+    expect(store.state.newSession!.issue).toBeNull();
+    expect(store.state.newSession!.existingWorktree).toBe("/repo/wt/a");
+  });
+
+  /**
+   * No caller sends both, and the precedence is pinned so that a draft
+   * cannot end up claiming two sources for one derived worktree name. The PR
+   * wins because it is the more specific request: it has a HEAD to check
+   * out, where an issue only names a branch to cut from.
+   */
+  it("yields to a PR rather than claiming the same worktree twice", () => {
+    const store = createTUIStore();
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      pr: PR,
+      issue: ISSUE,
+    });
+
+    const draft = store.state.newSession!;
+    expect(draft.pr).toEqual(PR);
+    expect(draft.issue).toBeNull();
   });
 });
