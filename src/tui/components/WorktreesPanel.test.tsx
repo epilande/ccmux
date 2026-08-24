@@ -59,6 +59,8 @@ import {
   describeReview,
   openInBrowser,
   prStatusText,
+  oneLine,
+  prStatusRowKey,
   viewTabSegments,
   initialView,
   PRS_TAB,
@@ -220,7 +222,9 @@ const noPRs: PRListResponse = { repos: [], errors: [] };
 
 /** What a sorted row is called, whichever kind it is. */
 function sortedName(entry: PanelRow): string {
-  return entry.kind === "pr" ? `#${entry.pr.number}` : entry.row.name;
+  if (entry.kind === "pr") return `#${entry.pr.number}`;
+  if (entry.kind === "pr-status") return "(pr-status)";
+  return entry.row.name;
 }
 
 /** A repo group for the pure layout helpers, PR section off by default. */
@@ -3472,36 +3476,40 @@ describe("PR row presentation", () => {
     expect(phrases[phrases.length - 1]?.text).toBe("checked out in pr-151");
   });
 
-  // The PR view's stand-in line, which is drawn only where a repo produced
-  // no rows. `0` is the answer that view exists to give, so it takes a line
-  // there where the Worktrees view says nothing at all.
+  // What a repo with no open PRs says. `0` is the answer the PR view exists
+  // to give, so it takes a ROW there where the Worktrees view says nothing.
   it("says what a repo with no PR rows has to say", () => {
-    expect(prStatusText({ kind: "pending" }, "◐", 40)).toBe(
-      "◐ checking GitHub",
-    );
-    expect(prStatusText({ kind: "ready", count: 0 }, "◐", 40)).toBe(
-      "no open PRs",
-    );
-    // The cause travels with the failure, because the line sits under the
+    expect(prStatusText({ kind: "pending" }, "◐")).toBe("◐ checking GitHub");
+    // No spinner to spend: `rowLabel` is pure and has none to pass.
+    expect(prStatusText({ kind: "pending" }, "")).toBe("checking GitHub");
+    expect(prStatusText({ kind: "ready", count: 0 }, "◐")).toBe("no open PRs");
+    // The cause travels with the failure, because the row sits under the
     // repo it applies to and a shared line below the list cannot say which.
     expect(
-      prStatusText({ kind: "unavailable", reason: "gh is logged out" }, "◐", 60),
+      prStatusText({ kind: "unavailable", reason: "gh is logged out" }, "◐"),
     ).toBe("unavailable: gh is logged out");
-    expect(prStatusText({ kind: "unavailable", reason: null }, "◐", 40)).toBe(
+    expect(prStatusText({ kind: "unavailable", reason: null }, "◐")).toBe(
       "unavailable",
     );
   });
 
-  // OpenTUI wraps rather than clipping, and a wrapped line in a `height={1}`
-  // box vanishes, so the line is truncated rather than trusted to fit.
-  it("truncates its line rather than letting it wrap away", () => {
+  // A newline is ZERO columns wide to `Bun.stringWidth`, so a two-line `gh`
+  // stderr passes every width guard and then loses everything after the
+  // break inside a `height={1}` box, with no ellipsis to say so.
+  // Unauthenticated `gh` prints exactly two lines.
+  it("flattens a multi-line gh failure to one line", () => {
     const text = prStatusText(
-      { kind: "unavailable", reason: "a very long explanation indeed" },
+      {
+        kind: "unavailable",
+        reason: "gh auth login required\nTo get started with GitHub CLI, run:",
+      },
       "◐",
-      20,
     );
-    expect(text.length).toBeLessThanOrEqual(20);
-    expect(text.endsWith("…")).toBe(true);
+    expect(text).not.toContain("\n");
+    expect(text).toBe(
+      "unavailable: gh auth login required To get started with GitHub CLI, run:",
+    );
+    expect(oneLine("  a\n\tb  ")).toBe("a b");
   });
 });
 
@@ -3564,15 +3572,28 @@ describe("view tabs", () => {
     );
   });
 
-  // Below the last rung it is fitted, which cuts from the END and so keeps
-  // the ACTIVE tab — the half that says where you are.
-  it("fits rather than overrunning its box, keeping the active tab", () => {
+  // What fitting guarantees is the PREFIX, and the prefix is always
+  // `Worktrees` — the ACTIVE tab in one view and the INACTIVE one in the
+  // other. The old name for this test claimed it kept the active tab, which
+  // it never asserted for `prs` and which is false there.
+  it("fits to its box, keeping the prefix in either view", () => {
     for (const width of [14, 12, 8, 4]) {
-      const fitted = viewTabSegments("prs", " · 7", width);
-      const used = fitted.reduce((n, s) => n + displayWidth(s.text), 0);
-      expect(used).toBeLessThanOrEqual(width);
+      for (const view of ["worktrees", "prs"] as const) {
+        const fitted = viewTabSegments(view, " · 7", width);
+        const used = fitted.reduce((n, s) => n + displayWidth(s.text), 0);
+        expect(used).toBeLessThanOrEqual(width);
+      }
     }
     expect(tabText("worktrees", " · 7", 12)).toStartWith("Worktrees");
+    expect(tabText("prs", " · 7", 12)).toStartWith("Worktrees");
+  });
+
+  // Pinned so nobody "fixes" it blind: below about fifteen columns the
+  // separator dangles with nothing after it. That is what fitting a segment
+  // list does, it needs a panel under ~16 columns to reach, and it is left
+  // alone deliberately.
+  it("leaves a dangling separator below the last rung", () => {
+    expect(tabText("worktrees", " · 7", 12)).toBe("Worktrees │ ");
   });
 });
 
@@ -3660,8 +3681,10 @@ describe("PR section layout", () => {
     expect(layout.get("/b")).toBeUndefined();
   });
 
-  // Whichever answer phase 3 gives, a repo with no rows spends exactly one
-  // line on saying so, so the groups below it do not move as it resolves.
+  // Whichever answer phase 3 gives, the repo that has no open PRs spends
+  // exactly one line saying so, so the groups below it do not move as it
+  // resolves. It spends that line as a ROW now, which is what makes it
+  // reachable; the layout has no arm for "a repo with no rows" at all.
   it("spends one line on every rowless PR-section state", () => {
     const pr = prRow({ pr: openPR({ number: 9 }), repoRoot: "/r2" });
     const states: PanelRepo["prSection"][] = [
@@ -3669,18 +3692,23 @@ describe("PR section layout", () => {
       { kind: "ready", count: 0 },
       { kind: "unavailable", reason: "gh is logged out" },
     ];
-    const lines = states.map(
-      (prSection) =>
-        visualLayout(
-          [
-            panelRepo("/r1", "r1", [], prSection),
-            panelRepo("/r2", "r2", [pr], { kind: "ready", count: 1 }),
-          ],
-          () => 1,
-          "prs",
-        ).get(pr.key)?.line,
-    );
-    // header(0) status(1) | header(2) pr(3), in all three.
+    const lines = states.map((prSection) => {
+      const standIn: PanelRow = {
+        kind: "pr-status",
+        key: prStatusRowKey("/r1"),
+        repoRoot: "/r1",
+        status: prSection,
+      };
+      return visualLayout(
+        [
+          panelRepo("/r1", "r1", [standIn], prSection),
+          panelRepo("/r2", "r2", [pr], { kind: "ready", count: 1 }),
+        ],
+        (entry) => rowVisualHeight(entry, false),
+        "prs",
+      ).get(pr.key)?.line;
+    });
+    // header(0) stand-in(1) | header(2) pr(3), in all three.
     expect(lines).toEqual([3, 3, 3]);
   });
 });
@@ -3810,6 +3838,33 @@ describe("WorktreesPanel PR view", () => {
     expect(prs).not.toContain("no open PRs");
   });
 
+  // Per-repo failures arrive as HTTP 200 with `repos: []`, so `prError()` is
+  // null and a naive count is 0: the tab asserted `· 0` while every line
+  // beneath it said the answer was unknown, and the Worktrees view, which has
+  // no such lines, showed only the fabricated zero.
+  it("never asserts a count of zero it cannot stand behind", async () => {
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(listOf([mainRow(), row()])),
+        scan: async () => json(emptyScan),
+        prs: async () =>
+          json({
+            repos: [],
+            errors: [
+              { repoRoot: "/repo", repoName: "repo", error: "no GitHub remote" },
+            ],
+          }),
+      },
+      {},
+    );
+    const shown = await frame();
+    expect(shown).toContain("Pull Requests · unavailable");
+    expect(shown).not.toContain("Pull Requests · 0");
+    // And the body agrees, because both read the same sections.
+    keys.pressKey("l");
+    expect(await frame()).toContain("unavailable: no GitHub remote");
+  });
+
   // A repo's own error rides inside an otherwise fine response, so only that
   // repo's line is marked and the others still answer. This is the steady
   // state with a current daemon, and it keeps the per-repo line the
@@ -3916,6 +3971,125 @@ describe("WorktreesPanel PR view", () => {
     expect(shown).not.toContain("#151");
     // Still on a worktree row, and the last one at that.
     expect(lineWith(shown, "alpha")).toContain(CURSOR_BAR);
+  });
+});
+
+describe("WorktreesPanel PR view reachability", () => {
+  /** N repos, each with only its main checkout and no open PRs. */
+  function prLessRepos(n: number): WorktreeListResponse {
+    return listOf(
+      Array.from({ length: n }, (_, i) =>
+        mainRow({
+          path: `/r${i}`,
+          repoRoot: `/r${i}`,
+          repoName: `repo-${i}`,
+          name: `repo-${i}`,
+        }),
+      ),
+    );
+  }
+
+  // The High this commit exists for. The stand-in line used to be a LINE:
+  // the render drew it and `visualLayout` counted it, but `flatRows()` did
+  // not contain it, so `moveCursor` returned on an empty list, the scroll
+  // effect had no cursor to chase, and every repo past the first screenful
+  // was unreachable from the keyboard while a scrollbar drew itself
+  // alongside. As a ROW it is simply walked to.
+  it("walks the cursor to the last repo when no repo has open PRs", async () => {
+    const { keys, frame } = await mountSettled(
+      prLessRepos(8),
+      emptyScan,
+      { height: 12 },
+      noPRs,
+    );
+    keys.pressKey("l");
+    const top = await frame();
+    expect(top).toContain("repo-0");
+    expect(top).not.toContain("repo-7");
+
+    for (let i = 0; i < 30; i++) keys.pressKey("j");
+    const bottom = await frame();
+    expect(bottom).toContain("repo-7");
+    expect(bottom).toContain("no open PRs");
+  });
+
+  // The mixed case from the same bug: the cursor used to pin to the single
+  // PR row because it was the only thing in `flatRows()`.
+  it("walks past a repo that does have PRs to the repos below it", async () => {
+    const list = prLessRepos(8);
+    const { keys, frame } = await mountSettled(
+      list,
+      emptyScan,
+      { height: 12 },
+      { repos: [{ repoRoot: "/r0", repoName: "repo-0", prs: [openPR()] }], errors: [] },
+    );
+    keys.pressKey("l");
+    for (let i = 0; i < 30; i++) keys.pressKey("j");
+    expect(await frame()).toContain("repo-7");
+  });
+
+  // The status row is an ordinary row, so it is keyed, sorted and placed by
+  // the same machinery as every other one.
+  it("gives the stand-in a key the layout places and nothing else claims", () => {
+    const key = prStatusRowKey("/r0");
+    expect(key).toBe("pr-status:/r0");
+    // Not a worktree path, and NOT a PR key — the re-seed effect's hold must
+    // not claim it, since no return path ever asks to land here.
+    expect(isPRRowKey(key)).toBe(false);
+    const statusRow: PanelRow = {
+      kind: "pr-status",
+      key,
+      repoRoot: "/r0",
+      status: { kind: "ready", count: 0 },
+    };
+    const layout = visualLayout(
+      [panelRepo("/r0", "r0", [panelRow({ row: row({ path: "/a" }) }), statusRow])],
+      (entry) => rowVisualHeight(entry, false),
+      "prs",
+    );
+    expect(layout.get(key)).toEqual({ line: 0, height: 1 });
+    // One line tall, derived from `detailPhrases` like every other row.
+    expect(rowVisualHeight(statusRow, false)).toBe(1);
+    // Never measured into the label column: a long `unavailable: …` would
+    // otherwise stretch every worktree's branch column in the panel.
+    expect(
+      labelColumnWidth([
+        statusRow,
+        { ...statusRow, key: "pr-status:/r1", status: { kind: "unavailable", reason: "x".repeat(60) } },
+      ]),
+    ).toBe(0);
+  });
+
+  // Behaviour this commit deliberately introduces: while phase 3 is in
+  // flight the PR view is a list of spinner rows, one per repo, and the
+  // cursor sits on one. That is what makes the pending view scrollable.
+  it("is a walkable list of spinner rows while phase 3 is pending", async () => {
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(prLessRepos(3)),
+        scan: async () => json(emptyScan),
+        prs: () => new Promise<Response>(() => {}),
+      },
+      { height: 16 },
+    );
+    keys.pressKey("l");
+    const shown = await frame();
+    expect(shown).toContain("checking GitHub");
+    expect(lineWith(shown, "checking GitHub")).toContain(CURSOR_BAR);
+  });
+
+  // Enter has nothing to open here, and says which of the three things the
+  // row is reporting rather than doing nothing.
+  it("says what the stand-in row is reporting when Enter cannot act", async () => {
+    const { keys, frame } = await mountSettled(
+      prLessRepos(2),
+      emptyScan,
+      {},
+      noPRs,
+    );
+    keys.pressKey("l");
+    keys.pressEnter();
+    expect(await frame()).toContain("no open PRs here");
   });
 });
 

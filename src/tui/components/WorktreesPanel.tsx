@@ -132,6 +132,33 @@ export interface PRPanelRow {
 }
 
 /**
+ * What a repo with no open-PR rows shows in the PR view.
+ *
+ * A ROW, and that is the whole point of it. It used to be a LINE — the render
+ * drew it and `visualLayout` counted it, but `flatRows()` did not contain it,
+ * so the cursor could not stand on it. A PR view whose repos all answered
+ * `no open PRs` therefore had an empty `flatRows()`: `moveCursor` returned on
+ * the spot, scrolling is an effect of where the cursor IS and had nothing to
+ * chase, and every repo past the first screenful was unreachable from the
+ * keyboard while a scrollbar drew itself alongside. Making it a row deletes
+ * that whole class of bug rather than patching it — there is no longer a
+ * second arm in the layout, or a second branch in the render, that the row
+ * list can disagree with.
+ *
+ * There is deliberately no worktrees-view counterpart: `GET /worktrees` only
+ * reports a repo it found worktrees for, main checkout included, so a repo
+ * group with zero worktree rows cannot exist.
+ */
+export interface PRStatusRow {
+  kind: "pr-status";
+  /** {@link prStatusRowKey}. */
+  key: string;
+  repoRoot: string;
+  /** The section state this line reports, which is also what it says. */
+  status: PRSectionStatus;
+}
+
+/**
  * A row of the list, which is no longer only worktrees.
  *
  * A discriminated union rather than a worktree row with optional PR fields,
@@ -139,9 +166,10 @@ export interface PRPanelRow {
  * removal a PR row has no notion of, and `y` and `d` act on a directory it
  * does not have. Narrowing on `kind` is what makes the compiler ask every one
  * of those what it means here — including a key added later, which is the
- * case a runtime guard would miss.
+ * case a runtime guard would miss, and which is exactly how `PRStatusRow`
+ * was added.
  */
-export type PanelRow = WorktreePanelRow | PRPanelRow;
+export type PanelRow = WorktreePanelRow | PRPanelRow | PRStatusRow;
 
 /**
  * The cursor/layout key for a PR row.
@@ -163,6 +191,18 @@ export function prRowKey(repoRoot: string, number: number): string {
  */
 export function isPRRowKey(key: string): boolean {
   return key.startsWith("pr:");
+}
+
+/**
+ * The cursor/layout key for a repo's PR-status row.
+ *
+ * Cannot collide with a worktree's, which is an absolute path, nor with a PR
+ * row's: `"pr-status:".startsWith("pr:")` is false, so {@link isPRRowKey}
+ * does not claim it and the re-seed effect's PR-key hold does not either.
+ * That is correct — no return path ever asks to land on one of these.
+ */
+export function prStatusRowKey(repoRoot: string): string {
+  return `pr-status:${repoRoot}`;
 }
 
 /**
@@ -424,6 +464,9 @@ function rowBucket(entry: PanelRow): number {
   // describe work on GitHub rather than a directory on disk, and the panel's
   // subject is the directories.
   if (entry.kind === "pr") return 4;
+  // Below the PRs. It can never tie with one — it exists only where there are
+  // none — but the bucket says so rather than leaving it to be inferred.
+  if (entry.kind === "pr-status") return 5;
   if (entry.row.isMain) return 0;
   if (entry.candidate) return 3;
   return entry.row.sessions.length > 0 ? 1 : 2;
@@ -431,7 +474,7 @@ function rowBucket(entry: PanelRow): number {
 
 /** Rows an agent is actively in sort above rows whose agent is parked. */
 function sessionRank(entry: PanelRow): number {
-  if (entry.kind === "pr") return 0;
+  if (entry.kind !== "worktree") return 0;
   const sessions = entry.row.sessions;
   if (sessions.some((s) => s.status === "working" || s.status === "waiting")) {
     return 0;
@@ -450,7 +493,10 @@ export function sortWorktreeRows(rows: PanelRow[]): PanelRow[] {
     // Both PRs, since the buckets above already separated the two kinds.
     // Newest first — gh's own order, restated so a future gh cannot change it.
     if (a.kind === "pr" && b.kind === "pr") return b.pr.number - a.pr.number;
-    if (a.kind === "pr" || b.kind === "pr") return 0;
+    // Narrowed on WORKTREE rather than on `pr`, so a third kind cannot reach
+    // `a.row` below. The buckets have already separated every pairing that
+    // gets here anyway; this is the compiler's guarantee of that, not a case.
+    if (a.kind !== "worktree" || b.kind !== "worktree") return 0;
     return a.row.name.localeCompare(b.row.name);
   });
 }
@@ -577,10 +623,16 @@ const TAB_SEPARATOR = " │ ";
  * 2. `Worktrees │ PRs · 7`   — the long label, swapped whole
  * 3. `Worktrees │ PRs`       — the count, which the body restates anyway
  *
- * Below that it is fitted, which cuts from the END and so keeps the ACTIVE
- * tab — the half that says where you are. A fourth rung used to drop the
- * active tab instead, and it existed only to preserve the key badge at
- * extreme widths; with the badge gone there is nothing left for it to save.
+ * Below that it is fitted, and what fitting guarantees is the PREFIX, which
+ * is always `Worktrees` — the ACTIVE tab in the Worktrees view and the
+ * INACTIVE one in the PR view. It is not "the tab that says where you are";
+ * saying so would be wrong in one of the two views. Below roughly fifteen
+ * columns the separator dangles with nothing after it (`Worktrees │ `), which
+ * is what fitting a segment list does and is left alone deliberately: it
+ * needs a panel under about sixteen columns to reach, well outside any width
+ * this renders at. A fourth rung used to drop the active tab instead, and it
+ * existed only to preserve a key badge on the inactive tab; with the badge
+ * gone there is nothing left for it to save.
  */
 export function viewTabSegments(
   view: PanelView,
@@ -631,6 +683,9 @@ function rowColor(entry: PanelRow, isCursor: boolean): string {
   if (entry.kind === "pr") {
     return entry.pr.isDraft ? theme.subtext : theme.text;
   }
+  // Dim: it is a fact ABOUT a repo, not a thing you can act on, and it reads
+  // as the detail line it used to be.
+  if (entry.kind === "pr-status") return theme.overlay;
   return entry.candidate && entry.row.dirty.dirty ? theme.yellow : theme.text;
 }
 
@@ -895,6 +950,10 @@ export function detailPhrases(
   opts: { dirtyOk: boolean; compact?: boolean },
 ): Phrase[] {
   if (entry.kind === "pr") return prDetailPhrases(entry, opts);
+  // Nothing on a second line, which is also how `rowVisualHeight` learns this
+  // row is one line tall — the same derivation every other row uses, rather
+  // than a height special-cased for it.
+  if (entry.kind === "pr-status") return [];
   const phrases: Phrase[] = [];
   const candidate = entry.candidate;
   const row = entry.row;
@@ -1045,6 +1104,24 @@ function prDetailPhrases(
   return phrases;
 }
 
+/**
+ * `text` with every run of whitespace flattened to one space.
+ *
+ * For strings that arrive from OUTSIDE and land in a `height={1}` box — a
+ * `gh` failure, above all. A newline is ZERO columns wide to
+ * `Bun.stringWidth`, so a two-line stderr (an unauthenticated `gh` prints
+ * exactly that) sails through every width guard and then loses everything
+ * after the break, with no ellipsis to say a word was dropped, because
+ * OpenTUI wraps and a wrapped line in a one-line box vanishes.
+ *
+ * Deliberately NOT inside `truncateText`, which has many callers with no such
+ * problem, and deliberately not done daemon-side in `ghProblem`: the CLI
+ * prints those same strings, where multi-line stderr is worth reading.
+ */
+export function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
 /** The separator between detail phrases, muted so the facts carry the line. */
 const PHRASE_SEPARATOR = " · ";
 
@@ -1138,6 +1215,11 @@ export function rowLabel(entry: PanelRow): string {
   // columns would put the only thing that identifies the PR to a human on the
   // dim line.
   if (entry.kind === "pr") return `#${entry.pr.number} ${entry.pr.title}`;
+  // No spinner here: `rowLabel` is pure and the render passes the live glyph
+  // to `primarySegments` instead. Nothing reads this arm today (the label
+  // column skips the row and `primarySegments` returns before it), so it
+  // exists to be honest rather than to be called.
+  if (entry.kind === "pr-status") return prStatusText(entry.status, "");
   return entry.row.isMain ? "main checkout" : entry.row.name;
 }
 
@@ -1158,7 +1240,7 @@ export function rowLabel(entry: PanelRow): string {
 export function rowBranch(entry: PanelRow): string {
   // A PR's head ref goes on the detail line instead. Its label is already the
   // full width of a title, so a second column beside it has nowhere to start.
-  if (entry.kind === "pr") return "";
+  if (entry.kind !== "worktree") return "";
   const row = entry.row;
   if (row.detached || !row.branch) return "detached";
   if (row.branch === rowLabel(entry)) return "";
@@ -1178,10 +1260,11 @@ export function rowBranch(entry: PanelRow): string {
 export function labelColumnWidth(rows: PanelRow[], max = 28): number {
   let width = 0;
   for (const entry of rows) {
-    // PR rows are deliberately not measured. Their label is a title, so a
-    // long one would push the branch column of every worktree in the panel to
-    // the cap — over a row that has no branch column of its own to align to.
-    if (entry.kind === "pr") continue;
+    // Only WORKTREE rows are measured. A PR row's label is a title and a
+    // status row's is a sentence; either would push the branch column of
+    // every worktree in the panel to the cap, over rows that have no branch
+    // column of their own to align to.
+    if (entry.kind !== "worktree") continue;
     width = Math.max(width, displayWidth(rowLabel(entry)));
   }
   return Math.min(width, max);
@@ -1217,6 +1300,22 @@ export function primarySegments(
     segments.push({ text: `${PR_MARKER} `, fg: theme.mauve });
     segments.push({
       text: rowLabel(entry),
+      fg: rowColor(entry, opts.isCursor),
+    });
+    return segments;
+  }
+  if (entry.kind === "pr-status") {
+    // NO marker glyph — the left-edge legend names things you can act on,
+    // and this is a sentence about the repo. The slot is still SPENT, so the
+    // text starts in exactly the column it did when this was drawn as a
+    // detail-shaped line rather than a row: `markerWidth(false)` here plus
+    // `ROW_GUTTER` outside is `detailGutter(false)`, unchanged.
+    segments.push({
+      text: " ".repeat(markerWidth(false)),
+      fg: theme.overlay,
+    });
+    segments.push({
+      text: prStatusText(entry.status, opts.statusIcon ?? ""),
       fg: rowColor(entry, opts.isCursor),
     });
     return segments;
@@ -1285,7 +1384,7 @@ export function primarySegments(
 export function splitRemovable(rows: PanelRow[]): {
   kept: WorktreePanelRow[];
   removable: WorktreePanelRow[];
-  prs: PRPanelRow[];
+  prs: (PRPanelRow | PRStatusRow)[];
 } {
   const worktrees = rows.filter(
     (entry): entry is WorktreePanelRow => entry.kind === "worktree",
@@ -1293,7 +1392,13 @@ export function splitRemovable(rows: PanelRow[]): {
   return {
     kept: worktrees.filter((entry) => !entry.candidate),
     removable: worktrees.filter((entry) => entry.candidate),
-    prs: rows.filter((entry): entry is PRPanelRow => entry.kind === "pr"),
+    // Both PR kinds, since the PR view renders them the same way: they are
+    // rows in one list, and a repo has either the open ones or the single
+    // line standing in for them. A third output would only give the render
+    // somewhere new to disagree with the layout.
+    prs: rows.filter(
+      (entry): entry is PRPanelRow | PRStatusRow => entry.kind !== "worktree",
+    ),
   };
 }
 
@@ -1324,35 +1429,33 @@ export function dividerText(count: number, width: number): string {
 }
 
 /**
- * What the PR view puts under a repo that has no rows to show.
+ * What a {@link PRStatusRow} says.
  *
- * Called ONLY where the repo contributed no PR rows, which is why `ready`
- * needs no count: it is zero by construction. Both halves of the panel derive
- * that condition the same way (`prs.length === 0`), so the line arithmetic
- * and the render cannot disagree about whether this line exists.
+ * `ready` needs no count because the row exists only where the repo produced
+ * no PR rows, so it is zero by construction — and that condition now lives in
+ * ONE place, `merged()`, rather than being re-derived by the render and the
+ * line arithmetic separately.
  *
- * The wait rides this line rather than blanking the section, for the reason
+ * The wait is said here rather than leaving the section blank, for the reason
  * the title's `scanning` suffix rides the title: an empty run of repo headers
  * reads as broken, and an answer that REPLACES text in place moves nothing.
- * The cause is stated here, under the repo it applies to, which is what a
- * single shared line cannot do. Reached only for a per-REPO failure: a
+ * The cause is said under the repo it applies to, which is what a single
+ * shared line cannot do; reached only for a per-REPO failure, since a
  * whole-request one has the same cause for every repo and takes the whole
- * view instead (`prWholeFailure`), rather than printing itself once per repo.
+ * view instead (`prWholeFailure`) rather than printing itself once per repo.
+ *
+ * No width and no truncation: this is a row's label now, and every row in the
+ * panel is fitted by `fitSegments` at render. Two places truncating one
+ * string is how they come to disagree. The reason is flattened to one line
+ * first — see {@link oneLine} for the newline that is zero columns wide.
  */
-export function prStatusText(
-  status: PRSectionStatus,
-  spinner: string,
-  width: number,
-): string {
-  const text =
-    status.kind === "pending"
-      ? `${spinner} checking GitHub`
-      : status.kind === "unavailable"
-        ? status.reason
-          ? `unavailable: ${status.reason}`
-          : "unavailable"
-        : "no open PRs";
-  return truncateText(text, Math.max(1, width));
+export function prStatusText(status: PRSectionStatus, spinner: string): string {
+  if (status.kind === "pending") {
+    return spinner ? `${spinner} checking GitHub` : "checking GitHub";
+  }
+  if (status.kind === "ready") return "no open PRs";
+  const reason = status.reason ? oneLine(status.reason) : "";
+  return reason ? `unavailable: ${reason}` : "unavailable";
 }
 
 /**
@@ -1585,8 +1688,8 @@ export type VisualLayout = Map<string, { line: number; height: number }>;
 
 /**
  * Lay the ACTIVE view out in visual lines: repo headers and the removable
- * divider each take one, a status line stands in for a repo with no PRs to
- * show, and a row takes whatever {@link rowVisualHeight} says.
+ * divider each take one, and a row takes whatever {@link rowVisualHeight}
+ * says.
  *
  * The divider is not a row and the cursor never lands on it, but it is a LINE,
  * and a scroll target computed without it puts every row below the divider one
@@ -1616,11 +1719,10 @@ export function visualLayout(
     if (headers) line += 1; // the repo header
     const { kept, removable, prs } = splitRemovable(repo.rows);
     if (view === "prs") {
-      // Either the rows or the ONE line that stands in for them
-      // ({@link prStatusText}), decided by the same test the render uses, so
-      // the arithmetic cannot drift from what is drawn.
-      if (prs.length > 0) prs.forEach(place);
-      else line += 1;
+      // No arm for "this repo has nothing": a repo with no open PRs carries a
+      // `pr-status` ROW instead, so there is no line here that is not also a
+      // row, and therefore nothing for the row list to disagree with.
+      prs.forEach(place);
       continue;
     }
     kept.forEach(place);
@@ -1745,6 +1847,9 @@ export function copyToClipboard(
  */
 export function rowPRUrl(entry: PanelRow): string | null {
   if (entry.kind === "pr") return entry.pr.url;
+  // A sentence about a repo has no PR of its own, so `o` says "no PR on this
+  // row" here, which is the same thing it says on a plain worktree.
+  if (entry.kind === "pr-status") return null;
   // One arm, not two: the merge in `merged()` already folds a candidate's PR
   // into `entry.pr` (`openPRs.get(path) ?? candidate?.pr ?? null`), so a
   // second `?? entry.candidate?.pr?.url` here was unreachable and read as if
@@ -1947,7 +2052,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           pr: openPRs.get(row.path) ?? candidate?.pr ?? null,
         };
       });
-      const prRows: PanelRow[] = (prsByRepo.get(repo.repoRoot) ?? []).map(
+      const openPRRows: PanelRow[] = (prsByRepo.get(repo.repoRoot) ?? []).map(
         (pr) => {
           const held = checkoutHolding(pr, repo.worktrees);
           return {
@@ -1968,15 +2073,32 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       // otherwise fine response. Either way the PR view says so under this
       // repo, with the cause.
       const prReason = pending ? null : prReasonFor(repo.repoRoot);
+      const prSection: PRSectionStatus = pending
+        ? { kind: "pending" }
+        : prReason !== null
+          ? { kind: "unavailable", reason: prReason }
+          : { kind: "ready", count: openPRRows.length };
+      // The ONE place that decides whether a repo has PR rows or the line
+      // that stands in for them. Not view-conditional: the view is a filter
+      // over one list, and the worktrees filter drops this row on its kind
+      // without knowing it exists. Everything downstream — the layout, the
+      // render, the cursor — then treats it as the ordinary row it is.
+      const prRows: PanelRow[] =
+        openPRRows.length > 0
+          ? openPRRows
+          : [
+              {
+                kind: "pr-status" as const,
+                key: prStatusRowKey(repo.repoRoot),
+                repoRoot: repo.repoRoot,
+                status: prSection,
+              },
+            ];
       return {
         repoRoot: repo.repoRoot,
         repoName: repo.repoName,
         rows: sortWorktreeRows([...worktrees, ...prRows]),
-        prSection: pending
-          ? { kind: "pending" as const }
-          : prReason !== null
-            ? { kind: "unavailable" as const, reason: prReason }
-            : { kind: "ready" as const, count: prRows.length },
+        prSection,
       };
     });
   });
@@ -2001,7 +2123,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    */
   const flatRows = createMemo(() =>
     allRows().filter((entry) =>
-      view() === "prs" ? entry.kind === "pr" : entry.kind === "worktree",
+      // The PR view takes everything that is NOT a worktree, which is both PR
+      // rows and the `pr-status` row standing in for a repo that has none.
+      // Spelled as the complement on purpose: the worktrees filter stays an
+      // exact kind, so a row kind added later lands in the PR view rather
+      // than in neither, which is how it became unreachable last time.
+      view() === "prs" ? entry.kind !== "worktree" : entry.kind === "worktree",
     ),
   );
 
@@ -2260,8 +2387,30 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    */
   const prTabSuffix = (): string => {
     if (prPending()) return ` · ${prIcon()}`;
-    if (prError() !== null) return " · unavailable";
-    return ` · ${allRows().filter((entry) => entry.kind === "pr").length}`;
+    const count = allRows().filter((entry) => entry.kind === "pr").length;
+    // Read off the SECTIONS the body is drawn from, not a second look at
+    // `errors`, so the tab and the lines under it can never tell different
+    // stories. Per-repo failures arrive as HTTP 200 with `repos: []`, so
+    // `prError()` is null and a fresh count is 0 — the tab asserted `· 0`
+    // while every line beneath it said the answer was unknown, and in the
+    // Worktrees view, which has no lines, the fabricated `0` was all you saw.
+    //
+    // A count of zero that ANY repo could not answer for is therefore not a
+    // count at all. This deliberately overstates the mixed case (one repo
+    // errored, twelve truthfully zero, and the tab still says `unavailable`):
+    // erring towards never asserting a number we cannot stand behind is the
+    // direction that cannot mislead.
+    //
+    // Known gap, left open on purpose: a repo that `GET /worktrees` reported
+    // but `GET /prs` mentions in NEITHER `repos` nor `errors` reads as
+    // ready-0 — "no open PRs" where the truth is "never asked". It is
+    // reachable, since the two are separate requests and the daemon derives
+    // its repo set per request, but closing it means changing what an absent
+    // repo means, which many tests currently bake in as the lenient reading.
+    if (count === 0 && merged().some((r) => r.prSection.kind === "unavailable")) {
+      return " · unavailable";
+    }
+    return ` · ${count}`;
   };
 
   const viewTabs = createMemo(() =>
@@ -2290,14 +2439,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   /**
    * Whether the active view has anything to draw.
    *
-   * Not the same question in both views. The PR view draws a line per repo
-   * even where there is not one open PR anywhere, so its emptiness is the
-   * REPO list's and not the row list's; asking `flatRows()` there would put
-   * "no worktrees found" over a panel that has plenty.
+   * One question for both views now. It used to need the REPO list in the PR
+   * view, because a repo with no open PRs drew a line that was not a row;
+   * that line is a `pr-status` row, so every repo contributes at least one
+   * row to either view and `flatRows()` answers for both.
    */
   const hasContent = () =>
     view() === "prs"
-      ? prWholeFailure() === null && merged().length > 0
+      ? prWholeFailure() === null && flatRows().length > 0
       : flatRows().length > 0;
 
   /** The line that stands in for the list, and the colour that says whether
@@ -2305,7 +2454,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const emptyState = (): RowSegment => {
     const failure = prWholeFailure();
     if (failure !== null) {
-      return { text: `Open PRs unavailable: ${failure}`, fg: theme.yellow };
+      // Flattened: a `gh` failure can be two lines, and a newline is zero
+      // columns wide, so it would pass the width guard and then take
+      // everything after it off the screen. See {@link oneLine}.
+      return {
+        text: `Open PRs unavailable: ${oneLine(failure)}`,
+        fg: theme.yellow,
+      };
     }
     return {
       text: view() === "prs" ? "No repos found." : "No worktrees found.",
@@ -2496,6 +2651,18 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         cursor: entry.key,
         ...origin,
       });
+      return;
+    }
+    if (entry.kind === "pr-status") {
+      // Enter has nothing to open. Say what the row is reporting rather than
+      // doing nothing, and where it is a failure name the key that retries.
+      flash(
+        entry.status.kind === "pending"
+          ? "still checking GitHub"
+          : entry.status.kind === "unavailable"
+            ? "open PRs unavailable here: r retries"
+            : "no open PRs here",
+      );
       return;
     }
     const session = entry.row.sessions[0];
@@ -2715,6 +2882,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           flash("d reviews a worktree; enter opens this PR");
           break;
         }
+        if (entry?.kind === "pr-status") {
+          flash("d reviews a worktree");
+          break;
+        }
         if (entry && props.onReview) {
           props.onReview({
             path: entry.row.path,
@@ -2780,6 +2951,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         // has no directory until one is cut from it.
         if (entry?.kind === "pr") {
           flash("no directory yet: enter cuts a worktree from this PR");
+          break;
+        }
+        if (entry?.kind === "pr-status") {
+          flash("nothing to copy on this line");
           break;
         }
         if (entry) copyPath(entry.row.path);
@@ -3039,7 +3214,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                       () =>
                         entry.kind === "worktree"
                           ? leadStatus(entry.row.sessions)
-                          : "idle",
+                          : // A waiting status row spins, which is what makes
+                            // the pending PR view look alive per repo rather
+                            // than thirteen static copies of one sentence.
+                            entry.kind === "pr-status" &&
+                              entry.status.kind === "pending"
+                            ? "working"
+                            : "idle",
                       () => null,
                       // Defaulted here because the two halves of the icon API
                       // disagree: `getStatusIcon` treats an unset style as
@@ -3187,36 +3368,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                           </box>
                         }
                       >
-                        {/* The repo's open pull requests, or the ONE line
-                            that stands in for them. `prs.length === 0` is the
-                            same test `visualLayout` makes, which is what
-                            keeps the scroll arithmetic and the render
-                            agreeing about whether that line exists. Shaped
-                            like a detail line — the rail, then the marker
-                            slot's indent — so a repo with nothing to report
-                            still reads as part of its group. */}
-                        <Show
-                          when={split().prs.length > 0}
-                          fallback={
-                            <box height={1} flexDirection="row">
-                              <text> </text>
-                              <text fg={theme.overlay}>{RAIL}</text>
-                              <text fg={theme.overlay}>
-                                {` ${" ".repeat(
-                                  markerWidth(false),
-                                )}${prStatusText(
-                                  repo.prSection,
-                                  prIcon(),
-                                  detailWidth(false),
-                                )}`}
-                              </text>
-                            </box>
-                          }
-                        >
-                          <For each={split().prs}>
-                            {(entry) => renderRow(entry)}
-                          </For>
-                        </Show>
+                        {/* The repo's open pull requests — or, where it has
+                            none, the single `pr-status` row standing in for
+                            them, which `merged()` put in the same list. One
+                            branch, because there is only one kind of thing
+                            here now. */}
+                        <For each={split().prs}>
+                          {(entry) => renderRow(entry)}
+                        </For>
                       </Show>
                     </box>
                   );
