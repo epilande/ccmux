@@ -7957,14 +7957,14 @@ describe("App worktrees panel (W)", () => {
       setup.mockInput.pressEnter();
       const dialog = await frame();
       expect(squish(dialog)).toContain(squish("New session in worktree"));
-      expect(dialog).not.toContain("Worktrees ·");
+      expect(dialog).not.toContain("Pull Requests");
 
       setup.mockInput.pressEscape();
       // A lone ESC needs the input parser disambiguation window before it
       // is delivered as a key at all.
       await new Promise((r) => setTimeout(r, 30));
       const shown = await frame();
-      expect(shown).toContain("Worktrees ·");
+      expect(shown).toContain("Pull Requests");
       expect(squish(shown)).not.toContain(squish("New session in worktree"));
       const lines = shown.split("\n");
       expect(lines.find((l) => l.includes("feature"))).toContain("┃");
@@ -8063,7 +8063,7 @@ describe("App worktrees panel (W)", () => {
       setup.mockInput.pressEscape();
       await new Promise((r) => setTimeout(r, 30));
       const shown = await frame();
-      expect(shown).not.toContain("Worktrees ·");
+      expect(shown).not.toContain("Pull Requests");
     } finally {
       restore();
     }
