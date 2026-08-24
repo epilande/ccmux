@@ -61,6 +61,7 @@ import {
   prStatusText,
   oneLine,
   prStatusRowKey,
+  prStatusRowRepo,
   viewTabSegments,
   initialView,
   PRS_TAB,
@@ -4151,6 +4152,132 @@ describe("WorktreesPanel PR view reachability", () => {
     keys.pressKey("l");
     keys.pressEnter();
     expect(await frame()).toContain("no open PRs here");
+  });
+});
+
+describe("WorktreesPanel PR view cursor under phase 3", () => {
+  /** N repos, each with only its main checkout. */
+  function repos(n: number): WorktreeListResponse {
+    return listOf(
+      Array.from({ length: n }, (_, i) =>
+        mainRow({
+          path: `/r${i}`,
+          repoRoot: `/r${i}`,
+          repoName: `repo-${i}`,
+          name: `repo-${i}`,
+        }),
+      ),
+    );
+  }
+
+  // A `pr-status` key does not go missing because its row was removed: it
+  // goes missing because that repo ANSWERED and its stand-in was replaced by
+  // real PR rows. Falling back to `rows[0]` yanked the cursor to the top of
+  // the list and dragged the viewport with it, away from the very rows the
+  // user had parked on waiting for.
+  it("keeps the cursor in the repo whose PRs just arrived", async () => {
+    let answer: ((r: Response) => void) | null = null;
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(repos(4)),
+        scan: async () => json(emptyScan),
+        prs: () => new Promise<Response>((resolve) => (answer = resolve)),
+      },
+      { height: 24 },
+    );
+    await frame();
+
+    // Park on the THIRD repo's stand-in row while GitHub is still thinking.
+    keys.pressKey("l");
+    keys.pressKey("j");
+    keys.pressKey("j");
+    const parked = await frame();
+    expect(parked).toContain("repo-2");
+
+    // That repo, and only that repo, answers.
+    answer!(
+      json({
+        repos: [{ repoRoot: "/r2", repoName: "repo-2", prs: [openPR()] }],
+        errors: [],
+      }),
+    );
+    const settled = await frame();
+
+    // The cursor is on the row that replaced the one it was parked on, not
+    // at the top of the list.
+    expect(lineWith(settled, "#151")).toContain(CURSOR_BAR);
+    expect(lineWith(settled, "no open PRs")).not.toContain(CURSOR_BAR);
+  });
+
+  // Bounded: a repo OTHER than the cursor's answering leaves the key intact,
+  // so the re-seed never runs at all.
+  it("does not move the cursor when a different repo answers", async () => {
+    let answer: ((r: Response) => void) | null = null;
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(repos(4)),
+        scan: async () => json(emptyScan),
+        prs: () => new Promise<Response>((resolve) => (answer = resolve)),
+      },
+      { height: 24 },
+    );
+    await frame();
+    keys.pressKey("l");
+    keys.pressKey("j");
+    await frame();
+
+    answer!(
+      json({
+        repos: [{ repoRoot: "/r3", repoName: "repo-3", prs: [openPR()] }],
+        errors: [],
+      }),
+    );
+    const settled = await frame();
+    // Still on repo-1's stand-in, which never changed.
+    const line = settled
+      .split("\n")
+      .findIndex((l) => l.includes(CURSOR_BAR));
+    expect(settled.split("\n")[line - 1]).toContain("repo-1");
+  });
+
+  // The whole-request failure replaces the list with one banner line, so
+  // there is nothing on screen for a cursor to be on. The row list used to
+  // hold a stand-in per repo anyway: the cursor seeded onto one and `j`
+  // walked it invisibly. Nothing destructive is reachable there, but it is
+  // exactly the shape this panel is built to avoid.
+  it("holds no cursor at all behind the whole-request banner", async () => {
+    const { keys, frame } = await mountPanel({
+      list: async () => json(repos(4)),
+      scan: async () => json(emptyScan),
+      prs: async () => {
+        throw new Error("gh is logged out");
+      },
+    });
+    keys.pressKey("l");
+    const shown = await frame();
+    expect(shown).toContain("Open PRs unavailable: gh is logged out");
+    // Nothing is DRAWN either way here, since the banner replaces the list.
+    // What the gate changes is whether a cursor exists behind it, and the
+    // way to see that is to press a key that reports on the row it is on:
+    // `y` answered "nothing to copy on this line" for a line that was not
+    // on any line. With no cursor there is no row and no flash at all.
+    keys.pressKey("j");
+    keys.pressKey("j");
+    keys.pressKey("y");
+    const walked = await frame();
+    expect(walked).not.toContain("nothing to copy on this line");
+    expect(walked).toContain("Open PRs unavailable: gh is logged out");
+    expect(walked).not.toContain(CURSOR_BAR);
+
+    // The worktrees view is untouched by the gate.
+    keys.pressKey("h");
+    expect(await frame()).toContain(CURSOR_BAR);
+  });
+
+  it("maps a stand-in key back to the repo that owns it", () => {
+    expect(prStatusRowRepo(prStatusRowKey("/r2"))).toBe("/r2");
+    expect(prStatusRowRepo(prRowKey("/r2", 151))).toBeNull();
+    expect(prStatusRowRepo("/repo/wt/alpha")).toBeNull();
   });
 });
 

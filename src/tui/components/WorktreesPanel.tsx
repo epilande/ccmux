@@ -206,6 +206,20 @@ export function prStatusRowKey(repoRoot: string): string {
 }
 
 /**
+ * The repo a {@link prStatusRowKey} names, or null for any other key.
+ *
+ * The inverse exists because a `pr-status` row is the one row kind that is
+ * REPLACED rather than removed: the moment its repo gains a PR the key is
+ * gone, and the cursor sitting on it is about to be re-seeded. Knowing which
+ * repo it named is what lets the re-seed land on that repo's new rows instead
+ * of at the top of the list.
+ */
+export function prStatusRowRepo(key: string): string | null {
+  const prefix = "pr-status:";
+  return key.startsWith(prefix) ? key.slice(prefix.length) : null;
+}
+
+/**
  * The panel's two views (issue #151).
  *
  * A second AXIS, orthogonal to the Tab scope: all four combinations are
@@ -2154,6 +2168,31 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   });
 
   /**
+   * What the PR view says INSTEAD of a list when phase 3 failed wholesale.
+   *
+   * One line, and no repo groups at all. The per-repo line is right for a
+   * per-repo failure — with thirteen repos, "which one" is the only question
+   * a shared line cannot answer — but a whole-request failure has ONE cause
+   * for every repo, and saying it under each of them filled the entire
+   * viewport with thirteen copies of the same sentence. That is not an edge
+   * case either: it is the FIRST-RUN state for every existing user, whose
+   * daemon predates `/prs` until they restart it.
+   *
+   * The groups go with it rather than standing over the line as bare
+   * headers. In this view a repo name whose PRs are entirely unknown carries
+   * no information, and thirteen empty headers is the same noise wearing a
+   * different shape.
+   *
+   * Declared ABOVE `flatRows`, which is a `createMemo` and therefore runs on
+   * creation and reads this. Below it, that is a temporal-dead-zone crash at
+   * mount, which is the same trap `prReasonFor` is placed above `merged` to
+   * avoid — and which the tests caught the moment `flatRows` started gating
+   * on it.
+   */
+  const prWholeFailure = (): string | null =>
+    view() === "prs" ? prError() : null;
+
+  /**
    * Every row of every repo, both kinds, in display order.
    *
    * The panel-WIDE measurements read this rather than the active view's list,
@@ -2171,16 +2210,26 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * screen. The rows themselves are unchanged and unsorted here: the view is a
    * filter over one list, not two lists.
    */
-  const flatRows = createMemo(() =>
-    allRows().filter((entry) =>
-      // The PR view takes everything that is NOT a worktree, which is both PR
-      // rows and the `pr-status` row standing in for a repo that has none.
-      // Spelled as the complement on purpose: the worktrees filter stays an
-      // exact kind, so a row kind added later lands in the PR view rather
-      // than in neither, which is how it became unreachable last time.
-      view() === "prs" ? entry.kind !== "worktree" : entry.kind === "worktree",
-    ),
-  );
+  const flatRows = createMemo(() => {
+    if (view() !== "prs") {
+      return allRows().filter((entry) => entry.kind === "worktree");
+    }
+    // A whole-request failure replaces the whole list with one banner line
+    // (`hasContent` / `emptyState`), so there is nothing on screen for a
+    // cursor to be on. Without this the row list still held a `pr-status`
+    // row per repo: the cursor seeded onto one and `j` walked it invisibly,
+    // which is the "a key acting on a row the user cannot see" shape this
+    // panel is built to avoid, even where every one of those keys only
+    // flashes. The gate is the same accessor the render uses, so the two
+    // cannot disagree about whether the list exists.
+    if (prWholeFailure() !== null) return [];
+    // Everything that is NOT a worktree: PR rows, and the `pr-status` row
+    // standing in for a repo that has none. Spelled as the complement on
+    // purpose — the worktrees filter stays an exact kind, so a row kind added
+    // later lands in the PR view rather than in neither, which is how these
+    // rows became unreachable in the first place.
+    return allRows().filter((entry) => entry.kind !== "worktree");
+  });
 
   /** One label column for the whole panel, so the branches form a single
    *  straight line across repo groups instead of re-aligning per group. */
@@ -2273,7 +2322,28 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     ) {
       return;
     }
-    if (first && !live) setCursorPath(first.key);
+    if (live || !first) return;
+    // A `pr-status` key does not go missing because its row was removed — it
+    // goes missing because that repo ANSWERED and its stand-in was replaced
+    // by real PR rows. Falling back to `rows[0]` there yanks the cursor to
+    // the top of the list and drags the viewport with it, away from the rows
+    // the user was parked on waiting for. So re-seed within the same repo
+    // when it still has rows, and only then fall back.
+    //
+    // Bounded on purpose: this fires only when the CURSOR's repo answers. A
+    // reload that returns the same answer keeps the key and never reaches
+    // here, and another repo gaining PRs does not touch this key either.
+    const repoRoot = prStatusRowRepo(path ?? "");
+    if (repoRoot !== null) {
+      const sameRepo = rows.find(
+        (r) => r.kind !== "worktree" && r.repoRoot === repoRoot,
+      );
+      if (sameRepo) {
+        setCursorPath(sameRepo.key);
+        return;
+      }
+    }
+    setCursorPath(first.key);
   });
 
   /**
@@ -2445,11 +2515,17 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     // while every line beneath it said the answer was unknown, and in the
     // Worktrees view, which has no lines, the fabricated `0` was all you saw.
     //
-    // A count of zero that ANY repo could not answer for is therefore not a
-    // count at all. This deliberately overstates the mixed case (one repo
-    // errored, twelve truthfully zero, and the tab still says `unavailable`):
-    // erring towards never asserting a number we cannot stand behind is the
-    // direction that cannot mislead.
+    // The gate is ZERO-ONLY, and the comment has to say so rather than claim
+    // a principle the code does not apply. A count of zero that ANY repo
+    // could not answer for is not a count at all, so it reads `unavailable`
+    // — which deliberately overstates the mixed case (one repo errored,
+    // twelve truthfully zero). A NON-zero count is shown as-is even when a
+    // repo failed: `· 1` alongside an unavailable repo is a lower bound
+    // presented as a total, and that is a known overstatement in the other
+    // direction, accepted because the alternative is hiding every count the
+    // moment any repo is unreachable. Do not read "never assert a number we
+    // cannot stand behind" as the rule in force here; it is the direction
+    // the zero case leans, not a property of the whole derivation.
     //
     // Known gap, left open on purpose: a repo that `GET /worktrees` reported
     // but `GET /prs` mentions in NEITHER `repos` nor `errors` reads as
@@ -2466,25 +2542,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const viewTabs = createMemo(() =>
     viewTabSegments(view(), prTabSuffix(), contentWidth()),
   );
-
-  /**
-   * What the PR view says INSTEAD of a list when phase 3 failed wholesale.
-   *
-   * One line, and no repo groups at all. The per-repo line is right for a
-   * per-repo failure — with thirteen repos, "which one" is the only question
-   * a shared line cannot answer — but a whole-request failure has ONE cause
-   * for every repo, and saying it under each of them filled the entire
-   * viewport with thirteen copies of the same sentence. That is not an edge
-   * case either: it is the FIRST-RUN state for every existing user, whose
-   * daemon predates `/prs` until they restart it.
-   *
-   * The groups go with it rather than standing over the line as bare
-   * headers. In this view a repo name whose PRs are entirely unknown carries
-   * no information, and thirteen empty headers is the same noise wearing a
-   * different shape.
-   */
-  const prWholeFailure = (): string | null =>
-    view() === "prs" ? prError() : null;
 
   /**
    * Whether the active view has anything to draw.
