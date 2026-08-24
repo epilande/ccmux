@@ -3935,10 +3935,8 @@ describe("WorktreesPanel PR view", () => {
     expect(await frame()).toContain("checked out in pr-151");
   });
 
-  // On switch the cursor reseeds to the view's FIRST row, because the key it
-  // held names a row this view does not have. Deliberately not remembered per
-  // view: one rule, and the row it lands on is always on screen.
-  it("reseeds the cursor onto the new view's first row", async () => {
+  // A FIRST visit to a view has nothing remembered, so it seeds on row 1.
+  it("seeds the cursor on the new view's first row on a first visit", async () => {
     const { keys, frame } = await mountSettled(
       listOf([mainRow(), row()]),
       emptyScan,
@@ -3952,9 +3950,59 @@ describe("WorktreesPanel PR view", () => {
 
     keys.pressKey("j");
     expect(lineWith(await frame(), "#150")).toContain(CURSOR_BAR);
+  });
 
+  // And a RETURN restores what the view was left on, both ways.
+  it("remembers each view's cursor across a round trip", async () => {
+    const { keys, frame } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      prsOf([openPR(), openPR({ number: 150 })]),
+    );
+    // Leave the worktrees view on its SECOND row.
+    keys.pressKey("j");
+    expect(lineWith(await frame(), "alpha")).toContain(CURSOR_BAR);
+
+    keys.pressKey("l");
+    keys.pressKey("j");
+    expect(lineWith(await frame(), "#150")).toContain(CURSOR_BAR);
+
+    // Back, and not to row 1.
     keys.pressKey("h");
-    expect(lineWith(await frame(), "main checkout")).toContain(CURSOR_BAR);
+    expect(lineWith(await frame(), "alpha")).toContain(CURSOR_BAR);
+    expect(lineWith(await frame(), "main checkout")).not.toContain(CURSOR_BAR);
+
+    // Forward, and not to row 1 either.
+    keys.pressKey("l");
+    expect(lineWith(await frame(), "#150")).toContain(CURSOR_BAR);
+  });
+
+  // The memory is a PREFERENCE, not an assignment. The PR view's keys change
+  // under it — a `pr-status` row vanishes the moment its repo gains a PR, and
+  // a PR that merges between visits takes its row with it — so a remembered
+  // key that is no longer there falls back to the ordinary re-seed.
+  it("falls back to the first row when the remembered row is gone", async () => {
+    let answer: ((r: Response) => void) | null = null;
+    const { keys, frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => json(emptyScan),
+      prs: () => new Promise<Response>((resolve) => (answer = resolve)),
+    });
+    await frame();
+
+    // While pending the PR view is a list of stand-in rows; leave it on one.
+    keys.pressKey("l");
+    expect(lineWith(await frame(), "checking GitHub")).toContain(CURSOR_BAR);
+    keys.pressKey("h");
+    await frame();
+
+    // Phase 3 lands and that stand-in row is REPLACED by a real PR row, so
+    // the remembered key names nothing.
+    answer!(json(prsOf([openPR()])));
+    await frame();
+    keys.pressKey("l");
+    expect(lineWith(await frame(), "#151")).toContain(CURSOR_BAR);
   });
 
   // j/k walk the ACTIVE view's rows and nothing else. A consumer left on the

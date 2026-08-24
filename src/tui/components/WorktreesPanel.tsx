@@ -1984,6 +1984,47 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const [view, setView] = createSignal<PanelView>(
     initialView(props.initialCursor),
   );
+  /**
+   * The row each view was last left on, so `h` restores what `l` left rather
+   * than dropping the cursor on row 1 both ways.
+   *
+   * A plain object and not a signal: nothing RENDERS from it. It is read once
+   * inside `switchView` and written once on the way out, so making it
+   * reactive would only add a dependency for effects to chase.
+   *
+   * Remembered keys go STALE by design, and that is the whole reason the
+   * restore is a preference rather than an assignment. The PR view's keys
+   * change under it: a repo with no open PRs carries a synthetic
+   * `pr-status:<repoRoot>` row that VANISHES the moment that repo gains a PR,
+   * and a PR that merges between two visits takes its row with it. So a
+   * remembered key that is not in the view's CURRENT rows is discarded and
+   * the ordinary re-seed takes over.
+   */
+  const lastCursorByView: Record<PanelView, string | null> = {
+    worktrees: null,
+    prs: null,
+  };
+
+  /**
+   * Move to `next`, remembering where this view was and restoring where that
+   * one was.
+   *
+   * Both halves go through here rather than through `setView` at the two key
+   * sites: remembering on the way out and restoring on the way in are one
+   * transaction, and splitting them is how one of them comes to be forgotten.
+   */
+  function switchView(next: PanelView): void {
+    if (next === view()) return;
+    lastCursorByView[view()] = cursorPath();
+    const remembered = lastCursorByView[next];
+    setView(next);
+    // Only if it is still there. `flatRows()` is read AFTER `setView`, so it
+    // is already the new view's list; a key that has gone falls through to
+    // the re-seed effect, which puts the cursor on the first row.
+    if (remembered !== null && flatRows().some((r) => r.key === remembered)) {
+      setCursorPath(remembered);
+    }
+  }
   const [note, setNote] = createSignal<string | null>(null);
   /** A fully successful removal's title-line notice; the next load wipes it. */
   const [titleNotice, setTitleNotice] = createSignal<string | null>(null);
@@ -2833,11 +2874,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       // precedent (`d` reviews a branch here and a working tree there).
       case "h":
       case "left":
-        setView("worktrees");
+        switchView("worktrees");
         break;
       case "l":
       case "right":
-        setView("prs");
+        switchView("prs");
         break;
       case "j":
       case "down":
