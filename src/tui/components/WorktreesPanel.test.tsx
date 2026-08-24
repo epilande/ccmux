@@ -60,7 +60,6 @@ import {
   openInBrowser,
   prStatusText,
   viewTabSegments,
-  tabKey,
   initialView,
   PRS_TAB,
   PRS_TAB_SHORT,
@@ -3515,24 +3514,24 @@ describe("view tabs", () => {
   it("brightens the active view and dims the other", () => {
     const worktrees = viewTabSegments("worktrees", " · 7", 60);
     expect(worktrees[0]).toEqual({ text: WORKTREES_TAB, fg: theme.text });
-    expect(worktrees[3]).toEqual({ text: PRS_TAB, fg: theme.overlay });
+    expect(worktrees[2]).toEqual({ text: PRS_TAB, fg: theme.overlay });
     const prs = viewTabSegments("prs", " · 7", 60);
-    expect(prs[1]).toEqual({ text: WORKTREES_TAB, fg: theme.overlay });
-    expect(prs[3]).toEqual({ text: PRS_TAB, fg: theme.text });
+    expect(prs[0]).toEqual({ text: WORKTREES_TAB, fg: theme.overlay });
+    expect(prs[2]).toEqual({ text: PRS_TAB, fg: theme.text });
   });
 
-  // The key sits on the thing it takes you TO. The active tab wears none,
-  // because there is nowhere to go — which is also what makes one key cost
-  // four columns where two would cost eight.
-  it("puts the key on the inactive tab only", () => {
+  // No key badge, in either view. A `[l]` on the inactive tab was tried and
+  // rejected: keyboard notation inside a label reads as documentation leaking
+  // into the interface. The keys are taught on the hint line instead.
+  it("carries labels and a count, never a key", () => {
     expect(tabText("worktrees", " · 7", 60)).toBe(
-      "Worktrees │ [l] Pull Requests · 7",
+      "Worktrees │ Pull Requests · 7",
     );
-    expect(tabText("prs", " · 7", 60)).toBe(
-      "[h] Worktrees │ Pull Requests · 7",
-    );
-    expect(tabKey("worktrees")).toBe("l");
-    expect(tabKey("prs")).toBe("h");
+    expect(tabText("prs", " · 7", 60)).toBe("Worktrees │ Pull Requests · 7");
+    for (const width of [60, 34, 22, 12]) {
+      expect(tabText("worktrees", " · 7", width)).not.toContain("[");
+      expect(tabText("prs", " · 7", width)).not.toContain("[");
+    }
   });
 
   // The pending state rides the LABEL, the same answer-replaces-text-in-place
@@ -3540,46 +3539,40 @@ describe("view tabs", () => {
   // it back when GitHub answers.
   it("carries the pending spinner in place of the count", () => {
     expect(tabText("worktrees", " · ◓", 60)).toBe(
-      "Worktrees │ [l] Pull Requests · ◓",
+      "Worktrees │ Pull Requests · ◓",
     );
   });
 
   // A ladder of WHOLE swaps, like `titleSegments`'s suffix: a `Pull Request…`
   // cut mid-word would spend the columns that carry everything after it.
   it("degrades one whole rung at a time", () => {
-    expect(tabText("worktrees", " · 7", 33)).toBe(
-      "Worktrees │ [l] Pull Requests · 7",
+    expect(tabText("worktrees", " · 7", 29)).toBe(
+      "Worktrees │ Pull Requests · 7",
     );
-    expect(tabText("worktrees", " · 7", 32)).toBe("Worktrees │ [l] PRs · 7");
-    expect(tabText("worktrees", " · 7", 32)).toContain(PRS_TAB_SHORT);
-    expect(tabText("worktrees", " · 7", 22)).toBe("Worktrees │ [l] PRs");
-    expect(tabText("worktrees", " · 7", 18)).toBe("[l] PRs");
-    expect(tabText("prs", " · 7", 18)).toBe("[h] Worktrees");
+    expect(tabText("worktrees", " · 7", 28)).toBe("Worktrees │ PRs · 7");
+    expect(tabText("worktrees", " · 7", 28)).toContain(PRS_TAB_SHORT);
+    expect(tabText("worktrees", " · 7", 18)).toBe("Worktrees │ PRs");
   });
 
-  // The requirement the width sweep produced: whatever else goes, the KEY
-  // survives, because nothing else on screen carries it. Every rung below is
-  // narrower than any width the panel is usable at.
-  it("keeps the key at every width down to the sidebar and below", () => {
-    for (const width of [30, 26, 20, 12, 8]) {
-      expect(tabText("worktrees", " · unavailable", width)).toContain("[l]");
-      expect(tabText("prs", " · unavailable", width)).toContain("[h]");
-    }
+  // The sidebar's own width, which is the ladder's whole reason for existing.
+  it("keeps both labels and the count at sidebar width", () => {
+    expect(tabText("worktrees", " · 7", 30)).toBe(
+      "Worktrees │ Pull Requests · 7",
+    );
+    expect(tabText("worktrees", " · unavailable", 30)).toBe(
+      "Worktrees │ PRs · unavailable",
+    );
   });
 
-  // The sidebar's own width, which is the one the ladder exists for.
-  it("keeps the key and the count at sidebar width", () => {
-    expect(tabText("worktrees", " · 7", 30)).toBe("Worktrees │ [l] PRs · 7");
-  });
-
-  it("fits the last rung rather than overrunning its box", () => {
-    for (const width of [12, 8, 4]) {
-      const used = viewTabSegments("prs", " · 7", width).reduce(
-        (n, s) => n + displayWidth(s.text),
-        0,
-      );
+  // Below the last rung it is fitted, which cuts from the END and so keeps
+  // the ACTIVE tab — the half that says where you are.
+  it("fits rather than overrunning its box, keeping the active tab", () => {
+    for (const width of [14, 12, 8, 4]) {
+      const fitted = viewTabSegments("prs", " · 7", width);
+      const used = fitted.reduce((n, s) => n + displayWidth(s.text), 0);
       expect(used).toBeLessThanOrEqual(width);
     }
+    expect(tabText("worktrees", " · 7", 12)).toStartWith("Worktrees");
   });
 });
 
@@ -4003,32 +3996,49 @@ describe("WorktreesPanel PR view safety gate", () => {
     expect(shown).not.toContain("x remove 1");
   });
 
-  // A width sweep is what settled this. On the hint line the key survived to
-  // 90 columns and was gone at 80 — the commonest default width — so it moved
-  // to the tab line, which always renders. The footer is back to exactly the
-  // hints it had before the views existed.
-  it("teaches the view key on the tab line at 80 columns", async () => {
-    const { list, scan } = removable();
-    const { settled } = await mountSettled(list, scan, {
-      repo: "/repo",
-      width: 80,
-      onReview: () => {},
-    });
-    expect(settled).toContain("[l] Pull Requests");
-    // And nowhere else: one teaching location, not two.
-    expect(settled).not.toContain("l PRs");
-    expect(settled).not.toContain("l pull requests");
-  });
-
-  it("teaches it on the tab line at 90 columns too", async () => {
+  // The keys are taught on the hint line, never on the tab line. The `[l]`
+  // badge that briefly lived there was rejected in live use.
+  it("teaches the view key in the footer, and never on the tab", async () => {
     const { list, scan } = removable();
     const { settled } = await mountSettled(list, scan, {
       repo: "/repo",
       width: 90,
       onReview: () => {},
     });
-    expect(settled).toContain("[l] Pull Requests");
-    expect(settled).not.toContain("l PRs");
+    expect(settled).toContain("l PRs");
+    expect(settled).toContain("Worktrees │ Pull Requests");
+    expect(settled).not.toContain("[l]");
+  });
+
+  // The accepted cost, asserted so it cannot regress silently in either
+  // direction. What decides it at 80 columns is the CURSOR, not the width
+  // alone: the removal keys are advertised only under the removable divider,
+  // so the line is at its fullest there and the view hint is what gives way.
+  // Deliberate — nothing that ACTS is displaced to keep it.
+  it("keeps the view hint at 80 columns on an ordinary row", async () => {
+    const { list, scan } = removable();
+    const { settled } = await mountSettled(list, scan, {
+      repo: "/repo",
+      width: 80,
+      onReview: () => {},
+    });
+    expect(settled).toContain("l PRs");
+  });
+
+  it("gives the view hint up before an acting key on a removable row", async () => {
+    const { list, scan } = removable();
+    const { keys, frame } = await mountSettled(list, scan, {
+      repo: "/repo",
+      width: 80,
+      onReview: () => {},
+    });
+    keys.pressKey("j");
+    const shown = await frame();
+    expect(shown).not.toContain("l PRs");
+    expect(shown).toContain("x remove");
+    expect(shown).toContain("space select");
+    expect(shown).toContain("enter open");
+    expect(shown).toContain("q close");
   });
 
   // The footer teaches the keys that are live, and only those.
@@ -4043,9 +4053,9 @@ describe("WorktreesPanel PR view safety gate", () => {
     keys.pressKey("l");
     const shown = await frame();
     expect(shown).toContain("enter checkout");
-    // The way back rides the inactive tab, not this line.
-    expect(shown).toContain("[h] Worktrees");
-    expect(shown).not.toContain("h worktrees");
+    // This view's line is short enough to carry the way back at a rank that
+    // survives the narrow widths.
+    expect(shown).toContain("h worktrees");
     expect(shown).not.toContain("space select");
     expect(shown).not.toContain("x remove");
     expect(shown).not.toContain("y copy");
