@@ -628,6 +628,23 @@ export function App(props: AppProps) {
     existingWorktree: string | null;
     panelRepo: string | null;
     panelScope: string | null;
+    /**
+     * The row's own KEY, where it is not simply the worktree's path.
+     *
+     * Sent by the Worktrees panel's Enter on a PR that IS checked out here:
+     * that row routes through this verb because the destination is the
+     * worktree holding it, but the row the user was standing on is the PR,
+     * and `initialView` reads the cursor to decide which view to reopen in.
+     * Without it a cancelled dialog returned to the WORKTREES view while the
+     * adjacent not-checked-out row returned correctly.
+     *
+     * The cursor and the view stay ONE decision, which is why this is a
+     * cursor and not a view flag: sending the view explicitly while the
+     * cursor stayed a path would reopen the PR view on a key its list cannot
+     * contain, and the re-seed would drop the cursor on the first row —
+     * trading a wrong view for a wrong row.
+     */
+    cursor?: string;
   }) {
     store.actions.hideWorktrees();
     const worktree = target.existingWorktree;
@@ -648,7 +665,7 @@ export function App(props: AppProps) {
       returnToWorktrees: {
         repo: target.panelRepo,
         scope: target.panelScope,
-        cursor: worktree ?? target.cwd,
+        cursor: target.cursor ?? worktree ?? target.cwd,
       },
     });
   }

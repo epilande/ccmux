@@ -7375,7 +7375,7 @@ describe("App worktrees panel (W)", () => {
    * Route the panel's two reads (and App's own onMount fetches) without
    * touching whatever `fetch` a neighbouring test installed.
    */
-  function mockWorktreeFetch(rows: unknown[]) {
+  function mockWorktreeFetch(rows: unknown[], prs: unknown[] = []) {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = ((input: string | URL | Request) => {
       const url =
@@ -7390,7 +7390,14 @@ describe("App worktrees panel (W)", () => {
                 { repoRoot: "/code/myapp", repoName: "myapp", worktrees: rows },
               ],
             }
-          : {};
+          : url.includes("/prs")
+            ? {
+                repos: [
+                  { repoRoot: "/code/myapp", repoName: "myapp", prs },
+                ],
+                errors: [],
+              }
+            : {};
       return Promise.resolve(
         new Response(JSON.stringify(body), {
           headers: { "Content-Type": "application/json" },
@@ -7411,8 +7418,9 @@ describe("App worktrees panel (W)", () => {
     rows: unknown[],
     sessionOverrides: Record<string, unknown> = {},
     extraSessions: Record<string, unknown>[] = [],
+    prs: unknown[] = [],
   ) {
-    const restore = mockWorktreeFetch(rows);
+    const restore = mockWorktreeFetch(rows, prs);
     // App hard-codes `effects={liveEffects}`, which is right for production
     // and means an App-level test reaches the REAL `open` and `pbcopy`: the
     // panel's required-prop guarantee stops at its own mount site, and this
@@ -7466,6 +7474,64 @@ describe("App worktrees panel (W)", () => {
       },
     };
   }
+
+  // The App half of the checked-out-PR return cursor. Enter on a PR whose
+  // head IS checked out here routes through `spawnInWorktree`, because the
+  // destination is the worktree holding it — but the ROW is the PR, and
+  // `initialView` reads the return cursor to pick the view. While that
+  // branch sent the worktree's PATH, cancelling the dialog came back to the
+  // Worktrees view, where the adjacent not-checked-out row came back right.
+  it("returns to the PR view after cancelling out of a checked-out PR", async () => {
+    const held = {
+      ...WORKTREE_ROW,
+      path: "/code/myapp/wt/pr",
+      name: "pr-7",
+      branch: "feat/seven",
+      tip: "sha-7",
+    };
+    const { restore, frame } = await openPanel(
+      [held],
+      // The session lives in the MAIN checkout, so the revalidating jump
+      // does not fire and the dialog is what opens.
+      { cwd: "/code/myapp" },
+      [],
+      [
+        {
+          number: 7,
+          title: "seven",
+          url: "https://github.com/o/r/pull/7",
+          author: "epilande",
+          isDraft: false,
+          reviewDecision: null,
+          ciStatus: null,
+          headRefName: "feat/seven",
+          headRefOid: "sha-7",
+        },
+      ],
+    );
+    try {
+      setup.mockInput.pressKey("l");
+      const prs = await frame();
+      expect(prs).toContain("#7 seven");
+      expect(prs).toContain("checked out in pr-7");
+
+      setup.mockInput.pressEnter();
+      expect(await frame()).toContain("New session in worktree");
+
+      setup.mockInput.pressEscape();
+      // A bare ESC byte is the prefix of every escape sequence, so the key
+      // parser holds it briefly before deciding it stands alone.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const back = await frame();
+
+      // The PR VIEW, on the PR row — not the Worktrees view on the path.
+      expect(back).toContain("#7 seven");
+      expect(back).toContain("checked out in pr-7");
+      expect(back).not.toContain("main checkout");
+    } finally {
+      restore();
+    }
+  });
 
   /**
    * The other side of `381680b`. The panel's `effects` prop is required, so a

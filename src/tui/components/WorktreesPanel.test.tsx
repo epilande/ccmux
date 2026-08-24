@@ -3974,6 +3974,19 @@ describe("WorktreesPanel PR view", () => {
   });
 });
 
+describe("PR row return cursor", () => {
+  // `initialView` is the single authority on which view an open lands in, so
+  // the fix is to feed it the right KEY rather than to send a view alongside
+  // it. A view sent explicitly with the cursor still a path would reopen the
+  // PR view on a key its list cannot hold, and the re-seed would drop the
+  // cursor on row 1 — a wrong row instead of a wrong view.
+  it("derives the PR view from the key a checked-out PR row sends", () => {
+    expect(initialView(prRowKey("/repo", 151))).toBe("prs");
+    // What the branch used to send, and why it came back to the wrong view.
+    expect(initialView("/repo/wt/pr")).toBe("worktrees");
+  });
+});
+
 describe("WorktreesPanel PR view reachability", () => {
   /** N repos, each with only its main checkout and no open PRs. */
   function prLessRepos(n: number): WorktreeListResponse {
@@ -4459,6 +4472,11 @@ describe("PR row keys", () => {
     expect(spawns[0]).toMatchObject({
       cwd: "/repo/wt/pr",
       existingWorktree: "/repo/wt/pr",
+      // The ROW's key, not the destination path: a cancelled dialog reopens
+      // through `initialView`, which reads the cursor, so a path here sent
+      // the user back to the Worktrees view while the adjacent
+      // not-checked-out row returned correctly.
+      cursor: prRowKey("/repo", 151),
     });
   });
 

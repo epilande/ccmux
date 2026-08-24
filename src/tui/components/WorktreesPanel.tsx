@@ -329,6 +329,15 @@ interface WorktreesPanelProps {
     existingWorktree: string | null;
     panelRepo: string | null;
     panelScope: string | null;
+    /**
+     * The row's KEY, when it is not the worktree path App would infer.
+     *
+     * Only a checked-out PR row sends it: that row's destination is the
+     * worktree holding the PR, so it takes this verb, but the row itself is
+     * the PR, and the return cursor is what `initialView` reads to decide
+     * which view to reopen in.
+     */
+    cursor?: string;
   }) => void;
   /**
    * Review a worktree's uncommitted diff. Absent where review cannot run
@@ -2640,6 +2649,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         props.onSpawn({
           cwd: entry.checkedOutPath,
           existingWorktree: entry.checkedOutPath,
+          // The PR row's own key, not the worktree's path. The destination
+          // is the worktree; the ROW is this PR, and a cancelled dialog has
+          // to come back to it — in the PR view, which `initialView` derives
+          // from exactly this cursor.
+          cursor: entry.key,
           ...origin,
         });
         return;
