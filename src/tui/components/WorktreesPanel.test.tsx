@@ -4134,6 +4134,68 @@ describe("view tabs on screen", () => {
     expect(lineWith(await frame(), WORKTREES_TAB)).toBe(before);
   });
 
+  // A click is a second way into `switchView`, so it has to refuse wherever
+  // the keys refuse. It did not: with `Remove worktrees?` up, the keyboard
+  // ignores `l` (the confirm handler returns before the view keys), but a
+  // click switched the list behind the dialog — and `y` then prunes a
+  // selection that is no longer on screen, which is precisely what gating
+  // the removal keys on the VIEW exists to prevent. Asserted as PARITY
+  // rather than as two separate facts, so the two paths cannot drift again.
+  it("refuses a tab click wherever the tab keys are refused", async () => {
+    const { keys, frame, mouse, settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      { candidates: [candidate()], skipped: [] },
+      {},
+      prsOf([openPR({ title: "a pull request" })]),
+    );
+    const at = cellOf(settled, PRS_TAB);
+    keys.pressKey("j");
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    const confirming = await frame();
+    expect(confirming).toContain("Remove worktrees?");
+
+    keys.pressKey("l");
+    const afterKey = await frame();
+    await mouse.click(at.x, at.y);
+    const afterClick = await frame();
+
+    // Neither reaches the PR view, and the confirm is still the thing on
+    // screen. Compared to each other as well as to the truth, because a
+    // guard that stopped BOTH by accident (say, by unmounting the chips)
+    // would satisfy the first two assertions alone.
+    expect(afterKey).not.toContain("#151");
+    expect(afterClick).not.toContain("#151");
+    expect(afterClick).toContain("Remove worktrees?");
+    expect(afterClick).toBe(afterKey);
+  });
+
+  // The guard is exactly the confirm, not "anything but the list". A reload
+  // also leaves the list phase, and the keys go on working through one — the
+  // key handler only returns early for the confirm — so a guard written as
+  // `phase() !== "list"` would silently stop both paths mid-refresh. Read
+  // off the FILL, because the body is showing `Reading worktrees...` and has
+  // no rows either way.
+  it("still switches view while a reload is in flight", async () => {
+    let lists = 0;
+    const { keys, frame, spans } = await mountPanel({
+      list: async () =>
+        ++lists === 1
+          ? json(listOf([mainRow(), row()]))
+          : await new Promise<Response>(() => {}),
+      scan: async () => json(emptyScan),
+    });
+    await frame();
+    keys.pressKey("r");
+    const reloading = await frame();
+    expect(reloading).toContain("Reading worktrees...");
+    keys.pressKey("l");
+    const switched = await frame();
+    expect(bgOf(tabLine(spans(), switched), PRS_TAB)).toEqual(
+      RGBA.fromHex(theme.border).toInts(),
+    );
+  });
+
   // The affordance: a filled block that answers nothing until it is clicked
   // reads as decoration.
   it("brightens the tab under the pointer", async () => {

@@ -2222,6 +2222,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    */
   function switchView(next: PanelView): void {
     if (next === view()) return;
+    // The confirm owns the panel while it is up: its key handler returns
+    // before the view keys are ever reached, so `h`/`l` do nothing there.
+    // The guard lives HERE and not at the key sites because the chips became
+    // clickable, and a click is a second way in that has to obey the same
+    // rule. It did not: clicking `Pull Requests` under an open `Remove
+    // worktrees?` switched the list behind the dialog, and a `y` then pruned
+    // a selection of worktrees no longer on screen — which is the exact
+    // thing `canRemove` gates the removal keys to prevent, reached from the
+    // side. Any third caller inherits the rule by construction.
+    if (phase() === "confirm") return;
     lastCursorByView[view()] = cursorPath();
     const remembered = lastCursorByView[next];
     setView(next);
