@@ -405,6 +405,8 @@ async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
     /** Cell-level colours, for the things a char frame cannot show: the view
      *  tabs are filled CHIPS, and a chip is its background. */
     spans: () => setup!.captureSpans(),
+    /** Re-render at a new terminal size, as a real resize does. */
+    resize: (width: number, height: number) => setup!.resize(width, height),
     /** Drain every pending microtask, then repaint. */
     frame: async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -791,6 +793,114 @@ describe("WorktreesPanel header counts", () => {
     expect(lineWith(shown, WORKTREES_TAB)).toContain(
       `${WORKTREES_TAB}   ${PRS_TAB}`,
     );
+  });
+
+  // `r`, a post-prune reload and a reopen all set the phase back to loading
+  // over a list that STAYS on screen. Blanking the count there narrows the
+  // chip by the width of its own number and drags the PR chip left and back
+  // under a pointer that may already be reaching for it. A same-scope reload
+  // is not a rescope, so the number holds — and it goes on agreeing with the
+  // rows still being shown.
+  it("holds the count across a refresh, which is not a rescope", async () => {
+    let lists = 0;
+    const { keys, frame } = await mountPanel({
+      list: async () =>
+        ++lists === 1
+          ? json(listOf([mainRow(), row()]))
+          : await new Promise<Response>(() => {}),
+      scan: async () => json(emptyScan),
+    });
+    const settled = await frame();
+    expect(lineWith(settled, WORKTREES_TAB)).toContain("Worktrees 2");
+    keys.pressKey("r");
+    const refreshing = await frame();
+    expect(lists).toBe(2);
+    expect(lineWith(refreshing, WORKTREES_TAB)).toContain("Worktrees 2");
+  });
+
+  // A Tab IS a rescope: the rows on screen now answer a different question,
+  // so the count that describes them has to go rather than tick from one
+  // scope's number to another's.
+  it("blanks the count while a rescope is in flight", async () => {
+    let lists = 0;
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () =>
+          ++lists === 1
+            ? json(listOf([mainRow(), row()]))
+            : await new Promise<Response>(() => {}),
+        scan: async () => json(emptyScan),
+      },
+      { repo: "/repo" },
+    );
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("Worktrees 2");
+    keys.pressTab();
+    const rescoping = await frame();
+    expect(lists).toBe(2);
+    expect(lineWith(rescoping, WORKTREES_TAB)).not.toMatch(/Worktrees \d/);
+  });
+
+  // The lead's width is what positions both chips, so it holds across the
+  // same reload for the same reason, and flips on the Tab that changed it.
+  it("holds the lead across a refresh and flips it on a rescope", async () => {
+    let lists = 0;
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () =>
+          ++lists === 1
+            ? json(listOf([mainRow(), row()]))
+            : await new Promise<Response>(() => {}),
+        scan: async () => json(emptyScan),
+      },
+      { repo: "/repo" },
+    );
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("repo ");
+    keys.pressKey("r");
+    expect(lists).toBe(2);
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("repo ");
+  });
+
+  // The UNSCOPED lone-repo lead is the one that reads loaded rows, so it is
+  // the one a reload can blank. `showsGroupHeaders` draws no header for a
+  // single group, which makes this label the only place that repo is named
+  // — dropping it and putting it back moves both chips and un-names the
+  // panel for as long as the reload takes.
+  it("holds an unscoped lone repo's name across a refresh", async () => {
+    let lists = 0;
+    const { keys, frame } = await mountPanel({
+      list: async () =>
+        ++lists === 1
+          ? json(listOf([mainRow(), row()]))
+          : await new Promise<Response>(() => {}),
+      scan: async () => json(emptyScan),
+    });
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("repo ");
+    keys.pressKey("r");
+    expect(lists).toBe(2);
+    const refreshing = lineWith(await frame(), WORKTREES_TAB);
+    expect(refreshing).toContain("repo ");
+    expect(refreshing).not.toContain("all repos");
+  });
+
+  it("flips the lead on the rescope, in the frame Tab produced", async () => {
+    let lists = 0;
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () =>
+          ++lists === 1
+            ? json(listOf([mainRow(), row()]))
+            : await new Promise<Response>(() => {}),
+        scan: async () => json(emptyScan),
+      },
+      { repo: "/repo" },
+    );
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("repo ");
+    keys.pressTab();
+    // The reload has not answered and never will, so this is the label
+    // during the rescope: it states what the panel is now fetching, which is
+    // the question Tab just asked, rather than the repo it left.
+    expect(lists).toBe(2);
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("all repos");
   });
 
   it("drops the counts whole, a rung above the scope, when narrow", async () => {
@@ -3702,10 +3812,11 @@ describe("view tabs", () => {
     );
   });
 
-  // What fitting guarantees is the FIRST chip, and it is always `Worktrees` —
-  // the ACTIVE tab in one view and the INACTIVE one in the other. The old
-  // name for this claimed it kept the active tab, which is false for `prs`.
-  it("fits to its box, keeping the first chip in either view", () => {
+  // What survives when only one chip can is the ACTIVE one. The flat-label
+  // version kept the LEFTMOST, which left `Worktrees` alone on the line while
+  // the PR view was showing — harmless for a word, not for a chip that
+  // carries a fill, since the strip would then show nothing filled at all.
+  it("fits to its box, keeping the chip that is showing", () => {
     for (const width of [16, 14, 12, 8, 4]) {
       for (const view of ["worktrees", "prs"] as const) {
         const fitted = tabsOf(view, "7", width);
@@ -3716,10 +3827,36 @@ describe("view tabs", () => {
             0,
           ) + Math.max(0, fitted.length - 1);
         expect(used).toBeLessThanOrEqual(width);
+        // Whatever is left on the line, the view showing is on it.
+        expect(fitted.some((tab) => tab.active)).toBe(true);
       }
     }
     expect(tabText("worktrees", "7", 12)).toStartWith(" Worktrees");
-    expect(tabText("prs", "7", 12)).toStartWith(" Worktrees");
+    expect(tabText("prs", "7", 12)).toStartWith(" PRs");
+  });
+
+  // Each rung is the first one that FITS, so a rung no narrower than the one
+  // above it can never be chosen. With no tail to drop, or no counts to drop,
+  // two rungs otherwise collapse into the same layout and one becomes dead.
+  it("never builds a rung that cannot be reached", () => {
+    for (const tail of [null, "◐ scanning"]) {
+      for (const counts of [
+        { worktrees: "42", prs: "7" },
+        { worktrees: "", prs: "" },
+      ]) {
+        let previous = Infinity;
+        // Descending widths walk the ladder rung by rung; every distinct
+        // layout it yields has to be strictly narrower than the last.
+        for (let width = 80; width >= 1; width--) {
+          const used = headerWidthOf(
+            headerLayout({ view: "prs", lead: "all repos", tail, width, ...counts }),
+          );
+          expect(used).toBeLessThanOrEqual(width);
+          expect(used).toBeLessThanOrEqual(previous);
+          previous = used;
+        }
+      }
+    }
   });
 
   // The flat-segment version left the separator dangling with nothing after
@@ -3842,6 +3979,100 @@ describe("view tabs on screen", () => {
     const at = cellOf(settled, WORKTREES_TAB);
     await mouse.click(at.x, at.y);
     expect(await frame()).toBe(settled);
+  });
+
+  // The width arithmetic lives in `headerLayout`, but the LINE is assembled
+  // from separate `<text>` nodes for the zone gap and the chip gap — columns
+  // the math has to account for and the JSX has to spend exactly once. Get
+  // that wrong and the header does not overflow visibly: OpenTUI wraps, and
+  // a wrapped line inside a `height={1}` box VANISHES. So the check is that
+  // the header is still on screen at every width, and still one line, with
+  // the list's first row directly beneath it.
+  //
+  // Swept rather than sampled, and across both views, because the rungs
+  // change at different widths in each and an extra column shows up only at
+  // the exact boundary where a rung is chosen.
+  it("stays on one visible line at every width, in both views", async () => {
+    for (const width of [90, 60, 47, 46, 45, 40, 37, 36, 35, 32, 30, 29, 24, 21, 20]) {
+      for (const view of ["worktrees", "prs"] as const) {
+        const { settled, frame, keys } = await mountSettled(
+          listOf([mainRow(), row()]),
+          emptyScan,
+          { width },
+          // A title carrying none of the header's words, so "the header did
+          // not wrap onto the next line" cannot be satisfied or defeated by
+          // a row that happens to mention them.
+          prsOf([openPR({ title: "a pull request" })]),
+        );
+        let shown = settled;
+        if (view === "prs") {
+          keys.pressKey("l");
+          shown = await frame();
+        }
+        const lines = shown.split("\n");
+        const at = lines.findIndex(
+          (line) => line.includes("Worktrees") || line.includes("PRs"),
+        );
+        expect({ width, view, at }).toEqual({ width, view, at: 1 });
+        // One line, not two: the row under the header carries list content
+        // and no second helping of the header (a wrapped chip strip would
+        // land there, and a header that vanished would put a list row on
+        // line 1 and pass the check above for the wrong reason).
+        const under = lines[at + 1]!;
+        expect({ width, view, under: under.replace(/[│┌┐└┘\s]/gu, "") }).not
+          .toEqual({ width, view, under: "" });
+        expect(under).not.toMatch(/Worktrees|PRs|Pull Requests/);
+
+        // And what is drawn is EXACTLY what the ladder measured. The border
+        // and one column of padding sit either side; everything between is
+        // the header. An extra drawn column that the math never counted is
+        // the failure this guards: it does not look wrong until the width
+        // where it tips the line over into a wrap, and then the line is gone
+        // entirely rather than clipped. (An empty `<text>` costs one column
+        // in OpenTUI, which is how three "emptied" zones once did it.)
+        const drawn = lines[at]!.slice(2).replace(/[│\s]+$/u, "");
+        const expected = headerText(
+          headerLayout({
+            view,
+            lead: "repo",
+            worktrees: "2",
+            prs: "1",
+            tail: null,
+            width: Math.max(8, width - 4),
+          }),
+        ).replace(/\s+$/u, "");
+        expect({ width, view, drawn }).toEqual({ width, view, drawn: expected });
+        // Each width gets its own renderer; the shared afterEach only ever
+        // reaches the last one this loop mounted.
+        setup?.renderer.destroy();
+        setup = undefined;
+      }
+    }
+  });
+
+  // The zones are drawn as SIBLINGS of a `<For>` in one row box, and a zone
+  // that unmounts and comes back does not necessarily come back where it
+  // was: dropped at a narrow width and restored on the way out, the scope
+  // lead reappeared at the END of the row, reading `Worktrees 16   Pull
+  // Requests 2 ccmux`. Every zone therefore renders unconditionally and goes
+  // EMPTY rather than absent, and this is what holds that line.
+  it("keeps the zones in order across a width round trip", async () => {
+    const { frame, resize } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      { width: 90 },
+      prsOf([openPR({ title: "a pull request" })]),
+    );
+    const leads = (line: string) =>
+      line.replace(/^[│\s]+/u, "").startsWith("repo");
+    expect(leads(lineWith(await frame(), WORKTREES_TAB))).toBe(true);
+    // Narrow enough that the ladder drops the lead entirely...
+    resize(24, 24);
+    const narrow = await frame();
+    expect(lineWith(narrow, WORKTREES_TAB)).not.toContain("repo ");
+    // ...and wide again, where it has to come back to the FRONT.
+    resize(90, 24);
+    expect(leads(lineWith(await frame(), WORKTREES_TAB))).toBe(true);
   });
 
   // The affordance: a filled block that answers nothing until it is clicked

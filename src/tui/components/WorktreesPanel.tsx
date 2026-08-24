@@ -737,10 +737,12 @@ function fitTabs(tabs: ViewTab[], width: number): ViewTab[] {
  * is not a smaller truth, it is a misleading one: `42` means something very
  * different across thirteen repos than inside one.
  *
- * Below the last rung `fitTabs` takes over, and what it guarantees is the
- * FIRST chip, which is always `Worktrees` — the ACTIVE tab in the Worktrees
- * view and the INACTIVE one in the PR view. It is not "the tab that says
- * where you are"; saying so would be wrong in one of the two views.
+ * Below the last rung both chips no longer fit at all, and what survives is
+ * the ACTIVE one. That reverses the flat-label version, which kept the
+ * leftmost chip and so could leave `Worktrees` alone on the line while the
+ * PR view was showing. Harmless when a tab was just a word; not harmless now
+ * that it carries a FILL, because the strip would then show nothing filled
+ * at all — the single state the fill exists to rule out.
  */
 export interface HeaderLayout {
   /** Null once the ladder has dropped it. */
@@ -758,6 +760,51 @@ function headerWidth(layout: HeaderLayout): number {
     tabsWidth(layout.tabs) +
     (layout.tail === null ? 0 : gap + displayWidth(layout.tail))
   );
+}
+
+/**
+ * One drawn piece of the header line: a run of text, or a clickable chip.
+ *
+ * The line is rendered from ONE `<For>` over these rather than from a
+ * `<Show>` per zone beside a `<For>` of chips, and both halves of that
+ * sentence are load-bearing. A `<Show>` sibling that unmounts does not
+ * reliably return to its own slot: the scope lead, dropped at a narrow width
+ * and restored on the way back out, came back at the END of the row
+ * (`Worktrees 16   Pull Requests 2   ccmux`). Rendering every zone
+ * unconditionally and EMPTYING it is not the fix either, however obvious it
+ * looks — an empty `<text>` still occupies one column in OpenTUI, so three
+ * emptied zones would put the line three columns over the width
+ * `headerWidth` measured, and a line that overruns its box does not clip, it
+ * wraps, and a wrapped line inside `height={1}` vanishes. A single list
+ * reconciler owns the order, and a zone with nothing to say is simply not in
+ * the list.
+ */
+export type HeaderPart =
+  | { kind: "lead"; key: string; text: string }
+  | { kind: "text"; key: string; text: string }
+  | { kind: "chip"; key: string; tab: ViewTab };
+
+/** The header line as the drawn pieces it is made of, in order. */
+export function headerParts(layout: HeaderLayout): HeaderPart[] {
+  const parts: HeaderPart[] = [];
+  if (layout.lead !== null) {
+    parts.push({ kind: "lead", key: "lead", text: layout.lead });
+    parts.push({ kind: "text", key: "lead-gap", text: ZONE_GAP });
+  }
+  layout.tabs.forEach((tab, index) => {
+    // The gap is its OWN piece and not padding on the chip: padding inside a
+    // background paints the gap in the chip's colour, which fuses two
+    // adjacent chips into one block.
+    if (index > 0) {
+      parts.push({ kind: "text", key: `gap-${tab.view}`, text: TAB_GAP });
+    }
+    parts.push({ kind: "chip", key: `chip-${tab.view}`, tab });
+  });
+  if (layout.tail !== null) {
+    parts.push({ kind: "text", key: "tail-gap", text: ZONE_GAP });
+    parts.push({ kind: "text", key: "tail", text: layout.tail });
+  }
+  return parts;
 }
 
 export function headerLayout(opts: {
@@ -794,21 +841,36 @@ export function headerLayout(opts: {
     chip("worktrees", WORKTREES_TAB, counts ? opts.worktrees : ""),
     chip("prs", prLabel, counts ? opts.prs : ""),
   ];
-  const ladder: HeaderLayout[] = [
-    { lead: opts.lead, tabs: build(PRS_TAB, true), tail: opts.tail },
-    { lead: opts.lead, tabs: build(PRS_TAB, true), tail: null },
-    { lead: opts.lead, tabs: build(PRS_TAB_SHORT, true), tail: null },
-    { lead: opts.lead, tabs: build(PRS_TAB_SHORT, false), tail: null },
-    { lead: null, tabs: build(PRS_TAB_SHORT, false), tail: null },
-  ];
-  for (const rung of ladder) {
-    if (headerWidth(rung) <= opts.width) return rung;
-  }
-  return {
-    lead: null,
-    tabs: fitTabs(build(PRS_TAB_SHORT, false), opts.width),
-    tail: null,
+  // The last chip standing is the ACTIVE one, not the leftmost. Under the
+  // old flat labels either would do, but a chip carries a FILL now, and a
+  // strip holding only the inactive chip is a header with nothing filled on
+  // it while the body shows the other view — the one state the fill exists
+  // to make impossible. Both chips keep their positions everywhere they both
+  // fit; this rung is reached only when one of them cannot.
+  const activeOnly = build(PRS_TAB_SHORT, false).filter((tab) => tab.active);
+
+  // Every rung must be strictly NARROWER than the one above it, or it is
+  // unreachable: the search takes the first rung that fits, so a rung no
+  // narrower than its predecessor can never be the first. That is easy to
+  // break by accident rather than by design — with no tail to drop, or no
+  // counts to drop, two rungs collapse into the same layout — so the ladder
+  // enforces it on the way in rather than asserting it in a comment.
+  const ladder: HeaderLayout[] = [];
+  const rung = (layout: HeaderLayout): void => {
+    const last = ladder[ladder.length - 1];
+    if (last !== undefined && headerWidth(layout) >= headerWidth(last)) return;
+    ladder.push(layout);
   };
+  rung({ lead: opts.lead, tabs: build(PRS_TAB, true), tail: opts.tail });
+  rung({ lead: opts.lead, tabs: build(PRS_TAB, true), tail: null });
+  rung({ lead: opts.lead, tabs: build(PRS_TAB_SHORT, true), tail: null });
+  rung({ lead: opts.lead, tabs: build(PRS_TAB_SHORT, false), tail: null });
+  rung({ lead: null, tabs: build(PRS_TAB_SHORT, false), tail: null });
+  rung({ lead: null, tabs: activeOnly, tail: null });
+  for (const layout of ladder) {
+    if (headerWidth(layout) <= opts.width) return layout;
+  }
+  return { lead: null, tabs: fitTabs(activeOnly, opts.width), tail: null };
 }
 
 /**
@@ -2221,6 +2283,18 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   /** Repo filter currently in force, which is what both requests carry. */
   const repoFilter = (): string | null => (scoped() ? props.repo : null);
 
+  /**
+   * The filter the rows on screen were loaded UNDER, or `undefined` before
+   * anything has loaded. What it exists for is telling a RESCOPE apart from a
+   * plain reload, which the phase alone cannot: `r`, a post-prune reload and
+   * a Tab all set the phase back to `loading` over a list that stays on
+   * screen, and only one of the three has made that list belong to another
+   * question.
+   */
+  const [loadedFilter, setLoadedFilter] = createSignal<string | null | undefined>(
+    undefined,
+  );
+
   const merged = createMemo<PanelRepo[]>(() => {
     const data = scan();
     const candidates = new Map(data?.candidates.map((c) => [c.path, c]) ?? []);
@@ -2554,11 +2628,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     if (scoped() && props.repo !== null) return basename(props.repo);
     // Unscoped, but only one repo answered: it still has to be named here,
     // because `showsGroupHeaders` draws no header for a lone group and the
-    // name would otherwise appear nowhere in the panel. Gated on the phase
-    // as well as the count — `repos()` holds the PREVIOUS scope's list while
-    // a rescope is in flight, and a Tab that widens the panel would go on
-    // naming the repo the user just widened away from.
-    const repos = phase() === "loading" ? [] : merged();
+    // name would otherwise appear nowhere in the panel. Gated on the SCOPE
+    // the rows were loaded under, exactly as the count is and for both of
+    // the same reasons — `repos()` holds the PREVIOUS scope's list while a
+    // rescope is in flight, so a Tab that widens the panel would go on
+    // naming the repo it just left; and a plain `r`, which is not a rescope,
+    // must not drop the name and put it back, since this label's width is
+    // what positions both chips.
+    const repos = loadedFilter() === repoFilter() ? merged() : [];
     return repos.length === 1 ? repos[0]!.repoName : "all repos";
   };
 
@@ -2608,16 +2685,19 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * worktrees and two PRs, with the number JUMPING when phase 3 arrived.
    * `markerBase` filters the same way.
    *
-   * Nothing is said while phase 1 is in flight, rather than the previous
-   * scope's number: `repos()` deliberately holds the old list across a Tab
-   * rescope, and a count that ticks from thirteen repos' worth to one repo's
-   * reads as a glitch. The chip narrows by the width of the number while it
-   * reloads, which moves the PR chip beside it — accepted because the only
-   * alternatives are stating a number for a scope the user just left or
-   * padding the chip to a width no content asked for.
+   * Gated on the SCOPE the rows were loaded under, not on the phase. A count
+   * that ticked from thirteen repos' worth to one repo's would read as a
+   * glitch, so a rescope blanks it — but `r`, a post-prune reload and a
+   * reopen are not rescopes, and blanking there narrows this chip by the
+   * width of its own number and drags the PR chip three columns left and
+   * back while the user may be reaching for it. A chip is a click target;
+   * the phase gate was moving one for reasons the user never asked about.
+   * Across a same-scope reload the number therefore HOLDS, which also keeps
+   * it agreeing with the rows still on screen — `repos()` deliberately holds
+   * those too.
    */
   const worktreeCount = (): string => {
-    if (phase() === "loading") return "";
+    if (loadedFilter() !== repoFilter()) return "";
     if (merged().length === 0) return "";
     return String(
       allRows().filter((entry) => entry.kind === "worktree").length,
@@ -2771,6 +2851,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         const data = (await response.json()) as WorktreeListResponse;
         if (generation !== loadGeneration) return;
         setRepos(data.repos);
+        setLoadedFilter(filter);
         setPhase("list");
       })
       .catch((err: unknown) => {
@@ -3378,27 +3459,22 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         }
       >
         <box width="100%" height={1} flexDirection="row">
-          {/* The scope leads, in the panel's brightest ink: it is the
-              subject the chips beside it are two views OF. */}
-          <Show when={header().lead}>
-            {(lead: () => string) => (
-              <>
-                <text fg={theme.text}>
-                  <strong>{lead()}</strong>
-                </text>
-                <text fg={theme.overlay}>{ZONE_GAP}</text>
-              </>
-            )}
-          </Show>
-          <For each={header().tabs}>
-            {(tab: ViewTab, index) => (
-              <>
-                {/* The gap is its OWN element and not padding on the chip:
-                    padding inside a background paints the gap in the chip's
-                    colour, which fuses two adjacent tabs into one block. */}
-                <Show when={index() > 0}>
-                  <text fg={theme.overlay}>{TAB_GAP}</text>
-                </Show>
+          <For each={headerParts(header())}>
+            {(part: HeaderPart) => {
+              if (part.kind === "lead") {
+                // The scope leads, in the panel's brightest ink: it is the
+                // subject the chips beside it are two views OF.
+                return (
+                  <text fg={theme.text}>
+                    <strong>{part.text}</strong>
+                  </text>
+                );
+              }
+              if (part.kind === "text") {
+                return <text fg={theme.overlay}>{part.text}</text>;
+              }
+              const tab = part.tab;
+              return (
                 <box
                   flexDirection="row"
                   /* ONE chip is filled, and the other takes the panel's own
@@ -3437,21 +3513,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                     )}
                   </For>
                 </box>
-              </>
-            )}
+              );
+            }}
           </For>
-          {/* The tail trails the chips rather than leading them, because it
-              is the zone that GROWS and shrinks on its own: a spinner
-              arriving to the LEFT of a chip would shove that chip sideways
-              under the pointer. */}
-          <Show when={header().tail}>
-            {(tail: () => string) => (
-              <>
-                <text fg={theme.overlay}>{ZONE_GAP}</text>
-                <text fg={theme.overlay}>{tail()}</text>
-              </>
-            )}
-          </Show>
         </box>
       </Show>
 
