@@ -12,6 +12,7 @@ import { MouseButtons } from "@opentui/core/testing";
 import type { SSECallbacks } from "./utils/sse";
 import * as clipboard from "./utils/clipboard";
 import { mockEnrichedSession, squish } from "./components/test-helpers";
+import { liveEffects } from "./components/WorktreesPanel";
 import { HANDOFF_BADGE } from "./components/session-columns";
 import { MAX_TURNS, renderTurns } from "../daemon/transcript-read";
 import { realpathSync } from "node:fs";
@@ -7374,7 +7375,7 @@ describe("App worktrees panel (W)", () => {
    * Route the panel's two reads (and App's own onMount fetches) without
    * touching whatever `fetch` a neighbouring test installed.
    */
-  function mockWorktreeFetch(rows: unknown[]) {
+  function mockWorktreeFetch(rows: unknown[], prs: unknown[] = []) {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = ((input: string | URL | Request) => {
       const url =
@@ -7389,7 +7390,14 @@ describe("App worktrees panel (W)", () => {
                 { repoRoot: "/code/myapp", repoName: "myapp", worktrees: rows },
               ],
             }
-          : {};
+          : url.includes("/prs")
+            ? {
+                repos: [
+                  { repoRoot: "/code/myapp", repoName: "myapp", prs },
+                ],
+                errors: [],
+              }
+            : {};
       return Promise.resolve(
         new Response(JSON.stringify(body), {
           headers: { "Content-Type": "application/json" },
@@ -7410,8 +7418,20 @@ describe("App worktrees panel (W)", () => {
     rows: unknown[],
     sessionOverrides: Record<string, unknown> = {},
     extraSessions: Record<string, unknown>[] = [],
+    prs: unknown[] = [],
   ) {
-    const restore = mockWorktreeFetch(rows);
+    const restore = mockWorktreeFetch(rows, prs);
+    // App hard-codes `effects={liveEffects}`, which is right for production
+    // and means an App-level test reaches the REAL `open` and `pbcopy`: the
+    // panel's required-prop guarantee stops at its own mount site, and this
+    // is the other side of it. `o` and `y` on a panel row are one keypress
+    // from a browser window, so the seam is stubbed here as well. spyOn, not
+    // mock.module, which leaks across files.
+    const openSpy = spyOn(liveEffects, "openUrl").mockReturnValue(true);
+    const copySpy = spyOn(liveEffects, "copyText").mockReturnValue({
+      osc52: true,
+      local: false,
+    });
     await renderApp(120, 24, { groupBy: "none" });
     sseCallbacks!.onInit(
       [
@@ -7440,7 +7460,13 @@ describe("App worktrees panel (W)", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await setup.renderOnce();
     return {
-      restore,
+      restore: () => {
+        openSpy.mockRestore();
+        copySpy.mockRestore();
+        restore();
+      },
+      openSpy,
+      copySpy,
       frame: async () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
         await setup.renderOnce();
@@ -7448,6 +7474,90 @@ describe("App worktrees panel (W)", () => {
       },
     };
   }
+
+  // The App half of the checked-out-PR return cursor. Enter on a PR whose
+  // head IS checked out here routes through `spawnInWorktree`, because the
+  // destination is the worktree holding it — but the ROW is the PR, and
+  // `initialView` reads the return cursor to pick the view. While that
+  // branch sent the worktree's PATH, cancelling the dialog came back to the
+  // Worktrees view, where the adjacent not-checked-out row came back right.
+  it("returns to the PR view after cancelling out of a checked-out PR", async () => {
+    const held = {
+      ...WORKTREE_ROW,
+      path: "/code/myapp/wt/pr",
+      name: "pr-7",
+      branch: "feat/seven",
+      tip: "sha-7",
+    };
+    const { restore, frame } = await openPanel(
+      [held],
+      // The session lives in the MAIN checkout, so the revalidating jump
+      // does not fire and the dialog is what opens.
+      { cwd: "/code/myapp" },
+      [],
+      [
+        {
+          number: 7,
+          title: "seven",
+          url: "https://github.com/o/r/pull/7",
+          author: "epilande",
+          isDraft: false,
+          reviewDecision: null,
+          ciStatus: null,
+          headRefName: "feat/seven",
+          headRefOid: "sha-7",
+        },
+      ],
+    );
+    try {
+      setup.mockInput.pressKey("l");
+      const prs = await frame();
+      expect(prs).toContain("#7 seven");
+      expect(prs).toContain("checked out in pr-7");
+
+      setup.mockInput.pressEnter();
+      expect(await frame()).toContain("New session in worktree");
+
+      setup.mockInput.pressEscape();
+      // A bare ESC byte is the prefix of every escape sequence, so the key
+      // parser holds it briefly before deciding it stands alone.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const back = await frame();
+
+      // The PR VIEW, on the PR row — not the Worktrees view on the path.
+      expect(back).toContain("#7 seven");
+      expect(back).toContain("checked out in pr-7");
+      expect(back).not.toContain("main checkout");
+    } finally {
+      restore();
+    }
+  });
+
+  /**
+   * The other side of `381680b`. The panel's `effects` prop is required, so a
+   * PANEL test cannot reach the real `open` or `pbcopy` by forgetting; App
+   * hard-codes `liveEffects`, so an APP test could. Nothing pressed `o` or
+   * `y` here, which made it latent rather than live, and latent is how the
+   * first one shipped.
+   */
+  it("cannot reach the real opener or clipboard from an App mount", async () => {
+    const { restore, frame, openSpy, copySpy } = await openPanel([
+      WORKTREE_ROW,
+    ]);
+    try {
+      setup.mockInput.pressKey("y");
+      await frame();
+      expect(copySpy).toHaveBeenCalled();
+
+      setup.mockInput.pressKey("o");
+      await frame();
+      // No PR on this row, so the opener is correctly never asked; the point
+      // is that the seam is the stub either way.
+      expect(openSpy).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
 
   it("opens over the selected row's repo", async () => {
     const { restore, frame } = await openPanel([WORKTREE_ROW]);
@@ -7723,9 +7833,24 @@ describe("App worktrees panel (W)", () => {
     const { restore, frame } = await openPanel([WORKTREE_ROW]);
     try {
       setup.mockInput.pressKey("d");
-      const shown = squish(await frame());
-      expect(shown).toContain(squish("no agent to send to"));
-      expect(shown).not.toContain(squish("Send review comments"));
+      const raw = await frame();
+      // Per LINE, not over the squished whole frame. Two constraints collide
+      // here. `squish` concatenates every row, so the panel's own rows land
+      // inside the toast's wrapped sentence and break any multi-word match.
+      // But the discriminating word is `agent`: the tail `send to)` is shared
+      // with `captured (no pane to send to)`, the PANELESS-session message, so
+      // asserting the tail let a regression that bound a stray session to this
+      // row stay green. Matching one line keeps both.
+      const lines = raw.split("\n").map((line) => squish(line));
+      expect(
+        lines.some((line) => line.includes(squish("captured (no agent to"))),
+      ).toBe(true);
+      // The message this test is NOT about, named so the two cannot be
+      // confused again.
+      expect(lines.some((line) => line.includes(squish("no pane to")))).toBe(
+        false,
+      );
+      expect(squish(raw)).not.toContain(squish("Send review comments"));
     } finally {
       restore();
     }

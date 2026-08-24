@@ -610,6 +610,41 @@ export async function readUpstreamStates(
 }
 
 /**
+ * Every local branch's tip commit, in one `for-each-ref`.
+ *
+ * Its own call rather than another column on {@link readUpstreamStates},
+ * whose result feeds the prune classifier: a shared shape would make one
+ * consumer's needs a change the other has to answer for.
+ *
+ * LOCAL, which is what keeps `worktree-list.ts` local: a tip is already in
+ * the object store, so this asks git a question it can answer without a
+ * network round trip. It is the only thing that can prove a PR is checked
+ * out here — matching the branch NAME is the namesake trap `selectPRForBranch`
+ * documents, where `--head patch-1` answers with 25 PRs from 25 forks.
+ */
+export async function readBranchTips(
+  repoRoot: string,
+  git: GitRun = runGit,
+): Promise<Map<string, string>> {
+  const tips = new Map<string, string>();
+  const res = await git(repoRoot, [
+    // `lstrip=2`, never `%(refname:short)`. Short is CONTEXTUAL: a branch that
+    // shares its name with a tag disambiguates to `heads/feat-x`, so the tip
+    // lands under a key no caller looks up and the PR is silently never
+    // marked checked out. `lstrip=2` always drops exactly `refs/heads/`.
+    "for-each-ref",
+    "--format=%(refname:lstrip=2)%09%(objectname)",
+    "refs/heads",
+  ]);
+  if (res.exitCode !== 0) return tips;
+  for (const line of res.stdout.split("\n")) {
+    const [name, oid] = line.split("\t");
+    if (name && oid) tips.set(name, oid);
+  }
+  return tips;
+}
+
+/**
  * What this repo's remotes say about whether a pull request could exist.
  *
  * Read on the PR-lookup FAILURE path only (see `ghPRStateLookup`), to separate

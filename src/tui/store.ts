@@ -166,11 +166,29 @@ export interface NewSessionFork {
  * `NewSessionDraft` satisfies it, and a mode added later fails to compile at
  * each site until it says what it means there.
  */
+/**
+ * The pull request a dialog is cutting a worktree from (issue #151).
+ *
+ * The whole mode hangs off this one nullable field, like `fork` does, and it
+ * carries only what the dialog SHOWS. Everything else about the worktree —
+ * its name, its base, the branch — is the daemon's: `POST /spawn` derives the
+ * name with `slugForPR` and refuses `pr` alongside `worktree.name` and
+ * `worktree.base`, so a client that offered either would be offering a 400.
+ */
+export interface NewSessionPR {
+  number: number;
+  /** What the note row calls it. */
+  title: string;
+  /** The repo the PR belongs to, which is also the request's `cwd`. */
+  repoRoot: string;
+}
+
 export interface NewSessionShape {
   moveChanges: boolean;
   destination: NewSessionDestination;
   fork: NewSessionFork | null;
   existingWorktree: string | null;
+  pr: NewSessionPR | null;
 }
 
 /**
@@ -192,6 +210,11 @@ export interface NewSessionShape {
  */
 export function namesAWorktree(draft: NewSessionShape): boolean {
   if (draft.existingWorktree !== null) return false;
+  // A PR spawn makes a worktree and still names nothing: the daemon derives
+  // the name from the PR (`slugForPR`), and `POST /spawn` refuses `pr`
+  // together with `worktree.name`. A Name row here would post one and earn a
+  // 400 on a dialog whose fields all looked answerable.
+  if (draft.pr !== null) return false;
   return draft.destination === "worktree" || draft.moveChanges;
 }
 
@@ -227,6 +250,10 @@ export function newSessionFields(
       return (
         draft.existingWorktree === null &&
         !draft.moveChanges &&
+        // A PR decides its own destination, exactly the way it decides the
+        // name: the worktree is cut from its head, so "here" is not an option
+        // the request has.
+        draft.pr === null &&
         (draft.fork === null || draft.fork.canWorktree)
       );
     }
@@ -292,6 +319,15 @@ export interface NewSessionDraft {
    * MADE.
    */
   existingWorktree: string | null;
+  /**
+   * The open pull request this spawn cuts a worktree from, or null (issue
+   * #151). Set only by the Worktrees panel's Enter on a PR row.
+   *
+   * Keeps the agent, the placement and the prompt — a prompt is legal and is
+   * APPENDED under the daemon's PR header by `seedPrompt` — and drops every
+   * row about the worktree, which the daemon derives from the PR itself.
+   */
+  pr: NewSessionPR | null;
   /**
    * Where a CANCEL returns, or null for a dialog the Worktrees panel did not
    * open (issue #102 follow-up). An origin marker, deliberately NOT a mode:
@@ -1418,8 +1454,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         // a worktree off — there the lock is the other way round. A spawn into
         // a worktree that already exists has no destination row at all, and a
         // write that reached one anyway would put the Name row back with it.
+        // A PR spawn is the same shape for a different reason: the daemon
+        // derives its worktree from the PR, and `POST /spawn` refuses `pr`
+        // alongside a name. Unreachable today, and enumerated because this
+        // comment names every other mode and the omission is what a later
+        // mode-aware change would trip over.
         if (draft.moveChanges) return;
         if (draft.existingWorktree !== null) return;
+        if (draft.pr !== null) return;
         if (draft.fork && !draft.fork.canWorktree) return;
         batch(() => {
           setState("newSession", "destination", option.value);
@@ -1912,6 +1954,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
        *  this worktree, with every row about CREATING one gone. The path is
        *  the working directory too, so `cwd` need not repeat it. */
       existingWorktree?: string;
+      /** Open in PR mode: cut a worktree from this pull request's head. The
+       *  destination, the name and the untracked choice are all the daemon's
+       *  to decide, so none of their rows appear. */
+      pr?: NewSessionPR;
       /** Origin marker for a dialog the Worktrees panel opened: cancel
        *  returns there. See {@link NewSessionDraft.returnToWorktrees}. */
       returnToWorktrees?: {
@@ -1926,17 +1972,23 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       // draft claiming two of them is not a state any consumer should have to
       // answer for.
       const existingWorktree = init.existingWorktree ?? null;
+      // A PR is normalized alongside the other three for the same reason: it
+      // decides the destination AND the name, so a draft claiming it plus a
+      // move or a fork is not a state any consumer should have to answer for.
+      const pr = existingWorktree === null ? (init.pr ?? null) : null;
       const moveChanges =
-        existingWorktree === null && init.moveChanges === true;
-      const fork = existingWorktree === null ? (init.fork ?? null) : null;
+        existingWorktree === null && pr === null && init.moveChanges === true;
+      const fork =
+        existingWorktree === null && pr === null ? (init.fork ?? null) : null;
       // A move exists to put the changes somewhere new; everything else
       // defaults to the directory it was opened over, a fork included — the
       // key that opens it used to fork in place with no dialog at all, and
       // Enter on an untouched dialog still does exactly that. An existing
       // worktree IS that directory, which is why it needs no choice of its own.
-      const destination: NewSessionDestination = moveChanges
-        ? "worktree"
-        : "here";
+      // A PR's worktree is as forced as a move's; the row is gone either way,
+      // and the value has to say the true thing for anything that reads it.
+      const destination: NewSessionDestination =
+        moveChanges || pr ? "worktree" : "here";
       batch(() => {
         setState("contextMenu", null);
         setState("groupContextMenu", null);
@@ -1963,12 +2015,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           worktreeName: null,
           fork,
           existingWorktree,
+          pr,
           returnToWorktrees: init.returnToWorktrees ?? null,
           field: newSessionFields({
             moveChanges,
             destination,
             fork,
             existingWorktree,
+            pr,
           })[0]!,
           dropdown: null,
         });

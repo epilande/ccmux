@@ -132,6 +132,8 @@ import {
 } from "./worktree-prune";
 import { fetchPrune, listWorktrees, normalizePath } from "./worktree-git";
 import { listAllWorktrees } from "./worktree-list";
+import { listOpenPRs, type PRListResponse } from "./pr-list";
+import { mapWithConcurrency } from "../lib/concurrency";
 import {
   moveChangesToWorktree,
   readUncommitted,
@@ -376,6 +378,48 @@ const PR_SWEEP_INTERVAL_MS = 2 * 60_000;
  */
 const WORKTREE_FETCH_TTL_MS = 60_000;
 
+/**
+ * How long one repo's open-PR list is served from cache.
+ *
+ * Modelled on `worktreeFetchedAt` above, but it caches the ANSWER rather than
+ * rate-limiting a side effect: `GET /prs` has nothing to do but the `gh` call,
+ * so a hit has to be able to reply without one. That is what makes a Tab
+ * rescope and a return-open free, which is why the TTL lives here and the
+ * panel keeps no cache of its own.
+ */
+const PR_LIST_TTL_MS = 60_000;
+
+/**
+ * A failed PR list is held for a SHORT window, deliberately shorter than a
+ * success.
+ *
+ * `pr-resolver.ts` backs failures off HARDER than successes, and is right to:
+ * it refreshes in the background, where a doomed retry costs a spawn and buys
+ * nothing. This one is in front of someone who is looking at the error and
+ * fixing it (`gh auth login` in another pane), and their next open of the
+ * panel is the retry. Long enough that a Tab or a reopen a second later does
+ * not re-spawn a doomed `gh`; short enough that the fix shows.
+ */
+const PR_LIST_FAILURE_TTL_MS = 15_000;
+
+/** What one `listOpenPRs` call answers with. */
+type PRListAnswer = Awaited<ReturnType<typeof listOpenPRs>>;
+
+/**
+ * One repo's slot in the open-PR cache.
+ *
+ * `answer` exists from the moment the call STARTS; `done` is filled in when
+ * it settles and is what the TTL is measured from. The two together let one
+ * entry be both the lock and the cache.
+ */
+interface PRCacheEntry {
+  answer: Promise<PRListAnswer>;
+  done: { at: number; result: PRListAnswer } | null;
+}
+
+/** How many repos are asked about at once, matching `worktree-list.ts`. */
+const PR_REPO_CONCURRENCY = 3;
+
 /** Upper bound on worktrees one prune request may name. Far above any real
  *  repo's worktree count; exists so a malformed body can't ask the daemon to
  *  normalize an unbounded list. */
@@ -568,6 +612,26 @@ export class DaemonServer {
   private getScanHealth: () => DaemonHealth;
   /** When each repo last had `git fetch --prune` run for a prune scan. */
   private worktreeFetchedAt = new Map<string, number>();
+  /**
+   * One repo's open-PR answer, keyed by repo root.
+   *
+   * Holds the in-flight PROMISE, not just the settled result, and that is
+   * what makes the entry a lock as well as a cache. A result-only cache is
+   * written on COMPLETION, so it can only ever deduplicate calls that start
+   * after one finishes: N concurrent misses for one repo each spawned their
+   * own `gh pr list`. The concurrent misses are real and ordinary: a picker
+   * and a sidebar with the panel open at once, a Tab rescope, a close and
+   * reopen on a cold or expired entry, the panel's `r` (which became a real
+   * path two commits after this was written), and any direct caller.
+   *
+   * Sharing the promise also removes the write-ordering hazard rather than
+   * guarding against it. Two calls for one repo can no longer overlap, so a
+   * slow one cannot land after a fast one and stamp its stale answer fresh.
+   *
+   * Exposed to tests through `ServerInternals`, the way `gitInfoCache` is, so
+   * a TTL boundary can be reached without waiting for one.
+   */
+  private prListCache = new Map<string, PRCacheEntry>();
   /**
    * Home directory, for the `project` $HOME-boundary guard (S4). A plain
    * field rather than a constructor param, so a test can stub it directly
@@ -1154,6 +1218,10 @@ export class DaemonServer {
       return await this.handleSearch(url, corsHeaders);
     }
 
+    if (path === "/prs" && req.method === "GET") {
+      return await this.handlePRList(url, corsHeaders);
+    }
+
     if (path === "/worktrees" && req.method === "GET") {
       return await this.handleWorktreeList(url, corsHeaders);
     }
@@ -1594,6 +1662,114 @@ export class DaemonServer {
         { status: 500, headers },
       );
     }
+  }
+
+  /**
+   * `GET /prs` — every open pull request of every repo in scope.
+   *
+   * `repo` and `cwd` mean exactly what they mean on `GET /worktrees` and the
+   * prune scan, and go through the SAME `worktreeRepoRoots`: the panel merges
+   * all three answers into one list, so a repo one of them can see and
+   * another cannot is a section attached to nothing.
+   *
+   * A repo's failure is reported per repo and never fails the response. The
+   * commonest one is structural (a checkout with no GitHub remote sitting
+   * beside one that has), and taking every other repo's list down with it
+   * would empty most of the multi-repo view over a fact about one row.
+   */
+  private async handlePRList(
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    try {
+      const sessions = await this.enrichSessions(
+        this.sessionManager.getSessions(),
+      );
+      const repoRoots = await this.worktreeRepoRoots(
+        sessions,
+        url.searchParams.get("repo"),
+        url.searchParams.get("cwd"),
+      );
+      // An EXPLICIT user refresh skips the freshness check, because a refresh
+      // key that answers from a 60s cache is a key that does nothing for the
+      // one thing on this panel that goes stale on its own: a PR merged a
+      // moment ago still reads open. It cannot stampede, because a live call
+      // is still JOINED rather than duplicated, and that is a property of the
+      // entry rather than of the TTL.
+      const refresh = url.searchParams.get("refresh") === "1";
+      const response: PRListResponse = { repos: [], errors: [] };
+      const answers = await mapWithConcurrency(
+        repoRoots,
+        PR_REPO_CONCURRENCY,
+        async (repoRoot) => ({
+          repoRoot,
+          result: await this.openPRsFor(repoRoot, refresh),
+        }),
+      );
+      for (const { repoRoot, result } of answers) {
+        const repoName = basename(repoRoot);
+        if (result.ok) {
+          response.repos.push({ repoRoot, repoName, prs: result.value });
+        } else {
+          response.errors.push({ repoRoot, repoName, error: result.error });
+        }
+      }
+      response.repos.sort((a, b) => a.repoName.localeCompare(b.repoName));
+      return Response.json(response, { headers });
+    } catch (err) {
+      return Response.json(
+        { error: `Failed to list PRs: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
+    }
+  }
+
+  /**
+   * One repo's open PRs: the cached answer if it is fresh, the in-flight call
+   * if there is one, and only otherwise a new `gh`.
+   */
+  private openPRsFor(repoRoot: string, refresh = false): Promise<PRListAnswer> {
+    const entry = this.prListCache.get(repoRoot);
+    if (entry) {
+      // Still running. Join it rather than starting a second `gh`: the TTL
+      // cannot help here, because it is only written when a call COMPLETES.
+      // Ahead of the `refresh` check on purpose, so a refresh JOINS a live
+      // call instead of racing a second one against it.
+      if (!entry.done) return entry.answer;
+      // A refresh skips a fresh SUCCESS and never a fresh failure. The
+      // argument for the bypass is entirely about success going stale on its
+      // own ("a PR merged a moment ago still reads open"); a failed lookup has
+      // no equivalent, and the failure TTL exists precisely so that a rapid
+      // reopen does not re-spawn a doomed `gh`. Without this, key-repeat on
+      // the panel's `r` serial-spawns one `gh` per press for as fast as it can
+      // fail. Someone who just fixed `gh auth login` waits at most 15s.
+      const bypass = refresh && entry.done.result.ok;
+      const ttl = entry.done.result.ok
+        ? PR_LIST_TTL_MS
+        : PR_LIST_FAILURE_TTL_MS;
+      if (!bypass && Date.now() - entry.done.at < ttl) return entry.answer;
+    }
+
+    const answer = listOpenPRs(repoRoot);
+    const fresh: PRCacheEntry = { answer, done: null };
+    // Registered BEFORE the first await, so a caller arriving in the same
+    // tick finds the entry rather than starting its own call.
+    this.prListCache.set(repoRoot, fresh);
+    void answer.then(
+      (result) => {
+        fresh.done = { at: Date.now(), result };
+      },
+      () => {
+        // `listOpenPRs` reports every failure it knows about as `ok: false`
+        // and does not throw, so this is the unforeseen case. Drop the entry
+        // rather than leave the repo permanently "in flight", which would
+        // wedge it for the daemon's whole life.
+        if (this.prListCache.get(repoRoot) === fresh) {
+          this.prListCache.delete(repoRoot);
+        }
+      },
+    );
+    return answer;
   }
 
   private async handlePruneCandidates(
