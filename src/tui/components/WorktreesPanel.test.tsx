@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { createMockKeys } from "@opentui/core/testing";
+import { RGBA, type CapturedFrame, type CapturedSpan } from "@opentui/core";
+import { createMockKeys, createMockMouse } from "@opentui/core/testing";
 import type {
   PruneCandidate,
   PruneOutcome,
@@ -62,11 +63,12 @@ import {
   oneLine,
   prStatusRowKey,
   prStatusRowRepo,
-  viewTabSegments,
+  viewTabs,
+  type ViewTab,
   initialView,
   PRS_TAB,
-  PRS_TAB_SHORT,
   WORKTREES_TAB,
+  PRS_TAB_SHORT,
   prRowKey,
   rowPRUrl,
   type PanelRepo,
@@ -399,6 +401,10 @@ async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
   return {
     ...recorder,
     keys: createMockKeys(setup.renderer),
+    mouse: createMockMouse(setup.renderer),
+    /** Cell-level colours, for the things a char frame cannot show: the view
+     *  tabs are filled CHIPS, and a chip is its background. */
+    spans: () => setup!.captureSpans(),
     /** Drain every pending microtask, then repaint. */
     frame: async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -3515,18 +3521,36 @@ describe("PR row presentation", () => {
 });
 
 describe("view tabs", () => {
+  // Chips are separated by one column that belongs to neither of them, so the
+  // rendered line is their texts joined by a space.
   const tabText = (view: "worktrees" | "prs", suffix: string, width: number) =>
-    viewTabSegments(view, suffix, width)
-      .map((s) => s.text)
-      .join("");
+    viewTabs(view, suffix, width)
+      .map((tab) => tab.segments.map((s) => s.text).join(""))
+      .join(" ");
+  const labelFg = (tab: ViewTab) => tab.segments[0]!.fg;
 
-  it("brightens the active view and dims the other", () => {
-    const worktrees = viewTabSegments("worktrees", " · 7", 60);
-    expect(worktrees[0]).toEqual({ text: WORKTREES_TAB, fg: theme.text });
-    expect(worktrees[2]).toEqual({ text: PRS_TAB, fg: theme.overlay });
-    const prs = viewTabSegments("prs", " · 7", 60);
-    expect(prs[0]).toEqual({ text: WORKTREES_TAB, fg: theme.overlay });
-    expect(prs[2]).toEqual({ text: PRS_TAB, fg: theme.text });
+  it("marks the showing view active and dims the other", () => {
+    const [wtA, prA] = viewTabs("worktrees", " · 7", 60);
+    expect(wtA!.active).toBe(true);
+    expect(prA!.active).toBe(false);
+    expect(labelFg(wtA!)).toBe(theme.text);
+    expect(labelFg(prA!)).toBe(theme.overlay);
+    const [wtB, prB] = viewTabs("prs", " · 7", 60);
+    expect(wtB!.active).toBe(false);
+    expect(prB!.active).toBe(true);
+    expect(labelFg(wtB!)).toBe(theme.overlay);
+    expect(labelFg(prB!)).toBe(theme.text);
+  });
+
+  // Each chip names the view its click selects. The render reads this and
+  // nothing else, so a chip can never be wired to the view beside it.
+  it("names the view each chip selects, in both views", () => {
+    for (const view of ["worktrees", "prs"] as const) {
+      expect(viewTabs(view, " · 7", 60).map((t) => t.view)).toEqual([
+        "worktrees",
+        "prs",
+      ]);
+    }
   });
 
   // No key badge, in either view. A `[l]` on the inactive tab was tried and
@@ -3534,9 +3558,9 @@ describe("view tabs", () => {
   // into the interface. The keys are taught on the hint line instead.
   it("carries labels and a count, never a key", () => {
     expect(tabText("worktrees", " · 7", 60)).toBe(
-      "Worktrees │ Pull Requests · 7",
+      " Worktrees   Pull Requests · 7 ",
     );
-    expect(tabText("prs", " · 7", 60)).toBe("Worktrees │ Pull Requests · 7");
+    expect(tabText("prs", " · 7", 60)).toBe(" Worktrees   Pull Requests · 7 ");
     for (const width of [60, 34, 22, 12]) {
       expect(tabText("worktrees", " · 7", width)).not.toContain("[");
       expect(tabText("prs", " · 7", width)).not.toContain("[");
@@ -3548,53 +3572,201 @@ describe("view tabs", () => {
   // it back when GitHub answers.
   it("carries the pending spinner in place of the count", () => {
     expect(tabText("worktrees", " · ◓", 60)).toBe(
-      "Worktrees │ Pull Requests · ◓",
+      " Worktrees   Pull Requests · ◓ ",
     );
+  });
+
+  // The count is a step dimmer than the label it sits beside, and one step
+  // dimmer again on the chip that is not showing. Flat `overlay` on the
+  // active chip's lighter ground read as noise.
+  it("dims the count under its own label", () => {
+    const [, active] = viewTabs("prs", " · 7", 60);
+    expect(active!.segments[1]).toEqual({ text: " · 7", fg: theme.subtext });
+    const [, inactive] = viewTabs("worktrees", " · 7", 60);
+    expect(inactive!.segments[1]).toEqual({ text: " · 7", fg: theme.overlay });
   });
 
   // A ladder of WHOLE swaps, like `titleSegments`'s suffix: a `Pull Request…`
   // cut mid-word would spend the columns that carry everything after it.
   it("degrades one whole rung at a time", () => {
-    expect(tabText("worktrees", " · 7", 29)).toBe(
-      "Worktrees │ Pull Requests · 7",
+    expect(tabText("worktrees", " · 7", 31)).toBe(
+      " Worktrees   Pull Requests · 7 ",
     );
-    expect(tabText("worktrees", " · 7", 28)).toBe("Worktrees │ PRs · 7");
-    expect(tabText("worktrees", " · 7", 28)).toContain(PRS_TAB_SHORT);
-    expect(tabText("worktrees", " · 7", 18)).toBe("Worktrees │ PRs");
+    expect(tabText("worktrees", " · 7", 30)).toBe(" Worktrees   PRs · 7 ");
+    expect(tabText("worktrees", " · 7", 30)).toContain(PRS_TAB_SHORT);
+    expect(tabText("worktrees", " · 7", 20)).toBe(" Worktrees   PRs ");
   });
 
-  // The sidebar's own width, which is the ladder's whole reason for existing.
+  // A 40-column sidebar's content width, which is the ladder's whole reason
+  // for existing: both labels survive there, and so does the cause of a
+  // failed lookup, which is the one suffix the body cannot restate as
+  // cheaply.
   it("keeps both labels and the count at sidebar width", () => {
-    expect(tabText("worktrees", " · 7", 30)).toBe(
-      "Worktrees │ Pull Requests · 7",
+    expect(tabText("worktrees", " · 7", 36)).toBe(
+      " Worktrees   Pull Requests · 7 ",
     );
-    expect(tabText("worktrees", " · unavailable", 30)).toBe(
-      "Worktrees │ PRs · unavailable",
+    expect(tabText("worktrees", " · unavailable", 36)).toBe(
+      " Worktrees   PRs · unavailable ",
     );
   });
 
-  // What fitting guarantees is the PREFIX, and the prefix is always
-  // `Worktrees` — the ACTIVE tab in one view and the INACTIVE one in the
-  // other. The old name for this test claimed it kept the active tab, which
-  // it never asserted for `prs` and which is false there.
-  it("fits to its box, keeping the prefix in either view", () => {
-    for (const width of [14, 12, 8, 4]) {
+  // What fitting guarantees is the FIRST chip, and it is always `Worktrees` —
+  // the ACTIVE tab in one view and the INACTIVE one in the other. The old
+  // name for this claimed it kept the active tab, which is false for `prs`.
+  it("fits to its box, keeping the first chip in either view", () => {
+    for (const width of [16, 14, 12, 8, 4]) {
       for (const view of ["worktrees", "prs"] as const) {
-        const fitted = viewTabSegments(view, " · 7", width);
-        const used = fitted.reduce((n, s) => n + displayWidth(s.text), 0);
+        const fitted = viewTabs(view, " · 7", width);
+        const used =
+          fitted.reduce(
+            (n, tab) =>
+              n + tab.segments.reduce((m, s) => m + displayWidth(s.text), 0),
+            0,
+          ) + Math.max(0, fitted.length - 1);
         expect(used).toBeLessThanOrEqual(width);
       }
     }
-    expect(tabText("worktrees", " · 7", 12)).toStartWith("Worktrees");
-    expect(tabText("prs", " · 7", 12)).toStartWith("Worktrees");
+    expect(tabText("worktrees", " · 7", 12)).toStartWith(" Worktrees");
+    expect(tabText("prs", " · 7", 12)).toStartWith(" Worktrees");
   });
 
-  // Pinned so nobody "fixes" it blind: below about fifteen columns the
-  // separator dangles with nothing after it. That is what fitting a segment
-  // list does, it needs a panel under ~16 columns to reach, and it is left
-  // alone deliberately.
-  it("leaves a dangling separator below the last rung", () => {
-    expect(tabText("worktrees", " · 7", 12)).toBe("Worktrees │ ");
+  // The flat-segment version left the separator dangling with nothing after
+  // it below about fifteen columns. A chip carries a BACKGROUND, so the same
+  // shortfall would paint an empty block of colour where a label belongs.
+  // `fitTabs` drops the chip it cannot fill instead.
+  it("drops a chip it cannot fill rather than painting an empty one", () => {
+    for (const width of [16, 14, 12, 8, 4]) {
+      for (const tab of viewTabs("worktrees", " · 7", width)) {
+        const text = tab.segments.map((s) => s.text).join("");
+        expect(text.trim()).not.toBe("");
+      }
+    }
+    expect(viewTabs("worktrees", " · 7", 12)).toHaveLength(1);
+  });
+});
+
+/**
+ * The tabs as they REACH THE SCREEN: a chip is its background and its click,
+ * and a char frame can show neither. `captureSpans` carries per-run colours
+ * and `createMockMouse` drives real pointer events at real coordinates.
+ */
+describe("view tabs on screen", () => {
+  const onePR = prsOf([openPR()]);
+
+  /**
+   * The screen row the chips are drawn on.
+   *
+   * Identified by carrying BOTH labels, because the TITLE line directly above
+   * also says `Worktrees` and matching on that alone silently pointed every
+   * helper here at the title. One of these tests passed that way while
+   * clicking a cell no tab occupies.
+   */
+  function tabRow(frame: string): number {
+    const y = frame
+      .split("\n")
+      .findIndex(
+        (line) => line.includes(WORKTREES_TAB) && line.includes(PRS_TAB),
+      );
+    if (y < 0) throw new Error("tab line not on screen");
+    return y;
+  }
+
+  function tabLine(spans: CapturedFrame, frame: string): CapturedSpan[] {
+    return spans.lines[tabRow(frame)]!.spans;
+  }
+
+  function bgOf(spans: CapturedSpan[], needle: string): number[] {
+    const span = spans.find((s) => s.text.includes(needle));
+    if (!span) throw new Error(`no span carrying "${needle}"`);
+    return span.bg.toInts();
+  }
+
+  function fgOf(spans: CapturedSpan[], needle: string): number[] {
+    const span = spans.find((s) => s.text.includes(needle));
+    if (!span) throw new Error(`no span carrying "${needle}"`);
+    return span.fg.toInts();
+  }
+
+  /** Where a chip's label sits on screen, as the mouse sees it. */
+  function cellOf(frame: string, needle: string): { x: number; y: number } {
+    const y = tabRow(frame);
+    const x = frame.split("\n")[y]!.indexOf(needle);
+    if (x < 0) throw new Error(`"${needle}" is not on the tab line`);
+    return { x, y };
+  }
+
+  // ONE fill, not two: `border` is darker than `surface` in dracula and
+  // rose-pine, so a second fill on the inactive chip would draw it RAISED
+  // above the active one in those palettes.
+  it("fills only the tab that is showing", async () => {
+    const { settled, spans } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    expect(settled).toContain(WORKTREES_TAB);
+    const line = tabLine(spans(), settled);
+    expect(bgOf(line, WORKTREES_TAB)).toEqual(
+      RGBA.fromHex(theme.border).toInts(),
+    );
+    expect(bgOf(line, PRS_TAB)).toEqual(RGBA.fromHex(theme.base).toInts());
+  });
+
+  it("switches the view when the other tab is clicked", async () => {
+    const { settled, frame, spans, mouse } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    expect(settled).toContain("main checkout");
+    expect(settled).not.toContain("#151");
+
+    const at = cellOf(settled, PRS_TAB);
+    await mouse.click(at.x, at.y);
+    const after = await frame();
+    expect(after).toContain("#151");
+    expect(after).not.toContain("main checkout");
+    // And the chip that is now showing carries the brighter ground.
+    const line = tabLine(spans(), after);
+    expect(bgOf(line, PRS_TAB)).toEqual(RGBA.fromHex(theme.border).toInts());
+    expect(bgOf(line, WORKTREES_TAB)).toEqual(RGBA.fromHex(theme.base).toInts());
+  });
+
+  // Clicking where you already are must not re-seed the cursor or reload:
+  // `switchView` returns early on its own view, and this is what proves the
+  // chip is wired through it rather than to a bare `setView`.
+  it("does nothing when the tab already showing is clicked", async () => {
+    const { settled, frame, mouse } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    const at = cellOf(settled, WORKTREES_TAB);
+    await mouse.click(at.x, at.y);
+    expect(await frame()).toBe(settled);
+  });
+
+  // The affordance: a filled block that answers nothing until it is clicked
+  // reads as decoration.
+  it("brightens the tab under the pointer", async () => {
+    const { settled, frame, spans, mouse } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    const at = cellOf(settled, PRS_TAB);
+    expect(fgOf(tabLine(spans(), settled), PRS_TAB)).toEqual(
+      RGBA.fromHex(theme.overlay).toInts(),
+    );
+    await mouse.moveTo(at.x, at.y);
+    const hovered = await frame();
+    expect(fgOf(tabLine(spans(), hovered), PRS_TAB)).toEqual(
+      RGBA.fromHex(theme.subtext).toInts(),
+    );
   });
 });
 
@@ -4368,7 +4540,9 @@ describe("WorktreesPanel PR view safety gate", () => {
       onReview: () => {},
     });
     expect(settled).toContain("l PRs");
-    expect(settled).toContain("Worktrees │ Pull Requests");
+    // The chips carry their own padding, so what reaches the screen is the
+    // two labels a single gap apart, with no separator glyph between them.
+    expect(settled).toContain(" Worktrees   Pull Requests");
     expect(settled).not.toContain("[l]");
   });
 

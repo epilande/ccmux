@@ -616,17 +616,90 @@ export function titleSegments(
   return fitSegments([{ text: title, fg: theme.text }], width);
 }
 
-/** The tab line's labels and the separator between them. */
+/** The tab line's labels. */
 export const WORKTREES_TAB = "Worktrees";
 export const PRS_TAB = "Pull Requests";
 /** What the PR tab degrades to at sidebar widths, where the long label plus
  *  a count does not fit beside `Worktrees`. */
 export const PRS_TAB_SHORT = "PRs";
-const TAB_SEPARATOR = " │ ";
+/**
+ * One column inside each tab and one between them.
+ *
+ * Both are baked into the SEGMENTS rather than set as box padding, so the
+ * width a tab occupies is exactly the width of its own text. The ladder
+ * below measures rungs by summing segment widths; padding the box instead
+ * would put two columns per tab outside that sum, and the line that has to
+ * fit `contentWidth()` would quietly run four columns over.
+ */
+const TAB_PAD = " ";
+const TAB_GAP = " ";
 
 /**
- * The view tabs: one line, directly under the title, naming both views with
- * the inactive one dimmed.
+ * One tab on the view line: which view it selects, whether it is the one
+ * showing, and the text of its own filled chip.
+ *
+ * A structure and not a flat segment list, which is what this used to
+ * return, because a chip has to be a single BOX to carry a background and a
+ * click, and a flat list cannot say where one chip ends and the next begins.
+ */
+export interface ViewTab {
+  view: PanelView;
+  active: boolean;
+  segments: RowSegment[];
+}
+
+/** Columns a rung occupies: every chip's own text, plus the gaps between. */
+function tabsWidth(tabs: ViewTab[]): number {
+  const chips = tabs.reduce(
+    (n, tab) =>
+      n + tab.segments.reduce((m, s) => m + displayWidth(s.text), 0),
+    0,
+  );
+  return chips + displayWidth(TAB_GAP) * Math.max(0, tabs.length - 1);
+}
+
+/**
+ * Fit a rung that is already too wide, chip by chip from the left.
+ *
+ * Each chip is fitted against what the ones before it left over, and a chip
+ * with nothing left ends the line rather than rendering an empty filled
+ * block. That last part is why this replaced a flat `fitSegments` call: the
+ * old one could leave the separator dangling with nothing after it, and a
+ * background makes that failure visible instead of merely odd — an empty
+ * two-column chip of colour, sitting where a label should be.
+ */
+function fitTabs(tabs: ViewTab[], width: number): ViewTab[] {
+  const fitted: ViewTab[] = [];
+  let remaining = width;
+  for (const tab of tabs) {
+    if (fitted.length > 0) {
+      const gap = displayWidth(TAB_GAP);
+      if (remaining <= gap) break;
+      remaining -= gap;
+    }
+    const segments = fitSegments(tab.segments, remaining);
+    const used = segments.reduce((n, s) => n + displayWidth(s.text), 0);
+    if (used === 0) break;
+    fitted.push({ ...tab, segments });
+    remaining -= used;
+  }
+  return fitted;
+}
+
+/**
+ * The view tabs: one line, directly under the title, naming both views as
+ * filled chips with the active one raised.
+ *
+ * The colour does the work a browser tab's shape does. Three grounds read as
+ * three levels because the palette already separates them: the panel sits on
+ * `base`, an inactive chip on `surface`, the active chip on `border` — the
+ * same raised-on-recessed pair `ContextMenu` uses for its highlighted item,
+ * so a filled block already means "this one" everywhere else in the TUI.
+ * It stays ONE line. A real tab strip wants a rule under it and that rule
+ * costs a row of list, which is the tax this whole panel exists to refuse.
+ *
+ * Both chips are clickable, and clicking the active one is a no-op because
+ * `switchView` returns early on its own view.
  *
  * It carries NO key. One revision put a `[l]` badge on the inactive tab and
  * live use rejected it: keyboard notation inside a label reads as
@@ -642,47 +715,50 @@ const TAB_SEPARATOR = " │ ";
  * The degradation is a ladder of WHOLE swaps, the way `titleSegments` drops
  * its suffix whole rather than truncating a label into nonsense:
  *
- * 1. `Worktrees │ Pull Requests · 7`
- * 2. `Worktrees │ PRs · 7`   — the long label, swapped whole
- * 3. `Worktrees │ PRs`       — the count, which the body restates anyway
+ * 1. ` Worktrees   Pull Requests · 7 `
+ * 2. ` Worktrees   PRs · 7 `   — the long label, swapped whole
+ * 3. ` Worktrees   PRs `       — the count, which the body restates anyway
  *
- * Below that it is fitted, and what fitting guarantees is the PREFIX, which
- * is always `Worktrees` — the ACTIVE tab in the Worktrees view and the
+ * Below that `fitTabs` takes over, and what it guarantees is the FIRST chip,
+ * which is always `Worktrees` — the ACTIVE tab in the Worktrees view and the
  * INACTIVE one in the PR view. It is not "the tab that says where you are";
- * saying so would be wrong in one of the two views. Below roughly fifteen
- * columns the separator dangles with nothing after it (`Worktrees │ `), which
- * is what fitting a segment list does and is left alone deliberately: it
- * needs a panel under about sixteen columns to reach, well outside any width
- * this renders at. A fourth rung used to drop the active tab instead, and it
- * existed only to preserve a key badge on the inactive tab; with the badge
- * gone there is nothing left for it to save.
+ * saying so would be wrong in one of the two views.
  */
-export function viewTabSegments(
+export function viewTabs(
   view: PanelView,
   suffix: string,
   width: number,
-): RowSegment[] {
-  const onWorktrees = view === "worktrees";
-  const build = (prLabel: string, tail: string): RowSegment[] => {
-    const segments: RowSegment[] = [
-      { text: WORKTREES_TAB, fg: onWorktrees ? theme.text : theme.overlay },
-      { text: TAB_SEPARATOR, fg: theme.overlay },
-      { text: prLabel, fg: onWorktrees ? theme.overlay : theme.text },
-    ];
-    if (tail) segments.push({ text: tail, fg: theme.overlay });
-    return segments;
+): ViewTab[] {
+  const chip = (
+    tabView: PanelView,
+    label: string,
+    tail: string,
+  ): ViewTab => {
+    const active = tabView === view;
+    const fg = active ? theme.text : theme.overlay;
+    const segments: RowSegment[] = [{ text: TAB_PAD + label, fg }];
+    // The count is the dim layer INSIDE the chip, one step down from its
+    // label rather than the flat `overlay` it wore on the bare line: on the
+    // active chip's lighter ground `overlay` reads as noise.
+    if (tail) {
+      segments.push({ text: tail, fg: active ? theme.subtext : theme.overlay });
+    }
+    segments.push({ text: TAB_PAD, fg });
+    return { view: tabView, active, segments };
   };
-  const total = (segments: RowSegment[]): number =>
-    segments.reduce((n, segment) => n + displayWidth(segment.text), 0);
+  const build = (prLabel: string, tail: string): ViewTab[] => [
+    chip("worktrees", WORKTREES_TAB, ""),
+    chip("prs", prLabel, tail),
+  ];
   const ladder = [
     build(PRS_TAB, suffix),
     build(PRS_TAB_SHORT, suffix),
     build(PRS_TAB_SHORT, ""),
   ];
   for (const rung of ladder) {
-    if (total(rung) <= width) return rung;
+    if (tabsWidth(rung) <= width) return rung;
   }
-  return fitSegments(ladder[ladder.length - 1]!, width);
+  return fitTabs(ladder[ladder.length - 1]!, width);
 }
 
 /**
@@ -2539,9 +2615,15 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     return ` · ${count}`;
   };
 
-  const viewTabs = createMemo(() =>
-    viewTabSegments(view(), prTabSuffix(), contentWidth()),
+  const tabs = createMemo(() =>
+    viewTabs(view(), prTabSuffix(), contentWidth()),
   );
+  /**
+   * The tab the pointer is over, so an inactive chip answers a hover before
+   * it is clicked. Without it a filled block that reacts to nothing until
+   * the click lands reads as decoration rather than a control.
+   */
+  const [hoveredTab, setHoveredTab] = createSignal<PanelView | null>(null);
 
   /**
    * Whether the active view has anything to draw.
@@ -3228,9 +3310,54 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         }
       >
         <box width="100%" height={1} flexDirection="row">
-          <For each={viewTabs()}>
-            {(segment: RowSegment) => (
-              <text fg={segment.fg}>{segment.text}</text>
+          <For each={tabs()}>
+            {(tab: ViewTab, index) => (
+              <>
+                {/* The gap is its OWN element and not padding on the chip:
+                    padding inside a background paints the gap in the chip's
+                    colour, which fuses two adjacent tabs into one block. */}
+                <Show when={index() > 0}>
+                  <text fg={theme.overlay}>{TAB_GAP}</text>
+                </Show>
+                <box
+                  flexDirection="row"
+                  /* ONE chip is filled, and the other takes the panel's own
+                     ground rather than a second, dimmer fill. Two fills was
+                     the first cut and it is not portable: `border` is DARKER
+                     than `surface` in dracula and rose-pine, which would draw
+                     the active chip recessed and the inactive one raised —
+                     backwards, in a palette a user can also override
+                     arbitrarily. With one fill there is nothing to invert:
+                     the filled chip is the one showing, whatever the theme
+                     does with its greys. */
+                  backgroundColor={tab.active ? theme.border : theme.base}
+                  onMouseOver={() => setHoveredTab(tab.view)}
+                  onMouseOut={() =>
+                    setHoveredTab((current) =>
+                      current === tab.view ? null : current,
+                    )
+                  }
+                  onMouseDown={(event) => {
+                    if (event.button === MouseButton.LEFT) {
+                      switchView(tab.view);
+                    }
+                  }}
+                >
+                  <For each={tab.segments}>
+                    {(segment: RowSegment) => (
+                      <text
+                        fg={
+                          !tab.active && hoveredTab() === tab.view
+                            ? theme.subtext
+                            : segment.fg
+                        }
+                      >
+                        {segment.text}
+                      </text>
+                    )}
+                  </For>
+                </box>
+              </>
             )}
           </For>
         </box>
