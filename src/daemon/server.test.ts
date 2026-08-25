@@ -48,6 +48,7 @@ import {
 } from "./server";
 import type { InvocationRecord } from "./invocation-manager";
 import type { PRListResponse } from "./pr-list";
+import type { IssueListResponse } from "./issue-list";
 import { SessionManager } from "./sessions";
 import type { SessionEvent } from "./sessions";
 import type { SSEEvent, DaemonHealth } from "../types";
@@ -89,12 +90,15 @@ type ServerInternals = {
   sweepOffset: number;
   /** Exposed so a test can expire git facts the way the TTL does. */
   gitInfoCache: Map<string, unknown>;
-  /** Same, for the open-PR cache: it also holds the in-flight promise, so a
-   *  test can watch a concurrent miss join rather than start a second call. */
-  prListCache: Map<
-    string,
-    { answer: Promise<unknown>; done: { at: number; result: unknown } | null }
-  >;
+  /** Same, for the open-PR cache: its entries hold the in-flight promise as
+   *  well as the settled answer, so a test can watch a concurrent miss join
+   *  rather than start a second call. */
+  prListCache: {
+    entries: Map<
+      string,
+      { answer: Promise<unknown>; done: { at: number; result: unknown } | null }
+    >;
+  };
   onBranchPRsChanged(cwd: string, branch: string): Promise<void>;
   visibleSessions: Set<string>;
   lastSidebarState: {
@@ -8940,7 +8944,7 @@ describe("GET /prs caching", () => {
         await new Promise((resolve) => setTimeout(resolve, 5));
         // Read by iteration, not by key: the cache is keyed on the root git
         // resolves, which need not be the spelling this test passed in.
-        inFlight = [...internals.prListCache.values()];
+        inFlight = [...internals.prListCache.entries.values()];
       }
       expect(inFlight).toHaveLength(1);
       expect(inFlight[0]?.done).toBeNull();
@@ -8949,7 +8953,7 @@ describe("GET /prs caching", () => {
       const second = listPRs(internals, repo);
       await Promise.all([first, second]);
       expect(gh.calls()).toBe(1);
-      expect([...internals.prListCache.values()][0]?.done).not.toBeNull();
+      expect([...internals.prListCache.entries.values()][0]?.done).not.toBeNull();
     } finally {
       gh.restore();
     }
@@ -8972,7 +8976,7 @@ describe("GET /prs caching", () => {
 
       // Rewound past the FAILURE ttl but well inside the SUCCESS one. A
       // cache that used one TTL for both would still be serving this.
-      const entry = internals.prListCache.get(repo);
+      const entry = internals.prListCache.entries.get(repo);
       expect(entry?.done).not.toBeNull();
       entry!.done!.at = Date.now() - 30_000;
       await listPRs(internals, repo);
@@ -9033,7 +9037,7 @@ describe("GET /prs caching", () => {
 
       // And it is a BACKOFF, not a lockout: past the failure TTL a refresh
       // retries like any other read.
-      const entry = [...internals.prListCache.values()][0];
+      const entry = [...internals.prListCache.entries.values()][0];
       entry!.done!.at = Date.now() - 30_000;
       await listPRs(internals, repo);
       expect(gh.calls()).toBe(2);
@@ -9053,7 +9057,7 @@ describe("GET /prs caching", () => {
       let inFlight: { done: unknown }[] = [];
       for (let i = 0; i < 100 && inFlight.length === 0; i++) {
         await new Promise((resolve) => setTimeout(resolve, 5));
-        inFlight = [...internals.prListCache.values()];
+        inFlight = [...internals.prListCache.entries.values()];
       }
       expect(inFlight[0]?.done).toBeNull();
 
@@ -9077,7 +9081,7 @@ describe("GET /prs caching", () => {
       await listPRs(internals, repo);
       expect(gh.calls()).toBe(1);
 
-      const entry = internals.prListCache.get(repo);
+      const entry = internals.prListCache.entries.get(repo);
       entry!.done!.at = Date.now() - 30_000;
       await listPRs(internals, repo);
       // Still one: 30s is past the 15s failure TTL and inside the 60s
@@ -9087,4 +9091,238 @@ describe("GET /prs caching", () => {
       gh.restore();
     }
   }, 20_000);
+});
+
+/**
+ * `GET /issues`, the sibling of `GET /prs`, tested for what is genuinely its
+ * own rather than for what it inherits.
+ *
+ * The cache DISCIPLINE (join an in-flight call, the refresh bypass, the two
+ * TTLs, the drop on an unforeseen throw) is unit-tested once on
+ * `RepoAnswerCache` and is not re-tested per endpoint. What is tested here is
+ * everything that could still be wired up wrongly: the scoping, the per-repo
+ * failure, and the fact that the two lists hold SEPARATE caches, which is the
+ * one claim no unit test on a single cache instance can make.
+ */
+describe("GET /issues", () => {
+  let root: string;
+
+  const ISSUE_ROW = {
+    number: 151,
+    title: "Open-PR list in the Worktrees panel",
+    url: "https://github.com/o/r/issues/151",
+    author: { login: "epilande" },
+    labels: [{ name: "enhancement" }],
+  };
+
+  function makeRepo(): string {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-issues-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    return repo;
+  }
+
+  /** A `gh` on PATH that answers `issue list` from `body`. */
+  function withStubbedGh(body: unknown, exitCode = 0) {
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "issues.json"), JSON.stringify(body));
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/bin/sh\ncat '${join(bin, "issues.json")}'\nexit ${exitCode}\n`,
+      { mode: 0o755 },
+    );
+    const previous = process.env.PATH;
+    process.env.PATH = `${bin}:${previous ?? ""}`;
+    return () => {
+      if (previous === undefined) delete process.env.PATH;
+      else process.env.PATH = previous;
+    };
+  }
+
+  /**
+   * A `gh` that tells `pr list` from `issue list` and COUNTS each separately,
+   * so the two caches can be shown not to be one.
+   */
+  function withSplitGh() {
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gh"), [
+      "#!/bin/sh",
+      `echo "$1" >> '${join(bin, "calls")}'`,
+      'if [ "$1" = "issue" ]; then',
+      `  cat '${join(bin, "issues.json")}'`,
+      "else",
+      `  cat '${join(bin, "prs.json")}'`,
+      "fi",
+    ].join("\n") + "\n", { mode: 0o755 });
+    writeFileSync(join(bin, "issues.json"), JSON.stringify([ISSUE_ROW]));
+    writeFileSync(join(bin, "prs.json"), JSON.stringify([]));
+    writeFileSync(join(bin, "calls"), "");
+    const previous = process.env.PATH;
+    process.env.PATH = `${bin}:${previous ?? ""}`;
+    return {
+      calls: (kind: string) =>
+        readFileSync(join(bin, "calls"), "utf8")
+          .split("\n")
+          .filter((line) => line === kind).length,
+      restore: () => {
+        if (previous === undefined) delete process.env.PATH;
+        else process.env.PATH = previous;
+      },
+    };
+  }
+
+  async function listIssues(
+    internals: ServerInternals,
+    query: string,
+  ): Promise<Response> {
+    return internals.handleRequest(
+      new Request(`http://127.0.0.1:2269/issues?${query}`),
+    );
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("answers with the repo's open issues, flattened", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh([ISSUE_ROW]);
+    try {
+      const res = await listIssues(
+        internals,
+        `repo=${encodeURIComponent(repo)}`,
+      );
+      const body = (await res.json()) as IssueListResponse;
+
+      expect(res.status).toBe(200);
+      expect(body.errors).toEqual([]);
+      expect(body.repos).toHaveLength(1);
+      expect(body.repos[0]?.repoName).toBe("repo");
+      expect(body.repos[0]?.issues[0]).toMatchObject({
+        number: 151,
+        author: "epilande",
+        labels: ["enhancement"],
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  // The same resolver `GET /prs`, `GET /worktrees` and the prune scan take:
+  // the picker draws PRs and issues as one surface, so a repo one endpoint
+  // can see and the other cannot is a section attached to nothing.
+  it("takes `repo` as a resolved filter and `cwd` as additive", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh([ISSUE_ROW]);
+    try {
+      const byCwd = await listIssues(
+        internals,
+        `cwd=${encodeURIComponent(repo)}`,
+      );
+      expect(
+        ((await byCwd.json()) as IssueListResponse).repos[0]?.repoRoot,
+      ).toContain("repo");
+
+      const nowhere = await listIssues(
+        internals,
+        `repo=${encodeURIComponent(root)}`,
+      );
+      expect(((await nowhere.json()) as IssueListResponse).repos).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  // A repo with issues DISABLED fails this call while its PRs still answer.
+  // Drawing that as an empty list would be a lie about the repo.
+  it("reports a repo's failure per repo, with a 200", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh({ message: "not authenticated" }, 1);
+    try {
+      const res = await listIssues(
+        internals,
+        `repo=${encodeURIComponent(repo)}`,
+      );
+      const body = (await res.json()) as IssueListResponse;
+
+      expect(res.status).toBe(200);
+      expect(body.repos).toEqual([]);
+      expect(body.errors[0]?.repoName).toBe("repo");
+      expect(body.errors[0]?.error).toContain("gh issue list exited 1");
+    } finally {
+      restore();
+    }
+  });
+
+  it("serves a repeat read from cache without running gh again", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh([ISSUE_ROW]);
+    try {
+      await listIssues(internals, `repo=${encodeURIComponent(repo)}`);
+      // gh is gone now; a cache miss would surface as an error row.
+      rmSync(join(root, "bin", "gh"));
+      const res = await listIssues(
+        internals,
+        `repo=${encodeURIComponent(repo)}`,
+      );
+      const body = (await res.json()) as IssueListResponse;
+
+      expect(body.errors).toEqual([]);
+      expect(body.repos[0]?.issues[0]?.number).toBe(151);
+    } finally {
+      restore();
+    }
+  });
+
+  /**
+   * The two lists hold separate caches, and that is why they are separate
+   * endpoints: a refresh of one must not evict or re-spawn the other. A
+   * shared cache keyed only by repo root would make either of these
+   * assertions fail — one list would serve the other's answer, or one
+   * refresh would cost two `gh` calls.
+   */
+  it("caches issues independently of PRs", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withSplitGh();
+    const query = `repo=${encodeURIComponent(repo)}`;
+    try {
+      await listIssues(internals, query);
+      await internals.handleRequest(
+        new Request(`http://127.0.0.1:2269/prs?${query}`),
+      );
+      expect(gh.calls("issue")).toBe(1);
+      expect(gh.calls("pr")).toBe(1);
+
+      // Refreshing PRs bypasses the PR cache and leaves the issue cache alone.
+      await internals.handleRequest(
+        new Request(`http://127.0.0.1:2269/prs?${query}&refresh=1`),
+      );
+      expect(gh.calls("pr")).toBe(2);
+      expect(gh.calls("issue")).toBe(1);
+
+      // And the reverse.
+      await listIssues(internals, `${query}&refresh=1`);
+      expect(gh.calls("issue")).toBe(2);
+      expect(gh.calls("pr")).toBe(2);
+
+      // The answers did not cross wires either.
+      const issues = (await (
+        await listIssues(internals, query)
+      ).json()) as IssueListResponse;
+      expect(issues.repos[0]?.issues[0]?.number).toBe(151);
+    } finally {
+      gh.restore();
+    }
+  });
 });

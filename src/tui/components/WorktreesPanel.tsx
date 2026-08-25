@@ -31,14 +31,28 @@ import type {
   WorktreeListResponse,
   WorktreeRow,
 } from "../../daemon/worktree-list";
-import type {
-  OpenPR,
-  PRListBody,
-  PRListResponse,
-} from "../../daemon/pr-list";
-import { normalizePRList } from "../../daemon/pr-list";
+import type { OpenPR, PRListResponse } from "../../daemon/pr-list";
 import type { SessionStatus } from "../../types/session";
-import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
+import { displayWidth, truncateText } from "../utils/format";
+import {
+  fitSegments,
+  oneLine,
+  scrollTargetFor,
+  unhandled,
+  type Phrase,
+  type RowSegment,
+  type VisualLayout,
+} from "./row-segments";
+import {
+  PR_MARKER,
+  checkoutHolding,
+  isPRRowKey,
+  prDetailPhrases,
+  prRowDim,
+  prRowKey,
+  prRowLabel,
+} from "./pr-rows";
+import { fetchOpenPRs, type SourceSectionStatus } from "../utils/source-lists";
 import { fitHints } from "./Footer";
 import { useStatusIcon } from "../utils/useStatusIcon";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
@@ -83,9 +97,6 @@ type Phase = "loading" | "list" | "confirm" | "running" | "done" | "error";
 const LIST_TIMEOUT_MS = 20_000;
 const SCAN_TIMEOUT_MS = 60_000;
 const RUN_TIMEOUT_MS = 10 * 60_000;
-/** Phase 3, one `gh pr list` per repo behind a daemon-side TTL. */
-const PR_TIMEOUT_MS = 30_000;
-
 /** How long a `y` copy confirmation stays on the hint line. */
 const COPY_NOTE_MS = 2_000;
 
@@ -155,7 +166,7 @@ export interface PRStatusRow {
   key: string;
   repoRoot: string;
   /** The section state this line reports, which is also what it says. */
-  status: PRSectionStatus;
+  status: SourceSectionStatus;
 }
 
 /**
@@ -170,28 +181,6 @@ export interface PRStatusRow {
  * was added.
  */
 export type PanelRow = WorktreePanelRow | PRPanelRow | PRStatusRow;
-
-/**
- * The cursor/layout key for a PR row.
- *
- * Synthetic, and it cannot collide with a worktree's: every worktree key is
- * an absolute path, so it starts with `/`.
- */
-export function prRowKey(repoRoot: string, number: number): string {
-  return `pr:${repoRoot}#${number}`;
-}
-
-/**
- * Whether `key` names a PR row rather than a worktree.
- *
- * Cheap and total: a worktree's key is an absolute path, so the prefix can
- * never be ambiguous. Used where a key has to be classified WITHOUT the row
- * in hand, which is precisely the case that matters — a cursor pointing at a
- * row phase 3 has not delivered yet.
- */
-export function isPRRowKey(key: string): boolean {
-  return key.startsWith("pr:");
-}
 
 /**
  * The cursor/layout key for a repo's PR-status row.
@@ -268,21 +257,8 @@ export interface PanelRepo {
    * view exists to give, so it takes a line under the repo header, and so
    * does `unavailable`, and so does the wait for GitHub.
    */
-  prSection: PRSectionStatus;
+  prSection: SourceSectionStatus;
 }
-
-/**
- * What phase 3 has to say about one repo.
- *
- * A union rather than a count plus flags, so "still waiting" and "answered
- * zero" cannot be confused. A nullable count invited exactly that. The
- * failure carries its own CAUSE, because the PR view says it under the repo
- * it applies to rather than in one line below a list of many.
- */
-export type PRSectionStatus =
-  | { kind: "pending" }
-  | { kind: "ready"; count: number }
-  | { kind: "unavailable"; reason: string | null };
 
 interface WorktreesPanelProps {
   /** Main checkout to scope to; null lists every known repo. */
@@ -447,33 +423,6 @@ export function worktreeHoldsPath(
 }
 
 /**
- * The local worktree holding `pr`'s head commit, or null.
- *
- * Identity is the SHA and nothing else. `headRefOid` equal to a branch tip is
- * what defeats name reuse and the fork noise `gh pr list --head` returns; a
- * match on the branch NAME would mark a PR as checked out because someone
- * else's fork happens to use the same word. Where either side does not
- * resolve — an old daemon that sends no `tip`, a detached worktree, a gh that
- * withheld `headRefOid` — the row stays UNMARKED, which costs a convenience
- * where a wrong mark would send Enter into the wrong directory.
- *
- * Among several worktrees at the same commit (a checkout just cut from this
- * branch shares its tip) the one whose branch is also the PR's head wins.
- * That is a tie-break between rows the SHA has already proven, never a way in
- * for a name to prove anything by itself.
- */
-export function checkoutHolding(
-  pr: OpenPR,
-  worktrees: WorktreeRow[],
-): WorktreeRow | null {
-  if (!pr.headRefOid) return null;
-  const matches = worktrees.filter((row) => row.tip === pr.headRefOid);
-  return (
-    matches.find((row) => row.branch === pr.headRefName) ?? matches[0] ?? null
-  );
-}
-
-/**
  * Where a row sits within its repo group.
  *
  * The order encodes what the panel is FOR: the main checkout anchors the
@@ -543,50 +492,6 @@ export function orderRepos<T extends { repoRoot: string; repoName: string }>(
   if (index <= 0) return sorted;
   const [first] = sorted.splice(index, 1);
   return first ? [first, ...sorted] : sorted;
-}
-
-/** A run of same-colored text on a row. */
-export interface RowSegment {
-  text: string;
-  fg: string;
-}
-
-/**
- * The longest prefix of `segments` that fits `width` columns, cutting the
- * segment that straddles the limit rather than dropping it.
- *
- * OpenTUI does not clip: a row wider than its box paints straight over the
- * border and the next row. Composing a row from colored `<text>` children and
- * hoping it fits is what that looks like in practice, so every row here is
- * fitted first and rendered second.
- */
-export function fitSegments(
-  segments: RowSegment[],
-  width: number,
-): RowSegment[] {
-  const kept: RowSegment[] = [];
-  let used = 0;
-  for (const segment of segments) {
-    if (used >= width) break;
-    const segmentWidth = displayWidth(segment.text);
-    if (used + segmentWidth <= width) {
-      kept.push(segment);
-      used += segmentWidth;
-      continue;
-    }
-    // Below two columns there is no room for text AND an ellipsis, and
-    // `truncateText` would spend both on the marker alone and overrun.
-    const room = width - used;
-    kept.push({
-      ...segment,
-      text:
-        room < 2
-          ? sliceToWidth(segment.text, room)
-          : truncateText(segment.text, room),
-    });
-    used = width;
-  }
-  return kept;
 }
 
 /** The view chips' labels. */
@@ -901,36 +806,13 @@ export function headerLayout(opts: {
  */
 function rowColor(entry: PanelRow, isCursor: boolean): string {
   if (isCursor) return theme.text;
-  // A draft is dimmer than the rest of its section: it is on GitHub but not
-  // asking for anything yet, and the section exists to point at what is.
   if (entry.kind === "pr") {
-    return entry.pr.isDraft ? theme.subtext : theme.text;
+    return prRowDim(entry.pr) ? theme.subtext : theme.text;
   }
   // Dim: it is a fact ABOUT a repo, not a thing you can act on, and it reads
   // as the detail line it used to be.
   if (entry.kind === "pr-status") return theme.overlay;
   return entry.candidate && entry.row.dirty.dirty ? theme.yellow : theme.text;
-}
-
-/**
- * What a `switch` over a wire-sourced union falls back to, without giving up
- * the compiler's help on the unions this repo owns.
- *
- * Every union the panel switches on arrives from the daemon, which is a
- * long-lived background process that can be NEWER than this build: a reason or
- * a PR state it has learned to send lands here as a value no case matches.
- * Without a default that renders as an empty string, and an empty string on a
- * removable row is a checkbox with no explanation beside it, the one thing
- * the section's whole design rules out.
- *
- * A bare `default:` would buy that at the cost of the error that catches a
- * member added to `PRUNE_REASONS` in this repo, which is the case worth
- * failing loudly. Routing the default through here keeps both: the `never`
- * parameter stops compiling the moment a case is missing, while the value
- * still decides what an unknown one renders as.
- */
-function unhandled<T>(_exhaustive: never, fallback: T): T {
-  return fallback;
 }
 
 /** Green for a proven merge, blue for the inferred one, peach for closed. */
@@ -1110,58 +992,6 @@ export function describeSessions(sessions: WorktreeSession[]): string {
 }
 
 /**
- * What a PR's review state says, in the words GitHub uses for it.
- *
- * `REVIEW_REQUIRED` is deliberately silent: it is the DEFAULT state of every
- * PR on a protected branch, so a phrase for it would appear on nearly every
- * row and say nothing about that row in particular.
- */
-export function describeReview(pr: OpenPR): Phrase | null {
-  switch (pr.reviewDecision) {
-    case "APPROVED":
-      return { text: "approved", fg: theme.green };
-    case "CHANGES_REQUESTED":
-      return { text: "changes requested", fg: theme.peach };
-    case "REVIEW_REQUIRED":
-      return null;
-    // `BranchPR` types this nullable AND optional, so both spellings of
-    // "GitHub said nothing" are cases here rather than a default.
-    case null:
-    case undefined:
-      return null;
-    default:
-      return unhandled(pr.reviewDecision, null);
-  }
-}
-
-/**
- * What a PR's checks say.
- *
- * `none` is silent rather than green: an un-CI'd PR has nothing to report,
- * and `foldChecks` keeps it out of `passing` for exactly that reason.
- */
-export function describeChecks(pr: OpenPR): Phrase | null {
-  switch (pr.ciStatus) {
-    case "passing":
-      return { text: "checks pass", fg: theme.green };
-    case "failing":
-      return { text: "checks fail", fg: theme.red };
-    case "pending":
-      return { text: "checks running", fg: theme.yellow };
-    case "none":
-      return null;
-    default:
-      return unhandled(pr.ciStatus, null);
-  }
-}
-
-/** A phrase on the detail line, with the colour it carries. */
-export interface Phrase {
-  text: string;
-  fg: string;
-}
-
-/**
  * Everything the detail line says about a row, in reading order and already
  * de-duplicated: a fact is stated once, by whichever phrase says it best.
  *
@@ -1172,7 +1002,12 @@ export function detailPhrases(
   entry: PanelRow,
   opts: { dirtyOk: boolean; compact?: boolean },
 ): Phrase[] {
-  if (entry.kind === "pr") return prDetailPhrases(entry, opts);
+  if (entry.kind === "pr") {
+    return prDetailPhrases(entry.pr, {
+      checkedOutName: entry.checkedOutName,
+      compact: opts.compact,
+    });
+  }
   // Nothing on a second line, which is also how `rowVisualHeight` learns this
   // row is one line tall — the same derivation every other row uses, rather
   // than a height special-cased for it.
@@ -1286,65 +1121,6 @@ export function detailPhrases(
   return phrases;
 }
 
-/**
- * A PR row's detail line: its head branch, who opened it, and only the states
- * that are news.
- *
- * The branch leads because it is what a checkout would be named after, and it
- * is the fact that connects the row to the worktrees above it. Draft, review
- * and checks each stay silent in their unremarkable state, by the same rule
- * the worktree rows follow: a phrase that appears on every row is noise that
- * pushes the ones that differ off a narrow panel.
- *
- * `checked out` comes LAST and is the loudest thing on the line, because it
- * changes what Enter does.
- */
-function prDetailPhrases(
-  entry: PRPanelRow,
-  opts: { compact?: boolean },
-): Phrase[] {
-  const pr = entry.pr;
-  const phrases: Phrase[] = [];
-  if (pr.headRefName) {
-    phrases.push({ text: pr.headRefName, fg: theme.overlay });
-  }
-  // The author is the first thing to go on a narrow surface: on a repo you
-  // work in, most PRs are yours, and the branch is the useful half.
-  if (pr.author && opts.compact !== true) {
-    phrases.push({ text: `@${pr.author}`, fg: theme.overlay });
-  }
-  if (pr.isDraft) phrases.push({ text: "draft", fg: theme.subtext });
-  const review = describeReview(pr);
-  if (review) phrases.push(review);
-  const checks = describeChecks(pr);
-  if (checks) phrases.push(checks);
-  if (entry.checkedOutName) {
-    phrases.push({
-      text: `checked out in ${entry.checkedOutName}`,
-      fg: theme.green,
-    });
-  }
-  return phrases;
-}
-
-/**
- * `text` with every run of whitespace flattened to one space.
- *
- * For strings that arrive from OUTSIDE and land in a `height={1}` box — a
- * `gh` failure, above all. A newline is ZERO columns wide to
- * `Bun.stringWidth`, so a two-line stderr (an unauthenticated `gh` prints
- * exactly that) sails through every width guard and then loses everything
- * after the break, with no ellipsis to say a word was dropped, because
- * OpenTUI wraps and a wrapped line in a one-line box vanishes.
- *
- * Deliberately NOT inside `truncateText`, which has many callers with no such
- * problem, and deliberately not done daemon-side in `ghProblem`: the CLI
- * prints those same strings, where multi-line stderr is worth reading.
- */
-export function oneLine(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
-}
-
 /** The separator between detail phrases, muted so the facts carry the line. */
 const PHRASE_SEPARATOR = " · ";
 
@@ -1375,15 +1151,6 @@ export const RAIL = "│";
  * belongs ON the rail, even at `┃`'s lighter weight.
  */
 export const CURSOR_BAR = "┃";
-
-/**
- * The PR rows' marker, in the same one-column slot the other markers use.
- *
- * A glyph of its own rather than a reused one: the slot is read as a legend
- * down the left edge, and a PR row is not any of the four things already
- * spelled there.
- */
-export const PR_MARKER = "⊙";
 
 /** Columns before line 1's content: a space, the rail (which the cursor bar
  *  overlays on the cursor row), and a space. The marker slot is inside
@@ -1433,11 +1200,7 @@ export function detailSegments(
  * which the repo header directly above has already said.
  */
 export function rowLabel(entry: PanelRow): string {
-  // `#151 Worktrees panel: open-PR list` — the number and the title are one
-  // label, on line 1 where the bright layer is. Splitting them across the two
-  // columns would put the only thing that identifies the PR to a human on the
-  // dim line.
-  if (entry.kind === "pr") return `#${entry.pr.number} ${entry.pr.title}`;
+  if (entry.kind === "pr") return prRowLabel(entry.pr);
   // No spinner here: `rowLabel` is pure and the render passes the live glyph
   // to `primarySegments` instead. Nothing reads this arm today (the label
   // column skips the row and `primarySegments` returns before it), so it
@@ -1672,7 +1435,7 @@ export function dividerText(count: number, width: number): string {
  * string is how they come to disagree. The reason is flattened to one line
  * first — see {@link oneLine} for the newline that is zero columns wide.
  */
-export function prStatusText(status: PRSectionStatus, spinner: string): string {
+export function prStatusText(status: SourceSectionStatus, spinner: string): string {
   if (status.kind === "pending") {
     return spinner ? `${spinner} checking GitHub` : "checking GitHub";
   }
@@ -1906,9 +1669,6 @@ export function rowVisualHeight(entry: PanelRow, compact = false): number {
   );
 }
 
-/** Where each row starts, and how tall it is, in the scrollbox's own units. */
-export type VisualLayout = Map<string, { line: number; height: number }>;
-
 /**
  * Lay the ACTIVE view out in visual lines: repo headers and the removable
  * divider each take one, and a row takes whatever {@link rowVisualHeight}
@@ -1953,28 +1713,6 @@ export function visualLayout(
     removable.forEach(place);
   }
   return layout;
-}
-
-/**
- * Scroll position that brings `path` fully into view, or null when it already
- * is. Same shape as `scrollTarget` in `utils/grouping.ts`, which is what the
- * session list uses; the difference is only how the lines are counted.
- */
-export function scrollTargetFor(
-  layout: VisualLayout,
-  path: string | null,
-  scrollTop: number,
-  viewportHeight: number,
-): number | null {
-  if (!path || viewportHeight <= 0) return null;
-  const slot = layout.get(path);
-  if (!slot) return null;
-  const lastLine = slot.line + slot.height - 1;
-  if (slot.line < scrollTop) return slot.line;
-  if (lastLine >= scrollTop + viewportHeight) {
-    return lastLine - viewportHeight + 1;
-  }
-  return null;
 }
 
 /**
@@ -2349,7 +2087,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       // otherwise fine response. Either way the PR view says so under this
       // repo, with the cause.
       const prReason = pending ? null : prReasonFor(repo.repoRoot);
-      const prSection: PRSectionStatus = pending
+      const prSection: SourceSectionStatus = pending
         ? { kind: "pending" }
         : prReason !== null
           ? { kind: "unavailable", reason: prReason }
@@ -2889,16 +2627,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     // so it knows nothing about a PR no checkout here has ever held, which is
     // most of what this section is for. A return-open simply refetches; the
     // daemon's per-repo TTL is what makes that cheap.
-    const prUrl = new URL(`${getDaemonUrl()}/prs`);
-    if (filter) prUrl.searchParams.set("repo", filter);
-    if (props.cwd) prUrl.searchParams.set("cwd", props.cwd);
-    // Only an explicit `r`. Every other load (open, Tab, a finished prune)
-    // is happy with the daemon's TTL, which is what keeps a rescope free.
-    if (opts.refresh) prUrl.searchParams.set("refresh", "1");
-    fetch(prUrl, { signal: AbortSignal.timeout(PR_TIMEOUT_MS) })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(describeHttpFailure(response.status));
-        const data = normalizePRList((await response.json()) as PRListBody);
+    fetchOpenPRs({
+      repo: filter,
+      cwd: props.cwd,
+      // Only an explicit `r`. Every other load (open, Tab, a finished prune)
+      // is happy with the daemon's TTL, which is what keeps a rescope free.
+      refresh: opts.refresh,
+    })
+      .then((data) => {
         if (generation !== loadGeneration) return;
         setPrs(data);
       })
