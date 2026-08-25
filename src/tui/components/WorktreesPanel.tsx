@@ -3125,6 +3125,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           { text: "enter checkout", rank: 4 },
           { text: "o github", rank: 2 },
           { text: "r refresh", rank: 1 },
+          // Rank 2 here and rank 1 on the fuller line below: this view has
+          // the room, and it is also the view where "start something else"
+          // is the likelier next thought.
+          { text: "n start", rank: 2 },
           { text: "h worktrees", rank: 3 },
           ...(props.repo !== null
             ? [{ text: scoped() ? "tab all repos" : "tab this repo", rank: 2 }]
@@ -3171,6 +3175,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         // what `r` at a higher rank did to `D include dirty`.
         { text: "o github", rank: 1 },
         { text: "r refresh", rank: 1 },
+        // Rank 1 for the same reason `o` and `r` are: it opens another
+        // surface rather than acting on this list, so it must never displace
+        // a key that does. The help overlay and the PR view teach it too.
+        { text: "n start", rank: 1 },
         ...(props.repo !== null
           ? [{ text: scoped() ? "tab all repos" : "tab this repo", rank: 2 }]
           : []),

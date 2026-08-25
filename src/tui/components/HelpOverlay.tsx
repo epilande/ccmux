@@ -25,6 +25,9 @@ const leftGroups = (reviewable?: boolean): Group[] => [
       { key: "m", desc: "Row menu (j/k, Enter)" },
       { key: "y", desc: "Copy last response" },
       { key: "n", desc: "New session" },
+      // Directly under `n`, because the mnemonic is the pair: `n` starts
+      // something new from nothing, `N` starts it from a PR or an issue.
+      { key: "N", desc: "Start from a PR or issue" },
       { key: "/", desc: "Search" },
       { key: "f", desc: "Toggle hide idle" },
       { key: "F", desc: "Fork session" },
