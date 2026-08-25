@@ -65,6 +65,12 @@ import {
  * permanently in search mode. That is a deliberate reversal of the first
  * design: one key means one thing on every surface here, so `j`/`k` move and
  * `q` closes exactly as they do in the panel and the picker.
+ *
+ * The filter row follows the session picker's search row exactly, down to
+ * Esc: it is DRAWN only while filtering, and leaving clears what was typed
+ * (`exitSearchMode` in `store.ts`). Those two halves are one decision. A row
+ * that hid while the query stayed applied would leave a list narrowed to
+ * three of forty with nothing on screen saying why.
  */
 
 /** Independent of the list read, so a slow GitHub cannot hold up the local
@@ -178,8 +184,16 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   );
   const [error, setError] = createSignal<string | null>(null);
   const [filter, setFilter] = createSignal(props.initialFilter ?? "");
-  /** Whether the filter input has the keyboard. `/` enters, Esc leaves. */
-  const [filtering, setFiltering] = createSignal(false);
+  /**
+   * Whether the filter input has the keyboard. `/` enters, Esc leaves.
+   *
+   * A carried query opens IN the filter, because leaving it clears it: a
+   * non-empty filter can only have been typed in filter mode, so a return
+   * from a cancelled dialog restores the state the pick was made from.
+   */
+  const [filtering, setFiltering] = createSignal(
+    (props.initialFilter ?? "") !== "",
+  );
   const [cursorKey, setCursorKey] = createSignal<string | null>(
     props.initialCursor ?? null,
   );
@@ -384,9 +398,10 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         return;
       }
       if (key === "escape") {
-        // Leaves the input, KEEPS the query. Esc means "give me the keys
-        // back", not "undo what I typed"; a second Esc closes the picker,
-        // which is the same two-step the main picker's search mode has.
+        // Drops the filter and the row with it, exactly as `exitSearchMode`
+        // does for the session picker's search. The query cannot outlive the
+        // row that shows it, or the list is narrowed for no visible reason.
+        setFilter("");
         setFiltering(false);
         event.preventDefault();
         return;
@@ -467,7 +482,9 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         ? [
             { text: "enter start", rank: 3 },
             { text: "ctrl-n/p move", rank: 2 },
-            { text: "esc done", rank: 3 },
+            // "cancel", not "done": Esc drops the query, the same word the
+            // session picker's footer uses for the same key.
+            { text: "esc cancel", rank: 3 },
           ]
         : [
             { text: "/ filter", rank: 3 },
@@ -570,36 +587,29 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         </text>
       </box>
 
-      {/* The filter line is always drawn, in both modes, so entering the
-          filter cannot step the list down a row under the cursor. In nav
-          mode it shows what is applied; in filter mode the input takes over
-          the same line. */}
-      <box width="100%" height={1} flexDirection="row">
-        <text fg={filtering() ? theme.blue : theme.overlay} width={2}>
-          {"> "}
-        </text>
-        <Show
-          when={filtering()}
-          fallback={
-            <text fg={filter() ? theme.text : theme.overlay}>
-              {filter()
-                ? truncateText(filter(), contentWidth() - 2)
-                : "/ to filter"}
-            </text>
-          }
-        >
+      {/* Drawn only while filtering, in the session picker's own shape: the
+          `/ ` prefix, a placeholder, and no line at all until `/` is pressed.
+          The footer's `/ filter` hint is what teaches the key, which is how
+          the session picker teaches it too. */}
+      <Show when={filtering()}>
+        <box width="100%" height={1} flexDirection="row">
+          <text fg={theme.overlay} width={2}>
+            {"/ "}
+          </text>
           <input
             value={filter()}
             onInput={setFilter}
             focused
+            placeholder="Filter pull requests and issues..."
+            placeholderColor={theme.overlay}
             textColor={theme.text}
             cursorColor={theme.blue}
             backgroundColor="transparent"
             focusedBackgroundColor="transparent"
             width="100%"
           />
-        </Show>
-      </box>
+        </box>
+      </Show>
 
       <box flexGrow={1} flexDirection="column">
         <Show when={phase() === "error"}>

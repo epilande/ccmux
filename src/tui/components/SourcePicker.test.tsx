@@ -443,9 +443,18 @@ describe("SourcePicker filter", () => {
     expect(await harness.frame()).toContain('Nothing matches "kubernetes"');
   });
 
-  it("shows how to start filtering when nothing is typed", async () => {
+  /**
+   * The row is the session picker's search row, down to being absent until
+   * `/` is pressed. A permanently-drawn prompt was the first design and the
+   * inconsistency was the whole objection to it: one surface asking to be
+   * searched while the other waits to be asked.
+   */
+  it("draws no filter row until the filter is entered", async () => {
     const harness = await mountSettled({ prs: [openPR()] });
-    expect(await harness.frame()).toContain("/ to filter");
+    expect(await harness.frame()).not.toContain("Filter pull requests");
+
+    harness.keys.pressKey("/");
+    expect(await harness.frame()).toContain("Filter pull requests and issues");
   });
 
   it("hints the nav keys in nav mode and the input keys in filter mode", async () => {
@@ -456,29 +465,37 @@ describe("SourcePicker filter", () => {
     const filtering = await harness.frame();
     // `q` types here, so the hint that names it must go: the surface would
     // otherwise advertise a key that does something else entirely.
-    expect(filtering).toContain("esc done");
+    expect(filtering).toContain("esc cancel");
     expect(filtering).not.toContain("q close");
   });
 
   /**
-   * Esc means "give me the keys back", not "undo what I typed" — the same
-   * two-step the main picker's search mode has, where a second Esc closes.
+   * Esc drops the query along with the row that showed it, which is what
+   * `exitSearchMode` does for the session picker's search. Keeping the query
+   * while hiding the row would leave the list narrowed with nothing on screen
+   * saying why.
    */
-  it("keeps the query when escape leaves the filter", async () => {
+  it("drops the query when escape leaves the filter, then closes", async () => {
     const harness = await mountSettled({
       prs: [openPR()],
       issues: [openIssue()],
       initialFilter: "park",
     });
-    harness.keys.pressKey("/");
-    await harness.frame();
+    // A carried query opens in the filter, so the row is there to leave.
+    expect(await harness.frame()).toContain("Issues 0");
+
     await harness.escape();
     const frame = await harness.frame();
 
-    expect(frame).toContain("park");
-    expect(frame).toContain("Issues 0");
-    // And it did not close the surface.
+    expect(frame).not.toContain("Filter pull requests");
+    // The whole list is back, both sections restated.
+    expect(frame).toContain("Issues 1");
+    expect(frame).toContain("#144");
+    // And the first Esc did not close the surface.
     expect(harness.picked.closes).toBe(0);
+
+    await harness.escape();
+    expect(harness.picked.closes).toBe(1);
   });
 
   it("re-seeds the cursor onto a row the filter left standing", async () => {
