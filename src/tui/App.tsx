@@ -26,6 +26,7 @@ import {
   type NewSessionIssue,
   type NewSessionPR,
   type NewSessionPlacement,
+  type SourcesReturn,
 } from "./store";
 import { killActionPath, restartActionPath } from "./utils/invoke-actions";
 import {
@@ -728,9 +729,6 @@ export function App(props: AppProps) {
     cursor: string;
     filter: string;
   }) {
-    // Built by `sourcesReturnMarker` rather than here: the build and the
-    // consume are three handlers apart, and a field going missing between
-    // them is exactly the regression this pair exists to make testable.
     return sourcesReturnMarker(store.state.sourcePicker, target);
   }
 
@@ -2359,16 +2357,7 @@ export function App(props: AppProps) {
     issue?: NewSessionIssue;
     /** Origin marker set ONLY by the source picker's Enter: a cancel of this
      *  dialog returns to the picker with its filter and cursor intact. */
-    returnToSources?: {
-      repo: string | null;
-      cursor: string;
-      filter: string;
-      origin: {
-        panelRepo: string | null;
-        panelScope: string | null;
-        panelCursor: string;
-      } | null;
-    };
+    returnToSources?: SourcesReturn;
     /** Origin marker set ONLY by the Worktrees panel's Enter: a cancel of
      *  this dialog returns to the panel, cursor on `cursor`, scoped to the
      *  live filter the panel had (`scope`, null when Tab had widened it). */

@@ -230,16 +230,11 @@ export interface SourcesReturn {
 /**
  * Build the marker a source-picker Enter hands to the dialog.
  *
- * Extracted from `App.tsx` rather than inlined there because the round trip
- * it belongs to has no other test: the picker's Enter, the dialog's cancel
- * and the picker's Esc live in three different handlers, and the bug this
- * exists to prevent is a field going missing BETWEEN them. A helper both ends
- * call is the smallest thing a test can hold on to.
- *
  * Reads the PICKER's scope and origin, never the row's: reopening scoped to
- * the row would silently narrow an all-repos picker, and rebuilding the
- * origin from the row cannot be done at all — the panel it names is gone by
- * the time a cancel runs.
+ * the row would silently narrow an all-repos picker, and the origin cannot be
+ * rebuilt from a row at all — the panel it names is gone by the time a cancel
+ * runs. Paired with {@link sourcesReopenOptions} rather than inlined at both
+ * ends, which sit three handlers apart.
  */
 export function sourcesReturnMarker(
   picker: { repo: string | null; origin: SourcePickerOrigin | null } | null,
@@ -254,9 +249,8 @@ export function sourcesReturnMarker(
 }
 
 /**
- * The reopen options that marker implies. The inverse of the above, and the
- * half that actually regressed: a reopen that drops `origin` leaves the
- * picker unable to say where Esc goes, so the panel becomes unreachable.
+ * The reopen options that marker implies. A reopen that drops `origin` leaves
+ * the picker unable to say where Esc goes, and the panel unreachable.
  */
 export function sourcesReopenOptions(marker: SourcesReturn): {
   initialCursor: string;
@@ -455,17 +449,10 @@ export interface NewSessionDraft {
    * spawn hands the board to the new session. It carries the picker's own
    * cursor key and its live filter text, because a return that dropped the
    * query would put the user back in front of the whole list they had just
-   * narrowed.
-   */
-  /**
-   * The picker's OWN origin rides along untouched.
-   *
-   * The picker is one stop on a nav stack that can be two deep — the
-   * Worktrees panel opens it, it opens this dialog — and a marker that
-   * restored only the picker's own state would rebuild the middle of that
-   * stack while silently dropping its bottom. Esc out of the reopened picker
-   * would then land on the session list rather than the panel the user came
-   * from, taking the panel's Tab-widened scope with it.
+   * narrowed. The picker's own {@link SourcePickerOrigin} rides along too,
+   * because this nav stack is two deep: a marker that restored only the
+   * picker would rebuild the middle of it and drop the bottom, so Esc out of
+   * the reopened picker would land on the session list rather than the panel.
    */
   returnToSources: SourcesReturn | null;
   returnToWorktrees: {

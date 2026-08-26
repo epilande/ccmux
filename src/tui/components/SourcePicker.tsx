@@ -300,12 +300,9 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
    * Whether the cursor is being HELD on a row that has not arrived yet.
    *
    * The hold below keeps `cursorKey` naming a row the list does not have, and
-   * `cursorIndex` answers 0 for any key it cannot find. Those two together
-   * would otherwise put Enter on the first row while `isCursor` highlights
-   * NOTHING — a key acting on a row the user can neither see nor has chosen.
-   * The pre-fix clobber at least made row 0 visibly the cursor before Enter
-   * reached it, so silently activating row 0 here would be a worse bug than
-   * the one the hold fixes rather than a smaller one.
+   * `cursorIndex` answers 0 for any key it cannot find. Together those would
+   * put Enter on the first row while `isCursor` highlights NOTHING — a key
+   * acting on a row the user can neither see nor chose.
    */
   const cursorHeld = createMemo(() => {
     const key = cursorKey();
@@ -314,13 +311,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     return sourcePending(key);
   });
 
-  /**
-   * The row a key acts on, or null while the cursor is held.
-   *
-   * Null rather than `rows()[0]` is the whole point: every caller already
-   * handles "no row" (Enter no-ops on an empty list), so the held state
-   * reuses that path instead of inventing a second one.
-   */
+  /** The row a key acts on, or null while held — the no-row path Enter has. */
   const cursorRow = createMemo(() =>
     cursorHeld() ? null : (rows()[cursorIndex()] ?? null),
   );
@@ -355,16 +346,12 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     if (live.length === 0) return;
     const key = cursorKey();
     if (key !== null && live.some((row) => row.key === key)) return;
-    // "Not delivered YET" is not the same as "gone", and the three reads land
-    // independently: the local worktree list answers in milliseconds while
-    // the two GitHub reads are network-bound. A seeded key whose own source
-    // has not answered is therefore absent for reasons that have nothing to
-    // do with the filter, and clobbering it here is unrecoverable — once the
-    // cursor moves to a row that DOES exist, the guard above finds that row
-    // present and never reconsiders, so the late answer restores the row and
-    // not the cursor. Hold instead, exactly as the panel holds a PR key while
-    // its own phase 3 is in flight. Bounded by the same generation as the
-    // read: an error settles the source and releases the hold.
+    // "Not delivered YET" is not "gone": the three reads land independently,
+    // so a seeded key can be absent for reasons the filter had no part in.
+    // Clobbering it is unrecoverable — the cursor then names a row that DOES
+    // exist, so the guard above never reconsiders and the late answer brings
+    // back the row without the cursor. Hold instead, as the panel holds a PR
+    // key through its own phase 3; `SOURCE_TIMEOUT_MS` bounds the wait.
     if (key !== null && sourcePending(key)) return;
     setCursorKey(live[0]!.key);
   });
@@ -382,22 +369,15 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
    * it: the filter re-derives the list with no keypress on the list at all.
    */
   createEffect(() => {
-    // Every signal this effect depends on is read BEFORE the `listBox` guard,
-    // and the order is load-bearing rather than stylistic. `listBox` is a
-    // plain ref, not a signal: an effect that bails on it having tracked
-    // nothing is an effect with no dependencies, and Solid never runs one
-    // again. The scrollbox mounts only once rows arrive (it is behind a
-    // `<Show>`), so at mount there is no box — read the guard first and the
-    // list is unscrollable for the whole life of the picker.
+    // Read every signal BEFORE the `listBox` guard. `listBox` is a ref rather
+    // than a signal, and the scrollbox mounts only once rows arrive, so
+    // guarding first leaves an effect that tracked nothing — which Solid
+    // never runs again, and the list never scrolls at all.
     //
-    // `scrollboxLayout()` in particular is NOT a redundant read, however
-    // unused it looks. It is the only signal that carries the INITIAL scroll:
-    // `layout()` re-runs this effect too early, when the box exists but yoga
-    // has not measured it, and `scrollTargetFor` refuses a zero-height
-    // viewport; `cursorKey()` only helps once a key is pressed. What lands
-    // the first scroll is the ref's resize subscription arriving as a bump
-    // here — which is why a seeded cursor deep in the list (the cancel
-    // return) scrolls at all. The no-keypress test is what pins this.
+    // `scrollboxLayout()` is the one that carries the INITIAL scroll, however
+    // unused it looks: `layout()` re-runs this too early, while yoga has not
+    // measured the box and `scrollTargetFor` refuses a zero-height viewport,
+    // and `cursorKey()` only moves once a key is pressed.
     void scrollboxLayout();
     const key = cursorKey();
     const plan = layout();

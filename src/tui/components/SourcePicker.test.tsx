@@ -431,20 +431,12 @@ describe("SourcePicker keys", () => {
   });
 
   /**
-   * The same effect, revived with NO keypress at all.
+   * The same effect, revived with NO keypress: the cancel-return, reopening
+   * on a row far down the list.
    *
-   * This is the test that pins `void scrollboxLayout()` specifically. Once a
-   * viewport has a size, `cursorKey` changing is enough to re-run the effect,
-   * so the `j`-pressing test above still passes if that read is deleted as
-   * unused — while this one does not. The initial scroll has only one
-   * carrier: `layout()` re-runs the effect too early, when the box exists but
-   * yoga has not measured it and the viewport height is still 0, and
-   * `scrollTargetFor` refuses a zero-height viewport. What actually lands the
-   * scroll is the resize event the scrollbox ref subscribes to, arriving as a
-   * `scrollboxLayout` bump.
-   *
-   * The path is the cancel-return: a dialog opened from a row far down the
-   * list, cancelled, reopening on that row.
+   * This is what pins `void scrollboxLayout()`. Once a viewport has a size a
+   * `cursorKey` change is enough to re-run the effect, so the test above
+   * still passes if that read is deleted as unused — this one does not.
    */
   it("scrolls a seeded cursor into view with no keypress", async () => {
     const many = Array.from({ length: 30 }, (_, i) =>
