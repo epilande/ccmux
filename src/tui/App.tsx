@@ -17,6 +17,8 @@ import type { TmuxSocketError } from "../types";
 import {
   createTUIStore,
   namesAWorktree,
+  sourcesReopenOptions,
+  sourcesReturnMarker,
   TickContext,
   type NewSessionDraft,
   type NewSessionField,
@@ -726,14 +728,10 @@ export function App(props: AppProps) {
     cursor: string;
     filter: string;
   }) {
-    return {
-      // The picker's own scope, not this row's repo: reopening scoped to the
-      // row would silently narrow an all-repos picker to whatever was under
-      // the cursor when the dialog opened.
-      repo: store.state.sourcePicker?.repo ?? null,
-      cursor: target.cursor,
-      filter: target.filter,
-    };
+    // Built by `sourcesReturnMarker` rather than here: the build and the
+    // consume are three handlers apart, and a field going missing between
+    // them is exactly the regression this pair exists to make testable.
+    return sourcesReturnMarker(store.state.sourcePicker, target);
   }
 
   function spawnFromSourcePR(target: {
@@ -853,8 +851,7 @@ export function App(props: AppProps) {
     store.actions.showWorktrees(origin.panelRepo, {
       initialCursor: origin.panelCursor,
       isReturn: true,
-      startWidened:
-        origin.panelRepo !== null && origin.panelScope === null,
+      startWidened: origin.panelRepo !== null && origin.panelScope === null,
     });
   }
 
@@ -2366,6 +2363,11 @@ export function App(props: AppProps) {
       repo: string | null;
       cursor: string;
       filter: string;
+      origin: {
+        panelRepo: string | null;
+        panelScope: string | null;
+        panelCursor: string;
+      } | null;
     };
     /** Origin marker set ONLY by the Worktrees panel's Enter: a cancel of
      *  this dialog returns to the panel, cursor on `cursor`, scoped to the
@@ -2426,10 +2428,10 @@ export function App(props: AppProps) {
     const marker = store.state.newSession?.returnToWorktrees ?? null;
     store.actions.closeNewSessionDialog();
     if (sources) {
-      store.actions.showSourcePicker(sources.repo, {
-        initialCursor: sources.cursor,
-        initialFilter: sources.filter,
-      });
+      store.actions.showSourcePicker(
+        sources.repo,
+        sourcesReopenOptions(sources),
+      );
       return;
     }
     if (marker) {

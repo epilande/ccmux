@@ -204,6 +204,72 @@ export interface NewSessionIssue {
   repoRoot: string;
 }
 
+/**
+ * Where the SOURCE PICKER itself was opened from, when the Worktrees panel
+ * opened it (issue #151).
+ *
+ * Named once and shared, because the nav stack it describes is two deep and
+ * every step has to agree on the shape: the panel writes it, the picker holds
+ * it, a dialog's cancel marker carries it, and Esc reads it back.
+ */
+export interface SourcePickerOrigin {
+  panelRepo: string | null;
+  /** The panel's LIVE scope, null when Tab had widened it. */
+  panelScope: string | null;
+  panelCursor: string;
+}
+
+/** What a cancelled dialog needs to put the source picker back as it was. */
+export interface SourcesReturn {
+  repo: string | null;
+  cursor: string;
+  filter: string;
+  origin: SourcePickerOrigin | null;
+}
+
+/**
+ * Build the marker a source-picker Enter hands to the dialog.
+ *
+ * Extracted from `App.tsx` rather than inlined there because the round trip
+ * it belongs to has no other test: the picker's Enter, the dialog's cancel
+ * and the picker's Esc live in three different handlers, and the bug this
+ * exists to prevent is a field going missing BETWEEN them. A helper both ends
+ * call is the smallest thing a test can hold on to.
+ *
+ * Reads the PICKER's scope and origin, never the row's: reopening scoped to
+ * the row would silently narrow an all-repos picker, and rebuilding the
+ * origin from the row cannot be done at all — the panel it names is gone by
+ * the time a cancel runs.
+ */
+export function sourcesReturnMarker(
+  picker: { repo: string | null; origin: SourcePickerOrigin | null } | null,
+  target: { cursor: string; filter: string },
+): SourcesReturn {
+  return {
+    repo: picker?.repo ?? null,
+    cursor: target.cursor,
+    filter: target.filter,
+    origin: picker?.origin ?? null,
+  };
+}
+
+/**
+ * The reopen options that marker implies. The inverse of the above, and the
+ * half that actually regressed: a reopen that drops `origin` leaves the
+ * picker unable to say where Esc goes, so the panel becomes unreachable.
+ */
+export function sourcesReopenOptions(marker: SourcesReturn): {
+  initialCursor: string;
+  initialFilter: string;
+  origin: SourcePickerOrigin | null;
+} {
+  return {
+    initialCursor: marker.cursor,
+    initialFilter: marker.filter,
+    origin: marker.origin,
+  };
+}
+
 export interface NewSessionShape {
   moveChanges: boolean;
   destination: NewSessionDestination;
@@ -391,11 +457,17 @@ export interface NewSessionDraft {
    * query would put the user back in front of the whole list they had just
    * narrowed.
    */
-  returnToSources: {
-    repo: string | null;
-    cursor: string;
-    filter: string;
-  } | null;
+  /**
+   * The picker's OWN origin rides along untouched.
+   *
+   * The picker is one stop on a nav stack that can be two deep — the
+   * Worktrees panel opens it, it opens this dialog — and a marker that
+   * restored only the picker's own state would rebuild the middle of that
+   * stack while silently dropping its bottom. Esc out of the reopened picker
+   * would then land on the session list rather than the panel the user came
+   * from, taking the panel's Tab-widened scope with it.
+   */
+  returnToSources: SourcesReturn | null;
   returnToWorktrees: {
     repo: string | null;
     scope: string | null;
@@ -479,11 +551,7 @@ interface TUIState {
     repo: string | null;
     initialCursor: string | null;
     initialFilter: string;
-    origin: {
-      panelRepo: string | null;
-      panelScope: string | null;
-      panelCursor: string;
-    } | null;
+    origin: SourcePickerOrigin | null;
   } | null;
   /**
    * A message that waits to be acknowledged, or null.
@@ -2044,11 +2112,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       /** Origin marker for a dialog the SOURCE PICKER opened: cancel returns
        *  there, with its filter and cursor. See
        *  {@link NewSessionDraft.returnToSources}. */
-      returnToSources?: {
-        repo: string | null;
-        cursor: string;
-        filter: string;
-      };
+      returnToSources?: SourcesReturn;
       /** Origin marker for a dialog the Worktrees panel opened: cancel
        *  returns there. See {@link NewSessionDraft.returnToWorktrees}. */
       returnToWorktrees?: {
@@ -2355,11 +2419,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       opts: {
         initialCursor?: string | null;
         initialFilter?: string;
-        origin?: {
-          panelRepo: string | null;
-          panelScope: string | null;
-          panelCursor: string;
-        } | null;
+        origin?: SourcePickerOrigin | null;
       } = {},
     ) {
       setState("sourcePicker", {

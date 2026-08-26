@@ -21,6 +21,7 @@ import { fetchOpenIssues, fetchOpenPRs } from "../utils/source-lists";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { useStatusIcon } from "../utils/useStatusIcon";
 import { fitHints } from "./Footer";
+import { isPRRowKey } from "./pr-rows";
 import {
   fitSegments,
   scrollTargetFor,
@@ -34,6 +35,7 @@ import {
   emptyStateText,
   filterRepos,
   hasRows,
+  isIssueRowKey,
   pickerRows,
   sectionText,
   sourceDetailPhrases,
@@ -294,7 +296,51 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     const index = rows().findIndex((row) => row.key === cursorKey());
     return index === -1 ? 0 : index;
   });
-  const cursorRow = createMemo(() => rows()[cursorIndex()] ?? null);
+  /**
+   * Whether the cursor is being HELD on a row that has not arrived yet.
+   *
+   * The hold below keeps `cursorKey` naming a row the list does not have, and
+   * `cursorIndex` answers 0 for any key it cannot find. Those two together
+   * would otherwise put Enter on the first row while `isCursor` highlights
+   * NOTHING — a key acting on a row the user can neither see nor has chosen.
+   * The pre-fix clobber at least made row 0 visibly the cursor before Enter
+   * reached it, so silently activating row 0 here would be a worse bug than
+   * the one the hold fixes rather than a smaller one.
+   */
+  const cursorHeld = createMemo(() => {
+    const key = cursorKey();
+    if (key === null) return false;
+    if (rows().some((row) => row.key === key)) return false;
+    return sourcePending(key);
+  });
+
+  /**
+   * The row a key acts on, or null while the cursor is held.
+   *
+   * Null rather than `rows()[0]` is the whole point: every caller already
+   * handles "no row" (Enter no-ops on an empty list), so the held state
+   * reuses that path instead of inventing a second one.
+   */
+  const cursorRow = createMemo(() =>
+    cursorHeld() ? null : (rows()[cursorIndex()] ?? null),
+  );
+
+  /**
+   * Whether the source that would deliver `key` has yet to answer.
+   *
+   * A row key names its own source — `pr:` or `issue:` — which is what makes
+   * this answerable per key rather than "is anything still loading". Holding
+   * on the latter would freeze a cursor the filter legitimately narrowed away
+   * while an unrelated source was in flight.
+   *
+   * A source that FAILED has answered: the hold releases and the cursor
+   * re-seeds, because the row is never coming.
+   */
+  function sourcePending(key: string): boolean {
+    if (isPRRowKey(key)) return prs() === null && prError() === null;
+    if (isIssueRowKey(key)) return issues() === null && issueError() === null;
+    return false;
+  }
 
   /**
    * Re-seed the cursor onto a row that exists.
@@ -309,6 +355,17 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     if (live.length === 0) return;
     const key = cursorKey();
     if (key !== null && live.some((row) => row.key === key)) return;
+    // "Not delivered YET" is not the same as "gone", and the three reads land
+    // independently: the local worktree list answers in milliseconds while
+    // the two GitHub reads are network-bound. A seeded key whose own source
+    // has not answered is therefore absent for reasons that have nothing to
+    // do with the filter, and clobbering it here is unrecoverable — once the
+    // cursor moves to a row that DOES exist, the guard above finds that row
+    // present and never reconsiders, so the late answer restores the row and
+    // not the cursor. Hold instead, exactly as the panel holds a PR key while
+    // its own phase 3 is in flight. Bounded by the same generation as the
+    // read: an error settles the source and releases the hold.
+    if (key !== null && sourcePending(key)) return;
     setCursorKey(live[0]!.key);
   });
 
@@ -325,12 +382,30 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
    * it: the filter re-derives the list with no keypress on the list at all.
    */
   createEffect(() => {
+    // Every signal this effect depends on is read BEFORE the `listBox` guard,
+    // and the order is load-bearing rather than stylistic. `listBox` is a
+    // plain ref, not a signal: an effect that bails on it having tracked
+    // nothing is an effect with no dependencies, and Solid never runs one
+    // again. The scrollbox mounts only once rows arrive (it is behind a
+    // `<Show>`), so at mount there is no box — read the guard first and the
+    // list is unscrollable for the whole life of the picker.
+    //
+    // `scrollboxLayout()` in particular is NOT a redundant read, however
+    // unused it looks. It is the only signal that carries the INITIAL scroll:
+    // `layout()` re-runs this effect too early, when the box exists but yoga
+    // has not measured it, and `scrollTargetFor` refuses a zero-height
+    // viewport; `cursorKey()` only helps once a key is pressed. What lands
+    // the first scroll is the ref's resize subscription arriving as a bump
+    // here — which is why a seeded cursor deep in the list (the cancel
+    // return) scrolls at all. The no-keypress test is what pins this.
+    void scrollboxLayout();
+    const key = cursorKey();
+    const plan = layout();
     const box = listBox;
     if (!box) return;
-    void scrollboxLayout();
     const target = scrollTargetFor(
-      layout(),
-      cursorKey(),
+      plan,
+      key,
       box.scrollTop,
       box.viewport?.height ?? 0,
     );
@@ -657,11 +732,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
                     <box height={1} width="100%">
                       <text fg={theme.overlay}>
                         {truncateText(
-                          sectionText(
-                            PRS_SECTION,
-                            repo.prSection,
-                            spinner(),
-                          ),
+                          sectionText(PRS_SECTION, repo.prSection, spinner()),
                           listWidth(),
                         )}
                       </text>

@@ -390,6 +390,83 @@ describe("SourcePicker keys", () => {
     expect(harness.picked.closes).toBe(1);
   });
 
+  /**
+   * The scroll effect has to SUBSCRIBE, which it only does if every signal it
+   * depends on is read before the `listBox` guard.
+   *
+   * `listBox` is a plain ref rather than a signal, and the scrollbox mounts
+   * only once rows arrive, so an effect that reads the guard first bails at
+   * mount having tracked nothing — and Solid never runs a dependency-less
+   * effect again. The list is then unscrollable for the whole life of the
+   * picker while `j` goes on moving a cursor nobody can see, and every key
+   * that acts, acts on that invisible row. The panel's counterpart carries
+   * the same rule in a comment; this asserts it instead.
+   */
+  it("scrolls the cursor's row into view past the fold", async () => {
+    const many = Array.from({ length: 30 }, (_, i) =>
+      openPR({
+        number: 200 + i,
+        title: `pr ${200 + i}`,
+        headRefOid: `sha-${200 + i}`,
+        headRefName: `feat/${200 + i}`,
+      }),
+    );
+    const harness = await mountSettled({
+      prs: many,
+      issues: [],
+      height: 14,
+    });
+    // The top of the list is what a fresh picker shows.
+    expect(await harness.frame()).toContain("#200");
+
+    for (let i = 0; i < 25; i += 1) harness.keys.pressKey("j");
+    const frame = await harness.frame();
+
+    // The cursor is on #225, so #225 must be ON SCREEN and the first row
+    // must have scrolled off. Asserting both matters: a viewport that never
+    // moved still "contains" the cursor row's number if you only look for it
+    // at the top of a long list.
+    expect(frame).toContain("#225");
+    expect(frame).not.toContain("#200");
+  });
+
+  /**
+   * The same effect, revived with NO keypress at all.
+   *
+   * This is the test that pins `void scrollboxLayout()` specifically. Once a
+   * viewport has a size, `cursorKey` changing is enough to re-run the effect,
+   * so the `j`-pressing test above still passes if that read is deleted as
+   * unused — while this one does not. The initial scroll has only one
+   * carrier: `layout()` re-runs the effect too early, when the box exists but
+   * yoga has not measured it and the viewport height is still 0, and
+   * `scrollTargetFor` refuses a zero-height viewport. What actually lands the
+   * scroll is the resize event the scrollbox ref subscribes to, arriving as a
+   * `scrollboxLayout` bump.
+   *
+   * The path is the cancel-return: a dialog opened from a row far down the
+   * list, cancelled, reopening on that row.
+   */
+  it("scrolls a seeded cursor into view with no keypress", async () => {
+    const many = Array.from({ length: 30 }, (_, i) =>
+      openPR({
+        number: 200 + i,
+        title: `pr ${200 + i}`,
+        headRefOid: `sha-${200 + i}`,
+        headRefName: `feat/${200 + i}`,
+      }),
+    );
+    const harness = await mountSettled({
+      prs: many,
+      issues: [],
+      height: 14,
+      initialCursor: "pr:/repo#225",
+    });
+
+    const frame = await harness.frame();
+    expect(frame).toContain("#225");
+    expect(frame).not.toContain("#200");
+  });
+
   it("does nothing on enter with no row under the cursor", async () => {
     const harness = await mountSettled({ prs: [], issues: [] });
     harness.keys.pressEnter();
@@ -496,6 +573,117 @@ describe("SourcePicker filter", () => {
 
     await harness.escape();
     expect(harness.picked.closes).toBe(1);
+  });
+
+  /**
+   * A seeded cursor survives its own source answering LAST.
+   *
+   * The three reads are independent and the re-seed effect cannot tell "this
+   * row is gone" from "this row has not arrived yet". If it clobbers a seeded
+   * issue key the moment the PR list lands, the damage is permanent: the
+   * cursor now names a row that DOES exist, so when the issue list finally
+   * arrives the guard finds the key present and returns. The row comes back
+   * and the cursor does not — and Enter starts work on the wrong source.
+   */
+  it("holds a seeded cursor while its own source is still in flight", async () => {
+    let releaseIssues: (() => void) | undefined;
+    const issuesArrived = new Promise<void>((resolve) => {
+      releaseIssues = resolve;
+    });
+    const harness = await mount(
+      {
+        prs: async () =>
+          json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", prs: [openPR()] }],
+            errors: [],
+          } satisfies PRListResponse),
+        issues: async () => {
+          await issuesArrived;
+          return json({
+            repos: [
+              {
+                repoRoot: "/repo",
+                repoName: "repo",
+                issues: [openIssue()],
+              },
+            ],
+            errors: [],
+          } satisfies IssueListResponse);
+        },
+        worktrees: async () =>
+          json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", worktrees: [] }],
+          } satisfies WorktreeListResponse),
+      },
+      { initialCursor: "issue:/repo#144" },
+    );
+
+    // The PR list has landed and the issue list has not. The seeded issue row
+    // does not exist yet, and the PR row does.
+    await harness.frame();
+    expect(await harness.frame()).toContain("#156");
+
+    releaseIssues?.();
+    await harness.frame();
+    await harness.frame();
+
+    // Enter must reach the ISSUE the cursor was seeded on, not the PR that
+    // happened to answer first.
+    harness.keys.pressEnter();
+    await harness.frame();
+    expect(harness.picked.prs).toHaveLength(0);
+    expect(harness.picked.issues).toHaveLength(1);
+    expect(harness.picked.issues[0]?.number).toBe(144);
+  });
+
+  /**
+   * Enter is INERT while the cursor is held, not merely aimed elsewhere.
+   *
+   * The hold keeps `cursorKey` naming a row the list does not have yet, and
+   * `cursorIndex` answers 0 for a key it cannot find — so without a guard the
+   * held state highlights nothing while Enter fires on the first row. That is
+   * strictly worse than the clobber the hold replaced, which at least showed
+   * the user which row Enter was about to take.
+   */
+  it("does nothing on enter while the cursor is held for a pending source", async () => {
+    let releaseIssues: (() => void) | undefined;
+    const issuesArrived = new Promise<void>((resolve) => {
+      releaseIssues = resolve;
+    });
+    const harness = await mount(
+      {
+        prs: async () =>
+          json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", prs: [openPR()] }],
+            errors: [],
+          } satisfies PRListResponse),
+        issues: async () => {
+          await issuesArrived;
+          return json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", issues: [] }],
+            errors: [],
+          } satisfies IssueListResponse);
+        },
+        worktrees: async () =>
+          json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", worktrees: [] }],
+          } satisfies WorktreeListResponse),
+      },
+      { initialCursor: "issue:/repo#144" },
+    );
+
+    // The PR has landed and the issue read has not: the seeded row does not
+    // exist, and the only row that does is one the user never aimed at.
+    await harness.frame();
+    expect(await harness.frame()).toContain("#156");
+
+    harness.keys.pressEnter();
+    await harness.frame();
+    expect(harness.picked.prs).toHaveLength(0);
+    expect(harness.picked.issues).toHaveLength(0);
+    expect(harness.picked.worktrees).toHaveLength(0);
+
+    releaseIssues?.();
   });
 
   it("re-seeds the cursor onto a row the filter left standing", async () => {

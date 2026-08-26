@@ -21,6 +21,8 @@ const {
   NEW_SESSION_FIELDS,
   namesAWorktree,
   newSessionFields,
+  sourcesReopenOptions,
+  sourcesReturnMarker,
 } = await import("./store");
 
 function headerLabels(items: FlatItem[]): string[] {
@@ -4184,6 +4186,64 @@ describe("new session dialog origin marker", () => {
       scope: null,
       cursor: "/repo/.claude/worktrees/panel",
     });
+  });
+
+  /**
+   * The picker's marker carries the picker's OWN origin, so a two-deep nav
+   * stack survives the round trip.
+   *
+   * `W` → `n` → Enter → Esc → Esc is the sequence: the panel opens the
+   * picker, the picker opens this dialog, and cancelling has to rebuild BOTH
+   * steps. A marker holding only repo/cursor/filter restores the middle of
+   * the stack and silently drops its bottom, so the second Esc closes to the
+   * session list instead of returning to the panel — taking the panel's
+   * Tab-widened scope with it.
+   */
+  it("carries the picker's own origin through the dialog round trip", () => {
+    const store = createTUIStore();
+    const origin = {
+      panelRepo: "/repo",
+      panelScope: null,
+      panelCursor: "/repo/.claude/worktrees/panel",
+    };
+
+    // The BUILD half, through the helper `sourcesReturn` calls. This is the
+    // line that regressed: a marker built without `origin` type-checks and
+    // reads correctly everywhere until the second Esc.
+    const built = sourcesReturnMarker(
+      { repo: "/repo", origin },
+      { cursor: "issue:/repo#144", filter: "notif" },
+    );
+    expect(built.origin).toEqual(origin);
+    // The PICKER's scope, never the row's.
+    expect(built.repo).toBe("/repo");
+
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      issue: { number: 144, title: "Notifications", repoRoot: "/repo" },
+      returnToSources: built,
+    });
+
+    expect(store.state.newSession?.returnToSources).toEqual({
+      repo: "/repo",
+      cursor: "issue:/repo#144",
+      filter: "notif",
+      origin,
+    });
+
+    // And the reopen puts it back where Esc reads it from, through the SAME
+    // helper `cancelNewSession` calls — replaying its argument list by hand
+    // here would pass even if App dropped the field.
+    const marker = store.state.newSession!.returnToSources!;
+    store.actions.closeNewSessionDialog();
+    store.actions.showSourcePicker(
+      marker.repo,
+      sourcesReopenOptions(marker),
+    );
+
+    expect(store.state.sourcePicker?.origin).toEqual(origin);
+    expect(store.state.sourcePicker?.initialFilter).toBe("notif");
   });
 });
 
