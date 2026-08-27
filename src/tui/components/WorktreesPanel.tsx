@@ -423,11 +423,9 @@ export function partitionSelection(
  *
  * A descendant that crosses into a NESTED checkout is not held: ccmux's own
  * worktrees live under the main checkout at `.claude/worktrees/<name>`, so a
- * main checkout sitting on a PR's head would otherwise claim a session
- * working in a different branch entirely. The boundary is the path
- * convention, not an fs walk for `.git` files — a worktree someone nested by
- * hand outside `.claude/worktrees` stays claimable, which is the same trust
- * ccmux places in its own layout everywhere else.
+ * main checkout on a PR's head would otherwise claim a session working in a
+ * different branch. The boundary is the path convention rather than an fs
+ * walk for `.git` files, so one nested by hand elsewhere stays claimable.
  *
  * Compares resolved paths, not real ones. Both sides come from the same
  * daemon (git's worktree list and the pane scan), so they agree in practice;
@@ -447,20 +445,15 @@ export function worktreeHoldsPath(
 }
 
 /**
- * The parent every nested checkout lives under, as SEGMENTS: the same
- * convention `ensureWorktreesExcluded` writes as `**\/.claude/worktrees/` in
- * `worktree-create.ts` and `worktree-paths.ts` matches by regex — restated
- * here because neither exports it in a form the TUI can import without
- * dragging daemon dependencies along.
+ * The parent every nested checkout lives under, as SEGMENTS. Restated from
+ * the `**\/.claude/worktrees/` `ensureWorktreesExcluded` writes, which the
+ * TUI cannot import without dragging daemon dependencies along.
  */
 const NESTED_CHECKOUT_SEGMENTS = [".claude", "worktrees"];
 
-/** Whether the relative path from a root to its descendant passes through a
- *  nested checkout's parent — `.claude` then `worktrees`, consecutive, at any
- *  depth, with something BEYOND them: the container directory itself belongs
- *  to the containing tree, since no nested checkout starts until one segment
- *  further. `resolve` has already normalized `..` away, so segments are
- *  literal. */
+/** Whether a root's descendant passes through one: the two segments
+ *  consecutive at any depth, with something BEYOND them, since the container
+ *  itself belongs to the tree that holds it. */
 function crossesNestedCheckout(relative: string): boolean {
   const segments = relative.split(sep);
   for (let i = 0; i + 2 < segments.length; i += 1) {

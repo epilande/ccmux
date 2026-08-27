@@ -1047,8 +1047,8 @@ describe("SourcePicker filter", () => {
     await harness.escape();
 
     // Down to the issue row, then refresh: the issue read is in flight again
-    // and its row is gone. HEAD holds it; a released-forever flag jumps the
-    // cursor to the PR that answered first.
+    // and its row is gone, so the hold must be back rather than the cursor
+    // landing on the PR that answered first.
     harness.keys.pressKey("j");
     await harness.frame();
     harness.keys.pressKey("r");

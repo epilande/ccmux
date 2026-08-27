@@ -200,15 +200,11 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     props.initialCursor ?? null,
   );
   /**
-   * Whether the user is mid-edit of the filter: set by a real edit (typing
-   * into the input — never the seed at mount), cleared when Esc drops the
-   * query. The hold below survives while this is false. A seeded cursor and
-   * a seeded filter arrive together on a cancel-return, so "non-empty"
-   * cannot be the release condition, and comparing values cannot either —
-   * dropping the query says nothing about the row the cursor is on, in
-   * either direction: Esc must not release a still-pending seed, and after
-   * Esc the state is indistinguishable from fresh nav, so a later refresh
-   * must hold the cursor's row again.
+   * Whether the user has typed into the filter. Releases the cursor hold
+   * below, and is why that release is neither "the filter is non-empty" (a
+   * cancel-return seeds a filter and a cursor together, and that hold must
+   * survive) nor a comparison against the seed (Esc clears the query, which
+   * says nothing about the row the cursor is on).
    */
   const [filterEdited, setFilterEdited] = createSignal(false);
   const [note, setNote] = createSignal<string | null>(null);
@@ -300,17 +296,13 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   );
 
   /**
-   * The same, narrowed by whatever is typed — and EMPTY until the local
-   * worktree read answers.
-   *
-   * The GitHub reads can land first, and a PR row drawn before `/worktrees`
-   * has answered cannot know it is already checked out: Enter on it would cut
-   * a duplicate worktree beside the one that holds it. Gating the data here
-   * closes the render and the keyboard in one place, since Enter reads
-   * `cursorRow()` → `rows()` → this. The gate is `worktrees()`, deliberately
-   * NOT `phase()`: an explicit refresh re-enters the loading phase without
-   * clearing `worktrees`, so the list stays live with momentarily stale
-   * checkout marks rather than blanking under the user.
+   * The same, narrowed by whatever is typed, and EMPTY until the local
+   * worktree read answers: a PR row drawn before `/worktrees` cannot know it
+   * is already checked out, and Enter would cut a duplicate beside it. The
+   * gate is on the data because Enter reads `cursorRow()` → `rows()` → this
+   * and never asks what is on screen. `worktrees()` rather than `phase()`,
+   * so an explicit refresh keeps the list live with momentarily stale
+   * checkout marks instead of blanking under the user.
    */
   const visible = createMemo(() =>
     worktrees() === null ? [] : filterRepos(repos(), filter()),
@@ -334,11 +326,8 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     const key = cursorKey();
     if (key === null) return false;
     if (rows().some((row) => row.key === key)) return false;
-    // An EDITED filter releases the hold, permanently: the user is narrowing
-    // toward a row they can see, and a hold that outlived their typing would
-    // leave a visible match unhighlighted with Enter dead until the source
-    // timed out. Only a real edit counts — Esc's clear drops the query, not
-    // the user's claim on the held row.
+    // Typing releases it: a hold that outlived the user's narrowing would
+    // leave a visible match unhighlighted with Enter dead until the timeout.
     if (filterEdited()) return false;
     return sourcePending(key);
   });
@@ -383,10 +372,8 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     // Clobbering it is unrecoverable — the cursor then names a row that DOES
     // exist, so the guard above never reconsiders and the late answer brings
     // back the row without the cursor. Hold instead, as the panel holds a PR
-    // key through its own phase 3; `SOURCE_TIMEOUT_MS` bounds the wait — but
-    // only until the user EDITS the filter: an edit means they are aiming at
-    // rows they can see, and the cursor must follow them. Esc's clear is not
-    // an edit, so a cleared query leaves a still-pending seed held.
+    // key through its own phase 3; `SOURCE_TIMEOUT_MS` bounds the wait, and
+    // typing ends it early — the cursor follows the rows the user is aiming at.
     if (key !== null && !filterEdited() && sourcePending(key)) return;
     setCursorKey(live[0]!.key);
   });
@@ -430,9 +417,8 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   function moveCursor(delta: number): void {
     const live = rows();
     if (live.length === 0) return;
-    // A held cursor sits BEFORE the list, not on row 0 — `cursorIndex` says 0
-    // for a key it cannot find — so the first movement lands on the FIRST
-    // visible row, releasing the hold, rather than skipping to the second.
+    // A held cursor sits BEFORE the list (`cursorIndex` says 0 for a key it
+    // cannot find), so the first movement lands on row one, not row two.
     const base = cursorHeld() ? -1 : cursorIndex();
     const next = Math.min(Math.max(base + delta, 0), live.length - 1);
     setCursorKey(live[next]!.key);
@@ -497,10 +483,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         // row that shows it, or the list is narrowed for no visible reason.
         setFilter("");
         setFiltering(false);
-        // The edit went with the query: what remains is indistinguishable
-        // from fresh nav, so the next refresh holds the cursor's row again.
-        // Safe in every ordering — the input's echo of this clear compares
-        // `""` against the already-cleared filter and cannot re-set the flag.
+        // The edit goes with it: what remains is fresh nav, which holds.
         setFilterEdited(false);
         event.preventDefault();
         return;
@@ -576,9 +559,8 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   });
 
   /**
-   * What the rowless surface says. The gate window above is a LOADING state
-   * rather than an absence — `emptyStateText` over the gated (empty) list
-   * would read "No repository here" while the local read is still in flight.
+   * What the rowless surface says. The gate above is a loading state, not an
+   * absence: `emptyStateText` over it would read "No repository here".
    */
   const emptyState = createMemo(() =>
     worktrees() === null
@@ -709,12 +691,8 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
           <input
             value={filter()}
             onInput={(value: string) => {
-              // The one place a USER edit happens, which is what makes the
-              // release flag safe to set here and nowhere else. The input
-              // also echoes PROGRAMMATIC sets — 0.1.97 emits `input` on any
-              // differing value assignment, the seed at mount included — so
-              // only a value the filter does not already hold counts as the
-              // user typing.
+              // 0.1.97 emits `input` for programmatic assignments too, the
+              // seed at mount included, so only a changed value is the user.
               if (value !== filter()) setFilterEdited(true);
               setFilter(value);
             }}
