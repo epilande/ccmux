@@ -428,17 +428,6 @@ export interface NewSessionDraft {
    */
   issue: NewSessionIssue | null;
   /**
-   * Where a CANCEL returns, or null for a dialog the Worktrees panel did not
-   * open (issue #102 follow-up). An origin marker, deliberately NOT a mode:
-   * it never reaches `NewSessionShape` or the policy functions, no field or
-   * row keys off it, and submit ignores it entirely, since a spawn hands the
-   * board to the new session. `cursor` is the panel row the dialog was
-   * opened over, so the reopened panel lands where the user left; `scope`
-   * is the panel's LIVE filter at that moment (null when Tab had widened
-   * it), which the reopen re-establishes, since the rescope is panel-local
-   * state nothing else remembers.
-   */
-  /**
    * Where a CANCEL returns when the SOURCE PICKER opened this dialog, or null
    * (issue #151). A separate nullable sibling of `returnToWorktrees` and not
    * a second shape of it, because the two return to different surfaces and a
@@ -455,6 +444,17 @@ export interface NewSessionDraft {
    * the reopened picker would land on the session list rather than the panel.
    */
   returnToSources: SourcesReturn | null;
+  /**
+   * Where a CANCEL returns, or null for a dialog the Worktrees panel did not
+   * open (issue #102 follow-up). An origin marker, deliberately NOT a mode:
+   * it never reaches `NewSessionShape` or the policy functions, no field or
+   * row keys off it, and submit ignores it entirely, since a spawn hands the
+   * board to the new session. `cursor` is the panel row the dialog was
+   * opened over, so the reopened panel lands where the user left; `scope`
+   * is the panel's LIVE filter at that moment (null when Tab had widened
+   * it), which the reopen re-establishes, since the rescope is panel-local
+   * state nothing else remembers.
+   */
   returnToWorktrees: {
     repo: string | null;
     scope: string | null;

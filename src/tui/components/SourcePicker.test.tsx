@@ -459,6 +459,113 @@ describe("SourcePicker keys", () => {
     expect(frame).not.toContain("#200");
   });
 
+  /**
+   * A movement during the hold starts at the TOP of the list.
+   *
+   * `cursorIndex` answers 0 for the held key it cannot find, so a naive
+   * `cursorIndex() + delta` sends the first `j` to the SECOND row — the user
+   * sees no highlight, presses `j` to get one, and lands one past where any
+   * list starts. A held cursor sits before the list, and the first movement
+   * lands on its first row.
+   */
+  it("lands the first movement of a held cursor on the first row", async () => {
+    const harness = await mount(
+      {
+        prs: async () =>
+          json({
+            repos: [
+              {
+                repoRoot: "/repo",
+                repoName: "repo",
+                prs: [openPR(), openPR({ number: 155, title: "second" })],
+              },
+            ],
+            errors: [],
+          } satisfies PRListResponse),
+        issues: () => new Promise<Response>(() => {}),
+        worktrees: async () =>
+          json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", worktrees: [] }],
+          } satisfies WorktreeListResponse),
+      },
+      { initialCursor: "issue:/repo#144" },
+    );
+    await harness.frame();
+    expect(await harness.frame()).toContain("#156");
+
+    harness.keys.pressKey("j");
+    await harness.frame();
+    harness.keys.pressEnter();
+    await harness.frame();
+
+    expect(harness.picked.prs).toHaveLength(1);
+    expect(harness.picked.prs[0]?.number).toBe(156);
+  });
+
+  /**
+   * Nothing is actionable until the LOCAL read answers.
+   *
+   * The GitHub reads can land first, and a PR row drawn before `/worktrees`
+   * has answered cannot know it is already checked out — Enter on it would
+   * cut a second worktree beside the one that holds it, which is the exact
+   * duplicate the one-agent-per-worktree rule exists to prevent.
+   */
+  it("keeps rows inert until the worktree list answers", async () => {
+    let releaseWorktrees: (() => void) | undefined;
+    const worktreesArrived = new Promise<void>((resolve) => {
+      releaseWorktrees = resolve;
+    });
+    const harness = await mount({
+      prs: async () =>
+        json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", prs: [openPR()] }],
+          errors: [],
+        } satisfies PRListResponse),
+      issues: async () =>
+        json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", issues: [] }],
+          errors: [],
+        } satisfies IssueListResponse),
+      worktrees: async () => {
+        await worktreesArrived;
+        return json({
+          repos: [
+            {
+              repoRoot: "/repo",
+              repoName: "repo",
+              worktrees: [
+                worktreeRow({
+                  name: "parking",
+                  tip: "sha-156",
+                  path: "/repo/wt/parking",
+                }),
+              ],
+            },
+          ],
+        } satisfies WorktreeListResponse);
+      },
+    });
+
+    // The PR answer has landed and the local list has not: no row is drawn,
+    // and Enter starts nothing.
+    expect(await harness.frame()).not.toContain("#156");
+    harness.keys.pressEnter();
+    await harness.frame();
+    expect(harness.picked.prs).toHaveLength(0);
+    expect(harness.picked.worktrees).toHaveLength(0);
+
+    releaseWorktrees?.();
+    await harness.frame();
+    await harness.frame();
+
+    // Once it answers, the row knows a worktree already holds this head, so
+    // Enter goes THERE rather than spawning a duplicate.
+    harness.keys.pressEnter();
+    await harness.frame();
+    expect(harness.picked.worktrees[0]?.path).toBe("/repo/wt/parking");
+    expect(harness.picked.prs).toHaveLength(0);
+  });
+
   it("does nothing on enter with no row under the cursor", async () => {
     const harness = await mountSettled({ prs: [], issues: [] });
     harness.keys.pressEnter();
@@ -676,6 +783,290 @@ describe("SourcePicker filter", () => {
     expect(harness.picked.worktrees).toHaveLength(0);
 
     releaseIssues?.();
+  });
+
+  /**
+   * The hold yields to the user's own typing.
+   *
+   * A hold that only asked "has the source answered" would keep Enter dead
+   * for up to `SOURCE_TIMEOUT_MS` while the user narrows toward a row they
+   * can SEE: the filter leaves a visible match, nothing highlights it, and
+   * the key does nothing. An edited filter is the proof the user has moved
+   * on from the seeded row, so it releases the hold.
+   */
+  it("releases the hold when the user edits the filter", async () => {
+    const harness = await mount(
+      {
+        prs: async () =>
+          json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", prs: [openPR()] }],
+            errors: [],
+          } satisfies PRListResponse),
+        issues: () => new Promise<Response>(() => {}),
+        worktrees: async () =>
+          json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", worktrees: [] }],
+          } satisfies WorktreeListResponse),
+      },
+      { initialCursor: "issue:/repo#144" },
+    );
+    await harness.frame();
+
+    harness.keys.pressKey("/");
+    await harness.frame();
+    for (const ch of "park") harness.keys.pressKey(ch);
+    await harness.frame();
+
+    harness.keys.pressEnter();
+    await harness.frame();
+    expect(harness.picked.prs).toHaveLength(1);
+    expect(harness.picked.prs[0]?.number).toBe(156);
+  });
+
+  /**
+   * ...but a filter that arrived WITH the cursor is not an edit.
+   *
+   * The cancel-return seeds both at once, and its sources reload from null,
+   * so this is exactly the state the hold exists for. "Filter is non-empty"
+   * as the release condition would re-seed the cursor onto whatever the
+   * carried query leaves standing — here the PR — and Enter would start work
+   * on a source the user never picked.
+   */
+  it("keeps the hold on a reopen that seeds the filter and the cursor together", async () => {
+    let releaseIssues: (() => void) | undefined;
+    const issuesArrived = new Promise<void>((resolve) => {
+      releaseIssues = resolve;
+    });
+    const harness = await mount(
+      {
+        prs: async () =>
+          json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", prs: [openPR()] }],
+            errors: [],
+          } satisfies PRListResponse),
+        issues: async () => {
+          await issuesArrived;
+          return json({
+            repos: [
+              { repoRoot: "/repo", repoName: "repo", issues: [openIssue()] },
+            ],
+            errors: [],
+          } satisfies IssueListResponse);
+        },
+        worktrees: async () =>
+          json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", worktrees: [] }],
+          } satisfies WorktreeListResponse),
+      },
+      // "e" matches the PR and the issue alike, so a wrongly released cursor
+      // has a row to land on — the discriminating half of this test.
+      { initialCursor: "issue:/repo#144", initialFilter: "e" },
+    );
+    await harness.frame();
+    expect(await harness.frame()).toContain("#156");
+
+    // Held: the seeded row's source has not answered and the filter is
+    // untouched, so Enter is inert rather than aimed at the PR.
+    harness.keys.pressEnter();
+    await harness.frame();
+    expect(harness.picked.prs).toHaveLength(0);
+    expect(harness.picked.issues).toHaveLength(0);
+
+    releaseIssues?.();
+    await harness.frame();
+    await harness.frame();
+
+    harness.keys.pressEnter();
+    await harness.frame();
+    expect(harness.picked.issues).toHaveLength(1);
+    expect(harness.picked.issues[0]?.number).toBe(144);
+  });
+
+  /**
+   * Esc is not an edit.
+   *
+   * Esc in filter mode clears the query, and a release condition that
+   * compared filter VALUES would read that clear as "the user moved on" for
+   * the rest of the component's life — the seeded cursor gets re-seeded away
+   * while its source is still pending, and Enter then starts the wrong row.
+   * Dropping the query says nothing about the held row.
+   */
+  it("keeps the hold when escape clears a seeded filter", async () => {
+    let releaseIssues: (() => void) | undefined;
+    const issuesArrived = new Promise<void>((resolve) => {
+      releaseIssues = resolve;
+    });
+    const harness = await mount(
+      {
+        prs: async () =>
+          json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", prs: [openPR()] }],
+            errors: [],
+          } satisfies PRListResponse),
+        issues: async () => {
+          await issuesArrived;
+          return json({
+            repos: [
+              { repoRoot: "/repo", repoName: "repo", issues: [openIssue()] },
+            ],
+            errors: [],
+          } satisfies IssueListResponse);
+        },
+        worktrees: async () =>
+          json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", worktrees: [] }],
+          } satisfies WorktreeListResponse),
+      },
+      { initialCursor: "issue:/repo#144", initialFilter: "e" },
+    );
+    await harness.frame();
+
+    // Esc while the seeded row's source is still pending: the query goes,
+    // the hold stays.
+    await harness.escape();
+
+    releaseIssues?.();
+    await harness.frame();
+    await harness.frame();
+
+    harness.keys.pressEnter();
+    await harness.frame();
+    expect(harness.picked.issues).toHaveLength(1);
+    expect(harness.picked.issues[0]?.number).toBe(144);
+    expect(harness.picked.prs).toHaveLength(0);
+  });
+
+  /**
+   * ...and the hold re-engages on a refresh after that Esc.
+   *
+   * `r` reloads the sources from null, so the seeded row vanishes again. A
+   * released-by-value-comparison hold would already be gone (the cleared
+   * query never reads as the seed again) and the re-seed effect would clobber
+   * the cursor onto whatever answered first.
+   */
+  it("still holds through a refresh after escape cleared the filter", async () => {
+    const releases: (() => void)[] = [];
+    const gates: Promise<void>[] = [
+      new Promise<void>((resolve) => releases.push(resolve)),
+      new Promise<void>((resolve) => releases.push(resolve)),
+    ];
+    let issueCalls = 0;
+    const harness = await mount(
+      {
+        prs: async () =>
+          json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", prs: [openPR()] }],
+            errors: [],
+          } satisfies PRListResponse),
+        issues: async () => {
+          await gates[issueCalls++];
+          return json({
+            repos: [
+              { repoRoot: "/repo", repoName: "repo", issues: [openIssue()] },
+            ],
+            errors: [],
+          } satisfies IssueListResponse);
+        },
+        worktrees: async () =>
+          json({
+            repos: [{ repoRoot: "/repo", repoName: "repo", worktrees: [] }],
+          } satisfies WorktreeListResponse),
+      },
+      { initialCursor: "issue:/repo#144", initialFilter: "e" },
+    );
+    await harness.frame();
+
+    await harness.escape();
+    releases[0]?.();
+    await harness.frame();
+    await harness.frame();
+
+    // Refresh: the issue read is in flight again, and the cursor's row is
+    // gone with it. The hold must come back rather than the PR inheriting
+    // the cursor.
+    harness.keys.pressKey("r");
+    await harness.frame();
+    harness.keys.pressEnter();
+    await harness.frame();
+    expect(harness.picked.prs).toHaveLength(0);
+    expect(harness.picked.issues).toHaveLength(0);
+
+    releases[1]?.();
+    await harness.frame();
+    await harness.frame();
+
+    harness.keys.pressEnter();
+    await harness.frame();
+    expect(harness.picked.issues).toHaveLength(1);
+    expect(harness.picked.issues[0]?.number).toBe(144);
+  });
+
+  /**
+   * Esc re-arms the hold, not just preserves it.
+   *
+   * A one-way released-forever flag overshoots: type anything, Esc, and the
+   * component would never hold again — a later `r` refresh nulls both
+   * sources and the re-seed clobbers the cursor onto whichever answers
+   * first. After Esc drops the query the state is indistinguishable from
+   * fresh nav, so the refresh-hold must be back.
+   */
+  it("re-arms the refresh hold after escape drops a typed query", async () => {
+    const releases: (() => void)[] = [];
+    const gates: Promise<void>[] = [
+      Promise.resolve(),
+      new Promise<void>((resolve) => releases.push(resolve)),
+    ];
+    let issueCalls = 0;
+    const harness = await mount({
+      prs: async () =>
+        json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", prs: [openPR()] }],
+          errors: [],
+        } satisfies PRListResponse),
+      issues: async () => {
+        await gates[issueCalls++];
+        return json({
+          repos: [
+            { repoRoot: "/repo", repoName: "repo", issues: [openIssue()] },
+          ],
+          errors: [],
+        } satisfies IssueListResponse);
+      },
+      worktrees: async () =>
+        json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", worktrees: [] }],
+        } satisfies WorktreeListResponse),
+    });
+    await harness.frame();
+
+    // A real edit, then Esc drops it: back to plain nav.
+    harness.keys.pressKey("/");
+    await harness.frame();
+    harness.keys.pressKey("e");
+    await harness.frame();
+    await harness.escape();
+
+    // Down to the issue row, then refresh: the issue read is in flight again
+    // and its row is gone. HEAD holds it; a released-forever flag jumps the
+    // cursor to the PR that answered first.
+    harness.keys.pressKey("j");
+    await harness.frame();
+    harness.keys.pressKey("r");
+    await harness.frame();
+    harness.keys.pressEnter();
+    await harness.frame();
+    expect(harness.picked.prs).toHaveLength(0);
+    expect(harness.picked.issues).toHaveLength(0);
+
+    releases[0]?.();
+    await harness.frame();
+    await harness.frame();
+
+    harness.keys.pressEnter();
+    await harness.frame();
+    expect(harness.picked.issues).toHaveLength(1);
+    expect(harness.picked.issues[0]?.number).toBe(144);
+    expect(harness.picked.prs).toHaveLength(0);
   });
 
   it("re-seeds the cursor onto a row the filter left standing", async () => {

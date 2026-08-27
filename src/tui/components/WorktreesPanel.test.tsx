@@ -173,9 +173,7 @@ function candidate(overrides: Partial<PruneCandidate> = {}): PruneCandidate {
   };
 }
 
-function panelRow(
-  overrides: Partial<WorktreePanelRow> = {},
-): WorktreePanelRow {
+function panelRow(overrides: Partial<WorktreePanelRow> = {}): WorktreePanelRow {
   const base = {
     kind: "worktree" as const,
     row: row(),
@@ -2118,10 +2116,7 @@ describe("sortWorktreeRows", () => {
       panelRow({ row: row({ name: "zulu" }) }),
       panelRow({ row: row({ name: "alpha" }) }),
     ];
-    expect(sortWorktreeRows(rows).map(sortedName)).toEqual([
-      "alpha",
-      "zulu",
-    ]);
+    expect(sortWorktreeRows(rows).map(sortedName)).toEqual(["alpha", "zulu"]);
   });
 });
 
@@ -2214,8 +2209,9 @@ describe("header zones", () => {
   it("drops the tail rather than truncating it", () => {
     const full = headerLayout({ ...base, tail: "◐ scanning" });
     const exact = headerWidthOf(full);
-    expect(headerLayout({ ...base, tail: "◐ scanning", width: exact }).tail)
-      .toBe("◐ scanning");
+    expect(
+      headerLayout({ ...base, tail: "◐ scanning", width: exact }).tail,
+    ).toBe("◐ scanning");
     expect(
       headerLayout({ ...base, tail: "◐ scanning", width: exact - 1 }).tail,
     ).toBeNull();
@@ -2286,9 +2282,17 @@ describe("row line 1", () => {
   // The loudest thing on the old screen was a worktree named after its branch
   // saying both, twice per row, for rows that had nothing else to report.
   it("omits a branch that only repeats the worktree name", () => {
-    expect(rowBranch(panelRow({ row: row({ name: "fix-codex", branch: "fix-codex" }) }))).toBe("");
     expect(
-      rowBranch(panelRow({ row: row({ name: "worktree-panel", branch: "feat/worktree-panel" }) })),
+      rowBranch(
+        panelRow({ row: row({ name: "fix-codex", branch: "fix-codex" }) }),
+      ),
+    ).toBe("");
+    expect(
+      rowBranch(
+        panelRow({
+          row: row({ name: "worktree-panel", branch: "feat/worktree-panel" }),
+        }),
+      ),
     ).toBe("feat/worktree-panel");
   });
 
@@ -2301,15 +2305,23 @@ describe("row line 1", () => {
   // news only when the main checkout sits somewhere unexpected.
   it("hides the main checkout's default branch, keeps an unexpected one", () => {
     expect(rowBranch(panelRow({ row: mainRow() }))).toBe("");
-    expect(rowBranch(panelRow({ row: mainRow({ branch: "master" }) }))).toBe("");
-    expect(rowBranch(panelRow({ row: mainRow({ branch: "feat/overlay" }) }))).toBe("feat/overlay");
+    expect(rowBranch(panelRow({ row: mainRow({ branch: "master" }) }))).toBe(
+      "",
+    );
+    expect(
+      rowBranch(panelRow({ row: mainRow({ branch: "feat/overlay" }) })),
+    ).toBe("feat/overlay");
     // The heuristic is scoped to the main checkout: a WORKTREE sitting on
     // main is unusual enough to say so.
-    expect(rowBranch(panelRow({ row: row({ name: "wt-a", branch: "main" }) }))).toBe("main");
+    expect(
+      rowBranch(panelRow({ row: row({ name: "wt-a", branch: "main" }) })),
+    ).toBe("main");
   });
 
   it("says detached rather than leaving the branch blank", () => {
-    expect(rowBranch(panelRow({ row: row({ branch: null, detached: true }) }))).toBe("detached");
+    expect(
+      rowBranch(panelRow({ row: row({ branch: null, detached: true }) })),
+    ).toBe("detached");
   });
 
   it("gives the main checkout a home icon and an agent row a dot", () => {
@@ -2832,7 +2844,9 @@ describe("removable section", () => {
     });
     const two = [
       ...one,
-      panelRepo("/r2", "r2", [panelRow({ row: row({ path: "/b", name: "b" }) })]),
+      panelRepo("/r2", "r2", [
+        panelRow({ row: row({ path: "/b", name: "b" }) }),
+      ]),
     ];
     expect(showsGroupHeaders(two)).toBe(true);
     expect(visualLayout(two, () => 1).get("/a")).toEqual({
@@ -2869,10 +2883,7 @@ describe("visual scrolling", () => {
     });
     const next = panelRow({ row: row({ path: "/c", name: "c" }) });
     const layout = visualLayout(
-      [
-        panelRepo("/r1", "r1", [plain, tall]),
-        panelRepo("/r2", "r2", [next]),
-      ],
+      [panelRepo("/r1", "r1", [plain, tall]), panelRepo("/r2", "r2", [next])],
       (entry) => rowVisualHeight(entry, false),
     );
     // header(0) a(1) divider(2) b(3,4) | header(5) c(6). `b` is classified,
@@ -2909,9 +2920,8 @@ describe("visual scrolling", () => {
         candidate: candidate({ path: `/w/${i}` }),
       }),
     );
-    const layout = visualLayout(
-      [panelRepo("/r", "r", rows)],
-      (entry) => rowVisualHeight(entry, false),
+    const layout = visualLayout([panelRepo("/r", "r", rows)], (entry) =>
+      rowVisualHeight(entry, false),
     );
     const viewport = 10;
     let scrollTop = 0;
@@ -2935,18 +2945,12 @@ describe("visual scrolling", () => {
     const rows = Array.from({ length: 12 }, (_, i) =>
       panelRow({ row: row({ path: `/w/${i}`, name: `w${i}` }) }),
     );
-    const before = visualLayout(
-      [panelRepo("/r", "r", rows)],
-      () => 1,
-    );
+    const before = visualLayout([panelRepo("/r", "r", rows)], () => 1);
     // Cursor on the first row, viewport at the top: nothing to scroll.
     expect(scrollTargetFor(before, "/w/0", 0, 6)).toBeNull();
     // Classification sinks it to the bottom, as a prunable candidate does.
     const resorted = [...rows.slice(1), rows[0]!];
-    const after = visualLayout(
-      [panelRepo("/r", "r", resorted)],
-      () => 1,
-    );
+    const after = visualLayout([panelRepo("/r", "r", resorted)], () => 1);
     // One repo, so no header line: eleven rows above it, and its own line is
     // the twelfth (index 11), which must sit on the viewport's last line.
     expect(scrollTargetFor(after, "/w/0", 0, 6)).toBe(6);
@@ -2988,6 +2992,54 @@ describe("worktreeHoldsPath", () => {
     expect(
       worktreeHoldsPath("/repo/wt/feature", "/repo/wt/feature/../other"),
     ).toBe(false);
+  });
+
+  /**
+   * ccmux's linked worktrees physically nest under the main checkout, so a
+   * plain descendant test lets a main checkout on a PR's head claim a session
+   * living in `.claude/worktrees/<name>` on a different branch — and Enter's
+   * revalidation then activates the wrong agent. A descendant that crosses
+   * into a nested checkout belongs to that checkout, not this root.
+   */
+  it("does not hold a session inside a nested checkout", () => {
+    expect(worktreeHoldsPath("/repo", "/repo/.claude/worktrees/foo")).toBe(
+      false,
+    );
+  });
+
+  // An agent that cd-ed deeper into the nested checkout is still ITS session.
+  it("does not hold a subdirectory of a nested checkout", () => {
+    expect(worktreeHoldsPath("/repo", "/repo/.claude/worktrees/foo/src")).toBe(
+      false,
+    );
+  });
+
+  // Only the RELATIVE path from root to candidate decides: a nested root's
+  // own path contains the segments, and it still claims its own children.
+  it("lets a nested root hold its own children", () => {
+    expect(
+      worktreeHoldsPath(
+        "/repo/.claude/worktrees/foo",
+        "/repo/.claude/worktrees/foo/src",
+      ),
+    ).toBe(true);
+  });
+
+  // Segments, not substrings: `worktrees-old` is not the checkout parent.
+  it("does not treat a segment that merely starts with worktrees as a boundary", () => {
+    expect(worktreeHoldsPath("/repo", "/repo/.claude/worktrees-old/x")).toBe(
+      true,
+    );
+  });
+
+  it("does not treat .claude alone as a boundary", () => {
+    expect(worktreeHoldsPath("/repo", "/repo/.claude/other")).toBe(true);
+  });
+
+  // The container directory itself belongs to the containing tree: no nested
+  // checkout starts until one segment further.
+  it("holds a session sitting on the container directory itself", () => {
+    expect(worktreeHoldsPath("/repo", "/repo/.claude/worktrees")).toBe(true);
   });
 });
 
@@ -3634,7 +3686,9 @@ describe("PR row identity", () => {
   it("leaves the row unmarked when either side does not resolve", () => {
     const noTip = row({ path: "/wt/pr", branch: "feat/x" });
     delete noTip.tip;
-    expect(checkoutHolding(openPR({ headRefOid: "sha-a" }), [noTip])).toBeNull();
+    expect(
+      checkoutHolding(openPR({ headRefOid: "sha-a" }), [noTip]),
+    ).toBeNull();
     expect(
       checkoutHolding(openPR({ headRefOid: null }), [
         row({ tip: "sha-a", branch: "feat/x" }),
@@ -3702,7 +3756,9 @@ describe("PR row presentation", () => {
 
   // Both would appear on nearly every row and say nothing about that row.
   it("stays silent on REVIEW_REQUIRED and on a PR with no checks", () => {
-    expect(describeReview(openPR({ reviewDecision: "REVIEW_REQUIRED" }))).toBeNull();
+    expect(
+      describeReview(openPR({ reviewDecision: "REVIEW_REQUIRED" })),
+    ).toBeNull();
     expect(describeReview(openPR({ reviewDecision: null }))).toBeNull();
     expect(describeChecks(openPR({ ciStatus: "none" }))).toBeNull();
     expect(describeChecks(openPR({ ciStatus: "passing" }))?.text).toBe(
@@ -3757,8 +3813,14 @@ describe("PR row presentation", () => {
 
 describe("view tabs", () => {
   const tabsOf = (view: "worktrees" | "prs", prs: string, width: number) =>
-    headerLayout({ view, lead: "all repos", worktrees: "42", prs, width, tail: null })
-      .tabs;
+    headerLayout({
+      view,
+      lead: "all repos",
+      worktrees: "42",
+      prs,
+      width,
+      tail: null,
+    }).tabs;
   // Chips are separated by one column that belongs to neither of them, so the
   // rendered strip is their texts joined by a space.
   const tabText = (view: "worktrees" | "prs", prs: string, width: number) =>
@@ -3834,9 +3896,7 @@ describe("view tabs", () => {
   // failed lookup, which is the one count the body cannot restate as cheaply.
   it("keeps both labels and the count at sidebar width", () => {
     expect(tabText("worktrees", "7", 36)).toBe(" Worktrees 42   PRs 7 ");
-    expect(tabText("worktrees", "unavailable", 36)).toBe(
-      " Worktrees   PRs ",
-    );
+    expect(tabText("worktrees", "unavailable", 36)).toBe(" Worktrees   PRs ");
   });
 
   // What survives when only one chip can is the ACTIVE one. The flat-label
@@ -3878,7 +3938,13 @@ describe("view tabs", () => {
         // layout it yields has to be strictly narrower than the last.
         for (let width = 80; width >= 1; width--) {
           const used = headerWidthOf(
-            headerLayout({ view: "prs", lead: "all repos", tail, width, ...counts }),
+            headerLayout({
+              view: "prs",
+              lead: "all repos",
+              tail,
+              width,
+              ...counts,
+            }),
           );
           expect(used).toBeLessThanOrEqual(width);
           expect(used).toBeLessThanOrEqual(previous);
@@ -4014,7 +4080,9 @@ describe("view tabs on screen", () => {
     // And the chip that is now showing carries the brighter ground.
     const line = tabLine(spans(), after);
     expect(bgOf(line, PRS_TAB)).toEqual(RGBA.fromHex(theme.border).toInts());
-    expect(bgOf(line, WORKTREES_TAB)).toEqual(RGBA.fromHex(theme.base).toInts());
+    expect(bgOf(line, WORKTREES_TAB)).toEqual(
+      RGBA.fromHex(theme.base).toInts(),
+    );
   });
 
   // Clicking where you already are must not re-seed the cursor or reload:
@@ -4044,7 +4112,9 @@ describe("view tabs on screen", () => {
   // change at different widths in each and an extra column shows up only at
   // the exact boundary where a rung is chosen.
   it("stays on one visible line at every width, in both views", async () => {
-    for (const width of [90, 60, 47, 46, 45, 40, 37, 36, 35, 32, 30, 29, 24, 21, 20]) {
+    for (const width of [
+      90, 60, 47, 46, 45, 40, 37, 36, 35, 32, 30, 29, 24, 21, 20,
+    ]) {
       for (const view of ["worktrees", "prs"] as const) {
         const { settled, frame, keys } = await mountSettled(
           listOf([mainRow(), row()]),
@@ -4070,8 +4140,11 @@ describe("view tabs on screen", () => {
         // land there, and a header that vanished would put a list row on
         // line 1 and pass the check above for the wrong reason).
         const under = lines[at + 1]!;
-        expect({ width, view, under: under.replace(/[│┌┐└┘\s]/gu, "") }).not
-          .toEqual({ width, view, under: "" });
+        expect({
+          width,
+          view,
+          under: under.replace(/[│┌┐└┘\s]/gu, ""),
+        }).not.toEqual({ width, view, under: "" });
         expect(under).not.toMatch(/Worktrees|PRs|Pull Requests/);
 
         // And what is drawn is EXACTLY what the ladder measured. The border
@@ -4092,7 +4165,11 @@ describe("view tabs on screen", () => {
             width: Math.max(8, width - 4),
           }),
         ).replace(/\s+$/u, "");
-        expect({ width, view, drawn }).toEqual({ width, view, drawn: expected });
+        expect({ width, view, drawn }).toEqual({
+          width,
+          view,
+          drawn: expected,
+        });
 
         // The same equality for the shapes the mount above cannot produce:
         // a tail present, and a lead that spells nothing (`basename("/")`).
@@ -4465,7 +4542,11 @@ describe("WorktreesPanel PR view", () => {
               repoRoot: "/other",
               repoName: "other",
               worktrees: [
-                row({ path: "/other/wt/d", repoRoot: "/other", repoName: "other" }),
+                row({
+                  path: "/other/wt/d",
+                  repoRoot: "/other",
+                  repoName: "other",
+                }),
               ],
             },
           ],
@@ -4505,7 +4586,11 @@ describe("WorktreesPanel PR view", () => {
           json({
             repos: [],
             errors: [
-              { repoRoot: "/repo", repoName: "repo", error: "no GitHub remote" },
+              {
+                repoRoot: "/repo",
+                repoName: "repo",
+                error: "no GitHub remote",
+              },
             ],
           }),
       },
@@ -4533,7 +4618,11 @@ describe("WorktreesPanel PR view", () => {
               repoRoot: "/other",
               repoName: "other",
               worktrees: [
-                row({ path: "/other/wt/d", repoRoot: "/other", repoName: "other" }),
+                row({
+                  path: "/other/wt/d",
+                  repoRoot: "/other",
+                  repoName: "other",
+                }),
               ],
             },
           ],
@@ -4736,7 +4825,10 @@ describe("WorktreesPanel PR view reachability", () => {
       list,
       emptyScan,
       { height: 12 },
-      { repos: [{ repoRoot: "/r0", repoName: "repo-0", prs: [openPR()] }], errors: [] },
+      {
+        repos: [{ repoRoot: "/r0", repoName: "repo-0", prs: [openPR()] }],
+        errors: [],
+      },
     );
     keys.pressKey("l");
     for (let i = 0; i < 30; i++) keys.pressKey("j");
@@ -4758,7 +4850,12 @@ describe("WorktreesPanel PR view reachability", () => {
       status: { kind: "ready", count: 0 },
     };
     const layout = visualLayout(
-      [panelRepo("/r0", "r0", [panelRow({ row: row({ path: "/a" }) }), statusRow])],
+      [
+        panelRepo("/r0", "r0", [
+          panelRow({ row: row({ path: "/a" }) }),
+          statusRow,
+        ]),
+      ],
       (entry) => rowVisualHeight(entry, false),
       "prs",
     );
@@ -4770,7 +4867,11 @@ describe("WorktreesPanel PR view reachability", () => {
     expect(
       labelColumnWidth([
         statusRow,
-        { ...statusRow, key: "pr-status:/r1", status: { kind: "unavailable", reason: "x".repeat(60) } },
+        {
+          ...statusRow,
+          key: "pr-status:/r1",
+          status: { kind: "unavailable", reason: "x".repeat(60) },
+        },
       ]),
     ).toBe(0);
   });
@@ -4887,9 +4988,7 @@ describe("WorktreesPanel PR view cursor under phase 3", () => {
     );
     const settled = await frame();
     // Still on repo-1's stand-in, which never changed.
-    const line = settled
-      .split("\n")
-      .findIndex((l) => l.includes(CURSOR_BAR));
+    const line = settled.split("\n").findIndex((l) => l.includes(CURSOR_BAR));
     expect(settled.split("\n")[line - 1]).toContain("repo-1");
   });
 
@@ -5317,7 +5416,9 @@ describe("PR row keys", () => {
   // PR row does not have, and a silent key reads as broken.
   it("guards y and d on a PR row and says why", async () => {
     const reviewed: unknown[] = [];
-    const { keys, frame } = await onPRRow({ onReview: (t) => reviewed.push(t) });
+    const { keys, frame } = await onPRRow({
+      onReview: (t) => reviewed.push(t),
+    });
 
     keys.pressKey("y");
     expect(await frame()).toContain("no directory yet");
@@ -5347,7 +5448,11 @@ describe("rowPRUrl", () => {
     expect(
       rowPRUrl(
         panelRow({
-          pr: { number: 9, url: "https://github.com/o/r/pull/9", state: "OPEN" },
+          pr: {
+            number: 9,
+            url: "https://github.com/o/r/pull/9",
+            state: "OPEN",
+          },
         }),
       ),
     ).toBe("https://github.com/o/r/pull/9");
