@@ -8037,10 +8037,10 @@ describe("POST /spawn with --pr and --issue", () => {
     }
   });
 
-  // OUR refusal naming the directory, rather than git's "already used by
-  // worktree at" at the end of a create — and raised before anything is
-  // fetched or written.
-  it("refuses when the PR's branch is already checked out elsewhere", async () => {
+  // A second `--pr` of a branch already checked out used to 400. Opening
+  // that checkout is what the source picker promises on Enter, and POST
+  // /spawn does the same under the repo lock — skip the fetch, spawn there.
+  it("opens the existing checkout when the PR's branch is already here", async () => {
     const repo = makeRepo();
     const elsewhere = join(root, "elsewhere");
     runFixtureGit(repo, "worktree", "add", "-b", "fix/flaky-binder", elsewhere);
@@ -8055,9 +8055,11 @@ describe("POST /spawn with --pr and --issue", () => {
       });
       const body = (await res.json()) as SpawnBody;
 
-      expect(res.status).toBe(400);
-      expect(body.error).toContain("already checked out at");
-      expect(body.error).toContain(elsewhere);
+      expect(res.status).toBe(200);
+      expect(body.worktree?.created).toBe(false);
+      expect(body.worktree?.path).toBe(realpathSync(elsewhere));
+      expect(body.worktree?.branch).toBe("fix/flaky-binder");
+      // No sibling under `.claude/worktrees`: the existing checkout is it.
       expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
     } finally {
       restoreEnv();
