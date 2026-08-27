@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   readlinkSync,
   rmSync,
   symlinkSync,
@@ -1313,7 +1314,9 @@ describe("createWorktree with a branch override", () => {
     expect(second.ok).toBe(true);
     if (!second.ok) return;
     expect(second.result.created).toBe(false);
-    expect(second.result.path).toBe(first.result.path);
+    expect(realpathSync(second.result.path)).toBe(
+      realpathSync(first.result.path),
+    );
     expect(existsSync(worktreePathFor(repo, "pr-7-fix-flaky"))).toBe(false);
   });
 });
@@ -1336,7 +1339,9 @@ describe("createWorktree reuseExisting", () => {
     expect(second.ok).toBe(true);
     if (!second.ok) return;
     expect(second.result.created).toBe(false);
-    expect(second.result.path).toBe(first.result.path);
+    expect(realpathSync(second.result.path)).toBe(
+      realpathSync(first.result.path),
+    );
     expect(existsSync(worktreePathFor(repo, "issue-144-new-title"))).toBe(
       false,
     );
