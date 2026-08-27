@@ -8,6 +8,11 @@
  * A surface supplies the rows; this supplies the arithmetic they are drawn
  * with.
  *
+ * The one thing here above the row level is {@link orderRepos}, which orders
+ * the GROUPS rows sit in. It lives here for the same reason and by the same
+ * test: two surfaces list the same repos, and they must list them in the same
+ * order or the second one reads as a different set.
+ *
  * The extraction is also what stops a second component's module graph from
  * swallowing a 3,900-line one just to reach `fitSegments`.
  */
@@ -127,3 +132,25 @@ export function scrollTargetFor(
   }
   return null;
 }
+
+/**
+ * Repos alphabetically, except that the one the surface was OPENED over leads.
+ *
+ * Widening the scope should not make the repo the user was looking at jump to
+ * wherever the alphabet puts it; the group they came from stays where their
+ * eyes already are, and everything else falls in behind it.
+ */
+export function orderRepos<T extends { repoRoot: string; repoName: string }>(
+  repos: T[],
+  home: string | null,
+): T[] {
+  const sorted = [...repos].sort((a, b) =>
+    a.repoName.localeCompare(b.repoName),
+  );
+  if (!home) return sorted;
+  const index = sorted.findIndex((repo) => repo.repoRoot === home);
+  if (index <= 0) return sorted;
+  const [first] = sorted.splice(index, 1);
+  return first ? [first, ...sorted] : sorted;
+}
+

@@ -54,8 +54,9 @@ import {
   symlinkSync,
 } from "node:fs";
 import { cp, rmdir } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
+  listWorktrees,
   normalizePath,
   readSymlinkDirectories,
   runGit,
@@ -191,6 +192,38 @@ export function slugForIssue(number: number, title: string): string {
     .slice(0, SLUG_MAX_CHARS - prefix.length - 1)
     .replace(/-+$/g, "");
   return slug ? `${prefix}-${slug}` : prefix;
+}
+
+/**
+ * Whether `name` is a worktree this tool cut for issue `number`.
+ *
+ * Family-exact, never a bare `startsWith`: `issue-14` must not claim
+ * `issue-144-foo`. The separator is part of the prefix. Same rule the
+ * source picker uses to mark a row as already checked out.
+ */
+export function isIssueWorktreeName(name: string, number: number): boolean {
+  const exact = `issue-${number}`;
+  return name === exact || name.startsWith(`${exact}-`);
+}
+
+/**
+ * The worktree a previous `--issue <n>` spawn cut, if any.
+ *
+ * The SHORTEST name wins — that is the first spawn — matching
+ * `worktreeForIssue` in the source picker so Enter and `POST /spawn` agree.
+ */
+export function pickIssueWorktree<T extends { name: string }>(
+  number: number,
+  worktrees: T[],
+): T | null {
+  const matches = worktrees.filter((row) =>
+    isIssueWorktreeName(row.name, number),
+  );
+  if (matches.length === 0) return null;
+  const [first] = [...matches].sort(
+    (a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name),
+  );
+  return first ?? null;
 }
 
 /**
@@ -760,6 +793,18 @@ export async function createWorktree(
      * writer wants the record, and inference would silently deny it.
      */
     recordBase?: boolean;
+    /**
+     * Open a registered worktree this pick returns, instead of numbering a
+     * sibling of the derived name.
+     *
+     * `--issue` is the caller: a second spawn of the same issue must land
+     * in the first checkout, not `issue-<n>-<slug>-2`. Runs under the repo
+     * lock, so a checkout that appeared since the picker was opened is
+     * still found.
+     */
+    reuseExisting?: (
+      worktrees: { name: string; path: string }[],
+    ) => { name: string; path: string } | null;
   },
   options: CreateWorktreeOptions = {},
 ): Promise<
@@ -781,6 +826,49 @@ export async function createWorktree(
     // running it on the open path too costs one `check-ignore` and heals a
     // repo whose worktrees predate this.
     await ensureWorktreesExcluded(mainRepoRoot, git);
+
+    const openIfPresent = async (
+      path: string,
+      name: string,
+    ): Promise<{ ok: true; result: WorktreeCreation } | null> => {
+      if (!existsSync(path)) return null;
+      if (!(await isRegisteredWorktree(mainRepoRoot, path, git))) return null;
+      const branch = await currentBranch(path, git);
+      return {
+        ok: true as const,
+        result: {
+          path,
+          name,
+          branch: branch ?? name,
+          created: false,
+          branchCreated: false,
+          symlinked: [],
+          included: [],
+        },
+      };
+    };
+
+    // A `--pr` spawn names the branch itself. git will not check the same
+    // branch out in two worktrees, so if it is already here, OPEN that
+    // checkout rather than numbering a sibling that git would refuse.
+    if (request.branch !== undefined) {
+      for (const entry of await listWorktrees(mainRepoRoot, git)) {
+        if (entry.bare || entry.branch !== request.branch) continue;
+        const opened = await openIfPresent(entry.path, basename(entry.path));
+        if (opened) return opened;
+      }
+    }
+
+    if (request.reuseExisting) {
+      const listed = (await listWorktrees(mainRepoRoot, git))
+        .filter((entry) => !entry.bare)
+        .map((entry) => ({ name: basename(entry.path), path: entry.path }));
+      const hit = request.reuseExisting(listed);
+      if (hit) {
+        const opened = await openIfPresent(hit.path, hit.name);
+        if (opened) return opened;
+      }
+    }
 
     // Inside the lock, so two spawns of one prompt cannot both settle on the
     // same free number.

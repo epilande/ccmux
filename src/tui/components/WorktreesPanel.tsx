@@ -37,6 +37,7 @@ import { displayWidth, truncateText } from "../utils/format";
 import {
   fitSegments,
   oneLine,
+  orderRepos,
   scrollTargetFor,
   unhandled,
   type Phrase,
@@ -341,6 +342,19 @@ interface WorktreesPanelProps {
     panelScope: string | null;
   }) => void;
   /**
+   * `n`: open the source picker over this panel's live scope (issue #151).
+   *
+   * The panel is where a user already is when they think "what else could I
+   * start", so the picker is one key away from it rather than only from the
+   * session list. The origin travels so Esc comes back HERE, on the row they
+   * left, in the view they left it in.
+   */
+  onStartFromSource?: (target: {
+    panelRepo: string | null;
+    panelScope: string | null;
+    cursor: string;
+  }) => void;
+  /**
    * Enter on an open PR that is NOT checked out here: cut a worktree from its
    * head (issue #151).
    *
@@ -407,6 +421,12 @@ export function partitionSelection(
  * The separator is part of the prefix on purpose: a plain `startsWith` makes
  * `/wt/feature-two` look like it lives inside `/wt/feature`.
  *
+ * A descendant that crosses into a NESTED checkout is not held: ccmux's own
+ * worktrees live under the main checkout at `.claude/worktrees/<name>`, so a
+ * main checkout on a PR's head would otherwise claim a session working in a
+ * different branch. The boundary is the path convention rather than an fs
+ * walk for `.git` files, so one nested by hand elsewhere stays claimable.
+ *
  * Compares resolved paths, not real ones. Both sides come from the same
  * daemon (git's worktree list and the pane scan), so they agree in practice;
  * a symlinked checkout reached by two different absolute paths would not
@@ -419,7 +439,32 @@ export function worktreeHoldsPath(
   if (!candidate) return false;
   const root = resolve(worktreePath);
   const path = resolve(candidate);
-  return path === root || path.startsWith(root + sep);
+  if (path === root) return true;
+  if (!path.startsWith(root + sep)) return false;
+  return !crossesNestedCheckout(path.slice(root.length + sep.length));
+}
+
+/**
+ * The parent every nested checkout lives under, as SEGMENTS. Restated from
+ * the `**\/.claude/worktrees/` `ensureWorktreesExcluded` writes, which the
+ * TUI cannot import without dragging daemon dependencies along.
+ */
+const NESTED_CHECKOUT_SEGMENTS = [".claude", "worktrees"];
+
+/** Whether a root's descendant passes through one: the two segments
+ *  consecutive at any depth, with something BEYOND them, since the container
+ *  itself belongs to the tree that holds it. */
+function crossesNestedCheckout(relative: string): boolean {
+  const segments = relative.split(sep);
+  for (let i = 0; i + 2 < segments.length; i += 1) {
+    if (
+      segments[i] === NESTED_CHECKOUT_SEGMENTS[0] &&
+      segments[i + 1] === NESTED_CHECKOUT_SEGMENTS[1]
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -460,7 +505,8 @@ function sessionRank(entry: PanelRow): number {
  */
 export function sortWorktreeRows(rows: PanelRow[]): PanelRow[] {
   return [...rows].sort((a, b) => {
-    const byBucket = rowBucket(a) - rowBucket(b) || sessionRank(a) - sessionRank(b);
+    const byBucket =
+      rowBucket(a) - rowBucket(b) || sessionRank(a) - sessionRank(b);
     if (byBucket !== 0) return byBucket;
     // Both PRs, since the buckets above already separated the two kinds.
     // Newest first — gh's own order, restated so a future gh cannot change it.
@@ -471,27 +517,6 @@ export function sortWorktreeRows(rows: PanelRow[]): PanelRow[] {
     if (a.kind !== "worktree" || b.kind !== "worktree") return 0;
     return a.row.name.localeCompare(b.row.name);
   });
-}
-
-/**
- * Repos alphabetically, except that the one the panel was OPENED over leads.
- *
- * Widening with Tab should not make the repo the user was looking at jump to
- * wherever the alphabet puts it; the group they came from stays where their
- * eyes already are, and everything else falls in behind it.
- */
-export function orderRepos<T extends { repoRoot: string; repoName: string }>(
-  repos: T[],
-  home: string | null,
-): T[] {
-  const sorted = [...repos].sort((a, b) =>
-    a.repoName.localeCompare(b.repoName),
-  );
-  if (!home) return sorted;
-  const index = sorted.findIndex((repo) => repo.repoRoot === home);
-  if (index <= 0) return sorted;
-  const [first] = sorted.splice(index, 1);
-  return first ? [first, ...sorted] : sorted;
 }
 
 /** The view chips' labels. */
@@ -540,8 +565,7 @@ export interface ViewTab {
 /** Columns a rung occupies: every chip's own text, plus the gaps between. */
 function tabsWidth(tabs: ViewTab[]): number {
   const chips = tabs.reduce(
-    (n, tab) =>
-      n + tab.segments.reduce((m, s) => m + displayWidth(s.text), 0),
+    (n, tab) => n + tab.segments.reduce((m, s) => m + displayWidth(s.text), 0),
     0,
   );
   return chips + displayWidth(TAB_GAP) * Math.max(0, tabs.length - 1);
@@ -734,11 +758,7 @@ export function headerLayout(opts: {
   tail: string | null;
   width: number;
 }): HeaderLayout {
-  const chip = (
-    tabView: PanelView,
-    label: string,
-    count: string,
-  ): ViewTab => {
+  const chip = (tabView: PanelView, label: string, count: string): ViewTab => {
     const active = tabView === opts.view;
     const fg = active ? theme.text : theme.overlay;
     const segments: RowSegment[] = [{ text: TAB_PAD + label, fg }];
@@ -1435,7 +1455,10 @@ export function dividerText(count: number, width: number): string {
  * string is how they come to disagree. The reason is flattened to one line
  * first — see {@link oneLine} for the newline that is zero columns wide.
  */
-export function prStatusText(status: SourceSectionStatus, spinner: string): string {
+export function prStatusText(
+  status: SourceSectionStatus,
+  spinner: string,
+): string {
   if (status.kind === "pending") {
     return spinner ? `${spinner} checking GitHub` : "checking GitHub";
   }
@@ -2044,7 +2067,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   /** Repo filter currently in force, which is what both requests carry. */
   const repoFilter = (): string | null => (scoped() ? props.repo : null);
 
-
   const merged = createMemo<PanelRepo[]>(() => {
     const data = scan();
     const candidates = new Map(data?.candidates.map((c) => [c.path, c]) ?? []);
@@ -2406,7 +2428,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    */
   const scanning = (): boolean => scan() === null && scanError() === null;
 
-
   // The PR header's own spinner, released the moment phase 3 lands.
   const prIcon = useStatusIcon(
     () => (prPending() ? "working" : "idle"),
@@ -2523,7 +2544,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     // reachable, since the two are separate requests and the daemon derives
     // its repo set per request, but closing it means changing what an absent
     // repo means, which many tests currently bake in as the lenient reading.
-    if (count === 0 && merged().some((r) => r.prSection.kind === "unavailable")) {
+    if (
+      count === 0 &&
+      merged().some((r) => r.prSection.kind === "unavailable")
+    ) {
       return "unavailable";
     }
     return String(count);
@@ -2815,7 +2839,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       flash("no PR on this row");
       return;
     }
-    flash(props.effects.openUrl(url) ? `opened ${url}` : "no browser opener here");
+    flash(
+      props.effects.openUrl(url) ? `opened ${url}` : "no browser opener here",
+    );
   }
 
   function runPrune(): void {
@@ -3029,7 +3055,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         // With nothing selected, `x` used to do nothing at all, which reads as
         // a broken key. It now either acts on the row under the cursor or says
         // what is missing.
-        if (entry?.kind === "worktree" && entry.candidate && !entry.candidate.dirty) {
+        if (
+          entry?.kind === "worktree" &&
+          entry.candidate &&
+          !entry.candidate.dirty
+        ) {
           // Single-target: the cursor IS the selection anyone would have made,
           // and the confirm still stands between it and the deletion.
           toggleSelected(entry.candidate.path);
@@ -3054,6 +3084,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         flash("nothing selected: space selects a worktree under `removable`");
         break;
       }
+      case "n":
+        // Ungated by view and by row: it opens another surface rather than
+        // acting on anything here, so there is nothing for a row kind to
+        // make it wrong about. The cursor rides along so Esc returns to it.
+        props.onStartFromSource?.({
+          panelRepo: props.repo,
+          panelScope: repoFilter(),
+          cursor: cursorKey() ?? "",
+        });
+        break;
       case "return":
       case "enter":
         if (entry) activateRow(entry);
@@ -3122,6 +3162,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           { text: "enter checkout", rank: 4 },
           { text: "o github", rank: 2 },
           { text: "r refresh", rank: 1 },
+          // Rank 2 here and rank 1 on the fuller line below: this view has
+          // the room, and it is also the view where "start something else"
+          // is the likelier next thought.
+          { text: "n start", rank: 2 },
           { text: "h worktrees", rank: 3 },
           ...(props.repo !== null
             ? [{ text: scoped() ? "tab all repos" : "tab this repo", rank: 2 }]
@@ -3168,6 +3212,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         // what `r` at a higher rank did to `D include dirty`.
         { text: "o github", rank: 1 },
         { text: "r refresh", rank: 1 },
+        // Rank 1 for the same reason `o` and `r` are: it opens another
+        // surface rather than acting on this list, so it must never displace
+        // a key that does. The help overlay and the PR view teach it too.
+        { text: "n start", rank: 1 },
         ...(props.repo !== null
           ? [{ text: scoped() ? "tab all repos" : "tab this repo", rank: 2 }]
           : []),
@@ -3554,7 +3602,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
               </text>
             </box>
           </Show>
-
         </Show>
 
         <Show when={phase() === "running"}>

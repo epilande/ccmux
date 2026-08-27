@@ -133,16 +133,17 @@ export function newSessionOptions(
       // repository for the second option to live in; the store refuses the
       // write regardless, but a locked field must not offer a list either.
       // Absent entirely for a spawn into a worktree that already exists, and
-      // for one cut from a PR, whose worktree the daemon decides.
+      // for one cut from a PR or an issue, whose worktree the daemon decides.
       //
-      // The PR case is unreachable today (`newSessionFields` drops the field,
-      // so no key, pill, overlay or click target reaches it) and is listed
-      // anyway, because the whole point of returning null HERE is that every
-      // consumer refuses together. A mode missing from this list is what makes
-      // the next mode-aware change a real bug.
+      // The PR and issue cases are unreachable today (`newSessionFields` drops
+      // the field, so no key, pill, overlay or click target reaches it) and
+      // are listed anyway, because the whole point of returning null HERE is
+      // that every consumer refuses together. A mode missing from this list is
+      // what makes the next mode-aware change a real bug.
       if (draft.moveChanges) return null;
       if (draft.existingWorktree !== null) return null;
       if (draft.pr !== null) return null;
+      if (draft.issue !== null) return null;
       if (draft.fork && !draft.fork.canWorktree) return null;
       return resolve(DESTINATION_OPTIONS, draft.destination);
     case "untracked":

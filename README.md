@@ -345,10 +345,11 @@ in the picker shows the PR's actual diff.
 `--base` works as usual.
 
 Both seed the agent's opening prompt with the title and URL, and your own
-`--prompt` is appended after it. Both refuse rather than guess: a PR that is
-not open, an issue that is closed, a PR whose branch is already checked out in
-another worktree (ccmux names it), and a same-named local branch that is not
-that PR (a branch counts as the PR's only when its `merge` *and* `remote` config
+`--prompt` is appended after it. A PR whose branch is already checked out is
+opened rather than duplicated; a second `--issue` of the same number opens the
+existing `issue-<n>` worktree the same way. Both refuse rather than guess: a
+PR that is not open, an issue that is closed, and a same-named local branch
+that is not that PR (a branch counts as the PR's only when its `merge` *and* `remote` config
 both already point at it, so a fork PR cannot ride in on a name collision with
 one of your origin-tracking branches). The remote is compared as a repository,
 not as text, so a branch you set up yourself with `git remote add fork <url>`
@@ -463,6 +464,8 @@ After a branch is merged (and auto-deleted on GitHub), three leftovers stay on y
 
 The panel has a second view: <kbd>l</kbd> switches to **Pull Requests**, every open PR of the repos in scope, with its branch, author, review state and checks, and the worktree it is already checked out in where there is one. <kbd>Enter</kbd> there cuts a worktree from the PR (or jumps to the agent already in it), <kbd>o</kbd> opens it on GitHub, and <kbd>h</kbd> goes back to the worktrees. The two axes are independent: <kbd>Tab</kbd> still scopes either view to one repo or all of them, and the tab line under the title names both views with the live PR count.
 
+<kbd>N</kbd> in the picker (or <kbd>n</kbd> inside the Worktrees panel) opens the **source picker**: every open pull request and every open issue of the repos in scope, in one list, with the worktree that already holds each one where there is one. <kbd>/</kbd> filters across both at once, so a word you remember finds it whether it was filed as a PR or as an issue, and the section counts follow what you type. <kbd>Enter</kbd> starts work on the row: it cuts a worktree from a PR's head, or one named after an issue and seeded with it, and where a checkout already exists it goes there instead of starting a second agent in the same tree.
+
 https://github.com/user-attachments/assets/cc25199b-f563-4cda-8b59-6e95c449a94a
 
 The panel loads in two passes: the list paints immediately from local git state, then the prune classification (which fetches and asks GitHub) merges in and sinks the finished worktrees to the bottom of their group. Those, and only those, become selectable for removal, showing why each one is removable. <kbd>Space</kbd> selects a row, and <kbd>x</kbd> removes what you selected after a confirmation that spells out what goes with it; on a single clean removable row, <kbd>x</kbd> with nothing selected takes that row. `ccmux worktree prune` runs the same classification from the command line:
@@ -560,6 +563,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions                                                                                              |
 | Fork session          | <kbd>F</kbd>                                                                       | Branch the conversation into a pane of its own, leaving the original running                                           |
 | Worktrees             | <kbd>W</kbd>                                                                       | Open the Worktrees panel: jump, start an agent, copy a path, review, or prune (multi-select, confirmation)             |
+| Start from PR/issue   | <kbd>N</kbd>                                                                       | Open the source picker: every open PR and issue of the repos in scope, filtered, Enter starts work on one              |
 | Review and hand back  | <kbd>d</kbd> / <kbd>D</kbd>                                                        | Review with [hunk](https://github.com/modem-dev/hunk), then offer to send notes to the agent (requires `hunk` on PATH) |
 | Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state                                                                                           |
 | Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)                                                                                    |
