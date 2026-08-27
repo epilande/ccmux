@@ -32,6 +32,7 @@ import {
   ISSUES_SECTION,
   PRS_SECTION,
   buildSourceRepos,
+  checkedOutPathFor,
   emptyStateText,
   filterRepos,
   hasRows,
@@ -211,12 +212,20 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   const [scrollboxLayout, setScrollboxLayout] = createSignal(0);
   let listBox: ScrollBoxRenderable | undefined;
   let loadGeneration = 0;
+  let activating = false;
 
   const width = () => dims().width;
   /** The box less its border and padding. */
   const contentWidth = () => Math.max(8, width() - 4);
   /** Inside the scrollbox, which keeps a column for its bar. */
   const listWidth = () => Math.max(4, contentWidth() - SCROLLBAR_GUTTER);
+
+  function worktreesUrl(): URL {
+    const listUrl = new URL(`${getDaemonUrl()}/worktrees`);
+    if (props.repo) listUrl.searchParams.set("repo", props.repo);
+    if (props.cwd) listUrl.searchParams.set("cwd", props.cwd);
+    return listUrl;
+  }
 
   /**
    * Three independent reads on one generation.
@@ -236,10 +245,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     setIssueError(null);
     setError(null);
 
-    const listUrl = new URL(`${getDaemonUrl()}/worktrees`);
-    if (props.repo) listUrl.searchParams.set("repo", props.repo);
-    if (props.cwd) listUrl.searchParams.set("cwd", props.cwd);
-    fetch(listUrl, { signal: AbortSignal.timeout(LIST_TIMEOUT_MS) })
+    fetch(worktreesUrl(), { signal: AbortSignal.timeout(LIST_TIMEOUT_MS) })
       .then(async (response) => {
         if (!response.ok) throw new Error(describeHttpFailure(response.status));
         const data = (await response.json()) as WorktreeListResponse;
@@ -431,28 +437,59 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
    * the worktree that holds it — so it routes through the caller's
    * open-worktree verb, which revalidates against the live session list and
    * jumps if an agent has moved in since this list was read.
+   *
+   * The mark on the row is from the `/worktrees` snapshot taken when the
+   * picker loaded. Another spawn can cut the issue (or PR) worktree while
+   * this surface sits open, leaving `checkedOutPath` null; Enter would then
+   * open spawn mode and `POST /spawn` would number a sibling. Re-read first,
+   * rematch with the same rules the list used, and go THERE if a checkout
+   * now exists.
    */
-  function activate(row: SourceRow): void {
+  async function activate(row: SourceRow): Promise<void> {
+    if (activating) return;
+    activating = true;
     const carry = { cursor: row.key, filter: filter() };
-    if (row.checkedOutPath) {
-      props.onOpenWorktree({ path: row.checkedOutPath, ...carry });
-      return;
-    }
-    if (row.kind === "pr") {
-      props.onPickPR({
-        number: row.pr.number,
-        title: row.pr.title,
+    try {
+      let snapshot = worktrees();
+      let refreshed = false;
+      try {
+        const response = await fetch(worktreesUrl(), {
+          signal: AbortSignal.timeout(LIST_TIMEOUT_MS),
+        });
+        if (response.ok) {
+          const fresh = (await response.json()) as WorktreeListResponse;
+          setWorktrees(fresh);
+          snapshot = fresh;
+          refreshed = true;
+        }
+      } catch {
+        // Keep the snapshot we already have: a failed re-read must not
+        // turn a known checkout into a spawn, or a spawn into a hang.
+      }
+      const path = checkedOutPathFor(row, snapshot);
+      const checkout = refreshed ? path : (path ?? row.checkedOutPath);
+      if (checkout) {
+        props.onOpenWorktree({ path: checkout, ...carry });
+        return;
+      }
+      if (row.kind === "pr") {
+        props.onPickPR({
+          number: row.pr.number,
+          title: row.pr.title,
+          repoRoot: row.repoRoot,
+          ...carry,
+        });
+        return;
+      }
+      props.onPickIssue({
+        number: row.issue.number,
+        title: row.issue.title,
         repoRoot: row.repoRoot,
         ...carry,
       });
-      return;
+    } finally {
+      activating = false;
     }
-    props.onPickIssue({
-      number: row.issue.number,
-      title: row.issue.title,
-      repoRoot: row.repoRoot,
-      ...carry,
-    });
   }
 
   /** Esc, and `q` in nav mode: back to wherever this was opened from. */

@@ -19,13 +19,12 @@ import type {
   WorktreeListResponse,
   WorktreeRow,
 } from "../../daemon/worktree-list";
-import { theme } from "../theme";
 import {
-  oneLine,
-  orderRepos,
-  unhandled,
-  type Phrase,
-} from "./row-segments";
+  isIssueWorktreeName,
+  pickIssueWorktree,
+} from "../../daemon/worktree-create";
+import { theme } from "../theme";
+import { oneLine, orderRepos, unhandled, type Phrase } from "./row-segments";
 import {
   PR_MARKER,
   checkoutHolding,
@@ -115,9 +114,9 @@ export interface SourceRepo {
  * otherwise claim `issue-144-foo`. The separator is part of the prefix, the
  * same rule `worktreeHoldsPath` follows for paths.
  *
- * Several can exist, because a second spawn on the same issue derives
- * `issue-144-foo-2` rather than opening the first. The SHORTEST name wins —
- * that is the first spawn — and the count of the rest is reported rather than
+ * Several can exist from older spawns that numbered a sibling before
+ * `POST /spawn` started opening the first. The SHORTEST name wins — that is
+ * the first spawn — and the count of the rest is reported rather than
  * swallowed: unlike a PR there is no SHA to break the tie, so silently
  * choosing one of two live checkouts must at least be visible.
  */
@@ -125,16 +124,29 @@ export function worktreeForIssue(
   number: number,
   worktrees: WorktreeRow[],
 ): { row: WorktreeRow; siblings: number } | null {
-  const exact = `issue-${number}`;
-  const family = `${exact}-`;
-  const matches = worktrees.filter(
-    (row) => row.name === exact || row.name.startsWith(family),
-  );
-  if (matches.length === 0) return null;
-  const [first] = [...matches].sort(
-    (a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name),
-  );
-  return first ? { row: first, siblings: matches.length - 1 } : null;
+  const first = pickIssueWorktree(number, worktrees);
+  if (!first) return null;
+  const siblings =
+    worktrees.filter((row) => isIssueWorktreeName(row.name, number)).length - 1;
+  return { row: first, siblings };
+}
+
+/**
+ * The checkout holding this row on `worktrees`, or null.
+ *
+ * Same matchers the list used when it was built (`checkoutHolding` for a PR,
+ * `worktreeForIssue` for an issue), so a refresh of `/worktrees` can be
+ * dropped in without a second set of rules.
+ */
+export function checkedOutPathFor(
+  row: SourceRow,
+  worktrees: WorktreeListResponse | null,
+): string | null {
+  const list =
+    worktrees?.repos.find((repo) => repo.repoRoot === row.repoRoot)
+      ?.worktrees ?? [];
+  if (row.kind === "pr") return checkoutHolding(row.pr, list)?.path ?? null;
+  return worktreeForIssue(row.issue.number, list)?.row.path ?? null;
 }
 
 /**
@@ -164,11 +176,15 @@ export function buildSourceRepos(input: {
   const note = (repoRoot: string, repoName: string) => {
     if (!names.has(repoRoot)) names.set(repoRoot, repoName);
   };
-  for (const repo of input.worktrees?.repos ?? []) note(repo.repoRoot, repo.repoName);
+  for (const repo of input.worktrees?.repos ?? [])
+    note(repo.repoRoot, repo.repoName);
   for (const repo of input.prs?.repos ?? []) note(repo.repoRoot, repo.repoName);
-  for (const repo of input.prs?.errors ?? []) note(repo.repoRoot, repo.repoName);
-  for (const repo of input.issues?.repos ?? []) note(repo.repoRoot, repo.repoName);
-  for (const repo of input.issues?.errors ?? []) note(repo.repoRoot, repo.repoName);
+  for (const repo of input.prs?.errors ?? [])
+    note(repo.repoRoot, repo.repoName);
+  for (const repo of input.issues?.repos ?? [])
+    note(repo.repoRoot, repo.repoName);
+  for (const repo of input.issues?.errors ?? [])
+    note(repo.repoRoot, repo.repoName);
 
   const worktreesByRoot = new Map<string, WorktreeRow[]>();
   for (const repo of input.worktrees?.repos ?? []) {
@@ -178,20 +194,20 @@ export function buildSourceRepos(input: {
   const built: SourceRepo[] = [];
   for (const [repoRoot, repoName] of names) {
     const worktrees = worktreesByRoot.get(repoRoot) ?? [];
-    const prs = (input.prs?.repos.find((r) => r.repoRoot === repoRoot)?.prs ?? []).map(
-      (pr): PRSourceRow => {
-        const holder = checkoutHolding(pr, worktrees);
-        return {
-          kind: "pr",
-          key: prRowKey(repoRoot, pr.number),
-          repoRoot,
-          repoName,
-          pr,
-          checkedOutPath: holder?.path ?? null,
-          checkedOutName: holder?.name ?? null,
-        };
-      },
-    );
+    const prs = (
+      input.prs?.repos.find((r) => r.repoRoot === repoRoot)?.prs ?? []
+    ).map((pr): PRSourceRow => {
+      const holder = checkoutHolding(pr, worktrees);
+      return {
+        kind: "pr",
+        key: prRowKey(repoRoot, pr.number),
+        repoRoot,
+        repoName,
+        pr,
+        checkedOutPath: holder?.path ?? null,
+        checkedOutName: holder?.name ?? null,
+      };
+    });
     const issues = (
       input.issues?.repos.find((r) => r.repoRoot === repoRoot)?.issues ?? []
     ).map((issue): IssueSourceRow => {
@@ -212,7 +228,12 @@ export function buildSourceRepos(input: {
       repoName,
       prs,
       issues,
-      prSection: sectionStatus(repoRoot, input.prs, input.prError, (repo) => repo.prs.length),
+      prSection: sectionStatus(
+        repoRoot,
+        input.prs,
+        input.prError,
+        (repo) => repo.prs.length,
+      ),
       issueSection: sectionStatus(
         repoRoot,
         input.issues,
@@ -237,7 +258,10 @@ export function buildSourceRepos(input: {
  */
 function sectionStatus<T extends { repoRoot: string }>(
   repoRoot: string,
-  response: { repos: T[]; errors: { repoRoot: string; error: string }[] } | null,
+  response: {
+    repos: T[];
+    errors: { repoRoot: string; error: string }[];
+  } | null,
   error: string | null,
   count: (repo: T) => number,
 ): SourceSectionStatus {

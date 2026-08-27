@@ -377,6 +377,55 @@ describe("SourcePicker keys", () => {
     expect(harness.picked.prs).toHaveLength(0);
   });
 
+  /**
+   * The first-read gate only blocks Enter before `/worktrees` answers. A
+   * checkout that appears WHILE the picker sits open is invisible on the
+   * snapshot Enter used to trust, and spawn would number `issue-<n>-<slug>-2`.
+   * Re-reading on Enter is what keeps "already checked out → open it".
+   */
+  it("opens a checkout that appeared while the picker sat open", async () => {
+    let listed: WorktreeRow[] = [];
+    const harness = await mount({
+      prs: async () =>
+        json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", prs: [] }],
+          errors: [],
+        } satisfies PRListResponse),
+      issues: async () =>
+        json({
+          repos: [
+            { repoRoot: "/repo", repoName: "repo", issues: [openIssue()] },
+          ],
+          errors: [],
+        } satisfies IssueListResponse),
+      worktrees: async () =>
+        json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", worktrees: listed }],
+        } satisfies WorktreeListResponse),
+    });
+    expect(await harness.frame()).toContain("#144");
+    expect(await harness.frame()).not.toContain("checked out");
+
+    listed = [
+      worktreeRow({
+        name: "issue-144-notifications",
+        path: "/repo/wt/issue-144",
+      }),
+    ];
+    harness.keys.pressEnter();
+    for (let i = 0; i < 15; i++) {
+      if (
+        harness.picked.worktrees.length > 0 ||
+        harness.picked.issues.length > 0
+      )
+        break;
+      await harness.frame();
+    }
+
+    expect(harness.picked.worktrees[0]?.path).toBe("/repo/wt/issue-144");
+    expect(harness.picked.issues).toHaveLength(0);
+  });
+
   it("closes on q", async () => {
     const harness = await mountSettled({ prs: [openPR()] });
     harness.keys.pressKey("q");

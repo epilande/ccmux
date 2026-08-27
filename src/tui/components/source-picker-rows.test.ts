@@ -140,8 +140,8 @@ describe("worktreeForIssue", () => {
     expect(worktreeForIssue(1, [worktree({ name: "issue-14" })])).toBeNull();
   });
 
-  // A second spawn on the same issue derives `-2` rather than opening the
-  // first, so several can exist. The first spawn wins and the rest are
+  // A second spawn on the same issue used to derive `-2` rather than opening
+  // the first, so several can exist. The first spawn wins and the rest are
   // counted, because there is no SHA here to break the tie and silently
   // choosing one of two live checkouts must be visible.
   it("takes the shortest name and counts the siblings", () => {

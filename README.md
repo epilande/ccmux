@@ -345,10 +345,11 @@ in the picker shows the PR's actual diff.
 `--base` works as usual.
 
 Both seed the agent's opening prompt with the title and URL, and your own
-`--prompt` is appended after it. Both refuse rather than guess: a PR that is
-not open, an issue that is closed, a PR whose branch is already checked out in
-another worktree (ccmux names it), and a same-named local branch that is not
-that PR (a branch counts as the PR's only when its `merge` *and* `remote` config
+`--prompt` is appended after it. A PR whose branch is already checked out is
+opened rather than duplicated; a second `--issue` of the same number opens the
+existing `issue-<n>` worktree the same way. Both refuse rather than guess: a
+PR that is not open, an issue that is closed, and a same-named local branch
+that is not that PR (a branch counts as the PR's only when its `merge` *and* `remote` config
 both already point at it, so a fork PR cannot ride in on a name collision with
 one of your origin-tracking branches). The remote is compared as a repository,
 not as text, so a branch you set up yourself with `git remote add fork <url>`

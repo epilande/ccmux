@@ -66,6 +66,7 @@ import {
   createWorktree,
   ensureWorktreesExcluded,
   existingWorktreeFor,
+  pickIssueWorktree,
   readCheckoutHead,
   slugForFork,
   slugForIssue,
@@ -4586,12 +4587,11 @@ export class DaemonServer {
 
       // A `--pr` spawn checks out the PR's OWN head ref, so its branch is
       // decided here rather than by the worktree's name. Two steps, in this
-      // order, because the first is the last thing that can refuse before
-      // anything is written:
+      // order:
       //
-      // 1. The branch already being checked out somewhere is OUR refusal,
-      //    naming the directory, rather than git's at the end of a create.
-      //    Ahead of `ensureWorktreesExcluded`, which writes to the repo.
+      // 1. The branch already being checked out somewhere is opened rather
+      //    than refused: Enter on a checked-out PR goes THERE. Confirmed
+      //    again under the repo lock inside `createWorktree`.
       // 2. The fetch and the branch decision, which `preparePRBranch` runs
       //    under the repo lock and releases before returning — it must not
       //    still hold it when `createWorktree` takes the same lock below.
@@ -4611,27 +4611,24 @@ export class DaemonServer {
           prSource.headRefName,
         );
         if (occupied) {
-          return Response.json(
-            {
-              error:
-                `PR #${prSource.number}'s branch '${prSource.headRefName}' is already checked out ` +
-                `at ${occupied}. Spawn an agent there instead, or remove that worktree first.`,
-            },
-            { status: 400, headers },
-          );
+          // Open that checkout rather than refusing. `createWorktree` will
+          // confirm under the repo lock and open it; skip the fetch — the
+          // branch is already here.
+          prBranch = prSource.headRefName;
+        } else {
+          const prepared = await preparePRBranch(mainRepoRoot, prSource);
+          if (!prepared.ok) {
+            return Response.json(
+              { error: prepared.error },
+              { status: 400, headers },
+            );
+          }
+          prBranch = prSource.headRefName;
+          // The SHA, never `FETCH_HEAD`: the base-branch fetch inside the prep
+          // has already overwritten that ref.
+          creation.base = prepared.value.head;
+          prBase = prepared.value.baseRemoteRef;
         }
-        const prepared = await preparePRBranch(mainRepoRoot, prSource);
-        if (!prepared.ok) {
-          return Response.json(
-            { error: prepared.error },
-            { status: 400, headers },
-          );
-        }
-        prBranch = prSource.headRefName;
-        // The SHA, never `FETCH_HEAD`: the base-branch fetch inside the prep
-        // has already overwritten that ref.
-        creation.base = prepared.value.head;
-        prBase = prepared.value.baseRemoteRef;
       }
 
       // Here rather than only inside the creation engine, because ORDER
@@ -4743,6 +4740,7 @@ export class DaemonServer {
           ...(moved.flattenedIndex ? { flattenedIndex: true } : {}),
         };
       } else {
+        const issueNumber = issueResult.value;
         const created = await createWorktree(mainRepoRoot, {
           ...creation,
           // No prompt on the pr/issue paths, deliberately:
@@ -4758,6 +4756,14 @@ export class DaemonServer {
           // the branch the PR targets, and when it cannot, no key is what
           // lets the picker's `D` fall back to its heuristic base.
           ...(prBranch ? { branch: prBranch, recordBase: false } : {}),
+          // Under the lock, so a checkout that appeared while the picker
+          // sat open is still found: numbering `issue-<n>-<slug>-2` would
+          // break Enter's "already checked out → open it" guarantee.
+          ...(issueNumber !== undefined
+            ? {
+                reuseExisting: (trees) => pickIssueWorktree(issueNumber, trees),
+              }
+            : {}),
         });
         if (!created.ok) {
           return Response.json(

@@ -25,6 +25,8 @@ import {
   slugForPR,
   slugFromPrompt,
   slugify,
+  pickIssueWorktree,
+  isIssueWorktreeName,
   withRepoLock,
   worktreePathFor,
 } from "./worktree-create";
@@ -1168,6 +1170,19 @@ describe("slugForPR / slugForIssue", () => {
   });
 });
 
+describe("pickIssueWorktree", () => {
+  it("takes the shortest family-exact name", () => {
+    const rows = [
+      { name: "issue-144-notifications-2", path: "/b" },
+      { name: "issue-144-notifications", path: "/a" },
+      { name: "issue-1444-other", path: "/c" },
+    ];
+    expect(pickIssueWorktree(144, rows)?.path).toBe("/a");
+    expect(isIssueWorktreeName("issue-1444-other", 144)).toBe(false);
+    expect(pickIssueWorktree(14, rows)).toBeNull();
+  });
+});
+
 describe("createWorktree with a branch override", () => {
   // A `--pr` spawn's directory is named after the PR while its branch has to
   // be the PR's own head ref, so `git push` works out of the box.
@@ -1278,5 +1293,69 @@ describe("createWorktree with a branch override", () => {
     expect(created.result.branchCreated).toBe(true);
     expect(await readConfig(repo, CONFIG_KEY("fix/flaky-binder"))).toBeNull();
     expect(await readConfig(repo, CONFIG_KEY("pr-7-fix-flaky"))).toBeNull();
+  });
+
+  // A second `--pr` of a branch already checked out used to 400. Opening
+  // that checkout is what the source picker promises on Enter.
+  it("opens the worktree already holding the overridden branch", async () => {
+    const repo = await makeRepo();
+    const first = await createWorktree(repo, {
+      name: "parking",
+      branch: "fix/flaky-binder",
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const second = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.result.created).toBe(false);
+    expect(second.result.path).toBe(first.result.path);
+    expect(existsSync(worktreePathFor(repo, "pr-7-fix-flaky"))).toBe(false);
+  });
+});
+
+describe("createWorktree reuseExisting", () => {
+  // The source picker's guarantee: a second `--issue` spawn opens the first
+  // checkout rather than numbering `issue-<n>-<slug>-2`.
+  it("opens the existing issue worktree instead of numbering a sibling", async () => {
+    const repo = await makeRepo();
+    const first = await createWorktree(repo, {
+      derivedName: "issue-144-old-title",
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const second = await createWorktree(repo, {
+      derivedName: "issue-144-new-title",
+      reuseExisting: (trees) => pickIssueWorktree(144, trees),
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.result.created).toBe(false);
+    expect(second.result.path).toBe(first.result.path);
+    expect(existsSync(worktreePathFor(repo, "issue-144-new-title"))).toBe(
+      false,
+    );
+  });
+
+  it("does not claim a longer issue number that merely starts with this one", async () => {
+    const repo = await makeRepo();
+    const other = await createWorktree(repo, {
+      derivedName: "issue-1444-other",
+    });
+    expect(other.ok).toBe(true);
+
+    const created = await createWorktree(repo, {
+      derivedName: "issue-144-notifications",
+      reuseExisting: (trees) => pickIssueWorktree(144, trees),
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.created).toBe(true);
+    expect(created.result.name).toBe("issue-144-notifications");
   });
 });
