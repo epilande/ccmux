@@ -355,8 +355,10 @@ describe("row presentation", () => {
   it("keeps an issue's labels on a narrow surface, where the author goes", () => {
     const [row] = pickerRows(build({ issues: [issue()] }));
     const phrases = sourceDetailPhrases(row!, { compact: true });
+    const texts = phrases.map((phrase) => phrase.text);
     // Labels say what KIND of work it is, which is the half worth the columns.
-    expect(phrases.map((phrase) => phrase.text)).toContain("bug");
+    expect(texts).toContain("bug");
+    expect(texts).not.toContain("@epilande");
   });
 
   it("says where an issue is already checked out, and how many others exist", () => {

@@ -296,7 +296,7 @@ export function sourceDetailPhrases(
     });
   }
   const phrases: Phrase[] = [];
-  if (row.issue.author) {
+  if (row.issue.author && opts.compact !== true) {
     phrases.push({ text: `@${row.issue.author}`, fg: theme.overlay });
   }
   // Labels are the only thing on an issue row that says what KIND of work it

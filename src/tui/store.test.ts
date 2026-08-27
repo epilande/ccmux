@@ -4347,6 +4347,21 @@ describe("new-session dialog in issue mode (issue #151)", () => {
     expect(newSessionFields(draft)).toEqual(["agent", "placement", "prompt"]);
   });
 
+  it("refuses a destination it has no row for", () => {
+    const store = createTUIStore();
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      issue: ISSUE,
+    });
+
+    // Forced to the worktree the daemon will cut. A write that landed would
+    // flip the draft to `here` on a dialog whose request cannot spawn into
+    // `cwd`: `POST /spawn` refuses `issue` without a worktree.
+    store.actions.setNewSessionDestination("here");
+    expect(store.state.newSession?.destination).toBe("worktree");
+  });
+
   // `POST /spawn` refuses `issue` alongside `worktree.name`; a Name row here
   // would post one and earn a 400 on a dialog whose fields all looked
   // answerable.
