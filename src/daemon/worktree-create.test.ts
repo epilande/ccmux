@@ -1296,6 +1296,57 @@ describe("createWorktree with a branch override", () => {
     expect(await readConfig(repo, CONFIG_KEY("pr-7-fix-flaky"))).toBeNull();
   });
 
+  // The caller validated the branch under a DIFFERENT acquisition of the repo
+  // lock, so a branch that appears in the window between the two must not be
+  // checked out as if it had passed those checks (issue #157).
+  it("refuses a branch that appeared after the caller settled it as absent", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "fix/flaky-binder"]);
+
+    const created = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+      branchExists: false,
+    });
+
+    // `git worktree add -b` on an existing branch: loud, and the message is
+    // git's own.
+    expect(created.ok).toBe(false);
+    if (created.ok) return;
+    expect(created.error).toContain("fix/flaky-binder");
+  });
+
+  // The other direction of the same race: a branch the caller fast-forwarded
+  // and something then deleted must not be silently re-cut at a base that has
+  // nothing to do with the PR.
+  it("refuses a branch that vanished after the caller settled it as present", async () => {
+    const repo = await makeRepo();
+
+    const created = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+      branchExists: true,
+    });
+
+    expect(created.ok).toBe(false);
+    if (created.ok) return;
+    expect(created.error).toContain("fix/flaky-binder");
+  });
+
+  it("still derives the answer for a caller that settles nothing", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "fix/flaky-binder"]);
+
+    const created = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.branchCreated).toBe(false);
+  });
+
   // A second `--pr` of a branch already checked out used to 400. Opening
   // that checkout is what the source picker promises on Enter.
   it("opens the worktree already holding the overridden branch", async () => {

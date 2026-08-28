@@ -761,9 +761,12 @@ async function recordBranchBase(
  * `git push` works out of the box, while its directory is named after the PR
  * number. Overriding here rather than duplicating the creation logic is what
  * keeps the lock, the numbering, the occupied-path refusals and the file
- * setup shared. With an override the branch is reused whenever it exists,
- * derived name or not: the caller has already decided which branch it means,
- * and the checks that make that safe are its own (see `gh-spawn-source.ts`).
+ * setup shared. With an override the caller also SETTLES whether that branch
+ * already exists, through `branchExists`: the checks that make reuse safe are
+ * its own (see `gh-spawn-source.ts`), and they ran under a different
+ * acquisition of the same lock, so re-deriving the answer here would let a
+ * branch that appeared in between be checked out as if it had passed them
+ * (issue #157).
  */
 export async function createWorktree(
   mainRepoRoot: string,
@@ -775,6 +778,21 @@ export async function createWorktree(
     derivedName?: string;
     /** The branch to check out, when it must differ from the name. */
     branch?: string;
+    /**
+     * Whether `branch` already exists, as the CALLER settled it. Only read
+     * alongside `branch`; omitted, the answer is derived here.
+     *
+     * The point is that it is a DECISION carried forward, not a fact
+     * re-measured. `preparePRBranch` validates the branch and releases the
+     * repo lock before this function takes it (`withRepoLock` is not
+     * reentrant), so a branch created inside that window would otherwise be
+     * checked out unconditionally and then reconfigured to track the PR —
+     * without ever passing the upstream checks that exist to prove it IS the
+     * PR (issue #157). Carrying the decision makes either race direction a
+     * loud git failure instead: `-b` refuses a branch that appeared, and a
+     * plain add refuses one that vanished.
+     */
+    branchExists?: boolean;
     /**
      * Whether to write `branch.<branch>.ccmux-base` for a branch this cut.
      * Defaults to true; only a caller whose base is NOT a review base opts
@@ -964,12 +982,14 @@ export async function createWorktree(
     // nobody chose. `-b` makes git refuse instead, which is a loud failure
     // the user can act on rather than a silent one they discover later.
     //
-    // An OVERRIDDEN branch reuses unconditionally, for the reason in this
-    // function's doc comment: the name it collides with is the caller's own
-    // choice rather than a slug that happened to match.
+    // An OVERRIDDEN branch takes the caller's own settled answer when it has
+    // one, for the reason in `branchExists`: measuring it again here would be
+    // a second, later observation of something already decided under checks
+    // this function cannot repeat.
     const reusingBranch =
       request.branch !== undefined
-        ? await localBranchExists(mainRepoRoot, branchName, git)
+        ? (request.branchExists ??
+          (await localBranchExists(mainRepoRoot, branchName, git)))
         : named.derived
           ? false
           : await localBranchExists(mainRepoRoot, name, git);

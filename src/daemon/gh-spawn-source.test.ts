@@ -295,9 +295,9 @@ describe("parseRepoSlug / sameRepo", () => {
   // alias the host comparison fails and the mismatch message prints the same
   // slug on both sides.
   it("treats ssh.github.com as github.com", () => {
-    expect(parseRepoSlug("ssh://git@ssh.github.com:443/junegunn/fzf.git")).toEqual(
-      { host: "github.com", owner: "junegunn", repo: "fzf" },
-    );
+    expect(
+      parseRepoSlug("ssh://git@ssh.github.com:443/junegunn/fzf.git"),
+    ).toEqual({ host: "github.com", owner: "junegunn", repo: "fzf" });
     expect(
       sameRepo(
         parseRepoSlug("ssh://git@ssh.github.com:443/junegunn/fzf.git"),
@@ -862,17 +862,54 @@ describe("configurePRBranch", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("writes no ccmux-base when the remote base never resolved", async () => {
+  it("clears ccmux-base when the remote base never resolved", async () => {
+    // ccmux OWNS the key on a `--pr` branch (issue #157): a REUSED branch can
+    // still carry one an earlier spawn recorded, and leaving it would make a
+    // base this spawn declined to write the one `D` diffs against.
     const calls: string[][] = [];
-    await configurePRBranch(
+    const result = await configurePRBranch(
       "/repo",
       "b",
       { ...OPEN_PR },
       null,
       gitAnswering([], calls),
     );
-    expect(calls.map((c) => c.join(" ")).join("\n")).not.toContain(
-      "ccmux-base",
+    expect(result.ok).toBe(true);
+    expect(calls.map((c) => c.join(" "))).toContain(
+      "config --unset branch.b.ccmux-base",
+    );
+  });
+
+  it("does not report a missing ccmux-base key as a failed clear", async () => {
+    // `git config --unset` exits 5 when the key was not there, which is the
+    // state being asked for — every ordinary same-repo spawn hits it.
+    const result = await configurePRBranch(
+      "/repo",
+      "b",
+      { ...OPEN_PR },
+      null,
+      gitAnswering([["config --unset branch.b.ccmux-base", { exitCode: 5 }]]),
+    );
+    expect(result).toEqual({ ok: true, value: {} });
+  });
+
+  it("still settles ccmux-base when a tracking write failed", async () => {
+    // Same reason every tracking op is attempted: stopping early leaves more
+    // of the branch's config unsettled than it has to.
+    const calls: string[][] = [];
+    const result = await configurePRBranch(
+      "/repo",
+      "b",
+      { ...OPEN_PR },
+      "origin/main",
+      gitAnswering(
+        [["config branch.b.merge", { exitCode: 4, stderr: "locked" }]],
+        calls,
+      ),
+    );
+    expect(result.ok).toBe(false);
+    expect(calls.map((c) => c.join(" "))).toContain(
+      "config branch.b.ccmux-base origin/main",
     );
   });
 });
@@ -911,5 +948,26 @@ describe("seedPrompt", () => {
     expect(seedPrompt("PR #1", "   ", "https://x/1", undefined)).toBe(
       "PR #1\nhttps://x/1",
     );
+  });
+
+  it("does not cut an astral character in half at the cap", () => {
+    // The cap counts UTF-16 code units, so an emoji straddling it would keep
+    // its high surrogate — not a character, and U+FFFD in anything that
+    // writes it out (issue #157). 198 x's puts the pair's halves at units
+    // 198 and 199, and the slice ends at 199.
+    const title = `${"x".repeat(198)}\u{1f600}${"y".repeat(50)}`;
+    const line = seedPrompt("PR #1", title, "u", undefined).split("\n")[0]!;
+    expect(line.endsWith("…")).toBe(true);
+    for (const unit of line) {
+      const code = unit.charCodeAt(0);
+      expect(code >= 0xd800 && code <= 0xdfff).toBe(false);
+    }
+    expect(line).toBe(`PR #1: ${"x".repeat(198)}…`);
+  });
+
+  it("keeps an astral character that ends before the cap", () => {
+    const title = `${"x".repeat(197)}\u{1f600}${"y".repeat(50)}`;
+    const line = seedPrompt("PR #1", title, "u", undefined).split("\n")[0]!;
+    expect(line).toBe(`PR #1: ${"x".repeat(197)}\u{1f600}…`);
   });
 });

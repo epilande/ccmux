@@ -7,6 +7,8 @@ import {
   afterEach,
 } from "bun:test";
 import { SessionManager, adoptsLoggedCwd, getMarkerKey } from "./sessions";
+import { decodeProjectPath } from "./parser";
+import { encodeProjectPath } from "./binder/primitives";
 import type { Session } from "../types/session";
 import type { SessionPidMarker } from "./session-markers";
 
@@ -63,6 +65,40 @@ describe("SessionManager", () => {
     expect(session.trackingMode).toBe("native");
     expect(session.status).toBe("idle");
     expect(manager.hasSession("test-id")).toBe(true);
+  });
+
+  // Issue #156: the project dir name encodes `/` as `-`, so decoding it back
+  // turns `notes-cli` into `notes/cli`. A caller that knows the real cwd
+  // hands it over rather than letting the guess stand.
+  it("prefers a caller's known cwd over decoding the project dir name", () => {
+    const manager = new SessionManager();
+    const logPath =
+      "/Users/test/.claude/projects/-Users-test-notes-cli/test-id.jsonl";
+
+    expect(manager.createSession("guessed", logPath).cwd).toBe(
+      "/Users/test/notes/cli",
+    );
+
+    const session = manager.createSession(
+      "test-id",
+      logPath,
+      "claude",
+      "/Users/test/notes-cli",
+    );
+    expect(session.cwd).toBe("/Users/test/notes-cli");
+    expect(session.project).toBe("notes-cli");
+  });
+
+  it("falls back to the decoded path when the caller knows nothing", () => {
+    const manager = new SessionManager();
+    const session = manager.createSession(
+      "test-id",
+      "/Users/test/.claude/projects/-Users-test-myproject/test-id.jsonl",
+      "claude",
+      null,
+    );
+    expect(session.cwd).toBe("/Users/test/myproject");
+    expect(session.project).toBe("myproject");
   });
 
   it("should update a session", () => {
@@ -1301,6 +1337,24 @@ describe("adoptsLoggedCwd", () => {
   // A sibling directory that merely shares a prefix is not the same worktree.
   it("does not treat a prefix-sharing sibling as the same worktree", () => {
     expect(adoptsLoggedCwd(`${agentWt}-2`, agentWt)).toBe(false);
+  });
+
+  // Issue #156: a hyphenated worktree name decodes into extra path
+  // separators, so the corrupted spelling prefix-matches nothing and the
+  // refusal above would make the corruption PERMANENT.
+  it("allows the log to correct a lossy decode of the same directory", () => {
+    const hyphenated = `${repo}/.claude/worktrees/add-tags`;
+    const decoded = decodeProjectPath(encodeProjectPath(hyphenated));
+    expect(decoded).not.toBe(hyphenated);
+    expect(adoptsLoggedCwd(decoded, hyphenated)).toBe(true);
+  });
+
+  // The escape hatch is encode-EQUALITY, not leniency: a teammate's worktree
+  // encodes to something the orchestrator's own cwd never does.
+  it("still refuses a teammate's worktree that merely decodes cleanly", () => {
+    expect(adoptsLoggedCwd(repo, `${repo}/.claude/worktrees/addtags`)).toBe(
+      false,
+    );
   });
 });
 

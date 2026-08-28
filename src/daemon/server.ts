@@ -4596,6 +4596,7 @@ export class DaemonServer {
       //    under the repo lock and releases before returning — it must not
       //    still hold it when `createWorktree` takes the same lock below.
       let prBranch: string | undefined;
+      let prBranchExisted: boolean | undefined;
       let prBase: string | null = null;
       if (prSource) {
         // Before the branch check and well before the fetch: `gh` resolved
@@ -4624,6 +4625,11 @@ export class DaemonServer {
             );
           }
           prBranch = prSource.headRefName;
+          // Carried into the create rather than left for it to re-derive: the
+          // prep released the repo lock before returning, and only this answer
+          // was reached through the upstream checks that prove the branch is
+          // this PR's (issue #157).
+          prBranchExisted = prepared.value.branchExisted;
           // The SHA, never `FETCH_HEAD`: the base-branch fetch inside the prep
           // has already overwritten that ref.
           creation.base = prepared.value.head;
@@ -4755,7 +4761,13 @@ export class DaemonServer {
           // own review base. `configurePRBranch` writes that key here with
           // the branch the PR targets, and when it cannot, no key is what
           // lets the picker's `D` fall back to its heuristic base.
-          ...(prBranch ? { branch: prBranch, recordBase: false } : {}),
+          ...(prBranch
+            ? {
+                branch: prBranch,
+                branchExists: prBranchExisted,
+                recordBase: false,
+              }
+            : {}),
           // Under the lock, so a checkout that appeared while the picker
           // sat open is still found: numbering `issue-<n>-<slug>-2` would
           // break Enter's "already checked out → open it" guarantee.

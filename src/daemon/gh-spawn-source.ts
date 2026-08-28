@@ -674,6 +674,16 @@ export async function preparePRBranch(
  * optional key would contradict that and 500 an otherwise-correct spawn
  * (worktree and all) over a diff-base hint. It is reported as a note instead.
  *
+ * ccmux OWNS that key on a `--pr` branch, which is why no base to record
+ * UNSETS it rather than leaving it (issue #157). The alternative — treating a
+ * pre-existing value as the user's — reads well until a branch is REUSED: the
+ * key would then still name whatever an earlier spawn recorded, so a base
+ * this spawn deliberately declined to write silently becomes what `D` diffs
+ * against. Owning it makes the branch's review base always describe the spawn
+ * that last prepared it, and absence is what lets `D` fall back to its
+ * heuristic. A base a user wants to keep belongs on a branch ccmux did not
+ * cut for a PR.
+ *
  * Every op is still attempted, because a partial write is what has to be
  * described accurately, and stopping early would leave more of it unset.
  */
@@ -685,9 +695,7 @@ export async function configurePRBranch(
   git: GitRun = runGit,
 ): Promise<SourceResult<PRBranchConfig>> {
   /** One `git config` write, or the removal of a key that must not persist. */
-  type ConfigOp =
-    | { key: string; value: string }
-    | { key: string; unset: true };
+  type ConfigOp = { key: string; value: string } | { key: string; unset: true };
 
   const run = async (op: ConfigOp): Promise<string | null> => {
     const res =
@@ -716,6 +724,19 @@ export async function configurePRBranch(
     const problem = await run(op);
     if (problem) failed.push(problem);
   }
+
+  // Optional, and never fatal; see this function's doc comment. Attempted
+  // before the tracking verdict below for the same reason every tracking op
+  // is attempted: stopping early leaves more of the branch's config
+  // unsettled, and this key decides what `D` diffs against whether or not the
+  // push config landed.
+  const baseKey = `branch.${branch}.ccmux-base`;
+  const baseProblem = await run(
+    baseRemoteRef
+      ? { key: baseKey, value: baseRemoteRef }
+      : { key: baseKey, unset: true },
+  );
+
   if (failed.length > 0) {
     return {
       ok: false,
@@ -723,20 +744,15 @@ export async function configurePRBranch(
     };
   }
 
-  // Optional, and never fatal; see this function's doc comment.
-  if (baseRemoteRef) {
-    const problem = await run({
-      key: `branch.${branch}.ccmux-base`,
-      value: baseRemoteRef,
-    });
-    if (problem) {
-      return {
-        ok: true,
-        value: {
-          baseNote: `could not record ${baseRemoteRef} as the review base for '${branch}' (${problem}); the picker's 'D' branch review will fall back to its default base`,
-        },
-      };
-    }
+  if (baseProblem) {
+    return {
+      ok: true,
+      value: {
+        baseNote: baseRemoteRef
+          ? `could not record ${baseRemoteRef} as the review base for '${branch}' (${baseProblem}); the picker's 'D' branch review will fall back to its default base`
+          : `could not clear the recorded review base for '${branch}' (${baseProblem}); the picker's 'D' branch review may diff against a base an earlier spawn recorded`,
+      },
+    };
   }
   return { ok: true, value: {} };
 }
@@ -793,6 +809,21 @@ export function stripControlChars(text: string): string {
 const CONTROL_CHARS =
   /[\x00-\x1f\x7f-\x9f\u061c\u200b\u200e\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]+/g;
 
+/**
+ * Drop a trailing HIGH surrogate left behind by slicing at a UTF-16 boundary.
+ *
+ * `String.prototype.slice` counts code UNITS, so a cap landing inside an
+ * astral character (an emoji, most CJK extension characters) keeps its first
+ * half. That half is not a character: it encodes to U+FFFD in anything that
+ * writes it out, so the title ends in a replacement glyph rather than the
+ * ellipsis that says it was cut (issue #157). Only the high half can be
+ * stranded this way — a slice never begins mid-pair, since it starts at 0.
+ */
+function dropTrailingLoneSurrogate(text: string): string {
+  const last = text.charCodeAt(text.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? text.slice(0, -1) : text;
+}
+
 export function seedPrompt(
   label: string,
   title: string,
@@ -802,7 +833,7 @@ export function seedPrompt(
   const clean = stripControlChars(title);
   const capped =
     clean.length > MAX_TITLE_CHARS
-      ? `${clean.slice(0, MAX_TITLE_CHARS - 1).trimEnd()}…`
+      ? `${dropTrailingLoneSurrogate(clean.slice(0, MAX_TITLE_CHARS - 1)).trimEnd()}…`
       : clean;
   const head = `${label}${capped ? `: ${capped}` : ""}\n${url}`;
   return userPrompt ? `${head}\n\n${userPrompt}` : head;
