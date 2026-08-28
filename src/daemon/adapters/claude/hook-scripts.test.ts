@@ -56,9 +56,10 @@ describe("claude hook script templates", () => {
     // Regression: Claude Code 2.1.250 runs hooks from a tty-less `sh -c`
     // wrapper, so trusting $PPID stored a dead pid + tty "?" and the marker
     // never bound. The walk prefers a comm=claude ancestor, else the first
-    // ancestor with a real controlling terminal.
+    // ancestor with a real controlling terminal, rejecting every no-tty
+    // spelling (macOS/BSD ps prints "??", Linux prints "?").
     expect(SESSION_START_HOOK_SCRIPT).toMatch(/claude\|\*\/claude/);
-    expect(SESSION_START_HOOK_SCRIPT).toContain('!= "?"');
+    expect(SESSION_START_HOOK_SCRIPT).toContain('""|"?"|"??"|"-"');
     expect(SESSION_START_HOOK_SCRIPT).toContain('--arg pid "$CLAUDE_PID"');
     expect(SESSION_START_HOOK_SCRIPT).toContain('--arg tty "$CLAUDE_TTY"');
   });

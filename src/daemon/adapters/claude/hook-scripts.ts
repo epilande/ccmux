@@ -11,17 +11,18 @@
  * Shared bash snippet: resolves the real claude PID and TTY by walking process
  * ancestry from $PPID. Sets $CLAUDE_PID and $CLAUDE_TTY.
  *
- * $PPID is NOT the claude process. Claude Code (verified on 2.1.250) runs hooks
- * from an intermediate `sh -c` wrapper, so $PPID points at a short-lived,
- * tty-less shell. Storing that pid gives the marker a DEAD pid and tty "?", so
- * `cleanupStaleMarkers` purges it on the next scan and neither the TTY match
- * nor the PID-ancestry fallback can bind it to a pane — the session becomes
- * invisible (and, because installed hooks disable Claude pane-tracking, that
- * means invisible entirely). Walk up from $PPID and take the first process
- * whose comm is claude, else the first with a real controlling terminal: the
- * agent runs foreground in its pane and owns the pane's pts, while every
- * wrapper above the hook is tty-less. Fall back to $PPID so a process-shape
- * surprise self-cleans within a scan cycle rather than silently no-opping.
+ * $PPID is not always the claude process. On LINUX (observed on Claude Code
+ * 2.1.250) hooks run from an intermediate `sh -c` wrapper, so $PPID is a
+ * short-lived, tty-less shell; storing that pid gives the marker a DEAD pid and
+ * a no-tty value, which `cleanupStaleMarkers` purges and no bind can rescue,
+ * leaving the session invisible (installed hooks disable Claude pane-tracking).
+ * On macOS the same version runs hooks directly, so $PPID IS the agent, the walk
+ * matches at the first hop, and it is harmless there. Walk up from $PPID and
+ * take the first process whose comm is claude, else the first with a real
+ * controlling terminal: the agent runs foreground in its pane and owns the
+ * pane's pts, while every wrapper above the hook is tty-less. Fall back to $PPID
+ * so a process-shape surprise self-cleans within a scan cycle rather than
+ * silently no-opping.
  */
 const CLAUDE_PID_WALK = `CLAUDE_PID=""
 CLAUDE_TTY=""
@@ -36,14 +37,19 @@ for _ in 1 2 3 4 5 6 7 8; do
     claude|*/claude)
       CLAUDE_PID="$WALK"; CLAUDE_TTY="$W_TTY"; break ;;
   esac
-  if [ -z "$CLAUDE_PID" ] && [ -n "$W_TTY" ] && [ "$W_TTY" != "?" ]; then
-    CLAUDE_PID="$WALK"; CLAUDE_TTY="$W_TTY"
-  fi
+  # No controlling terminal prints "??" on macOS/BSD ps and "?" on Linux.
+  case "$W_TTY" in
+    ""|"?"|"??"|"-") ;;
+    *) [ -z "$CLAUDE_PID" ] && { CLAUDE_PID="$WALK"; CLAUDE_TTY="$W_TTY"; } ;;
+  esac
   WALK=$(ps -o ppid= -p "$WALK" 2>/dev/null | tr -d ' ')
 done
 [ -n "$CLAUDE_PID" ] || CLAUDE_PID="$PPID"
 [ -n "$CLAUDE_TTY" ] || CLAUDE_TTY=$(ps -p "$PPID" -o tty= 2>/dev/null | tr -d ' ')
-[ -n "$CLAUDE_TTY" ] || CLAUDE_TTY="unknown"`;
+# Normalize every no-tty spelling to the marker's sentinel.
+case "$CLAUDE_TTY" in
+  ""|"?"|"??"|"-") CLAUDE_TTY="unknown" ;;
+esac`;
 
 export const SESSION_START_HOOK_SCRIPT = `#!/bin/bash
 # Writes PID marker when Claude session starts/resumes

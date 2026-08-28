@@ -72,7 +72,8 @@ describe("cursor hook script templates", () => {
       // $PPID wrapper.
       const script = renderSessionStartScript(markersDir);
       expect(script).toContain("CURSOR_TTY_PID");
-      expect(script).toContain('!= "?"');
+      // Every no-tty spelling is rejected: macOS/BSD ps prints "??", Linux "?".
+      expect(script).toContain('""|"?"|"??"|"-"');
     });
   });
 

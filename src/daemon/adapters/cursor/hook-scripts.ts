@@ -69,12 +69,12 @@ for _ in 1 2 3 4 5 6 7 8; do
       break
       ;;
   esac
-  if [ -z "$CURSOR_TTY_PID" ]; then
-    WTTY=$(ps -o tty= -p "$WALK" 2>/dev/null | tr -d ' ')
-    if [ -n "$WTTY" ] && [ "$WTTY" != "?" ]; then
-      CURSOR_TTY_PID="$WALK"
-    fi
-  fi
+  WTTY=$(ps -o tty= -p "$WALK" 2>/dev/null | tr -d ' ')
+  # No controlling terminal prints "??" on macOS/BSD ps and "?" on Linux.
+  case "$WTTY" in
+    ""|"?"|"??"|"-") ;;
+    *) [ -z "$CURSOR_TTY_PID" ] && CURSOR_TTY_PID="$WALK" ;;
+  esac
   WALK=$(ps -o ppid= -p "$WALK" 2>/dev/null | tr -d ' ')
 done
 [ -n "$CURSOR_PID" ] || CURSOR_PID="$CURSOR_TTY_PID"
