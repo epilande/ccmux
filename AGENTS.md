@@ -217,8 +217,8 @@ Cloud VMs configure git with `commit.gpgsign=true` and an SSH signing helper glo
 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false bun test
 ```
 
-With signing disabled the full suite is deterministic (~5377 pass / 0 fail in ~70s). The first cold `bun test` after boot can still take a few minutes (module transpile + tree-sitter wasm compile) before warming up. This override affects only the test run; it does not change how the agent signs its own commits.
+With signing disabled the full suite passes with no failures and, once warm, finishes in under a couple of minutes. The first cold `bun test` after boot can still take several minutes (module transpile + tree-sitter wasm compile) before warming up. This override affects only the test run; it does not change how the agent signs its own commits.
 
 ### Exercising ccmux end to end
 
-`ccmux` needs a tmux server with agent processes to track. To drive it without a real agent, run a stand-in whose `argv[0]` basename matches an agent's `processMatch` (e.g. `exec -a claude bash <script>` for Claude, matched by `/\bclaude\b/i`), then point an isolated daemon at that server (`CCMUX_TMUX_SOCKET`/`CCMUX_PORT`) as described under "Fully isolated runs" above.
+`ccmux` needs a tmux server with agent processes to track. To drive it without a real agent, run a stand-in whose `argv[0]` basename matches an agent's `processMatch` (defined per agent in `src/lib/agents.ts`) — e.g. `exec -a claude bash <script>` makes the process's `argv[0]` `claude`, which Claude's `processMatch` matches — then point an isolated daemon at that server (`CCMUX_TMUX_SOCKET`/`CCMUX_PORT`) as described under "Fully isolated runs" above.
