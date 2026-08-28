@@ -204,3 +204,21 @@ setup.renderer.destroy();               // always clean up in afterEach
 - **Fixed timestamps**: Use `"2024-01-15T12:00:00Z"` instead of `new Date()` to avoid time-dependent fragility
 
 **Pure logic tests** (store, grouping, format, icons) use standard `bun:test` without `testRender`.
+
+## Cursor Cloud specific instructions
+
+In Cursor Cloud Agent VMs, `bun` and the linked `ccmux` binary live in `~/.bun/bin` (on `PATH` for fresh shells), installed by the environment `install` step (`bun install` + `bun link`). `tmux`, `git`, `gh`, and `node` are preinstalled on the base image.
+
+### Running the test suite
+
+Cloud VMs configure git with `commit.gpgsign=true` and an SSH signing helper globally. The git-backed suites (`worktree-*`) create throwaway repos that inherit this, and signing the hundreds of test commits is slow and can fail nondeterministically (`git commit` failing with empty stderr), so a plain `bun test` may hang for minutes or report spurious failures that do not reproduce locally. Run the suite with commit signing disabled for that invocation only:
+
+```bash
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false bun test
+```
+
+With signing disabled the full suite is deterministic (~5377 pass / 0 fail in ~70s). The first cold `bun test` after boot can still take a few minutes (module transpile + tree-sitter wasm compile) before warming up. This override affects only the test run; it does not change how the agent signs its own commits.
+
+### Exercising ccmux end to end
+
+`ccmux` needs a tmux server with agent processes to track. To drive it without a real agent, run a stand-in whose `argv[0]` basename matches an agent's `processMatch` (e.g. `exec -a claude bash <script>` for Claude, matched by `/\bclaude\b/i`), then point an isolated daemon at that server (`CCMUX_TMUX_SOCKET`/`CCMUX_PORT`) as described under "Fully isolated runs" above.
