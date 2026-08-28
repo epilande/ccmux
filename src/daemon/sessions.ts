@@ -9,7 +9,7 @@ import type {
   BackgroundChild,
   BackgroundInFlight,
 } from "../types/session";
-import { extractProjectInfo } from "./parser";
+import { decodeProjectPath, extractProjectInfo } from "./parser";
 import { appendPrompt } from "./status-machine";
 import { getSessionPidMarker } from "./session-markers";
 import { deriveProject } from "./project-derivation";
@@ -147,22 +147,25 @@ export function isBackgroundSession(session: Session): boolean {
  * - and never when the session is already inside that same worktree, so a
  *   session that really does live there keeps tracking its own subdirectories
  *   (this very session is one);
- * - and never when `current` is merely a LOSSY SPELLING of `next` (issue
- *   #156). `decodeProjectPath` turns every `-` in the encoded project dir
- *   back into `/`, so a session in `…/worktrees/add-tags` can start life
- *   holding `…/worktrees/add/tags` — which prefix-matches nothing, so the
- *   refusal would make that corruption PERMANENT, and permanent in exactly
- *   the place the guard is about. Re-encoding settles it: the encode is
- *   `/`→`-`, the decode is its exact inverse over an encoded string, so two
- *   paths that encode alike are two spellings of one directory rather than
- *   two directories. A teammate's worktree never encodes to the
- *   orchestrator's own cwd, so this cannot reopen the hole above.
+ * - and never when `current` is the LOSSY DECODE of `next` (issue #156).
+ *   `decodeProjectPath` turns every `-` in the encoded project dir back into
+ *   `/`, so a session in `…/worktrees/add-tags` can start life holding
+ *   `…/worktrees/add/tags` — which prefix-matches nothing, so the refusal
+ *   would make that corruption PERMANENT, and permanent in exactly the place
+ *   the guard is about.
+ *
+ *   The test is the round trip, not encode-equality. Encoding maps every
+ *   non-alphanumeric to `-`, so it is many-to-one over punctuation and
+ *   `…/add_tags` encodes the same as `…/add-tags` — equal encodes would let
+ *   a session in one adopt a drifted entry naming its sibling. Asking
+ *   whether `current` is exactly what decoding `next`'s encoded form
+ *   produces admits the corruption this heals and nothing else.
  */
 export function adoptsLoggedCwd(current: string | null, next: string): boolean {
   const target = worktreeCheckoutRoot(next);
   if (!target || !current) return true;
   if (current === target || current.startsWith(`${target}/`)) return true;
-  return encodeProjectPath(current) === encodeProjectPath(next);
+  return decodeProjectPath(encodeProjectPath(next)) === current;
 }
 
 /**

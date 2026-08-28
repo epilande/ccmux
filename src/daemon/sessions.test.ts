@@ -1349,12 +1349,23 @@ describe("adoptsLoggedCwd", () => {
     expect(adoptsLoggedCwd(decoded, hyphenated)).toBe(true);
   });
 
-  // The escape hatch is encode-EQUALITY, not leniency: a teammate's worktree
-  // encodes to something the orchestrator's own cwd never does.
+  // The escape hatch is the round TRIP, not leniency: a teammate's worktree
+  // is not what decoding the orchestrator's own cwd produces.
   it("still refuses a teammate's worktree that merely decodes cleanly", () => {
     expect(adoptsLoggedCwd(repo, `${repo}/.claude/worktrees/addtags`)).toBe(
       false,
     );
+  });
+
+  // Encoding maps every non-alphanumeric to `-`, so it is many-to-one over
+  // punctuation. Encode-equality would let a session in one of these adopt a
+  // drifted entry naming the other; the round trip does not.
+  it("does not treat punctuation twins as the same directory", () => {
+    const underscore = `${repo}/.claude/worktrees/add_tags`;
+    const hyphen = `${repo}/.claude/worktrees/add-tags`;
+    expect(encodeProjectPath(underscore)).toBe(encodeProjectPath(hyphen));
+    expect(adoptsLoggedCwd(underscore, hyphen)).toBe(false);
+    expect(adoptsLoggedCwd(hyphen, underscore)).toBe(false);
   });
 });
 
