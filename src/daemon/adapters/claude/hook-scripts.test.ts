@@ -51,6 +51,23 @@ describe("claude hook script templates", () => {
     );
     expect(SESSION_START_HOOK_SCRIPT).toContain('agent_type: "claude"');
   });
+
+  it("session-start resolves the real claude pid by walking ancestry, not $PPID", () => {
+    // Regression: Claude Code 2.1.250 runs hooks from a tty-less `sh -c`
+    // wrapper, so trusting $PPID stored a dead pid + tty "?" and the marker
+    // never bound. The walk prefers a comm=claude ancestor, else the first
+    // ancestor with a real controlling terminal.
+    expect(SESSION_START_HOOK_SCRIPT).toMatch(/claude\|\*\/claude/);
+    expect(SESSION_START_HOOK_SCRIPT).toContain('!= "?"');
+    expect(SESSION_START_HOOK_SCRIPT).toContain('--arg pid "$CLAUDE_PID"');
+    expect(SESSION_START_HOOK_SCRIPT).toContain('--arg tty "$CLAUDE_TTY"');
+  });
+
+  it("state-notify backfills pid/tty from the ancestry walk, not $PPID", () => {
+    expect(STATE_NOTIFY_HOOK_SCRIPT).toMatch(/claude\|\*\/claude/);
+    expect(STATE_NOTIFY_HOOK_SCRIPT).toContain('--arg pid "$CLAUDE_PID"');
+    expect(STATE_NOTIFY_HOOK_SCRIPT).toContain('--arg tty "$CLAUDE_TTY"');
+  });
 });
 
 describe("claude hook script execution (requires bash + jq)", () => {
