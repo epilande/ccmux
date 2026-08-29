@@ -368,7 +368,9 @@ describe("completionScript", () => {
   });
 
   it("quotes fish candidate lines so tabs survive", () => {
-    expect(completionScript("fish")).toContain(`printf '%s\\n' -- "$line"`);
+    const script = completionScript("fish");
+    expect(script).toContain(`switch "$line"`);
+    expect(script).toContain(`printf '%s\\n' -- "$line"`);
   });
 
   it("disables globbing while reading bash candidates", () => {

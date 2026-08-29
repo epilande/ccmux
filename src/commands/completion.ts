@@ -532,7 +532,7 @@ const FISH_SCRIPT = `function __ccmux_complete
     set -l tokens (commandline -opc)
     set -l current (commandline -ct)
     for line in (ccmux __complete fish -- $tokens[2..] "$current" 2>/dev/null)
-        switch $line
+        switch "$line"
             case ':dir'
                 __fish_complete_directories "$current"
             case ':file'
