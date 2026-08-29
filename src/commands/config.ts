@@ -184,6 +184,8 @@ export function configValueChoices(key: string): readonly string[] | null {
       return BOOLEAN_CHOICES;
     case "notifications.backend":
       return VALID_NOTIFICATION_BACKENDS;
+    case "notifications.events":
+      return VALID_NOTIFICATION_EVENTS;
     default:
       return null;
   }

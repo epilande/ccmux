@@ -58,6 +58,26 @@ export interface InvocationRow {
   agent?: string;
 }
 
+/** The fields `GET /invocations` returns that the completer reads. */
+export interface DaemonInvocation {
+  invocationId: string;
+  status: string;
+  agent?: string;
+}
+
+/** Map the daemon's `invocationId` onto the completer's `id`. */
+export function invocationRowsFromDaemon(
+  records: readonly DaemonInvocation[],
+): InvocationRow[] {
+  return records
+    .filter((row) => row.invocationId)
+    .map((row) => ({
+      id: row.invocationId,
+      status: row.status,
+      agent: row.agent,
+    }));
+}
+
 /** Every external lookup, injected so the walk itself is pure and testable. */
 export interface CompletionDeps {
   sessions(): Promise<SessionRow[]>;
@@ -125,6 +145,23 @@ const nativeSessionIds: ValueSource = async ({ deps }) => ({
     })),
 });
 
+/** ccmux ids, plus native ids when they differ. Not pane ids. */
+const forkSessions: ValueSource = async ({ deps }) => {
+  const rows = await deps.sessions();
+  const candidates: Candidate[] = [];
+  const seen = new Set<string>();
+  const add = (value: string, row: SessionRow) => {
+    if (seen.has(value)) return;
+    seen.add(value);
+    candidates.push({ value, description: describeSession(row) });
+  };
+  for (const row of rows) add(row.id, row);
+  for (const row of rows) {
+    if (row.nativeSessionId) add(row.nativeSessionId, row);
+  }
+  return { candidates };
+};
+
 const paneTargets: ValueSource = async ({ deps }) => ({
   candidates: [
     ...(await deps.sessions())
@@ -189,8 +226,8 @@ const OPTION_SOURCES: Record<string, ValueSource> = {
   "--cwd": directive("dir"),
   "--repo": directive("dir"),
   "--socket": directive("file"),
-  "--resume": sessionRefs({ self: false }),
-  "--fork": sessionRefs({ self: false }),
+  "--resume": nativeSessionIds,
+  "--fork": forkSessions,
   "--session": nativeSessionIds,
   "--agent": agentNames,
   "--target": paneTargets,
@@ -216,7 +253,24 @@ function findCommand(cmd: Command, word: string): Command | undefined {
 }
 
 function findOption(cmd: Command, flag: string): Option | undefined {
-  return cmd.options.find((opt) => opt.long === flag || opt.short === flag);
+  const local = cmd.options.find(
+    (opt) => opt.long === flag || opt.short === flag,
+  );
+  if (local) return local;
+  const fallback = defaultSubcommand(cmd);
+  return fallback?.options.find(
+    (opt) => opt.long === flag || opt.short === flag,
+  );
+}
+
+/**
+ * Commander records `isDefault` as `_defaultCommandName` on the parent.
+ * `ccmux --icons` is valid because picker is the root default.
+ */
+function defaultSubcommand(cmd: Command): Command | undefined {
+  const name = (cmd as unknown as { _defaultCommandName?: string })
+    ._defaultCommandName;
+  return name ? findCommand(cmd, name) : undefined;
 }
 
 function subcommandCandidates(cmd: Command): Candidate[] {
@@ -227,10 +281,18 @@ function subcommandCandidates(cmd: Command): Candidate[] {
 }
 
 function optionCandidates(cmd: Command): Candidate[] {
-  return visibleOptions(cmd).map((opt) => ({
-    value: opt.long ?? opt.short ?? opt.flags,
-    description: opt.description,
-  }));
+  const seen = new Set<string>();
+  const candidates: Candidate[] = [];
+  for (const source of [cmd, defaultSubcommand(cmd)]) {
+    if (!source) continue;
+    for (const opt of visibleOptions(source)) {
+      const value = opt.long ?? opt.short ?? opt.flags;
+      if (seen.has(value)) continue;
+      seen.add(value);
+      candidates.push({ value, description: opt.description });
+    }
+  }
+  return candidates;
 }
 
 /** The argument a positional at `index` binds to; a trailing variadic absorbs the rest. */
@@ -352,6 +414,10 @@ export async function completeWords(
   return filterPrefix({ candidates, directive: completionDirective }, current);
 }
 
+function isSafeCandidateValue(value: string): boolean {
+  return !value.startsWith(":") && !/[\n\r\t]/.test(value);
+}
+
 /** Serialize for the wrapper scripts; bash cannot show descriptions, so it gets bare values. */
 export function renderCompletion(
   completion: Completion,
@@ -360,6 +426,7 @@ export function renderCompletion(
   const lines: string[] = [];
   if (completion.directive) lines.push(`:${completion.directive}`);
   for (const c of completion.candidates) {
+    if (!isSafeCandidateValue(c.value)) continue;
     const description = c.description?.replace(/\s+/g, " ").trim();
     lines.push(
       shell !== "bash" && description ? `${c.value}\t${description}` : c.value,
@@ -387,10 +454,10 @@ export const liveCompletionDeps: CompletionDeps = {
     return body?.sessions ?? [];
   },
   async invocations() {
-    const body = await fetchDaemon<{ invocations?: InvocationRow[] }>(
+    const body = await fetchDaemon<{ invocations?: DaemonInvocation[] }>(
       "/invocations",
     );
-    return body?.invocations ?? [];
+    return invocationRowsFromDaemon(body?.invocations ?? []);
   },
   async agentNames() {
     try {
@@ -444,12 +511,14 @@ const BASH_SCRIPT = `_ccmux() {
   done
   local IFS=$'\\n'
   COMPREPLY=()
+  set -f
   for line in $(ccmux __complete bash -- "\${words[@]}" 2>/dev/null); do
     case "$line" in
       :dir|:file) directive="\${line#:}" ;;
       *) COMPREPLY+=("$line") ;;
     esac
   done
+  set +f
   case "$directive" in
     dir) COMPREPLY=($(compgen -d -- "$cur")); compopt -o filenames 2>/dev/null ;;
     file) COMPREPLY=($(compgen -f -- "$cur")); compopt -o filenames 2>/dev/null ;;
@@ -469,7 +538,7 @@ const FISH_SCRIPT = `function __ccmux_complete
             case ':file'
                 __fish_complete_path "$current"
             case '*'
-                echo $line
+                printf '%s\\n' -- "$line"
         end
     end
 end

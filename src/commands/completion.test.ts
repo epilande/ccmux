@@ -5,6 +5,7 @@ import {
   COMPLETION_SHELLS,
   completeWords,
   completionScript,
+  invocationRowsFromDaemon,
   renderCompletion,
   type Completion,
   type CompletionDeps,
@@ -118,6 +119,11 @@ describe("completeWords: options", () => {
     );
   });
 
+  it("walks the default command's options at the root", async () => {
+    expect(values(await complete("--i"))).toEqual(["--icons"]);
+    expect(values(await complete("--icons", ""))).toContain("nerdfont");
+  });
+
   it("hands directory options to the shell with a directive", async () => {
     const got = await complete("spawn", "--cwd", "");
     expect(got.directive).toBe("dir");
@@ -162,11 +168,18 @@ describe("completeWords: dynamic values", () => {
     expect(values(await complete("kill", "%3"))).toEqual(["%33", "%35"]);
   });
 
-  it("offers sessions for --resume/--fork and native ids for --session", async () => {
-    expect(values(await complete("spawn", "--resume", ""))).toContain("%33");
+  it("offers native ids for --resume/--session and ccmux ids for --fork", async () => {
+    expect(values(await complete("spawn", "--resume", ""))).toEqual([
+      SESSION_A,
+    ]);
     expect(values(await complete("invoke", "--session", ""))).toEqual([
       SESSION_A,
     ]);
+    expect(values(await complete("spawn", "--fork", ""))).toEqual([
+      SESSION_A,
+      SESSION_B,
+    ]);
+    expect(values(await complete("spawn", "--fork", ""))).not.toContain("%33");
   });
 
   it("offers panes plus `none` for spawn --target", async () => {
@@ -204,6 +217,32 @@ describe("completeWords: dynamic values", () => {
     ]);
   });
 
+  it("maps the daemon's invocationId onto cancel/result candidates", async () => {
+    const fixture = [
+      {
+        invocationId: "inv_real",
+        agent: "claude",
+        cwd: "/tmp/ccmux",
+        startedAt: 1_700_000_000_000,
+        status: "running",
+      },
+    ];
+    expect(invocationRowsFromDaemon(fixture)).toEqual([
+      { id: "inv_real", status: "running", agent: "claude" },
+    ]);
+    const daemonDeps: CompletionDeps = {
+      ...deps,
+      invocations: async () => invocationRowsFromDaemon(fixture),
+    };
+    const got = await completeWords(
+      program,
+      ["invoke", "cancel", ""],
+      daemonDeps,
+    );
+    expect(values(got)).toEqual(["inv_real"]);
+    expect(got.candidates[0].description).toBe("claude running");
+  });
+
   it("completes config keys, then the key's values when they are enumerable", async () => {
     const keys = values(await complete("config", "set", ""));
     expect(keys).toContain("theme");
@@ -223,6 +262,9 @@ describe("completeWords: dynamic values", () => {
       values(await complete("config", "set", "sidebar.position", "")),
     ).toEqual(["left", "right"]);
     expect(values(await complete("config", "set", "command", ""))).toEqual([]);
+    expect(
+      values(await complete("config", "set", "notifications.events", "")),
+    ).toEqual(["waiting", "finished"]);
   });
 
   it("completes the completion command's own shell argument", async () => {
@@ -288,6 +330,24 @@ describe("renderCompletion", () => {
   it("prints nothing at all when there is nothing to offer", () => {
     expect(renderCompletion({ candidates: [] }, "zsh")).toBe("");
   });
+
+  it("drops values that would forge candidates or directives", () => {
+    expect(
+      renderCompletion(
+        {
+          candidates: [
+            { value: "ok", description: "fine" },
+            { value: "bad\n:dir" },
+            { value: "bad\rname" },
+            { value: "bad\tname" },
+            { value: ":dir" },
+            { value: ":sneaky" },
+          ],
+        },
+        "zsh",
+      ),
+    ).toBe("ok\tfine\n");
+  });
 });
 
 describe("completionScript", () => {
@@ -305,5 +365,15 @@ describe("completionScript", () => {
     expect(completionScript("zsh")).toContain("compdef _ccmux ccmux");
     expect(completionScript("bash")).toContain("complete -F _ccmux ccmux");
     expect(completionScript("fish")).toContain("complete -c ccmux");
+  });
+
+  it("quotes fish candidate lines so tabs survive", () => {
+    expect(completionScript("fish")).toContain(`printf '%s\\n' -- "$line"`);
+  });
+
+  it("disables globbing while reading bash candidates", () => {
+    const script = completionScript("bash");
+    expect(script).toContain("set -f");
+    expect(script).toContain("set +f");
   });
 });
