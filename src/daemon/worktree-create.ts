@@ -761,12 +761,9 @@ async function recordBranchBase(
  * `git push` works out of the box, while its directory is named after the PR
  * number. Overriding here rather than duplicating the creation logic is what
  * keeps the lock, the numbering, the occupied-path refusals and the file
- * setup shared. With an override the caller also SETTLES whether that branch
- * already exists, through `branchExists`: the checks that make reuse safe are
- * its own (see `gh-spawn-source.ts`), and they ran under a different
- * acquisition of the same lock, so re-deriving the answer here would let a
- * branch that appeared in between be checked out as if it had passed them
- * (issue #157).
+ * setup shared. The checks that make reuse safe are the caller's own (see
+ * `gh-spawn-source.ts`), which is why it also settles whether the branch
+ * exists; see `branchExists`.
  */
 export async function createWorktree(
   mainRepoRoot: string,
@@ -794,9 +791,8 @@ export async function createWorktree(
      * with the local branch gone DWIMs it back into existence from
      * `<remote>/<branch>` (git-worktree(1), default behaviour), silently
      * checking out history that never passed those checks. So the create
-     * re-measures under its own lock and refuses on disagreement. Only
-     * re-measuring to REUSE would be the bug; re-measuring to REFUSE is what
-     * covers both directions.
+     * re-measures under its own lock, only ever to refuse on disagreement,
+     * never to reuse the newer answer.
      */
     branchExists?: boolean;
     /**
@@ -989,22 +985,16 @@ export async function createWorktree(
     // the user can act on rather than a silent one they discover later.
     //
     // An OVERRIDDEN branch takes the caller's own settled answer when it has
-    // one, for the reason in `branchExists`: measuring it again here would be
-    // a second, later observation of something already decided under checks
-    // this function cannot repeat. It is still measured, but only to REFUSE
-    // on disagreement, never to reuse the newer answer. Without that check
-    // the vanished direction is silent rather than loud: git's remote-branch
-    // DWIM recreates `<branch>` from `<remote>/<branch>` and checks out
-    // history the caller's checks never saw.
+    // one, and is measured again only to refuse on disagreement; see
+    // `branchExists` for why either direction of that race is a refusal.
     if (request.branch !== undefined && request.branchExists !== undefined) {
       const measured = await localBranchExists(mainRepoRoot, branchName, git);
       if (measured !== request.branchExists) {
         return {
           ok: false as const,
           error:
-            `Branch '${branchName}' ${measured ? "appeared" : "vanished"} after the ` +
-            `caller settled it, so it was not checked out: whatever is there now ` +
-            `has not been proved to be what was asked for. Try again.`,
+            `Branch '${branchName}' ${measured ? "appeared" : "vanished"} while this ` +
+            `spawn was preparing it; nothing was checked out, try again`,
         };
       }
     }

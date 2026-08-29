@@ -332,9 +332,8 @@ export function decideInitialClaudeBatch(
         },
       );
       if (replace) {
-        // The verify callback above only passed because `matchingProcs`
-        // holds this pane, so its process cwd is the real one; see the
-        // marker arm for why the decode is a last resort (issue #156).
+        // Real cwd over the lossy decode, as in the marker arm. The verify
+        // callback above only passed because `matchingProcs` holds this pane.
         const realCwd =
           transcriptCwd ??
           matchingProcs.find((mp) => mp.pane.paneId === replace.paneId)?.proc
@@ -480,8 +479,7 @@ export function decideInitialClaudeBatch(
         type: "create-unbound",
         sessionId: entry.sessionId,
         path: entry.path,
-        // No pane to read a cwd from — an unbound session has only what its
-        // own transcript says.
+        // No pane to read a cwd from: only the transcript can say.
         cwd: entry.transcriptCwd,
       });
     }

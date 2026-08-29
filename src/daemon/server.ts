@@ -4616,8 +4616,8 @@ export class DaemonServer {
           // confirm under the repo lock and open it; skip the fetch — the
           // branch is already here.
           prBranch = prSource.headRefName;
-          // Occupied means the branch exists. Carried for the same reason as
-          // the other arm: the create must not re-derive the decision.
+          // Occupied means the branch exists; carried, not re-derived
+          // (see `branchExists` in `worktree-create.ts`).
           prBranchExisted = true;
         } else {
           const prepared = await preparePRBranch(mainRepoRoot, prSource);
@@ -4628,10 +4628,9 @@ export class DaemonServer {
             );
           }
           prBranch = prSource.headRefName;
-          // Carried into the create rather than left for it to re-derive: the
-          // prep released the repo lock before returning, and only this answer
-          // was reached through the upstream checks that prove the branch is
-          // this PR's (issue #157).
+          // Only this answer came through the checks that prove the branch is
+          // this PR's, and the prep released the repo lock before returning,
+          // so the create must not re-derive it (issue #157).
           prBranchExisted = prepared.value.branchExisted;
           // The SHA, never `FETCH_HEAD`: the base-branch fetch inside the prep
           // has already overwritten that ref.

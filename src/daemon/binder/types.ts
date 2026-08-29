@@ -196,8 +196,7 @@ export interface InitialBatchObservation {
 }
 
 /**
- * Ordered actions the watcher applies after the batch decision: one applied
- * outcome of the initial Claude batch.
+ * Ordered actions the watcher applies after the batch decision.
  *
  * The creating arms carry `cwd`: the session's REAL working directory, from
  * the transcript's own `cwd` field or the bound pane's process cwd. Null only

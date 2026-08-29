@@ -1344,8 +1344,7 @@ describe("createWorktree with a branch override", () => {
     expect(created.ok).toBe(false);
     if (created.ok) return;
     expect(created.error).toContain("fix/flaky-binder");
-    // Nothing was created, the DWIM branch least of all. `git` throws on a
-    // non-zero exit, so the absent case needs the raw runner.
+    // `git` throws on a non-zero exit, so the absent case needs the raw runner.
     const local = await runGit(repo, [
       "show-ref",
       "--verify",

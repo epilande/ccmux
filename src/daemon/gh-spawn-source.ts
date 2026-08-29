@@ -675,14 +675,11 @@ export async function preparePRBranch(
  * (worktree and all) over a diff-base hint. It is reported as a note instead.
  *
  * ccmux OWNS that key on a `--pr` branch, which is why no base to record
- * UNSETS it rather than leaving it (issue #157). The alternative — treating a
- * pre-existing value as the user's — reads well until a branch is REUSED: the
- * key would then still name whatever an earlier spawn recorded, so a base
- * this spawn deliberately declined to write silently becomes what `D` diffs
- * against. Owning it makes the branch's review base always describe the spawn
- * that last prepared it, and absence is what lets `D` fall back to its
- * heuristic. A base a user wants to keep belongs on a branch ccmux did not
- * cut for a PR.
+ * UNSETS it rather than leaving it (issue #157). Treating a pre-existing
+ * value as the user's breaks on a REUSED branch: the key would still name
+ * whatever an earlier spawn recorded, so a base this spawn declined to write
+ * silently becomes what `D` diffs against, where absence is what lets `D`
+ * fall back to its heuristic.
  *
  * Every op is still attempted, because a partial write is what has to be
  * described accurately, and stopping early would leave more of it unset.
@@ -725,11 +722,8 @@ export async function configurePRBranch(
     if (problem) failed.push(problem);
   }
 
-  // Optional, and never fatal; see this function's doc comment. Attempted
-  // before the tracking verdict below for the same reason every tracking op
-  // is attempted: stopping early leaves more of the branch's config
-  // unsettled, and this key decides what `D` diffs against whether or not the
-  // push config landed.
+  // Optional, never fatal, and attempted even when a tracking op failed; see
+  // this function's doc comment.
   const baseKey = `branch.${branch}.ccmux-base`;
   const baseProblem = await run(
     baseRemoteRef
