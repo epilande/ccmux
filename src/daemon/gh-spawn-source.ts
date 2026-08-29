@@ -674,12 +674,17 @@ export async function preparePRBranch(
  * optional key would contradict that and 500 an otherwise-correct spawn
  * (worktree and all) over a diff-base hint. It is reported as a note instead.
  *
- * ccmux OWNS that key on a `--pr` branch, which is why no base to record
- * UNSETS it rather than leaving it (issue #157). Treating a pre-existing
- * value as the user's breaks on a REUSED branch: the key would still name
- * whatever an earlier spawn recorded, so a base this spawn declined to write
- * silently becomes what `D` diffs against, where absence is what lets `D`
- * fall back to its heuristic.
+ * ccmux OWNS that key on a `--pr` branch, which is why a looked-up base
+ * that could not be resolved UNSETS it rather than leaving it (issue #157).
+ * Treating a pre-existing value as the user's breaks on a REUSED branch:
+ * the key would still name whatever an earlier spawn recorded, so a base
+ * this spawn declined to write silently becomes what `D` diffs against,
+ * where absence is what lets `D` fall back to its heuristic.
+ *
+ * That unset is only for a decline. Occupied reopen never looks the base
+ * up (it skips {@link preparePRBranch}), so a missing argument here means
+ * "leave the key" rather than "clear it" — the first spawn's still-correct
+ * `ccmux-base` must survive a second `--pr` / source-picker Enter.
  *
  * Every op is still attempted, because a partial write is what has to be
  * described accurately, and stopping early would leave more of it unset.
@@ -688,7 +693,12 @@ export async function configurePRBranch(
   mainRepoRoot: string,
   branch: string,
   pr: PRSource,
-  baseRemoteRef: string | null,
+  /**
+   * `origin/<base>` to record, `null` when this spawn looked the base up
+   * and declined to write it (unset so `D` falls back), or omitted when
+   * this spawn never looked it up (leave whatever is already there).
+   */
+  baseRemoteRef?: string | null,
   git: GitRun = runGit,
 ): Promise<SourceResult<PRBranchConfig>> {
   /** One `git config` write, or the removal of a key that must not persist. */
@@ -723,13 +733,17 @@ export async function configurePRBranch(
   }
 
   // Optional, never fatal, and attempted even when a tracking op failed; see
-  // this function's doc comment.
+  // this function's doc comment. Omitted (`undefined`) is "never looked up":
+  // do not treat that as a decline, which would unset a still-correct key.
   const baseKey = `branch.${branch}.ccmux-base`;
-  const baseProblem = await run(
-    baseRemoteRef
-      ? { key: baseKey, value: baseRemoteRef }
-      : { key: baseKey, unset: true },
-  );
+  const baseProblem =
+    baseRemoteRef === undefined
+      ? null
+      : await run(
+          baseRemoteRef
+            ? { key: baseKey, value: baseRemoteRef }
+            : { key: baseKey, unset: true },
+        );
 
   if (failed.length > 0) {
     return {

@@ -4597,7 +4597,10 @@ export class DaemonServer {
       //    still hold it when `createWorktree` takes the same lock below.
       let prBranch: string | undefined;
       let prBranchExisted: boolean | undefined;
-      let prBase: string | null = null;
+      // `undefined` until prepare looks the base up. Occupied skips prepare,
+      // and `configurePRBranch` must not treat that as a decline (a `null`
+      // would unset the `ccmux-base` the first spawn recorded).
+      let prBase: string | null | undefined;
       if (prSource) {
         // Before the branch check and well before the fetch: `gh` resolved
         // the number through its own repo selection, and the fetch below is
@@ -4614,7 +4617,8 @@ export class DaemonServer {
         if (occupied) {
           // Open that checkout rather than refusing. `createWorktree` will
           // confirm under the repo lock and open it; skip the fetch — the
-          // branch is already here.
+          // branch is already here. Leave `prBase` unset so the later
+          // `configurePRBranch` does not wipe a still-correct `ccmux-base`.
           prBranch = prSource.headRefName;
           // Occupied means the branch exists; carried, not re-derived
           // (see `branchExists` in `worktree-create.ts`).
