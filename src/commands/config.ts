@@ -21,6 +21,8 @@ import { VALID_ICON_STYLES, type IconStyle } from "../lib/icons";
 import { BUILTIN_THEME_NAMES, DEFAULT_THEME_NAME } from "../tui/themes";
 import { resolveThemeVerbose } from "../tui/theme";
 
+const BOOLEAN_CHOICES = ["true", "false"] as const;
+
 export const KNOWN_KEYS: Record<
   string,
   {
@@ -29,17 +31,21 @@ export const KNOWN_KEYS: Record<
     description: string;
     /** Printed after a successful set (e.g. "takes effect on restart"). */
     note?: string;
+    /** The complete value set, when it is enumerable (shell completion). */
+    choices?: readonly string[];
   }
 > = {
   iconStyle: {
     validate: (v) => VALID_ICON_STYLES.includes(v as IconStyle),
     parse: (v) => v as IconStyle,
     description: `Icon style (${VALID_ICON_STYLES.join(", ")})`,
+    choices: VALID_ICON_STYLES,
   },
   showPreview: {
     validate: (v) => v === "true" || v === "false",
     parse: (v) => v === "true",
     description: "Show preview panel in picker (true, false)",
+    choices: BOOLEAN_CHOICES,
   },
   previewWidth: {
     validate: (v) => {
@@ -58,11 +64,13 @@ export const KNOWN_KEYS: Record<
     validate: (v) => (VALID_GROUP_BY as readonly string[]).includes(v),
     parse: (v) => v,
     description: `Group sessions by (${VALID_GROUP_BY.join(", ")})`,
+    choices: VALID_GROUP_BY,
   },
   promptDisplay: {
     validate: (v) => (VALID_PROMPT_DISPLAYS as readonly string[]).includes(v),
     parse: (v) => v,
     description: `Prompt display mode (${VALID_PROMPT_DISPLAYS.join(", ")}; default inline)`,
+    choices: VALID_PROMPT_DISPLAYS,
   },
   backgroundAgents: {
     validate: (v) => v === "true" || v === "false",
@@ -70,6 +78,7 @@ export const KNOWN_KEYS: Record<
     description:
       "Show Claude background agents as rows (true, false; default true, daemon restart required)",
     note: "Takes effect after a daemon restart (ccmux daemon restart)",
+    choices: BOOLEAN_CHOICES,
   },
   additionalClaudeConfigDirs: {
     validate: (v) => {
@@ -96,6 +105,7 @@ export const KNOWN_KEYS: Record<
     parse: (v) => v === "true",
     description:
       "Search pane content in TUI search (true, false; default true)",
+    choices: BOOLEAN_CHOICES,
   },
   searchPaneLines: {
     validate: (v) => {
@@ -111,17 +121,20 @@ export const KNOWN_KEYS: Record<
     parse: (v) => v === "true",
     description:
       "Search live Claude/Codex transcripts via the daemon (true, false; default true)",
+    choices: BOOLEAN_CHOICES,
   },
   persistent: {
     validate: (v) => v === "true" || v === "false",
     parse: (v) => v === "true",
     description:
       "Keep picker open after switching sessions (true, false; default false)",
+    choices: BOOLEAN_CHOICES,
   },
   reviewHandback: {
     validate: (v) => (VALID_REVIEW_HANDBACK as readonly string[]).includes(v),
     parse: (v) => v,
     description: `Hunk review note delivery (${VALID_REVIEW_HANDBACK.join(", ")}; default confirm)`,
+    choices: VALID_REVIEW_HANDBACK,
   },
   tmuxSocket: {
     validate: (v) => v.trim().length > 0,
@@ -135,8 +148,46 @@ export const KNOWN_KEYS: Record<
     parse: (v) => v,
     description: `TUI theme (${BUILTIN_THEME_NAMES.join(", ")}; default ${DEFAULT_THEME_NAME})`,
     note: "Takes effect on next picker/sidebar launch. For per-key overrides, edit theme as an object in ccmux.json (see ccmux config themes).",
+    choices: BUILTIN_THEME_NAMES,
   },
 };
+
+/**
+ * Every key `config set`/`config get` accept by exact name: the flat
+ * KNOWN_KEYS plus the dotted sidebar and notifications leaves. The
+ * `columns.<row>.<side>` and `breakpoints.<name>` families are open-ended
+ * and are left to the shell's own guesswork.
+ */
+export function completableConfigKeys(): string[] {
+  return [
+    ...Object.keys(KNOWN_KEYS),
+    "sidebar.width",
+    "sidebar.position",
+    "notifications.enabled",
+    "notifications.events",
+    "notifications.sound",
+    "notifications.delayMs",
+    "notifications.backend",
+    "notifications.command",
+  ];
+}
+
+/** The enumerable value set for a config key, or null when it is free-form. */
+export function configValueChoices(key: string): readonly string[] | null {
+  const known = KNOWN_KEYS[key]?.choices;
+  if (known) return known;
+  switch (key) {
+    case "sidebar.position":
+      return ["left", "right"];
+    case "notifications.enabled":
+    case "notifications.sound":
+      return BOOLEAN_CHOICES;
+    case "notifications.backend":
+      return VALID_NOTIFICATION_BACKENDS;
+    default:
+      return null;
+  }
+}
 
 const ROW_NAMES = ["row1", "row2"] as const;
 const SIDE_NAMES = ["left", "right"] as const;
