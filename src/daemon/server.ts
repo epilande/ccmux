@@ -4616,6 +4616,9 @@ export class DaemonServer {
           // confirm under the repo lock and open it; skip the fetch — the
           // branch is already here.
           prBranch = prSource.headRefName;
+          // Occupied means the branch exists. Carried for the same reason as
+          // the other arm: the create must not re-derive the decision.
+          prBranchExisted = true;
         } else {
           const prepared = await preparePRBranch(mainRepoRoot, prSource);
           if (!prepared.ok) {

@@ -789,8 +789,14 @@ export async function createWorktree(
      * checked out unconditionally and then reconfigured to track the PR —
      * without ever passing the upstream checks that exist to prove it IS the
      * PR (issue #157). Carrying the decision makes either race direction a
-     * loud git failure instead: `-b` refuses a branch that appeared, and a
-     * plain add refuses one that vanished.
+     * refusal instead. `-b` refuses a branch that appeared, but git alone
+     * does NOT cover the other direction: `git worktree add <path> <branch>`
+     * with the local branch gone DWIMs it back into existence from
+     * `<remote>/<branch>` (git-worktree(1), default behaviour), silently
+     * checking out history that never passed those checks. So the create
+     * re-measures under its own lock and refuses on disagreement. Only
+     * re-measuring to REUSE would be the bug; re-measuring to REFUSE is what
+     * covers both directions.
      */
     branchExists?: boolean;
     /**
@@ -985,7 +991,23 @@ export async function createWorktree(
     // An OVERRIDDEN branch takes the caller's own settled answer when it has
     // one, for the reason in `branchExists`: measuring it again here would be
     // a second, later observation of something already decided under checks
-    // this function cannot repeat.
+    // this function cannot repeat. It is still measured, but only to REFUSE
+    // on disagreement, never to reuse the newer answer. Without that check
+    // the vanished direction is silent rather than loud: git's remote-branch
+    // DWIM recreates `<branch>` from `<remote>/<branch>` and checks out
+    // history the caller's checks never saw.
+    if (request.branch !== undefined && request.branchExists !== undefined) {
+      const measured = await localBranchExists(mainRepoRoot, branchName, git);
+      if (measured !== request.branchExists) {
+        return {
+          ok: false as const,
+          error:
+            `Branch '${branchName}' ${measured ? "appeared" : "vanished"} after the ` +
+            `caller settled it, so it was not checked out: whatever is there now ` +
+            `has not been proved to be what was asked for. Try again.`,
+        };
+      }
+    }
     const reusingBranch =
       request.branch !== undefined
         ? (request.branchExists ??

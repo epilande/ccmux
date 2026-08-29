@@ -195,9 +195,9 @@ export interface InitialBatchObservation {
   getTranscriptCwd(path: string): string | null;
 }
 
-/** Ordered actions the watcher applies after the batch decision. */
 /**
- * One applied outcome of the initial Claude batch.
+ * Ordered actions the watcher applies after the batch decision: one applied
+ * outcome of the initial Claude batch.
  *
  * The creating arms carry `cwd`: the session's REAL working directory, from
  * the transcript's own `cwd` field or the bound pane's process cwd. Null only
@@ -215,7 +215,7 @@ export type InitialBatchAction =
       pid: number;
       provenance: BindingProvenance;
       confidence: BindingConfidence;
-      /** {@link InitialBatchAction} — the session's real cwd, when known. */
+      /** The session's real cwd, when known; see the type's doc comment. */
       cwd: string | null;
     }
   | {
@@ -227,7 +227,7 @@ export type InitialBatchAction =
       type: "create-unbound";
       sessionId: string;
       path: string;
-      /** {@link InitialBatchAction} — the session's real cwd, when known. */
+      /** The session's real cwd, when known; see the type's doc comment. */
       cwd: string | null;
     }
   | {
@@ -238,7 +238,7 @@ export type InitialBatchAction =
       path: string;
       paneId: string;
       pid: number;
-      /** {@link InitialBatchAction} — the session's real cwd, when known. */
+      /** The session's real cwd, when known; see the type's doc comment. */
       cwd: string | null;
     }
   | { type: "skip"; path: string };

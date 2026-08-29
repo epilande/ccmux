@@ -1309,18 +1309,31 @@ describe("createWorktree with a branch override", () => {
       branchExists: false,
     });
 
-    // `git worktree add -b` on an existing branch: loud, and the message is
-    // git's own.
+    // The re-measure under the create's own lock refuses before git runs.
     expect(created.ok).toBe(false);
     if (created.ok) return;
     expect(created.error).toContain("fix/flaky-binder");
   });
 
-  // The other direction of the same race: a branch the caller fast-forwarded
-  // and something then deleted must not be silently re-cut at a base that has
-  // nothing to do with the PR.
+  // The other direction of the same race, and the one git does not refuse on
+  // its own: with a remote-tracking ref of the same name present, a plain
+  // `git worktree add <path> <branch>` DWIMs the deleted branch back into
+  // existence from `origin/<branch>` and exits 0. The fixture therefore has
+  // the remote-tracking ref, which is what makes this test about the create's
+  // own re-measure rather than about an error git happens to produce.
   it("refuses a branch that vanished after the caller settled it as present", async () => {
     const repo = await makeRepo();
+    await git(repo, [
+      "remote",
+      "add",
+      "origin",
+      "https://example.invalid/x.git",
+    ]);
+    await git(repo, [
+      "update-ref",
+      "refs/remotes/origin/fix/flaky-binder",
+      "HEAD",
+    ]);
 
     const created = await createWorktree(repo, {
       derivedName: "pr-7-fix-flaky",
@@ -1331,6 +1344,15 @@ describe("createWorktree with a branch override", () => {
     expect(created.ok).toBe(false);
     if (created.ok) return;
     expect(created.error).toContain("fix/flaky-binder");
+    // Nothing was created, the DWIM branch least of all. `git` throws on a
+    // non-zero exit, so the absent case needs the raw runner.
+    const local = await runGit(repo, [
+      "show-ref",
+      "--verify",
+      "--quiet",
+      "refs/heads/fix/flaky-binder",
+    ]);
+    expect(local.exitCode).not.toBe(0);
   });
 
   it("still derives the answer for a caller that settles nothing", async () => {

@@ -958,10 +958,6 @@ describe("seedPrompt", () => {
     const title = `${"x".repeat(198)}\u{1f600}${"y".repeat(50)}`;
     const line = seedPrompt("PR #1", title, "u", undefined).split("\n")[0]!;
     expect(line.endsWith("…")).toBe(true);
-    for (const unit of line) {
-      const code = unit.charCodeAt(0);
-      expect(code >= 0xd800 && code <= 0xdfff).toBe(false);
-    }
     expect(line).toBe(`PR #1: ${"x".repeat(198)}…`);
   });
 

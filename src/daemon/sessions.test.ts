@@ -1413,4 +1413,25 @@ describe("updateSession cwd drift", () => {
 
     expect(manager.getSession(id)?.cwd).toBe(`${agentWt}/src`);
   });
+
+  // Issue #156 end to end: a session created from a log path alone starts on
+  // the lossy decode of the project dir name, and the first transcript entry
+  // carrying the real cwd has to be able to heal both it and the project.
+  it("heals a lossy decode once the transcript reports the real cwd", () => {
+    const manager = new SessionManager();
+    const real = "/Users/test/repo/.claude/worktrees/add-tags";
+    const corrupted = "/Users/test/repo//claude/worktrees/add/tags";
+    const created = manager.createSession(
+      "sess-156",
+      `/Users/test/.claude/projects/${encodeProjectPath(real)}/sess-156.jsonl`,
+    );
+
+    expect(created.cwd).toBe(corrupted);
+    expect(created.project).toBe("tags");
+
+    manager.updateSession("sess-156", { cwd: real });
+
+    expect(manager.getSession("sess-156")?.cwd).toBe(real);
+    expect(manager.getSession("sess-156")?.project).toBe("add-tags");
+  });
 });
