@@ -957,6 +957,9 @@ export class Daemon {
           binding.sessionId,
           this.buildLogPath(binding.cwd, binding.sessionId),
           "claude",
+          // The binding's raw cwd, not the log path's encoded dir name:
+          // decoding that back is lossy over hyphens (issue #156).
+          binding.cwd,
         );
         this.sessionManager.setTmuxPane(binding.sessionId, binding.paneId);
         this.sessionManager.setPid(binding.sessionId, binding.pid);

@@ -602,6 +602,80 @@ describe("decideInitialClaudeBatch", () => {
     });
   });
 
+  // Issue #156: the applier used to derive the cwd by decoding the project
+  // dir name, which cannot tell a `-` in a directory name from the `/` it
+  // encodes. Every creating arm now carries the real one.
+  it("carries the bound process's real cwd on a marker claim", () => {
+    const { actions } = decideInitialClaudeBatch(
+      [
+        batchItem({
+          sessionId: "marked",
+          encodedProjectPath: "-repo-notes-cli",
+        }),
+      ],
+      batchObs({
+        processes: [proc({ pid: 2, tty: "ttys002", cwd: "/repo/notes-cli" })],
+        panes: [pane({ paneId: "%2", tty: "/dev/ttys002" })],
+        markerPidBySessionId: new Map([["marked", 2]]),
+      }),
+    );
+
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      type: "create",
+      provenance: "marker",
+      cwd: "/repo/notes-cli",
+    });
+  });
+
+  it("prefers the transcript's own cwd over the bound process's", () => {
+    const { actions } = decideInitialClaudeBatch(
+      [batchItem({ sessionId: "marked", encodedProjectPath: "-nowhere" })],
+      batchObs({
+        // The encoded key matches no process, so the drift fallback reads the
+        // transcript and matches on the raw cwd instead.
+        processes: [proc({ pid: 2, tty: "ttys002", cwd: "/repo/notes-cli" })],
+        panes: [pane({ paneId: "%2", tty: "/dev/ttys002" })],
+        markerPidBySessionId: new Map([["marked", 2]]),
+        getTranscriptCwd: () => "/repo/notes-cli",
+      }),
+    );
+
+    expect(actions[0]).toMatchObject({
+      type: "create",
+      cwd: "/repo/notes-cli",
+    });
+  });
+
+  it("carries the real cwd on a heuristic binding too", () => {
+    const { actions } = decideInitialClaudeBatch(
+      [
+        batchItem({
+          sessionId: "plain",
+          encodedProjectPath: "-repo-notes-cli",
+        }),
+      ],
+      batchObs({
+        processes: [
+          proc({
+            pid: 1,
+            tty: "ttys001",
+            cwd: "/repo/notes-cli",
+            startTime: 1_000,
+          }),
+        ],
+        panes: [pane({ paneId: "%1", tty: "/dev/ttys001" })],
+        getSessionTimestamps: () => [2_000],
+      }),
+    );
+
+    expect(actions[0]).toMatchObject({
+      type: "create",
+      provenance: "start-time",
+      cwd: "/repo/notes-cli",
+    });
+  });
+
   it("existing sessions reserve their pane and get process-existing", () => {
     const { actions } = decideInitialClaudeBatch(
       [
@@ -690,9 +764,9 @@ describe("decideInitialClaudeBatch", () => {
     );
 
     expect(actions).toEqual([
-      { type: "create-unbound", sessionId: "a", path: "/p/a.jsonl" },
-      { type: "create-unbound", sessionId: "b", path: "/p/b.jsonl" },
-      { type: "create-unbound", sessionId: "c", path: "/p/c.jsonl" },
+      { type: "create-unbound", sessionId: "a", path: "/p/a.jsonl", cwd: null },
+      { type: "create-unbound", sessionId: "b", path: "/p/b.jsonl", cwd: null },
+      { type: "create-unbound", sessionId: "c", path: "/p/c.jsonl", cwd: null },
     ]);
   });
 

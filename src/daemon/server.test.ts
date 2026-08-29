@@ -8067,6 +8067,43 @@ describe("POST /spawn with --pr and --issue", () => {
     }
   });
 
+  // Occupied skips prepare, so `prBase` used to stay at its `null`
+  // initializer and `configurePRBranch` would UNSET the key the first
+  // spawn recorded. A second `--pr` / source-picker Enter must keep it.
+  it("keeps the recorded review base when the PR's branch is already checked out", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv();
+    try {
+      const first = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      expect(first.status).toBe(200);
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.ccmux-base"),
+      ).toBe("origin/main");
+
+      const second = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await second.json()) as SpawnBody;
+
+      expect(second.status).toBe(200);
+      expect(body.worktree?.created).toBe(false);
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.ccmux-base"),
+      ).toBe("origin/main");
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
   // The upstream config is the only evidence a same-named branch is THIS PR.
   // Without it the spawn would start on unrelated history under a name that
   // says otherwise.

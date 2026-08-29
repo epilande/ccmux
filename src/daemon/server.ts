@@ -4596,7 +4596,11 @@ export class DaemonServer {
       //    under the repo lock and releases before returning — it must not
       //    still hold it when `createWorktree` takes the same lock below.
       let prBranch: string | undefined;
-      let prBase: string | null = null;
+      let prBranchExisted: boolean | undefined;
+      // `undefined` until prepare looks the base up. Occupied skips prepare,
+      // and `configurePRBranch` must not treat that as a decline (a `null`
+      // would unset the `ccmux-base` the first spawn recorded).
+      let prBase: string | null | undefined;
       if (prSource) {
         // Before the branch check and well before the fetch: `gh` resolved
         // the number through its own repo selection, and the fetch below is
@@ -4613,8 +4617,12 @@ export class DaemonServer {
         if (occupied) {
           // Open that checkout rather than refusing. `createWorktree` will
           // confirm under the repo lock and open it; skip the fetch — the
-          // branch is already here.
+          // branch is already here. Leave `prBase` unset so the later
+          // `configurePRBranch` does not wipe a still-correct `ccmux-base`.
           prBranch = prSource.headRefName;
+          // Occupied means the branch exists; carried, not re-derived
+          // (see `branchExists` in `worktree-create.ts`).
+          prBranchExisted = true;
         } else {
           const prepared = await preparePRBranch(mainRepoRoot, prSource);
           if (!prepared.ok) {
@@ -4624,6 +4632,10 @@ export class DaemonServer {
             );
           }
           prBranch = prSource.headRefName;
+          // Only this answer came through the checks that prove the branch is
+          // this PR's, and the prep released the repo lock before returning,
+          // so the create must not re-derive it (issue #157).
+          prBranchExisted = prepared.value.branchExisted;
           // The SHA, never `FETCH_HEAD`: the base-branch fetch inside the prep
           // has already overwritten that ref.
           creation.base = prepared.value.head;
@@ -4755,7 +4767,13 @@ export class DaemonServer {
           // own review base. `configurePRBranch` writes that key here with
           // the branch the PR targets, and when it cannot, no key is what
           // lets the picker's `D` fall back to its heuristic base.
-          ...(prBranch ? { branch: prBranch, recordBase: false } : {}),
+          ...(prBranch
+            ? {
+                branch: prBranch,
+                branchExists: prBranchExisted,
+                recordBase: false,
+              }
+            : {}),
           // Under the lock, so a checkout that appeared while the picker
           // sat open is still found: numbering `issue-<n>-<slug>-2` would
           // break Enter's "already checked out → open it" guarantee.

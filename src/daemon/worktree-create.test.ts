@@ -1296,6 +1296,78 @@ describe("createWorktree with a branch override", () => {
     expect(await readConfig(repo, CONFIG_KEY("pr-7-fix-flaky"))).toBeNull();
   });
 
+  // The caller validated the branch under a DIFFERENT acquisition of the repo
+  // lock, so a branch that appears in the window between the two must not be
+  // checked out as if it had passed those checks (issue #157).
+  it("refuses a branch that appeared after the caller settled it as absent", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "fix/flaky-binder"]);
+
+    const created = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+      branchExists: false,
+    });
+
+    // The re-measure under the create's own lock refuses before git runs.
+    expect(created.ok).toBe(false);
+    if (created.ok) return;
+    expect(created.error).toContain("fix/flaky-binder");
+  });
+
+  // The other direction of the same race, and the one git does not refuse on
+  // its own: with a remote-tracking ref of the same name present, a plain
+  // `git worktree add <path> <branch>` DWIMs the deleted branch back into
+  // existence from `origin/<branch>` and exits 0. The fixture therefore has
+  // the remote-tracking ref, which is what makes this test about the create's
+  // own re-measure rather than about an error git happens to produce.
+  it("refuses a branch that vanished after the caller settled it as present", async () => {
+    const repo = await makeRepo();
+    await git(repo, [
+      "remote",
+      "add",
+      "origin",
+      "https://example.invalid/x.git",
+    ]);
+    await git(repo, [
+      "update-ref",
+      "refs/remotes/origin/fix/flaky-binder",
+      "HEAD",
+    ]);
+
+    const created = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+      branchExists: true,
+    });
+
+    expect(created.ok).toBe(false);
+    if (created.ok) return;
+    expect(created.error).toContain("fix/flaky-binder");
+    // `git` throws on a non-zero exit, so the absent case needs the raw runner.
+    const local = await runGit(repo, [
+      "show-ref",
+      "--verify",
+      "--quiet",
+      "refs/heads/fix/flaky-binder",
+    ]);
+    expect(local.exitCode).not.toBe(0);
+  });
+
+  it("still derives the answer for a caller that settles nothing", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "fix/flaky-binder"]);
+
+    const created = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.branchCreated).toBe(false);
+  });
+
   // A second `--pr` of a branch already checked out used to 400. Opening
   // that checkout is what the source picker promises on Enter.
   it("opens the worktree already holding the overridden branch", async () => {

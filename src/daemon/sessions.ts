@@ -9,11 +9,11 @@ import type {
   BackgroundChild,
   BackgroundInFlight,
 } from "../types/session";
-import { extractProjectInfo } from "./parser";
+import { decodeProjectPath, extractProjectInfo } from "./parser";
 import { appendPrompt } from "./status-machine";
 import { getSessionPidMarker } from "./session-markers";
 import { deriveProject } from "./project-derivation";
-import { findSoftEvictTargets } from "./binder/primitives";
+import { encodeProjectPath, findSoftEvictTargets } from "./binder/primitives";
 import { worktreeCheckoutRoot } from "../lib/worktree-paths";
 
 interface PaneTrackedSessionInput {
@@ -146,12 +146,26 @@ export function isBackgroundSession(session: Session): boolean {
  *   lands (a session genuinely started inside one is unaffected);
  * - and never when the session is already inside that same worktree, so a
  *   session that really does live there keeps tracking its own subdirectories
- *   (this very session is one).
+ *   (this very session is one);
+ * - and never when `current` is the LOSSY DECODE of `next` (issue #156).
+ *   `decodeProjectPath` turns every `-` in the encoded project dir back into
+ *   `/`, so a session in `…/worktrees/add-tags` can start life holding
+ *   `…/worktrees/add/tags` — which prefix-matches nothing, so the refusal
+ *   would make that corruption PERMANENT, and permanent in exactly the place
+ *   the guard is about.
+ *
+ *   The test is the round trip, not encode-equality. Encoding maps every
+ *   non-alphanumeric to `-`, so it is many-to-one over punctuation and
+ *   `…/add_tags` encodes the same as `…/add-tags` — equal encodes would let
+ *   a session in one adopt a drifted entry naming its sibling. Asking
+ *   whether `current` is exactly what decoding `next`'s encoded form
+ *   produces admits the corruption this heals and nothing else.
  */
 export function adoptsLoggedCwd(current: string | null, next: string): boolean {
   const target = worktreeCheckoutRoot(next);
   if (!target || !current) return true;
-  return current === target || current.startsWith(`${target}/`);
+  if (current === target || current.startsWith(`${target}/`)) return true;
+  return decodeProjectPath(encodeProjectPath(next)) === current;
 }
 
 /**
@@ -301,14 +315,28 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Create a new session from a log file path
+   * Create a new session from a log file path.
+   *
+   * `knownCwd` is the session's REAL working directory when the caller has
+   * one (the transcript's own `cwd` field, the bound pane's process cwd, a
+   * migration binding). Without it the cwd is derived from the log path, and
+   * for Claude that derivation is a guess: the project dir name encodes `/`
+   * as `-`, so `decodeProjectPath` cannot tell a hyphen that was in a
+   * directory name from a separator and turns `notes-cli` into `notes/cli`
+   * (issue #156). Every caller that CAN know passes it, so the guess is the
+   * last resort rather than the default.
    */
   createSession(
     sessionId: string,
     logPath: string,
     agentType: string = "claude",
+    knownCwd?: string | null,
   ): Session {
-    const { project, cwd } = extractProjectInfo(logPath);
+    const derived = extractProjectInfo(logPath);
+    const cwd = knownCwd || derived.cwd;
+    const project = knownCwd
+      ? deriveProject(knownCwd, derived.project)
+      : derived.project;
 
     const session: Session = {
       id: sessionId,
