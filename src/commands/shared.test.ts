@@ -26,13 +26,16 @@ function harness(
   options: {
     alive?: boolean;
     routes?: Record<string, Route | Route[]>;
+    /** Queue of LISTEN pids; last element repeats. Default is a stable pid. */
+    listenPids?: Array<number | null>;
   } = {},
 ) {
-  const launches: number[] = [];
+  const launches: Array<number | undefined> = [];
   const logs: string[] = [];
   const warns: string[] = [];
   const calls: string[] = [];
   const routes = { ...(options.routes ?? {}) };
+  const listenPids = [...(options.listenPids ?? [1001])];
   const deps: ReconcileDeps = defaultReconcileDeps({
     isAlive: async () => options.alive ?? true,
     getJson: async (path) => {
@@ -48,8 +51,12 @@ function harness(
       if (route === undefined) throw new Error(`no route for ${path}`);
       return typeof route === "function" ? route() : route;
     },
-    launch: async () => {
-      launches.push(Date.now());
+    findListenPid: async () => {
+      return listenPids.length > 1 ? listenPids.shift()! : listenPids[0]!;
+    },
+    launch: async (pid) => {
+      launches.push(pid);
+      return true;
     },
     cli,
     log: (line) => logs.push(line),
@@ -113,7 +120,7 @@ describe("reconcileDaemon", () => {
       },
     });
     expect(await reconcileDaemon(h.deps)).toBe("restarted");
-    expect(h.launches).toHaveLength(1);
+    expect(h.launches).toEqual([1001]);
     expect(h.logs).toEqual(["Daemon is outdated; restarting..."]);
     expect(h.warns).toEqual([]);
     // One read for the probe, one re-read right before the kill.
@@ -152,8 +159,13 @@ describe("reconcileDaemon", () => {
       },
     });
     expect(await reconcileDaemon(h.deps)).toBe("restarted");
-    expect(h.launches).toHaveLength(1);
-    expect(h.calls).toEqual(["/server-info", "/invocations", "/server-info"]);
+    expect(h.launches).toEqual([1001]);
+    expect(h.calls).toEqual([
+      "/server-info",
+      "/invocations",
+      "/server-info",
+      "/invocations",
+    ]);
   });
 
   it("legacy daemon with a running invocation: no launch, invocations-only warning", async () => {
@@ -178,7 +190,7 @@ describe("reconcileDaemon", () => {
     ]);
   });
 
-  it("legacy daemon with only finished invocations: launches", async () => {
+  it("legacy daemon with only finished invocations: fail safe (handoff-blind)", async () => {
     const h = harness({
       routes: {
         "/server-info": info(undefined),
@@ -188,7 +200,21 @@ describe("reconcileDaemon", () => {
         },
       },
     });
-    expect(await reconcileDaemon(h.deps)).toBe("restarted");
+    expect(await reconcileDaemon(h.deps)).toBe("busy");
+    expect(h.launches).toHaveLength(0);
+  });
+
+  it("modern /server-info with a build but no busy field: fail safe, no launch", async () => {
+    const h = harness({
+      routes: {
+        "/server-info": info(outdatedBuild),
+        "/invocations": { status: 200, body: { invocations: [] } },
+      },
+    });
+    expect(await reconcileDaemon(h.deps)).toBe("busy");
+    expect(h.launches).toHaveLength(0);
+    // Must not ask /invocations: that path cannot see queued handoffs.
+    expect(h.calls).toEqual(["/server-info"]);
   });
 
   it("legacy daemon whose /invocations is unreadable: fail safe, no launch", async () => {
@@ -257,6 +283,41 @@ describe("reconcileDaemon", () => {
     expect(await reconcileDaemon(h.deps)).toBe("raced");
     expect(h.launches).toHaveLength(0);
   });
+
+  it("race: confirm re-read finds the same outdated daemon now busy, so nothing is killed", async () => {
+    const h = harness({
+      routes: {
+        "/server-info": [
+          info(outdatedBuild, { invocations: 0, handoffs: 0 }),
+          info(outdatedBuild, { invocations: 1, handoffs: 0 }),
+        ],
+      },
+    });
+    expect(await reconcileDaemon(h.deps)).toBe("busy");
+    expect(h.launches).toHaveLength(0);
+  });
+
+  it("confirm kill is bound to the snapshotted LISTEN pid", async () => {
+    const h = harness({
+      routes: {
+        "/server-info": info(outdatedBuild, { invocations: 0, handoffs: 0 }),
+      },
+      listenPids: [4242],
+    });
+    expect(await reconcileDaemon(h.deps)).toBe("restarted");
+    expect(h.launches).toEqual([4242]);
+  });
+
+  it("race: the confirm listener is no longer the snapshotted pid, so nothing is killed", async () => {
+    const h = harness({
+      routes: {
+        "/server-info": info(outdatedBuild, { invocations: 0, handoffs: 0 }),
+      },
+      listenPids: [111, 222],
+    });
+    expect(await reconcileDaemon(h.deps)).toBe("raced");
+    expect(h.launches).toHaveLength(0);
+  });
 });
 
 describe("probeDaemon / settleDaemon split", () => {
@@ -276,7 +337,7 @@ describe("probeDaemon / settleDaemon split", () => {
     expect(h.launches).toHaveLength(0);
     expect(h.logs).toEqual([]);
     expect(await settleDaemon(probe, h.deps)).toBe("restarted");
-    expect(h.launches).toHaveLength(1);
+    expect(h.launches).toEqual([1001]);
   });
 
   it("busy is not measured for a current daemon", async () => {
@@ -285,5 +346,57 @@ describe("probeDaemon / settleDaemon split", () => {
     expect(probe.verdict).toBe("current");
     expect(probe.busy).toBe(null);
     expect(h.calls).toEqual(["/server-info"]);
+  });
+});
+
+describe("getDaemonJson plaintext 404", () => {
+  it("treats a plaintext Not Found as status 404 without parsing", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response("Not Found", { status: 404 })) as typeof fetch;
+    try {
+      const result = await defaultReconcileDeps().getJson("/invocations", 1000);
+      expect(result).toEqual({ status: 404, body: null });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("a legacy daemon whose /invocations is plaintext 404 is idle and launches", async () => {
+    const originalFetch = globalThis.fetch;
+    const replies: Record<string, Response> = {
+      "/server-info": new Response(JSON.stringify(info(undefined).body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+      "/invocations": new Response("Not Found", { status: 404 }),
+    };
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const path = url.startsWith("http")
+        ? new URL(url).pathname
+        : url;
+      const reply = replies[path];
+      if (!reply) throw new Error(`unexpected fetch ${url}`);
+      return reply.clone();
+    }) as typeof fetch;
+    try {
+      const launches: Array<number | undefined> = [];
+      const deps = defaultReconcileDeps({
+        isAlive: async () => true,
+        findListenPid: async () => 1001,
+        launch: async (pid) => {
+          launches.push(pid);
+          return true;
+        },
+        cli,
+        log: () => {},
+        warn: () => {},
+      });
+      expect(await reconcileDaemon(deps)).toBe("restarted");
+      expect(launches).toEqual([1001]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

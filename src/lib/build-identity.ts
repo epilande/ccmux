@@ -11,10 +11,12 @@
  *
  * Three fields, compared in this order by `classifyDaemonBuild`:
  *
- * 1. `version` (package.json). Differs -> `outdated`. Checked FIRST because a
- *    version bump is the one signal that is true across checkouts: a daemon
- *    from an older release should be replaced by any newer CLI, wherever the
- *    newer CLI lives.
+ * 1. `version` (package.json). A *strictly older* daemon version -> `outdated`.
+ *    Checked FIRST because a version bump is the one signal that is true
+ *    across checkouts: a daemon from an older release should be replaced by
+ *    any newer CLI, wherever the newer CLI lives. A *newer* daemon than this
+ *    CLI is `foreign` (kept): an older CLI must not evict a newer daemon, or
+ *    two versions flip-flop the shared process on every command.
  * 2. `artifact`: what was installed. For a compiled binary its realpath; for
  *    `bun <script>` the CHECKOUT ROOT (two levels above the script, so
  *    `dist/index.js` and `src/index.ts` of one checkout share an artifact
@@ -140,8 +142,32 @@ export function classifyDaemonBuild(
 ): BuildVerdict {
   const identity = parseBuildIdentity(daemon);
   if (!identity) return "outdated";
-  if (identity.version !== cli.version) return "outdated";
+  if (identity.version !== cli.version) {
+    const cmp = compareSemver(identity.version, cli.version);
+    // Only a strictly older daemon is replaced. Newer, or unorderable, is
+    // kept so an older CLI cannot evict a newer daemon (and flip-flop).
+    return cmp !== null && cmp < 0 ? "outdated" : "foreign";
+  }
   if (identity.artifact !== cli.artifact) return "foreign";
   if (identity.stamp !== cli.stamp) return "outdated";
   return "current";
+}
+
+/** `a - b` for `major.minor.patch` (optional leading `v`). Null if either side will not parse. */
+function compareSemver(a: string, b: string): number | null {
+  const parse = (value: string): [number, number, number] | null => {
+    const match = value
+      .trim()
+      .replace(/^v/i, "")
+      .match(/^(\d+)\.(\d+)\.(\d+)/);
+    if (!match) return null;
+    return [Number(match[1]), Number(match[2]), Number(match[3])];
+  };
+  const left = parse(a);
+  const right = parse(b);
+  if (!left || !right) return null;
+  for (let i = 0; i < 3; i++) {
+    if (left[i] !== right[i]) return left[i] - right[i];
+  }
+  return 0;
 }

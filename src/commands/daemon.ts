@@ -105,9 +105,12 @@ function printBuild(daemonBuild: unknown): void {
   if (verdict === "current") {
     console.log("Build: current");
   } else if (verdict === "foreign") {
+    const reason =
+      daemon && daemon.version !== cli.version
+        ? `daemon ${daemon.version} is newer than this CLI ${cli.version}`
+        : `same version ${cli.version}, different install`;
     console.log(
-      `Build: foreign checkout (same version ${cli.version}, different install); ` +
-        "left alone, run ccmux daemon restart to switch",
+      `Build: foreign (${reason}); left alone, run ccmux daemon restart to switch`,
     );
   } else {
     console.log(

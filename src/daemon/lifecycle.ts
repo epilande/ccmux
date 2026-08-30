@@ -277,12 +277,15 @@ async function isKillableDaemonPid(pid: number): Promise<boolean> {
  * which may have been recycled by an unrelated live process. Safe to call
  * whenever /health is unreachable (the auto-start path does).
  */
-export async function stopDaemonByPort(): Promise<boolean> {
+export async function stopDaemonByPort(expectedPid?: number): Promise<boolean> {
   const pid = await findDaemonPidByPort();
   if (!pid) {
     removeStalePidFile(); // no listener -> no daemon; clear stale state only
     return false;
   }
+  // A confirm-time snapshot: another CLI may have already replaced the
+  // outdated listener with a current daemon. Never signal a different pid.
+  if (expectedPid !== undefined && pid !== expectedPid) return false;
 
   if (!(await isKillableDaemonPid(pid))) return false; // foreign squatter
 

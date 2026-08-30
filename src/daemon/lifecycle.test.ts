@@ -288,6 +288,22 @@ describe("stopDaemonByPort", () => {
     mockBunSpawn(""); // lsof finds no listener
     expect(await stopDaemonByPort()).toBe(false);
   });
+
+  it("does not kill a listener that is not the expected confirm-time pid", async () => {
+    const listener = spawnSleepProcess();
+    mockBunSpawn(`${listener}\n`);
+    expect(await stopDaemonByPort(listener + 1)).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(isProcessAlive(listener)).toBe(true);
+  });
+
+  it("kills the listener when it still matches the expected confirm-time pid", async () => {
+    const listener = spawnSleepProcess();
+    mockBunSpawn(`${listener}\n`);
+    expect(await stopDaemonByPort(listener)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(isProcessAlive(listener)).toBe(false);
+  });
 });
 
 describe("isStandaloneBinary", () => {

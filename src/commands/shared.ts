@@ -25,8 +25,11 @@ import {
  * Shared by every auto-start path so they behave identically. Exits on failure,
  * surfacing the port holder's PID/command line instead of a silent error.
  */
-export async function launchDaemon(): Promise<void> {
-  const evicted = await stopDaemonByPort();
+export async function launchDaemon(expectedPid?: number): Promise<boolean> {
+  const evicted = await stopDaemonByPort(expectedPid);
+  // Confirm-time replace is bound to one LISTEN pid. If that pid is gone
+  // (a peer already spawned a current daemon), do not kill or spawn over it.
+  if (expectedPid !== undefined && !evicted) return false;
   if (evicted) {
     // let the killed listener's socket release before we bind
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -34,7 +37,7 @@ export async function launchDaemon(): Promise<void> {
 
   spawnDaemonBackground();
 
-  if (await waitForDaemon()) return;
+  if (await waitForDaemon()) return true;
 
   const blockerPid = await findDaemonPidByPort();
   if (blockerPid) {
@@ -58,10 +61,12 @@ export interface DaemonProbe {
   verdict: BuildVerdict;
   daemonBuild: BuildIdentity | null;
   /**
-   * Only measured for an `outdated` daemon. `handoffs` is null when the daemon
-   * predates the `busy` field and the count came from `/invocations`; the
-   * whole thing is null when the daemon could not be asked (treated as busy,
-   * fail safe: never kill a daemon that may be mid-invocation).
+   * Only measured for an `outdated` daemon. `handoffs` is 0 when the count is
+   * known (the `busy` field, or a 404 on `/invocations` from a daemon that
+   * predates both features). It is null when the count came from a 200
+   * `/invocations` fallback, which cannot see queued handoffs — that is not
+   * idle. The whole thing is null when the daemon could not be asked, or a
+   * modern `/server-info` omitted `busy` (treated as busy, fail safe).
    */
   busy: { invocations: number; handoffs: number | null } | null;
 }
@@ -73,7 +78,13 @@ export interface ReconcileDeps {
     path: string,
     timeoutMs: number,
   ) => Promise<{ status: number; body: unknown }>;
-  launch: () => Promise<void>;
+  /** Current TCP LISTEN pid on the daemon port, or null if none / unreadable. */
+  findListenPid: () => Promise<number | null>;
+  /**
+   * Spawn a current daemon. When `expectedPid` is set, kill only that pid
+   * and abort (return false) if the listener is no longer it.
+   */
+  launch: (expectedPid?: number) => Promise<boolean>;
   cli: BuildIdentity;
   /** Progress line channel ("Starting daemon...", "restarting..."). */
   log: (line: string) => void;
@@ -95,6 +106,9 @@ async function getDaemonJson(
   const response = await fetch(`${getDaemonUrl()}${path}`, {
     signal: AbortSignal.timeout(timeoutMs),
   });
+  // Unknown routes are plaintext "Not Found". Parsing that throws and would
+  // hide the 404 from `countRunningInvocations` (legacy idle).
+  if (response.status === 404) return { status: 404, body: null };
   const body: unknown = await response.json();
   return { status: response.status, body };
 }
@@ -105,6 +119,7 @@ export function defaultReconcileDeps(
   return {
     isAlive: isDaemonRunningAsync,
     getJson: getDaemonJson,
+    findListenPid: findDaemonPidByPort,
     launch: launchDaemon,
     cli: BUILD_IDENTITY,
     log: (line) => console.error(line),
@@ -141,25 +156,37 @@ async function readBuild(deps: ReconcileDeps): Promise<{
   };
 }
 
-/** Running-invocation count from `GET /invocations`, or null if unknowable. */
+/**
+ * Running-invocation count from `GET /invocations`.
+ * `absent` is a plaintext/JSON 404 (daemon predates the endpoint).
+ * `unknown` is an unreadable or malformed response.
+ */
 async function countRunningInvocations(
   deps: ReconcileDeps,
-): Promise<number | null> {
+): Promise<
+  | { kind: "ok"; running: number }
+  | { kind: "absent" }
+  | { kind: "unknown" }
+> {
   try {
     const { status, body } = await deps.getJson(
       "/invocations",
       DAEMON_INFO_TIMEOUT_MS,
     );
-    // A daemon too old to have the endpoint cannot be running an invocation.
-    if (status === 404) return 0;
+    // A daemon too old to have the endpoint cannot be running an invocation
+    // or a handoff (both features postdate it).
+    if (status === 404) return { kind: "absent" };
     if (status !== 200 || !isRecord(body) || !Array.isArray(body.invocations)) {
-      return null;
+      return { kind: "unknown" };
     }
-    return body.invocations.filter(
-      (record: unknown) => isRecord(record) && record.status === "running",
-    ).length;
+    return {
+      kind: "ok",
+      running: body.invocations.filter(
+        (record: unknown) => isRecord(record) && record.status === "running",
+      ).length,
+    };
   } catch {
-    return null;
+    return { kind: "unknown" };
   }
 }
 
@@ -175,8 +202,15 @@ async function measureBusy(
   ) {
     return { invocations: busy.invocations, handoffs: busy.handoffs };
   }
-  const invocations = await countRunningInvocations(deps);
-  return invocations === null ? null : { invocations, handoffs: null };
+  // Identified daemon without a complete `busy` field: fail safe. The
+  // `/invocations` fallback cannot see queued handoffs.
+  if (parseBuildIdentity(isRecord(info) ? info.build : undefined)) {
+    return null;
+  }
+  const counted = await countRunningInvocations(deps);
+  if (counted.kind === "unknown") return null;
+  if (counted.kind === "absent") return { invocations: 0, handoffs: 0 };
+  return { invocations: counted.running, handoffs: null };
 }
 
 /**
@@ -196,7 +230,7 @@ export async function probeDaemon(
 }
 
 function isIdle(busy: DaemonProbe["busy"]): boolean {
-  return busy !== null && busy.invocations === 0 && (busy.handoffs ?? 0) === 0;
+  return busy !== null && busy.invocations === 0 && busy.handoffs === 0;
 }
 
 function describeBusy(busy: DaemonProbe["busy"]): string {
@@ -209,7 +243,8 @@ function describeBusy(busy: DaemonProbe["busy"]): string {
 /**
  * Act on a probe: start a missing daemon, replace an outdated idle one, warn
  * about an outdated busy one, leave a current or foreign one alone (foreign is
- * another checkout on the same version; see `build-identity.ts`).
+ * another checkout on the same version, or a newer daemon than this CLI;
+ * see `build-identity.ts`).
  */
 export async function settleDaemon(
   probe: DaemonProbe,
@@ -229,11 +264,25 @@ export async function settleDaemon(
     return "busy";
   }
   deps.log("Daemon is outdated; restarting...");
-  // Another CLI may have replaced it between the probe and now. Re-read once
-  // right before the kill; a daemon that is no longer outdated stays.
-  const { verdict } = await readBuild(deps);
+  // Another CLI may have replaced it, or an invoke/handoff may have started,
+  // between the probe and now. Snapshot the LISTEN pid, then re-read build
+  // *and* busy; kill only that pid. A daemon that is no longer outdated, is
+  // now busy, or is no longer that listener stays.
+  const listenPid = await deps.findListenPid();
+  const { verdict, info } = await readBuild(deps);
   if (verdict !== "outdated") return "raced";
-  await deps.launch();
+  const busy = await measureBusy(deps, info);
+  if (!isIdle(busy)) {
+    deps.warn(
+      `Daemon is outdated but busy (${describeBusy(busy)}); ` +
+        "run `ccmux daemon restart` when it is free.",
+    );
+    return "busy";
+  }
+  if (listenPid === null || (await deps.findListenPid()) !== listenPid) {
+    return "raced";
+  }
+  if (!(await deps.launch(listenPid))) return "raced";
   return "restarted";
 }
 

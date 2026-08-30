@@ -1206,9 +1206,9 @@ export class DaemonServer {
       // progress, and would otherwise read as busy until the periodic sweep.
       this.handoffQueue.sweep();
       // `build` and `busy` are what the CLI's auto-start path reads to decide
-      // whether to replace this daemon (issue #163). Both are additive, so a
-      // reader treats a missing `build` as outdated and a missing `busy` as
-      // "ask /invocations".
+      // whether to replace this daemon (issue #163). Both are additive: a
+      // missing `build` is outdated, and a missing `busy` on an identified
+      // daemon is busy (fail safe — `/invocations` cannot see queued handoffs).
       return Response.json(
         {
           socketPath,

@@ -146,7 +146,7 @@ describe("classifyDaemonBuild", () => {
     ).toBe("outdated");
   });
 
-  it("a different version is outdated, whatever the artifact", () => {
+  it("a strictly older daemon version is outdated, whatever the artifact", () => {
     expect(classifyDaemonBuild({ ...cli, version: "1.3.1" }, cli)).toBe(
       "outdated",
     );
@@ -156,6 +156,18 @@ describe("classifyDaemonBuild", () => {
         cli,
       ),
     ).toBe("outdated");
+  });
+
+  it("a newer daemon than this CLI is foreign (kept; do not flip-flop)", () => {
+    expect(classifyDaemonBuild({ ...cli, version: "1.3.3" }, cli)).toBe(
+      "foreign",
+    );
+    expect(
+      classifyDaemonBuild(
+        { version: "2.0.0", artifact: "/elsewhere", stamp: "1:1" },
+        cli,
+      ),
+    ).toBe("foreign");
   });
 
   it("same version, different artifact is foreign (left alone)", () => {
