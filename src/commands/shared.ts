@@ -117,13 +117,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-/** `{ verdict, build }` from one `/server-info` read; `current` when unreadable. */
-async function readBuild(
-  deps: ReconcileDeps,
-): Promise<{ verdict: BuildVerdict; build: BuildIdentity | null; info: unknown }> {
+/** One `/server-info` read, classified; `current` when the read fails. */
+async function readBuild(deps: ReconcileDeps): Promise<{
+  verdict: BuildVerdict;
+  build: BuildIdentity | null;
+  info: unknown;
+}> {
   let info: unknown;
   try {
-    ({ body: info } = await deps.getJson("/server-info", DAEMON_INFO_TIMEOUT_MS));
+    ({ body: info } = await deps.getJson(
+      "/server-info",
+      DAEMON_INFO_TIMEOUT_MS,
+    ));
   } catch {
     // Slow or unreadable: a live daemon is never evicted on a failed read.
     return { verdict: "current", build: null, info: null };

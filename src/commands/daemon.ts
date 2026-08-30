@@ -23,6 +23,7 @@ import {
   BUILD_IDENTITY,
   classifyDaemonBuild,
   parseBuildIdentity,
+  type BuildIdentity,
 } from "../lib/build-identity";
 import type { TmuxSocketError } from "../types";
 
@@ -94,9 +95,11 @@ async function printTmuxServer(): Promise<void> {
 function printBuild(daemonBuild: unknown): void {
   const daemon = parseBuildIdentity(daemonBuild);
   const cli = BUILD_IDENTITY;
-  const describe = (b: typeof cli) =>
+  const describe = (b: BuildIdentity) =>
     `${b.version} ${b.artifact}${b.stamp ? ` (${b.stamp})` : ""}`;
-  console.log(`Daemon build: ${daemon ? describe(daemon) : "none (predates build identity)"}`);
+  console.log(
+    `Daemon build: ${daemon ? describe(daemon) : "none (predates build identity)"}`,
+  );
   console.log(`CLI build: ${describe(cli)}`);
   const verdict = classifyDaemonBuild(daemonBuild, cli);
   if (verdict === "current") {

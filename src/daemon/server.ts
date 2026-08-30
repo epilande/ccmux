@@ -1202,12 +1202,13 @@ export class DaemonServer {
       // The probe runs first so its outcome, not a stale scan verdict, decides
       // `socketError`: a tmux that has come back up clears the diagnostic here.
       const socketPath = await this.getServerSocketPath();
-      // `build` and `busy` are what the CLI's auto-start path reads to decide
-      // whether this daemon is outdated and whether it is safe to replace
-      // right now (issue #163). Both additive: a daemon predating them omits
-      // the keys, and a reader treats a missing `build` as outdated and a
-      // missing `busy` as "ask /invocations".
+      // Sweep first: a handoff that has already expired is not work in
+      // progress, and would otherwise read as busy until the periodic sweep.
       this.handoffQueue.sweep();
+      // `build` and `busy` are what the CLI's auto-start path reads to decide
+      // whether to replace this daemon (issue #163). Both are additive, so a
+      // reader treats a missing `build` as outdated and a missing `busy` as
+      // "ask /invocations".
       return Response.json(
         {
           socketPath,

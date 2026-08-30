@@ -8,11 +8,9 @@ import {
 } from "./shared";
 import type { BuildIdentity } from "../lib/build-identity";
 
-/**
- * The reconcile decision matrix, driven entirely through injected deps: no
- * fetch, no lsof, no kill. `routes` answers `getJson` by path; a route that
- * throws stands in for a timeout or an unreadable body.
- */
+// The reconcile decision matrix, driven entirely through injected deps: no
+// fetch, no lsof, no kill. `routes` answers `getJson` by path; a route that
+// throws stands in for a timeout or an unreadable body.
 
 const cli: BuildIdentity = {
   version: "1.3.2",
@@ -43,7 +41,9 @@ function harness(
       if (entry === undefined) throw new Error(`no route for ${path}`);
       // A queue answers in order and repeats its last element.
       const route = Array.isArray(entry)
-        ? (entry.length > 1 ? entry.shift() : entry[0])
+        ? entry.length > 1
+          ? entry.shift()
+          : entry[0]
         : entry;
       if (route === undefined) throw new Error(`no route for ${path}`);
       return typeof route === "function" ? route() : route;
@@ -63,7 +63,13 @@ const info = (
   busy?: { invocations: number; handoffs: number },
 ) => ({
   status: 200,
-  body: { socketPath: "/tmp/sock", socketError: null, health: { degraded: false }, build, ...(busy ? { busy } : {}) },
+  body: {
+    socketPath: "/tmp/sock",
+    socketError: null,
+    health: { degraded: false },
+    build,
+    ...(busy ? { busy } : {}),
+  },
 });
 
 const outdatedBuild = { ...cli, version: "1.3.1" };

@@ -51,7 +51,11 @@ describe("computeBuildIdentity", () => {
 
   it("bun <script>: dist/index.js and src/index.ts of one checkout share an artifact but not a stamp", () => {
     const dist = file(join(dir, "dist", "index.js"), "bundled", 1_700_000_000);
-    const src = file(join(dir, "src", "index.ts"), "source code", 1_700_000_100);
+    const src = file(
+      join(dir, "src", "index.ts"),
+      "source code",
+      1_700_000_100,
+    );
     const fromDist = computeBuildIdentity({
       execPath: "/usr/local/bin/bun",
       argv1: dist,
@@ -70,8 +74,16 @@ describe("computeBuildIdentity", () => {
   it("bun <script>: a sibling checkout is a different artifact", () => {
     const a = file(join(dir, "a", "dist", "index.js"), "x", 1_700_000_000);
     const b = file(join(dir, "b", "dist", "index.js"), "x", 1_700_000_000);
-    const idA = computeBuildIdentity({ execPath: "bun", argv1: a, version: "1" });
-    const idB = computeBuildIdentity({ execPath: "bun", argv1: b, version: "1" });
+    const idA = computeBuildIdentity({
+      execPath: "bun",
+      argv1: a,
+      version: "1",
+    });
+    const idB = computeBuildIdentity({
+      execPath: "bun",
+      argv1: b,
+      version: "1",
+    });
     expect(idA.artifact).not.toBe(idB.artifact);
     // Same size and mtime, so only the artifact separates them.
     expect(idA.stamp).toBe(idB.stamp);
@@ -152,7 +164,10 @@ describe("classifyDaemonBuild", () => {
     );
     // The stamp is not consulted across artifacts.
     expect(
-      classifyDaemonBuild({ ...cli, artifact: "/elsewhere", stamp: "9:9" }, cli),
+      classifyDaemonBuild(
+        { ...cli, artifact: "/elsewhere", stamp: "9:9" },
+        cli,
+      ),
     ).toBe("foreign");
   });
 

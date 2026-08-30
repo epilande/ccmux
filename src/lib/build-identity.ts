@@ -77,9 +77,10 @@ function stampOf(path: string): string {
 }
 
 /**
- * Pure form of the identity computation, for tests. Never throws: a file that
- * cannot be resolved or stat'ed degrades to its unresolved path and an empty
- * stamp rather than failing the import of every module that needs this one.
+ * The identity computation with its inputs supplied, so tests can drive it.
+ * A file that cannot be resolved or stat'ed degrades to its unresolved path
+ * and an empty stamp rather than failing the import of every module that
+ * needs this one.
  */
 export function computeBuildIdentity(
   inputs: BuildIdentityInputs,
