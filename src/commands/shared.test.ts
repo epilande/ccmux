@@ -353,7 +353,7 @@ describe("getDaemonJson plaintext 404", () => {
   it("treats a plaintext Not Found as status 404 without parsing", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
-      new Response("Not Found", { status: 404 })) as typeof fetch;
+      new Response("Not Found", { status: 404 })) as unknown as typeof fetch;
     try {
       const result = await defaultReconcileDeps().getJson("/invocations", 1000);
       expect(result).toEqual({ status: 404, body: null });
@@ -371,15 +371,13 @@ describe("getDaemonJson plaintext 404", () => {
       }),
       "/invocations": new Response("Not Found", { status: 404 }),
     };
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
       const url = String(input);
-      const path = url.startsWith("http")
-        ? new URL(url).pathname
-        : url;
+      const path = url.startsWith("http") ? new URL(url).pathname : url;
       const reply = replies[path];
       if (!reply) throw new Error(`unexpected fetch ${url}`);
       return reply.clone();
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
     try {
       const launches: Array<number | undefined> = [];
       const deps = defaultReconcileDeps({
