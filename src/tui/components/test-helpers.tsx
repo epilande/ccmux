@@ -1,4 +1,6 @@
 import { expect } from "bun:test";
+import type { CliRenderer } from "@opentui/core";
+import { createMockKeys } from "@opentui/core/testing";
 import type { EnrichedSession, Session } from "../../types";
 import type { FilteredSession, StatusSummary } from "../utils/grouping";
 
@@ -140,4 +142,46 @@ export function expectFrameIntegrity(
 // assertion matches a message regardless of where word-wrap split it.
 export function squish(s: string): string {
   return s.replace(/[│┌┐└┘─\s]/g, "");
+}
+
+/**
+ * Press Escape so the component actually receives it.
+ *
+ * Neither `@opentui/core/testing` path does this on its own (issue #160):
+ *
+ * - `pressKey("escape")` resolves its argument as key INPUT and knows the
+ *   escape byte only under the `KeyCodes.ESCAPE` name, so the word falls
+ *   through as text and the handler sees six keys: `e s c a p e`. The
+ *   harness guard test (`test-harness-guard.test.ts`) fails the suite on
+ *   that spelling.
+ * - `pressEscape()` emits the right byte, but a bare `\x1b` is the prefix of
+ *   every escape sequence, so the stdin parser HOLDS it for a 20ms
+ *   disambiguation window (`StdinParser` `timeoutMs`, on the renderer's
+ *   clock) before it will call it a key. A `renderOnce()` or a 0ms `settle()`
+ *   right after sees nothing, and a keypress inside the window turns into
+ *   meta-that-key instead.
+ *
+ * This forces the window closed instead of sleeping through it: it tells the
+ * parser the timeout has elapsed and drains the event it then releases, so
+ * the escape is dispatched synchronously and the caller only has to repaint.
+ * Both members are private on `CliRenderer`; if an upgrade renames them the
+ * helper throws rather than degrading into a silent no-op, which is the
+ * whole failure mode this exists to close.
+ */
+export function deliverEscape(renderer: CliRenderer): void {
+  const internals = renderer as unknown as {
+    stdinParser?: { flushTimeout?: (nowMs?: number) => void };
+    drainStdinParser?: () => void;
+  };
+  const flush = internals.stdinParser?.flushTimeout;
+  const drain = internals.drainStdinParser;
+  if (typeof flush !== "function" || typeof drain !== "function") {
+    throw new Error(
+      "deliverEscape: CliRenderer no longer exposes stdinParser.flushTimeout " +
+        "and drainStdinParser; update the helper for this @opentui/core",
+    );
+  }
+  createMockKeys(renderer).pressEscape();
+  flush.call(internals.stdinParser, Number.MAX_SAFE_INTEGER);
+  drain.call(internals);
 }

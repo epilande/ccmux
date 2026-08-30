@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { RGBA, type CapturedFrame, type CapturedSpan } from "@opentui/core";
 import { createMockKeys, createMockMouse } from "@opentui/core/testing";
+import { deliverEscape } from "./test-helpers";
 import type {
   PruneCandidate,
   PruneOutcome,
@@ -405,6 +406,8 @@ async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
   return {
     ...recorder,
     keys: createMockKeys(setup.renderer),
+    /** Escape, actually delivered (see `deliverEscape`). */
+    escape: () => deliverEscape(setup!.renderer),
     mouse: createMockMouse(setup.renderer),
     /** Cell-level colours, for the things a char frame cannot show: the view
      *  tabs are filled CHIPS, and a chip is its background. */
@@ -1957,7 +1960,7 @@ describe("removal confirm", () => {
   });
 
   it("restores the list on esc with the selection intact", async () => {
-    const { keys, frame } = await mountPanel({
+    const { keys, escape, frame } = await mountPanel({
       list: async () => json(listOf([mainRow(), row()])),
       scan: async () => json({ candidates: [candidate()], skipped: [] }),
     });
@@ -1966,11 +1969,7 @@ describe("removal confirm", () => {
     keys.pressKey(" ");
     keys.pressKey("x");
     expect(await frame()).toContain("Remove worktrees?");
-    // A bare ESC is the prefix of every CSI sequence, so the parser holds it
-    // briefly to see whether more bytes follow. `frame()`'s single macrotask
-    // is not long enough (App.test.tsx waits the same way).
-    keys.pressEscape();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    escape();
     const back = await frame();
     expect(back).not.toContain("Remove worktrees?");
     expect(back).toContain("x remove 1");
@@ -5058,7 +5057,7 @@ describe("WorktreesPanel PR view safety gate", () => {
     );
     // Select the removable row.
     keys.pressKey("j");
-    keys.pressKey("space");
+    keys.pressKey(" ");
     expect(await frame()).toContain("x remove 1");
 
     keys.pressKey("l");
@@ -5080,7 +5079,7 @@ describe("WorktreesPanel PR view safety gate", () => {
       prsOf([openPR()]),
     );
     keys.pressKey("j");
-    keys.pressKey("space");
+    keys.pressKey(" ");
     keys.pressKey("l");
     keys.pressKey("h");
     expect(await frame()).toContain("x remove 1");
@@ -5098,7 +5097,7 @@ describe("WorktreesPanel PR view safety gate", () => {
       prsOf([openPR()]),
     );
     keys.pressKey("l");
-    keys.pressKey("space");
+    keys.pressKey(" ");
     keys.pressKey("a");
     keys.pressKey("D");
     await frame();
@@ -5430,7 +5429,7 @@ describe("PR row keys", () => {
 
   it("leaves the removal keys inert on a PR row", async () => {
     const { keys, frame } = await onPRRow();
-    keys.pressKey("space");
+    keys.pressKey(" ");
     keys.pressKey("x");
     const shown = await frame();
     // No checkbox appeared, and `x` named the view that owns removal rather
