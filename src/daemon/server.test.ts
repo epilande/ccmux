@@ -53,6 +53,7 @@ import { SessionManager } from "./sessions";
 import type { SessionEvent } from "./sessions";
 import type { SSEEvent, DaemonHealth } from "../types";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
+import { BUILD_IDENTITY } from "../lib/build-identity";
 import type { SpawnableAgent } from "../lib/spawnable-agents";
 import type { Session, TmuxPane, EnrichedSession } from "../types/session";
 import { AttentionTracker } from "./attention-tracker";
@@ -3275,6 +3276,25 @@ describe("getServerSocketPath and /server-info", () => {
       expect(data.health).toEqual({ degraded: false });
       // The route resolves through the same cached lookup: one spawn only.
       expect(state.calls).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("carries this process's build identity and idle busy counts on GET /server-info", async () => {
+    const { internals } = createServer();
+    const { restore } = withSpawnQueue([{ code: 0, out: "/tmp/sock\n" }]);
+    try {
+      const res = await internals.handleRequest(
+        new Request("http://localhost/server-info"),
+      );
+      const data = (await res.json()) as {
+        build: unknown;
+        busy: { invocations: number; handoffs: number };
+      };
+      expect(data.build).toEqual(BUILD_IDENTITY);
+      // Nothing invoked, nothing handed off: the CLI may replace this daemon.
+      expect(data.busy).toEqual({ invocations: 0, handoffs: 0 });
     } finally {
       restore();
     }

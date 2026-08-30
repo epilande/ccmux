@@ -6,16 +6,30 @@ import {
   findDaemonPidByPort,
   getProcessCommand,
 } from "../daemon";
-import { DAEMON_PORT, getDaemonUrl } from "../lib/config";
+import {
+  DAEMON_INFO_TIMEOUT_MS,
+  DAEMON_PORT,
+  getDaemonUrl,
+} from "../lib/config";
 import { daemonBody } from "../lib/daemon-json";
+import {
+  BUILD_IDENTITY,
+  classifyDaemonBuild,
+  parseBuildIdentity,
+  type BuildIdentity,
+  type BuildVerdict,
+} from "../lib/build-identity";
 
 /**
  * Evict any zombie on the daemon port, spawn a fresh daemon, wait for health.
  * Shared by every auto-start path so they behave identically. Exits on failure,
  * surfacing the port holder's PID/command line instead of a silent error.
  */
-export async function launchDaemon(): Promise<void> {
-  const evicted = await stopDaemonByPort();
+export async function launchDaemon(expectedPid?: number): Promise<boolean> {
+  const evicted = await stopDaemonByPort(expectedPid);
+  // Confirm-time replace is bound to one LISTEN pid. If that pid is gone
+  // (a peer already spawned a current daemon), do not kill or spawn over it.
+  if (expectedPid !== undefined && !evicted) return false;
   if (evicted) {
     // let the killed listener's socket release before we bind
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -23,7 +37,7 @@ export async function launchDaemon(): Promise<void> {
 
   spawnDaemonBackground();
 
-  if (await waitForDaemon()) return;
+  if (await waitForDaemon()) return true;
 
   const blockerPid = await findDaemonPidByPort();
   if (blockerPid) {
@@ -38,14 +52,254 @@ export async function launchDaemon(): Promise<void> {
 }
 
 /**
- * Ensure the daemon is running, starting it if necessary.
+ * What the auto-start path learned about the running daemon, with no side
+ * effects yet. `settleDaemon` turns it into a launch, a restart, or nothing.
+ */
+export interface DaemonProbe {
+  alive: boolean;
+  /** Fail-open: an unreadable `/server-info` reads as `current`. */
+  verdict: BuildVerdict;
+  daemonBuild: BuildIdentity | null;
+  /**
+   * Only measured for an `outdated` daemon. `handoffs` is 0 when the count is
+   * known (the `busy` field, or a 404 on `/invocations` from a daemon that
+   * predates both features). It is null when the count came from a 200
+   * `/invocations` fallback, which cannot see queued handoffs — that is not
+   * idle. The whole thing is null when the daemon could not be asked, or a
+   * modern `/server-info` omitted `busy` (treated as busy, fail safe).
+   */
+  busy: { invocations: number; handoffs: number | null } | null;
+}
+
+export interface ReconcileDeps {
+  isAlive: () => Promise<boolean>;
+  /** GET `<daemon>/<path>` within `timeoutMs`; resolves status + JSON body or throws. */
+  getJson: (
+    path: string,
+    timeoutMs: number,
+  ) => Promise<{ status: number; body: unknown }>;
+  /** Current TCP LISTEN pid on the daemon port, or null if none / unreadable. */
+  findListenPid: () => Promise<number | null>;
+  /**
+   * Spawn a current daemon. When `expectedPid` is set, kill only that pid
+   * and abort (return false) if the listener is no longer it.
+   */
+  launch: (expectedPid?: number) => Promise<boolean>;
+  cli: BuildIdentity;
+  /** Progress line channel ("Starting daemon...", "restarting..."). */
+  log: (line: string) => void;
+  /** Warning channel (outdated-but-busy). */
+  warn: (line: string) => void;
+}
+
+export type ReconcileOutcome =
+  | "started"
+  | "kept"
+  | "restarted"
+  | "busy"
+  | "raced";
+
+async function getDaemonJson(
+  path: string,
+  timeoutMs: number,
+): Promise<{ status: number; body: unknown }> {
+  const response = await fetch(`${getDaemonUrl()}${path}`, {
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  // Unknown routes are plaintext "Not Found". Parsing that throws and would
+  // hide the 404 from `countRunningInvocations` (legacy idle).
+  if (response.status === 404) return { status: 404, body: null };
+  const body: unknown = await response.json();
+  return { status: response.status, body };
+}
+
+export function defaultReconcileDeps(
+  overrides: Partial<ReconcileDeps> = {},
+): ReconcileDeps {
+  return {
+    isAlive: isDaemonRunningAsync,
+    getJson: getDaemonJson,
+    findListenPid: findDaemonPidByPort,
+    launch: launchDaemon,
+    cli: BUILD_IDENTITY,
+    log: (line) => console.error(line),
+    warn: (line) => console.error(line),
+    ...overrides,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/** One `/server-info` read, classified; `current` when the read fails. */
+async function readBuild(deps: ReconcileDeps): Promise<{
+  verdict: BuildVerdict;
+  build: BuildIdentity | null;
+  info: unknown;
+}> {
+  let info: unknown;
+  try {
+    ({ body: info } = await deps.getJson(
+      "/server-info",
+      DAEMON_INFO_TIMEOUT_MS,
+    ));
+  } catch {
+    // Slow or unreadable: a live daemon is never evicted on a failed read.
+    return { verdict: "current", build: null, info: null };
+  }
+  const build = isRecord(info) ? info.build : undefined;
+  return {
+    verdict: classifyDaemonBuild(build, deps.cli),
+    build: parseBuildIdentity(build),
+    info,
+  };
+}
+
+/**
+ * Running-invocation count from `GET /invocations`.
+ * `absent` is a plaintext/JSON 404 (daemon predates the endpoint).
+ * `unknown` is an unreadable or malformed response.
+ */
+async function countRunningInvocations(
+  deps: ReconcileDeps,
+): Promise<
+  | { kind: "ok"; running: number }
+  | { kind: "absent" }
+  | { kind: "unknown" }
+> {
+  try {
+    const { status, body } = await deps.getJson(
+      "/invocations",
+      DAEMON_INFO_TIMEOUT_MS,
+    );
+    // A daemon too old to have the endpoint cannot be running an invocation
+    // or a handoff (both features postdate it).
+    if (status === 404) return { kind: "absent" };
+    if (status !== 200 || !isRecord(body) || !Array.isArray(body.invocations)) {
+      return { kind: "unknown" };
+    }
+    return {
+      kind: "ok",
+      running: body.invocations.filter(
+        (record: unknown) => isRecord(record) && record.status === "running",
+      ).length,
+    };
+  } catch {
+    return { kind: "unknown" };
+  }
+}
+
+async function measureBusy(
+  deps: ReconcileDeps,
+  info: unknown,
+): Promise<DaemonProbe["busy"]> {
+  const busy = isRecord(info) ? info.busy : undefined;
+  if (
+    isRecord(busy) &&
+    typeof busy.invocations === "number" &&
+    typeof busy.handoffs === "number"
+  ) {
+    return { invocations: busy.invocations, handoffs: busy.handoffs };
+  }
+  // Identified daemon without a complete `busy` field: fail safe. The
+  // `/invocations` fallback cannot see queued handoffs.
+  if (parseBuildIdentity(isRecord(info) ? info.build : undefined)) {
+    return null;
+  }
+  const counted = await countRunningInvocations(deps);
+  if (counted.kind === "unknown") return null;
+  if (counted.kind === "absent") return { invocations: 0, handoffs: 0 };
+  return { invocations: counted.running, handoffs: null };
+}
+
+/**
+ * Liveness plus a best-effort build comparison, no side effects. `/health`
+ * on its short budget is the ONLY thing that decides an unreachable daemon;
+ * the `/server-info` read gets its own longer budget and fails open.
+ */
+export async function probeDaemon(
+  deps: ReconcileDeps = defaultReconcileDeps(),
+): Promise<DaemonProbe> {
+  if (!(await deps.isAlive())) {
+    return { alive: false, verdict: "current", daemonBuild: null, busy: null };
+  }
+  const { verdict, build, info } = await readBuild(deps);
+  const busy = verdict === "outdated" ? await measureBusy(deps, info) : null;
+  return { alive: true, verdict, daemonBuild: build, busy };
+}
+
+function isIdle(busy: DaemonProbe["busy"]): boolean {
+  return busy !== null && busy.invocations === 0 && busy.handoffs === 0;
+}
+
+function describeBusy(busy: DaemonProbe["busy"]): string {
+  if (busy === null) return "could not read its invocations";
+  const parts = [`${busy.invocations} running invocations`];
+  if (busy.handoffs !== null) parts.push(`${busy.handoffs} queued handoffs`);
+  return parts.join(", ");
+}
+
+/**
+ * Act on a probe: start a missing daemon, replace an outdated idle one, warn
+ * about an outdated busy one, leave a current or foreign one alone (foreign is
+ * another checkout on the same version, or a newer daemon than this CLI;
+ * see `build-identity.ts`).
+ */
+export async function settleDaemon(
+  probe: DaemonProbe,
+  deps: ReconcileDeps = defaultReconcileDeps(),
+): Promise<ReconcileOutcome> {
+  if (!probe.alive) {
+    deps.log("Starting daemon...");
+    await deps.launch();
+    return "started";
+  }
+  if (probe.verdict !== "outdated") return "kept";
+  if (!isIdle(probe.busy)) {
+    deps.warn(
+      `Daemon is outdated but busy (${describeBusy(probe.busy)}); ` +
+        "run `ccmux daemon restart` when it is free.",
+    );
+    return "busy";
+  }
+  deps.log("Daemon is outdated; restarting...");
+  // Another CLI may have replaced it, or an invoke/handoff may have started,
+  // between the probe and now. Snapshot the LISTEN pid, then re-read build
+  // *and* busy; kill only that pid. A daemon that is no longer outdated, is
+  // now busy, or is no longer that listener stays.
+  const listenPid = await deps.findListenPid();
+  const { verdict, info } = await readBuild(deps);
+  if (verdict !== "outdated") return "raced";
+  const busy = await measureBusy(deps, info);
+  if (!isIdle(busy)) {
+    deps.warn(
+      `Daemon is outdated but busy (${describeBusy(busy)}); ` +
+        "run `ccmux daemon restart` when it is free.",
+    );
+    return "busy";
+  }
+  if (listenPid === null || (await deps.findListenPid()) !== listenPid) {
+    return "raced";
+  }
+  if (!(await deps.launch(listenPid))) return "raced";
+  return "restarted";
+}
+
+/** `probeDaemon` then `settleDaemon`, for callers with nothing to overlap. */
+export async function reconcileDaemon(
+  deps: ReconcileDeps = defaultReconcileDeps(),
+): Promise<ReconcileOutcome> {
+  return settleDaemon(await probeDaemon(deps), deps);
+}
+
+/**
+ * Ensure a daemon running THIS build is serving, starting or replacing one
+ * as needed (an outdated daemon is only replaced when idle).
  * Exits the process if the daemon cannot be started.
  */
 export async function ensureDaemon(): Promise<void> {
-  if (await isDaemonRunningAsync()) return;
-
-  console.error("Starting daemon...");
-  await launchDaemon();
+  await reconcileDaemon();
 }
 
 /**

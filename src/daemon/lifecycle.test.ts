@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { writeFileSync, existsSync, unlinkSync, mkdirSync, rmSync } from "fs";
-import { dirname, join } from "path";
+import { dirname, join, resolve } from "path";
 import { tmpdir } from "os";
 import { spawn } from "child_process";
 import {
@@ -11,6 +11,7 @@ import {
   findDaemonPidByPort,
   stopDaemonByPort,
   isStandaloneBinary,
+  daemonSpawnArgv,
 } from "./lifecycle";
 import { getPidFilePath } from "../lib/config";
 
@@ -288,6 +289,22 @@ describe("stopDaemonByPort", () => {
     mockBunSpawn(""); // lsof finds no listener
     expect(await stopDaemonByPort()).toBe(false);
   });
+
+  it("does not kill a listener that is not the expected confirm-time pid", async () => {
+    const listener = spawnSleepProcess();
+    mockBunSpawn(`${listener}\n`);
+    expect(await stopDaemonByPort(listener + 1)).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(isProcessAlive(listener)).toBe(true);
+  });
+
+  it("kills the listener when it still matches the expected confirm-time pid", async () => {
+    const listener = spawnSleepProcess();
+    mockBunSpawn(`${listener}\n`);
+    expect(await stopDaemonByPort(listener)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(isProcessAlive(listener)).toBe(false);
+  });
 });
 
 describe("isStandaloneBinary", () => {
@@ -325,5 +342,78 @@ describe("isStandaloneBinary", () => {
   it("treats a real dev script path as not standalone", () => {
     expect(isStandaloneBinary("/Users/me/ccmux/src/index.ts")).toBe(false);
     expect(isStandaloneBinary("/home/me/ccmux/dist/index.js")).toBe(false);
+  });
+});
+
+describe("daemonSpawnArgv", () => {
+  it("resolves a relative bun script against the import-time cwd (bin/ccmux + sidebar chdir)", () => {
+    // Pre-fix spawn forwarded argv[1] as-is. After the sidebar chdirs to
+    // CCMUX_CALLER_PWD, bun looks for dist/index.js in the caller's directory
+    // and cannot start the replacement daemon.
+    expect(
+      daemonSpawnArgv("dist/index.js", "/usr/local/bin/bun", "/opt/ccmux"),
+    ).toEqual(["/opt/ccmux/dist/index.js", "daemon", "start"]);
+    expect(
+      daemonSpawnArgv("src/index.ts", "/root/.bun/bin/bun", "/home/me/ccmux"),
+    ).toEqual(["/home/me/ccmux/src/index.ts", "daemon", "start"]);
+  });
+
+  it("keeps an already-absolute script path", () => {
+    expect(
+      daemonSpawnArgv("/opt/ccmux/src/index.ts", "/usr/bin/bun", "/elsewhere"),
+    ).toEqual(["/opt/ccmux/src/index.ts", "daemon", "start"]);
+  });
+
+  it("omits the script path for a compiled binary", () => {
+    expect(
+      daemonSpawnArgv("/$bunfs/root/index.js", "/usr/local/bin/ccmux", "/tmp"),
+    ).toEqual(["daemon", "start"]);
+  });
+
+  it("bun finds the resolved script after cwd has left the package root", async () => {
+    const root = join(
+      tmpdir(),
+      `ccmux-daemon-spawn-${process.pid}-${Date.now()}`,
+    );
+    const caller = join(
+      tmpdir(),
+      `ccmux-caller-pwd-${process.pid}-${Date.now()}`,
+    );
+    mkdirSync(join(root, "dist"), { recursive: true });
+    mkdirSync(caller, { recursive: true });
+    writeFileSync(
+      join(root, "dist", "index.js"),
+      'process.stdout.write("ok\\n");',
+    );
+    try {
+      const args = daemonSpawnArgv("dist/index.js", process.execPath, root);
+      expect(args[0]).toBe(resolve(root, "dist/index.js"));
+
+      // Sidebar has already chdir'd; spawn inherits that cwd. A relative
+      // argv[1] (the pre-fix spawn) makes bun miss the script.
+      const proc = Bun.spawn([process.execPath, args[0]], {
+        cwd: caller,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exit] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      expect(exit).toBe(0);
+      expect(stdout).toBe("ok\n");
+      expect(stderr).toBe("");
+
+      const relative = Bun.spawn([process.execPath, "dist/index.js"], {
+        cwd: caller,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(await relative.exited).not.toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(caller, { recursive: true, force: true });
+    }
   });
 });

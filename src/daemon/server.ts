@@ -84,6 +84,7 @@ import {
   type PRSource,
 } from "./gh-spawn-source";
 import { getAgents, type AgentDef } from "../lib/agents";
+import { BUILD_IDENTITY } from "../lib/build-identity";
 import { listSpawnableAgents, spawnBinaryFor } from "../lib/spawnable-agents";
 import {
   getMarkerKey,
@@ -1201,11 +1202,25 @@ export class DaemonServer {
       // The probe runs first so its outcome, not a stale scan verdict, decides
       // `socketError`: a tmux that has come back up clears the diagnostic here.
       const socketPath = await this.getServerSocketPath();
+      // Sweep first: a handoff that has already expired is not work in
+      // progress, and would otherwise read as busy until the periodic sweep.
+      this.handoffQueue.sweep();
+      // `build` and `busy` are what the CLI's auto-start path reads to decide
+      // whether to replace this daemon (issue #163). Both are additive: a
+      // missing `build` is outdated, and a missing `busy` on an identified
+      // daemon is busy (fail safe — `/invocations` cannot see queued handoffs).
       return Response.json(
         {
           socketPath,
           socketError: this.socketError,
           health: this.getScanHealth(),
+          build: BUILD_IDENTITY,
+          busy: {
+            invocations: this.invocationManager
+              .listInvocations()
+              .filter((record) => record.status === "running").length,
+            handoffs: this.handoffQueue.size(),
+          },
         },
         { headers: corsHeaders },
       );

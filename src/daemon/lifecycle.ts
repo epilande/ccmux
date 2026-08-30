@@ -6,7 +6,7 @@ import {
   closeSync,
   mkdirSync,
 } from "fs";
-import { dirname } from "path";
+import { dirname, resolve } from "path";
 import { spawn } from "child_process";
 import {
   LOG_FILE,
@@ -206,14 +206,44 @@ export function isStandaloneBinary(
 }
 
 /**
+ * cwd at import, before the sidebar (or the daemon itself) chdirs away.
+ * `bin/ccmux` execs `bun dist/index.js` so argv[1] is relative; resolve it
+ * against this directory, not the cwd at spawn time.
+ */
+const SPAWN_CWD = process.cwd();
+
+/**
+ * argv for re-spawning this process as `daemon start`.
+ *
+ * `bin/ccmux` execs `bun dist/index.js` (or `bun src/index.ts`) so argv[1] is
+ * relative. After an idle replace, `launchDaemon` has already killed the
+ * listener; `spawnDaemonBackground` then re-spawns. The sidebar chdirs to
+ * `CCMUX_CALLER_PWD` before `ensureDaemon()`, so a relative script would be
+ * resolved from the caller's directory and bun would fail to start — leaving
+ * no daemon and dropping SSE for every TUI. Resolve against `cwd` (the
+ * directory at import, before any chdir). A compiled binary has no script
+ * path to forward.
+ */
+export function daemonSpawnArgv(
+  argv1: string | undefined,
+  execPath: string,
+  cwd: string,
+): string[] {
+  if (isStandaloneBinary(argv1, execPath)) return ["daemon", "start"];
+  return [resolve(cwd, argv1!), "daemon", "start"];
+}
+
+/**
  * Spawn daemon process in background (detached)
  */
 export function spawnDaemonBackground(): void {
   mkdirSync(dirname(LOG_FILE), { recursive: true });
   const logFd = openSync(LOG_FILE, "a");
-  const daemonArgs = isStandaloneBinary(process.argv[1])
-    ? ["daemon", "start"]
-    : [process.argv[1], "daemon", "start"];
+  const daemonArgs = daemonSpawnArgv(
+    process.argv[1],
+    process.execPath,
+    SPAWN_CWD,
+  );
   const child = spawn(process.execPath, daemonArgs, {
     detached: true,
     stdio: ["ignore", logFd, logFd],
@@ -277,12 +307,15 @@ async function isKillableDaemonPid(pid: number): Promise<boolean> {
  * which may have been recycled by an unrelated live process. Safe to call
  * whenever /health is unreachable (the auto-start path does).
  */
-export async function stopDaemonByPort(): Promise<boolean> {
+export async function stopDaemonByPort(expectedPid?: number): Promise<boolean> {
   const pid = await findDaemonPidByPort();
   if (!pid) {
     removeStalePidFile(); // no listener -> no daemon; clear stale state only
     return false;
   }
+  // A confirm-time snapshot: another CLI may have already replaced the
+  // outdated listener with a current daemon. Never signal a different pid.
+  if (expectedPid !== undefined && pid !== expectedPid) return false;
 
   if (!(await isKillableDaemonPid(pid))) return false; // foreign squatter
 
