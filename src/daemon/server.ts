@@ -50,6 +50,7 @@ import {
   MAX_SPAWN_PROMPT_BYTES,
   normalizeBoolean,
   normalizeClientTty,
+  normalizeModel,
   normalizePrompt,
   resolveSpawnFocusArgv,
   normalizeSplit,
@@ -4112,6 +4113,7 @@ export class DaemonServer {
       worktree?: unknown;
       pr?: unknown;
       issue?: unknown;
+      model?: unknown;
     };
     try {
       body = (await req.json()) as typeof body;
@@ -4201,6 +4203,18 @@ export class DaemonServer {
       );
     }
     const prompt = promptResult.value;
+
+    // The value is spliced unquoted into the agent command, so the pattern
+    // check here is what keeps it inert. Whether the agent takes a model
+    // flag at all is the builders' call, once the agent is resolved.
+    const modelResult = normalizeModel(body.model);
+    if (!modelResult.ok) {
+      return Response.json(
+        { error: modelResult.error },
+        { status: 400, headers },
+      );
+    }
+    const model = modelResult.value;
 
     // Every other spawn field goes through a normalizer; `detach` used to be
     // an unchecked cast, so `{"detach":"false"}` (a truthy string) reached
@@ -4432,12 +4446,14 @@ export class DaemonServer {
           // Everything here runs before the first side effect, so that
           // refusal is a 400 with no pane and no worktree behind it.
           logPath: forkSource.session.logPath,
+          model,
         })
       : buildAgentSpawnCommand({
           agent,
           binary: cmd,
           resume,
           prompt: spawnPrompt,
+          model,
         });
     if (!commandResult.ok) {
       return Response.json(
@@ -4897,11 +4913,15 @@ export class DaemonServer {
     }
 
     // Create tmux pane
+    // A new window is named after the worktree when the spawn has one (the
+    // `--worktree` name, `issue-<n>-...`, `pr-<n>-...`, a reused checkout),
+    // else after the agent; `buildTmuxSpawnArgv` ignores it for a split.
     const spawnArgv = buildTmuxSpawnArgv({
       split,
       cwd: spawnCwd,
       placement,
       detach,
+      windowName: worktreeInfo?.name ?? agent.name,
     });
     const tmuxCmd = spawnArgv[0];
     // Hoisted so the outer catch (below) can kill a pane that was created

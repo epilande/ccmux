@@ -3849,6 +3849,8 @@ describe("POST /spawn", () => {
       expect(argv[0]).toEqual([
         "tmux",
         "new-window",
+        "-n",
+        "prompty",
         "-d",
         "-c",
         cwd,
@@ -3924,6 +3926,8 @@ describe("POST /spawn", () => {
       expect(argv[1]).toEqual([
         "tmux",
         "new-window",
+        "-n",
+        "prompty",
         "-d",
         "-a",
         "-t",
@@ -3954,6 +3958,8 @@ describe("POST /spawn", () => {
       expect(argv[1]).toEqual([
         "tmux",
         "new-window",
+        "-n",
+        "prompty",
         "-d",
         "-t",
         "$3:",
