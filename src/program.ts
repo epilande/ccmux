@@ -26,7 +26,6 @@ import {
   createCompleteCommand,
 } from "./commands/completion";
 
-/** The full ccmux command tree; `src/index.ts` parses it, tests walk it. */
 export function createProgram(): Command {
   const program = new Command();
 
@@ -37,7 +36,6 @@ export function createProgram(): Command {
     )
     .version(pkg.version);
 
-  // Register commands
   program.addCommand(createDaemonCommand());
   program.addCommand(createShowCommand());
   program.addCommand(createDismissCommand());

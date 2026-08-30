@@ -410,16 +410,9 @@ describe("completionScript", () => {
 // ---------------------------------------------------------------------------
 // The scripts, actually run.
 //
-// The assertions above pin the scripts' TEXT. Only running one pins its
-// BEHAVIOR, and the difference is not academic: `printf '%s\n' -- "$line"`
-// shipped in the fish script because `--` after a format string is data, not a
-// flag, so printf reused the format and emitted a bare `--` before every
-// candidate. A substring assertion happily pinned the buggy literal, and a
-// snapshot would have recorded it just as happily. Asking the shell what it
-// ended up offering is the only check in that class.
-//
-// Each run puts a stub `ccmux` first on PATH, so no daemon, no real binary and
-// no timing reaches the assertion.
+// The assertions above pin the scripts' TEXT. Running them is what pins
+// behavior. A stub `ccmux` is first on PATH so no daemon or real binary
+// reaches the assertion.
 // ---------------------------------------------------------------------------
 
 // Prefer /bin/bash on macOS: it is 3.2, the version the script's index loop
@@ -449,8 +442,6 @@ function makeStub(name: string, body: string): string {
 beforeAll(() => {
   shellRoot = mkdtempSync(join(tmpdir(), "ccmux-completion-"));
 
-  // What `renderCompletion` really sends each shell: bare values to bash,
-  // value<TAB>description to the shells that can show one.
   stubs.values = makeStub("values", `printf 'alpha\\nbeta\\n'`);
   stubs.described = makeStub(
     "described",
@@ -577,9 +568,6 @@ describe("completionScript: fish, executed", () => {
   it.skipIf(!FISH)(
     "offers exactly the endpoint's candidates and nothing else",
     () => {
-      // Exact equality is the whole point: a bare `--` rode in front of these
-      // for as long as the printf passed one, and no substring assertion could
-      // see it.
       expect(fishComplete("ccmux ", stubs.described)).toEqual([
         "alpha\tfirst",
         "beta\tsecond",
@@ -679,7 +667,6 @@ describe("liveCompletionDeps", () => {
     const calls = stubFetch({ sessions: [] });
     await liveCompletionDeps.sessions();
 
-    // The duration itself is not worth pinning; that there is a deadline is.
     expect(calls[0].init?.signal).toBeInstanceOf(AbortSignal);
   });
 

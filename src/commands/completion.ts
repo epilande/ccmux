@@ -43,7 +43,6 @@ export interface Completion {
   directive?: CompletionDirective;
 }
 
-/** The slice of a daemon session row the completer reads. */
 export interface SessionRow {
   id: string;
   agentType: string;
@@ -66,7 +65,6 @@ export interface DaemonInvocation {
   agent?: string;
 }
 
-/** Map the daemon's `invocationId` onto the completer's `id`. */
 export function invocationRowsFromDaemon(
   records: readonly DaemonInvocation[],
 ): InvocationRow[] {
@@ -79,7 +77,6 @@ export function invocationRowsFromDaemon(
     }));
 }
 
-/** Every external lookup, injected so the walk itself is pure and testable. */
 export interface CompletionDeps {
   sessions(): Promise<SessionRow[]>;
   invocations(): Promise<InvocationRow[]>;
@@ -88,7 +85,6 @@ export interface CompletionDeps {
 
 interface ValueContext {
   deps: CompletionDeps;
-  /** Positional words already consumed by the command being completed. */
   positionals: string[];
   root: Command;
 }
@@ -361,7 +357,6 @@ export async function completeWords(
   for (let i = 0; i < previous.length; i++) {
     const word = previous[i];
     if (pendingOption) {
-      // The value of the option before it, whatever it looks like.
       pendingOption = null;
       continue;
     }
