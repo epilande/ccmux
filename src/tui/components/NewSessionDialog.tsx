@@ -1030,6 +1030,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               height={1}
               flexDirection="row"
               flexGrow={1}
+              flexShrink={1}
               paddingLeft={1}
               paddingRight={1}
               backgroundColor={
@@ -1047,6 +1048,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 backgroundColor="transparent"
                 focusedBackgroundColor="transparent"
                 flexGrow={1}
+                flexShrink={1}
               />
             </box>
           </box>
@@ -1100,6 +1102,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               height={1}
               flexDirection="row"
               flexGrow={1}
+              flexShrink={1}
               paddingLeft={1}
               paddingRight={1}
               backgroundColor={
@@ -1119,6 +1122,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 backgroundColor="transparent"
                 focusedBackgroundColor="transparent"
                 flexGrow={1}
+                flexShrink={1}
               />
             </box>
             <Show when={nameHint()}>
