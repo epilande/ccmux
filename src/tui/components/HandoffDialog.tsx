@@ -208,9 +208,10 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
     Math.max(1, contentWidth() - LABEL_WIDTH - CONTROL_GAP - 2);
 
   /** Truncated HERE rather than by the layout: an OpenTUI input draws its
-   *  placeholder in full past its own box. (A long typed VALUE overruns the
-   *  border at sidebar widths exactly as the new-session dialog's Prompt
-   *  field has always done; that is the input's own scrolling, not this.) */
+   *  placeholder in full past its own box. (A long typed VALUE is the other
+   *  overrun, handled at the input: it measures itself from its text, and
+   *  Yoga's default `flexShrink` of 0 let that measurement widen the control
+   *  past the border instead of scrolling; see the `flexShrink` below.) */
   const notePlaceholder = () =>
     truncateText("note (optional) · sent in the header", controlWidth());
 
@@ -346,6 +347,7 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
           height={1}
           flexDirection="row"
           flexGrow={1}
+          flexShrink={1}
           paddingLeft={1}
           paddingRight={1}
           backgroundColor={
@@ -366,6 +368,7 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
             // being refused AFTER the dialog closed would lose what was typed.
             maxLength={MAX_HANDOFF_NOTE_CHARS}
             flexGrow={1}
+            flexShrink={1}
           />
         </box>
       </box>
