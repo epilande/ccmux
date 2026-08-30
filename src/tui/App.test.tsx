@@ -6755,7 +6755,9 @@ describe("App copy last response", () => {
     try {
       await renderRow();
       await openCopyDialog();
-      await press("escape");
+      deliverEscape(setup.renderer);
+      await settle();
+      await setup.renderOnce();
       const frame = squish(setup.captureCharFrame());
       expect(frame).not.toContain("Lastresponse");
       expect(asked).toEqual([]);
