@@ -517,3 +517,4 @@ Section and repo headers are LINES the cursor never stops on, but lines `sourceP
 | D-Bus notifier (buttons, inline reply, retract)                                                                         | `src/lib/notify-dbus.ts`                      |
 | macOS `ccmux-notifier` helper app (Swift)                                                                               | `notifier/`                                   |
 | Setup install/uninstall flow                                                                                            | `src/commands/setup.ts`                       |
+| Shell completions (`completion` scripts + hidden `__complete` tree walk)                                                | `src/commands/completion.ts`                  |

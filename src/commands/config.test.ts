@@ -15,8 +15,14 @@ mock.module("../lib/preferences", () => ({
   },
 }));
 
-const { createConfigCommand, getNestedValue, flattenObject, KNOWN_KEYS } =
-  await import("./config");
+const {
+  createConfigCommand,
+  getNestedValue,
+  flattenObject,
+  KNOWN_KEYS,
+  completableConfigKeys,
+  configValueChoices,
+} = await import("./config");
 
 class ExitError extends Error {
   constructor(public code?: number) {
@@ -436,5 +442,86 @@ describe("KNOWN_KEYS.reviewHandback", () => {
 
   it("parse returns the value unchanged", () => {
     expect(spec.parse("auto")).toBe("auto");
+  });
+});
+
+// completableConfigKeys() is a hand-maintained literal array (KNOWN_KEYS plus
+// eight hardcoded dotted strings); the "set" action's acceptance of those
+// dotted keys is control flow (an if/else for sidebar.*, a switch for
+// notifications.*), not a shared data structure. Nothing else asserts the two
+// stay in sync, so a new notifications.<key> case can ship uncompletable with
+// every other test still green. This suite fails the moment they drift.
+describe("completableConfigKeys() parity with config set", () => {
+  // Signals `config set` prints only on the "I don't recognize this key"
+  // paths (top-level, sidebar.<key>, notifications.<key>). A value-validation
+  // error (e.g. "Invalid value for previewWidth: ...") never includes these,
+  // so checking for them isolates "key unrecognized" from "value rejected".
+  const UNKNOWN_KEY_SIGNALS = [
+    "Valid keys:",
+    "Valid sidebar keys:",
+    "Valid notifications keys:",
+  ] as const;
+
+  // A value `config set` should actually accept for each completable key, so
+  // a rejection can only mean the key itself was not recognized. Enumerable
+  // keys pull their first choice from configValueChoices(); the rest are
+  // free-form and read straight off each validator in config.ts.
+  function plausibleValueFor(key: string): string {
+    const choices = configValueChoices(key);
+    if (choices && choices.length > 0) return choices[0]!;
+    switch (key) {
+      case "previewWidth":
+        return "40"; // integer 20-80
+      case "searchPaneLines":
+        return "50"; // integer 10-500
+      case "command":
+        return "claude"; // non-empty string
+      case "tmuxSocket":
+        return "work"; // non-empty string
+      case "additionalClaudeConfigDirs":
+        return '["~/.claude-personal"]'; // JSON array of abs/~ paths
+      case "sidebar.width":
+        return "40"; // integer 10-80
+      case "notifications.delayMs":
+        return "500"; // non-negative integer
+      case "notifications.command":
+        return "notify-send"; // non-empty string
+      default:
+        throw new Error(
+          `plausibleValueFor: no fixture value for "${key}" — ` +
+            `add one so the parity test can exercise it`,
+        );
+    }
+  }
+
+  it("recognizes every key completableConfigKeys() offers as a valid config set key", async () => {
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      for (const key of completableConfigKeys()) {
+        store = {};
+        errorSpy.mockClear();
+        const value = plausibleValueFor(key);
+
+        await runConfigSet(key, value);
+
+        const unknownKeyRejection = errorSpy.mock.calls.some((call) =>
+          UNKNOWN_KEY_SIGNALS.some((signal) =>
+            String(call[0]).includes(signal),
+          ),
+        );
+        if (unknownKeyRejection) {
+          throw new Error(
+            `completableConfigKeys() offers "${key}" but config set rejects ` +
+              `it as unknown: ${errorSpy.mock.calls.map((c) => c.join(" ")).join(" | ")}`,
+          );
+        }
+      }
+    } finally {
+      restoreExit();
+      errorSpy.mockRestore();
+      logSpy.mockRestore();
+    }
   });
 });

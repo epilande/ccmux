@@ -71,6 +71,23 @@ ccmux setup
 
 `ccmux setup` installs agent hooks for authoritative session matching. ccmux works without it, but it's recommended; see [Session Matching with Hooks](#-session-matching-with-hooks). Bare `ccmux setup` only configures agents whose executable is found on PATH; use `ccmux setup --agent <name>` to install for a specific agent even if it isn't detected.
 
+### Shell Completions
+
+`ccmux completion <shell>` prints a completion script for zsh, bash, or fish. It completes commands and flags, and asks the running daemon for live values: session ids and `%pane` ids wherever a command takes one, agent names, invocation ids, config keys and their values. Directory flags such as `--cwd` fall through to the shell's own path completion.
+
+```sh
+# zsh (~/.zshrc, after compinit)
+eval "$(ccmux completion zsh)"
+
+# bash (~/.bashrc)
+eval "$(ccmux completion bash)"
+
+# fish
+ccmux completion fish > ~/.config/fish/completions/ccmux.fish
+```
+
+The zsh `eval` has to come after `compinit`, since the script registers itself with `compdef`. A file in `fpath` sidesteps that and avoids running ccmux at every shell start: `ccmux completion zsh > ~/.zfunc/_ccmux` with `fpath=(~/.zfunc $fpath)` before `compinit`. The Homebrew formula installs completions for all three shells.
+
 ## 🚀 Quick Start
 
 1. Start your AI coding sessions in tmux panes as usual
@@ -133,6 +150,7 @@ ccmux setup
 | `ccmux setup --status`                      | Report install state without writing anything                                                                                    |
 | `ccmux setup --uninstall`                   | Remove hooks (preserves user-owned hook entries)                                                                                 |
 | `ccmux debug`                               | Diagnose session tracking discrepancies                                                                                          |
+| `ccmux completion <shell>`                  | Print the completion script for zsh, bash, or fish ([install](#shell-completions))                                               |
 | `ccmux notify [message]`                    | Send a notification via the configured backend (bare: test message + diagnostics)                                                |
 | `ccmux sidebar`                             | Launch narrow sidebar TUI (no preview/footer)                                                                                    |
 | `ccmux sidebar --toggle`                    | Smart toggle: spawn/kill sidebars in every window across all tmux sessions                                                       |
@@ -349,12 +367,12 @@ Both seed the agent's opening prompt with the title and URL, and your own
 opened rather than duplicated; a second `--issue` of the same number opens the
 existing `issue-<n>` worktree the same way. Both refuse rather than guess: a
 PR that is not open, an issue that is closed, and a same-named local branch
-that is not that PR (a branch counts as the PR's only when its `merge` *and* `remote` config
+that is not that PR (a branch counts as the PR's only when its `merge` _and_ `remote` config
 both already point at it, so a fork PR cannot ride in on a name collision with
 one of your origin-tracking branches). The remote is compared as a repository,
 not as text, so a branch you set up yourself with `git remote add fork <url>`
 and `git checkout -b <branch> fork/<branch>` is recognized as the PR's. A local
-branch that *is* the PR is fast-forwarded, never force-updated. If it has
+branch that _is_ the PR is fast-forwarded, never force-updated. If it has
 diverged, ccmux leaves it alone and says so.
 
 ccmux fetches the PR from `origin`, while `gh` resolves the number through its
