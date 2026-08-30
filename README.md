@@ -988,6 +988,8 @@ ccmux daemon status                        # prints the socket the running daemo
 
 A leading `/` means a socket path, anything else a label. Environment and config are the primary interface because the daemon is usually auto-started for you (it inherits your environment, so both reach it); the flag only applies to a `ccmux daemon start` you run yourself.
 
+After an upgrade you do not need to restart the daemon by hand: the next ccmux command notices the running daemon is on an older build and replaces it, as long as it has no running invocations or queued handoffs (a busy daemon is kept, with a one-line warning). A daemon started from a different checkout on the same version is left alone; switch with `ccmux daemon restart`. `ccmux daemon status` shows both builds.
+
 Inside tmux, the client half of ccmux ignores the setting and uses the server you are attached to; the daemon always honors it, which is the point of the setting.
 
 > [!NOTE]

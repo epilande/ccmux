@@ -19,6 +19,11 @@ import {
 } from "../lib/config";
 import { printDaemonHealth } from "./shared";
 import { daemonBody } from "../lib/daemon-json";
+import {
+  BUILD_IDENTITY,
+  classifyDaemonBuild,
+  parseBuildIdentity,
+} from "../lib/build-identity";
 import type { TmuxSocketError } from "../types";
 
 /**
@@ -64,18 +69,48 @@ async function printTmuxServer(): Promise<void> {
     const info = await daemonBody<{
       socketPath: string | null;
       socketError?: TmuxSocketError | null;
+      build?: unknown;
     }>(response, "server info");
     if (info.socketPath) {
       console.log(`tmux socket: ${info.socketPath}`);
-      return;
+    } else {
+      const error = info.socketError ?? null;
+      console.log(
+        `tmux socket: unreachable${error?.attemptedSocket ? ` at ${error.attemptedSocket}` : ""}` +
+          (error ? ` (${error.message})` : ""),
+      );
     }
-    const error = info.socketError ?? null;
-    console.log(
-      `tmux socket: unreachable${error?.attemptedSocket ? ` at ${error.attemptedSocket}` : ""}` +
-        (error ? ` (${error.message})` : ""),
-    );
+    printBuild(info.build);
   } catch {
     // The health line below already covers an unreachable daemon.
+  }
+}
+
+/**
+ * The daemon's build next to this CLI's, and the verdict the auto-start path
+ * would reach (`classifyDaemonBuild`). A daemon predating the field prints
+ * as `none`, which is outdated by definition.
+ */
+function printBuild(daemonBuild: unknown): void {
+  const daemon = parseBuildIdentity(daemonBuild);
+  const cli = BUILD_IDENTITY;
+  const describe = (b: typeof cli) =>
+    `${b.version} ${b.artifact}${b.stamp ? ` (${b.stamp})` : ""}`;
+  console.log(`Daemon build: ${daemon ? describe(daemon) : "none (predates build identity)"}`);
+  console.log(`CLI build: ${describe(cli)}`);
+  const verdict = classifyDaemonBuild(daemonBuild, cli);
+  if (verdict === "current") {
+    console.log("Build: current");
+  } else if (verdict === "foreign") {
+    console.log(
+      `Build: foreign checkout (same version ${cli.version}, different install); ` +
+        "left alone, run ccmux daemon restart to switch",
+    );
+  } else {
+    console.log(
+      `Build: OUTDATED (daemon ${daemon?.version ?? "unknown"}, cli ${cli.version}); ` +
+        "replaced automatically when idle, or run ccmux daemon restart",
+    );
   }
 }
 
