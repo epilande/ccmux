@@ -1,11 +1,31 @@
-import { describe, expect, it } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  spyOn,
+} from "bun:test";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Command } from "commander";
 import { createProgram } from "../program";
+import * as preferences from "../lib/preferences";
 import {
   COMPLETION_SHELLS,
   completeWords,
   completionScript,
   invocationRowsFromDaemon,
+  liveCompletionDeps,
   renderCompletion,
   type Completion,
   type CompletionDeps,
@@ -370,12 +390,400 @@ describe("completionScript", () => {
   it("quotes fish candidate lines so tabs survive", () => {
     const script = completionScript("fish");
     expect(script).toContain(`switch "$line"`);
-    expect(script).toContain(`printf '%s\\n' -- "$line"`);
+    expect(script).toContain(`printf '%s\\n' "$line"`);
+  });
+
+  // `--` only ends option parsing BEFORE the format string. After it, printf
+  // takes it as data and reuses the format, so every candidate came back
+  // preceded by a bare `--` line, which fish then offered as a completion.
+  it("does not pass `--` to fish's printf, which would emit it as a candidate", () => {
+    expect(completionScript("fish")).not.toContain(`printf '%s\\n' --`);
   });
 
   it("disables globbing while reading bash candidates", () => {
     const script = completionScript("bash");
     expect(script).toContain("set -f");
     expect(script).toContain("set +f");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The scripts, actually run.
+//
+// The assertions above pin the scripts' TEXT. Only running one pins its
+// BEHAVIOR, and the difference is not academic: `printf '%s\n' -- "$line"`
+// shipped in the fish script because `--` after a format string is data, not a
+// flag, so printf reused the format and emitted a bare `--` before every
+// candidate. A substring assertion happily pinned the buggy literal, and a
+// snapshot would have recorded it just as happily. Asking the shell what it
+// ended up offering is the only check in that class.
+//
+// Each run puts a stub `ccmux` first on PATH, so no daemon, no real binary and
+// no timing reaches the assertion.
+// ---------------------------------------------------------------------------
+
+// Prefer /bin/bash on macOS: it is 3.2, the version the script's index loop
+// exists for. Fall back to whatever bash is on PATH elsewhere.
+const BASH = existsSync("/bin/bash") ? "/bin/bash" : Bun.which("bash");
+const FISH = Bun.which("fish");
+
+// zsh is deliberately NOT executed. `compdef` registers into the completion
+// system and `_describe` writes its results through ZLE, neither of which
+// exists outside an interactive shell; driving it needs a pty harness. The zsh
+// script keeps its text assertions only.
+
+let shellRoot = "";
+let bashScriptPath = "";
+let fishConfigHome = "";
+let workDir = "";
+const stubs: Record<string, string> = {};
+
+/** A directory holding an executable `ccmux` that answers with `body`. */
+function makeStub(name: string, body: string): string {
+  const dir = join(shellRoot, `bin-${name}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "ccmux"), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  return dir;
+}
+
+beforeAll(() => {
+  shellRoot = mkdtempSync(join(tmpdir(), "ccmux-completion-"));
+
+  // What `renderCompletion` really sends each shell: bare values to bash,
+  // value<TAB>description to the shells that can show one.
+  stubs.values = makeStub("values", `printf 'alpha\\nbeta\\n'`);
+  stubs.described = makeStub(
+    "described",
+    `printf 'alpha\\tfirst\\nbeta\\tsecond\\n'`,
+  );
+  stubs.directive = makeStub("directive", `printf ':dir\\n'`);
+  stubs.glob = makeStub("glob", `printf '*\\n'`);
+  // Echoes its own argv, so a test can assert what the wrapper passed along.
+  stubs.argv = makeStub("argv", `for a in "$@"; do printf 'arg=[%s]\\n' "$a"; done`);
+
+  bashScriptPath = join(shellRoot, "ccmux.bash");
+  writeFileSync(bashScriptPath, completionScript("bash"));
+
+  // fish loads completions from $XDG_CONFIG_HOME/fish/completions, which is
+  // also how the override keeps the developer's own fish config out of the run.
+  fishConfigHome = join(shellRoot, "fish-config");
+  mkdirSync(join(fishConfigHome, "fish", "completions"), { recursive: true });
+  writeFileSync(
+    join(fishConfigHome, "fish", "completions", "ccmux.fish"),
+    completionScript("fish"),
+  );
+
+  // A known working directory for the directory-directive branches to complete
+  // against, and for the glob test to have something to wrongly expand into.
+  workDir = join(shellRoot, "work");
+  mkdirSync(join(workDir, "alpha-dir"), { recursive: true });
+  mkdirSync(join(workDir, "beta-dir"), { recursive: true });
+});
+
+afterAll(() => {
+  if (shellRoot) rmSync(shellRoot, { recursive: true, force: true });
+});
+
+function shQuote(word: string): string {
+  return `'${word.split("'").join(`'\\''`)}'`;
+}
+
+/** Run a shell with `stub` shadowing the real ccmux; returns stdout's lines. */
+function runShell(
+  command: string,
+  argv: string[],
+  stub: string,
+  env: Record<string, string> = {},
+): string[] {
+  const result = spawnSync(command, argv, {
+    encoding: "utf8",
+    cwd: workDir,
+    env: { ...process.env, ...env, PATH: `${stub}:${process.env.PATH}` },
+  });
+  expect(result.error).toBeUndefined();
+  const lines = result.stdout.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+/** Complete `words` (the last is the word under the cursor) through bash. */
+function bashComplete(words: string[], stub: string): string[] {
+  const body = [
+    `source ${shQuote(bashScriptPath)}`,
+    `COMP_WORDS=(ccmux ${words.map(shQuote).join(" ")})`,
+    `COMP_CWORD=${words.length}`,
+    `_ccmux`,
+    `if (( \${#COMPREPLY[@]} )); then printf '%s\\n' "\${COMPREPLY[@]}"; fi`,
+  ].join("\n");
+  return runShell(BASH as string, ["-c", body], stub);
+}
+
+/** Ask fish's own completion engine what `line` completes to. */
+function fishComplete(line: string, stub: string): string[] {
+  return runShell(FISH as string, ["-c", `complete -C ${shQuote(line)}`], stub, {
+    XDG_CONFIG_HOME: fishConfigHome,
+  });
+}
+
+describe("completionScript: bash, executed", () => {
+  it.skipIf(!BASH)("turns the endpoint's lines into COMPREPLY", () => {
+    expect(bashComplete(["spawn", ""], stubs.values)).toEqual([
+      "alpha",
+      "beta",
+    ]);
+  });
+
+  it.skipIf(!BASH)(
+    "passes every typed word separately, the empty trailing one included",
+    () => {
+      // The argv contract the script's explicit index loop exists to keep:
+      // `__complete bash --`, then one argument per typed word, the word under
+      // the cursor last even when it is empty.
+      //
+      // Measured on this machine's bash 3.2.57: the quoted slice the comment
+      // warns about, `"${COMP_WORDS[@]:1:COMP_CWORD}"`, collapses into ONE word
+      // only while `IFS=$'\n'` is in effect. The script sets IFS after the
+      // loop, so swapping the slice back in would not fail today; moving that
+      // IFS assignment above it would, and this is what would catch it.
+      expect(bashComplete(["spawn", "--cwd", ""], stubs.argv)).toEqual([
+        "arg=[__complete]",
+        "arg=[bash]",
+        "arg=[--]",
+        "arg=[spawn]",
+        "arg=[--cwd]",
+        "arg=[]",
+      ]);
+    },
+  );
+
+  it.skipIf(!BASH)(
+    "hands a :dir directive to compgen instead of offering it",
+    () => {
+      const got = bashComplete(["spawn", "--cwd", ""], stubs.directive);
+      expect(got).toContain("alpha-dir");
+      expect(got).toContain("beta-dir");
+      expect(got).not.toContain(":dir");
+    },
+  );
+
+  it.skipIf(!BASH)("does not glob a candidate that looks like a pattern", () => {
+    // What `set -f` around the read buys: the unquoted $(...) would otherwise
+    // replace a `*` candidate with the working directory's filenames.
+    expect(bashComplete([""], stubs.glob)).toEqual(["*"]);
+  });
+});
+
+describe("completionScript: fish, executed", () => {
+  it.skipIf(!FISH)(
+    "offers exactly the endpoint's candidates and nothing else",
+    () => {
+      // Exact equality is the whole point: a bare `--` rode in front of these
+      // for as long as the printf passed one, and no substring assertion could
+      // see it.
+      expect(fishComplete("ccmux ", stubs.described)).toEqual([
+        "alpha\tfirst",
+        "beta\tsecond",
+      ]);
+    },
+  );
+
+  it.skipIf(!FISH)("completes directories itself on a :dir directive", () => {
+    const got = fishComplete("ccmux --cwd ", stubs.directive);
+    expect(got.some((line) => line.startsWith("alpha-dir/"))).toBe(true);
+    expect(got.some((line) => line.startsWith(":dir"))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The live lookups and the hidden endpoint.
+//
+// Everything here fails silently in production: all three wrapper scripts send
+// the endpoint's stderr to /dev/null, so a wrong route, a dropped timeout or a
+// thrown lookup is indistinguishable from "nothing to complete".
+// ---------------------------------------------------------------------------
+
+interface FetchCall {
+  url: string;
+  init?: RequestInit;
+}
+
+let fetchSpy: ReturnType<typeof spyOn> | undefined;
+let prefsSpy: ReturnType<typeof spyOn> | undefined;
+let stdoutSpy: ReturnType<typeof spyOn> | undefined;
+
+afterEach(() => {
+  // `spyOn` + `mockRestore`, never `mock.module`, which leaks across files.
+  fetchSpy?.mockRestore();
+  fetchSpy = undefined;
+  prefsSpy?.mockRestore();
+  prefsSpy = undefined;
+  stdoutSpy?.mockRestore();
+  stdoutSpy = undefined;
+});
+
+/** Answer every request with `body`, recording what was asked for. */
+function stubFetch(body: string | object, status = 200): FetchCall[] {
+  const calls: FetchCall[] = [];
+  fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+    input: unknown,
+    init?: RequestInit,
+  ) => {
+    calls.push({ url: String(input), init });
+    return new Response(
+      typeof body === "string" ? body : JSON.stringify(body),
+      { status, headers: { "content-type": "application/json" } },
+    );
+  }) as unknown as typeof fetch);
+  return calls;
+}
+
+/** Answer every request the way an absent daemon does. */
+function stubFetchRejecting(): void {
+  fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+    throw new Error("connection refused");
+  }) as unknown as typeof fetch);
+}
+
+const DAEMON_SESSION = {
+  id: "sess_live",
+  agentType: "claude",
+  project: "ccmux",
+  status: "idle",
+  tmuxPane: "%7",
+  nativeSessionId: "native_live",
+};
+
+describe("liveCompletionDeps", () => {
+  it("reads sessions from the daemon's /sessions", async () => {
+    const calls = stubFetch({ sessions: [DAEMON_SESSION] });
+
+    expect(await liveCompletionDeps.sessions()).toEqual([DAEMON_SESSION]);
+    expect(calls).toHaveLength(1);
+    expect(new URL(calls[0].url).pathname).toBe("/sessions");
+  });
+
+  it("reads invocations from /invocations and renames invocationId", async () => {
+    const calls = stubFetch({
+      invocations: [
+        { invocationId: "inv_live", status: "running", agent: "codex" },
+      ],
+    });
+
+    expect(await liveCompletionDeps.invocations()).toEqual([
+      { id: "inv_live", status: "running", agent: "codex" },
+    ]);
+    expect(new URL(calls[0].url).pathname).toBe("/invocations");
+  });
+
+  it("gives every request a timeout signal, so a Tab press cannot hang", async () => {
+    const calls = stubFetch({ sessions: [] });
+    await liveCompletionDeps.sessions();
+
+    // The duration itself is not worth pinning; that there is a deadline is.
+    expect(calls[0].init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("offers nothing when the daemon answers with an error status", async () => {
+    stubFetch({ sessions: [DAEMON_SESSION] }, 500);
+    expect(await liveCompletionDeps.sessions()).toEqual([]);
+
+    fetchSpy?.mockRestore();
+    stubFetch({ invocations: [{ invocationId: "x", status: "running" }] }, 404);
+    expect(await liveCompletionDeps.invocations()).toEqual([]);
+  });
+
+  it("offers nothing when the body is not JSON", async () => {
+    stubFetch("<html>not the daemon</html>");
+    expect(await liveCompletionDeps.sessions()).toEqual([]);
+  });
+
+  it("offers nothing when the body omits the key it came for", async () => {
+    stubFetch({ somethingElse: [] });
+    expect(await liveCompletionDeps.sessions()).toEqual([]);
+
+    fetchSpy?.mockRestore();
+    stubFetch({ somethingElse: [] });
+    expect(await liveCompletionDeps.invocations()).toEqual([]);
+  });
+
+  it("offers nothing when there is no daemon to answer at all", async () => {
+    stubFetchRejecting();
+    expect(await liveCompletionDeps.sessions()).toEqual([]);
+    expect(await liveCompletionDeps.invocations()).toEqual([]);
+  });
+
+  it("lists the built-in agents, and nothing when the lookup throws", async () => {
+    expect(await liveCompletionDeps.agentNames()).toContain("claude");
+
+    prefsSpy = spyOn(preferences, "getPreferences").mockRejectedValue(
+      new Error("unreadable config"),
+    );
+    expect(await liveCompletionDeps.agentNames()).toEqual([]);
+  });
+});
+
+describe("__complete: the endpoint the scripts call", () => {
+  /** Parse a fresh tree (Commander instances are single-use) and capture stdout. */
+  async function runComplete(...words: string[]): Promise<string> {
+    const written: string[] = [];
+    stdoutSpy = spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string,
+    ) => {
+      written.push(String(chunk));
+      return true;
+    }) as unknown as typeof process.stdout.write);
+    try {
+      await createProgram().parseAsync(words, { from: "user" });
+    } finally {
+      stdoutSpy.mockRestore();
+      stdoutSpy = undefined;
+    }
+    return written.join("");
+  }
+
+  it("completes an empty trailing word with the subcommands under it", async () => {
+    stubFetch({ sessions: [] });
+
+    expect(await runComplete("__complete", "zsh", "--", "worktree", "")).toBe(
+      "list\tList every worktree of the repos ccmux knows about, plus this one\n" +
+        "prune\tRemove worktrees whose work is finished\n" +
+        "help\tdisplay help for command\n",
+    );
+  });
+
+  it("lets a user-typed `--` through, so it still ends option parsing", async () => {
+    stubFetch({ sessions: [] });
+
+    // The first `--` is Commander's own separator; the second is one the user
+    // typed. If it were swallowed, `--h` would read as a flag prefix and the
+    // endpoint would answer `--help` instead of staying quiet.
+    expect(
+      await runComplete("__complete", "zsh", "--", "send", "%33", "--", "--h"),
+    ).toBe("");
+    expect(await runComplete("__complete", "zsh", "--", "send", "%33", "--h")).toBe(
+      "--help\tdisplay help for command\n",
+    );
+  });
+
+  it("carries the daemon's sessions all the way to stdout", async () => {
+    stubFetch({ sessions: [DAEMON_SESSION] });
+
+    expect(await runComplete("__complete", "zsh", "--", "switch", "")).toBe(
+      "sess_live\tclaude ccmux idle\n%7\tclaude ccmux idle\n",
+    );
+  });
+
+  it("drops the descriptions bash cannot show", async () => {
+    stubFetch({ sessions: [DAEMON_SESSION] });
+
+    expect(await runComplete("__complete", "bash", "--", "switch", "")).toBe(
+      "sess_live\n%7\n",
+    );
+  });
+
+  it("stays silent when the daemon is unreachable", async () => {
+    stubFetchRejecting();
+
+    expect(await runComplete("__complete", "fish", "--", "switch", "")).toBe("");
   });
 });

@@ -76,7 +76,7 @@ ccmux setup
 `ccmux completion <shell>` prints a completion script for zsh, bash, or fish. It completes commands and flags, and asks the running daemon for live values: session ids and `%pane` ids wherever a command takes one, agent names, invocation ids, config keys and their values. Directory flags such as `--cwd` fall through to the shell's own path completion.
 
 ```sh
-# zsh (~/.zshrc)
+# zsh (~/.zshrc, after compinit)
 eval "$(ccmux completion zsh)"
 
 # bash (~/.bashrc)
@@ -86,7 +86,7 @@ eval "$(ccmux completion bash)"
 ccmux completion fish > ~/.config/fish/completions/ccmux.fish
 ```
 
-For zsh, a file in `fpath` avoids running ccmux at every shell start: `ccmux completion zsh > ~/.zfunc/_ccmux` with `fpath=(~/.zfunc $fpath)` before `compinit`. The Homebrew formula installs completions for all three shells.
+The zsh `eval` has to come after `compinit`, since the script registers itself with `compdef`. A file in `fpath` sidesteps that and avoids running ccmux at every shell start: `ccmux completion zsh > ~/.zfunc/_ccmux` with `fpath=(~/.zfunc $fpath)` before `compinit`. The Homebrew formula installs completions for all three shells.
 
 ## 🚀 Quick Start
 

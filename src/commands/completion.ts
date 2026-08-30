@@ -24,6 +24,7 @@ import { getDaemonUrl } from "../lib/config";
 import { getAgents } from "../lib/agents";
 import { getPreferences } from "../lib/preferences";
 import { VALID_ICON_STYLES } from "../lib/icons";
+import { UNTRACKED_MODES } from "../daemon/worktree-move-changes";
 import { completableConfigKeys, configValueChoices } from "./config";
 
 export const COMPLETION_SHELLS = ["zsh", "bash", "fish"] as const;
@@ -232,7 +233,7 @@ const OPTION_SOURCES: Record<string, ValueSource> = {
   "--agent": agentNames,
   "--target": paneTargets,
   "--icons": fixed(VALID_ICON_STYLES),
-  "--untracked": fixed(["move", "copy", "leave"]),
+  "--untracked": fixed(UNTRACKED_MODES),
   "--split": fixed(["h", "v"]),
   "--position": fixed(["left", "right"]),
   "--format": fixed(["text"]),
@@ -538,7 +539,7 @@ const FISH_SCRIPT = `function __ccmux_complete
             case ':file'
                 __fish_complete_path "$current"
             case '*'
-                printf '%s\\n' -- "$line"
+                printf '%s\\n' "$line"
         end
     end
 end
