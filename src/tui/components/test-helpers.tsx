@@ -165,8 +165,7 @@ export function squish(s: string): string {
  * parser the timeout has elapsed and drains the event it then releases, so
  * the escape is dispatched synchronously and the caller only has to repaint.
  * Both members are private on `CliRenderer`; if an upgrade renames them the
- * helper throws rather than degrading into a silent no-op, which is the
- * whole failure mode this exists to close.
+ * helper throws rather than degrading into a silent no-op.
  */
 export function deliverEscape(renderer: CliRenderer): void {
   const internals = renderer as unknown as {

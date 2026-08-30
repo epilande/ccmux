@@ -27,15 +27,14 @@ describe("deliverEscape", () => {
     const { seen, setup } = await mountProbe();
     deliverEscape(setup.renderer);
     expect(seen).toEqual(["escape"]);
-    // And a key pressed right after is itself, not meta-that-key: the
-    // pending ESC was consumed, not left in the parser's window.
+    // The pending ESC was consumed rather than left in the parser's
+    // window, so the next key is itself and not meta-that-key.
     setup.mockInput.pressKey("x");
     expect(seen).toEqual(["escape", "x"]);
   });
 
-  // The two harness traps this helper exists for, pinned so a future
-  // @opentui upgrade that fixes either shows up as a failure here rather
-  // than as a helper nobody remembers the reason for.
+  // Pinned so an @opentui upgrade that fixes either trap fails here rather
+  // than leaving a helper nobody remembers the reason for.
   it("pins why the raw harness paths cannot be used for escape", async () => {
     const { seen, setup } = await mountProbe();
     setup.mockInput.pressKey("escape");

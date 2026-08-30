@@ -3,13 +3,9 @@
  *
  * `pressKey()` takes key INPUT, and its only names are the `KeyCodes`
  * constants (`RETURN`, `ESCAPE`, ...). Any other multi-character string is
- * typed out letter by letter, so `pressKey("escape")` presses `e s c a p e`,
- * `pressKey("space")` presses `a` among others, and the test keeps passing
- * for whatever those letters happen to do. And a raw `pressEscape()` emits a
- * byte the parser holds for 20ms, so an assertion made right after it tests
- * a screen escape never reached. Both are silent; this is what makes them
- * loud. Use `deliverEscape` from `test-helpers` for escape and a real
- * character (or `KeyCodes` name) for everything else.
+ * typed out letter by letter, so the test keeps passing for whatever those
+ * letters happen to do. A raw `pressEscape()` is delivered late for the
+ * reason `deliverEscape` in `test-helpers` documents; use that instead.
  *
  * Known gap: for `pressKeys([...])` only the first element is checked.
  */

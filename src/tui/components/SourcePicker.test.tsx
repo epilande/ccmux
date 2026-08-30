@@ -139,7 +139,7 @@ async function mount(
     await setup!.renderOnce();
     return setup!.captureCharFrame();
   };
-  /** Escape, actually delivered (see `deliverEscape` for why neither raw path is). */
+  /** Escape, actually delivered (see `deliverEscape`). */
   const escape = async () => {
     deliverEscape(setup!.renderer);
     await setup!.renderOnce();
