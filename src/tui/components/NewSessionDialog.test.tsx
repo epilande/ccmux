@@ -739,6 +739,28 @@ describe("NewSessionDialog", () => {
     expect(frame).not.toContain("New window");
   });
 
+  it("scrolls a long prompt inside its control instead of widening it", async () => {
+    // Same defect the handoff dialog's Note field had: the input measures
+    // itself from its text, and with Yoga's default `flexShrink` of 0 a long
+    // value pushed the control (and its wrapper) through the right border.
+    const prompt =
+      "a very long prompt that keeps going well past the width of the dialog box";
+    const frame = await renderDialog({
+      draft: draft({ prompt, field: "prompt" }),
+      width: 60,
+    });
+    const lines = frame.split("\n");
+    const promptLine = lines.find((line) => line.includes("Prompt"));
+    const titleLine = lines.find((line) => line.includes("New session"));
+    expect(promptLine).toBeDefined();
+    expect(titleLine).toBeDefined();
+    const rightEdge = titleLine!.lastIndexOf("│");
+    expect(promptLine![rightEdge]).toBe("│");
+    expect(promptLine!.trimEnd().length).toBe(titleLine!.trimEnd().length);
+    expect(promptLine).toContain("dialog box");
+    expect(promptLine).not.toContain("a very long");
+  });
+
   it("keeps the placements distinguishable at the real sidebar rail", async () => {
     // A 30-column rail leaves the overlay too few columns for the full
     // labels, which truncated `Split right`/`Split down` into two rows both

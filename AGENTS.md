@@ -202,6 +202,7 @@ setup.renderer.destroy();               // always clean up in afterEach
 - **Mocking tmux**: Preview tests use `mock.module()` from `bun:test` to mock `capturePane` before importing the component
 - **Input simulation**: `createMockKeys` and `createSpy` from `@opentui/core/testing` for keyboard/callback tests
 - **Fixed timestamps**: Use `"2024-01-15T12:00:00Z"` instead of `new Date()` to avoid time-dependent fragility
+- **Escape**: use `deliverEscape(setup.renderer)` from `test-helpers.tsx`. `pressKey("escape")` types six letters and a raw `pressEscape()` sits in the parser's 20ms lone-ESC window, so an assertion right after tests nothing; `test-harness-guard.test.ts` fails the suite on either spelling
 
 **Pure logic tests** (store, grouping, format, icons) use standard `bun:test` without `testRender`.
 

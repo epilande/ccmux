@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createMockKeys } from "@opentui/core/testing";
+import { deliverEscape } from "./test-helpers";
 import type { CapturedSpan } from "@opentui/core";
 import type { IssueListResponse, OpenIssue } from "../../daemon/issue-list";
 import type { OpenPR, PRListResponse } from "../../daemon/pr-list";
@@ -138,19 +139,9 @@ async function mount(
     await setup!.renderOnce();
     return setup!.captureCharFrame();
   };
-  /**
-   * Escape, actually delivered.
-   *
-   * A bare `\u001b` is the prefix of every escape SEQUENCE, so the parser
-   * holds it until either more bytes arrive or its timeout elapses — which is
-   * why `pressEscape()` followed by an immediate repaint reports nothing, and
-   * why a following keypress arrives as meta-that-key instead. The wait is
-   * the whole helper. (`pressKey("escape")` is a different trap: it types the
-   * six letters, which is issue #160.)
-   */
+  /** Escape, actually delivered (see `deliverEscape`). */
   const escape = async () => {
-    keys.pressEscape();
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    deliverEscape(setup!.renderer);
     await setup!.renderOnce();
   };
   return { picked, keys, escape, frame, spans: () => setup!.captureSpans() };

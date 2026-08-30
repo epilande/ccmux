@@ -11,7 +11,11 @@ import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import type { SSECallbacks } from "./utils/sse";
 import * as clipboard from "./utils/clipboard";
-import { mockEnrichedSession, squish } from "./components/test-helpers";
+import {
+  deliverEscape,
+  mockEnrichedSession,
+  squish,
+} from "./components/test-helpers";
 import { liveEffects } from "./components/WorktreesPanel";
 import { HANDOFF_BADGE } from "./components/session-columns";
 import { MAX_TURNS, renderTurns } from "../daemon/transcript-read";
@@ -757,7 +761,7 @@ describe("App sidebar mode", () => {
 
       setup.mockInput.pressKey("j");
       await setup.renderOnce();
-      setup.mockInput.pressKey("return");
+      setup.mockInput.pressEnter();
       await setup.renderOnce();
 
       expect(exitSpy).not.toHaveBeenCalled();
@@ -773,7 +777,7 @@ describe("App sidebar mode", () => {
 
     try {
       await renderApp(30, 20, { sidebar: true });
-      setup.mockInput.pressKey("escape");
+      deliverEscape(setup.renderer);
       await setup.renderOnce();
 
       expect(exitSpy).not.toHaveBeenCalled();
@@ -2452,8 +2456,8 @@ describe("App fork (F / context menu)", () => {
 
       // Ordinary new-session dialogs still refresh on every open so a
       // long-lived picker can discover agents installed since startup.
-      setup.mockInput.pressEscape();
-      await settle(20);
+      deliverEscape(setup.renderer);
+      await settle();
       await setup.renderOnce();
       setup.mockInput.pressKey("n");
       await settle();
@@ -2626,8 +2630,8 @@ describe("App fork (F / context menu)", () => {
 
       // Dismiss the submitted fork and start drafting an unrelated session
       // while its daemon request is still pending.
-      setup.mockInput.pressEscape();
-      await settle(20);
+      deliverEscape(setup.renderer);
+      await settle();
       await setup.renderOnce();
       setup.mockInput.pressKey("n");
       await settle();
@@ -2985,10 +2989,8 @@ describe("App new session dialog", () => {
     const { spawns, restore } = withDaemon();
     try {
       await openDialog();
-      setup.mockInput.pressEscape();
-      // A bare ESC byte is the prefix of every escape sequence, so the key
-      // parser holds it briefly before deciding it stands alone.
-      await settle(20);
+      deliverEscape(setup.renderer);
+      await settle();
       await setup.renderOnce();
       expect(setup.captureCharFrame()).not.toContain("New session");
       expect(spawns).toHaveLength(0);
@@ -3083,8 +3085,8 @@ describe("App new session dialog", () => {
       await setup.renderOnce();
       setup.mockInput.pressKey("j");
       await setup.renderOnce();
-      setup.mockInput.pressEscape();
-      await settle(20);
+      deliverEscape(setup.renderer);
+      await settle();
       await setup.renderOnce();
       // The dialog survives (escape was the overlay's), the held agent is
       // unchanged, and the list is gone.
@@ -3779,8 +3781,8 @@ describe("App new session dialog", () => {
       expect(setup.captureCharFrame()).toContain("connection refused");
 
       // Close, bring the daemon back, reopen: the list is fetched again.
-      setup.mockInput.pressEscape();
-      await settle(20);
+      deliverEscape(setup.renderer);
+      await settle();
       await setup.renderOnce();
       failNext = false;
       setup.mockInput.pressKey("n");
@@ -3944,8 +3946,8 @@ describe("App new session dialog", () => {
       expect(calls).toBe(1);
       expect(setup.captureCharFrame()).not.toContain("Codex");
 
-      setup.mockInput.pressEscape();
-      await settle(20);
+      deliverEscape(setup.renderer);
+      await settle();
       await setup.renderOnce();
       setup.mockInput.pressKey("n");
       await settle();
@@ -4058,8 +4060,8 @@ describe("App new session dialog", () => {
       const byKey = setup.captureCharFrame();
       expect(byKey).toContain("/where/the/picker/ran");
 
-      setup.mockInput.pressEscape();
-      await settle(20);
+      deliverEscape(setup.renderer);
+      await settle();
       await setup.renderOnce();
 
       const byMouse = await openGroupMenuNewSession();
@@ -4103,8 +4105,8 @@ describe("App new session dialog", () => {
       expect(byKey).toContain("/code/myapp");
       expect(byKey).not.toContain("worktrees/feature");
 
-      setup.mockInput.pressEscape();
-      await settle(20);
+      deliverEscape(setup.renderer);
+      await settle();
       await setup.renderOnce();
 
       const byMouse = await openGroupMenuNewSession();
@@ -4734,7 +4736,7 @@ describe("App move-changes menu gate", () => {
       // Open on the first row, then dismiss and open on the second.
       await setup.mockMouse.click(5, 1, MouseButtons.RIGHT);
       await setup.renderOnce();
-      setup.mockInput.pressKey("escape");
+      deliverEscape(setup.renderer);
       await setup.renderOnce();
       await setup.mockMouse.click(5, 2, MouseButtons.RIGHT);
       await setup.renderOnce();
@@ -5290,7 +5292,7 @@ describe("App move-changes reporting", () => {
       expect(exitSpy).not.toHaveBeenCalled();
       expect(squish(setup.captureCharFrame())).toContain("deadbee1234");
 
-      setup.mockInput.pressKey("escape");
+      deliverEscape(setup.renderer);
       await settle();
       expect(exitSpy).toHaveBeenCalled();
     } finally {
@@ -5342,7 +5344,7 @@ describe("App move-changes reporting", () => {
 
       // Dismissed by a keypress, and the dialog it was raised over is still
       // there to correct and retry.
-      setup.mockInput.pressKey("escape");
+      deliverEscape(setup.renderer);
       await setup.renderOnce();
       const after = squish(setup.captureCharFrame());
       expect(after).not.toContain("gitstashapplyabc1234def");
@@ -5689,8 +5691,8 @@ describe("App fork into worktree", () => {
     const { spawns, restore } = withForkDaemon();
     try {
       await openForkDialog();
-      setup.mockInput.pressEscape();
-      await settle(20);
+      deliverEscape(setup.renderer);
+      await settle();
       await setup.renderOnce();
 
       expect(spawns).toHaveLength(0);
@@ -5963,10 +5965,8 @@ describe("App row menu (m)", () => {
       await press("m");
       expect(setup.captureCharFrame()).toContain("Attach");
 
-      setup.mockInput.pressEscape();
-      // A lone ESC byte is only unambiguous once the parser has waited out
-      // the sequence it could have started; every escape test here does this.
-      await settle(20);
+      deliverEscape(setup.renderer);
+      await settle();
       await setup.renderOnce();
       expect(setup.captureCharFrame()).not.toContain("Attach");
     } finally {
@@ -6755,7 +6755,9 @@ describe("App copy last response", () => {
     try {
       await renderRow();
       await openCopyDialog();
-      await press("escape");
+      deliverEscape(setup.renderer);
+      await settle();
+      await setup.renderOnce();
       const frame = squish(setup.captureCharFrame());
       expect(frame).not.toContain("Lastresponse");
       expect(asked).toEqual([]);
@@ -7172,10 +7174,8 @@ describe("App hand off to", () => {
     try {
       await renderRows();
       await pickTarget();
-      setup.mockInput.pressEscape();
-      // A bare ESC byte is the prefix of every escape sequence, so the key
-      // parser holds it briefly before deciding it stands alone.
-      await settle(20);
+      deliverEscape(setup.renderer);
+      await settle();
       await setup.renderOnce();
       const frame = squish(setup.captureCharFrame());
       // Neither the dialog nor the pick mode it came from is left behind.
@@ -7287,10 +7287,8 @@ describe("App hand off to", () => {
     try {
       await renderRows();
       await startPick();
-      setup.mockInput.pressEscape();
-      // A bare ESC byte is the prefix of every escape sequence, so the key
-      // parser holds it briefly before deciding it stands alone.
-      await settle(20);
+      deliverEscape(setup.renderer);
+      await settle();
       await setup.renderOnce();
       expect(posted).toEqual([]);
       expect(squish(setup.captureCharFrame())).not.toContain("esccancel");
@@ -7518,10 +7516,8 @@ describe("App worktrees panel (W)", () => {
       setup.mockInput.pressEnter();
       expect(await frame()).toContain("New session in worktree");
 
-      setup.mockInput.pressEscape();
-      // A bare ESC byte is the prefix of every escape sequence, so the key
-      // parser holds it briefly before deciding it stands alone.
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      deliverEscape(setup.renderer);
+      await new Promise((resolve) => setTimeout(resolve, 0));
       const back = await frame();
 
       // The PR VIEW, on the PR row — not the Worktrees view on the path.
@@ -7959,10 +7955,8 @@ describe("App worktrees panel (W)", () => {
       expect(squish(dialog)).toContain(squish("New session in worktree"));
       expect(dialog).not.toContain("Pull Requests");
 
-      setup.mockInput.pressEscape();
-      // A lone ESC needs the input parser disambiguation window before it
-      // is delivered as a key at all.
-      await new Promise((r) => setTimeout(r, 30));
+      deliverEscape(setup.renderer);
+      await new Promise((r) => setTimeout(r, 0));
       const shown = await frame();
       expect(shown).toContain("Pull Requests");
       expect(squish(shown)).not.toContain(squish("New session in worktree"));
@@ -8033,8 +8027,8 @@ describe("App worktrees panel (W)", () => {
       await new Promise((r) => setTimeout(r, 0));
       await setup.renderOnce();
       const before = urls.length;
-      setup.mockInput.pressEscape();
-      await new Promise((r) => setTimeout(r, 30));
+      deliverEscape(setup.renderer);
+      await new Promise((r) => setTimeout(r, 0));
       await setup.renderOnce();
       await new Promise((r) => setTimeout(r, 0));
       await setup.renderOnce();
@@ -8060,8 +8054,8 @@ describe("App worktrees panel (W)", () => {
       await frame();
       setup.mockInput.pressKey("n");
       expect(squish(await frame())).toContain(squish("New session"));
-      setup.mockInput.pressEscape();
-      await new Promise((r) => setTimeout(r, 30));
+      deliverEscape(setup.renderer);
+      await new Promise((r) => setTimeout(r, 0));
       const shown = await frame();
       expect(shown).not.toContain("Pull Requests");
     } finally {
