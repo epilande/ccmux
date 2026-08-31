@@ -773,7 +773,7 @@ export function buildAgentForkCommand(
   if (!templateUsesTranscriptPath(template)) {
     return {
       ok: true,
-      value: substitutePlaceholders(template, { id: sessionId, bin: binary }),
+      value: substitutePlaceholders(template, { id: sessionId, bin: launcher }),
     };
   }
 

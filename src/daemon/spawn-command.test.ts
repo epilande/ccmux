@@ -1692,6 +1692,25 @@ describe("buildAgentForkCommand with a model", () => {
     }
   });
 
+  it("splices the flag into an id-form template, which has no transcript path", () => {
+    // The id form is what the codebase itself recommends as the fallback
+    // (see the {path}-resolution refusal), so it must carry the model too.
+    expect(
+      buildAgentForkCommand({
+        agent: {
+          ...claudeAgent,
+          forkCommand: "{bin} --resume {id} --fork-session",
+        },
+        binary: "claude",
+        sessionId: "abc-123",
+        model: "opus",
+      }),
+    ).toEqual({
+      ok: true,
+      value: "claude --model opus --resume abc-123 --fork-session",
+    });
+  });
+
   it("refuses an agent without a verified model flag", () => {
     const result = buildAgentForkCommand({
       agent: { ...claudeAgent, modelFlag: undefined },
