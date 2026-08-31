@@ -2846,6 +2846,22 @@ describe("idle agent consent", () => {
     );
   });
 
+  // The phrase reads the LIST's sessions and the note gates on the SCAN's,
+  // fetched once at mount and seconds apart, so an agent that went
+  // `working -> idle` in that window rendered `claude working (x ends it)`.
+  it("withholds the note when the phrase it would ride disagrees", () => {
+    const stale = panelRow({
+      row: row({ sessions: [session({ status: "working" })] }),
+      candidate: candidate({ sessions: [session({ status: "idle" })] }),
+    });
+    const text = detailSegments(stale, { compact: false, dirtyOk: false })
+      .map((s) => s.text)
+      .join(" ");
+    expect(text).toContain("claude working");
+    expect(text).not.toContain("(x ends it)");
+    expect(text).not.toContain("(will be ended)");
+  });
+
   // A kept row's sessions phrase is untouched: nothing is going to end there.
   it("leaves a row nobody can remove saying only what is true of it", () => {
     expect(consentText(panelRow({ row: row({ sessions: [session()] }) }))).toBe(

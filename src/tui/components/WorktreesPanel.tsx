@@ -87,9 +87,10 @@ import { theme } from "../theme";
  *   merged, and removal ends those agents. That is a second consent, and it
  *   asks for no extra key: selecting the row IS the consent (`endsSessions`
  *   gates the row's note, `a`, the confirm line and `allowEndIdle` alike),
- *   because the cost is bounded: the transcript persists and the session
- *   resumes, which is also why none of it is coloured like work that would
- *   be lost.
+ *   because the cost is bounded: the transcript FILE persists, which is also
+ *   why none of it is coloured like work that would be lost. The file, not
+ *   resumability: three built-ins resume by directory (`opencode --continue`,
+ *   `omp -c`, `pi -c`) and the directory is what a removal deletes.
  */
 
 type Phase = "loading" | "list" | "confirm" | "running" | "done" | "error";
@@ -1158,14 +1159,23 @@ export function detailPhrases(
   // last dirty phrase: the sentence a reader is already looking at gains the
   // consequence, rather than an instruction arriving as a phrase of its own.
   //
-  // Yellow, not red: what is ending is an idle agent whose transcript survives
-  // and whose session resumes, so it must not read as loudly as the one case
-  // that loses work. Selection is the consent, so the armed wording is the
+  // Yellow, not red: what is ending is an idle agent whose transcript file
+  // survives the removal, so it must not read as loudly as the one case that
+  // loses work outright. Selection is the consent, so the armed wording is the
   // whole difference: the `[x]` box already says the row is picked, which is
   // why this note, unlike the dirty one, need not name a key twice.
+  //
+  // The note also requires the phrase it rides to AGREE with it. `sessionsText`
+  // reads the LIST's sessions while `endsSessions` gates on the SCAN's, and the
+  // two are fetched once at mount, seconds apart and merged by path without
+  // reconciling. An agent that went `working -> idle` in that window rendered
+  // `claude working (x ends it)` until the next load: a row offering to end
+  // what it calls working.
   const sessionSegments: Phrase[] = [];
   if (sessionsText) {
-    const ending = endsSessions(candidate);
+    const ending =
+      endsSessions(candidate) &&
+      sessionSource.every((s) => s.status === "idle");
     const endNote = sessionSource.length > 1 ? "(x ends them)" : "(x ends it)";
     sessionSegments.push({
       text: ending
@@ -1634,8 +1644,8 @@ export function removalDetails(opts: {
   }
   // Named here as well as on the row, because the rows that carry it can be
   // off screen by the time the confirm is up. Not part of `destructive`: the
-  // transcript survives and the session resumes, so the red border stays with
-  // the one case that loses work.
+  // transcript file survives, so the red border stays with the one case that
+  // loses work outright.
   if (opts.endingSessions > 0) {
     lines.push(
       `ending ${plural(opts.endingSessions, "idle agent session", "idle agent sessions")}`,

@@ -340,7 +340,12 @@ describe("planPrune", () => {
     const withSkip: PruneScan = {
       ...scan([EMPTY, OCCUPIED]),
       skipped: [
-        { path: "/repo/wt/x", repoRoot: "/repo", branch: "x", reason: "locked" },
+        {
+          path: "/repo/wt/x",
+          repoRoot: "/repo",
+          branch: "x",
+          reason: "locked",
+        },
       ],
     };
 
@@ -355,16 +360,22 @@ describe("endIdleSummary", () => {
     expect(endIdleSummary([EMPTY])).toBeNull();
   });
 
-  it("counts the sessions and promises the transcripts survive", () => {
+  it("counts the sessions and says the transcript files survive", () => {
     expect(endIdleSummary([EMPTY, OCCUPIED])).toBe(
-      "It will also end 1 idle agent session. Transcripts persist, so that session stays resumable.",
+      "It will also end 1 idle agent session. The transcript persists on disk, but agents that resume by directory (opencode, pi, omp) lose the way back once the worktree is gone.",
     );
     const two = candidate({
       path: "/repo/wt/two",
       sessions: [idleSession("s1"), idleSession("s2", "codex")],
     });
     expect(endIdleSummary([two])).toContain("end 2 idle agent sessions");
-    expect(endIdleSummary([two])).toContain("those sessions stay resumable");
+    expect(endIdleSummary([two])).toContain("Transcripts persist on disk");
+  });
+
+  // Three built-ins resume by directory, and the directory is what the
+  // removal deletes, so the prompt may not promise resumability.
+  it("does not claim the session stays resumable", () => {
+    expect(endIdleSummary([EMPTY, OCCUPIED])).not.toContain("resumable");
   });
 });
 
@@ -392,9 +403,7 @@ async function runCommand(
       bodies.push(body);
       return { ...EMPTY_RESULT, dryRun: body.dryRun };
     },
-    ...(answers.length > 0
-      ? { ask: async () => queued.shift() ?? "" }
-      : {}),
+    ...(answers.length > 0 ? { ask: async () => queued.shift() ?? "" } : {}),
   };
   try {
     await runPruneCommand(options, deps);
@@ -420,10 +429,10 @@ describe("runPruneCommand and --end-idle", () => {
   });
 
   it("offers it under the flag and sends the consent with the dry run", async () => {
-    const { output, bodies } = await runCommand({ dryRun: true, endIdle: true }, [
-      EMPTY,
-      OCCUPIED,
-    ]);
+    const { output, bodies } = await runCommand(
+      { dryRun: true, endIdle: true },
+      [EMPTY, OCCUPIED],
+    );
 
     expect(output).toContain("Prunable worktrees (2):");
     // The row says what happens, not just that an agent is there.
@@ -443,7 +452,7 @@ describe("runPruneCommand and --end-idle", () => {
     );
 
     expect(output).toContain("It will also end 1 idle agent session.");
-    expect(output).toContain("stays resumable");
+    expect(output).toContain("The transcript persists on disk");
     expect(bodies[0].dryRun).toBe(false);
     expect(bodies[0].allowEndIdle).toEqual([OCCUPIED.path]);
   });

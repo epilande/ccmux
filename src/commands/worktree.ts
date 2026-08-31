@@ -198,9 +198,12 @@ function pathsWithSessions(candidates: PruneCandidate[]): string[] {
  * null when none were selected.
  *
  * At the decision point rather than only on the rows, for the same reason the
- * ignored files are: someone who selected with 'a' never read them. It says
- * the transcripts survive because that is the difference between ending a
- * session and losing it.
+ * ignored files are: someone who selected with 'a' never read them.
+ *
+ * It says the transcript FILE survives and names who cannot get back to it,
+ * rather than promising the session resumes: `opencode --continue`, `omp -c`
+ * and `pi -c` resume by DIRECTORY (see `resumeCommand` in `src/lib/agents.ts`),
+ * and the directory is what this removal deletes.
  */
 export function endIdleSummary(selected: PruneCandidate[]): string | null {
   const count = selected.reduce((n, c) => n + c.sessions.length, 0);
@@ -208,7 +211,9 @@ export function endIdleSummary(selected: PruneCandidate[]): string | null {
   const one = count === 1;
   return (
     `It will also end ${count} idle agent session${one ? "" : "s"}. ` +
-    `Transcripts persist, so ${one ? "that session stays" : "those sessions stay"} resumable.`
+    `${one ? "The transcript persists" : "Transcripts persist"} on disk, but ` +
+    `agents that resume by directory (opencode, pi, omp) lose the way back ` +
+    `once the worktree is gone.`
   );
 }
 
@@ -362,7 +367,10 @@ export async function runPruneCommand(
   // ever run there.
   const cwd = repo ? undefined : callerCwd();
   const endIdle = options.endIdle === true;
-  const { candidates, skipped } = planPrune(await fetchScan(repo, cwd), endIdle);
+  const { candidates, skipped } = planPrune(
+    await fetchScan(repo, cwd),
+    endIdle,
+  );
 
   if (candidates.length === 0) {
     console.log("No worktrees are ready to prune.");
