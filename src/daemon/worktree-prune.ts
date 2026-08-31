@@ -10,8 +10,11 @@
  * itself classified in the same process.
  *
  * There is no automatic mode and no caller-supplied "prune everything": both
- * surfaces select explicitly, and dirty rows require their own opt-in on top
- * of that.
+ * surfaces select explicitly, and each destructive edge carries its own
+ * opt-in on top of that. Dirty rows need `allowDirtyPaths`; a worktree whose
+ * bound agent sessions are all idle needs `allowEndIdlePaths`, because
+ * removing it ENDS those sessions. The two are independent axes, and a
+ * worktree that is both needs both.
  */
 
 import { existsSync, renameSync } from "node:fs";
@@ -125,10 +128,14 @@ export interface WorktreeSession {
   tmuxTarget: string | null;
   pid: number | null;
   /**
-   * A paneless Claude background-agent row. Its pid belongs to Claude's own
-   * supervisor rather than to ccmux, so it must never be signalled directly
-   * (the same rule `handleKillSession` follows). It still counts for the
-   * session gate.
+   * A paneless Claude background-agent row, or an Agent-tool subagent folded
+   * in under its parent. Its pid belongs to Claude's own supervisor rather
+   * than to ccmux, so it must never be signalled directly (the same rule
+   * `handleKillSession` follows).
+   *
+   * That is also why it HOLDS the worktree whatever its status: the end-idle
+   * gate offers a worktree on the promise that ccmux can stop what lives
+   * there, and this is the one kind of session it cannot.
    */
   background?: boolean;
 }
@@ -168,10 +175,18 @@ export interface PruneCandidate {
   /** `.git/worktrees/<name>`, captured while the worktree still exists. */
   adminDir: string | null;
   /**
-   * Sessions in this worktree; removal takes them down. Always empty on a
-   * candidate {@link scanRepo} produced, since a bound session in any state
-   * now skips the worktree instead. Still honored by {@link runPrune} because
-   * its contract is the candidate it is handed, not the scan's behavior.
+   * Sessions in this worktree; removal ENDS them.
+   *
+   * Non-empty only on an end-idle candidate ({@link classifyEndIdle}): every
+   * session on it is `idle` and is ccmux's own to stop, and the only reason
+   * allowed to offer such a worktree is `pr-merged`, proven by `gh`. A
+   * `working`, `waiting` or background session skips the worktree at
+   * classification instead, so it never reaches a candidate at all.
+   *
+   * Removing one of these takes a second opt-in, `allowEndIdlePaths`
+   * ({@link PruneOptions}): {@link runPrune} refuses the candidate without
+   * it, and re-checks every session's LIVE status before it signals anything,
+   * since consent is not a claim about the present.
    */
   sessions: WorktreeSession[];
 }
@@ -563,8 +578,11 @@ export function branchDeletionFor(reason: PruneReason): BranchDeletion {
 /**
  * Classify every linked worktree of one repo.
  *
- * Ordering matters for safety: the session gate and the lock check run before
- * anything else, so a live worktree is never classified at all.
+ * Ordering matters for safety: the lock check and the session gate run before
+ * anything else, so a worktree an agent is live in is never classified on
+ * local evidence. A worktree whose sessions are ALL idle is classified, but
+ * only through {@link classifyEndIdle}, where a merged PR is the single
+ * reason that can offer it.
  *
  * It buys less than it looks like on cost. An ordinary active worktree — a
  * branch pushed with a PR still open — reaches the `gh` call, because
@@ -573,6 +591,12 @@ export function branchDeletionFor(reason: PruneReason): BranchDeletion {
  * is a branch with no upstream, a branch already merged locally, or a hit in
  * the daemon's open-PR cache (`openPR`); everything else pays for it, which
  * is why the calls run concurrently rather than one at a time.
+ *
+ * A worktree whose sessions are all idle now pays for one as well
+ * ({@link classifyEndIdle}): a merged PR is the only thing that may offer it,
+ * and the cache can only ever answer OPEN. A worktree an agent is working or
+ * waiting in still spends nothing, because it is not offerable whatever the
+ * answer comes back as.
  */
 export async function scanRepo(
   repoRoot: string,
@@ -711,23 +735,26 @@ async function classifyOne(
   if (!branch) return {};
 
   const sessions = deps.sessionsFor?.(normalizePath(path)) ?? [];
-  // ANY session bound to this worktree outranks every removal reason, not just
-  // a working one. `working` is the obvious case (pulling the directory out
-  // from under it loses whatever it has not written yet), but an agent sitting
-  // at its prompt or blocked on a permission question is equally in use, and
-  // for `waiting` the agent is by definition mid-turn.
+  // A session that HOLDS the worktree whatever the refs or GitHub say, and
+  // the three shapes it comes in:
   //
-  // The gate has to be this wide because the classification cannot always tell
-  // fresh from finished: a worktree branched from base has the base's tip as
-  // its own, which every local check reads as "already merged" (see
-  // `isMergedInto`). A live session is the signal that survives that.
-  const live =
-    sessions.find((s) => s.status === "working") ?? sessions.at(0) ?? null;
-  if (live) {
-    const reason =
-      live.status === "working"
-        ? "an agent is working here"
-        : `an agent is ${live.status} here`;
+  // - `working`: pulling the directory out from under it loses whatever it
+  //   has not written yet.
+  // - `waiting`: the agent is by definition mid-turn, blocked on an answer.
+  //   It reads as the calmer state and is not.
+  // - background: a paneless Claude background row or a subagent folded in
+  //   under its parent. ccmux cannot end it (the pid is the supervisor's), so
+  //   it can never honestly offer to remove what it lives in, at any status.
+  //
+  // `working` is looked for before `waiting` so a worktree holding both does
+  // not report the quieter of the two.
+  const holding =
+    sessions.find((s) => s.status === "working") ??
+    sessions.find((s) => s.status === "waiting") ??
+    sessions.find((s) => s.background === true) ??
+    null;
+  if (holding) {
+    const reason = `an agent is ${holding.status} here`;
     // The skip and the open row are INDEPENDENT facts, and an occupied
     // worktree is the likeliest one of all to have an open PR — reporting
     // only the skip made the panel's badge unreachable for exactly those
@@ -746,6 +773,15 @@ async function classifyOne(
       ...(openPR ? { open: { path, repoRoot, branch, pr: openPR } } : {}),
     };
   }
+
+  // Every session here is idle and is ccmux's to stop, so the worktree can be
+  // OFFERED. It goes down its own path rather than the local-evidence one
+  // below, and never falls through to it: `merged-locally` and
+  // `upstream-gone` must not reach an occupied worktree. A worktree branched
+  // from base carries the base's own tip, which every local check reads as
+  // "already merged" (see `isMergedInto`), and that is precisely the fresh
+  // worktree an agent is sitting idle in.
+  if (sessions.length > 0) return classifyEndIdle(entry, ctx, branch, sessions);
 
   const upstream = ctx.upstreams.get(branch) ?? {
     upstream: null,
@@ -800,28 +836,131 @@ async function classifyOne(
   const reason = reasonFor(pr, mergedLocally, upstream.gone);
   if (!reason) return {};
 
-  const dirtyState = await readDirtyState(path, git, {
+  return {
+    candidate: await buildCandidate(path, ctx, {
+      branch,
+      reason,
+      pr,
+      upstream: upstream.upstream,
+      sessions,
+    }),
+  };
+}
+
+/**
+ * Classify a worktree whose bound sessions are ALL idle and all ccmux's to
+ * stop: the end-idle gate.
+ *
+ * The rule is one thing, deliberately narrow. Only `pr-merged` may offer an
+ * occupied worktree, because it is the only reason backed by evidence from
+ * outside this machine: GitHub says the work landed, and
+ * {@link selectPRForBranch} has already proven the PR is about THIS branch by
+ * head SHA. Everything else stays a skip, including the two reasons that
+ * would offer an unoccupied worktree happily (`merged-locally`,
+ * `upstream-gone`), the rejected-work reason (`pr-closed`), a branch with no
+ * PR at all, and a lookup that could not reach an answer. No proof is not a
+ * guess: the cost of being wrong here is a live agent killed and its
+ * directory deleted.
+ *
+ * Every arm returns. Falling through to the local-evidence path would both
+ * spend a second `gh` call and hand `reasonFor` an occupied worktree.
+ */
+async function classifyEndIdle(
+  entry: WorktreeEntry,
+  ctx: ClassifyContext,
+  branch: string,
+  sessions: WorktreeSession[],
+): Promise<Classification> {
+  const { repoRoot, deps } = ctx;
+  const path = entry.path;
+  // The skip this gate falls back to, kept as one value so every refusal
+  // arm below reports the same sentence. It names the session's own status
+  // rather than the literal "idle" so a status this gate does not know about
+  // cannot be described as one it does.
+  const held: Classification = {
+    skip: {
+      path,
+      repoRoot,
+      branch,
+      reason: `an agent is ${sessions[0].status} here`,
+    },
+  };
+
+  // The daemon's cache first: it is populated from the branches its SESSIONS
+  // sit on, which is exactly this case, so the busy-branch answer is usually
+  // already here and costs no network at all. A cache entry is only ever an
+  // OPEN PR, so a hit is a skip plus the badge the panel wants.
+  const cachedPR = deps.openPR?.(path, branch) ?? null;
+  if (cachedPR) {
+    return { ...held, open: { path, repoRoot, branch, pr: cachedPR } };
+  }
+
+  // The one `gh` call the end-idle gate spends, and it is spent only here:
+  // on a worktree whose sessions are all idle and whose branch had no cached
+  // open PR. An occupied worktree that is NOT offerable still pays nothing,
+  // because it returned at the holding gate above.
+  const lookupPR = deps.lookupPR ?? ghPRStateLookup;
+  const lookup = await lookupPR(path, branch, ctx.hosting);
+  if (!lookup.ok) return held;
+
+  const pr = lookup.pr;
+  if (pr?.state === "OPEN") {
+    return { ...held, open: { path, repoRoot, branch, pr } };
+  }
+  if (pr?.state !== "MERGED") return held;
+
+  return {
+    candidate: await buildCandidate(path, ctx, {
+      branch,
+      reason: "pr-merged",
+      pr,
+      upstream: ctx.upstreams.get(branch)?.upstream ?? null,
+      sessions,
+    }),
+  };
+}
+
+/**
+ * Assemble the candidate for a worktree that has earned a reason, including
+ * the `git status` its dirty counts come from.
+ *
+ * Shared by both classification paths so an end-idle candidate is the SAME
+ * shape as any other: same dirty accounting, same ignored-file accounting,
+ * same branch-deletion policy. The only thing that separates them is a
+ * non-empty `sessions`, which is what {@link runPrune}'s end-idle opt-in
+ * keys off.
+ */
+async function buildCandidate(
+  path: string,
+  ctx: ClassifyContext,
+  args: {
+    branch: string;
+    reason: PruneReason;
+    pr: PRState | null;
+    upstream: string | null;
+    sessions: WorktreeSession[];
+  },
+): Promise<PruneCandidate> {
+  const dirtyState = await readDirtyState(path, ctx.git, {
     setupSymlinks: ctx.setupSymlinks,
   });
   return {
-    candidate: {
-      path,
-      repoRoot,
-      repoName: ctx.repoName,
-      name: basename(path),
-      branch,
-      reason,
-      detail: detailFor(reason, pr, upstream.upstream, ctx.baseRefs),
-      pr,
-      dirty: dirtyState.dirty,
-      modified: dirtyState.modified,
-      untracked: dirtyState.untracked,
-      ignoredFiles: dirtyState.ignoredFiles,
-      ignoredDirs: dirtyState.ignoredDirs,
-      branchDeletion: branchDeletionFor(reason),
-      adminDir: readAdminDir(path),
-      sessions,
-    },
+    path,
+    repoRoot: ctx.repoRoot,
+    repoName: ctx.repoName,
+    name: basename(path),
+    branch: args.branch,
+    reason: args.reason,
+    detail: detailFor(args.reason, args.pr, args.upstream, ctx.baseRefs),
+    pr: args.pr,
+    dirty: dirtyState.dirty,
+    modified: dirtyState.modified,
+    untracked: dirtyState.untracked,
+    ignoredFiles: dirtyState.ignoredFiles,
+    ignoredDirs: dirtyState.ignoredDirs,
+    branchDeletion: branchDeletionFor(args.reason),
+    adminDir: readAdminDir(path),
+    sessions: args.sessions,
   };
 }
 
@@ -997,8 +1136,10 @@ export interface PruneOptions extends PruneDeps {
    * convention spawn placement uses.
    *
    * It exempts that pane from the LAST-MOMENT check only. A worktree with a
-   * bound session is still skipped at classification, so this cannot be used
-   * to prune a worktree an agent is actually working in.
+   * working, waiting or background session is still skipped at
+   * classification, and one whose sessions are all idle still needs
+   * {@link PruneOptions.allowEndIdlePaths}, so this cannot be used to prune a
+   * worktree an agent is actually working in.
    */
   callerPane?: string;
   dryRun?: boolean;
@@ -1020,6 +1161,33 @@ export interface PruneOptions extends PruneDeps {
    * an opted-in removal on a spurious "was not opted in".
    */
   allowDirtyPaths?: string[];
+  /**
+   * Worktree paths the user separately opted in to ENDING the idle agent
+   * sessions in. A candidate carrying sessions and not listed here is
+   * refused before anything is signalled, for the same reason a dirty one is:
+   * the confirmation that selected a row is about a directory, and killing
+   * someone's agent is a different thing to agree to.
+   *
+   * A separate axis from {@link PruneOptions.allowDirtyPaths}, not a
+   * stronger form of it. A merged worktree that is both dirty and occupied
+   * needs BOTH opt-ins and refuses on whichever is missing.
+   *
+   * Compared against `normalizePath(candidate.path)` exactly like the dirty
+   * list, and for the same reason (S10).
+   */
+  allowEndIdlePaths?: string[];
+  /**
+   * The session's status RIGHT NOW, as the daemon sees it. The scan's answer
+   * is a snapshot that a `gh` call per branch and a user's confirmation have
+   * both aged since, and an agent that went back to work in that window must
+   * not be killed on a consent given while it was idle. Any non-idle answer
+   * refuses the candidate; consent never overrides live status.
+   *
+   * `undefined` means the daemon has no such session any more, which is the
+   * good case (it exited) and proceeds. Omitting the callback entirely skips
+   * the re-check, for callers that have nothing live to ask.
+   */
+  sessionStatus?: (sessionId: string) => SessionStatus | undefined;
 }
 
 const PROCESS_EXIT_TIMEOUT_MS = 3000;
@@ -1274,6 +1442,12 @@ export function trashPathFor(worktreePath: string, now: Date): string {
  * metadata (`git worktree prune`, stale lock files) is reclaimed once per
  * repo rather than once per worktree.
  *
+ * Both consent gates come first, before anything is signalled or moved: the
+ * dirty opt-in, then the end-idle opt-in and the live-status re-check it is
+ * paired with. A candidate that fails either has nothing done to it at all,
+ * and both run under `dryRun` too so a dry run refuses what a real run
+ * would.
+ *
  * Per candidate, `stopSessions` (S9) runs BEFORE the dirty re-check (S8),
  * which runs immediately before the rename. Checking dirt first would leave
  * the whole agent-shutdown wait unguarded — exactly the gap that let a
@@ -1289,6 +1463,7 @@ export async function runPrune(
   const now = options.now ?? (() => new Date());
   const log = options.log ?? ((m: string) => console.log(m));
   const allowDirty = new Set(options.allowDirtyPaths ?? []);
+  const allowEndIdle = new Set(options.allowEndIdlePaths ?? []);
   const outcomes: PruneOutcome[] = [];
   const trashToDelete: string[] = [];
 
@@ -1325,6 +1500,53 @@ export async function runPrune(
       continue;
     }
 
+    // The other consent gate, and an INDEPENDENT one: a candidate carrying
+    // sessions is a worktree whose idle agents this run would end, which the
+    // scan offers only for a merged PR. Selecting the row is agreement about
+    // a directory; ending someone's session is a separate thing to agree to,
+    // so it takes its own opt-in and refuses before anything is signalled.
+    // Normalized on both sides for the same reason as the dirty list (S10).
+    if (candidate.sessions.length > 0) {
+      if (!allowEndIdle.has(normalizePath(candidate.path))) {
+        outcome.error = "has an idle agent session and was not opted in";
+        const count = candidate.sessions.length;
+        steps.push({
+          step: "refused",
+          ok: false,
+          detail: `${count} idle agent session${count === 1 ? "" : "s"} would be ended; needs an explicit end-idle opt-in`,
+        });
+        continue;
+      }
+
+      // Consent is not a claim about the present. The scan's status is a
+      // snapshot that a `gh` call per branch and the user's own confirmation
+      // have aged, and an agent that picked up work in that window must not
+      // be killed on an opt-in given while it was idle. Runs under dryRun
+      // too, so a dry run reports what would actually happen rather than what
+      // the stale list says.
+      //
+      // Background sessions are not asked about: ccmux cannot end one, so
+      // `stopSessions` never signals it and its status decides nothing here.
+      // An `undefined` answer is the good case, a session the daemon no
+      // longer has, and proceeds.
+      const status = options.sessionStatus;
+      const busy = status
+        ? candidate.sessions
+            .filter((s) => !s.background)
+            .map((s) => ({ session: s, live: status(s.id) }))
+            .find((s) => s.live !== undefined && s.live !== "idle")
+        : undefined;
+      if (busy) {
+        outcome.error = `its agent is ${busy.live} now, not idle; nothing was deleted`;
+        steps.push({
+          step: "refused",
+          ok: false,
+          detail: `${busy.session.agentType} ${busy.session.id} went ${busy.live} after the list was built; the end-idle opt-in does not cover that`,
+        });
+        continue;
+      }
+    }
+
     // Everything gitignored the removal takes with it. The FILES are already
     // on the row and in both confirmations; the DIRECTORIES are named here
     // and nowhere else, because a `node_modules/` in front of every confirm
@@ -1352,6 +1574,21 @@ export async function runPrune(
             ? ` (DIRTY: ${candidate.modified} modified, ${candidate.untracked} untracked)`
             : ""),
       });
+      // What a dry run owes the user most: the sessions this removal would
+      // END. The directory line alone reads as a file operation, and the
+      // opt-in that authorized it is exactly the one worth being able to
+      // review before the real run.
+      for (const session of candidate.sessions) {
+        steps.push({
+          step: "would stop agent",
+          ok: true,
+          detail: session.background
+            ? `${session.agentType} ${session.id} is supervisor-owned; it would not be signalled`
+            : session.pid
+              ? `${session.agentType} pid ${session.pid} would be stopped`
+              : `${session.agentType} ${session.id} has no pid; only its pane would be closed`,
+        });
+      }
       for (const detail of ignoredSummaries) {
         steps.push({ step: "would delete ignored", ok: true, detail });
       }

@@ -1859,6 +1859,7 @@ export class DaemonServer {
     let body: {
       paths?: unknown;
       allowDirty?: unknown;
+      allowEndIdle?: unknown;
       dryRun?: unknown;
       cleanState?: unknown;
       repo?: unknown;
@@ -1910,9 +1911,15 @@ export class DaemonServer {
     if (pathsCapError) return pathsCapError;
     const allowDirtyCapError = overCap(body.allowDirty, "allowDirty entries");
     if (allowDirtyCapError) return allowDirtyCapError;
+    const allowEndIdleCapError = overCap(
+      body.allowEndIdle,
+      "allowEndIdle entries",
+    );
+    if (allowEndIdleCapError) return allowEndIdleCapError;
 
     const paths = asPaths(body.paths);
     const allowDirty = asPaths(body.allowDirty);
+    const allowEndIdle = asPaths(body.allowEndIdle);
     const cleanState = body.cleanState === true;
 
     // Validated the same way the spawn endpoint validates its own pane ids: a
@@ -1972,10 +1979,20 @@ export class DaemonServer {
         // resolved through symlinks, so an opt-in echoed back through a client
         // still matches the candidate it was granted for.
         allowDirtyPaths: allowDirty.map(normalizePath),
+        // The second opt-in, on its own axis: the paths whose idle agent
+        // sessions the caller agreed to end. Normalized like the dirty list.
+        allowEndIdlePaths: allowEndIdle.map(normalizePath),
+        // Read at the moment of removal, not from the scan. The candidate's
+        // sessions were idle when they were listed, and the confirmation that
+        // followed took as long as a user takes; an agent that went back to
+        // work in that window refuses the removal even though its path was
+        // opted in.
+        sessionStatus: (id) => this.sessionManager.getSession(id)?.status,
         // The caller's own pane, exempt from the last-moment occupancy guard
         // so pruning from a pane inside the worktree still works. It never
-        // widens what is prunable: a worktree with a bound session is already
-        // skipped at classification.
+        // widens what is prunable: a worktree with a non-idle session is
+        // already skipped at classification, and an all-idle one is gated on
+        // `allowEndIdle` above.
         callerPane: callerPaneResult.value,
         source: typeof body.source === "string" ? body.source : "api",
       });

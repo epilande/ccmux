@@ -6164,6 +6164,99 @@ describe("worktree prune endpoints", () => {
     expect(body.error).toContain("500");
   });
 
+  it("rejects an over-cap allowEndIdle list too", async () => {
+    const { repo, worktree } = makePruneFixture();
+    const { internals } = serverFor(repo);
+    const over = Array.from({ length: 501 }, (_, i) => join(root, `p${i}`));
+
+    const res = await post(internals, {
+      paths: [worktree],
+      allowEndIdle: over,
+    });
+    const body = (await res.json()) as { error: string };
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("allowEndIdle");
+    expect(body.error).toContain("501");
+    expect(existsSync(worktree)).toBe(true);
+  });
+
+  /**
+   * The end-idle gate at the endpoint (#175). A worktree whose only session
+   * is idle IS offered once `gh` says its PR merged, so the request that acts
+   * on it must carry a second opt-in: removing it ends that session, which
+   * selecting a row does not agree to.
+   *
+   * Only the refusal is driven here, deliberately. Letting the run proceed
+   * would reach `runPrune`'s real `closePane`, and the endpoint injects no
+   * seam for it, so the test would send `tmux kill-pane` at whatever `%1`
+   * happens to be on the developer's own tmux server. The removal side is
+   * covered against injected seams in worktree-prune.test.ts.
+   */
+  it("refuses a candidate whose idle session was not opted in, without a 409", async () => {
+    const { worktree } = makePruneFixture();
+    // A MERGED PR at this worktree's tip, which is what `selectPRForBranch`
+    // demands as proof and the only thing that offers an occupied worktree.
+    const head = Bun.spawnSync(["git", "-C", worktree, "rev-parse", "HEAD"], {
+      env: GIT_FIXTURE_ENV,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+      .stdout.toString()
+      .trim();
+    const binDir = join(root, "fakebin");
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(
+      join(binDir, "gh"),
+      "#!/bin/bash\n" +
+        // The daemon's open-PR resolver asks with `--state open`; only the
+        // `--state all` lookup should see the merged PR.
+        'for a in "$@"; do [ "$a" = "open" ] && { echo "[]"; exit 0; }; done\n' +
+        `cat <<'JSON'\n${JSON.stringify([
+          {
+            number: 3,
+            url: "https://github.com/o/r/pull/3",
+            state: "MERGED",
+            isCrossRepository: false,
+            headRefOid: head,
+          },
+        ])}\nJSON\n`,
+      { mode: 0o755 },
+    );
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${originalPath}`;
+    try {
+      // The session lives IN the worktree, and a fresh pane-tracked session
+      // is idle, which is exactly the row the gate offers.
+      const { internals } = serverFor(worktree);
+
+      const listed = await internals.handleRequest(
+        new Request("http://127.0.0.1:2269/worktrees/prune-candidates"),
+      );
+      const scan = (await listed.json()) as {
+        candidates: Array<{ path: string; sessions: unknown[] }>;
+      };
+      const offered = scan.candidates.find(
+        (c) => c.path === realpathSync(worktree),
+      );
+      expect(offered?.sessions).toHaveLength(1);
+
+      const res = await post(internals, { paths: [worktree] });
+      const body = (await res.json()) as {
+        outcomes: Array<{ removed: boolean; error?: string }>;
+      };
+
+      // A refusal from inside the run, not a 409: the path IS currently
+      // removable, it just needs the consent the request did not carry.
+      expect(res.status).toBe(200);
+      expect(body.outcomes[0]?.removed).toBe(false);
+      expect(body.outcomes[0]?.error).toContain("idle agent session");
+      expect(existsSync(worktree)).toBe(true);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
   it("rejects an over-cap allowDirty list too, not just paths", async () => {
     const { repo, worktree } = makePruneFixture();
     const { internals } = serverFor(repo);
