@@ -186,6 +186,14 @@ Two rejections share `kind: "agent_error"` / exit 4; disambiguate on the **messa
 - Contains `already in flight`: you reused a running id. **Mint a fresh id** and retry;
   do not back off.
 
+## Cleaning up after a merge
+
+Once the PR merges, `ccmux worktree prune --end-idle` takes the worktree, the local branch,
+the tmux window and the idle agent sitting in it in one step (the picker's Worktrees panel,
+`W`, does the same: select the row, then `x`). A worktree whose agent is working or waiting
+is never offered, so this cannot pull a job out from under itself. The agent's transcript is
+its own file, so the session stays resumable after its pane is gone.
+
 ## Gotchas (read before a long run)
 
 - **Admission lag: a freshly-fired id is briefly ABSENT from `list`.** A naive poll loop
