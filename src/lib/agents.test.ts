@@ -286,6 +286,26 @@ describe("getAgents", () => {
     ).toBe(false);
   });
 
+  it("declares a verified --model flag on every built-in", () => {
+    // Each was read off the agent's own `--help` (agy for antigravity, and
+    // `codex resume --help` for the resume path). A new built-in with no
+    // modelFlag would refuse `ccmux spawn --model`; re-verify before adding.
+    for (const agent of BUILTIN_AGENTS) {
+      expect(agent.modelFlag).toBe("--model");
+    }
+  });
+
+  it("carries a custom agent's modelFlag through the merge", () => {
+    const agents = getAgents({
+      agents: {
+        myagent: { processMatch: "myagent", modelFlag: "-m" },
+        codex: { modelFlag: "-m" },
+      },
+    });
+    expect(agents.find((a) => a.name === "myagent")?.modelFlag).toBe("-m");
+    expect(agents.find((a) => a.name === "codex")?.modelFlag).toBe("-m");
+  });
+
   it("parses terminal rules for custom agents", () => {
     const agents = getAgents({
       agents: {

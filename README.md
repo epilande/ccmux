@@ -299,6 +299,7 @@ ccmux spawn --cwd ~/proj                                           # Set working
 ccmux spawn --resume <id>                                          # Resume an existing session
 ccmux spawn --fork <id>                                            # Branch an existing session into a new one
 ccmux spawn --prompt "fix the tests"                               # Send an initial prompt
+ccmux spawn --model opus                                           # Start the agent on a model (its own flag, e.g. claude --model)
 ccmux spawn --worktree --prompt "fix flicker"                      # Spawn into a git worktree (name derived from the prompt)
 ccmux spawn --worktree fix-flicker                                 # Spawn into a named worktree, creating it if needed
 ccmux spawn --worktree --base develop --prompt "fix flicker"       # Branch the new worktree from develop
@@ -330,6 +331,14 @@ It is supported for the agents whose interactive-with-prompt invocation ccmux
 has verified; for anything else (including custom agents) ccmux refuses the
 spawn rather than guessing a flag, and you can teach it the right shape with
 `promptCommand` in your agent config.
+
+`--model <name>` starts the agent on that model, passed through as the agent's
+own flag (`--model` for every built-in, read from each CLI's `--help`). An
+agent with no known flag, including a custom one, refuses the spawn; declare
+`modelFlag` in its config to teach it. A new window is named after the
+worktree when the spawn has one (`fix-flicker`, `issue-150-...`, `pr-154-...`)
+and after the agent otherwise, so a batch of spawns is tellable apart; the name
+pins tmux's `automatic-rename` off for that window.
 
 `--worktree [name]` spawns the agent into a git worktree at
 `<main>/.claude/worktrees/<name>`, creating it first if it doesn't exist yet.

@@ -32,7 +32,16 @@ a task you judge wants human eyes (launch it, tell the user, stop), or workspace
 ```bash
 # Launch a live pane for the user, then stop. Do NOT poll or drive it.
 ccmux spawn codex --cwd /path/to/repo --prompt "Long refactor: <brief>"
+ccmux spawn claude --issue 163 --detach          # worktree issue-163-<slug>, prompt seeded from the issue
+ccmux spawn codex --pr 155 --detach              # worktree on the PR's branch
+ccmux spawn --worktree fix-flicker --model opus  # named worktree; the agent's own model flag
 ```
+
+`--issue <n>` / `--pr <n>` cut a worktree from GitHub (via `gh`) and seed the prompt;
+`--worktree [name]` cuts one from the current branch (name derived from `--prompt` if omitted).
+Pass `--detach` when dispatching so the user's view stays put. The new window is named after
+the worktree, else the agent, so a batch of spawns is tellable apart in tmux. `--model <name>`
+maps onto each built-in's model flag and is refused for agents without a known one.
 
 **Do not drive a spawned pane as a worker** (spawn -> `ccmux send` -> poll -> `ccmux screen`
 -> parse scrollback). It is a brittle scrape loop: no completion signal, render races, and

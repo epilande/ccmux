@@ -3,7 +3,11 @@ import { resolve } from "node:path";
 import { getDaemonUrl } from "../lib/config";
 import { readString } from "../lib/daemon-json";
 import { ensureDaemon } from "./shared";
-import { PANE_ID_PATTERN, type SpawnSplit } from "../daemon/spawn-command";
+import {
+  MODEL_PATTERN,
+  PANE_ID_PATTERN,
+  type SpawnSplit,
+} from "../daemon/spawn-command";
 import {
   isUntrackedMode,
   UNTRACKED_MODES,
@@ -87,6 +91,18 @@ function parseNumber(flag: string): (value: string) => number {
     }
     return Number(digits);
   };
+}
+
+/**
+ * `--model`'s value. The daemon splices it unquoted into the agent command,
+ * so the same pattern it enforces is applied here, where a typo costs an
+ * error message rather than a daemon start.
+ */
+function parseModel(value: string): string {
+  if (MODEL_PATTERN.test(value)) return value;
+  throw new InvalidArgumentError(
+    "Expected a model name such as opus, gpt-5, or provider/model.",
+  );
 }
 
 /** `--untracked`'s value, rejected at parse time so a typo never reaches the
@@ -184,6 +200,11 @@ export function createSpawnCommand(): Command {
     )
     .option("--prompt <text>", "Initial prompt to send")
     .option(
+      "--model <name>",
+      "Model to start the agent on, passed through as the agent's own model flag (refused for agents without a known one)",
+      parseModel,
+    )
+    .option(
       "--split [direction]",
       "Split current pane instead of new window ('h' left/right, 'v' stacked)",
       parseSplit,
@@ -228,6 +249,7 @@ export function createSpawnCommand(): Command {
           resume?: string;
           fork?: string;
           prompt?: string;
+          model?: string;
           split?: SpawnSplit;
           target?: string;
           detach?: boolean;
@@ -389,6 +411,7 @@ export function createSpawnCommand(): Command {
               resume: options.resume,
               fork: options.fork,
               prompt: options.prompt,
+              model: options.model,
               split: options.split ?? false,
               target: explicitTarget,
               callerPane: optedOut ? undefined : callerPane(daemonSocket),

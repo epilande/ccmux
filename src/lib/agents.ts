@@ -105,6 +105,18 @@ export interface AgentDef {
    */
   forkCommand?: string;
   /**
+   * The agent's own command-line flag for choosing a model, spliced after
+   * the launcher binary by `POST /spawn` when `--model` is given (`claude
+   * --model opus`). The value is validated to a shell-inert character set
+   * upstream, so it is never quoted.
+   *
+   * Undefined means "this agent's model flag has not been verified", and a
+   * model spawn is refused for it. Every built-in below declares one that
+   * was read from the agent's own `--help`; a custom agent declares its own
+   * in ccmux.json. Per-agent findings live in `docs/agent-adapters.md`.
+   */
+  modelFlag?: string;
+  /**
    * argv to stop a paneless background session (`trackingMode: "background"`)
    * given its daemon-short id. Only meaningful for agents with a background
    * mode whose worker pid is owned by a supervisor process, not by ccmux —
@@ -383,6 +395,9 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
   if (override.forkCommand !== undefined) {
     merged.forkCommand = override.forkCommand;
   }
+  if (override.modelFlag !== undefined) {
+    merged.modelFlag = override.modelFlag;
+  }
   if (override.sessionFilePattern !== undefined) {
     merged.sessionFilePattern = parseRegex(
       override.sessionFilePattern,
@@ -528,6 +543,7 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // "claude [options] [command] [prompt]" — "starts an interactive session
     // by default, use -p/--print for non-interactive output" (claude --help).
     promptCommand: "{bin} '{prompt}'",
+    modelFlag: "--model",
     // `--fork-session` resumes the transcript into a NEW session id rather
     // than appending to the source, so the original keeps its history and can
     // carry on being used. Verified against a live original, including one
@@ -689,6 +705,7 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // "--prompt  prompt to use", and its positional is a PROJECT PATH, not a
     // prompt. (`opencode run` is the non-interactive one.)
     promptCommand: "{bin} --prompt '{prompt}'",
+    modelFlag: "--model",
     // OpenCode's permission dialog is a horizontal option row
     // (`Allow once  Allow always  Reject`) navigated with Left/Right arrows;
     // Enter confirms the highlighted option. Verified e2e on OpenCode 1.18.3:
@@ -822,6 +839,7 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // "codex [OPTIONS] [PROMPT]" — "[PROMPT] Optional user prompt to start the
     // session"; `codex exec` is the non-interactive subcommand.
     promptCommand: "{bin} '{prompt}'",
+    modelFlag: "--model",
     sessionFilePattern: CODEX_SESSION_FILE_PATTERN,
     // The marker, not the pane, decides when a Codex permission wait ends:
     // no hook fires on resolution, so the log adapter infers it and the pane
@@ -987,6 +1005,7 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // "agent [options] [command] [prompt...]" — "prompt  Initial prompt for
     // the agent"; -p/--print is the non-interactive mode.
     promptCommand: "{bin} '{prompt}'",
+    modelFlag: "--model",
     // `cursor` on PATH is the IDE GUI launcher (Cursor.app/.../bin/code);
     // the CLI agent ships as `cursor-agent`.
     executable: "cursor-agent",
@@ -1070,6 +1089,7 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // interactive form is the separate "-i / --prompt-interactive  Run an
     // initial prompt interactively and continue the session".
     promptCommand: "{bin} -i '{prompt}'",
+    modelFlag: "--model",
     executable: "agy",
     invokeMode: {
       args: ["agy", "-p", "{prompt}"],
@@ -1090,6 +1110,7 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // provided prompt and continue in interactive mode" says so explicitly and
     // cannot be flipped by a future default change.
     promptCommand: "{bin} -i '{prompt}'",
+    modelFlag: "--model",
     commandPatterns: [
       /(?:^|\s)(?:npx|npm\s+exec)\s+@google\/gemini-cli(?:\s|$)/i,
       /\/\.bin\/gemini(?:\s|$)/i,
@@ -1235,6 +1256,7 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // prompt / omp \"List all .ts files in src/\"" vs "# Non-interactive mode
     // (process and exit) / omp -p \"...\"".
     promptCommand: "{bin} '{prompt}'",
+    modelFlag: "--model",
     // omp writes its JSONL transcript to
     // ~/.omp/agent/sessions/<encoded-cwd>/<ts>_<uuidv7>.jsonl, the same
     // filename shape as pi's, so the pattern is reused verbatim. ccmux does
@@ -1321,6 +1343,7 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // prompt / pi \"List all .ts files in src/\"" vs "# Non-interactive mode
     // (process and exit) / pi -p \"...\"". pi has NO --prompt flag at all.
     promptCommand: "{bin} '{prompt}'",
+    modelFlag: "--model",
     // pi writes its JSONL transcript to
     // ~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<uuidv7>.jsonl. ccmux does
     // not parse it in v1 (pi closes the file after each append, so the lsof
@@ -1434,6 +1457,7 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // execute this prompt". Copilot's `-p/--prompt` is explicitly the
     // non-interactive scripting mode.
     promptCommand: "{bin} -i '{prompt}'",
+    modelFlag: "--model",
     // Copilot holds `session-state/<uuid>/session.db` open (lsof-discoverable),
     // so the no-hooks path can recover the native session id from it.
     sessionFilePattern: COPILOT_SESSION_FILE_PATTERN,
@@ -1515,6 +1539,7 @@ export function getAgents(preferences?: Preferences): AgentDef[] {
       resumeCommand: override.resumeCommand,
       promptCommand: override.promptCommand,
       forkCommand: override.forkCommand,
+      modelFlag: override.modelFlag,
       sessionFilePattern: override.sessionFilePattern
         ? parseRegex(
             override.sessionFilePattern,

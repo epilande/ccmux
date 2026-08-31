@@ -3849,6 +3849,8 @@ describe("POST /spawn", () => {
       expect(argv[0]).toEqual([
         "tmux",
         "new-window",
+        "-n",
+        "prompty",
         "-d",
         "-c",
         cwd,
@@ -3924,6 +3926,8 @@ describe("POST /spawn", () => {
       expect(argv[1]).toEqual([
         "tmux",
         "new-window",
+        "-n",
+        "prompty",
         "-d",
         "-a",
         "-t",
@@ -3954,6 +3958,8 @@ describe("POST /spawn", () => {
       expect(argv[1]).toEqual([
         "tmux",
         "new-window",
+        "-n",
+        "prompty",
         "-d",
         "-t",
         "$3:",
@@ -4605,6 +4611,55 @@ describe("POST /spawn", () => {
     }
   });
 
+  it("threads --model through to the composed agent command", async () => {
+    // `normalizeModel` and the builders are each unit-tested, but nothing
+    // proved the wire field travels between them: dropping `model` from the
+    // `buildAgentSpawnCommand` call left every other test green.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({
+          agent: "prompty",
+          cwd,
+          prompt: "go",
+          model: "opus",
+          detach: true,
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(argv[1]).toEqual([
+        "tmux",
+        "send-keys",
+        "-t",
+        "%99",
+        "prompty --model opus 'go'",
+        "Enter",
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("refuses a flag-shaped model with nothing created", async () => {
+    // The value is spliced unquoted, so the refusal has to land before the
+    // pane exists rather than after it.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, model: "-x", detach: true }),
+      );
+      expect(res.status).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error).toContain("Invalid 'model' field");
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+
   it("refuses a prompt spawn for an agent with no promptCommand", async () => {
     // The old code emitted `--prompt` for every agent, which silently
     // means one-shot print mode (Copilot) or an unknown flag (pi).
@@ -4769,6 +4824,31 @@ describe("POST /spawn", () => {
         restore();
       }
     });
+
+    it("carries --model into the fork command", async () => {
+      // Same wire-threading gap as the spawn path, on the other builder:
+      // `forkAgent` uses the id form, so this also pins that branch.
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const source = trackedSession(manager, "forky");
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id, model: "opus", detach: true }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[1]).toEqual([
+          "tmux",
+          "send-keys",
+          "-t",
+          "%99",
+          "forky --model opus --resume src-sid --fork-session",
+          "Enter",
+        ]);
+      } finally {
+        restore();
+      }
+    });
+
 
     it("takes the agent from the source, ignoring the caller's", async () => {
       const { manager, internals } = serverForAgents([forkAgent, noForkAgent]);

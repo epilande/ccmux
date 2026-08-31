@@ -60,6 +60,12 @@ export interface AgentConfig {
    * you have checked that resuming a LIVE session does not disturb it.
    */
   forkCommand?: string;
+  /**
+   * The agent's model flag (`"--model"`), spliced after the launcher binary
+   * by `ccmux spawn --model`. See `AgentDef.modelFlag`. Without it, a model
+   * spawn is refused for this agent.
+   */
+  modelFlag?: string;
   sessionFilePattern?: string;
   executable?: string;
   invokeMode?: InvokeModeConfig;
