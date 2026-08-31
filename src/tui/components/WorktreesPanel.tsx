@@ -82,6 +82,14 @@ import { theme } from "../theme";
  *   top of being selected. The daemon enforces the same dirty gate
  *   independently, so this is the ergonomic half of the rule, not the whole
  *   of it.
+ * - A worktree an agent lives in can now be offered (issue #175): the daemon
+ *   classifies one whose bound sessions are ALL idle and whose PR is proved
+ *   merged, and removal ends those agents. That is a second consent, and it
+ *   asks for no extra key: selecting the row IS the consent (`endsSessions`
+ *   gates the row's note, `a`, the confirm line and `allowEndIdle` alike),
+ *   because the cost is bounded: the transcript persists and the session
+ *   resumes, which is also why none of it is coloured like work that would
+ *   be lost.
  */
 
 type Phase = "loading" | "list" | "confirm" | "running" | "done" | "error";
@@ -1012,6 +1020,21 @@ export function describeSessions(sessions: WorktreeSession[]): string {
 }
 
 /**
+ * Whether removing this candidate takes an agent down with it.
+ *
+ * The daemon now OFFERS a worktree whose bound sessions are all idle when the
+ * branch's PR is proved merged, and refuses to remove one unless the request
+ * names it in `allowEndIdle`. Selecting the row is that consent, which is why
+ * one predicate gates all four places that have to agree about it: the row's
+ * note, the `a` bulk key, the confirmation line, and the request field. A
+ * daemon predating the change sends no sessions on a candidate, and every one
+ * of those four then behaves exactly as it did.
+ */
+export function endsSessions(candidate: PruneCandidate | null): boolean {
+  return (candidate?.sessions.length ?? 0) > 0;
+}
+
+/**
  * Everything the detail line says about a row, in reading order and already
  * de-duplicated: a fact is stated once, by whichever phrase says it best.
  *
@@ -1020,7 +1043,7 @@ export function describeSessions(sessions: WorktreeSession[]): string {
  */
 export function detailPhrases(
   entry: PanelRow,
-  opts: { dirtyOk: boolean; compact?: boolean },
+  opts: { dirtyOk: boolean; compact?: boolean; selected?: boolean },
 ): Phrase[] {
   if (entry.kind === "pr") {
     return prDetailPhrases(entry.pr, {
@@ -1037,14 +1060,17 @@ export function detailPhrases(
   const row = entry.row;
 
   // At sidebar widths the line cannot hold both, and the phrase that must
-  // survive is the one about work that would be DELETED, not the one about
-  // why the row is removable (the rule above it already says that
-  // categorically). At full width the reason leads, which reads better.
+  // survive is the one about what a removal would TAKE (uncommitted work, or
+  // the agent living here), not the one about why the row is removable (the
+  // rule above it already says that categorically). At full width the reason
+  // leads, which reads better.
   const dirtyLeads = opts.compact === true && candidate?.dirty === true;
+  const consentLeads = opts.compact === true && endsSessions(candidate);
+  const consequenceLeads = dirtyLeads || consentLeads;
   const reasonPhrase: Phrase[] = candidate
     ? [{ text: describeReason(candidate), fg: reasonColor(candidate.reason) }]
     : [];
-  if (!dirtyLeads) phrases.push(...reasonPhrase);
+  if (!consequenceLeads) phrases.push(...reasonPhrase);
   // Locked comes off the worktree itself, not off the scan, so it is already
   // true on the first paint. The scan's own `locked` skip would say it twice.
   if (row.locked) phrases.push({ text: "locked", fg: theme.overlay });
@@ -1061,7 +1087,15 @@ export function detailPhrases(
   // saying nothing.
   const skipReason = entry.skip?.reason ?? "";
   const skipText = skipReason ? describeSkip(skipReason) : "";
-  const sessionsText = describeSessions(row.sessions);
+  // The two halves of the session story come from different phases, exactly
+  // like the dirty one below: the phrase reads the LIST's sessions and the
+  // consent note gates on the SCAN's. They are read seconds apart and merged
+  // by path without reconciling, so the scan's own copy stands in when the
+  // list has none. Otherwise a row the daemon will end an agent in would
+  // carry the note with nothing to say it about.
+  const sessionSource =
+    row.sessions.length > 0 ? row.sessions : (candidate?.sessions ?? []);
+  const sessionsText = describeSessions(sessionSource);
   const alreadySaid =
     (row.locked && skipText === "locked") ||
     (sessionsText !== "" && isLivenessSkip(skipReason));
@@ -1120,17 +1154,31 @@ export function detailPhrases(
       fg: note && opts.dirtyOk ? theme.red : warn,
     });
   });
-  if (dirtyLeads) {
-    phrases.unshift(...dirtySegments);
+  // The consent note rides the session summary the way the `D` note rides the
+  // last dirty phrase: the sentence a reader is already looking at gains the
+  // consequence, rather than an instruction arriving as a phrase of its own.
+  //
+  // Yellow, not red: what is ending is an idle agent whose transcript survives
+  // and whose session resumes, so it must not read as loudly as the one case
+  // that loses work. Selection is the consent, so the armed wording is the
+  // whole difference: the `[x]` box already says the row is picked, which is
+  // why this note, unlike the dirty one, need not name a key twice.
+  const sessionSegments: Phrase[] = [];
+  if (sessionsText) {
+    const ending = endsSessions(candidate);
+    const endNote = sessionSource.length > 1 ? "(x ends them)" : "(x ends it)";
+    sessionSegments.push({
+      text: ending
+        ? `${sessionsText} ${opts.selected ? "(will be ended)" : endNote}`
+        : sessionsText,
+      fg: ending ? theme.yellow : statusColor(leadStatus(sessionSource)),
+    });
+  }
+  if (consequenceLeads) {
+    phrases.unshift(...dirtySegments, ...sessionSegments);
     phrases.push(...reasonPhrase);
   } else {
-    phrases.push(...dirtySegments);
-  }
-  if (sessionsText) {
-    phrases.push({
-      text: sessionsText,
-      fg: statusColor(leadStatus(row.sessions)),
-    });
+    phrases.push(...dirtySegments, ...sessionSegments);
   }
   if (candidate && candidate.ignoredFiles.length > 0) {
     phrases.push({
@@ -1201,7 +1249,7 @@ const SCROLLBAR_GUTTER = 1;
  *  it stays muted while the phrases keep their own colours. */
 export function detailSegments(
   entry: PanelRow,
-  opts: { compact: boolean; dirtyOk: boolean },
+  opts: { compact: boolean; dirtyOk: boolean; selected?: boolean },
 ): RowSegment[] {
   const segments: RowSegment[] = [];
   for (const phrase of detailPhrases(entry, opts)) {
@@ -1575,11 +1623,22 @@ export function removalDetails(opts: {
   includedDirty: number;
   blockedDirty: number;
   ignoredFiles: number;
+  /** Idle agent sessions the removal will end, counted across the selection. */
+  endingSessions: number;
 }): string[] {
   const lines: string[] = [];
   if (opts.includedDirty > 0) {
     lines.push(
       `including ${plural(opts.includedDirty, "worktree", "worktrees")} with uncommitted work`,
+    );
+  }
+  // Named here as well as on the row, because the rows that carry it can be
+  // off screen by the time the confirm is up. Not part of `destructive`: the
+  // transcript survives and the session resumes, so the red border stays with
+  // the one case that loses work.
+  if (opts.endingSessions > 0) {
+    lines.push(
+      `ending ${plural(opts.endingSessions, "idle agent session", "idle agent sessions")}`,
     );
   }
   if (opts.blockedDirty > 0) {
@@ -2360,6 +2419,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     effective().reduce((n, c) => n + c.ignoredFiles.length, 0);
   /** Selected dirty rows that WILL be deleted (their opt-in is live). */
   const includedDirty = () => effective().filter((c) => c.dirty);
+  /** Idle agent sessions the current selection would end. */
+  const endingCount = () =>
+    effective().reduce((n, c) => n + c.sessions.length, 0);
 
   /** Columns a row may occupy: the box minus its border and padding. */
   const contentWidth = () => Math.max(8, dims().width - 4);
@@ -2853,6 +2915,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       body: JSON.stringify({
         paths: chosen.map((c) => c.path),
         allowDirty: chosen.filter((c) => c.dirty).map((c) => c.path),
+        // The daemon refuses a candidate with sessions unless the request
+        // names it here, and re-reads their live status before ending
+        // anything. An exact mirror of `allowDirty`: the selection is the
+        // consent, and this is the wire half of it.
+        allowEndIdle: chosen.filter(endsSessions).map((c) => c.path),
         source: "picker",
         repo: repoFilter(),
         cwd: props.cwd,
@@ -2987,18 +3054,26 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       case "a":
       case "A":
         if (!canRemove) break;
-        // "All" means all CLEAN rows: a bulk key must never be the thing that
-        // opts a dirty worktree in. Clearing the opt-ins matters as much as
-        // the selection — a stale `dirtyOk` left behind would silently re-arm
-        // the moment the row was selected again by hand.
+        // "All" means all rows that consent to nothing beyond their own
+        // deletion: a bulk key must never be the thing that opts a dirty
+        // worktree in, and by the same rule it must never be the thing that
+        // ends an agent. Clearing the opt-ins matters as much as the
+        // selection, since a stale `dirtyOk` left behind would silently
+        // re-arm the moment the row was selected again by hand.
         setSelected(
           new Set(
             candidates()
-              .filter((c) => !c.dirty)
+              .filter((c) => !c.dirty && !endsSessions(c))
               .map((c) => c.path),
           ),
         );
         setDirtyOk(new Set<string>());
+        // Said out loud only where it applies: a row `a` passed over is
+        // clean, so nothing else on screen explains why its box stayed empty.
+        // A dirty row's own phrase already does.
+        if (candidates().some(endsSessions)) {
+          flash("a skips idle agent rows: space selects one");
+        }
         break;
       // Shift+D opts a dirty row in; a bare `d` reviews the row's diff. Both
       // spellings of the capital are matched because terminals disagree: the
@@ -3406,6 +3481,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                       detailSegments(entry, {
                         compact: props.compact === true,
                         dirtyOk: dirtyOk().has(entry.key),
+                        selected: isSelected(),
                       }),
                     );
                     // The session list's own icon, spinner and all. Called
@@ -3673,6 +3749,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             includedDirty: includedDirty().length,
             blockedDirty: blockedDirty().length,
             ignoredFiles: ignoredCount(),
+            endingSessions: endingCount(),
           })}
           destructive={includedDirty().length > 0}
           width={contentWidth()}
