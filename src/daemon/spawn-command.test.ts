@@ -1658,6 +1658,30 @@ describe("buildAgentSpawnCommand with a model", () => {
     ).toEqual({ ok: true, value: "codex -m gpt-5" });
   });
 
+  it("refuses a modelFlag that could break out of the {bin} slot", () => {
+    // The flag is spliced unquoted after the binary and substituted for
+    // `{bin}` after the template scan skipped that token as inert. A
+    // semicolon, space, quote, or `$(` would run as shell, not as a flag;
+    // whitespace-only is the same hole after trim.
+    for (const modelFlag of [
+      "--model;rm",
+      "--model && rm",
+      "--model'",
+      '--model"',
+      "   ",
+      "--model$(id)",
+    ]) {
+      const result = buildAgentSpawnCommand({
+        agent: agentWith({ name: "custom", modelFlag }),
+        binary: "custom",
+        model: "opus",
+        prompt: "seed from an issue",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("agents.custom.modelFlag");
+    }
+  });
+
   it("uses --model on every built-in", () => {
     for (const agent of BUILTIN_AGENTS) {
       expect(agent.modelFlag).toBe("--model");

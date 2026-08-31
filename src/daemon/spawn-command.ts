@@ -44,6 +44,14 @@ export const NATIVE_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
  */
 export const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 
+/**
+ * The only accepted shape for `agents.<name>.modelFlag`. It is spliced
+ * UNQUOTED after the launcher binary (and then into `{bin}`), so a
+ * semicolon, space, quote, or `$(` would run as shell, not as a flag.
+ * Wide enough for every built-in (`--model`) and the short form (`-m`).
+ */
+export const MODEL_FLAG_PATTERN = /^--?[A-Za-z][A-Za-z0-9-]*$/;
+
 export type BuildResult<T> =
   | { ok: true; value: T }
   | { ok: false; error: string };
@@ -471,8 +479,10 @@ function binaryIsQuoteNeutral(binary: string): boolean {
  * whose callers append the flag pair at the end instead (also accepted by
  * every verified built-in, including `codex resume`).
  *
- * `model` needs no quoting: `MODEL_PATTERN` makes it inert, and the binary
- * is separately required to be quote-neutral wherever that matters.
+ * `model` needs no quoting: `MODEL_PATTERN` makes it inert. The flag is
+ * constrained to `MODEL_FLAG_PATTERN` for the same reason, and the composed
+ * launcher (`binary + flag + model`) is required to be quote-neutral
+ * wherever `{bin}` is substituted into a quoted template.
  */
 function modelLauncher(
   agent: AgentDef,
@@ -491,13 +501,22 @@ function modelLauncher(
   }
   // A config file can hold any JSON, and this runs outside the route's try
   // block, so a non-string would surface as an opaque 500.
-  if (typeof flag !== "string" || flag === "") {
+  if (typeof flag !== "string") {
     return {
       ok: false,
       error: `Invalid 'agents.${agent.name}.modelFlag': expected a string.`,
     };
   }
-  const suffix = ` ${flag} ${model}`;
+  const trimmed = flag.trim();
+  if (!MODEL_FLAG_PATTERN.test(trimmed)) {
+    return {
+      ok: false,
+      error:
+        `Invalid 'agents.${agent.name}.modelFlag': expected a flag such as ` +
+        `"--model" or "-m".`,
+    };
+  }
+  const suffix = ` ${trimmed} ${model}`;
   return { ok: true, value: { launcher: `${binary}${suffix}`, suffix } };
 }
 
@@ -566,11 +585,11 @@ export function buildAgentSpawnCommand(
         error: `Invalid 'agents.${agent.name}.promptCommand': expected a string.`,
       };
     }
-    if (!binaryIsQuoteNeutral(binary)) {
+    if (!binaryIsQuoteNeutral(launcher)) {
       return {
         ok: false,
         error:
-          `Cannot spawn '${agent.name}' with a prompt: its launcher (${binary}) contains ` +
+          `Cannot spawn '${agent.name}' with a prompt: its launcher (${launcher}) contains ` +
           `a quote, a backslash, or a command substitution, which would break the quoting ` +
           `around the prompt.`,
       };
@@ -789,11 +808,11 @@ export function buildAgentForkCommand(
         `("{bin} --resume {id} --fork-session") to resume by session id instead.`,
     };
   }
-  if (!binaryIsQuoteNeutral(binary)) {
+  if (!binaryIsQuoteNeutral(launcher)) {
     return {
       ok: false,
       error:
-        `Cannot fork '${agent.name}': its launcher (${binary}) contains a quote, a ` +
+        `Cannot fork '${agent.name}': its launcher (${launcher}) contains a quote, a ` +
         `backslash, or a command substitution, which would break the quoting around the ` +
         `transcript path.`,
     };
