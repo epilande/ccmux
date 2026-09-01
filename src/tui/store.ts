@@ -1420,6 +1420,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       .map((fs) => fs.session);
   });
 
+  /** Stable identity for a flat row. Used to find a pre-kill predecessor in
+   *  the post-rebuild list after headers for emptied groups disappear. */
+  function flatItemIdentity(item: FlatItem): string {
+    return item.type === "header"
+      ? `header:${item.groupKey}`
+      : `session:${item.filteredSession.session.id}`;
+  }
+
   /** Select an item in the flat list by index.
    *  Batched to prevent transient states where selectedIndex() falls back to 0. */
   function selectItemAt(index: number) {
@@ -1674,10 +1682,19 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     removeSession(sessionId: string) {
       const wasSelected = state.selectedSessionId === sessionId;
-      // Capture before the list mutates. After killing index i, land on the
-      // previous row (i-1), clamped to 0. Killing the top row stays on the
-      // new 0. Empty list is fine. Do not wrap.
+      // Capture before the list mutates. After the kill, land on the last
+      // predecessor that still exists in the rebuilt flat list — not
+      // killedIndex-1, which indexes the new list with the old index and
+      // jumps forward onto the next group's header when an emptied group's
+      // header is omitted. Killing the top row stays on the new 0. Empty
+      // list is fine. Do not wrap.
       const killedIndex = wasSelected ? selectedIndex() : -1;
+      const previousKeys =
+        killedIndex > 0
+          ? flatItems()
+              .slice(0, killedIndex)
+              .map(flatItemIdentity)
+          : [];
       batch(() => {
         setState("sessions", (s) =>
           s.filter((session) => session.id !== sessionId),
@@ -1693,7 +1710,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         if (killedIndex <= 0) return;
         const remaining = flatItems();
         if (remaining.length === 0) return;
-        selectItemAt(Math.min(killedIndex - 1, remaining.length - 1));
+        for (let i = previousKeys.length - 1; i >= 0; i--) {
+          const idx = remaining.findIndex(
+            (item) => flatItemIdentity(item) === previousKeys[i],
+          );
+          if (idx !== -1) {
+            selectItemAt(idx);
+            return;
+          }
+        }
       });
     },
 

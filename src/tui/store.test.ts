@@ -1103,6 +1103,79 @@ describe("store", () => {
       expect(store.selectedIndex()).toBe(0);
     });
 
+    it("removeSession last-of-middle-group should not land on the next group's header", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "a",
+          project: "alpha",
+          lastUserInputAt: "2024-01-01T14:00:00Z",
+        }),
+        createMockSession({
+          id: "b",
+          project: "beta",
+          lastUserInputAt: "2024-01-01T13:00:00Z",
+        }),
+        createMockSession({
+          id: "c",
+          project: "charlie",
+          lastUserInputAt: "2024-01-01T12:00:00Z",
+        }),
+      ]);
+
+      // [header(alpha), a, header(beta), b, header(charlie), c]
+      expect(store.flatItems()).toHaveLength(6);
+      store.actions.setSelectedIndex(3);
+      expect(store.selectedSession()?.id).toBe("b");
+
+      store.actions.removeSession("b");
+
+      // beta's header is gone. Do not jump forward onto charlie's header —
+      // next x would be kill-group on the wrong project.
+      expect(store.selectedHeaderKey()).toBeNull();
+      expect(store.selectedGroupHeader()).toBeNull();
+      expect(store.selectedSession()?.id).toBe("a");
+      expect(store.selectedIndex()).toBe(1);
+    });
+
+    it("removeSession first-of-many should land on the living group header", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "a1",
+          project: "alpha",
+          lastUserInputAt: "2024-01-01T14:00:00Z",
+        }),
+        createMockSession({
+          id: "a2",
+          project: "alpha",
+          lastUserInputAt: "2024-01-01T13:00:00Z",
+        }),
+        createMockSession({
+          id: "a3",
+          project: "alpha",
+          lastUserInputAt: "2024-01-01T12:00:00Z",
+        }),
+      ]);
+
+      // [header(alpha), a1, a2, a3]
+      expect(store.flatItems()).toHaveLength(4);
+      store.actions.setSelectedIndex(1);
+      expect(store.selectedSession()?.id).toBe("a1");
+
+      store.actions.removeSession("a1");
+
+      // Literal previous living row is the header. Next x is kill-group.
+      expect(store.selectedSession()).toBeNull();
+      expect(store.selectedHeaderKey()).toBe("alpha");
+      expect(store.selectedGroupHeader()?.groupKey).toBe("alpha");
+      expect(store.selectedIndex()).toBe(0);
+      expect(store.selectedGroupSessions().map((s) => s.id)).toEqual([
+        "a2",
+        "a3",
+      ]);
+    });
+
     it("should reset to first when setSessions drops selected", () => {
       const store = createTUIStore({ groupBy: "none" });
       store.actions.setSessions([
