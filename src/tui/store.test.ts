@@ -1061,6 +1061,48 @@ describe("store", () => {
       expect(store.selectedIndex()).toBe(0);
     });
 
+    it("removeSession should select the previous row, not jump to the top", () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", lastUserInputAt: "2024-01-01T14:00:00Z" }),
+        createMockSession({ id: "b", lastUserInputAt: "2024-01-01T13:00:00Z" }),
+        createMockSession({ id: "c", lastUserInputAt: "2024-01-01T12:00:00Z" }),
+        createMockSession({ id: "d", lastUserInputAt: "2024-01-01T11:00:00Z" }),
+      ]);
+
+      store.actions.setSelectedIndex(3);
+      expect(store.selectedSession()?.id).toBe("d");
+      expect(store.selectedIndex()).toBe(3);
+
+      store.actions.removeSession("d");
+      expect(store.selectedSession()?.id).toBe("c");
+      expect(store.selectedIndex()).toBe(2);
+
+      store.actions.removeSession("c");
+      expect(store.selectedSession()?.id).toBe("b");
+      expect(store.selectedIndex()).toBe(1);
+
+      store.actions.removeSession("b");
+      expect(store.selectedSession()?.id).toBe("a");
+      expect(store.selectedIndex()).toBe(0);
+
+      store.actions.removeSession("a");
+      expect(store.selectedSession()).toBeNull();
+      expect(store.selectedIndex()).toBe(-1);
+
+      store.actions.setSessions([
+        createMockSession({ id: "a", lastUserInputAt: "2024-01-01T14:00:00Z" }),
+        createMockSession({ id: "b", lastUserInputAt: "2024-01-01T13:00:00Z" }),
+        createMockSession({ id: "c", lastUserInputAt: "2024-01-01T12:00:00Z" }),
+      ]);
+      store.actions.setSelectedIndex(0);
+      expect(store.selectedSession()?.id).toBe("a");
+
+      store.actions.removeSession("a");
+      expect(store.selectedSession()?.id).toBe("b");
+      expect(store.selectedIndex()).toBe(0);
+    });
+
     it("should reset to first when setSessions drops selected", () => {
       const store = createTUIStore({ groupBy: "none" });
       store.actions.setSessions([
@@ -1261,7 +1303,7 @@ describe("store", () => {
       // Remove the focused session
       store.actions.removeSession("b");
       expect(store.state.previewFocused).toBe(false);
-      expect(store.state.selectedSessionId).toBeNull();
+      expect(store.selectedSession()?.id).toBe("a");
     });
 
     it("removeSession should not exit preview focus when a different session is removed", () => {

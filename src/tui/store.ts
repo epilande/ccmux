@@ -1673,15 +1673,28 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     removeSession(sessionId: string) {
-      setState("sessions", (s) =>
-        s.filter((session) => session.id !== sessionId),
-      );
-      if (state.selectedSessionId === sessionId) {
+      const wasSelected = state.selectedSessionId === sessionId;
+      // Capture before the list mutates. After killing index i, land on the
+      // previous row (i-1), clamped to 0. Killing the top row stays on the
+      // new 0. Empty list is fine. Do not wrap.
+      const killedIndex = wasSelected ? selectedIndex() : -1;
+      batch(() => {
+        setState("sessions", (s) =>
+          s.filter((session) => session.id !== sessionId),
+        );
+        if (!wasSelected) return;
         if (state.previewFocused) {
           setState("previewFocused", false);
         }
+        // Drop the dead id first. selectedIndex() falls back to 0 when the
+        // id is missing, which is the jump-to-top this exists to stop.
         setState("selectedSessionId", null);
-      }
+        setSelectedHeaderKey(null);
+        if (killedIndex <= 0) return;
+        const remaining = flatItems();
+        if (remaining.length === 0) return;
+        selectItemAt(Math.min(killedIndex - 1, remaining.length - 1));
+      });
     },
 
     /** An invoke worker began executing (invocation_started SSE event). */
