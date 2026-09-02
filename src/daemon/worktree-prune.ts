@@ -140,6 +140,23 @@ export interface WorktreeSession {
   background?: boolean;
 }
 
+/**
+ * What {@link PruneOptions.liveSession} answers with: the daemon's CURRENT row
+ * for a session the scan recorded.
+ *
+ * Deliberately not a `Pick<WorktreeSession, ...>`. A scan row carries no `cwd`
+ * — it was grouped BY worktree, so it never needed one — and the cwd is
+ * exactly the field that decides whether the live row is still the one this
+ * removal may end.
+ */
+export interface LiveWorktreeSession {
+  status: SessionStatus;
+  pid: number | null;
+  tmuxPane: string | null;
+  /** Where the row is NOW, which need not be where the scan found it. */
+  cwd: string;
+}
+
 export interface PruneCandidate {
   /** Absolute worktree root, as git records it. */
   path: string;
@@ -1003,6 +1020,19 @@ export interface OccupantPane {
 }
 
 /**
+ * Is `path` the worktree root itself, or something under it?
+ *
+ * Containment rather than equality, because "in this worktree" is what both
+ * callers actually mean: a pane sitting in `src/`, or an agent that cd'd
+ * there, never left. Both arguments must already be `normalizePath`ed — a
+ * prefix test on mixed separators or a trailing slash is silently wrong.
+ */
+function pathIsWithin(root: string, path: string): boolean {
+  if (path === root) return true;
+  return path.startsWith(root.endsWith(sep) ? root : root + sep);
+}
+
+/**
  * Panes that are evidence of LIVE WORK inside a worktree about to be removed.
  *
  * This exists because the session gate cannot close its own race. The scan
@@ -1044,13 +1074,11 @@ export function paneOccupants(
   ignorePaneIds: Iterable<string> = [],
 ): OccupantPane[] {
   const root = normalizePath(worktreePath);
-  const prefix = root.endsWith(sep) ? root : root + sep;
   const ignored = new Set(ignorePaneIds);
   return panes.filter((pane) => {
     if (ignored.has(pane.paneId)) return false;
     if (!pane.currentPath) return false;
-    const path = normalizePath(pane.currentPath);
-    if (path !== root && !path.startsWith(prefix)) return false;
+    if (!pathIsWithin(root, normalizePath(pane.currentPath))) return false;
     if (isCcmuxPane(pane.paneTitle)) return false;
     return !isShellCommand(pane.currentCommand);
   });
@@ -1177,8 +1205,9 @@ export interface PruneOptions extends PruneDeps {
    */
   allowEndIdlePaths?: string[];
   /**
-   * The session RIGHT NOW, as the daemon sees it: both the status the consent
-   * is checked against and the pid the signal is sent to.
+   * The session RIGHT NOW, as the daemon sees it: the status the consent is
+   * checked against, the pid the signal is sent to, and the binding that
+   * proves both still belong to the worktree being removed.
    *
    * It has to carry the pid, not just the status. A candidate's sessions are
    * a snapshot that a `gh` call per branch and every earlier candidate's
@@ -1189,18 +1218,26 @@ export interface PruneOptions extends PruneDeps {
    * that authorized the kill would describe one process and the SIGTERM would
    * land on another.
    *
+   * It has to carry the BINDING for that same reason one step further. A row
+   * does not only change process, it MOVES: a marker claim is authoritative,
+   * and resuming a session from a sibling checkout (`claude --resume` resolves
+   * anywhere in the repo) re-points one id at a new pane, a new pid and a new
+   * cwd. The live row is then perfectly idle, and signalling its pid would
+   * kill an agent in a worktree this run is not touching. So a row whose `cwd`
+   * has left `candidate.path` is treated exactly like a missing one, and a row
+   * still inside it is stopped at the pane the lookup gives rather than the
+   * one the scan wrote down.
+   *
    * Any non-idle answer refuses the candidate; consent never overrides live
    * status. `undefined` means the daemon has no such session any more, which
    * is the good case (it exited) — the run proceeds, but with nothing left to
    * signal and without closing the scan pane. `handleKillSession` 404s a
    * missing row the same way; the pane can already hold a replacement occupant,
    * and occupancy would exempt it as one this run closed. Omitting the
-   * callback entirely skips both the re-check and the pid refresh, for callers
-   * with nothing live to ask.
+   * callback entirely skips the re-check, the pid refresh and the binding
+   * check alike, for callers with nothing live to ask.
    */
-  liveSession?: (
-    sessionId: string,
-  ) => Pick<WorktreeSession, "status" | "pid"> | undefined;
+  liveSession?: (sessionId: string) => LiveWorktreeSession | undefined;
 }
 
 const PROCESS_EXIT_TIMEOUT_MS = 3000;
@@ -1558,10 +1595,26 @@ export async function runPrune(
       // `stopSessions` never signals it and its status decides nothing here.
       const lookup = options.liveSession;
       if (lookup) {
-        const resolved = candidate.sessions.map((session) => ({
-          session,
-          live: session.background ? undefined : lookup(session.id),
-        }));
+        const root = normalizePath(candidate.path);
+        const resolved = candidate.sessions.map((session) => {
+          const live = session.background ? undefined : lookup(session.id);
+          // A row that has MOVED OUT of this worktree is not this removal's
+          // to end, whatever it is doing: its pid and its pane now describe
+          // an agent somewhere else, and killing it is the exact accident the
+          // live re-check exists to prevent. Folded into the missing-row case
+          // rather than made a refusal, because it does not hold this
+          // directory any more either — and the pane the scan recorded, now
+          // somebody else's or nobody's, is left for occupancy to judge.
+          if (live && !pathIsWithin(root, normalizePath(live.cwd))) {
+            steps.push({
+              step: "session moved",
+              ok: true,
+              detail: `${session.agentType} ${session.id} is in ${live.cwd} now, not this worktree; it is not signalled`,
+            });
+            return { session, live: undefined };
+          }
+          return { session, live };
+        });
         const busy = resolved.find(
           (entry) => entry.live !== undefined && entry.live.status !== "idle",
         );
@@ -1574,19 +1627,32 @@ export async function runPrune(
           });
           continue;
         }
-        // An `undefined` answer leaves a null pid AND a null pane: the daemon
-        // no longer tracks this session, so there is no process it can
-        // honestly claim to be ending and no pane it can honestly claim to
-        // own. `handleKillSession` 404s a missing row and leaves the pane;
-        // closing it here would destroy a replacement occupant (native UUID
-        // gone, new agent in the same `%N`) that occupancy would then exempt
-        // as a pane this run already closed. A live row still carries the
-        // scan's pane: that is the one this run verified.
+        // An `undefined` answer — a row the daemon has lost, or one that
+        // moved out above — leaves a null pid AND a null pane: there is no
+        // process this run can honestly claim to be ending and no pane it can
+        // honestly claim to own. `handleKillSession` 404s a missing row and
+        // leaves the pane; closing it here would destroy a replacement
+        // occupant (native UUID gone, new agent in the same `%N`) that
+        // occupancy would then exempt as a pane this run already closed.
+        //
+        // A live row hands over its pane as well as its pid, and for the same
+        // reason: the binder can move a row between panes, and the pane worth
+        // closing is the one the agent is in NOW. `tmuxTarget` is only the
+        // human label for the scan's pane, so it goes when the pane it named
+        // does.
         sessionsToStop = resolved.map(({ session, live }) =>
           session.background
             ? session
             : live
-              ? { ...session, pid: live.pid }
+              ? {
+                  ...session,
+                  pid: live.pid,
+                  tmuxPane: live.tmuxPane,
+                  tmuxTarget:
+                    live.tmuxPane === session.tmuxPane
+                      ? session.tmuxTarget
+                      : null,
+                }
               : { ...session, pid: null, tmuxPane: null },
         );
       }
@@ -1723,10 +1789,16 @@ export async function runPrune(
     // passed as exemptions for any tmux has not finished reaping. A scan pane
     // whose live row is gone is not among them, so a replacement occupant
     // still sitting in it is a refusal.
+    //
+    // `closedPanes` specifically, not the panes this run MEANT to close: a
+    // `kill-pane` that found nothing is in there (the agent took its pane
+    // with it), a `kill-pane` that FAILED is not. Exempting a failed close
+    // would wave through the one pane we know is still live, and the run
+    // would delete the directory out from under it.
     try {
       const panes = await (options.listPanes ?? defaultListPanes)();
       const occupants = paneOccupants(panes, candidate.path, [
-        ...sessionsToStop.flatMap((s) => (s.tmuxPane ? [s.tmuxPane] : [])),
+        ...shutdown.closedPanes,
         ...(options.callerPane ? [options.callerPane] : []),
       ]);
       if (occupants.length > 0) {

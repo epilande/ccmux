@@ -1993,10 +1993,22 @@ export class DaemonServer {
         // process since the scan, and the check and the kill have to be about
         // one process to mean anything (`handleKillSession` keeps the same
         // rule for the same reason).
+        //
+        // With the pane and the cwd, because a row moves as well as changes
+        // process. A marker claim re-points a session at whatever pane now
+        // holds it, so an id the scan found in this worktree can be answering
+        // from a sibling checkout by now — idle there, and none of this run's
+        // business. `runPrune` compares the cwd against the worktree it is
+        // removing and signals nothing that has left.
         liveSession: (id) => {
           const session = this.sessionManager.getSession(id);
           return session
-            ? { status: session.status, pid: session.pid }
+            ? {
+                status: session.status,
+                pid: session.pid,
+                tmuxPane: session.tmuxPane,
+                cwd: session.cwd,
+              }
             : undefined;
         },
         // The caller's own pane, exempt from the last-moment occupancy guard

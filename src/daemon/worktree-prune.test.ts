@@ -1026,7 +1026,12 @@ describe("end-idle gate", () => {
         stateFiles: [],
         log: () => {},
         allowEndIdlePaths: [normalizePath(candidate.path)],
-        liveSession: () => ({ status: "working", pid: 4242 }),
+        liveSession: () => ({
+          status: "working",
+          pid: 4242,
+          tmuxPane: "%9",
+          cwd: candidate.path,
+        }),
         killProcess: kill.killProcess,
         closePane: async () => "closed",
       });
@@ -1122,7 +1127,12 @@ describe("end-idle gate", () => {
         log: () => {},
         sleep: async () => {},
         allowEndIdlePaths: [normalizePath(candidate.path)],
-        liveSession: () => ({ status: "idle", pid: 5150 }),
+        liveSession: () => ({
+          status: "idle",
+          pid: 5150,
+          tmuxPane: "%9",
+          cwd: candidate.path,
+        }),
         killProcess: kill.killProcess,
         closePane: async () => "closed",
       });
@@ -1143,13 +1153,149 @@ describe("end-idle gate", () => {
         log: () => {},
         dryRun: true,
         allowEndIdlePaths: [normalizePath(candidate.path)],
-        liveSession: () => ({ status: "idle", pid: 5150 }),
+        liveSession: () => ({
+          status: "idle",
+          pid: 5150,
+          tmuxPane: "%9",
+          cwd: candidate.path,
+        }),
       });
 
       expect(
         result.outcomes[0].steps.find((s) => s.step === "would stop agent")
           ?.detail,
       ).toContain("pid 5150");
+    });
+
+    // The same argument as the pid, one field further: a marker claim can
+    // re-point a session id at a pane in a SIBLING checkout between the list
+    // and the run (resuming it there is enough). The live row is idle, so
+    // status alone waves it through — and the pid it carries belongs to an
+    // agent in a worktree this run is not deleting.
+    it("signals nothing for a session that moved to another worktree", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-session-moved");
+      const kill = killSpy();
+      const closed: string[] = [];
+      // A SIBLING, not a subdirectory: sharing a prefix with the worktree is
+      // exactly how a naive `startsWith` mistakes one for the other.
+      const elsewhere = candidate.path + "-other";
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => ({
+          status: "idle",
+          pid: 5150,
+          tmuxPane: "%12",
+          cwd: elsewhere,
+        }),
+        killProcess: kill.killProcess,
+        closePane: async (paneId) => {
+          closed.push(paneId);
+          return "closed";
+        },
+      });
+
+      expect(kill.signals).toEqual([]);
+      expect(closed).toEqual([]);
+      expect(
+        result.outcomes[0].steps.some(
+          (s) => s.step === "session moved" && s.detail.includes(elsewhere),
+        ),
+      ).toBe(true);
+      // Nothing holds the directory any more, so the removal still proceeds.
+      expect(result.outcomes[0].removed).toBe(true);
+      expect(existsSync(wt)).toBe(false);
+    });
+
+    // Containment, not equality. An agent that cd'd within its own worktree
+    // never left it, and refusing to signal it would leave the very process
+    // the removal has to stop running in the directory it is deleting.
+    it("still stops a session whose cwd moved deeper into the same worktree", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-session-deeper");
+      const kill = killSpy();
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => ({
+          status: "idle",
+          pid: 5150,
+          tmuxPane: "%9",
+          cwd: join(candidate.path, "src", "daemon"),
+        }),
+        killProcess: kill.killProcess,
+        closePane: async () => "closed",
+      });
+
+      expect(kill.signals).toEqual(["SIGTERM:5150"]);
+      expect(result.outcomes[0].removed).toBe(true);
+      expect(existsSync(wt)).toBe(false);
+    });
+
+    // The binder moves a row between panes, so the pane worth closing is the
+    // one the agent is in now. Closing the scan's would leave the live pane
+    // open and destroy whatever took over the old one.
+    it("closes the pane the live row is in, not the one the scan recorded", async () => {
+      const { candidate } = await occupied("run-end-idle-pane-moved");
+      const kill = killSpy();
+      const closed: string[] = [];
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => ({
+          status: "idle",
+          pid: 4242,
+          tmuxPane: "%12",
+          cwd: candidate.path,
+        }),
+        killProcess: kill.killProcess,
+        closePane: async (paneId) => {
+          closed.push(paneId);
+          return "closed";
+        },
+      });
+
+      expect(candidate.sessions[0].tmuxPane).toBe("%9");
+      expect(closed).toEqual(["%12"]);
+      expect(result.outcomes[0].panesClosed).toEqual(["%12"]);
+    });
+
+    // The exemption list is the panes whose close was CONFIRMED, not the ones
+    // the run meant to close. A pane still standing after a failed `kill-pane`
+    // is the one occupant we already know about, and waving it through would
+    // delete the directory out from under it.
+    it("refuses when a pane it could not close is still live in the worktree", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-close-failed");
+      const kill = killSpy();
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        killProcess: kill.killProcess,
+        closePane: async () => "failed",
+        listPanes: async () => [
+          {
+            paneId: "%9",
+            currentPath: candidate.path,
+            currentCommand: "claude",
+            paneTitle: null,
+          },
+        ],
+      });
+
+      expect(result.outcomes[0].removed).toBe(false);
+      expect(result.outcomes[0].error).toContain("something is running");
+      expect(existsSync(wt)).toBe(true);
     });
 
     // Two independent axes, and a worktree that is both refuses on whichever
