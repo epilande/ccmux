@@ -1929,15 +1929,38 @@ describe("removal confirm", () => {
 
   it("lists only the consequences that apply", () => {
     expect(
-      removalDetails({ includedDirty: 0, blockedDirty: 0, ignoredFiles: 0 }),
+      removalDetails({
+        includedDirty: 0,
+        blockedDirty: 0,
+        ignoredFiles: 0,
+        endingSessions: 0,
+      }),
     ).toEqual([]);
     expect(
-      removalDetails({ includedDirty: 1, blockedDirty: 2, ignoredFiles: 3 }),
+      removalDetails({
+        includedDirty: 1,
+        blockedDirty: 2,
+        ignoredFiles: 3,
+        endingSessions: 4,
+      }),
     ).toEqual([
       "including 1 worktree with uncommitted work",
+      "ending 4 idle agent sessions",
       "skipping 2 dirty worktrees (needs D)",
       "3 ignored files go too",
     ]);
+  });
+
+  // The line only the sessions produce, in both of its numbers.
+  it("counts the idle agents a removal would end", () => {
+    const base = { includedDirty: 0, blockedDirty: 0, ignoredFiles: 0 };
+    expect(removalDetails({ ...base, endingSessions: 1 })).toEqual([
+      "ending 1 idle agent session",
+    ]);
+    expect(removalDetails({ ...base, endingSessions: 2 })).toEqual([
+      "ending 2 idle agent sessions",
+    ]);
+    expect(removalDetails({ ...base, endingSessions: 0 })).toEqual([]);
   });
 
   it("centers over a list that stays visible underneath", async () => {
@@ -2760,6 +2783,153 @@ describe("row detail line", () => {
       }),
     );
     expect(text).toBe("4 untracked · 2 agents idle");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The idle-agent consent (issue #175)
+// ---------------------------------------------------------------------------
+
+/** The detail line for a row the removal would end an agent in. */
+function consentText(
+  entry: PanelRow,
+  opts: { selected?: boolean; compact?: boolean; dirtyOk?: boolean } = {},
+): string {
+  return detailSegments(entry, {
+    compact: opts.compact === true,
+    dirtyOk: opts.dirtyOk === true,
+    selected: opts.selected,
+  })
+    .map((s) => s.text)
+    .join("");
+}
+
+/** The colour the sessions phrase is drawn in, wherever it sits in the line. */
+function sessionPhraseColor(
+  entry: PanelRow,
+  opts: { selected?: boolean } = {},
+): string | undefined {
+  return detailSegments(entry, {
+    compact: false,
+    dirtyOk: false,
+    selected: opts.selected,
+  }).find((s) => s.text.includes("claude idle"))?.fg;
+}
+
+describe("idle agent consent", () => {
+  /** What the daemon now offers: a merged PR whose agents are all idle. */
+  function endsAgent(
+    sessions = [session({ status: "idle" })],
+  ): WorktreePanelRow {
+    return panelRow({
+      row: row({ sessions }),
+      candidate: candidate({ sessions }),
+    });
+  }
+
+  it("says the removal ends the agent, and says it differently once picked", () => {
+    expect(consentText(endsAgent())).toBe(
+      "PR #68 merged · claude idle (x ends it)",
+    );
+    expect(consentText(endsAgent(), { selected: true })).toBe(
+      "PR #68 merged · claude idle (will be ended)",
+    );
+  });
+
+  it("counts the agents the note is about", () => {
+    const two = [
+      session({ status: "idle" }),
+      session({ id: "s2", status: "idle" }),
+    ];
+    expect(consentText(endsAgent(two))).toContain(
+      "2 agents idle (x ends them)",
+    );
+  });
+
+  // The phrase reads the LIST's sessions and the note gates on the SCAN's,
+  // fetched once at mount and seconds apart, so an agent that went
+  // `working -> idle` in that window rendered `claude working (x ends it)`.
+  it("withholds the note when the phrase it would ride disagrees", () => {
+    const stale = panelRow({
+      row: row({ sessions: [session({ status: "working" })] }),
+      candidate: candidate({ sessions: [session({ status: "idle" })] }),
+    });
+    const text = detailSegments(stale, { compact: false, dirtyOk: false })
+      .map((s) => s.text)
+      .join(" ");
+    expect(text).toContain("claude working");
+    expect(text).not.toContain("(x ends it)");
+    expect(text).not.toContain("(will be ended)");
+  });
+
+  // A kept row's sessions phrase is untouched: nothing is going to end there.
+  it("leaves a row nobody can remove saying only what is true of it", () => {
+    expect(consentText(panelRow({ row: row({ sessions: [session()] }) }))).toBe(
+      "claude idle",
+    );
+  });
+
+  // The scan's own copy stands in when the list's read has not caught up, so
+  // the note always has a phrase to ride.
+  it("borrows the scan's sessions when the list read has none", () => {
+    const sessions = [session({ status: "idle" })];
+    expect(
+      consentText(panelRow({ row: row(), candidate: candidate({ sessions }) })),
+    ).toContain("claude idle (x ends it)");
+  });
+
+  // Yellow, like the dirty counts on a row that would delete them, and never
+  // red: an ended session resumes and its transcript survives.
+  it("warns in yellow without borrowing the colour of lost work", () => {
+    expect(sessionPhraseColor(endsAgent())).toBe(theme.yellow);
+    expect(sessionPhraseColor(endsAgent(), { selected: true })).toBe(
+      theme.yellow,
+    );
+    expect(
+      sessionPhraseColor(panelRow({ row: row({ sessions: [session()] }) })),
+    ).not.toBe(theme.yellow);
+  });
+
+  // At sidebar widths the tail is what truncates, so the consequence has to
+  // lead, by the same rule the dirty phrase already follows.
+  it("leads the compact line with the consequence, not the reason", () => {
+    expect(consentText(endsAgent(), { compact: true })).toBe(
+      "claude idle (x ends it) · PR #68 merged",
+    );
+  });
+
+  // Both consents on one row: the dirty one is the higher stakes and leads.
+  it("orders both consents by what they cost", () => {
+    const sessions = [session({ status: "idle" })];
+    const both = panelRow({
+      row: row({ dirty: { dirty: true, modified: 2, untracked: 0 }, sessions }),
+      candidate: candidate({ dirty: true, modified: 2, sessions }),
+    });
+    expect(consentText(both, { compact: true })).toBe(
+      "2 modified (D deletes them) · claude idle (x ends it) · PR #68 merged",
+    );
+  });
+
+  // `rowVisualHeight` derives the height from `detailPhrases` WITHOUT a
+  // selection, so a row that grew a note by being picked would be measured
+  // one line short and overlap its neighbour. The invariant is not
+  // expressible through `rowVisualHeight` itself (its second argument is
+  // `compact`, not `selected`): what has to hold is that selecting a row
+  // changes the phrases' TEXT and never their count.
+  it("keeps the row two lines tall selected or not, at either width", () => {
+    for (const compact of [false, true]) {
+      const unselected = detailPhrases(endsAgent(), { dirtyOk: false, compact });
+      const selected = detailPhrases(endsAgent(), {
+        dirtyOk: false,
+        compact,
+        selected: true,
+      });
+      expect(selected).toHaveLength(unselected.length);
+      expect(selected.map((p) => p.text)).not.toEqual(
+        unselected.map((p) => p.text),
+      );
+      expect(rowVisualHeight(endsAgent(), compact)).toBe(2);
+    }
   });
 });
 
@@ -3649,6 +3819,158 @@ describe("WorktreesPanel dirty gate", () => {
     } finally {
       if (original !== undefined) process.env.TMUX_PANE = original;
     }
+  });
+});
+
+describe("WorktreesPanel idle agent gate", () => {
+  const idle = [session({ status: "idle" })];
+  const agentList = listOf([row({ sessions: idle })]);
+  const agentScan: ScanResponse = {
+    candidates: [candidate({ sessions: idle })],
+    skipped: [],
+  };
+
+  it("shows the consent on the row, under the removable divider", async () => {
+    const { settled } = await mountSettled(agentList, agentScan);
+    expect(settled).toContain("removable");
+    const line = lineWith(settled, "claude idle");
+    expect(isDetailLine(line)).toBe(true);
+    expect(line).toContain("claude idle (x ends it)");
+    // Still a checkbox row, so the consent is something to pick.
+    expect(lineWith(settled, "alpha")).toContain("[ ]");
+  });
+
+  it("changes the wording once the row is picked", async () => {
+    const { keys, frame } = await mountSettled(agentList, agentScan);
+    keys.pressKey(" ");
+    const shown = await frame();
+    expect(lineWith(shown, "alpha")).toContain("[x]");
+    expect(shown).toContain("claude idle (will be ended)");
+    expect(shown).not.toContain("(x ends it)");
+    expect(shown).toContain("x remove 1");
+  });
+
+  // A bulk key is never the consent, and it says so rather than leaving an
+  // empty box on a row that is otherwise clean.
+  it("leaves the row for space, and a says why", async () => {
+    const { keys, frame } = await mountSettled(agentList, agentScan);
+    keys.pressKey("a");
+    const afterAll = await frame();
+    expect(afterAll).not.toContain("[x]");
+    // The note owns the hint line for a couple of seconds, which is why the
+    // selection is read off the box rather than off `x remove N` here.
+    expect(afterAll).toContain("a skips idle agent rows");
+    keys.pressKey(" ");
+    const afterSpace = await frame();
+    expect(lineWith(afterSpace, "alpha")).toContain("[x]");
+    expect(afterSpace).toContain("claude idle (will be ended)");
+  });
+
+  // `a` still takes every row it is allowed to, alongside the one it skips.
+  it("still selects the agent-free rows beside it", async () => {
+    const { keys, frame } = await mountSettled(
+      listOf([row({ sessions: idle }), row({ path: "/repo/wt/b", name: "b" })]),
+      {
+        candidates: [
+          candidate({ sessions: idle }),
+          candidate({ path: "/repo/wt/b", name: "b" }),
+        ],
+        skipped: [],
+      },
+    );
+    keys.pressKey("a");
+    const shown = await frame();
+    expect(lineWith(shown, "alpha")).toContain("[ ]");
+    expect(lineWith(shown, " b ")).toContain("[x]");
+  });
+
+  it("names the ended sessions at the confirmation step", async () => {
+    const { keys, frame } = await mountSettled(agentList, agentScan);
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    const confirm = await frame();
+    expect(confirm).toContain("Remove worktrees?");
+    expect(confirm).toContain("ending 1 idle agent session");
+  });
+
+  // `x` on the cursor row is the single-target shortcut, and the confirm it
+  // opens is what names the consequence.
+  it("reaches the confirm from the cursor row alone", async () => {
+    const { keys, frame } = await mountSettled(agentList, agentScan);
+    keys.pressKey("x");
+    expect(await frame()).toContain("ending 1 idle agent session");
+  });
+
+  it("sends the consent with the run, for exactly the picked rows", async () => {
+    let body: Record<string, unknown> = {};
+    const { keys, frame } = await mountSettled(
+      listOf([row({ sessions: idle }), row({ path: "/repo/wt/b", name: "b" })]),
+      {
+        candidates: [
+          candidate({ sessions: idle }),
+          candidate({ path: "/repo/wt/b", name: "b" }),
+        ],
+        skipped: [],
+      },
+    );
+    fetchSpy!.mockImplementation((async (
+      input: unknown,
+      init?: RequestInit,
+    ) => {
+      if (String(input).includes("/worktrees/prune") && init?.body) {
+        body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      }
+      return json({ outcomes: [] });
+    }) as unknown as typeof fetch);
+
+    keys.pressKey(" "); // the agent row
+    keys.pressKey("j");
+    keys.pressKey(" "); // the plain one
+    keys.pressKey("x");
+    keys.pressKey("y");
+    await frame();
+
+    expect(body).toMatchObject({
+      paths: ["/repo/wt/alpha", "/repo/wt/b"],
+      allowDirty: [],
+      allowEndIdle: ["/repo/wt/alpha"],
+    });
+  });
+
+  // A daemon predating the change offers no such candidate, and the field
+  // rides along empty rather than disappearing.
+  it("sends an empty consent when nothing ends an agent", async () => {
+    let body: Record<string, unknown> = {};
+    const { keys, frame } = await mountSettled(listOf([row()]), {
+      candidates: [candidate()],
+      skipped: [],
+    });
+    fetchSpy!.mockImplementation((async (
+      input: unknown,
+      init?: RequestInit,
+    ) => {
+      if (String(input).includes("/worktrees/prune") && init?.body) {
+        body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      }
+      return json({ outcomes: [] });
+    }) as unknown as typeof fetch);
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    keys.pressKey("y");
+    await frame();
+    expect(body).toMatchObject({ allowEndIdle: [] });
+  });
+
+  // The sidebar's width, where the tail truncates: the consequence has to be
+  // the half that survives.
+  it("keeps the consent readable at sidebar width", async () => {
+    const { settled } = await mountSettled(agentList, agentScan, {
+      compact: true,
+      width: 44,
+    });
+    expect(lineWith(settled, "claude idle")).toContain(
+      "claude idle (x ends it)",
+    );
   });
 });
 
