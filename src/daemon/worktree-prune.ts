@@ -1177,17 +1177,28 @@ export interface PruneOptions extends PruneDeps {
    */
   allowEndIdlePaths?: string[];
   /**
-   * The session's status RIGHT NOW, as the daemon sees it. The scan's answer
-   * is a snapshot that a `gh` call per branch and a user's confirmation have
-   * both aged since, and an agent that went back to work in that window must
-   * not be killed on a consent given while it was idle. Any non-idle answer
-   * refuses the candidate; consent never overrides live status.
+   * The session RIGHT NOW, as the daemon sees it: both the status the consent
+   * is checked against and the pid the signal is sent to.
    *
-   * `undefined` means the daemon has no such session any more, which is the
-   * good case (it exited) and proceeds. Omitting the callback entirely skips
-   * the re-check, for callers that have nothing live to ask.
+   * It has to carry the pid, not just the status. A candidate's sessions are
+   * a snapshot that a `gh` call per branch and every earlier candidate's
+   * shutdown wait have aged, and the reconciler rewrites a live row's `pid`
+   * when a new agent process takes over a pane, or clears it on a soft evict.
+   * Reading the status from the live row and the pid from the snapshot is the
+   * mismatch `handleKillSession` warns about in its own comment: the status
+   * that authorized the kill would describe one process and the SIGTERM would
+   * land on another.
+   *
+   * Any non-idle answer refuses the candidate; consent never overrides live
+   * status. `undefined` means the daemon has no such session any more, which
+   * is the good case (it exited) — the run proceeds, but with nothing left to
+   * signal, so it only closes the pane. Omitting the callback entirely skips
+   * both the re-check and the pid refresh, for callers with nothing live to
+   * ask.
    */
-  sessionStatus?: (sessionId: string) => SessionStatus | undefined;
+  liveSession?: (
+    sessionId: string,
+  ) => Pick<WorktreeSession, "status" | "pid"> | undefined;
 }
 
 const PROCESS_EXIT_TIMEOUT_MS = 3000;
@@ -1337,9 +1348,14 @@ async function stillAliveAfter(
  * still be writing to it. The pane is still closed either way: closing it is
  * a UI courtesy, not a data-safety measure, so it is not worth withholding
  * over a process ccmux could not kill.
+ *
+ * Takes the sessions rather than the candidate because the pids it signals
+ * are the ones {@link runPrune} just re-read from the live daemon, not the
+ * ones the scan wrote down (S12). A session the daemon no longer knows
+ * arrives here with a null pid and only has its pane closed.
  */
 async function stopSessions(
-  candidate: PruneCandidate,
+  sessions: WorktreeSession[],
   deps: PruneDeps,
   steps: PruneStep[],
 ): Promise<{ closedPanes: string[]; allExited: boolean }> {
@@ -1349,7 +1365,7 @@ async function stopSessions(
   const closed: string[] = [];
   let allExited = true;
 
-  for (const session of candidate.sessions) {
+  for (const session of sessions) {
     if (session.background) {
       // Read-only here by design. Its worker is supervisor-owned, and it has
       // no pane to close, so there is nothing this run may safely do to it.
@@ -1500,6 +1516,11 @@ export async function runPrune(
       continue;
     }
 
+    // What this run will actually signal, and what the dry run reports. It
+    // starts as the scan's snapshot and is replaced below by whatever the
+    // live lookup says, when there is one.
+    let sessionsToStop = candidate.sessions;
+
     // The other consent gate, and an INDEPENDENT one: a candidate carrying
     // sessions is a worktree whose idle agents this run would end, which the
     // scan offers only for a merged PR. Selecting the row is agreement about
@@ -1525,25 +1546,39 @@ export async function runPrune(
       // too, so a dry run reports what would actually happen rather than what
       // the stale list says.
       //
+      // The SAME lookup supplies the pid this run signals (S12). Asking the
+      // live row whether it may be killed and then killing the pid the scan
+      // wrote down is only sound while the two describe one process, and the
+      // reconciler is free to rewrite a row's pid in exactly this window.
+      //
       // Background sessions are not asked about: ccmux cannot end one, so
       // `stopSessions` never signals it and its status decides nothing here.
-      // An `undefined` answer is the good case, a session the daemon no
-      // longer has, and proceeds.
-      const status = options.sessionStatus;
-      const busy = status
-        ? candidate.sessions
-            .filter((s) => !s.background)
-            .map((s) => ({ session: s, live: status(s.id) }))
-            .find((s) => s.live !== undefined && s.live !== "idle")
-        : undefined;
-      if (busy) {
-        outcome.error = `its agent is ${busy.live} now, not idle; nothing was deleted`;
-        steps.push({
-          step: "refused",
-          ok: false,
-          detail: `${busy.session.agentType} ${busy.session.id} went ${busy.live} after the list was built; the end-idle opt-in does not cover that`,
-        });
-        continue;
+      const lookup = options.liveSession;
+      if (lookup) {
+        const resolved = candidate.sessions.map((session) => ({
+          session,
+          live: session.background ? undefined : lookup(session.id),
+        }));
+        const busy = resolved.find(
+          (entry) => entry.live !== undefined && entry.live.status !== "idle",
+        );
+        if (busy) {
+          outcome.error = `its agent is ${busy.live?.status} now, not idle; nothing was deleted`;
+          steps.push({
+            step: "refused",
+            ok: false,
+            detail: `${busy.session.agentType} ${busy.session.id} went ${busy.live?.status} after the list was built; the end-idle opt-in does not cover that`,
+          });
+          continue;
+        }
+        // An `undefined` answer leaves a null pid on purpose: the daemon no
+        // longer tracks this session, so there is no process it can honestly
+        // claim to be ending, and `stopSessions` falls through to closing the
+        // pane. Pane ids, unlike pids, are never reused by a tmux server, so
+        // the snapshot's pane is still the right target or no target at all.
+        sessionsToStop = resolved.map(({ session, live }) =>
+          session.background ? session : { ...session, pid: live?.pid ?? null },
+        );
       }
     }
 
@@ -1578,7 +1613,7 @@ export async function runPrune(
       // END. The directory line alone reads as a file operation, and the
       // opt-in that authorized it is exactly the one worth being able to
       // review before the real run.
-      for (const session of candidate.sessions) {
+      for (const session of sessionsToStop) {
         steps.push({
           step: "would stop agent",
           ok: true,
@@ -1622,7 +1657,7 @@ export async function runPrune(
     // the previous behavior renamed and deleted the directory unconditionally
     // after the wait, so a wedged agent kept writing into the trash directory
     // right up until it was removed.
-    const shutdown = await stopSessions(candidate, options, steps);
+    const shutdown = await stopSessions(sessionsToStop, options, steps);
     outcome.panesClosed = shutdown.closedPanes;
     if (!shutdown.allExited) {
       outcome.error =

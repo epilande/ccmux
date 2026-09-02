@@ -2910,11 +2910,26 @@ describe("idle agent consent", () => {
     );
   });
 
-  // The height derivation calls `detailPhrases` without a selection, and a
-  // row that gained a note must not gain or lose a line by being picked.
-  it("keeps the row two lines tall either way", () => {
-    expect(rowVisualHeight(endsAgent())).toBe(2);
-    expect(rowVisualHeight(endsAgent(), true)).toBe(2);
+  // `rowVisualHeight` derives the height from `detailPhrases` WITHOUT a
+  // selection, so a row that grew a note by being picked would be measured
+  // one line short and overlap its neighbour. The invariant is not
+  // expressible through `rowVisualHeight` itself (its second argument is
+  // `compact`, not `selected`): what has to hold is that selecting a row
+  // changes the phrases' TEXT and never their count.
+  it("keeps the row two lines tall selected or not, at either width", () => {
+    for (const compact of [false, true]) {
+      const unselected = detailPhrases(endsAgent(), { dirtyOk: false, compact });
+      const selected = detailPhrases(endsAgent(), {
+        dirtyOk: false,
+        compact,
+        selected: true,
+      });
+      expect(selected).toHaveLength(unselected.length);
+      expect(selected.map((p) => p.text)).not.toEqual(
+        unselected.map((p) => p.text),
+      );
+      expect(rowVisualHeight(endsAgent(), compact)).toBe(2);
+    }
   });
 });
 

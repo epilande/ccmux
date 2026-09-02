@@ -1987,7 +1987,18 @@ export class DaemonServer {
         // followed took as long as a user takes; an agent that went back to
         // work in that window refuses the removal even though its path was
         // opted in.
-        sessionStatus: (id) => this.sessionManager.getSession(id)?.status,
+        //
+        // It answers with the pid as well as the status, and the run signals
+        // THAT pid: the reconciler may have moved this row onto a different
+        // process since the scan, and the check and the kill have to be about
+        // one process to mean anything (`handleKillSession` keeps the same
+        // rule for the same reason).
+        liveSession: (id) => {
+          const session = this.sessionManager.getSession(id);
+          return session
+            ? { status: session.status, pid: session.pid }
+            : undefined;
+        },
         // The caller's own pane, exempt from the last-moment occupancy guard
         // so pruning from a pane inside the worktree still works. It never
         // widens what is prunable: a worktree with a non-idle session is

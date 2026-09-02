@@ -6193,10 +6193,12 @@ describe("worktree prune endpoints", () => {
    * happens to be on the developer's own tmux server. The removal side is
    * covered against injected seams in worktree-prune.test.ts.
    */
-  it("refuses a candidate whose idle session was not opted in, without a 409", async () => {
-    const { worktree } = makePruneFixture();
-    // A MERGED PR at this worktree's tip, which is what `selectPRForBranch`
-    // demands as proof and the only thing that offers an occupied worktree.
+  /**
+   * A `gh` on PATH reporting a MERGED PR at this worktree's tip, which is what
+   * `selectPRForBranch` demands as proof and the only thing that offers a
+   * worktree an agent lives in. Returns the PATH restore.
+   */
+  function withMergedPR(worktree: string): () => void {
     const head = Bun.spawnSync(["git", "-C", worktree, "rev-parse", "HEAD"], {
       env: GIT_FIXTURE_ENV,
       stdout: "pipe",
@@ -6225,6 +6227,14 @@ describe("worktree prune endpoints", () => {
     );
     const originalPath = process.env.PATH;
     process.env.PATH = `${binDir}:${originalPath}`;
+    return () => {
+      process.env.PATH = originalPath;
+    };
+  }
+
+  it("refuses a candidate whose idle session was not opted in, without a 409", async () => {
+    const { worktree } = makePruneFixture();
+    const restore = withMergedPR(worktree);
     try {
       // The session lives IN the worktree, and a fresh pane-tracked session
       // is idle, which is exactly the row the gate offers.
@@ -6253,7 +6263,52 @@ describe("worktree prune endpoints", () => {
       expect(body.outcomes[0]?.error).toContain("idle agent session");
       expect(existsSync(worktree)).toBe(true);
     } finally {
-      process.env.PATH = originalPath;
+      restore();
+    }
+  });
+
+  /**
+   * The endpoint's own `liveSession` supplier, which every test that reaches
+   * the gate elsewhere replaces with a stub. It fails OPEN if it ever stops
+   * resolving — an `undefined` answer means "the daemon no longer has this
+   * session", and the run proceeds without signalling anything — so a broken
+   * wiring would go unnoticed rather than break a test.
+   *
+   * Driven under `dryRun`, which reports the pid the real run would signal
+   * and touches nothing: no process, no pane, no directory. A supplier that
+   * answered `undefined` would report a session with no pid instead.
+   */
+  it("resolves the live session, pid included, through its own supplier", async () => {
+    const { worktree } = makePruneFixture();
+    const restore = withMergedPR(worktree);
+    try {
+      const ctx = createServer();
+      ctx.manager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: worktree,
+        pid: 4242,
+      });
+
+      const res = await post(ctx.internals, {
+        paths: [worktree],
+        allowEndIdle: [worktree],
+        dryRun: true,
+      });
+      const body = (await res.json()) as {
+        outcomes: Array<{
+          removed: boolean;
+          steps: Array<{ step: string; detail: string }>;
+        }>;
+      };
+
+      const stop = body.outcomes[0]?.steps.find(
+        (s) => s.step === "would stop agent",
+      );
+      expect(stop?.detail).toContain("pid 4242");
+      expect(existsSync(worktree)).toBe(true);
+    } finally {
+      restore();
     }
   });
 

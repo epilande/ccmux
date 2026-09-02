@@ -1026,7 +1026,7 @@ describe("end-idle gate", () => {
         stateFiles: [],
         log: () => {},
         allowEndIdlePaths: [normalizePath(candidate.path)],
-        sessionStatus: () => "working",
+        liveSession: () => ({ status: "working", pid: 4242 }),
         killProcess: kill.killProcess,
         closePane: async () => "closed",
       });
@@ -1040,8 +1040,11 @@ describe("end-idle gate", () => {
     });
 
     // A session the daemon no longer has is the GOOD case: it exited on its
-    // own between the list and the run.
-    it("proceeds when the live lookup no longer knows the session", async () => {
+    // own between the list and the run. Nothing is signalled for it — the
+    // scan's pid is the only one left to aim at and it describes a process
+    // the daemon has already stopped accounting for — but its pane is still
+    // closed, since a tmux server never reuses a pane id.
+    it("proceeds without signalling when the live lookup no longer knows the session", async () => {
       const { wt, candidate } = await occupied("run-end-idle-session-gone");
       const kill = killSpy();
 
@@ -1050,13 +1053,58 @@ describe("end-idle gate", () => {
         log: () => {},
         sleep: async () => {},
         allowEndIdlePaths: [normalizePath(candidate.path)],
-        sessionStatus: () => undefined,
+        liveSession: () => undefined,
         killProcess: kill.killProcess,
         closePane: async () => "closed",
       });
 
+      expect(kill.signals).toEqual([]);
+      expect(result.outcomes[0].panesClosed).toEqual(["%9"]);
       expect(result.outcomes[0].removed).toBe(true);
       expect(existsSync(wt)).toBe(false);
+    });
+
+    // The whole point of re-reading the session rather than its status: the
+    // reconciler moves a row onto a new process when one takes over its pane,
+    // and a run that checked the live row but signalled the scan's pid would
+    // kill whatever now answers to a number nobody re-verified.
+    it("signals the pid the daemon has now, not the one the scan recorded", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-pid-moved");
+      const kill = killSpy();
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => ({ status: "idle", pid: 5150 }),
+        killProcess: kill.killProcess,
+        closePane: async () => "closed",
+      });
+
+      expect(candidate.sessions[0].pid).toBe(4242);
+      expect(kill.signals).toEqual(["SIGTERM:5150"]);
+      expect(result.outcomes[0].removed).toBe(true);
+      expect(existsSync(wt)).toBe(false);
+    });
+
+    // A dry run promises to report what the real run would do, so it reports
+    // the live pid too.
+    it("names the live pid in the dry run, not the recorded one", async () => {
+      const { candidate } = await occupied("run-end-idle-pid-moved-dry");
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        dryRun: true,
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => ({ status: "idle", pid: 5150 }),
+      });
+
+      expect(
+        result.outcomes[0].steps.find((s) => s.step === "would stop agent")
+          ?.detail,
+      ).toContain("pid 5150");
     });
 
     // Two independent axes, and a worktree that is both refuses on whichever
