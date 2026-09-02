@@ -6182,18 +6182,6 @@ describe("worktree prune endpoints", () => {
   });
 
   /**
-   * The end-idle gate at the endpoint (#175). A worktree whose only session
-   * is idle IS offered once `gh` says its PR merged, so the request that acts
-   * on it must carry a second opt-in: removing it ends that session, which
-   * selecting a row does not agree to.
-   *
-   * Only the refusal is driven here, deliberately. Letting the run proceed
-   * would reach `runPrune`'s real `closePane`, and the endpoint injects no
-   * seam for it, so the test would send `tmux kill-pane` at whatever `%1`
-   * happens to be on the developer's own tmux server. The removal side is
-   * covered against injected seams in worktree-prune.test.ts.
-   */
-  /**
    * A `gh` on PATH reporting a MERGED PR at this worktree's tip, which is what
    * `selectPRForBranch` demands as proof and the only thing that offers a
    * worktree an agent lives in. Returns the PATH restore.
@@ -6232,6 +6220,18 @@ describe("worktree prune endpoints", () => {
     };
   }
 
+  /**
+   * The end-idle gate at the endpoint (#175). A worktree whose only session
+   * is idle IS offered once `gh` says its PR merged, so the request that acts
+   * on it must carry a second opt-in: removing it ends that session, which
+   * selecting a row does not agree to.
+   *
+   * Only the refusal is driven here, deliberately. Letting the run proceed
+   * would reach `runPrune`'s real `closePane`, and the endpoint injects no
+   * seam for it, so the test would send `tmux kill-pane` at whatever `%1`
+   * happens to be on the developer's own tmux server. The removal side is
+   * covered against injected seams in worktree-prune.test.ts.
+   */
   it("refuses a candidate whose idle session was not opted in, without a 409", async () => {
     const { worktree } = makePruneFixture();
     const restore = withMergedPR(worktree);
