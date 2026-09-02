@@ -1325,6 +1325,21 @@ export class Daemon {
       // consumer (isLinkedLogSilent, resolveDeadProcessState) agrees on the
       // "missing" signal.
       getLogFileMtime: readLogFileMtime,
+      // Backs the OpenCode marker ownership check. `undefined` (no snapshot
+      // yet) is the boot window the reconciler fails open on, so this stays
+      // synchronous rather than reaching for `resolvePaneHostingPid`'s async
+      // boot-snapshot fallbacks.
+      paneIdHostingPid: (pid: number) => {
+        if (!this.latestProcessTree || this.paneCache.size === 0)
+          return undefined;
+        return (
+          findPaneHostingPid(
+            pid,
+            [...this.paneCache.values()],
+            this.latestProcessTree,
+          )?.paneId ?? null
+        );
+      },
     };
   }
 

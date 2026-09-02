@@ -66,6 +66,13 @@ export interface ReconcilerDeps {
    * or the `null` "missing" signal. Must not throw.
    */
   getLogFileMtime(logPath: string): number | null;
+  /**
+   * Pane hosting `pid` by process ancestry: the pane id, `null` when the pid
+   * is not under any tracked pane, or `undefined` when the daemon has no
+   * process snapshot yet (boot window) and cannot say. Backs the OpenCode
+   * marker ownership check in `collectPaneTrackedSources`.
+   */
+  paneIdHostingPid?(pid: number): string | null | undefined;
 }
 
 /**
@@ -1001,7 +1008,12 @@ async function captureTerminalRule(
 export function collectPaneTrackedSources(
   deps: Pick<
     ReconcilerDeps,
-    "hookManager" | "logAdapters" | "now" | "getLogFileMtime" | "agents"
+    | "hookManager"
+    | "logAdapters"
+    | "now"
+    | "getLogFileMtime"
+    | "agents"
+    | "paneIdHostingPid"
   >,
   session: Session,
   ruleMatch: ReturnType<typeof matchTerminalRule>,
@@ -1032,7 +1044,8 @@ export function collectPaneTrackedSources(
   // all already behave. A marker, when present, still out-ranks it.
   const hasLinkedLog =
     deps.logAdapters.has(session.agentType) && !!session.logPath;
-  const marker = deps.hookManager.getMarkerForSession(session);
+  const matched = deps.hookManager.getMarkerForSession(session);
+  const marker = ownsOpenCodeMarker(deps, session, matched) ? matched : null;
 
   const sources: CascadeSource[] = [];
   let metadata: MarkerSourceMetadata = {};
@@ -1087,6 +1100,64 @@ export function collectPaneTrackedSources(
   }
 
   return { sources, metadata, suspectPermissionUpgrade };
+}
+
+/** One warn per (session, marker session id, marker pid); see below. */
+const warnedForeignOpenCodeMarkers = new Set<string>();
+const FOREIGN_MARKER_WARN_CAP = 500;
+
+/**
+ * OpenCode marker ownership (issue #177). Two `opencode` processes in one
+ * directory share OpenCode's SQLite db, so a session id one server hosts is
+ * visible to the other. A marker's `pid` is a HOSTING CLAIM, and the only
+ * pane whose markers may fold onto a row is the row's OWN pane: the pane
+ * that hosts the pid ancestrally.
+ *
+ * The row can be holding a foreign `nativeSessionId` (the plugin's old
+ * blanket seed wrote one; a stale claim leaves one behind), and the marker
+ * lookup here is BY that id, so without this check the row paints the other
+ * pane's aggregate — newest `last_prompt` included — on every tick and on
+ * every marker rewrite the other server does. `adapters/link.ts` heals the
+ * held id on the next scan; this guard stops the paint in the meantime.
+ * Dropping the marker source leaves the terminal/log sources to speak, and
+ * leaves the row's existing `lastPrompt` alone rather than clearing it.
+ *
+ * Fails OPEN on anything but a definite mismatch. `undefined` is the boot
+ * window before the first process snapshot (the same posture as the
+ * recycled-pid tripwire in `binder/links.ts`); `null` is a pid that is not
+ * under any pane the last snapshot saw, which is what a marker written
+ * seconds after a fresh spawn looks like, and dropping it would blind the
+ * row for a whole scan interval. The cost of that choice: a SIBLING's fresh
+ * pid looks the same, so against a pre-fix plugin (whose boot seed still
+ * rewrites this row's marker under the sibling's pid) the guard can lag its
+ * trigger by up to one snapshot interval (689ms measured live) and let one
+ * fold through before the next scan's tree closes it. The fixed plugin never
+ * writes that marker, so the shipped pair has no such window.
+ */
+function ownsOpenCodeMarker(
+  deps: Pick<ReconcilerDeps, "paneIdHostingPid">,
+  session: Session,
+  marker: SessionPidMarker | null,
+): boolean {
+  if (!marker) return false;
+  if (session.agentType !== "opencode") return true;
+  const hostingPane = deps.paneIdHostingPid?.(marker.pid);
+  if (typeof hostingPane !== "string") return true;
+  if (hostingPane === session.tmuxPane) return true;
+
+  const key = `${session.id}|${marker.session_id}|${marker.pid}`;
+  if (!warnedForeignOpenCodeMarkers.has(key)) {
+    if (warnedForeignOpenCodeMarkers.size >= FOREIGN_MARKER_WARN_CAP) {
+      warnedForeignOpenCodeMarkers.clear();
+    }
+    warnedForeignOpenCodeMarkers.add(key);
+    console.warn(
+      `[reconciler] opencode session ${session.id} (pane ${session.tmuxPane}) ` +
+        `holds marker ${marker.session_id} whose pid ${marker.pid} is hosted ` +
+        `by pane ${hostingPane}; ignoring it until the link pass heals the id`,
+    );
+  }
+  return false;
 }
 
 /**

@@ -157,6 +157,32 @@ export function makePlugin({ markersDir, version, now = Date.now }) {
     return "working";
   }
 
+  /**
+   * Seed markers at boot for the sessions THIS server actually hosts.
+   *
+   * Ownership rule (issue #177). `session.list` is project-wide: OpenCode
+   * serves it from the SQLite db every process in the directory SHARES, so
+   * it returns the project's whole history plus every sibling process's live
+   * sessions. A marker carries `pid: process.pid`, which makes it a HOSTING
+   * CLAIM — seeding one for a session we do not host hands the daemon a
+   * wrong pid for that session id, flipping the row to this pane, resetting
+   * its state to idle and dropping the sibling's `last_prompt`.
+   *
+   * `client.session.status` is the only per-process evidence available: it
+   * is backed by `SessionStatus.list()`, an in-memory Map owned by THIS
+   * server, whose entries are deleted when a session goes idle. So an entry
+   * exists only for a session this process is currently running, and
+   * membership — not the entry's value — is the proof we may claim it.
+   * Sessions with no entry are skipped entirely; a later `session.status`,
+   * `session.created` or prompt event writes their marker normally, at which
+   * point the pid claim is true. When `session.status` itself fails we seed
+   * nothing, which is the safe direction.
+   *
+   * The old blanket seed also mis-set fresh rows even with one server
+   * running: every listed historical session got a marker written in the
+   * same millisecond, so the daemon's newest-marker fold picked an arbitrary
+   * one and `ccmux last` on an untouched row read a random old transcript.
+   */
   async function eagerSeed(client, directory) {
     const [listRes, statusRes] = await Promise.all([
       client.session.list({ query: { directory } }).catch((err) => {
@@ -175,15 +201,17 @@ export function makePlugin({ markersDir, version, now = Date.now }) {
     /** @type {Record<string, OpencodeSessionStatus>} */
     const statusMap = (statusRes && statusRes.data) || {};
 
-    const writes = sessions.map((s) =>
-      queueWrite(s.id, () =>
-        writeMerged(s.id, {
-          state: stateFromStatus(statusMap[s.id]),
-          directory: s.directory,
-          title: s.title,
-        }),
-      ),
-    );
+    const writes = sessions
+      .filter((s) => Object.hasOwn(statusMap, s.id))
+      .map((s) =>
+        queueWrite(s.id, () =>
+          writeMerged(s.id, {
+            state: stateFromStatus(statusMap[s.id]),
+            directory: s.directory,
+            title: s.title,
+          }),
+        ),
+      );
     await Promise.all(writes);
   }
 

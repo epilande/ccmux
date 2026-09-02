@@ -153,7 +153,7 @@ The entire interface between ccmux and the agent is one JSON file per session, w
 
 ### OpenCode aggregation
 
-OpenCode is the special case. A single OpenCode server process hosts N sessions, so N markers share one PID. `aggregateOpenCodeMarkers()` (`adapters/opencode/aggregate.ts`) folds them into one ccmux session with worst-of status (waiting > working > idle). `attentionType`, `pendingTool`, `cwd`, and `nativeSessionId` follow the newest-waiting or newest-activity marker. Re-folded on every reconcile tick (not just on marker add or remove), so newly-waiting siblings show up promptly.
+OpenCode is the special case. A single OpenCode server process hosts N sessions, so N markers share one PID. `aggregateOpenCodeMarkers()` (`adapters/opencode/aggregate.ts`) folds them into one ccmux session with worst-of status (waiting > working > idle). `attentionType`, `pendingTool`, `cwd`, and `nativeSessionId` follow the newest-waiting or newest-activity marker. Re-folded on every reconcile tick (not just on marker add or remove), so newly-waiting siblings show up promptly. Fold scope is the row's OWN pane: a marker is folded only when its pid resolves (by process ancestry, `paneIdHostingPid`) to that row's pane, since two servers in one directory share OpenCode's SQLite db and a row can hold a foreign session id until the link pass heals it (issue #177). Symmetrically, the plugin seeds boot markers only for sessions its own status map lists, which is the only per-process evidence that this server hosts them.
 
 ## Single source of truth for adapters
 
