@@ -158,30 +158,15 @@ export function makePlugin({ markersDir, version, now = Date.now }) {
   }
 
   /**
-   * Seed markers at boot for the sessions THIS server actually hosts.
-   *
-   * Ownership rule (issue #177). `session.list` is project-wide: OpenCode
-   * serves it from the SQLite db every process in the directory SHARES, so
-   * it returns the project's whole history plus every sibling process's live
-   * sessions. A marker carries `pid: process.pid`, which makes it a HOSTING
-   * CLAIM — seeding one for a session we do not host hands the daemon a
-   * wrong pid for that session id, flipping the row to this pane, resetting
-   * its state to idle and dropping the sibling's `last_prompt`.
-   *
-   * `client.session.status` is the only per-process evidence available: it
-   * is backed by `SessionStatus.list()`, an in-memory Map owned by THIS
-   * server, whose entries are deleted when a session goes idle. So an entry
-   * exists only for a session this process is currently running, and
-   * membership — not the entry's value — is the proof we may claim it.
-   * Sessions with no entry are skipped entirely; a later `session.status`,
-   * `session.created` or prompt event writes their marker normally, at which
-   * point the pid claim is true. When `session.status` itself fails we seed
-   * nothing, which is the safe direction.
-   *
-   * The old blanket seed also mis-set fresh rows even with one server
-   * running: every listed historical session got a marker written in the
-   * same millisecond, so the daemon's newest-marker fold picked an arbitrary
-   * one and `ccmux last` on an untouched row read a random old transcript.
+   * Seed markers at boot for the sessions THIS server hosts. A marker's
+   * `pid` is a hosting claim, and `session.list` is project-wide over the
+   * SQLite db every process in the directory shares (history plus sibling
+   * processes' live sessions), so seeding from it rewrote a sibling's live
+   * marker under our pid (issue #177). `client.session.status` is the only
+   * per-process evidence: `SessionStatus.list()` is this server's in-memory
+   * map, idle entries deleted, so an entry exists only for a session this
+   * process is running. Membership, not the entry's value, is the gate; a
+   * skipped session's first bus event writes its marker normally.
    */
   async function eagerSeed(client, directory) {
     const [listRes, statusRes] = await Promise.all([

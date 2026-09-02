@@ -737,13 +737,9 @@ describe("reconcileAll", () => {
       expect(session.status).toBe("working");
     });
 
-    /**
-     * Marker ownership (issue #177). Two `opencode` servers in one directory
-     * share the SQLite db, so a row can be holding a session id the OTHER
-     * server hosts until the link pass heals it. The marker lookup is BY that
-     * id, so the fold has to check the marker's pid resolves to the row's own
-     * pane before it paints that server's aggregate (last prompt included).
-     */
+    // Issue #177: a row can hold a session id the OTHER server hosts until
+    // the link pass heals it, so the fold checks the marker's pid resolves
+    // to the row's own pane before painting that server's aggregate.
     describe("marker pane ownership", () => {
       function hostedMarker(pid: number): SessionPidMarker {
         return ocMarker({

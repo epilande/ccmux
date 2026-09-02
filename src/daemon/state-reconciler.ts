@@ -1107,32 +1107,21 @@ const warnedForeignOpenCodeMarkers = new Set<string>();
 const FOREIGN_MARKER_WARN_CAP = 500;
 
 /**
- * OpenCode marker ownership (issue #177). Two `opencode` processes in one
- * directory share OpenCode's SQLite db, so a session id one server hosts is
- * visible to the other. A marker's `pid` is a HOSTING CLAIM, and the only
- * pane whose markers may fold onto a row is the row's OWN pane: the pane
- * that hosts the pid ancestrally.
+ * OpenCode marker ownership (issue #177). Two `opencode` servers in one
+ * directory share OpenCode's SQLite db, so a row can hold a `nativeSessionId`
+ * the OTHER server hosts until `adapters/link.ts` heals it, and the marker
+ * lookup is by that id. A marker's `pid` is a hosting claim: only a marker
+ * whose pid resolves to the row's own pane may fold onto it. Dropping a
+ * foreign marker leaves the terminal/log sources to speak and leaves the
+ * row's stored `lastPrompt` alone.
  *
- * The row can be holding a foreign `nativeSessionId` (the plugin's old
- * blanket seed wrote one; a stale claim leaves one behind), and the marker
- * lookup here is BY that id, so without this check the row paints the other
- * pane's aggregate — newest `last_prompt` included — on every tick and on
- * every marker rewrite the other server does. `adapters/link.ts` heals the
- * held id on the next scan; this guard stops the paint in the meantime.
- * Dropping the marker source leaves the terminal/log sources to speak, and
- * leaves the row's existing `lastPrompt` alone rather than clearing it.
- *
- * Fails OPEN on anything but a definite mismatch. `undefined` is the boot
- * window before the first process snapshot (the same posture as the
- * recycled-pid tripwire in `binder/links.ts`); `null` is a pid that is not
- * under any pane the last snapshot saw, which is what a marker written
- * seconds after a fresh spawn looks like, and dropping it would blind the
- * row for a whole scan interval. The cost of that choice: a SIBLING's fresh
- * pid looks the same, so against a pre-fix plugin (whose boot seed still
- * rewrites this row's marker under the sibling's pid) the guard can lag its
- * trigger by up to one snapshot interval (689ms measured live) and let one
- * fold through before the next scan's tree closes it. The fixed plugin never
- * writes that marker, so the shipped pair has no such window.
+ * Fails open on anything but a definite mismatch. `undefined` is the boot
+ * window before the first process snapshot (same posture as the recycled-pid
+ * tripwire in `binder/links.ts`); `null` is a pid newer than the snapshot,
+ * which is what a fresh spawn's own marker looks like, and dropping it would
+ * blind the row for a scan interval. A sibling's fresh pid looks the same,
+ * so against a pre-fix plugin (whose seed rewrites this row's marker under
+ * that pid) one fold can slip through before the next scan closes it.
  */
 function ownsOpenCodeMarker(
   deps: Pick<ReconcilerDeps, "paneIdHostingPid">,
