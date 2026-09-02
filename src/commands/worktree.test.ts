@@ -1,11 +1,22 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import {
+  END_IDLE_SKIP_REASON,
   callerCwd,
+  endIdleSummary,
   formatWorktreeList,
   parseSelection,
+  planPrune,
   resolveRepoOption,
+  runPruneCommand,
+  type PruneCommandDeps,
+  type PrunePostBody,
 } from "./worktree";
 import type { WorktreeRepo, WorktreeRow } from "../daemon/worktree-list";
+import type {
+  PruneCandidate,
+  PruneRunResult,
+  PruneScan,
+} from "../daemon/worktree-prune";
 
 describe("parseSelection", () => {
   it("accepts single numbers and comma lists", () => {
@@ -255,5 +266,205 @@ describe("callerCwd and resolveRepoOption", () => {
     process.env.CCMUX_CALLER_PWD = "/home/dev/project";
     expect(resolveRepoOption("/srv/repo")).toBe("/srv/repo");
     expect(resolveRepoOption(undefined)).toBeUndefined();
+  });
+});
+
+/**
+ * The `--end-idle` opt-in. The daemon offers a worktree whose bound sessions
+ * are all idle once the branch's PR is proven merged; the CLI is what decides
+ * whether those rows are offered to the user at all, and what consent it
+ * sends back with the run.
+ */
+function candidate(overrides: Partial<PruneCandidate> = {}): PruneCandidate {
+  return {
+    path: "/repo/wt/feat-a",
+    repoRoot: "/repo",
+    repoName: "repo",
+    name: "feat-a",
+    branch: "feat/a",
+    reason: "pr-merged",
+    detail: "PR #12 merged",
+    pr: null,
+    dirty: false,
+    modified: 0,
+    untracked: 0,
+    ignoredFiles: [],
+    ignoredDirs: [],
+    branchDeletion: "force",
+    adminDir: null,
+    sessions: [],
+    ...overrides,
+  };
+}
+
+function idleSession(id = "s1", agentType = "claude") {
+  return {
+    id,
+    agentType,
+    status: "idle" as const,
+    tmuxPane: "%1",
+    tmuxTarget: "w:0.1",
+    pid: 4242,
+  };
+}
+
+const OCCUPIED = candidate({
+  path: "/repo/wt/merged",
+  name: "merged",
+  branch: "feat/merged",
+  sessions: [idleSession()],
+});
+const EMPTY = candidate();
+
+function scan(candidates: PruneCandidate[]): PruneScan {
+  return { candidates, skipped: [], open: [] };
+}
+
+describe("planPrune", () => {
+  it("withholds an occupied candidate and names the flag", () => {
+    const plan = planPrune(scan([EMPTY, OCCUPIED]), false);
+
+    expect(plan.candidates).toEqual([EMPTY]);
+    expect(plan.skipped).toEqual([
+      {
+        path: OCCUPIED.path,
+        repoRoot: OCCUPIED.repoRoot,
+        branch: OCCUPIED.branch,
+        reason: END_IDLE_SKIP_REASON,
+      },
+    ]);
+    expect(END_IDLE_SKIP_REASON).toContain("--end-idle");
+  });
+
+  it("offers it with the opt-in, leaving the daemon's own skips alone", () => {
+    const withSkip: PruneScan = {
+      ...scan([EMPTY, OCCUPIED]),
+      skipped: [
+        {
+          path: "/repo/wt/x",
+          repoRoot: "/repo",
+          branch: "x",
+          reason: "locked",
+        },
+      ],
+    };
+
+    const plan = planPrune(withSkip, true);
+    expect(plan.candidates).toEqual([EMPTY, OCCUPIED]);
+    expect(plan.skipped).toEqual(withSkip.skipped);
+  });
+});
+
+describe("endIdleSummary", () => {
+  it("says nothing when no selected worktree has a session", () => {
+    expect(endIdleSummary([EMPTY])).toBeNull();
+  });
+
+  it("counts the sessions and says the transcript files survive", () => {
+    expect(endIdleSummary([EMPTY, OCCUPIED])).toBe(
+      "It will also end 1 idle agent session. The transcript persists on disk, but agents that resume by directory (opencode, pi, omp) lose the way back once the worktree is gone.",
+    );
+    const two = candidate({
+      path: "/repo/wt/two",
+      sessions: [idleSession("s1"), idleSession("s2", "codex")],
+    });
+    expect(endIdleSummary([two])).toContain("end 2 idle agent sessions");
+    expect(endIdleSummary([two])).toContain("Transcripts persist on disk");
+  });
+
+  // Three built-ins resume by directory, and the directory is what the
+  // removal deletes, so the prompt may not promise resumability.
+  it("does not claim the session stays resumable", () => {
+    expect(endIdleSummary([EMPTY, OCCUPIED])).not.toContain("resumable");
+  });
+});
+
+const EMPTY_RESULT: PruneRunResult = { outcomes: [], state: [], dryRun: true };
+
+/**
+ * Drive the command with its daemon edges stubbed, returning what it printed
+ * and every body it posted.
+ */
+async function runCommand(
+  options: Parameters<typeof runPruneCommand>[0],
+  candidates: PruneCandidate[],
+  answers: string[] = [],
+): Promise<{ output: string; bodies: PrunePostBody[] }> {
+  const bodies: PrunePostBody[] = [];
+  const lines: string[] = [];
+  const log = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  });
+  const queued = [...answers];
+  const deps: PruneCommandDeps = {
+    ensureDaemon: async () => {},
+    fetchScan: async () => scan(candidates),
+    postPrune: async (body) => {
+      bodies.push(body);
+      return { ...EMPTY_RESULT, dryRun: body.dryRun };
+    },
+    ...(answers.length > 0 ? { ask: async () => queued.shift() ?? "" } : {}),
+  };
+  try {
+    await runPruneCommand(options, deps);
+  } finally {
+    log.mockRestore();
+  }
+  return { output: lines.join("\n"), bodies };
+}
+
+describe("runPruneCommand and --end-idle", () => {
+  it("keeps an occupied worktree out of the count, the list and the run", async () => {
+    const { output, bodies } = await runCommand({ dryRun: true }, [
+      EMPTY,
+      OCCUPIED,
+    ]);
+
+    expect(output).toContain("Prunable worktrees (1):");
+    expect(output).not.toContain(`${OCCUPIED.repoName}/${OCCUPIED.name}`);
+    expect(output).toContain(`${OCCUPIED.path}: ${END_IDLE_SKIP_REASON}`);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].paths).toEqual([EMPTY.path]);
+    expect(bodies[0].allowEndIdle).toEqual([]);
+  });
+
+  it("offers it under the flag and sends the consent with the dry run", async () => {
+    const { output, bodies } = await runCommand(
+      { dryRun: true, endIdle: true },
+      [EMPTY, OCCUPIED],
+    );
+
+    expect(output).toContain("Prunable worktrees (2):");
+    // The row says what happens, not just that an agent is there.
+    expect(output).toContain("[claude idle]  removal ends this session");
+    expect(output).not.toContain(END_IDLE_SKIP_REASON);
+    expect(bodies[0].paths).toEqual([EMPTY.path, OCCUPIED.path]);
+    expect(bodies[0].allowEndIdle).toEqual([OCCUPIED.path]);
+  });
+
+  // The consequence is repeated at the decision point for the same reason the
+  // ignored files are: selecting with 'a' never reads the rows.
+  it("spells the ended sessions out at the confirmation", async () => {
+    const { output, bodies } = await runCommand(
+      { endIdle: true },
+      [EMPTY, OCCUPIED],
+      ["a", "y"],
+    );
+
+    expect(output).toContain("It will also end 1 idle agent session.");
+    expect(output).toContain("The transcript persists on disk");
+    expect(bodies[0].dryRun).toBe(false);
+    expect(bodies[0].allowEndIdle).toEqual([OCCUPIED.path]);
+  });
+
+  it("sends no consent for a worktree the user did not select", async () => {
+    const { bodies } = await runCommand(
+      { endIdle: true },
+      [EMPTY, OCCUPIED],
+      ["1", "y"],
+    );
+
+    expect(bodies[0].paths).toEqual([EMPTY.path]);
+    expect(bodies[0].allowEndIdle).toEqual([]);
   });
 });

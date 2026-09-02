@@ -186,6 +186,23 @@ Two rejections share `kind: "agent_error"` / exit 4; disambiguate on the **messa
 - Contains `already in flight`: you reused a running id. **Mint a fresh id** and retry;
   do not back off.
 
+## Cleaning up after a merge
+
+Once the PR merges, `ccmux worktree prune --end-idle` removes the worktree, the local branch,
+the idle agent sitting in it and that agent's pane. A worktree whose agent is working or
+waiting is never offered, so this cannot pull a job out from under itself.
+
+**You cannot run the removal yourself.** It is interactive by design: there is no `--yes`,
+and the command exits 1 when stdin is not a TTY, which a Bash tool never is. What you can run
+is `ccmux worktree prune --end-idle --dry-run`, which reports what would go without touching
+anything. Hand the removal to the human: the picker's Worktrees panel (`W`, select the row,
+then `x`), or the same command in their terminal, where it prompts for a selection and then
+`Proceed? [y/N]`.
+
+The agent's transcript file survives its pane, but that is not the same as the session being
+resumable: `opencode`, `pi` and `omp` resume by DIRECTORY, and the directory is what the
+removal deletes.
+
 ## Gotchas (read before a long run)
 
 - **Admission lag: a freshly-fired id is briefly ABSENT from `list`.** A naive poll loop
