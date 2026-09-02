@@ -1040,13 +1040,15 @@ describe("end-idle gate", () => {
     });
 
     // A session the daemon no longer has is the GOOD case: it exited on its
-    // own between the list and the run. Nothing is signalled for it — the
-    // scan's pid is the only one left to aim at and it describes a process
-    // the daemon has already stopped accounting for — but its pane is still
-    // closed, since a tmux server never reuses a pane id.
-    it("proceeds without signalling when the live lookup no longer knows the session", async () => {
+    // own between the list and the run. Nothing is signalled for it, and the
+    // scan's pane is not closed either — `handleKillSession` 404s a missing
+    // row and leaves the pane, because the same `%N` can already hold a
+    // replacement occupant occupancy would otherwise exempt as one this run
+    // closed. Directory removal still proceeds when occupancy finds nothing.
+    it("proceeds without signalling or closing a pane when the live lookup no longer knows the session", async () => {
       const { wt, candidate } = await occupied("run-end-idle-session-gone");
       const kill = killSpy();
+      const closed: string[] = [];
 
       const result = await runPrune([candidate], {
         stateFiles: [],
@@ -1055,13 +1057,56 @@ describe("end-idle gate", () => {
         allowEndIdlePaths: [normalizePath(candidate.path)],
         liveSession: () => undefined,
         killProcess: kill.killProcess,
-        closePane: async () => "closed",
+        closePane: async (paneId) => {
+          closed.push(paneId);
+          return "closed";
+        },
       });
 
       expect(kill.signals).toEqual([]);
-      expect(result.outcomes[0].panesClosed).toEqual(["%9"]);
+      expect(closed).toEqual([]);
+      expect(result.outcomes[0].panesClosed).toEqual([]);
       expect(result.outcomes[0].removed).toBe(true);
       expect(existsSync(wt)).toBe(false);
+    });
+
+    // Native UUID gone, new working agent in the same pane: occupancy must
+    // still see that occupant, because we did not close the pane and did not
+    // verify its status.
+    it("lets occupancy refuse a replacement occupant in a pane whose session is gone", async () => {
+      const { wt, candidate } = await occupied(
+        "run-end-idle-session-gone-occupant",
+      );
+      const kill = killSpy();
+      const closed: string[] = [];
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => undefined,
+        killProcess: kill.killProcess,
+        closePane: async (paneId) => {
+          closed.push(paneId);
+          return "closed";
+        },
+        listPanes: async () => [
+          {
+            paneId: "%9",
+            currentPath: candidate.path,
+            currentCommand: "claude",
+            paneTitle: null,
+          },
+        ],
+      });
+
+      expect(kill.signals).toEqual([]);
+      expect(closed).toEqual([]);
+      expect(result.outcomes[0].panesClosed).toEqual([]);
+      expect(result.outcomes[0].removed).toBe(false);
+      expect(result.outcomes[0].error).toContain("something is running");
+      expect(existsSync(wt)).toBe(true);
     });
 
     // The whole point of re-reading the session rather than its status: the

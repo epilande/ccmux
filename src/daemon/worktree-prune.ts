@@ -1029,10 +1029,10 @@ export interface OccupantPane {
  * The pane title is what distinguishes them — every ccmux surface sets one
  * (`isCcmuxPane`), and a surface is never the work a prune should refuse on.
  *
- * `ignorePaneIds` carries the candidate's own session panes, which
- * {@link runPrune} has already stopped and closed by this point; a pane tmux
- * has not finished reaping must not become a refusal of the removal that just
- * closed it.
+ * `ignorePaneIds` carries the panes this run actually closed, which
+ * {@link runPrune} has already stopped by this point; a pane tmux has not
+ * finished reaping must not become a refusal of the removal that just closed
+ * it. A scan pane whose live row is gone is not among them.
  *
  * What it does NOT catch, and cannot: work outside tmux (an editor in another
  * terminal, a build in an IDE), and a process whose pane cwd is elsewhere. The
@@ -1192,9 +1192,11 @@ export interface PruneOptions extends PruneDeps {
    * Any non-idle answer refuses the candidate; consent never overrides live
    * status. `undefined` means the daemon has no such session any more, which
    * is the good case (it exited) — the run proceeds, but with nothing left to
-   * signal, so it only closes the pane. Omitting the callback entirely skips
-   * both the re-check and the pid refresh, for callers with nothing live to
-   * ask.
+   * signal and without closing the scan pane. `handleKillSession` 404s a
+   * missing row the same way; the pane can already hold a replacement occupant,
+   * and occupancy would exempt it as one this run closed. Omitting the
+   * callback entirely skips both the re-check and the pid refresh, for callers
+   * with nothing live to ask.
    */
   liveSession?: (
     sessionId: string,
@@ -1352,7 +1354,8 @@ async function stillAliveAfter(
  * Takes the sessions rather than the candidate because the pids it signals
  * are the ones {@link runPrune} just re-read from the live daemon, not the
  * ones the scan wrote down (S12). A session the daemon no longer knows
- * arrives here with a null pid and only has its pane closed.
+ * arrives here with a null pid and a null pane: nothing to signal, and
+ * nothing to close.
  */
 async function stopSessions(
   sessions: WorktreeSession[],
@@ -1571,13 +1574,20 @@ export async function runPrune(
           });
           continue;
         }
-        // An `undefined` answer leaves a null pid on purpose: the daemon no
-        // longer tracks this session, so there is no process it can honestly
-        // claim to be ending, and `stopSessions` falls through to closing the
-        // pane. Pane ids, unlike pids, are never reused by a tmux server, so
-        // the snapshot's pane is still the right target or no target at all.
+        // An `undefined` answer leaves a null pid AND a null pane: the daemon
+        // no longer tracks this session, so there is no process it can
+        // honestly claim to be ending and no pane it can honestly claim to
+        // own. `handleKillSession` 404s a missing row and leaves the pane;
+        // closing it here would destroy a replacement occupant (native UUID
+        // gone, new agent in the same `%N`) that occupancy would then exempt
+        // as a pane this run already closed. A live row still carries the
+        // scan's pane: that is the one this run verified.
         sessionsToStop = resolved.map(({ session, live }) =>
-          session.background ? session : { ...session, pid: live?.pid ?? null },
+          session.background
+            ? session
+            : live
+              ? { ...session, pid: live.pid }
+              : { ...session, pid: null, tmuxPane: null },
         );
       }
     }
@@ -1597,7 +1607,7 @@ export async function runPrune(
 
     if (dryRun) {
       outcome.removed = true;
-      for (const session of candidate.sessions) {
+      for (const session of sessionsToStop) {
         if (session.tmuxPane) outcome.panesClosed.push(session.tmuxPane);
       }
       steps.push({
@@ -1621,7 +1631,9 @@ export async function runPrune(
             ? `${session.agentType} ${session.id} is supervisor-owned; it would not be signalled`
             : session.pid
               ? `${session.agentType} pid ${session.pid} would be stopped`
-              : `${session.agentType} ${session.id} has no pid; only its pane would be closed`,
+              : session.tmuxPane
+                ? `${session.agentType} ${session.id} has no pid; only its pane would be closed`
+                : `${session.agentType} ${session.id} is gone; nothing would be signalled or closed`,
         });
       }
       for (const detail of ignoredSummaries) {
@@ -1707,12 +1719,14 @@ export async function runPrune(
     // above. tmux has no such latency.
     //
     // Placed after `stopSessions` deliberately: the panes this run legitimately
-    // closed are gone by now, and the candidate's own session panes are passed
-    // as exemptions for any tmux has not finished reaping.
+    // closed are gone by now, and THOSE panes (not the scan's snapshot) are
+    // passed as exemptions for any tmux has not finished reaping. A scan pane
+    // whose live row is gone is not among them, so a replacement occupant
+    // still sitting in it is a refusal.
     try {
       const panes = await (options.listPanes ?? defaultListPanes)();
       const occupants = paneOccupants(panes, candidate.path, [
-        ...candidate.sessions.flatMap((s) => (s.tmuxPane ? [s.tmuxPane] : [])),
+        ...sessionsToStop.flatMap((s) => (s.tmuxPane ? [s.tmuxPane] : [])),
         ...(options.callerPane ? [options.callerPane] : []),
       ]);
       if (occupants.length > 0) {
