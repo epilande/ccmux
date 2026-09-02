@@ -35,6 +35,7 @@ import {
   trashPathFor,
   type GhPRRow,
   type PRLookupResult,
+  type PRState,
   type PruneCandidate,
   type WorktreeSession,
 } from "./worktree-prune";
@@ -626,10 +627,14 @@ describe("a branch on a base tip with several base refs", () => {
 });
 
 /**
- * The session gate, widened from `working` to any bound session. An agent at
- * its prompt (`idle`) or blocked on a permission question (`waiting`) is a
- * session the user is still in the middle of, and it holds the worktree as its
- * cwd, so removal SIGTERMs it and deletes the directory under it.
+ * The session gate. A bound session holds the worktree as its cwd, so removal
+ * SIGTERMs it and deletes the directory under it: `working` is mid-write and
+ * `waiting` is mid-turn, blocked on a permission question.
+ *
+ * `idle` is held here too, but for a narrower reason than it looks: these
+ * scans hand back no PR at all (`noPR`), and only a MERGED PR can offer a
+ * worktree whose sessions are all idle. The end-idle gate's own describe
+ * block covers what happens when one exists.
  */
 describe("session gate", () => {
   async function mergedWorktree(
@@ -693,6 +698,688 @@ describe("session gate", () => {
 
     expect(scan.candidates).toHaveLength(1);
     expect(scan.skipped).toEqual([]);
+  });
+});
+
+/**
+ * The end-idle gate: a worktree whose bound sessions are ALL idle is offered,
+ * and removing it ends them.
+ *
+ * One piece of evidence qualifies a worktree for that, and it comes from off
+ * this machine: GitHub says the PR merged. Local evidence does not, because
+ * the classification cannot tell fresh from finished. A worktree branched
+ * from base carries the base's own tip, which every local check reads as
+ * "already merged", and that is exactly the fresh worktree an agent is
+ * sitting idle in. A lookup that could not reach an answer does not qualify
+ * either: no proof is not a guess when being wrong kills a live agent.
+ *
+ * `runPrune` then asks for the consent separately, and re-asks the daemon
+ * what the session is doing RIGHT NOW before it signals anything.
+ */
+describe("end-idle gate", () => {
+  const prIn = (state: PRState["state"]): PRState => ({
+    number: 12,
+    url: "https://github.com/o/r/pull/12",
+    state,
+  });
+
+  /** A `lookupPR` that always answers `result`, counting what it costs. */
+  function countingLookup(result: PRLookupResult): {
+    lookupPR: () => Promise<PRLookupResult>;
+    calls: () => number;
+  } {
+    let calls = 0;
+    return {
+      lookupPR: async () => {
+        calls++;
+        return result;
+      },
+      calls: () => calls,
+    };
+  }
+
+  /** One worktree, one branch with a commit, sessions of the caller's shape. */
+  async function scanWith(
+    name: string,
+    sessions: WorktreeSession[],
+    options: {
+      lookup?: PRLookupResult;
+      cachedOpenPR?: PRState | null;
+      dirty?: boolean;
+      mergeLocally?: boolean;
+    } = {},
+  ) {
+    const { repo } = await makeRepo(name);
+    const wt = await addWorktree(repo, "feat/end-idle");
+    if (options.mergeLocally) {
+      await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/end-idle"]);
+    }
+    if (options.dirty) {
+      writeFileSync(join(wt, "uncommitted.txt"), "unsaved work\n");
+    }
+    const lookup = countingLookup(
+      options.lookup ?? { ok: true, pr: prIn("MERGED") },
+    );
+    const scan = await scanRepo(repo, {
+      skipFetch: true,
+      sessionsFor: (path) => (path === normalizePath(wt) ? sessions : []),
+      openPR: () => options.cachedOpenPR ?? null,
+      lookupPR: lookup.lookupPR,
+    });
+    return { repo, wt, scan, lookups: lookup.calls() };
+  }
+
+  it("offers a merged worktree whose sessions are all idle, for one gh call", async () => {
+    const { wt, scan, lookups } = await scanWith("end-idle-merged", [
+      session({ status: "idle" }),
+    ]);
+
+    expect(scan.candidates).toHaveLength(1);
+    expect(scan.candidates[0]).toMatchObject({
+      path: normalizePath(wt),
+      branch: "feat/end-idle",
+      reason: "pr-merged",
+      branchDeletion: "force",
+      detail: "PR #12 merged",
+      dirty: false,
+    });
+    // The sessions ride along: they are what `runPrune` gates on, and what
+    // its opt-in is asked about.
+    expect(scan.candidates[0].sessions).toHaveLength(1);
+    expect(scan.skipped).toEqual([]);
+    // Exactly one. The gate is the only thing that spends a call here, and
+    // it spends it once.
+    expect(lookups).toBe(1);
+  });
+
+  // The unchanged half of the contract, and the reason it stays free: a
+  // worktree an agent is mid-work or mid-turn in is not offerable whatever
+  // GitHub says, so it never reaches the network.
+  for (const status of ["working", "waiting"] as const) {
+    it(`keeps the skip and spends no gh call while an agent is ${status}`, async () => {
+      const { wt, scan, lookups } = await scanWith("end-idle-" + status, [
+        session({ status }),
+      ]);
+
+      expect(scan.candidates).toEqual([]);
+      expect(scan.skipped).toEqual([
+        {
+          path: normalizePath(wt),
+          repoRoot: expect.any(String),
+          branch: "feat/end-idle",
+          reason: `an agent is ${status} here`,
+        },
+      ]);
+      expect(lookups).toBe(0);
+    });
+  }
+
+  // Dirty is a SEPARATE axis, not a condition of the gate. The row is
+  // offered carrying both facts, and `runPrune` then wants both opt-ins.
+  it("offers a merged, idle worktree that is also dirty, carrying both facts", async () => {
+    const { scan } = await scanWith(
+      "end-idle-dirty",
+      [session({ status: "idle" })],
+      { dirty: true },
+    );
+
+    expect(scan.candidates).toHaveLength(1);
+    expect(scan.candidates[0]).toMatchObject({
+      reason: "pr-merged",
+      dirty: true,
+      untracked: 1,
+    });
+    expect(scan.candidates[0].sessions).toHaveLength(1);
+  });
+
+  it("keeps the skip when the PR state could not be established", async () => {
+    const { scan } = await scanWith(
+      "end-idle-lookup-failed",
+      [session({ status: "idle" })],
+      { lookup: { ok: false, error: "gh pr list exited 1" } },
+    );
+
+    expect(scan.candidates).toEqual([]);
+    expect(scan.skipped[0]?.reason).toBe("an agent is idle here");
+    expect(scan.open).toEqual([]);
+  });
+
+  /**
+   * The one this gate exists to get right. `git worktree add -b feat/x <path>
+   * main` leaves the new branch on the base's tip, so the ancestry check says
+   * "merged into main" for a directory created seconds ago, and an agent
+   * that has just been spawned into it is idle by definition, sitting at its
+   * first prompt.
+   */
+  it("does not offer an idle worktree on local merge evidence alone", async () => {
+    const { scan } = await scanWith(
+      "end-idle-merged-locally",
+      [session({ status: "idle" })],
+      { lookup: { ok: true, pr: null }, mergeLocally: true },
+    );
+
+    expect(scan.candidates).toEqual([]);
+    expect(scan.skipped[0]?.reason).toBe("an agent is idle here");
+  });
+
+  it("does not offer an idle worktree whose PR was closed unmerged", async () => {
+    const { scan } = await scanWith(
+      "end-idle-pr-closed",
+      [session({ status: "idle" })],
+      { lookup: { ok: true, pr: prIn("CLOSED") } },
+    );
+
+    expect(scan.candidates).toEqual([]);
+    expect(scan.skipped[0]?.reason).toBe("an agent is idle here");
+  });
+
+  // The cache can only ever answer OPEN, and that answer is enough on its
+  // own: the work is in flight, and the panel still gets its badge.
+  it("takes an OPEN PR from the cache without a gh call, and reports both rows", async () => {
+    const { wt, scan, lookups } = await scanWith(
+      "end-idle-open-cached",
+      [session({ status: "idle" })],
+      { cachedOpenPR: prIn("OPEN") },
+    );
+
+    expect(scan.candidates).toEqual([]);
+    expect(scan.skipped[0]?.reason).toBe("an agent is idle here");
+    expect(scan.open).toEqual([
+      {
+        path: normalizePath(wt),
+        repoRoot: expect.any(String),
+        branch: "feat/end-idle",
+        pr: prIn("OPEN"),
+      },
+    ]);
+    expect(lookups).toBe(0);
+  });
+
+  it("reports the same two rows when the OPEN PR comes from the lookup", async () => {
+    const { scan, lookups } = await scanWith(
+      "end-idle-open-looked-up",
+      [session({ status: "idle" })],
+      { lookup: { ok: true, pr: prIn("OPEN") } },
+    );
+
+    expect(scan.candidates).toEqual([]);
+    expect(scan.skipped[0]?.reason).toBe("an agent is idle here");
+    expect(scan.open[0]?.pr).toEqual(prIn("OPEN"));
+    expect(lookups).toBe(1);
+  });
+
+  // ccmux cannot end a supervisor-owned agent, so it must not offer to
+  // remove what one lives in, merged PR or not. Both shapes: the paneless
+  // Claude background row, and the synthetic subagent entry the daemon folds
+  // in under its parent (no pid of its own).
+  for (const [label, extra] of [
+    ["a background agent", { background: true }],
+    ["a subagent entry", { pid: null, background: true }],
+  ] as const) {
+    it(`keeps the skip for an idle worktree holding ${label}`, async () => {
+      const { scan, lookups } = await scanWith("end-idle-" + label.slice(2), [
+        session({ status: "idle", ...extra }),
+      ]);
+
+      expect(scan.candidates).toEqual([]);
+      expect(scan.skipped[0]?.reason).toBe("an agent is idle here");
+      expect(lookups).toBe(0);
+    });
+  }
+
+  /**
+   * `runPrune`'s half: the consent, and the live re-check that outranks it.
+   */
+  describe("runPrune", () => {
+    /** A merged, idle-occupied candidate against a real fixture repo. */
+    async function occupied(
+      name: string,
+      options: { dirty?: boolean } = {},
+    ): Promise<{ wt: string; candidate: PruneCandidate }> {
+      const { wt, scan } = await scanWith(
+        name,
+        [session({ status: "idle", pid: 4242, tmuxPane: "%9" })],
+        { dirty: options.dirty },
+      );
+      expect(scan.candidates).toHaveLength(1);
+      return { wt, candidate: scan.candidates[0] };
+    }
+
+    /**
+     * A `killProcess` that behaves like an agent which exits on SIGTERM, and
+     * records what it was sent. The liveness probes (`kill(pid, 0)`) throw
+     * once it is gone, which is how `runPrune` confirms the exit.
+     */
+    function killSpy(): {
+      killProcess: (pid: number, signal: NodeJS.Signals | 0) => void;
+      signals: string[];
+    } {
+      const signals: string[] = [];
+      let alive = true;
+      return {
+        signals,
+        killProcess: (pid, signal) => {
+          if (signal === "SIGTERM") {
+            signals.push(`SIGTERM:${pid}`);
+            alive = false;
+            return;
+          }
+          if (!alive) throw new Error("ESRCH");
+          signals.push(`${String(signal)}:${pid}`);
+        },
+      };
+    }
+
+    it("refuses a candidate with sessions that carries no end-idle opt-in", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-refused");
+      const kill = killSpy();
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        killProcess: kill.killProcess,
+        closePane: async () => "closed",
+      });
+
+      expect(result.outcomes[0].error).toBe(
+        "has an idle agent session and was not opted in",
+      );
+      expect(result.outcomes[0].removed).toBe(false);
+      expect(result.outcomes[0].trashPath).toBeNull();
+      // Refused BEFORE anything is signalled: the agent is untouched, not
+      // killed and then regretted.
+      expect(kill.signals).toEqual([]);
+      expect(existsSync(wt)).toBe(true);
+      expect(
+        result.outcomes[0].steps.some(
+          (s) => s.step === "refused" && s.detail.includes("end-idle opt-in"),
+        ),
+      ).toBe(true);
+    });
+
+    it("stops the agent and removes the directory once the path is opted in", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-allowed");
+      const kill = killSpy();
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        killProcess: kill.killProcess,
+        closePane: async () => "closed",
+      });
+
+      expect(kill.signals).toEqual(["SIGTERM:4242"]);
+      expect(result.outcomes[0].removed).toBe(true);
+      expect(result.outcomes[0].panesClosed).toEqual(["%9"]);
+      expect(existsSync(wt)).toBe(false);
+    });
+
+    // Consent is not a claim about the present: it was given while the agent
+    // was idle, and the user took as long as a user takes to give it.
+    it("refuses an opted-in path whose agent is working again", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-went-working");
+      const kill = killSpy();
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => ({
+          status: "working",
+          pid: 4242,
+          tmuxPane: "%9",
+          cwd: candidate.path,
+        }),
+        killProcess: kill.killProcess,
+        closePane: async () => "closed",
+      });
+
+      expect(result.outcomes[0].error).toBe(
+        "its agent is working now, not idle; nothing was deleted",
+      );
+      expect(kill.signals).toEqual([]);
+      expect(result.outcomes[0].removed).toBe(false);
+      expect(existsSync(wt)).toBe(true);
+    });
+
+    // A session the daemon no longer has is the GOOD case: it exited on its
+    // own between the list and the run. Nothing is signalled for it, and the
+    // scan's pane is not closed either — `handleKillSession` 404s a missing
+    // row and leaves the pane, because the same `%N` can already hold a
+    // replacement occupant occupancy would otherwise exempt as one this run
+    // closed. Directory removal still proceeds when occupancy finds nothing.
+    it("proceeds without signalling or closing a pane when the live lookup no longer knows the session", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-session-gone");
+      const kill = killSpy();
+      const closed: string[] = [];
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => undefined,
+        killProcess: kill.killProcess,
+        closePane: async (paneId) => {
+          closed.push(paneId);
+          return "closed";
+        },
+      });
+
+      expect(kill.signals).toEqual([]);
+      expect(closed).toEqual([]);
+      expect(result.outcomes[0].panesClosed).toEqual([]);
+      expect(result.outcomes[0].removed).toBe(true);
+      expect(existsSync(wt)).toBe(false);
+    });
+
+    // Native UUID gone, new working agent in the same pane: occupancy must
+    // still see that occupant, because we did not close the pane and did not
+    // verify its status.
+    it("lets occupancy refuse a replacement occupant in a pane whose session is gone", async () => {
+      const { wt, candidate } = await occupied(
+        "run-end-idle-session-gone-occupant",
+      );
+      const kill = killSpy();
+      const closed: string[] = [];
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => undefined,
+        killProcess: kill.killProcess,
+        closePane: async (paneId) => {
+          closed.push(paneId);
+          return "closed";
+        },
+        listPanes: async () => [
+          {
+            paneId: "%9",
+            currentPath: candidate.path,
+            currentCommand: "claude",
+            paneTitle: null,
+          },
+        ],
+      });
+
+      expect(kill.signals).toEqual([]);
+      expect(closed).toEqual([]);
+      expect(result.outcomes[0].panesClosed).toEqual([]);
+      expect(result.outcomes[0].removed).toBe(false);
+      expect(result.outcomes[0].error).toContain("something is running");
+      expect(existsSync(wt)).toBe(true);
+    });
+
+    // The whole point of re-reading the session rather than its status: the
+    // reconciler moves a row onto a new process when one takes over its pane,
+    // and a run that checked the live row but signalled the scan's pid would
+    // kill whatever now answers to a number nobody re-verified.
+    it("signals the pid the daemon has now, not the one the scan recorded", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-pid-moved");
+      const kill = killSpy();
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => ({
+          status: "idle",
+          pid: 5150,
+          tmuxPane: "%9",
+          cwd: candidate.path,
+        }),
+        killProcess: kill.killProcess,
+        closePane: async () => "closed",
+      });
+
+      expect(candidate.sessions[0].pid).toBe(4242);
+      expect(kill.signals).toEqual(["SIGTERM:5150"]);
+      expect(result.outcomes[0].removed).toBe(true);
+      expect(existsSync(wt)).toBe(false);
+    });
+
+    // A dry run promises to report what the real run would do, so it reports
+    // the live pid too.
+    it("names the live pid in the dry run, not the recorded one", async () => {
+      const { candidate } = await occupied("run-end-idle-pid-moved-dry");
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        dryRun: true,
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => ({
+          status: "idle",
+          pid: 5150,
+          tmuxPane: "%9",
+          cwd: candidate.path,
+        }),
+      });
+
+      expect(
+        result.outcomes[0].steps.find((s) => s.step === "would stop agent")
+          ?.detail,
+      ).toContain("pid 5150");
+    });
+
+    // The same argument as the pid, one field further: a marker claim can
+    // re-point a session id at a pane in a SIBLING checkout between the list
+    // and the run (resuming it there is enough). The live row is idle, so
+    // status alone waves it through — and the pid it carries belongs to an
+    // agent in a worktree this run is not deleting.
+    it("signals nothing for a session that moved to another worktree", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-session-moved");
+      const kill = killSpy();
+      const closed: string[] = [];
+      // A SIBLING, not a subdirectory: sharing a prefix with the worktree is
+      // exactly how a naive `startsWith` mistakes one for the other.
+      const elsewhere = candidate.path + "-other";
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => ({
+          status: "idle",
+          pid: 5150,
+          tmuxPane: "%12",
+          cwd: elsewhere,
+        }),
+        killProcess: kill.killProcess,
+        closePane: async (paneId) => {
+          closed.push(paneId);
+          return "closed";
+        },
+      });
+
+      expect(kill.signals).toEqual([]);
+      expect(closed).toEqual([]);
+      expect(
+        result.outcomes[0].steps.some(
+          (s) => s.step === "session moved" && s.detail.includes(elsewhere),
+        ),
+      ).toBe(true);
+      // Nothing holds the directory any more, so the removal still proceeds.
+      expect(result.outcomes[0].removed).toBe(true);
+      expect(existsSync(wt)).toBe(false);
+    });
+
+    // Containment, not equality. An agent that cd'd within its own worktree
+    // never left it, and refusing to signal it would leave the very process
+    // the removal has to stop running in the directory it is deleting.
+    it("still stops a session whose cwd moved deeper into the same worktree", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-session-deeper");
+      const kill = killSpy();
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => ({
+          status: "idle",
+          pid: 5150,
+          tmuxPane: "%9",
+          cwd: join(candidate.path, "src", "daemon"),
+        }),
+        killProcess: kill.killProcess,
+        closePane: async () => "closed",
+      });
+
+      expect(kill.signals).toEqual(["SIGTERM:5150"]);
+      expect(result.outcomes[0].removed).toBe(true);
+      expect(existsSync(wt)).toBe(false);
+    });
+
+    // The binder moves a row between panes, so the pane worth closing is the
+    // one the agent is in now. Closing the scan's would leave the live pane
+    // open and destroy whatever took over the old one.
+    it("closes the pane the live row is in, not the one the scan recorded", async () => {
+      const { candidate } = await occupied("run-end-idle-pane-moved");
+      const kill = killSpy();
+      const closed: string[] = [];
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        liveSession: () => ({
+          status: "idle",
+          pid: 4242,
+          tmuxPane: "%12",
+          cwd: candidate.path,
+        }),
+        killProcess: kill.killProcess,
+        closePane: async (paneId) => {
+          closed.push(paneId);
+          return "closed";
+        },
+      });
+
+      expect(candidate.sessions[0].tmuxPane).toBe("%9");
+      expect(closed).toEqual(["%12"]);
+      expect(result.outcomes[0].panesClosed).toEqual(["%12"]);
+    });
+
+    // The exemption list is the panes whose close was CONFIRMED, not the ones
+    // the run meant to close. A pane still standing after a failed `kill-pane`
+    // is the one occupant we already know about, and waving it through would
+    // delete the directory out from under it.
+    it("refuses when a pane it could not close is still live in the worktree", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-close-failed");
+      const kill = killSpy();
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        killProcess: kill.killProcess,
+        closePane: async () => "failed",
+        listPanes: async () => [
+          {
+            paneId: "%9",
+            currentPath: candidate.path,
+            currentCommand: "claude",
+            paneTitle: null,
+          },
+        ],
+      });
+
+      expect(result.outcomes[0].removed).toBe(false);
+      expect(result.outcomes[0].error).toContain("something is running");
+      expect(existsSync(wt)).toBe(true);
+    });
+
+    // Two independent axes, and a worktree that is both refuses on whichever
+    // opt-in is missing.
+    it("refuses a dirty, occupied candidate that carries only one of the two opt-ins", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-dirty", {
+        dirty: true,
+      });
+      expect(candidate.dirty).toBe(true);
+      const options = {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        closePane: async () => "closed" as const,
+      };
+
+      const endIdleOnly = await runPrune([candidate], {
+        ...options,
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        killProcess: killSpy().killProcess,
+      });
+      expect(endIdleOnly.outcomes[0].error).toBe(
+        "has uncommitted or untracked changes and was not opted in",
+      );
+
+      const dirtyOnly = await runPrune([candidate], {
+        ...options,
+        allowDirtyPaths: [normalizePath(candidate.path)],
+        killProcess: killSpy().killProcess,
+      });
+      expect(dirtyOnly.outcomes[0].error).toBe(
+        "has an idle agent session and was not opted in",
+      );
+
+      expect(existsSync(wt)).toBe(true);
+    });
+
+    it("removes a dirty, occupied candidate that carries both opt-ins", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-dirty-both", {
+        dirty: true,
+      });
+      const kill = killSpy();
+
+      const result = await runPrune([candidate], {
+        stateFiles: [],
+        log: () => {},
+        sleep: async () => {},
+        allowDirtyPaths: [normalizePath(candidate.path)],
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+        killProcess: kill.killProcess,
+        closePane: async () => "closed",
+      });
+
+      expect(kill.signals).toEqual(["SIGTERM:4242"]);
+      expect(result.outcomes[0].removed).toBe(true);
+      expect(existsSync(wt)).toBe(false);
+    });
+
+    // A dry run has to refuse what a real run would refuse, and say what it
+    // would end rather than only naming the directory.
+    it("reports the sessions it would stop, and still refuses without the opt-in", async () => {
+      const { wt, candidate } = await occupied("run-end-idle-dry");
+
+      const refused = await runPrune([candidate], {
+        dryRun: true,
+        stateFiles: [],
+        log: () => {},
+      });
+      expect(refused.outcomes[0].error).toBe(
+        "has an idle agent session and was not opted in",
+      );
+
+      const allowed = await runPrune([candidate], {
+        dryRun: true,
+        stateFiles: [],
+        log: () => {},
+        allowEndIdlePaths: [normalizePath(candidate.path)],
+      });
+      const stopStep = allowed.outcomes[0].steps.find(
+        (s) => s.step === "would stop agent",
+      );
+      expect(stopStep?.detail).toContain("pid 4242");
+      expect(existsSync(wt)).toBe(true);
+    });
   });
 });
 
@@ -908,6 +1595,9 @@ describe("runPrune", () => {
       stateFiles: [],
       log: () => {},
       sleep: async () => {},
+      // A candidate carrying sessions is refused without this opt-in, so
+      // every test about what stopping them DOES has to grant it first.
+      allowEndIdlePaths: [normalizePath(withSession.path)],
       killProcess: (pid, signal) => {
         if (signal === "SIGTERM") {
           order.push(`kill:${pid}`);
@@ -967,6 +1657,7 @@ describe("runPrune", () => {
       const result = await runPrune([withSession], {
         stateFiles: [],
         log: () => {},
+        allowEndIdlePaths: [normalizePath(withSession.path)],
       });
 
       const stopStep = result.outcomes[0].steps.find(
@@ -1007,6 +1698,7 @@ describe("runPrune", () => {
     const result = await runPrune([withSession], {
       stateFiles: [],
       log: () => {},
+      allowEndIdlePaths: [normalizePath(withSession.path)],
       // Never throws for any pid or signal: every liveness probe reports
       // the process alive, exactly like an agent that resists both
       // SIGTERM and SIGKILL.
@@ -1031,6 +1723,7 @@ describe("runPrune", () => {
     const result = await runPrune([withSession], {
       stateFiles: [],
       log: () => {},
+      allowEndIdlePaths: [normalizePath(withSession.path)],
       closePane: async () => "already-gone",
     });
 
@@ -2305,6 +2998,7 @@ describe("background sessions", () => {
     const result = await runPrune(candidates, {
       stateFiles: [],
       log: () => {},
+      allowEndIdlePaths: [normalizePath(candidates[0].path)],
       killProcess: (pid) => {
         killed.push(pid);
       },
@@ -2391,6 +3085,7 @@ describe("dirty re-check before removal", () => {
       stateFiles: [],
       log: () => {},
       sleep: async () => {},
+      allowEndIdlePaths: [normalizePath(withSession.path)],
       killProcess: (_pid, signal) => {
         if (signal === "SIGTERM") {
           alive = false;
@@ -2763,16 +3458,18 @@ describe("open rows for occupied worktrees", () => {
     expect(scan.candidates).toEqual([]);
   });
 
-  // Cache only: the worktree is not going to be offered for removal whatever
-  // the answer, so it does not get to spend a network round trip.
-  it("spends no gh call on an occupied worktree, and reports no open row without one", async () => {
+  // Cache only for a worktree an agent is WORKING in: it is not going to be
+  // offered for removal whatever the answer, so it does not get to spend a
+  // network round trip. (An all-idle one does, and pays for exactly one; see
+  // the end-idle gate's own tests.)
+  it("spends no gh call on a worktree its agent is working in, and reports no open row without one", async () => {
     const { repo } = await makeRepo("occupied-no-cache");
     await addWorktree(repo, "feat/busy");
     let lookups = 0;
 
     const scan = await scanRepo(repo, {
       skipFetch: true,
-      sessionsFor: () => [session({ status: "idle" })],
+      sessionsFor: () => [session({ status: "working" })],
       openPR: () => null,
       lookupPR: async () => {
         lookups++;
@@ -2782,7 +3479,7 @@ describe("open rows for occupied worktrees", () => {
 
     expect(lookups).toBe(0);
     expect(scan.open).toEqual([]);
-    expect(scan.skipped[0]?.reason).toBe("an agent is idle here");
+    expect(scan.skipped[0]?.reason).toBe("an agent is working here");
   });
 });
 

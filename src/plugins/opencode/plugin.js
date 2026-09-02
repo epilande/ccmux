@@ -157,6 +157,17 @@ export function makePlugin({ markersDir, version, now = Date.now }) {
     return "working";
   }
 
+  /**
+   * Seed markers at boot for the sessions THIS server hosts. A marker's
+   * `pid` is a hosting claim, and `session.list` is project-wide over the
+   * SQLite db every process in the directory shares (history plus sibling
+   * processes' live sessions), so seeding from it rewrote a sibling's live
+   * marker under our pid (issue #177). `client.session.status` is the only
+   * per-process evidence: `SessionStatus.list()` is this server's in-memory
+   * map, idle entries deleted, so an entry exists only for a session this
+   * process is running. Membership, not the entry's value, is the gate; a
+   * skipped session's first bus event writes its marker normally.
+   */
   async function eagerSeed(client, directory) {
     const [listRes, statusRes] = await Promise.all([
       client.session.list({ query: { directory } }).catch((err) => {
@@ -175,15 +186,17 @@ export function makePlugin({ markersDir, version, now = Date.now }) {
     /** @type {Record<string, OpencodeSessionStatus>} */
     const statusMap = (statusRes && statusRes.data) || {};
 
-    const writes = sessions.map((s) =>
-      queueWrite(s.id, () =>
-        writeMerged(s.id, {
-          state: stateFromStatus(statusMap[s.id]),
-          directory: s.directory,
-          title: s.title,
-        }),
-      ),
-    );
+    const writes = sessions
+      .filter((s) => Object.hasOwn(statusMap, s.id))
+      .map((s) =>
+        queueWrite(s.id, () =>
+          writeMerged(s.id, {
+            state: stateFromStatus(statusMap[s.id]),
+            directory: s.directory,
+            title: s.title,
+          }),
+        ),
+      );
     await Promise.all(writes);
   }
 
