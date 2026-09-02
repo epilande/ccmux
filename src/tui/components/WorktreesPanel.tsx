@@ -3480,7 +3480,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                     const isCursor = createMemo(
                       () => cursorKey() === entry.key,
                     );
-                    const isSelected = () => selected().has(entry.key);
+                    // A memo for the same reason as `isCursor`: `selected()`
+                    // is a new Set on every toggle, and as a plain accessor
+                    // that change reaches the `detail` memo of every mounted
+                    // row. Held as a boolean, only the rows that actually
+                    // flipped rebuild their segments.
+                    const isSelected = createMemo(() =>
+                      selected().has(entry.key),
+                    );
                     // The marker slot's width, which is what the detail line
                     // indents to. A PR row never carries a checkbox.
                     const hasCheckbox =
