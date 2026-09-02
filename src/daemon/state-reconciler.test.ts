@@ -1,4 +1,12 @@
-import { afterAll, describe, expect, it, mock, beforeEach } from "bun:test";
+import {
+  afterAll,
+  describe,
+  expect,
+  it,
+  mock,
+  beforeEach,
+  spyOn,
+} from "bun:test";
 import { join } from "path";
 import { tmpdir } from "os";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
@@ -727,6 +735,181 @@ describe("reconcileAll", () => {
 
       const session = sessionManager.getSession(id)!;
       expect(session.status).toBe("working");
+    });
+
+    // Issue #177: a row can hold a session id the OTHER server hosts until
+    // the link pass heals it, so the fold checks the marker's pid resolves
+    // to the row's own pane before painting that server's aggregate.
+    describe("marker pane ownership", () => {
+      function hostedMarker(pid: number): SessionPidMarker {
+        return ocMarker({
+          session_id: "ses_primary",
+          pid,
+          state: "working",
+          state_timestamp: 1_000,
+          last_prompt: "the other pane's prompt",
+        });
+      }
+
+      async function reconcileWithHosting(
+        marker: SessionPidMarker,
+        overrides: Partial<ReconcilerDeps> = {},
+      ): Promise<void> {
+        await reconcileAll(
+          makeDeps(sessionManager, {
+            hookManager: {
+              getMarkerForSession: () => marker,
+              getMarkersByAgentAndPid: () => [marker],
+            },
+            agents: [opencodeAgent],
+            ...overrides,
+          }),
+          makeSnapshot({
+            panes: [fakePane({ paneId: "%2", tty: "ttys002" })],
+          }),
+        );
+      }
+
+      it("ignores a marker whose pid is hosted by a different pane, warning once", async () => {
+        const id = opencodeSession();
+        const marker = hostedMarker(5_555);
+        const warn = spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          await reconcileWithHosting(marker, {
+            paneIdHostingPid: () => "%9",
+          });
+          await reconcileWithHosting(marker, {
+            paneIdHostingPid: () => "%9",
+          });
+
+          const foreignWarnings = warn.mock.calls.filter((call) =>
+            String(call[0]).includes("holds marker"),
+          );
+          expect(foreignWarnings).toHaveLength(1);
+        } finally {
+          warn.mockRestore();
+        }
+
+        const session = sessionManager.getSession(id)!;
+        expect(session.status).toBe("idle");
+        expect(session.lastPrompt).toBeNull();
+      });
+
+      it("lets the terminal source speak once the foreign marker is dropped", async () => {
+        // Dropping the marker means "proceed as if there were none", not
+        // "produce no state": the pane's own rules stay the baseline.
+        const id = opencodeSession();
+        mockCapturePane = async () => "processing your request";
+        const warn = spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          await reconcileWithHosting(hostedMarker(5_560), {
+            paneIdHostingPid: () => "%9",
+            agents: [
+              {
+                ...opencodeAgent,
+                terminalRules: [
+                  {
+                    status: "working",
+                    attentionType: null,
+                    pendingTool: null,
+                    matchAny: ["processing"],
+                  },
+                ],
+              },
+            ],
+          });
+        } finally {
+          warn.mockRestore();
+        }
+
+        const session = sessionManager.getSession(id)!;
+        expect(session.status).toBe("working");
+        expect(session.lastPrompt).toBeNull();
+      });
+
+      it("applies a marker whose pid is hosted by the row's own pane", async () => {
+        const id = opencodeSession();
+        await reconcileWithHosting(hostedMarker(5_556), {
+          paneIdHostingPid: () => "%2",
+        });
+
+        const session = sessionManager.getSession(id)!;
+        expect(session.status).toBe("working");
+        expect(session.lastPrompt).toBe("the other pane's prompt");
+      });
+
+      it("applies the marker when the pid is under no known pane (fail open)", async () => {
+        // A pid that spawned after the last process snapshot resolves to
+        // null; dropping its marker would blind the row for a full scan.
+        const id = opencodeSession();
+        await reconcileWithHosting(hostedMarker(5_557), {
+          paneIdHostingPid: () => null,
+        });
+
+        expect(sessionManager.getSession(id)!.status).toBe("working");
+      });
+
+      it("applies the marker during the boot window (fail open)", async () => {
+        const id = opencodeSession();
+        await reconcileWithHosting(hostedMarker(5_558), {
+          paneIdHostingPid: () => undefined,
+        });
+
+        expect(sessionManager.getSession(id)!.status).toBe("working");
+      });
+
+      it("applies the marker when deps carry no pane resolver at all", async () => {
+        const id = opencodeSession();
+        await reconcileWithHosting(hostedMarker(5_559));
+
+        expect(sessionManager.getSession(id)!.status).toBe("working");
+      });
+
+      it("leaves a non-opencode agent's foreign-pane marker alone", async () => {
+        // The guard is opencode-only: every other agent is one session per
+        // pane, so its marker pid carries no cross-pane ambiguity.
+        const id = makeSession(sessionManager, {
+          agentType: "cursor",
+          trackingMode: "pane",
+          status: "idle",
+          tmuxPane: "%2",
+          nativeSessionId: "cur-1",
+        });
+        const cursorAgent: AgentDef = {
+          name: "cursor",
+          shortCode: "CU",
+          processMatch: /cursor/,
+          terminalRules: [],
+          hooks: { type: "generic-status" },
+        };
+        const marker: SessionPidMarker = {
+          agent_type: "cursor",
+          pid: 7_777,
+          session_id: "cur-1",
+          timestamp: 1,
+          state: "working",
+          state_timestamp: 1_000,
+          last_prompt: "cursor prompt",
+        };
+
+        await reconcileAll(
+          makeDeps(sessionManager, {
+            hookManager: {
+              getMarkerForSession: () => marker,
+              getMarkersByAgentAndPid: () => [],
+            },
+            agents: [cursorAgent],
+            paneIdHostingPid: () => "%9",
+          }),
+          makeSnapshot({
+            panes: [fakePane({ paneId: "%2", tty: "ttys002" })],
+          }),
+        );
+
+        const session = sessionManager.getSession(id)!;
+        expect(session.status).toBe("working");
+        expect(session.lastPrompt).toBe("cursor prompt");
+      });
     });
   });
 
