@@ -108,7 +108,7 @@ The zsh `eval` has to come after `compinit`, since the script registers itself w
 > bind-key -n M-p run-shell -C 'display-popup -c "#{client_tty}" -e "CCMUX_CLIENT_TTY=#{client_tty}" -E -w 80% -h 75% "ccmux"'
 > ```
 >
-> The wrapper captures the client that opened the popup, so selecting a session never switches another attached client. The picker exits after selection, so the popup closes itself and drops you straight into that pane. (`display-popup` requires tmux 3.2+.)
+> The wrapper captures the client that opened the popup, so selecting a session never switches another attached client. The picker exits after selection, so the popup closes itself and drops you straight into that pane. (This binding needs tmux 3.3+, since `display-popup -e` arrived in 3.3.)
 
 ## 🎮 Usage
 

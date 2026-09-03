@@ -93,6 +93,18 @@ describe("switchToPane", () => {
     }
   });
 
+  it("refuses a client tty that is not a device path", async () => {
+    const spawn = withSpawn([]);
+    try {
+      const result = await withClientTty("ttys005", () => switchToPane("%8"));
+
+      expect(result).toBe("client-unavailable");
+      expect(spawn.calls).toEqual([]);
+    } finally {
+      spawn.restore();
+    }
+  });
+
   it("refuses when a legacy launch has no current tmux client", async () => {
     const spawn = withSpawn([{ exitCode: 1 }]);
     try {

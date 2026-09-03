@@ -22,6 +22,7 @@ import { MAX_TURNS, renderTurns } from "../daemon/transcript-read";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { SwitchToPaneResult } from "./utils/client-switch";
 
 // Capture SSE callbacks so tests can fire events
 let sseCallbacks: SSECallbacks | null = null;
@@ -42,7 +43,6 @@ mock.module("./utils/sse", () => ({
   },
 }));
 
-type SwitchToPaneResult = boolean | "client-unavailable";
 const switchToPaneSpy = mock(
   async (_target: string): Promise<SwitchToPaneResult> => true,
 );
@@ -1589,13 +1589,15 @@ describe("App pane-switch feedback and server scoping", () => {
   }
 
   it("one-shot picker: a failed pane switch shows a toast and does not exit", async () => {
-    switchToPaneSpy.mockImplementation(async () => false);
+    switchToPaneSpy.mockImplementation(async () => "switch-failed");
     const restoreFetch = withServerInfo(null); // fail-open: same-server guard passes
     const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
       await renderWithSession();
       await selectFirstRowAndEnter();
-      expect(setup.captureCharFrame()).toContain("Failed to switch");
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("Failed to switch: pane or client unavailable"),
+      );
       expect(exitSpy).not.toHaveBeenCalled();
     } finally {
       restoreExit();
@@ -1610,9 +1612,11 @@ describe("App pane-switch feedback and server scoping", () => {
     try {
       await renderWithSession();
       await selectFirstRowAndEnter();
-      const frame = setup.captureCharFrame();
-      expect(frame).toContain("Cannot switch: unable to identify");
-      expect(frame).toContain("this picker's tmux client");
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish(
+          "Cannot switch: CCMUX_CLIENT_TTY is malformed or no tmux client was found (check your tmux binding)",
+        ),
+      );
       expect(exitSpy).not.toHaveBeenCalled();
     } finally {
       restoreExit();
@@ -1697,13 +1701,15 @@ describe("App pane-switch feedback and server scoping", () => {
   it("persistent picker: a failed pane switch shows a toast (was sidebar-only)", async () => {
     // The Toast render gate used to be sidebar-only, so a switch failure in the
     // persistent picker showed nothing. Now it must surface here too.
-    switchToPaneSpy.mockImplementation(async () => false);
+    switchToPaneSpy.mockImplementation(async () => "switch-failed");
     const restoreFetch = withServerInfo(null);
     const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
       await renderWithSession({ persistent: true });
       await selectFirstRowAndEnter();
-      expect(setup.captureCharFrame()).toContain("Failed to switch");
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("Failed to switch: pane or client unavailable"),
+      );
       expect(exitSpy).not.toHaveBeenCalled(); // persistent never exits
     } finally {
       restoreExit();

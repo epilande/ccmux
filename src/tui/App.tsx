@@ -280,8 +280,8 @@ export function App(props: AppProps) {
         // Surface refusal/failure instead of exiting the picker as if it worked.
         store.actions.showToast(
           result === "client-unavailable"
-            ? "Cannot switch: unable to identify this picker's tmux client"
-            : "Failed to switch: pane is gone",
+            ? "Cannot switch: CCMUX_CLIENT_TTY is malformed or no tmux client was found (check your tmux binding)"
+            : "Failed to switch: pane or client unavailable",
         );
         return;
       }

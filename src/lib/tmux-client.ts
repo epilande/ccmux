@@ -17,7 +17,11 @@
 
 import { tmuxArgv } from "./tmux-exec";
 
-/** The device-path shape tmux reports for `#{client_tty}`. */
+/**
+ * The only accepted shape for a tmux client tty. tmux reports
+ * `#{client_tty}` as an absolute device path (`/dev/ttys004` on macOS,
+ * `/dev/pts/3` on Linux), and callers may pass it straight into a tmux argv.
+ */
 export const CLIENT_TTY_PATTERN = /^\/dev\/[A-Za-z0-9._/-]{1,64}$/;
 
 /**

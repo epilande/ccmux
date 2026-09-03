@@ -8,8 +8,6 @@ import {
   type UntrackedMode,
 } from "./worktree-move-changes";
 
-export { CLIENT_TTY_PATTERN } from "../lib/tmux-client";
-
 /**
  * Requested split direction, in tmux's own vocabulary: `"h"` splits the
  * target pane left/right (tmux `-h`), `"v"` splits it top/bottom (tmux
@@ -92,13 +90,10 @@ export function normalizeTarget(
 }
 
 /**
- * The only accepted shape for a tmux client tty (`callerTty`). tmux reports
- * `#{client_tty}` as an absolute device path (`/dev/ttys004` on macOS,
- * `/dev/pts/3` on Linux), and the value travels straight into a tmux argv, so
- * anything outside that shape is a caller mistake worth naming rather than a
- * flag to hand to tmux.
+ * Validate a wire tmux-client-tty field (`callerTty`). Anything outside the
+ * accepted shape is a caller mistake worth naming rather than a flag to hand
+ * to tmux.
  */
-/** Validate a wire tmux-client-tty field (`callerTty`). */
 export function normalizeClientTty(
   value: unknown,
   field = "callerTty",
