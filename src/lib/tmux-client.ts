@@ -17,6 +17,9 @@
 
 import { tmuxArgv } from "./tmux-exec";
 
+/** The device-path shape tmux reports for `#{client_tty}`. */
+export const CLIENT_TTY_PATTERN = /^\/dev\/[A-Za-z0-9._/-]{1,64}$/;
+
 /**
  * The pid of the tmux client attached to the current session context (i.e.
  * `$TMUX`'s session, or - when invoked from inside a pane - the one

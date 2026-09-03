@@ -275,11 +275,14 @@ export function App(props: AppProps) {
     } else {
       flashPaneDetached(pane);
     }
-    switchToPane(pane).then((ok) => {
-      if (!ok) {
-        // Pane is gone (daemon holds the stale row until its liveness sweep).
-        // Surface it instead of exiting the one-shot picker as if it worked.
-        store.actions.showToast("Failed to switch: pane is gone");
+    switchToPane(pane).then((result) => {
+      if (result !== true) {
+        // Surface refusal/failure instead of exiting the picker as if it worked.
+        store.actions.showToast(
+          result === "client-unavailable"
+            ? "Cannot switch: unable to identify this picker's tmux client"
+            : "Failed to switch: pane is gone",
+        );
         return;
       }
       if (!props.persistent && !props.sidebar) process.exit(0);

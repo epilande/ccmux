@@ -7,6 +7,8 @@ import { PANE_FIELD_SEP } from "../../lib/tmux-format";
 import { tmuxArgv, tmuxShellPrefix } from "../../lib/tmux-exec";
 import { theme } from "../theme";
 
+export { switchToPane } from "./client-switch";
+
 /**
  * Capture a pane's visible content. THROWS on failure (spawn error or non-zero
  * `tmux capture-pane` exit — the pane is gone). We await the exit code so a dead
@@ -37,20 +39,6 @@ export async function capturePane(
     );
   }
   return output;
-}
-
-export async function switchToPane(target: string): Promise<boolean> {
-  try {
-    const proc = Bun.spawn(tmuxArgv("switch-client", "-t", target), {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    const exitCode = await proc.exited;
-    return exitCode === 0;
-  } catch {
-    return false;
-  }
 }
 
 const SPECIAL_KEY_MAP: Record<string, string> = {

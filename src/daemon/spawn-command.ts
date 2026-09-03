@@ -1,11 +1,14 @@
 import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { AgentDef } from "../lib/agents";
+import { CLIENT_TTY_PATTERN } from "../lib/tmux-client";
 import {
   isUntrackedMode,
   UNTRACKED_MODES,
   type UntrackedMode,
 } from "./worktree-move-changes";
+
+export { CLIENT_TTY_PATTERN } from "../lib/tmux-client";
 
 /**
  * Requested split direction, in tmux's own vocabulary: `"h"` splits the
@@ -95,8 +98,6 @@ export function normalizeTarget(
  * anything outside that shape is a caller mistake worth naming rather than a
  * flag to hand to tmux.
  */
-export const CLIENT_TTY_PATTERN = /^\/dev\/[A-Za-z0-9._/-]{1,64}$/;
-
 /** Validate a wire tmux-client-tty field (`callerTty`). */
 export function normalizeClientTty(
   value: unknown,

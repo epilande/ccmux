@@ -42,7 +42,10 @@ mock.module("./utils/sse", () => ({
   },
 }));
 
-const switchToPaneSpy = mock(async (_target: string): Promise<boolean> => true);
+type SwitchToPaneResult = boolean | "client-unavailable";
+const switchToPaneSpy = mock(
+  async (_target: string): Promise<SwitchToPaneResult> => true,
+);
 const sendKeysSpy = mock(
   async (
     _target: string,
@@ -1593,6 +1596,23 @@ describe("App pane-switch feedback and server scoping", () => {
       await renderWithSession();
       await selectFirstRowAndEnter();
       expect(setup.captureCharFrame()).toContain("Failed to switch");
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      restoreExit();
+      restoreFetch();
+    }
+  });
+
+  it("one-shot picker: an unknown caller client is refused with a specific toast", async () => {
+    switchToPaneSpy.mockImplementation(async () => "client-unavailable");
+    const restoreFetch = withServerInfo(null);
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    try {
+      await renderWithSession();
+      await selectFirstRowAndEnter();
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Cannot switch: unable to identify");
+      expect(frame).toContain("this picker's tmux client");
       expect(exitSpy).not.toHaveBeenCalled();
     } finally {
       restoreExit();
