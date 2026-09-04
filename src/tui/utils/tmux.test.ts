@@ -264,6 +264,15 @@ function withTmuxStubs(responses: SpawnResponse[]): {
 const windowRow = (id: string, name: string) =>
   [id, name].join(PANE_FIELD_SEP);
 
+/** A `list-clients` listing in the launcher's own `-F` shape. The decoy comes
+ *  first and sits on a different session, so a match by anything other than the
+ *  tty (position, "the only line", the newest session) picks the wrong one. */
+const clientList = (tty: string, sessionId: string) =>
+  [
+    ["/dev/ttys097", "$1"].join(PANE_FIELD_SEP),
+    [tty, sessionId].join(PANE_FIELD_SEP),
+  ].join("\n") + "\n";
+
 /** Both the flag slot and the env var have to be clear for the fallback
  *  cases, and put back for everything else in the suite. */
 function withNoCapturedTty<T>(run: () => Promise<T>): Promise<T> {
@@ -307,6 +316,7 @@ describe("openDedupedCommandWindow client pinning", () => {
   it("pins the switch that follows a fresh new-window", async () => {
     const stubs = withTmuxStubs([
       { stdout: "" },
+      { stdout: clientList("/dev/ttys005", "$3") },
       { stdout: "%9\n" },
       {},
     ]);
@@ -315,8 +325,9 @@ describe("openDedupedCommandWindow client pinning", () => {
       const result = await openAgentsWindow("/tmp/proj");
 
       expect(result).toEqual({ ok: true, clientSwitched: true });
-      expect(stubs.calls[1]?.[1]).toBe("new-window");
-      expect(stubs.calls[2]).toEqual([
+      expect(stubs.calls[1]?.[1]).toBe("list-clients");
+      expect(stubs.calls[2]?.[1]).toBe("new-window");
+      expect(stubs.calls[3]).toEqual([
         "tmux",
         "switch-client",
         "-c",
@@ -329,12 +340,128 @@ describe("openDedupedCommandWindow client pinning", () => {
     }
   });
 
+  it("creates the window detached in the captured client's own session", async () => {
+    // Untargeted, tmux picks the most-recently-active session, which inside a
+    // popup is whichever OTHER terminal typed last: without -d that client's
+    // view jumps, and without -t the window lands in its session and our own
+    // switch follows it there.
+    const stubs = withTmuxStubs([
+      { stdout: "" },
+      { stdout: clientList("/dev/ttys005", "$3") },
+      { stdout: "%9\n" },
+      {},
+    ]);
+    try {
+      setPinnedTmuxClientTty("/dev/ttys005");
+      const result = await openAgentsWindow("/tmp/proj");
+
+      expect(result).toEqual({ ok: true, clientSwitched: true });
+      expect(stubs.calls[1]).toEqual([
+        "tmux",
+        "list-clients",
+        "-F",
+        ["#{client_tty}", "#{session_id}"].join(PANE_FIELD_SEP),
+      ]);
+      expect(stubs.calls[2]).toEqual([
+        "tmux",
+        "new-window",
+        "-d",
+        "-n",
+        AGENTS_WINDOW_NAME,
+        "-c",
+        "/tmp/proj",
+        "-t",
+        "$3",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        '"/usr/bin/claude" agents',
+      ]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("skips placement when the listing has no line for the pinned tty", async () => {
+    // The captured client detached between capture and launch. Its session is
+    // unknowable, so we place nothing rather than borrow the decoy's session.
+    const stubs = withTmuxStubs([
+      { stdout: "" },
+      { stdout: clientList("/dev/ttys099", "$7") },
+      { stdout: "%9\n" },
+      {},
+    ]);
+    try {
+      setPinnedTmuxClientTty("/dev/ttys005");
+      const result = await openAgentsWindow("/tmp/proj");
+
+      expect(result).toEqual({ ok: true, clientSwitched: true });
+      const newWindow = stubs.calls[2] ?? [];
+      expect(newWindow[1]).toBe("new-window");
+      expect(newWindow).toContain("-d");
+      expect(newWindow).not.toContain("-t");
+      expect(newWindow).not.toContain("$7");
+      expect(newWindow).not.toContain("$1");
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("still opens the window when the session query is refused", async () => {
+    const stubs = withTmuxStubs([
+      { stdout: "" },
+      { exitCode: 1 },
+      { stdout: "%9\n" },
+      {},
+    ]);
+    try {
+      setPinnedTmuxClientTty("/dev/ttys005");
+      const result = await openAgentsWindow("/tmp/proj");
+
+      // Placement is a best effort: a failed query must not sink the launch.
+      expect(result).toEqual({ ok: true, clientSwitched: true });
+      const newWindow = stubs.calls[2] ?? [];
+      expect(newWindow[1]).toBe("new-window");
+      expect(newWindow).toContain("-d");
+      expect(newWindow).not.toContain("-t");
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("ignores a session query that answers with something else", async () => {
+    // Anything but a `$N` session id is a tmux message we cannot use as a
+    // target, and passing it through would fail the whole new-window.
+    const stubs = withTmuxStubs([
+      { stdout: "" },
+      { stdout: clientList("/dev/ttys005", "nope") },
+      { stdout: "%9\n" },
+      {},
+    ]);
+    try {
+      setPinnedTmuxClientTty("/dev/ttys005");
+      const result = await openAgentsWindow("/tmp/proj");
+
+      expect(result).toEqual({ ok: true, clientSwitched: true });
+      const newWindow = stubs.calls[2] ?? [];
+      expect(newWindow[1]).toBe("new-window");
+      expect(newWindow).toContain("-d");
+      expect(newWindow).not.toContain("-t");
+      // Not the decoy's session either: an unusable match line is no reason to
+      // reach for some other client's.
+      expect(newWindow).not.toContain("$1");
+    } finally {
+      stubs.restore();
+    }
+  });
+
   it("reports the miss when the switch after a fresh new-window fails", async () => {
     // A captured tty whose client has since detached: the window is created
     // and the switch is refused, so the caller must not exit over a jump that
     // never happened.
     const stubs = withTmuxStubs([
       { stdout: "" },
+      { stdout: clientList("/dev/ttys005", "$3") },
       { stdout: "%9\n" },
       { exitCode: 1 },
     ]);
@@ -349,6 +476,7 @@ describe("openDedupedCommandWindow client pinning", () => {
       });
       expect(stubs.calls.map((argv) => argv[1])).toEqual([
         "list-windows",
+        "list-clients",
         "new-window",
         "switch-client",
       ]);
@@ -376,7 +504,12 @@ describe("openDedupedCommandWindow client pinning", () => {
         reason: "no-client-tty",
       });
       const verbs = stubs.calls.map((argv) => argv[1]);
+      // Exactly one display-message, the tty fallback. With no tty there is no
+      // client whose session to ask about, so no placement query runs.
       expect(verbs).toEqual(["list-windows", "display-message", "new-window"]);
+      const newWindow = stubs.calls[2] ?? [];
+      expect(newWindow).toContain("-d");
+      expect(newWindow).not.toContain("-t");
     } finally {
       stubs.restore();
     }
@@ -441,6 +574,7 @@ describe("openDedupedCommandWindow client pinning", () => {
       { stdout: windowRow("@2", AGENTS_WINDOW_NAME) },
       { exitCode: 1 },
       { stdout: "" },
+      { stdout: clientList("/dev/ttys005", "$3") },
       { stdout: "%9\n" },
       {},
     ]);
@@ -453,6 +587,7 @@ describe("openDedupedCommandWindow client pinning", () => {
         "list-windows",
         "switch-client",
         "list-windows",
+        "list-clients",
         "new-window",
         "switch-client",
       ]);

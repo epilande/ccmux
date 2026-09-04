@@ -307,6 +307,55 @@ async function windowStillExists(windowName: string): Promise<boolean> {
   }
 }
 
+/** Ask tmux which session a client is attached to, so `new-window` can be
+ *  aimed at it. Returns null on any failure, which the caller treats as "place
+ *  it wherever tmux would have".
+ *
+ *  The placement matters because a popup's command client has no pane of its
+ *  own, so an untargeted `new-window` falls through to tmux's
+ *  `cmd_find_best_session`: the session with the newest activity time, which
+ *  every keypress bumps. With two clients attached and the OTHER one typing
+ *  last, the window is born in a session its owner never asked for, and the
+ *  pinned `switch-client` then drags our client into someone else's session
+ *  (where the next dedupe pass also finds the window). Same wrong guess the
+ *  client pinning exists to avoid, one level up.
+ *
+ *  It has to be an UNTARGETED listing matched on the tty here, because the two
+ *  obvious shortcuts both answer the wrong question:
+ *   - `display-message -c <tty> "#{session_id}"` names the client only for
+ *     DELIVERY. The format is still expanded against the default target
+ *     session, which is that same most-recently-active session, so under the
+ *     exact two-client split this exists to fix it hands back the OTHER
+ *     client's session (measured on 3.6a: `-c` A answers B's `$1`).
+ *   - `-t` on `list-clients` is a target SESSION, not a client. A tty there
+ *     fails outright on our documented 3.2 floor, and even where a later tmux
+ *     resolves one it lists every client of THAT SESSION, so the tty match has
+ *     to happen here regardless. */
+async function resolveClientSessionId(
+  clientTty: string,
+): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(
+      tmuxArgv(
+        "list-clients",
+        "-F",
+        ["#{client_tty}", "#{session_id}"].join(PANE_FIELD_SEP),
+      ),
+      { stdout: "pipe", stderr: "ignore" },
+    );
+    const out = await new Response(proc.stdout).text();
+    if ((await proc.exited) !== 0) return null;
+    for (const line of out.split("\n")) {
+      const [tty, sessionId] = line.split(PANE_FIELD_SEP);
+      if (tty !== clientTty) continue;
+      return sessionId && /^\$\d+$/.test(sessionId) ? sessionId : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Switch to an existing window with the given name if one is live, else spawn
  * one (cwd = the row's cwd) running `command` and switch to it. The command
@@ -331,6 +380,16 @@ async function windowStillExists(windowName: string): Promise<boolean> {
  * `src/daemon/spawn-command.ts` already follows). A switch tmux REFUSES lands
  * in the same place: the result reports `clientSwitched: false` with the
  * reason, never a jump that did not happen.
+ *
+ * The `new-window` is `-d` and targeted at the captured client's session for
+ * the same reason. Left to itself tmux picks the most-recently-active session,
+ * which inside a popup is whichever terminal typed last: without `-d` that
+ * client's view jumps to a window it never asked for, and without `-t` the
+ * window is born in that client's session, so our own switch lands us inside
+ * it. Targeted and detached, nothing moves until the pinned `switch-client`
+ * runs, and a bare pane id there selects the session, window and pane together.
+ * `resolveClientSessionId` is what supplies that target, and its doc comment
+ * covers why the session has to be read off an untargeted `list-clients`.
  */
 async function openDedupedCommandWindow(
   windowName: string,
@@ -379,13 +438,18 @@ async function openDedupedCommandWindow(
       // Window really is gone: fall through and spawn.
     }
 
+    const sessionId = clientTty
+      ? await resolveClientSessionId(clientTty)
+      : null;
     const spawn = Bun.spawn(
       tmuxArgv(
         "new-window",
+        "-d",
         "-n",
         windowName,
         "-c",
         cwd,
+        ...(sessionId ? ["-t", sessionId] : []),
         "-P",
         "-F",
         "#{pane_id}",
@@ -399,9 +463,11 @@ async function openDedupedCommandWindow(
     }
     const paneId = (await new Response(spawn.stdout).text()).trim();
 
-    // new-window already selects within its session; switch-client covers the
-    // popup / other-session contexts, pinned to the captured client for the
-    // reason in this function's header.
+    // `-d` means nothing is selected anywhere yet, so this switch is the whole
+    // jump: pinned to the captured client, and given a bare pane id, which
+    // tmux resolves to its session, window and pane together. When no tty was
+    // captured we leave the window detached rather than move a client the user
+    // never touched, for the reason in this function's header.
     if (!clientTty)
       return { ok: true, clientSwitched: false, reason: "no-client-tty" };
     const switchFresh = Bun.spawn(
