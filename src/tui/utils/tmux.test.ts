@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import {
   parseLaunchPane,
   parseRestoreCandidate,
@@ -7,7 +7,17 @@ import {
   isSafeAgentShortId,
   AGENTS_WINDOW_NAME,
 } from "./tmux";
+import { setPinnedTmuxClientTty } from "../../lib/tmux-client";
 import { PANE_FIELD_SEP } from "../../lib/tmux-format";
+
+// App/Preview tests `mock.module("../utils/tmux")` process-wide, so a plain
+// import of the window launcher would be the stub by the time the full suite
+// reaches this file. A distinct cache entry always gets the implementation,
+// the same trick client-switch.test.ts uses.
+const REAL_TMUX_SPECIFIER = "./tmux" + "?real";
+const { openAgentsWindow } = (await import(
+  REAL_TMUX_SPECIFIER
+)) as typeof import("./tmux");
 
 // Note: capturePane isn't unit-tested here. Preview/App tests call
 // `mock.module("../utils/tmux")`, which is process-wide in Bun, so capturePane
@@ -210,5 +220,204 @@ describe("parseLaunchPane", () => {
 
   it("returns null on empty output", () => {
     expect(parseLaunchPane("", null)).toBe(null);
+  });
+});
+
+interface SpawnResponse {
+  stdout?: string;
+  exitCode?: number;
+}
+
+/** Stubs the three process spawns the window launcher makes: `Bun.which`
+ *  for the claude binary, and `Bun.spawn` for every tmux call. */
+function withTmuxStubs(responses: SpawnResponse[]): {
+  calls: string[][];
+  restore: () => void;
+} {
+  const originalSpawn = Bun.spawn;
+  const originalWhich = Bun.which;
+  const originalTmux = process.env.TMUX;
+  const calls: string[][] = [];
+  process.env.TMUX = "/private/tmp/tmux-501/default,1,0";
+  Bun.which = ((cmd: string) =>
+    cmd === "claude" ? "/usr/bin/claude" : null) as typeof Bun.which;
+  Bun.spawn = ((argv: string[]) => {
+    calls.push([...argv]);
+    const response = responses.shift() ?? {};
+    return {
+      stdout: new Blob([response.stdout ?? ""]).stream(),
+      stderr: new Blob([""]).stream(),
+      exited: Promise.resolve(response.exitCode ?? 0),
+    };
+  }) as unknown as typeof Bun.spawn;
+  return {
+    calls,
+    restore: () => {
+      Bun.spawn = originalSpawn;
+      Bun.which = originalWhich;
+      if (originalTmux === undefined) delete process.env.TMUX;
+      else process.env.TMUX = originalTmux;
+    },
+  };
+}
+
+const windowRow = (id: string, name: string) =>
+  [id, name].join(PANE_FIELD_SEP);
+
+/** Both the flag slot and the env var have to be clear for the fallback
+ *  cases, and put back for everything else in the suite. */
+function withNoCapturedTty<T>(run: () => Promise<T>): Promise<T> {
+  const previousEnv = process.env.CCMUX_CLIENT_TTY;
+  delete process.env.CCMUX_CLIENT_TTY;
+  setPinnedTmuxClientTty(undefined);
+  return run().finally(() => {
+    if (previousEnv === undefined) delete process.env.CCMUX_CLIENT_TTY;
+    else process.env.CCMUX_CLIENT_TTY = previousEnv;
+  });
+}
+
+afterEach(() => {
+  setPinnedTmuxClientTty(undefined);
+});
+
+describe("openDedupedCommandWindow client pinning", () => {
+  it("pins an existing-window switch to the captured client", async () => {
+    const stubs = withTmuxStubs([
+      { stdout: windowRow("@2", AGENTS_WINDOW_NAME) },
+      {},
+    ]);
+    try {
+      setPinnedTmuxClientTty("/dev/ttys005");
+      const result = await openAgentsWindow("/tmp/proj");
+
+      expect(result).toEqual({ ok: true, clientSwitched: true });
+      expect(stubs.calls[1]).toEqual([
+        "tmux",
+        "switch-client",
+        "-c",
+        "/dev/ttys005",
+        "-t",
+        "@2",
+      ]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("pins the switch that follows a fresh new-window", async () => {
+    const stubs = withTmuxStubs([
+      { stdout: "" },
+      { stdout: "%9\n" },
+      {},
+    ]);
+    try {
+      setPinnedTmuxClientTty("/dev/ttys005");
+      const result = await openAgentsWindow("/tmp/proj");
+
+      expect(result).toEqual({ ok: true, clientSwitched: true });
+      expect(stubs.calls[1]?.[1]).toBe("new-window");
+      expect(stubs.calls[2]).toEqual([
+        "tmux",
+        "switch-client",
+        "-c",
+        "/dev/ttys005",
+        "-t",
+        "%9",
+      ]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("opens the window but switches nobody when no client tty resolves", async () => {
+    // A bare `switch-client` here would move the most-recently-active client,
+    // which inside a popup is whichever OTHER terminal typed last.
+    const stubs = withTmuxStubs([
+      { stdout: "" },
+      { exitCode: 1 },
+      { stdout: "%9\n" },
+    ]);
+    try {
+      const result = await withNoCapturedTty(() =>
+        openAgentsWindow("/tmp/proj"),
+      );
+
+      expect(result).toEqual({ ok: true, clientSwitched: false });
+      const verbs = stubs.calls.map((argv) => argv[1]);
+      expect(verbs).toEqual(["list-windows", "display-message", "new-window"]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("refuses rather than switching when an existing window has no client", async () => {
+    const stubs = withTmuxStubs([
+      { stdout: windowRow("@2", AGENTS_WINDOW_NAME) },
+      { exitCode: 1 },
+    ]);
+    try {
+      const result = await withNoCapturedTty(() =>
+        openAgentsWindow("/tmp/proj"),
+      );
+
+      expect(result).toEqual({ ok: true, clientSwitched: false });
+      // list-windows, then the failed display-message. Nothing else: no
+      // switch, and no duplicate window either.
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-windows",
+        "display-message",
+      ]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("does not spawn a duplicate when a stale tty fails the switch", async () => {
+    // Pre-#181 a failed switch meant one thing: the window vanished. A stale
+    // captured tty fails identically, and falling through would defeat the
+    // name dedupe on every activation.
+    const stubs = withTmuxStubs([
+      { stdout: windowRow("@2", AGENTS_WINDOW_NAME) },
+      { exitCode: 1 },
+      { stdout: windowRow("@2", AGENTS_WINDOW_NAME) },
+    ]);
+    try {
+      setPinnedTmuxClientTty("/dev/ttys005");
+      const result = await openAgentsWindow("/tmp/proj");
+
+      expect(result).toEqual({ ok: true, clientSwitched: false });
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-windows",
+        "switch-client",
+        "list-windows",
+      ]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("still spawns when the existing window really did vanish", async () => {
+    const stubs = withTmuxStubs([
+      { stdout: windowRow("@2", AGENTS_WINDOW_NAME) },
+      { exitCode: 1 },
+      { stdout: "" },
+      { stdout: "%9\n" },
+      {},
+    ]);
+    try {
+      setPinnedTmuxClientTty("/dev/ttys005");
+      const result = await openAgentsWindow("/tmp/proj");
+
+      expect(result).toEqual({ ok: true, clientSwitched: true });
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-windows",
+        "switch-client",
+        "list-windows",
+        "new-window",
+        "switch-client",
+      ]);
+    } finally {
+      stubs.restore();
+    }
   });
 });

@@ -10,6 +10,11 @@ import {
 import { markStartup } from "../lib/startup-timing";
 import { PICKER_PANE_TITLE } from "../lib/config";
 import { tmuxArgv } from "../lib/tmux-exec";
+import { setPinnedTmuxClientTty } from "../lib/tmux-client";
+import {
+  defaultPopupHintDeps,
+  detectLegacyPopupBinding,
+} from "../lib/popup-hint";
 import { forkableAgentNames } from "../lib/agents";
 
 /**
@@ -32,13 +37,23 @@ export function createPickerCommand(): Command {
     .option("--icons <style>", "Icon style: none, emoji, nerdfont, dot")
     .option("--persistent", "Keep picker open after switching sessions")
     .option("--no-persistent", "Close picker after switching sessions")
+    .option(
+      "--client-tty <tty>",
+      "tmux client tty to act on (set by the popup keybinding)",
+    )
     .action(
       async (options: {
         preview?: boolean;
         icons?: string;
         persistent?: boolean;
+        clientTty?: string;
       }) => {
         markStartup("cli_parse");
+
+        // Before anything can switch a client. The value is validated where it
+        // is consumed, not here: a malformed one must be refused with a toast
+        // the user can act on, never silently replaced by tmux's guess.
+        setPinnedTmuxClientTty(options.clientTty);
 
         if (options.icons && !isValidIconStyle(options.icons)) {
           console.error(
@@ -53,12 +68,18 @@ export function createPickerCommand(): Command {
         const reconcileDeps = defaultReconcileDeps({
           log: (line) => console.log(line),
         });
-        const [daemonProbe, prefs, uiState, tui] = await Promise.all([
-          probeDaemon(reconcileDeps),
-          getPreferences(),
-          getUIState(),
-          import("../tui"),
-        ]);
+        // The legacy-binding check rides along here: it costs two tmux
+        // queries and a `tty`, and only when no client tty was captured at
+        // all. Resolved out here so the TUI never probes tmux itself, and
+        // while fd 0 is still the interactive terminal.
+        const [daemonProbe, prefs, uiState, tui, legacyPopupBinding] =
+          await Promise.all([
+            probeDaemon(reconcileDeps),
+            getPreferences(),
+            getUIState(),
+            import("../tui"),
+            detectLegacyPopupBinding(defaultPopupHintDeps()),
+          ]);
         markStartup("parallel_init");
 
         await settleDaemon(daemonProbe, reconcileDeps);
@@ -102,6 +123,7 @@ export function createPickerCommand(): Command {
           reviewHandback: prefs.reviewHandback,
           forkableAgents: forkableAgentNames(prefs),
           theme: prefs.theme,
+          legacyPopupBinding,
         });
       },
     );

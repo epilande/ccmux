@@ -102,13 +102,13 @@ The zsh `eval` has to come after `compinit`, since the script registers itself w
 >
 > ```tmux
 > # Prefix + C-p: open ccmux in a centered popup
-> bind-key C-p run-shell -C 'display-popup -c "#{client_tty}" -e "CCMUX_CLIENT_TTY=#{client_tty}" -E -w 80% -h 75% "ccmux"'
+> bind-key C-p run-shell -C 'display-popup -E -w 80% -h 75% "ccmux --client-tty #{client_tty}"'
 >
 > # Or skip the prefix entirely (Alt+p from any pane)
-> bind-key -n M-p run-shell -C 'display-popup -c "#{client_tty}" -e "CCMUX_CLIENT_TTY=#{client_tty}" -E -w 80% -h 75% "ccmux"'
+> bind-key -n M-p run-shell -C 'display-popup -E -w 80% -h 75% "ccmux --client-tty #{client_tty}"'
 > ```
 >
-> The wrapper captures the client that opened the popup, so selecting a session never switches another attached client. The picker exits after selection, so the popup closes itself and drops you straight into that pane. (This binding needs tmux 3.3+, since `display-popup -e` arrived in 3.3.)
+> The `run-shell -C` wrapper is what makes `#{client_tty}` expand, since `display-popup` never expands its own command. That hands the picker the client that opened the popup, so selecting a session never switches another attached client. The picker exits after selection, so the popup closes itself and drops you straight into that pane. (This binding needs tmux 3.2+.) The `-e "CCMUX_CLIENT_TTY=#{client_tty}"` form documented previously still works, on tmux 3.3+.
 
 ## 🎮 Usage
 

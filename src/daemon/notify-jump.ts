@@ -4,7 +4,14 @@
  * pane; a background/unbound one opens the picker popup on the
  * most-recently-active client. Both `notify-delivery.ts`'s D-Bus callback and
  * the `/notification-action` handler's `default` action run this in-process
- * (no `sh -c` wrapper needed — we're already in the daemon).
+ * (no `sh -c` wrapper needed, we are already in the daemon).
+ *
+ * The popup gets the resolved tty handed to it as `--client-tty`, not just as
+ * `-c`. `-c` decides which client the popup DRAWS on; the picker inside it
+ * still has to know which client to switch, and asking tmux from inside a
+ * popup returns whichever other attached client typed last. As a positional
+ * argument it needs no `display-popup -e` and therefore no tmux 3.3 floor:
+ * every flag on this line exists in 3.2.
  */
 
 import type { SpawnFn } from "../lib/notify";
@@ -38,9 +45,13 @@ export interface JumpDeps {
 
 /**
  * Perform the jump for `target`. Background/unbound sessions open
- * `display-popup -c <tty> -E <ccmux>`; bound sessions run
+ * `display-popup -c <tty> -E <ccmux> --client-tty <tty>`; bound sessions run
  * `switch-client -c <tty> -t <pane>`. Fail-open: any missing client tty or
  * spawn error is swallowed (logged), never thrown.
+ *
+ * The popup command is passed as separate argv, never as one shell string:
+ * with more than one positional argument tmux execs it directly, so the tty
+ * reaches the picker without a shell to quote it past.
  */
 export async function performJump(
   target: JumpTarget,
@@ -60,6 +71,8 @@ export async function performJump(
           clientTty,
           "-E",
           deps.ccmuxPath,
+          "--client-tty",
+          clientTty,
         ),
         { stdout: "ignore", stderr: "ignore" },
       );

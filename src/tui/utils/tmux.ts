@@ -5,6 +5,7 @@ import {
 } from "../../lib/config";
 import { PANE_FIELD_SEP } from "../../lib/tmux-format";
 import { tmuxArgv, tmuxShellPrefix } from "../../lib/tmux-exec";
+import { resolvePinnedTmuxClientTty } from "../../lib/tmux-client";
 import { theme } from "../theme";
 
 export { switchToPane } from "./client-switch";
@@ -208,7 +209,14 @@ export function parseWindowIdByName(
   return null;
 }
 
-export type OpenAgentsResult = { ok: true } | { ok: false; error: string };
+export type OpenAgentsResult =
+  /**
+   * The window is up. `clientSwitched` is false when we had no captured client
+   * tty to move, i.e. the window exists but the user is still looking at
+   * wherever they were: the caller must say so rather than exiting as if the
+   * jump happened.
+   */
+  { ok: true; clientSwitched: boolean } | { ok: false; error: string };
 
 /**
  * Roster short ids are hex in practice, but they arrive from Claude's
@@ -267,6 +275,29 @@ export async function openAgentAttachWindow(
   );
 }
 
+/** Re-ask tmux whether a named window is still around, to tell a refused
+ *  `switch-client` apart from one whose target vanished mid-flight. A failed
+ *  query answers "gone", which falls through to spawn: an unreachable tmux
+ *  must not turn into a permanent refusal to open the window. */
+async function windowStillExists(windowName: string): Promise<boolean> {
+  try {
+    const list = Bun.spawn(
+      tmuxArgv(
+        "list-windows",
+        "-a",
+        "-F",
+        ["#{window_id}", "#{window_name}"].join(PANE_FIELD_SEP),
+      ),
+      { stdout: "pipe", stderr: "ignore" },
+    );
+    const out = await new Response(list.stdout).text();
+    if ((await list.exited) !== 0) return false;
+    return parseWindowIdByName(out, windowName) !== null;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Switch to an existing window with the given name if one is live, else spawn
  * one (cwd = the row's cwd) running `command` and switch to it. The command
@@ -279,6 +310,16 @@ export async function openAgentAttachWindow(
  * and the next launch would switch to that dead shell instead of
  * relaunching. The paneless analog of pane click-through for
  * `trackingMode:"background"` rows.
+ *
+ * Every `switch-client` here names its client with `-c`, from the same
+ * captured tty `switchToPane` uses. A bare `switch-client` falls through to
+ * tmux's `cmd_find_best_client`, which returns the most-recently-active client
+ * of any session, and a popup's own keystrokes never advance its client's
+ * activity time: with two clients attached, one keypress on the other one is
+ * enough to make a bare switch yank a terminal the user never touched. With no
+ * tty to name we open the window and DO NOT switch anyone, because moving the
+ * wrong client is a worse failure than not moving one (the rule
+ * `src/daemon/spawn-command.ts` already follows).
  */
 async function openDedupedCommandWindow(
   windowName: string,
@@ -306,13 +347,24 @@ async function openDedupedCommandWindow(
       (await list.exited) === 0
         ? parseWindowIdByName(listOut, windowName)
         : null;
+    const { tty: clientTty } = await resolvePinnedTmuxClientTty();
     if (existing) {
-      const switchProc = Bun.spawn(tmuxArgv("switch-client", "-t", existing), {
-        stdout: "ignore",
-        stderr: "ignore",
-      });
-      if ((await switchProc.exited) === 0) return { ok: true };
-      // Window vanished between list and switch: fall through and spawn.
+      if (!clientTty) return { ok: true, clientSwitched: false };
+      const switchProc = Bun.spawn(
+        tmuxArgv("switch-client", "-c", clientTty, "-t", existing),
+        { stdout: "ignore", stderr: "ignore" },
+      );
+      if ((await switchProc.exited) === 0) {
+        return { ok: true, clientSwitched: true };
+      }
+      // A failed switch used to mean one thing (the window vanished between
+      // list and switch) and now means two: a stale captured tty fails the
+      // same way. Ask again before spawning, or a broken binding would defeat
+      // the name dedupe and open a second window on every activation.
+      if (await windowStillExists(windowName)) {
+        return { ok: true, clientSwitched: false };
+      }
+      // Window really is gone: fall through and spawn.
     }
 
     const spawn = Bun.spawn(
@@ -335,13 +387,15 @@ async function openDedupedCommandWindow(
     }
     const paneId = (await new Response(spawn.stdout).text()).trim();
 
-    // new-window already selects within its session; switch-client covers
-    // the popup / other-session contexts (same approach as switchToPane).
-    await Bun.spawn(tmuxArgv("switch-client", "-t", paneId), {
+    // new-window already selects within its session; switch-client covers the
+    // popup / other-session contexts, pinned to the captured client for the
+    // reason in this function's header.
+    if (!clientTty) return { ok: true, clientSwitched: false };
+    await Bun.spawn(tmuxArgv("switch-client", "-c", clientTty, "-t", paneId), {
       stdout: "ignore",
       stderr: "ignore",
     }).exited;
-    return { ok: true };
+    return { ok: true, clientSwitched: true };
   } catch (err) {
     return {
       ok: false,

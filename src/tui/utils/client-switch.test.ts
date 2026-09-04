@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import { setPinnedTmuxClientTty } from "../../lib/tmux-client";
 
 // App.test.tsx process-wide mocks tmux.ts, which re-exports this function.
 // Use a distinct cache entry so this file always exercises the implementation.
@@ -48,6 +49,26 @@ async function withClientTty<T>(
     else process.env.CCMUX_CLIENT_TTY = previous;
   }
 }
+
+/**
+ * The `--client-tty` flag lives in a module-level slot rather than an
+ * argument, so every test that sets it has to put it back.
+ */
+async function withClientTtyFlag<T>(
+  value: string | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
+  setPinnedTmuxClientTty(value);
+  try {
+    return await run();
+  } finally {
+    setPinnedTmuxClientTty(undefined);
+  }
+}
+
+afterEach(() => {
+  setPinnedTmuxClientTty(undefined);
+});
 
 describe("switchToPane", () => {
   it("pins the switch to the client tty captured by the picker binding", async () => {
@@ -127,6 +148,37 @@ describe("switchToPane", () => {
       );
 
       expect(result).toBe("switch-failed");
+    } finally {
+      spawn.restore();
+    }
+  });
+  it("prefers the --client-tty flag over the environment and the fallback", async () => {
+    const spawn = withSpawn([{}]);
+    try {
+      const result = await withClientTtyFlag("/dev/ttys011", () =>
+        withClientTty("/dev/ttys005", () => switchToPane("%42")),
+      );
+
+      expect(result).toBe(true);
+      expect(spawn.calls).toEqual([
+        ["tmux", "switch-client", "-c", "/dev/ttys011", "-t", "%42"],
+      ]);
+    } finally {
+      spawn.restore();
+    }
+  });
+
+  it("refuses an invalid --client-tty instead of falling back to the env or tmux", async () => {
+    // A malformed capture means the user's tmux binding is broken. Guessing
+    // here is how the wrong client gets moved, which is the whole bug.
+    const spawn = withSpawn([]);
+    try {
+      const result = await withClientTtyFlag("ttys011", () =>
+        withClientTty("/dev/ttys005", () => switchToPane("%42")),
+      );
+
+      expect(result).toBe("client-unavailable");
+      expect(spawn.calls).toEqual([]);
     } finally {
       spawn.restore();
     }

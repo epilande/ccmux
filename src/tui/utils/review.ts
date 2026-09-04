@@ -1,4 +1,5 @@
 import { appendFileSync } from "node:fs";
+import { readOwnTty } from "../../lib/tty";
 import { resolve, sep } from "node:path";
 import type { CliRenderer } from "@opentui/core";
 import { LOG_FILE, MAX_SEND_TEXT_CHARS } from "../../lib/config";
@@ -290,27 +291,9 @@ async function defaultGitDiffNames(
 }
 
 async function defaultReadTty(): Promise<string | null> {
-  try {
-    // `tty` reports the pathname of the terminal on stdin (fd 0). Resolve this
-    // before the renderer suspends, while fd 0 is still our interactive tty; it
-    // matches the `tty` location hunk records for the child we spawn with
-    // inherited stdio. Exits non-zero ("not a tty") when stdin is redirected.
-    const proc = Bun.spawn(["tty"], {
-      stdin: "inherit",
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    const [stdout, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      proc.exited,
-    ]);
-    if (exitCode !== 0) return null;
-    const tty = stdout.trim();
-    return tty.startsWith("/dev/") ? tty : null;
-  } catch (err) {
-    debugLog(`tty resolution failed: ${err}`);
-    return null;
-  }
+  // Our own tty matches the `tty` location hunk records for the child we spawn
+  // with inherited stdio, which is what makes the match below work.
+  return readOwnTty(debugLog);
 }
 
 /**

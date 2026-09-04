@@ -146,3 +146,64 @@ export async function resolveActiveTmuxClientTty(): Promise<string | null> {
     return null;
   }
 }
+
+/**
+ * The client tty captured by the tmux binding that launched us, set from
+ * `ccmux --client-tty <tty>` before the TUI mounts. Module-level rather than
+ * threaded through every caller because it is a process-wide fact about how
+ * this ccmux was invoked, exactly like `CCMUX_CLIENT_TTY` is. Pass `undefined`
+ * to clear it (tests).
+ */
+let pinnedClientTty: string | undefined;
+
+export function setPinnedTmuxClientTty(value: string | undefined): void {
+  pinnedClientTty = value;
+}
+
+/**
+ * Did the launcher hand us a client tty at all (flag or environment)?
+ * Validity is deliberately NOT considered: a malformed captured value still
+ * means the binding tried, and the caller that wants to know about the
+ * malformed case gets it from {@link resolvePinnedTmuxClientTty}. Synchronous
+ * so the legacy-binding hint can gate its tmux queries on it without paying
+ * for the `display-message` fallback.
+ */
+export function hasCapturedTmuxClientTty(): boolean {
+  return (
+    pinnedClientTty !== undefined || process.env.CCMUX_CLIENT_TTY !== undefined
+  );
+}
+
+export interface ResolvedClientTty {
+  /** A validated tty safe to pass as `switch-client -c`, else null. */
+  tty: string | null;
+  /** True when a value came from the flag or the environment, valid or not. */
+  captured: boolean;
+}
+
+/**
+ * The one client tty every ccmux surface should act on behalf of:
+ * `--client-tty` first, then `CCMUX_CLIENT_TTY`, then whatever tmux calls the
+ * current client.
+ *
+ * A captured value is never fallen through on. `#{client_tty}` inside a popup
+ * resolves to whichever OTHER attached client typed last (a popup's own
+ * keystrokes do not advance its client's activity time), so silently
+ * substituting the guess for a malformed capture would move a client the user
+ * never touched. A capture that fails {@link CLIENT_TTY_PATTERN} means the
+ * user's tmux binding is broken, and they should hear about it.
+ */
+export async function resolvePinnedTmuxClientTty(): Promise<ResolvedClientTty> {
+  const captured = pinnedClientTty ?? process.env.CCMUX_CLIENT_TTY;
+  if (captured !== undefined) {
+    return {
+      tty: CLIENT_TTY_PATTERN.test(captured) ? captured : null,
+      captured: true,
+    };
+  }
+  const current = await resolveCurrentTmuxClientTty();
+  return {
+    tty: current && CLIENT_TTY_PATTERN.test(current) ? current : null,
+    captured: false,
+  };
+}

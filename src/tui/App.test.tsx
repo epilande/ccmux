@@ -56,13 +56,19 @@ const flashPaneSpy = mock(() => {});
 const flashPaneDetachedSpy = mock(() => {});
 const isPaneInCurrentWindowSpy = mock(async () => true);
 const openAgentAttachWindowSpy = mock(
-  async (): Promise<{ ok: true } | { ok: false; error: string }> => ({
+  async (): Promise<
+    { ok: true; clientSwitched: boolean } | { ok: false; error: string }
+  > => ({
     ok: true,
+    clientSwitched: true,
   }),
 );
 const openAgentsWindowSpy = mock(
-  async (): Promise<{ ok: true } | { ok: false; error: string }> => ({
+  async (): Promise<
+    { ok: true; clientSwitched: boolean } | { ok: false; error: string }
+  > => ({
     ok: true,
+    clientSwitched: true,
   }),
 );
 // The real one spawns `tmux list-panes` against whatever ambient TMUX the
@@ -211,9 +217,15 @@ beforeEach(() => {
   isPaneInCurrentWindowSpy.mockClear();
   isPaneInCurrentWindowSpy.mockImplementation(async () => true);
   openAgentAttachWindowSpy.mockClear();
-  openAgentAttachWindowSpy.mockImplementation(async () => ({ ok: true }));
+  openAgentAttachWindowSpy.mockImplementation(async () => ({
+    ok: true,
+    clientSwitched: true,
+  }));
   openAgentsWindowSpy.mockClear();
-  openAgentsWindowSpy.mockImplementation(async () => ({ ok: true }));
+  openAgentsWindowSpy.mockImplementation(async () => ({
+    ok: true,
+    clientSwitched: true,
+  }));
   resolveLaunchPaneSpy.mockClear();
   resolveLaunchPaneSpy.mockImplementation(async () => "%7");
   uiStateWrites.length = 0;
@@ -897,8 +909,62 @@ describe("App sidebar mode", () => {
     }
   });
 
+  it("background launch with no client to switch stays open and says so", async () => {
+    // The window is up but nobody was moved to it: exiting here would close
+    // the picker over a jump that never happened.
+    const exitSpy = mock(() => {});
+    const originalExit = process.exit;
+    process.exit = exitSpy as never;
+    openAgentAttachWindowSpy.mockImplementation(async () => ({
+      ok: true,
+      clientSwitched: false,
+    }));
+
+    try {
+      await renderApp(80, 20, { sidebar: true });
+      sseCallbacks!.onInit([backgroundSession()], null);
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await flushLaunch();
+      await setup.renderOnce();
+
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("no captured client tty to switch"),
+      );
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      process.exit = originalExit;
+    }
+  });
+
+  it("hints once when the launcher detected a legacy popup binding", async () => {
+    // The prop is picker-only (`ccmux sidebar` never sets it); sidebar mode is
+    // borrowed here just for the Toast, same as the launcher tests above.
+    await renderApp(80, 20, { sidebar: true, legacyPopupBinding: true });
+    sseCallbacks!.onInit([backgroundSession()], null);
+    await setup.renderOnce();
+
+    expect(squish(setup.captureCharFrame())).toContain(
+      squish("Your tmux binding"),
+    );
+  });
+
+  it("says nothing about the binding when the launcher found nothing wrong", async () => {
+    await renderApp(80, 20, { sidebar: true });
+    sseCallbacks!.onInit([backgroundSession()], null);
+    await setup.renderOnce();
+
+    expect(squish(setup.captureCharFrame())).not.toContain(
+      squish("Your tmux binding"),
+    );
+  });
+
   it("ignores a second background activation while a launch is in flight", async () => {
-    let resolveLaunch: (r: { ok: true }) => void = () => {};
+    let resolveLaunch: (r: { ok: true; clientSwitched: boolean }) => void =
+      () => {};
     openAgentAttachWindowSpy.mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -921,7 +987,7 @@ describe("App sidebar mode", () => {
       await setup.renderOnce();
 
       expect(openAgentAttachWindowSpy).toHaveBeenCalledTimes(1);
-      resolveLaunch({ ok: true });
+      resolveLaunch({ ok: true, clientSwitched: true });
       await flushLaunch();
     } finally {
       process.exit = originalExit;
@@ -1614,7 +1680,7 @@ describe("App pane-switch feedback and server scoping", () => {
       await selectFirstRowAndEnter();
       expect(squish(setup.captureCharFrame())).toContain(
         squish(
-          "Cannot switch: CCMUX_CLIENT_TTY is malformed or no tmux client was found (check your tmux binding)",
+          "Cannot switch: no captured client tty, check the tmux binding in the README",
         ),
       );
       expect(exitSpy).not.toHaveBeenCalled();

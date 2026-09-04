@@ -124,6 +124,9 @@ import { createIdleGcScheduler } from "./utils/idle-gc";
 import { setSpinnerPaused } from "./utils/useStatusIcon";
 import { markStartup, reportStartup } from "../lib/startup-timing";
 
+/** Long enough to read a sentence that sends the user to the README. */
+const LEGACY_BINDING_HINT_MS = 6000;
+
 interface AppProps {
   initialPreview?: boolean;
   iconStyle?: IconStyle;
@@ -147,6 +150,12 @@ interface AppProps {
    * Fork action, which is otherwise hidden rather than offered-then-refused.
    */
   forkableAgents?: string[];
+  /**
+   * The launcher decided we are a popup on a legacy binding that passes no
+   * client tty, with more than one client attached. Resolved before the mount
+   * (see `src/commands/picker.ts`) so the TUI does no tmux probing of its own.
+   */
+  legacyPopupBinding?: boolean;
 }
 
 /** Message text for a rejected fetch/parse, for a toast. */
@@ -280,7 +289,7 @@ export function App(props: AppProps) {
         // Surface refusal/failure instead of exiting the picker as if it worked.
         store.actions.showToast(
           result === "client-unavailable"
-            ? "Cannot switch: CCMUX_CLIENT_TTY is malformed or no tmux client was found (check your tmux binding)"
+            ? "Cannot switch: no captured client tty, check the tmux binding in the README"
             : "Failed to switch: pane or client unavailable",
         );
         return;
@@ -344,6 +353,14 @@ export function App(props: AppProps) {
       backgroundLaunchInFlight = false;
       if (!result.ok) {
         store.actions.showToast(`${label} failed: ${result.error}`);
+        return;
+      }
+      if (!result.clientSwitched) {
+        // The window is up but nobody was moved to it. Exiting here would
+        // close the picker over a jump that did not happen.
+        store.actions.showToast(
+          `${label}: window opened, but no captured client tty to switch (check the tmux binding in the README)`,
+        );
         return;
       }
       if (!props.persistent && !props.sidebar) process.exit(0);
@@ -3162,6 +3179,22 @@ export function App(props: AppProps) {
   const [previewRefreshKey, setPreviewRefreshKey] = createSignal(0);
   const [initialDataReceived, setInitialDataReceived] = createSignal(false);
 
+  /**
+   * The legacy-binding hint is one toast for the life of the picker. It rides
+   * on the first SSE payload rather than the raw mount so it is not already
+   * gone by the time the list paints, and the flag makes an SSE reconnect
+   * (which replays `init`) not repeat it.
+   */
+  let legacyBindingHintShown = false;
+  function hintLegacyPopupBinding() {
+    if (legacyBindingHintShown || !props.legacyPopupBinding) return;
+    legacyBindingHintShown = true;
+    store.actions.showToast(
+      "Your tmux binding does not pass the client tty; with several clients attached the wrong one may switch. See README.",
+      LEGACY_BINDING_HINT_MS,
+    );
+  }
+
   onMount(() => {
     sseClient = new SSEClient({
       onInit: (sessions, activePaneId, invocations) => {
@@ -3177,6 +3210,7 @@ export function App(props: AppProps) {
           }
         }
         setInitialDataReceived(true);
+        hintLegacyPopupBinding();
         // Reconcile invoke state against the daemon's init snapshot on every
         // (re)connect. SSE has no replay, so an `invocation_finished` missed
         // while the socket was down would otherwise strand the synthetic row
