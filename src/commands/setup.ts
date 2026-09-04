@@ -3,6 +3,11 @@ import { isDaemonRunningAsync } from "../daemon";
 import { createBuiltinHookAdapters } from "../daemon/adapters";
 import type { HookAdapter, HookAdapterOutcome } from "../daemon/hook-adapter";
 import { getAgentExecutable } from "../lib/agents";
+import {
+  findLegacyPopupBindings,
+  readTmuxKeyBindings,
+  RECOMMENDED_POPUP_BINDING,
+} from "../lib/popup-binding-check";
 
 function appendAgent(value: string, prev: string[]): string[] {
   return [...prev, value];
@@ -48,6 +53,35 @@ async function printDaemonRestartHint(): Promise<void> {
 
 function plural(word: string, n: number): string {
   return n === 1 ? word : `${word}s`;
+}
+
+/**
+ * Report tmux bindings that open ccmux in a popup without handing it the
+ * invoking client's tty.
+ *
+ * Advisory: it prints nothing when tmux is unreachable or every binding is
+ * fine, and never touches the exit code. `setup` is the command people run
+ * after upgrading, which is the only reason this lives here rather than in the
+ * picker alone (the picker's own hint needs two clients attached to fire).
+ */
+async function printPopupBindingWarning(): Promise<void> {
+  const listing = await readTmuxKeyBindings();
+  const offenders = listing ? findLegacyPopupBindings(listing) : [];
+  if (offenders.length === 0) return;
+
+  console.log(
+    `\nOutdated ccmux popup ${plural("binding", offenders.length)} in tmux:`,
+  );
+  for (const binding of offenders) {
+    const label =
+      binding.table && binding.key ? `${binding.table} ${binding.key}: ` : "";
+    console.log(`  ${label}${binding.command}`);
+  }
+  console.log(
+    "\nA popup that is handed no client tty can switch the wrong client when",
+  );
+  console.log("more than one is attached. Rebind it in ~/.tmux.conf:");
+  console.log(`\n  ${RECOMMENDED_POPUP_BINDING}`);
 }
 
 /**
@@ -184,9 +218,12 @@ export function createSetupCommand(): Command {
 
       if (options.status) {
         await printStatus(selected);
+        await printPopupBindingWarning();
         return;
       }
 
+      // Not on --uninstall: someone removing hooks is not asking about their
+      // keybindings.
       if (options.uninstall) {
         await runUninstall(selected);
       } else {
@@ -195,6 +232,7 @@ export function createSetupCommand(): Command {
           ? new Set<string>()
           : findMissingAgents(selected);
         await runInstall(selected, missing);
+        await printPopupBindingWarning();
       }
     });
 }
