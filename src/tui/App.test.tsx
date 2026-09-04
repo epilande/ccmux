@@ -23,6 +23,7 @@ import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SwitchToPaneResult } from "./utils/client-switch";
+import type { OpenAgentsResult } from "./utils/tmux";
 
 // Capture SSE callbacks so tests can fire events
 let sseCallbacks: SSECallbacks | null = null;
@@ -56,17 +57,13 @@ const flashPaneSpy = mock(() => {});
 const flashPaneDetachedSpy = mock(() => {});
 const isPaneInCurrentWindowSpy = mock(async () => true);
 const openAgentAttachWindowSpy = mock(
-  async (): Promise<
-    { ok: true; clientSwitched: boolean } | { ok: false; error: string }
-  > => ({
+  async (): Promise<OpenAgentsResult> => ({
     ok: true,
     clientSwitched: true,
   }),
 );
 const openAgentsWindowSpy = mock(
-  async (): Promise<
-    { ok: true; clientSwitched: boolean } | { ok: false; error: string }
-  > => ({
+  async (): Promise<OpenAgentsResult> => ({
     ok: true,
     clientSwitched: true,
   }),
@@ -918,6 +915,7 @@ describe("App sidebar mode", () => {
     openAgentAttachWindowSpy.mockImplementation(async () => ({
       ok: true,
       clientSwitched: false,
+      reason: "no-client-tty",
     }));
 
     try {
@@ -934,6 +932,39 @@ describe("App sidebar mode", () => {
       expect(squish(setup.captureCharFrame())).toContain(
         squish("no captured client tty to switch"),
       );
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      process.exit = originalExit;
+    }
+  });
+
+  it("background launch whose switch was refused blames the switch, not the binding", async () => {
+    // Same "window is up, nobody moved" shape as above, different cause: a
+    // captured tty that tmux refused. Pointing at the README binding here
+    // would blame a binding that is fine.
+    const exitSpy = mock(() => {});
+    const originalExit = process.exit;
+    process.exit = exitSpy as never;
+    openAgentAttachWindowSpy.mockImplementation(async () => ({
+      ok: true,
+      clientSwitched: false,
+      reason: "switch-failed",
+    }));
+
+    try {
+      await renderApp(80, 20, { sidebar: true });
+      sseCallbacks!.onInit([backgroundSession()], null);
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await flushLaunch();
+      await setup.renderOnce();
+
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain(squish("could not be switched"));
+      expect(frame).not.toContain(squish("no captured client tty"));
       expect(exitSpy).not.toHaveBeenCalled();
     } finally {
       process.exit = originalExit;
@@ -963,8 +994,7 @@ describe("App sidebar mode", () => {
   });
 
   it("ignores a second background activation while a launch is in flight", async () => {
-    let resolveLaunch: (r: { ok: true; clientSwitched: boolean }) => void =
-      () => {};
+    let resolveLaunch: (r: OpenAgentsResult) => void = () => {};
     openAgentAttachWindowSpy.mockImplementation(
       () =>
         new Promise((resolve) => {

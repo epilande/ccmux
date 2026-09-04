@@ -48,6 +48,7 @@ import {
   openAgentsWindow,
   openAgentAttachWindow,
   resolveLaunchPane,
+  type ClientSwitchMiss,
   type OpenAgentsResult,
 } from "./utils/tmux";
 import { tmuxArgv } from "../lib/tmux-exec";
@@ -215,6 +216,19 @@ const SPAWN_SPLIT: Record<NewSessionPlacement, "h" | "v" | false> = {
   "split-v": "v",
 };
 
+/** One message per reason a background launch moved nobody. Keyed rather than
+ *  branched so a new miss reason cannot silently inherit another's blame:
+ *  "no-client-tty" points at the tmux binding, "switch-failed" must not. */
+const CLIENT_SWITCH_MISS_TOAST: Record<
+  ClientSwitchMiss,
+  (label: string) => string
+> = {
+  "no-client-tty": (label) =>
+    `${label}: window opened, but no captured client tty to switch (check the tmux binding in the README)`,
+  "switch-failed": (label) =>
+    `${label}: window opened, but the client could not be switched to it`,
+};
+
 export function App(props: AppProps) {
   const renderer = useRenderer();
   /** The viewport, for the handful of key handlers that have to agree with
@@ -341,7 +355,8 @@ export function App(props: AppProps) {
    * Shared exit semantics for the background launchers (per-agent attach and
    * the global agent view). Mirrors selectPane: the picker exits after
    * switching, the sidebar/persistent board stays. On failure, stay and
-   * surface a toast.
+   * surface a toast. A window that opened without moving anyone is not a
+   * failure, but it is not a jump either: it toasts its own reason and stays.
    */
   function launchBackgroundWindow(
     label: string,
@@ -358,9 +373,7 @@ export function App(props: AppProps) {
       if (!result.clientSwitched) {
         // The window is up but nobody was moved to it. Exiting here would
         // close the picker over a jump that did not happen.
-        store.actions.showToast(
-          `${label}: window opened, but no captured client tty to switch (check the tmux binding in the README)`,
-        );
+        store.actions.showToast(CLIENT_SWITCH_MISS_TOAST[result.reason](label));
         return;
       }
       if (!props.persistent && !props.sidebar) process.exit(0);

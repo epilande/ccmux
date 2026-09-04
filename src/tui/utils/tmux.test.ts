@@ -329,6 +329,34 @@ describe("openDedupedCommandWindow client pinning", () => {
     }
   });
 
+  it("reports the miss when the switch after a fresh new-window fails", async () => {
+    // A captured tty whose client has since detached: the window is created
+    // and the switch is refused, so the caller must not exit over a jump that
+    // never happened.
+    const stubs = withTmuxStubs([
+      { stdout: "" },
+      { stdout: "%9\n" },
+      { exitCode: 1 },
+    ]);
+    try {
+      setPinnedTmuxClientTty("/dev/ttys005");
+      const result = await openAgentsWindow("/tmp/proj");
+
+      expect(result).toEqual({
+        ok: true,
+        clientSwitched: false,
+        reason: "switch-failed",
+      });
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-windows",
+        "new-window",
+        "switch-client",
+      ]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
   it("opens the window but switches nobody when no client tty resolves", async () => {
     // A bare `switch-client` here would move the most-recently-active client,
     // which inside a popup is whichever OTHER terminal typed last.
@@ -342,7 +370,11 @@ describe("openDedupedCommandWindow client pinning", () => {
         openAgentsWindow("/tmp/proj"),
       );
 
-      expect(result).toEqual({ ok: true, clientSwitched: false });
+      expect(result).toEqual({
+        ok: true,
+        clientSwitched: false,
+        reason: "no-client-tty",
+      });
       const verbs = stubs.calls.map((argv) => argv[1]);
       expect(verbs).toEqual(["list-windows", "display-message", "new-window"]);
     } finally {
@@ -360,7 +392,11 @@ describe("openDedupedCommandWindow client pinning", () => {
         openAgentsWindow("/tmp/proj"),
       );
 
-      expect(result).toEqual({ ok: true, clientSwitched: false });
+      expect(result).toEqual({
+        ok: true,
+        clientSwitched: false,
+        reason: "no-client-tty",
+      });
       // list-windows, then the failed display-message. Nothing else: no
       // switch, and no duplicate window either.
       expect(stubs.calls.map((argv) => argv[1])).toEqual([
@@ -385,7 +421,11 @@ describe("openDedupedCommandWindow client pinning", () => {
       setPinnedTmuxClientTty("/dev/ttys005");
       const result = await openAgentsWindow("/tmp/proj");
 
-      expect(result).toEqual({ ok: true, clientSwitched: false });
+      expect(result).toEqual({
+        ok: true,
+        clientSwitched: false,
+        reason: "switch-failed",
+      });
       expect(stubs.calls.map((argv) => argv[1])).toEqual([
         "list-windows",
         "switch-client",

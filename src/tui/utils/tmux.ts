@@ -209,14 +209,23 @@ export function parseWindowIdByName(
   return null;
 }
 
+/** Why nobody was moved to the window that is now up. `"no-client-tty"`: we
+ *  never captured a client tty to name. `"switch-failed"`: we had one and
+ *  tmux refused the `switch-client` (a stale tty, most often a client that
+ *  detached since capture). The two blame different things, so the caller
+ *  must not collapse them into one message. */
+export type ClientSwitchMiss = "no-client-tty" | "switch-failed";
+
+/**
+ * The window is up. `clientSwitched` is false when nobody was moved to it,
+ * i.e. the window exists but the user is still looking at wherever they were,
+ * and `reason` says why: the caller must say so rather than exiting as if the
+ * jump happened.
+ */
 export type OpenAgentsResult =
-  /**
-   * The window is up. `clientSwitched` is false when we had no captured client
-   * tty to move, i.e. the window exists but the user is still looking at
-   * wherever they were: the caller must say so rather than exiting as if the
-   * jump happened.
-   */
-  { ok: true; clientSwitched: boolean } | { ok: false; error: string };
+  | { ok: true; clientSwitched: true }
+  | { ok: true; clientSwitched: false; reason: ClientSwitchMiss }
+  | { ok: false; error: string };
 
 /**
  * Roster short ids are hex in practice, but they arrive from Claude's
@@ -319,7 +328,9 @@ async function windowStillExists(windowName: string): Promise<boolean> {
  * enough to make a bare switch yank a terminal the user never touched. With no
  * tty to name we open the window and DO NOT switch anyone, because moving the
  * wrong client is a worse failure than not moving one (the rule
- * `src/daemon/spawn-command.ts` already follows).
+ * `src/daemon/spawn-command.ts` already follows). A switch tmux REFUSES lands
+ * in the same place: the result reports `clientSwitched: false` with the
+ * reason, never a jump that did not happen.
  */
 async function openDedupedCommandWindow(
   windowName: string,
@@ -349,7 +360,8 @@ async function openDedupedCommandWindow(
         : null;
     const { tty: clientTty } = await resolvePinnedTmuxClientTty();
     if (existing) {
-      if (!clientTty) return { ok: true, clientSwitched: false };
+      if (!clientTty)
+        return { ok: true, clientSwitched: false, reason: "no-client-tty" };
       const switchProc = Bun.spawn(
         tmuxArgv("switch-client", "-c", clientTty, "-t", existing),
         { stdout: "ignore", stderr: "ignore" },
@@ -362,7 +374,7 @@ async function openDedupedCommandWindow(
       // same way. Ask again before spawning, or a broken binding would defeat
       // the name dedupe and open a second window on every activation.
       if (await windowStillExists(windowName)) {
-        return { ok: true, clientSwitched: false };
+        return { ok: true, clientSwitched: false, reason: "switch-failed" };
       }
       // Window really is gone: fall through and spawn.
     }
@@ -390,11 +402,19 @@ async function openDedupedCommandWindow(
     // new-window already selects within its session; switch-client covers the
     // popup / other-session contexts, pinned to the captured client for the
     // reason in this function's header.
-    if (!clientTty) return { ok: true, clientSwitched: false };
-    await Bun.spawn(tmuxArgv("switch-client", "-c", clientTty, "-t", paneId), {
-      stdout: "ignore",
-      stderr: "ignore",
-    }).exited;
+    if (!clientTty)
+      return { ok: true, clientSwitched: false, reason: "no-client-tty" };
+    const switchFresh = Bun.spawn(
+      tmuxArgv("switch-client", "-c", clientTty, "-t", paneId),
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    // The window exists either way, so this is never an error. A stale
+    // captured tty fails here exactly as it does on the existing-window path,
+    // and the caller has to hear about it instead of exiting over a jump that
+    // did not happen.
+    if ((await switchFresh.exited) !== 0) {
+      return { ok: true, clientSwitched: false, reason: "switch-failed" };
+    }
     return { ok: true, clientSwitched: true };
   } catch (err) {
     return {
