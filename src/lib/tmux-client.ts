@@ -18,6 +18,13 @@
 import { tmuxArgv } from "./tmux-exec";
 
 /**
+ * The only accepted shape for a tmux client tty. tmux reports
+ * `#{client_tty}` as an absolute device path (`/dev/ttys004` on macOS,
+ * `/dev/pts/3` on Linux), and callers may pass it straight into a tmux argv.
+ */
+export const CLIENT_TTY_PATTERN = /^\/dev\/[A-Za-z0-9._/-]{1,64}$/;
+
+/**
  * The pid of the tmux client attached to the current session context (i.e.
  * `$TMUX`'s session, or - when invoked from inside a pane - the one
  * `display-message` resolves by default). Returns null on any query failure

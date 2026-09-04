@@ -275,11 +275,14 @@ export function App(props: AppProps) {
     } else {
       flashPaneDetached(pane);
     }
-    switchToPane(pane).then((ok) => {
-      if (!ok) {
-        // Pane is gone (daemon holds the stale row until its liveness sweep).
-        // Surface it instead of exiting the one-shot picker as if it worked.
-        store.actions.showToast("Failed to switch: pane is gone");
+    switchToPane(pane).then((result) => {
+      if (result !== true) {
+        // Surface refusal/failure instead of exiting the picker as if it worked.
+        store.actions.showToast(
+          result === "client-unavailable"
+            ? "Cannot switch: CCMUX_CLIENT_TTY is malformed or no tmux client was found (check your tmux binding)"
+            : "Failed to switch: pane or client unavailable",
+        );
         return;
       }
       if (!props.persistent && !props.sidebar) process.exit(0);
