@@ -135,6 +135,7 @@ interface AppProps {
   iconStyle?: IconStyle;
   previewWidth?: number;
   columns?: ColumnsConfig;
+  promptLines?: number;
   breakpoints?: BreakpointConfig;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
@@ -261,6 +262,7 @@ export function App(props: AppProps) {
     iconStyle: props.iconStyle,
     previewWidth: props.previewWidth,
     columns: props.columns,
+    promptLines: props.promptLines,
     breakpoints: props.breakpoints,
     searchPaneContent: props.searchPaneContent,
     searchPaneLines: props.searchPaneLines,
@@ -4094,6 +4096,11 @@ export function App(props: AppProps) {
             activePaneId={store.state.activePaneId}
             activeSessionId={store.state.activeSessionId}
             columns={store.state.columns}
+            promptLines={store.state.promptLines}
+            // The same "a query is narrowing the list" the flat items are
+            // built from, so the block yields exactly when rows carry
+            // highlights to show instead.
+            searchActive={store.state.searchQuery.trim().length > 0}
             breakpoints={store.state.breakpoints}
             dimmed={store.state.previewFocused}
             sidebar={props.sidebar}

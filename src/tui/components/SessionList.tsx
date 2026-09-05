@@ -22,7 +22,13 @@ import {
   resolveLayout,
   applyPromptDisplay,
   rowHasContent,
+  normalizePrompt,
+  promptBlockWidth,
+  withoutPrompt,
+  EMPTY_PROMPT_BLOCK,
+  PROMPT_BLOCK_MIN_WIDTH,
 } from "./session-columns";
+import { createPromptBlockCache } from "./prompt-block-cache";
 import { theme } from "../theme";
 import { socketErrorMessage } from "../../lib/tmux-socket";
 
@@ -40,6 +46,18 @@ interface SessionListProps {
   sidebar?: boolean;
   /** Prompt display mode (cycled by the `p` key): inline, own row, or off. */
   promptDisplay?: PromptDisplay;
+  /** Height of the wrapped prompt block, in lines. 0 (the default) is off. */
+  promptLines?: number;
+  /**
+   * Whether a search query is currently narrowing the list.
+   *
+   * The block yields to the one-line `prompt` cell while it is: that cell is
+   * the only place a row draws its match highlights, the older-prompt match
+   * line, the transcript snippet and the `[pane]`/`[transcript]`/`[cwd]`
+   * source tag, and a result with no visible reason for matching is worse
+   * than a prompt with less room.
+   */
+  searchActive?: boolean;
   loading?: boolean;
   /** Set when the daemon cannot reach its tmux server; replaces the empty
    *  state, which would otherwise read as "no agents are running". */
@@ -81,12 +99,31 @@ const ROW_MENU_INDENT = 2;
 
 export const SessionList: Component<SessionListProps> = (props) => {
   let scrollboxRef: ScrollBoxRenderable | undefined;
+  const promptBlockCache = createPromptBlockCache(normalizePrompt);
   const [scrollboxLayout, setScrollboxLayout] = createSignal(0);
   const dims = useSharedTerminalDimensions();
   const effectiveWidth = () =>
     props.showPreview
       ? Math.floor((dims().width * (100 - props.previewWidth)) / 100)
       : dims().width;
+
+  /**
+   * Whether rows draw the wrapped block at all, decided ONCE for the list.
+   *
+   * The same answer has to reach two places (the block itself, and the
+   * `prompt` cell the block replaces) and they must never disagree, or a
+   * width where the block yields would show no prompt at all. So the three
+   * ways it yields (turned off, a search is running, a rail too narrow for a
+   * readable wrap) live here rather than at either use site.
+   */
+  const blockActive = () =>
+    (props.promptLines ?? 0) > 0 &&
+    // `promptDisplay: "off"` means no prompt anywhere, and the `p` key cycles
+    // it live — so it hides the block too rather than leaving one prompt
+    // surface the toggle cannot reach.
+    props.promptDisplay !== "off" &&
+    !props.searchActive &&
+    promptBlockWidth(effectiveWidth()) >= PROMPT_BLOCK_MIN_WIDTH;
 
   // Resolved once here for every row (the layout is identical across
   // rows at a given width/config) and passed down to each SessionItem.
@@ -99,15 +136,53 @@ export const SessionList: Component<SessionListProps> = (props) => {
       props.columns,
       props.breakpoints,
     );
-    return applyPromptDisplay(
+    const cols = applyPromptDisplay(
       resolved,
       props.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
       !!props.sidebar,
     );
+    // The block renders the same text a `prompt` cell would, so the cell
+    // goes, but only while the block is actually drawn. Otherwise the row
+    // would lose its prompt entirely.
+    return blockActive() ? withoutPrompt(cols) : cols;
   });
 
-  const hasSubtitle = (session: EnrichedSession) =>
-    rowHasContent(session, layout().row2);
+  /**
+   * The wrapped prompt block, resolved HERE rather than in the row, for the
+   * same reason `layout` is: the scroll math below and the renderer must
+   * agree on the row's height, and the only way they cannot disagree is to
+   * derive both from one array. The row draws exactly these lines; the row
+   * is exactly this many lines tall.
+   *
+   * Memoized per session (see `prompt-block-cache.ts`): the measurement pass
+   * asks for every preceding row's block on every call, and an unchanged
+   * session must hand back the same array so the row's `<For>` stays still.
+   */
+  const promptBlock = (session: EnrichedSession): string[] => {
+    if (!blockActive()) return EMPTY_PROMPT_BLOCK;
+    // Raw, not normalized: the cache normalizes on a miss, so the two regex
+    // passes do not run on every one of the measurement pass's reads.
+    return promptBlockCache.lines(
+      session.id,
+      session.lastPrompt ?? "",
+      promptBlockWidth(effectiveWidth()),
+      props.promptLines ?? 0,
+    );
+  };
+
+  // The cache only ever grows by session id, so retire the ids that left.
+  createEffect(() => {
+    promptBlockCache.retain(
+      props.items.flatMap((item) =>
+        item.type === "session" ? [item.filteredSession.session.id] : [],
+      ),
+    );
+  });
+
+  const sessionLines = (session: EnrichedSession) =>
+    1 +
+    (rowHasContent(session, layout().row2) ? 1 : 0) +
+    promptBlock(session).length;
 
   createEffect(() => {
     // Re-run once the scrollbox gets real dimensions (and on later resizes).
@@ -125,7 +200,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
       index,
       scrollboxRef.scrollTop,
       viewportHeight,
-      hasSubtitle,
+      sessionLines,
     );
     if (target !== null) {
       scrollboxRef.scrollTo(target);
@@ -151,7 +226,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
     if (!item) return null;
     const divider = item.type === "header" && index > 0 ? 1 : 0;
     const line =
-      toVisualLine(props.items, index, hasSubtitle) -
+      toVisualLine(props.items, index, sessionLines) -
       scrollbox.scrollTop +
       divider;
     return {
@@ -216,6 +291,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
           item.filteredSession.session.id === props.activeSessionId
         }
         layout={layout()}
+        promptBlock={promptBlock(item.filteredSession.session)}
         dimmed={props.dimmed}
         sidebar={props.sidebar}
         onActivate={onActivate}

@@ -482,6 +482,9 @@ describe("completableConfigKeys() parity with config set", () => {
         return '["~/.claude-personal"]'; // JSON array of abs/~ paths
       case "sidebar.width":
         return "40"; // integer 10-80
+      case "promptLines":
+      case "sidebar.promptLines":
+        return "3"; // integer 0-MAX_PROMPT_LINES
       case "notifications.delayMs":
         return "500"; // non-negative integer
       case "notifications.command":
