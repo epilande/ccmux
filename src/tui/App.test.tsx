@@ -23,6 +23,7 @@ import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { SwitchToPaneResult } from "./utils/client-switch";
+import type { OpenAgentsResult } from "./utils/tmux";
 
 // Capture SSE callbacks so tests can fire events
 let sseCallbacks: SSECallbacks | null = null;
@@ -54,15 +55,20 @@ const sendKeysSpy = mock(
 );
 const flashPaneSpy = mock(() => {});
 const flashPaneDetachedSpy = mock(() => {});
+// Assertable because a refused switch must not mark the pane active
+// daemon-wide: the real one is a fetch to the daemon.
+const notifyActivePaneSpy = mock(async () => {});
 const isPaneInCurrentWindowSpy = mock(async () => true);
 const openAgentAttachWindowSpy = mock(
-  async (): Promise<{ ok: true } | { ok: false; error: string }> => ({
+  async (): Promise<OpenAgentsResult> => ({
     ok: true,
+    clientSwitched: true,
   }),
 );
 const openAgentsWindowSpy = mock(
-  async (): Promise<{ ok: true } | { ok: false; error: string }> => ({
+  async (): Promise<OpenAgentsResult> => ({
     ok: true,
+    clientSwitched: true,
   }),
 );
 // The real one spawns `tmux list-panes` against whatever ambient TMUX the
@@ -83,7 +89,7 @@ mock.module("./utils/tmux", () => ({
   flashPaneDetached: flashPaneDetachedSpy,
   isPaneInCurrentWindow: isPaneInCurrentWindowSpy,
   selectPane: async () => true,
-  notifyActivePane: () => {},
+  notifyActivePane: notifyActivePaneSpy,
   openAgentAttachWindow: openAgentAttachWindowSpy,
   openAgentsWindow: openAgentsWindowSpy,
   resolveLaunchPane: resolveLaunchPaneSpy,
@@ -203,17 +209,24 @@ let setup: Setup;
 beforeEach(() => {
   sseCallbacks = null;
   switchToPaneSpy.mockClear();
-  switchToPaneSpy.mockImplementation(async () => true);
+  switchToPaneSpy.mockImplementation(async (_target: string) => true);
   sendKeysSpy.mockClear();
   sendKeysSpy.mockImplementation(async () => true);
   flashPaneSpy.mockClear();
   flashPaneDetachedSpy.mockClear();
+  notifyActivePaneSpy.mockClear();
   isPaneInCurrentWindowSpy.mockClear();
   isPaneInCurrentWindowSpy.mockImplementation(async () => true);
   openAgentAttachWindowSpy.mockClear();
-  openAgentAttachWindowSpy.mockImplementation(async () => ({ ok: true }));
+  openAgentAttachWindowSpy.mockImplementation(async () => ({
+    ok: true,
+    clientSwitched: true,
+  }));
   openAgentsWindowSpy.mockClear();
-  openAgentsWindowSpy.mockImplementation(async () => ({ ok: true }));
+  openAgentsWindowSpy.mockImplementation(async () => ({
+    ok: true,
+    clientSwitched: true,
+  }));
   resolveLaunchPaneSpy.mockClear();
   resolveLaunchPaneSpy.mockImplementation(async () => "%7");
   uiStateWrites.length = 0;
@@ -897,8 +910,73 @@ describe("App sidebar mode", () => {
     }
   });
 
+  it("background launch with no client to switch stays open and says so", async () => {
+    // The window is up but nobody was moved to it: exiting here would close
+    // the picker over a jump that never happened.
+    const exitSpy = mock(() => {});
+    const originalExit = process.exit;
+    process.exit = exitSpy as never;
+    openAgentAttachWindowSpy.mockImplementation(async () => ({
+      ok: true,
+      clientSwitched: false,
+      reason: "no-client-tty",
+    }));
+
+    try {
+      await renderApp(80, 20, { sidebar: true });
+      sseCallbacks!.onInit([backgroundSession()], null);
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await flushLaunch();
+      await setup.renderOnce();
+
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish("window opened, but no tmux client to switch"),
+      );
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      process.exit = originalExit;
+    }
+  });
+
+  it("background launch whose switch was refused blames the switch, not the binding", async () => {
+    // Same "window is up, nobody moved" shape as above, different cause: a
+    // captured tty that tmux refused. Pointing at the README binding here
+    // would blame a binding that is fine.
+    const exitSpy = mock(() => {});
+    const originalExit = process.exit;
+    process.exit = exitSpy as never;
+    openAgentAttachWindowSpy.mockImplementation(async () => ({
+      ok: true,
+      clientSwitched: false,
+      reason: "switch-failed",
+    }));
+
+    try {
+      await renderApp(80, 20, { sidebar: true });
+      sseCallbacks!.onInit([backgroundSession()], null);
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      setup.mockInput.pressEnter();
+      await flushLaunch();
+      await setup.renderOnce();
+
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain(squish("could not be switched"));
+      expect(frame).not.toContain(squish("no tmux client to switch"));
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      process.exit = originalExit;
+    }
+  });
+
   it("ignores a second background activation while a launch is in flight", async () => {
-    let resolveLaunch: (r: { ok: true }) => void = () => {};
+    let resolveLaunch: (r: OpenAgentsResult) => void = () => {};
     openAgentAttachWindowSpy.mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -921,7 +999,7 @@ describe("App sidebar mode", () => {
       await setup.renderOnce();
 
       expect(openAgentAttachWindowSpy).toHaveBeenCalledTimes(1);
-      resolveLaunch({ ok: true });
+      resolveLaunch({ ok: true, clientSwitched: true });
       await flushLaunch();
     } finally {
       process.exit = originalExit;
@@ -1605,8 +1683,27 @@ describe("App pane-switch feedback and server scoping", () => {
     }
   });
 
-  it("one-shot picker: an unknown caller client is refused with a specific toast", async () => {
-    switchToPaneSpy.mockImplementation(async () => "client-unavailable");
+  it("one-shot picker: no tmux client at all is refused without blaming a binding", async () => {
+    // The sidebar and a plain pane reach this too, and neither was launched by
+    // a binding there is anything to fix.
+    switchToPaneSpy.mockImplementation(async () => "no-client");
+    const restoreFetch = withServerInfo(null);
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    try {
+      await renderWithSession();
+      await selectFirstRowAndEnter();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain(squish("Cannot switch: no tmux client found"));
+      expect(frame).not.toContain(squish("binding"));
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      restoreExit();
+      restoreFetch();
+    }
+  });
+
+  it("one-shot picker: a malformed capture names the capture, not the absence of one", async () => {
+    switchToPaneSpy.mockImplementation(async () => "malformed-capture");
     const restoreFetch = withServerInfo(null);
     const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
@@ -1614,7 +1711,7 @@ describe("App pane-switch feedback and server scoping", () => {
       await selectFirstRowAndEnter();
       expect(squish(setup.captureCharFrame())).toContain(
         squish(
-          "Cannot switch: CCMUX_CLIENT_TTY is malformed or no tmux client was found (check your tmux binding)",
+          "Cannot switch: the captured client tty is malformed, check the tmux binding in the README",
         ),
       );
       expect(exitSpy).not.toHaveBeenCalled();
@@ -1624,14 +1721,45 @@ describe("App pane-switch feedback and server scoping", () => {
     }
   });
 
-  it("one-shot picker: a successful pane switch exits the process", async () => {
-    // switchToPaneSpy defaults to true (beforeEach).
+  it("one-shot picker: a successful pane switch flashes, notifies and exits", async () => {
+    // switchToPaneSpy defaults to true (beforeEach). The visual and daemon-side
+    // feedback belongs to the success path only.
     const restoreFetch = withServerInfo(null);
     const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
       await renderWithSession();
       await selectFirstRowAndEnter();
+      expect(switchToPaneSpy).toHaveBeenCalledWith("%5");
+      expect(notifyActivePaneSpy).toHaveBeenCalledWith("%5");
+      expect(flashPaneDetachedSpy).toHaveBeenCalledWith("%5");
       expect(exitSpy).toHaveBeenCalledWith(0);
+    } finally {
+      restoreExit();
+      restoreFetch();
+    }
+  });
+
+  it("one-shot picker: a legacy popup refusal points at the binding and leaves no trace", async () => {
+    // The only warning a user on the old binding now gets, so it has to name
+    // the fix. And nothing may have happened before the refusal: flashing the
+    // pane and marking it active daemon-wide, then saying nobody moved, is the
+    // worst of both.
+    switchToPaneSpy.mockImplementation(async () => "legacy-popup");
+    const restoreFetch = withServerInfo(null);
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    try {
+      await renderWithSession();
+      await selectFirstRowAndEnter();
+      expect(switchToPaneSpy).toHaveBeenCalledWith("%5");
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish(
+          "Cannot switch: this popup was given no client tty and several clients are attached, update the tmux binding (see README)",
+        ),
+      );
+      expect(notifyActivePaneSpy).not.toHaveBeenCalled();
+      expect(flashPaneSpy).not.toHaveBeenCalled();
+      expect(flashPaneDetachedSpy).not.toHaveBeenCalled();
+      expect(exitSpy).not.toHaveBeenCalled();
     } finally {
       restoreExit();
       restoreFetch();

@@ -10,6 +10,7 @@ import {
 import { markStartup } from "../lib/startup-timing";
 import { PICKER_PANE_TITLE } from "../lib/config";
 import { tmuxArgv } from "../lib/tmux-exec";
+import { setPinnedTmuxClientTty } from "../lib/tmux-client";
 import { forkableAgentNames } from "../lib/agents";
 
 /**
@@ -32,13 +33,23 @@ export function createPickerCommand(): Command {
     .option("--icons <style>", "Icon style: none, emoji, nerdfont, dot")
     .option("--persistent", "Keep picker open after switching sessions")
     .option("--no-persistent", "Close picker after switching sessions")
+    .option(
+      "--client-tty <tty>",
+      "tmux client tty to act on (set by the popup keybinding)",
+    )
     .action(
       async (options: {
         preview?: boolean;
         icons?: string;
         persistent?: boolean;
+        clientTty?: string;
       }) => {
         markStartup("cli_parse");
+
+        // Before anything can switch a client. The value is validated where it
+        // is consumed, not here: a malformed one must be refused with a toast
+        // the user can act on, never silently replaced by tmux's guess.
+        setPinnedTmuxClientTty(options.clientTty);
 
         if (options.icons && !isValidIconStyle(options.icons)) {
           console.error(
