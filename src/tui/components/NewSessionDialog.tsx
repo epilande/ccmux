@@ -14,9 +14,9 @@ import { slugForFork, slugFromPrompt } from "../../daemon/worktree-create";
 import {
   displayWidth,
   shortenCwd,
-  sliceToWidth,
   truncateMiddle,
   truncateText,
+  wrapText,
 } from "../utils/format";
 import { agentColorFor } from "./SessionItem";
 import { DropdownOverlay, DropdownTrigger } from "./DropdownField";
@@ -60,64 +60,6 @@ const CONTROL_GAP = 1;
 export const NAME_HINT = "auto · -2 if taken";
 export const NAME_HINT_SHORT = "auto";
 
-/**
- * Greedy word-wrap into lines of at most `width` columns, breaking a word
- * that cannot fit on a line of its own.
- *
- * The dialog wraps its agent error itself rather than handing a long string
- * to the renderer, because the height budget below has to know the row count
- * BEFORE layout and the renderer's own wrapping cannot be predicted from
- * here (it breaks mid-word at the tail of a line, and a space landing on the
- * boundary moves to the next row). Lines produced here already fit, so
- * nothing can wrap a second time and the budget cannot be wrong.
- *
- * Widths are display columns (`displayWidth`), so a line of wide glyphs (CJK,
- * emoji) fits its column like an ASCII one does, and mid-word breaks land on
- * grapheme boundaries (issue #91).
- */
-export function wrapText(text: string, width: number): string[] {
-  if (width <= 0) return [text];
-  const lines: string[] = [];
-  let line = "";
-  let lineWidth = 0;
-  for (const word of text.split(/\s+/).filter(Boolean)) {
-    let rest = word;
-    // Longer than the whole column: it can only be broken mid-word.
-    while (displayWidth(rest) > width) {
-      if (line) {
-        lines.push(line);
-        line = "";
-        lineWidth = 0;
-      }
-      const head = sliceToWidth(rest, width);
-      if (!head) {
-        // A single cluster wider than the whole column (a wide glyph at
-        // width 1): nothing can be split off it, so let the word overflow
-        // rather than slice a cluster or spin on an empty head.
-        lines.push(rest);
-        rest = "";
-        break;
-      }
-      lines.push(head);
-      rest = rest.slice(head.length);
-    }
-    if (!rest) continue;
-    const restWidth = displayWidth(rest);
-    if (!line) {
-      line = rest;
-      lineWidth = restWidth;
-    } else if (lineWidth + 1 + restWidth <= width) {
-      line += ` ${rest}`;
-      lineWidth += 1 + restWidth;
-    } else {
-      lines.push(line);
-      line = rest;
-      lineWidth = restWidth;
-    }
-  }
-  if (line) lines.push(line);
-  return lines.length > 0 ? lines : [""];
-}
 
 /**
  * Which mode a draft is in, flattened to the booleans the budget turns on.

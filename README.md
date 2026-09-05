@@ -102,13 +102,13 @@ The zsh `eval` has to come after `compinit`, since the script registers itself w
 >
 > ```tmux
 > # Prefix + C-p: open ccmux in a centered popup
-> bind-key C-p display-popup -E -w 80% -h 75% "ccmux"
+> bind-key C-p run-shell -C 'display-popup -E -w 80% -h 75% "ccmux --client-tty #{client_tty}"'
 >
 > # Or skip the prefix entirely (Alt+p from any pane)
-> bind-key -n M-p display-popup -E -w 80% -h 75% "ccmux"
+> bind-key -n M-p run-shell -C 'display-popup -E -w 80% -h 75% "ccmux --client-tty #{client_tty}"'
 > ```
 >
-> The picker exits after you select a session, so the popup closes itself and drops you straight into that pane. (`display-popup` requires tmux 3.2+.)
+> The `run-shell -C` wrapper is what makes `#{client_tty}` expand, since `display-popup` never expands its own command. That hands the picker the client that opened the popup, so selecting a session never switches another attached client. The picker exits after selection, so the popup closes itself and drops you straight into that pane. (This binding needs tmux 3.2+.) The `-e "CCMUX_CLIENT_TTY=#{client_tty}"` form documented previously still works, on tmux 3.3+.
 
 ## 🎮 Usage
 
@@ -719,6 +719,17 @@ Pass an empty string to clear a side: `ccmux config set columns.row2.left ""`.
 | `pr`      | `short`/`full`        | `full`       | Open PRs for the branch (`#25`/`PR #25`)                                                 |
 
 The `project` cell reads `path:branch`, and a session running in a git worktree marks it twice: the branch gains a trailing `+` (also on the standalone `branch` column), and the path is replaced by `<repo>/<worktree>` — `ccmux/parking` rather than the `worktrees/parking` the directory happens to spell, so worktrees of different repos stay distinguishable. Both survive the `dirname` mode, since they are identity rather than path context; when the cell is too narrow for both, the repo yields before the worktree's own name does.
+
+### Wrapped prompt block
+
+`promptLines` renders the last prompt as a wrapped block of up to N lines, between the identity row and row 2 — the same text the one-line `prompt` column shows, given room to actually be read.
+
+```bash
+ccmux config set promptLines 3          # picker and sidebar
+ccmux config set sidebar.promptLines 4  # sidebar only
+```
+
+`0` (the default) disables it; the cap is 10. Turning it on removes the `prompt` cell from both rows rather than printing the same text twice, and `promptDisplay: "off"` (the <kbd>p</kbd> key) still hides it. While a search is active the block yields to the one-line `prompt` cell, so the match highlights and the `[pane]`/`[transcript]`/`[cwd]` source tag stay visible; a rail too narrow for a readable wrap keeps the cell for the same reason. A session with no prompt gets no extra lines. The preview pane already shows the selected row's full last prompt, so the block earns its keep mostly in the sidebar. The block is wrapped and measured before layout, so a row's reported height and its drawn lines are always the same number — the scroll and row-menu geometry stay exact at any height.
 
 Defaults: `row1.left` is `index, status, project` (status badge widens icon→short→full as the terminal grows). `row1.right` cascades by breakpoint: just `pane` below `xs`, then `agent:short, pane` at `xs`, `agent:short, pane, time` at `sm`, and `agent:full, version, pane, time` at `md`+. The `prompt` and `pr` cells are configured on `row2`, but `promptDisplay` (default `inline`, cycled live by <kbd>p</kbd>) controls how they render: `inline` flattens them onto `row1` so each session stays a single line, `row2` gives the prompt its own line with `pr` at the right edge, and `off` hides both. Sessions with no prompt stay single-line in `inline` mode; in `row2` mode the second line still appears when another row-2 field (such as an open PR) has data.
 

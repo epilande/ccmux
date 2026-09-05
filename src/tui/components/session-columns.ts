@@ -482,6 +482,61 @@ export function rowHasPrompt(row: ResolvedRow): boolean {
   );
 }
 
+/**
+ * Drop every `prompt` cell from both rows, leaving the rest of each row
+ * intact — unlike `stripPrompt`, which also clears row 2 wholesale because
+ * `promptDisplay: "off"` means "no prompt anywhere, collapse the row".
+ *
+ * Used when the wrapped prompt block is DRAWN: the block IS the prompt, so a
+ * `prompt` column alongside it would print the same text twice. Whenever the
+ * block yields instead (a search is active, `promptDisplay: "off"`, or a rail
+ * too narrow for a readable block), the one-line cell comes back.
+ */
+export function withoutPrompt(cols: ResolvedColumns): ResolvedColumns {
+  const drop = (entries: ResolvedEntry[]) =>
+    entries.filter((e) => e.field !== "prompt");
+  return {
+    row1: { left: drop(cols.row1.left), right: drop(cols.row1.right) },
+    row2: { left: drop(cols.row2.left), right: drop(cols.row2.right) },
+  };
+}
+
+/** Columns the wrapped prompt block is inset from the row's left edge, so it
+ *  reads as belonging to the row above rather than as a row of its own. */
+export const PROMPT_BLOCK_INDENT = 2;
+
+/**
+ * One shared array for every row that has no block, so a row whose block is
+ * off never re-keys the `<For>` that draws it on an identity-only change.
+ */
+export const EMPTY_PROMPT_BLOCK: string[] = [];
+
+/**
+ * Narrowest block worth drawing. Below this the wrap is more hyphen-less
+ * word fragment than prose, so the caller drops the block and lets the
+ * one-line `prompt` cell have the row instead.
+ */
+export const PROMPT_BLOCK_MIN_WIDTH = 8;
+
+/**
+ * Usable width for the wrapped prompt block at a given row width.
+ *
+ * Shared so the wrap and the box it is drawn in cannot be computed from two
+ * different ideas of the geometry — a disagreement here is an off-by-one in
+ * the row height, which the scroll math would then carry into every row
+ * below it.
+ *
+ * Reports the REAL width, which on a very narrow rail can be tiny or even
+ * negative; clamping it up would wrap to a width wider than the box it is
+ * drawn in. Callers compare against {@link PROMPT_BLOCK_MIN_WIDTH} and skip
+ * the block entirely rather than draw one that cannot fit.
+ */
+export function promptBlockWidth(totalWidth: number): number {
+  const PADDING = 2; // the item's own paddingLeft + paddingRight
+  const SCROLLBAR = 3; // the scrollbox gutter the terminal width hides
+  return totalWidth - PADDING - PROMPT_BLOCK_INDENT - SCROLLBAR;
+}
+
 /** Max rendered width of an attention label before it is ellipsized. */
 export const ATTENTION_LABEL_MAX = 12;
 

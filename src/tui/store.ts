@@ -647,6 +647,7 @@ interface TUIState {
    *  an in-process memory would never be read again. */
   lastSpawnAgent: string | null;
   columns?: ColumnsConfig;
+  promptLines?: number;
   breakpoints?: BreakpointConfig;
   groupBy: GroupBy;
   hideIdle: boolean;
@@ -658,6 +659,7 @@ interface TUIStoreOptions {
   iconStyle?: IconStyle;
   previewWidth?: number;
   columns?: ColumnsConfig;
+  promptLines?: number;
   breakpoints?: BreakpointConfig;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
@@ -974,6 +976,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     newSession: null,
     lastSpawnAgent: options.lastSpawnAgent ?? null,
     columns: options.columns,
+    promptLines: options.promptLines,
     breakpoints: options.breakpoints,
     groupBy: options.groupBy ?? DEFAULT_GROUP_BY,
     hideIdle: options.hideIdle ?? false,

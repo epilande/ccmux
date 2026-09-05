@@ -1,6 +1,7 @@
 import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { AgentDef } from "../lib/agents";
+import { CLIENT_TTY_PATTERN } from "../lib/tmux-client";
 import {
   isUntrackedMode,
   UNTRACKED_MODES,
@@ -89,15 +90,10 @@ export function normalizeTarget(
 }
 
 /**
- * The only accepted shape for a tmux client tty (`callerTty`). tmux reports
- * `#{client_tty}` as an absolute device path (`/dev/ttys004` on macOS,
- * `/dev/pts/3` on Linux), and the value travels straight into a tmux argv, so
- * anything outside that shape is a caller mistake worth naming rather than a
- * flag to hand to tmux.
+ * Validate a wire tmux-client-tty field (`callerTty`). Anything outside the
+ * accepted shape is a caller mistake worth naming rather than a flag to hand
+ * to tmux.
  */
-export const CLIENT_TTY_PATTERN = /^\/dev\/[A-Za-z0-9._/-]{1,64}$/;
-
-/** Validate a wire tmux-client-tty field (`callerTty`). */
 export function normalizeClientTty(
   value: unknown,
   field = "callerTty",

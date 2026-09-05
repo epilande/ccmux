@@ -64,6 +64,9 @@ describe("performJump: terminal activation", () => {
       "/dev/ttys002",
       "-E",
       "/bin/ccmux",
+      // The picker inside a popup cannot ask tmux who invoked it: pass it in.
+      "--client-tty",
+      "/dev/ttys002",
     ]);
     expect(events).toEqual(["spawn:display-popup", "activate"]);
   });

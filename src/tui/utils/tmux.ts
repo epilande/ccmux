@@ -5,7 +5,14 @@ import {
 } from "../../lib/config";
 import { PANE_FIELD_SEP } from "../../lib/tmux-format";
 import { tmuxArgv, tmuxShellPrefix } from "../../lib/tmux-exec";
+import {
+  resolvePinnedTmuxClientTty,
+  resolveTmuxClientSessionId,
+  type ClientTtyRefusal,
+} from "../../lib/tmux-client";
 import { theme } from "../theme";
+
+export { switchToPane } from "./client-switch";
 
 /**
  * Capture a pane's visible content. THROWS on failure (spawn error or non-zero
@@ -37,20 +44,6 @@ export async function capturePane(
     );
   }
   return output;
-}
-
-export async function switchToPane(target: string): Promise<boolean> {
-  try {
-    const proc = Bun.spawn(tmuxArgv("switch-client", "-t", target), {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    const exitCode = await proc.exited;
-    return exitCode === 0;
-  } catch {
-    return false;
-  }
 }
 
 const SPECIAL_KEY_MAP: Record<string, string> = {
@@ -220,7 +213,36 @@ export function parseWindowIdByName(
   return null;
 }
 
-export type OpenAgentsResult = { ok: true } | { ok: false; error: string };
+/** Why nobody was moved to the window that is now up. `"no-client-tty"`: we
+ *  never captured a client tty to name. `"switch-failed"`: we had one and
+ *  tmux refused the `switch-client` (a stale tty, most often a client that
+ *  detached since capture). The two blame different things, so the caller
+ *  must not collapse them into one message. */
+export type ClientSwitchMiss = "no-client-tty" | "switch-failed";
+
+/**
+ * The window is up. `clientSwitched` is false when nobody was moved to it,
+ * i.e. the window exists but the user is still looking at wherever they were,
+ * and `reason` says why: the caller must say so rather than exiting as if the
+ * jump happened.
+ */
+export type OpenAgentsResult =
+  | { ok: true; clientSwitched: true }
+  | { ok: true; clientSwitched: false; reason: ClientSwitchMiss }
+  | { ok: false; error: string };
+
+/** The two resolver refusals that stop a launch before it creates anything.
+ *  `"no-client"` is not among them: with nobody to move, an untargeted window
+ *  is still the right outcome. */
+const WINDOW_LAUNCH_REFUSAL: Record<
+  Exclude<ClientTtyRefusal, "no-client">,
+  string
+> = {
+  "malformed-capture":
+    "captured client tty is malformed, check the tmux binding in the README",
+  "legacy-popup":
+    "no client tty was passed to this popup and several clients are attached, update the tmux binding (see README)",
+};
 
 /**
  * Roster short ids are hex in practice, but they arrive from Claude's
@@ -279,6 +301,30 @@ export async function openAgentAttachWindow(
   );
 }
 
+/** The `@N` of the window with this name, or null when tmux has none (or
+ *  could not be asked). Shared by the dedupe lookup and the post-switch
+ *  re-query, which ask tmux the same question for different reasons. A failed
+ *  query answers "gone", which falls through to spawn: an unreachable tmux
+ *  must not turn into a permanent refusal to open the window. */
+async function findWindowIdByName(windowName: string): Promise<string | null> {
+  try {
+    const list = Bun.spawn(
+      tmuxArgv(
+        "list-windows",
+        "-a",
+        "-F",
+        ["#{window_id}", "#{window_name}"].join(PANE_FIELD_SEP),
+      ),
+      { stdout: "pipe", stderr: "ignore" },
+    );
+    const out = await new Response(list.stdout).text();
+    if ((await list.exited) !== 0) return null;
+    return parseWindowIdByName(out, windowName);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Switch to an existing window with the given name if one is live, else spawn
  * one (cwd = the row's cwd) running `command` and switch to it. The command
@@ -291,6 +337,40 @@ export async function openAgentAttachWindow(
  * and the next launch would switch to that dead shell instead of
  * relaunching. The paneless analog of pane click-through for
  * `trackingMode:"background"` rows.
+ *
+ * Every `switch-client` here names its client with `-c`, from the same
+ * resolver `switchToPane` uses. A bare `switch-client` falls through to tmux's
+ * `cmd_find_best_client`, which returns the most-recently-active client of any
+ * session, and a popup's own keystrokes never advance its client's activity
+ * time: with two clients attached, one keypress on the other one is enough to
+ * make a bare switch yank a terminal the user never touched. A switch tmux
+ * REFUSES reports `clientSwitched: false` with its reason, never a jump that
+ * did not happen.
+ *
+ * What the resolver answers decides the whole shape of the launch, so it runs
+ * FIRST, before the dedupe listing and before anything is created:
+ *  - A tty, captured or guessed: the window is placed in that client's session
+ *    and the pinned switch moves it.
+ *  - A malformed capture, or a legacy popup binding with several clients
+ *    attached: REFUSE with `ok: false` and create nothing. Both mean the tty
+ *    we would act on names the wrong terminal, and an untargeted window plus
+ *    an unpinned switch is exactly the cross-session yank this path exists to
+ *    remove. A toast the user can act on beats a silent fallback.
+ *  - No client at all (nothing captured, tmux names none): open the window
+ *    untargeted and move NOBODY, reporting `no-client-tty`. There is no client
+ *    to misplace it relative to, and none to move into it.
+ *
+ * The `new-window` is `-d` and targeted at the resolved client's session.
+ * Left to itself tmux picks the most-recently-active session, which inside a
+ * popup is whichever terminal typed last: without `-d` that client's view
+ * jumps to a window it never asked for, and without `-t` the window is born in
+ * that client's session, so our own switch lands us inside it. Targeted and
+ * detached, nothing moves until the pinned `switch-client` runs, and a bare
+ * pane id there selects the session, window and pane together.
+ * `resolveTmuxClientSessionId` supplies that target, and its doc comment covers
+ * why the session has to be read off an untargeted `list-clients`. When it
+ * cannot answer for a tty we DID resolve, the launch refuses and creates
+ * nothing, for the same reason as above.
  */
 async function openDedupedCommandWindow(
   windowName: string,
@@ -304,36 +384,60 @@ async function openDedupedCommandWindow(
     return { ok: false, error: "not inside tmux" };
   }
   try {
-    const list = Bun.spawn(
-      tmuxArgv(
-        "list-windows",
-        "-a",
-        "-F",
-        ["#{window_id}", "#{window_name}"].join(PANE_FIELD_SEP),
-      ),
-      { stdout: "pipe", stderr: "ignore" },
-    );
-    const listOut = await new Response(list.stdout).text();
-    const existing =
-      (await list.exited) === 0
-        ? parseWindowIdByName(listOut, windowName)
-        : null;
+    // Before the listing: a refusal here must not have created or even looked
+    // for anything. The raw captured value stays out of the message because it
+    // is arbitrary text.
+    const resolved = await resolvePinnedTmuxClientTty();
+    if (resolved.tty === null && resolved.refusal !== "no-client") {
+      return { ok: false, error: WINDOW_LAUNCH_REFUSAL[resolved.refusal] };
+    }
+    const clientTty = resolved.tty;
+    const existing = await findWindowIdByName(windowName);
     if (existing) {
-      const switchProc = Bun.spawn(tmuxArgv("switch-client", "-t", existing), {
-        stdout: "ignore",
-        stderr: "ignore",
-      });
-      if ((await switchProc.exited) === 0) return { ok: true };
-      // Window vanished between list and switch: fall through and spawn.
+      if (!clientTty)
+        return { ok: true, clientSwitched: false, reason: "no-client-tty" };
+      const switchProc = Bun.spawn(
+        tmuxArgv("switch-client", "-c", clientTty, "-t", existing),
+        { stdout: "ignore", stderr: "ignore" },
+      );
+      if ((await switchProc.exited) === 0) {
+        return { ok: true, clientSwitched: true };
+      }
+      // A failed switch used to mean one thing (the window vanished between
+      // list and switch) and now means two: a stale captured tty fails the
+      // same way. Ask again before spawning, or a broken binding would defeat
+      // the name dedupe and open a second window on every activation.
+      if ((await findWindowIdByName(windowName)) !== null) {
+        return { ok: true, clientSwitched: false, reason: "switch-failed" };
+      }
+      // Window really is gone: fall through and spawn.
     }
 
+    // Fail closed. Dropping `-t` here would put the window wherever tmux
+    // likes, which is the cross-session placement this path exists to remove,
+    // and whatever broke the lookup (a stale tty, an unreachable tmux) breaks
+    // the pinned switch too. The user would get a "switch failed" toast plus a
+    // window in somebody else's session. Better to create nothing and say so.
+    let placement: string[] = [];
+    if (clientTty) {
+      const sessionId = await resolveTmuxClientSessionId(clientTty);
+      if (!sessionId) {
+        return {
+          ok: false,
+          error: `no tmux session found for client ${clientTty}`,
+        };
+      }
+      placement = ["-t", sessionId];
+    }
     const spawn = Bun.spawn(
       tmuxArgv(
         "new-window",
+        "-d",
         "-n",
         windowName,
         "-c",
         cwd,
+        ...placement,
         "-P",
         "-F",
         "#{pane_id}",
@@ -347,13 +451,25 @@ async function openDedupedCommandWindow(
     }
     const paneId = (await new Response(spawn.stdout).text()).trim();
 
-    // new-window already selects within its session; switch-client covers
-    // the popup / other-session contexts (same approach as switchToPane).
-    await Bun.spawn(tmuxArgv("switch-client", "-t", paneId), {
-      stdout: "ignore",
-      stderr: "ignore",
-    }).exited;
-    return { ok: true };
+    // `-d` means nothing is selected anywhere yet, so this switch is the whole
+    // jump: pinned to the resolved client, and given a bare pane id, which
+    // tmux resolves to its session, window and pane together. With no client
+    // we leave the window detached rather than move one the user never
+    // touched, for the reason in this function's header.
+    if (!clientTty)
+      return { ok: true, clientSwitched: false, reason: "no-client-tty" };
+    const switchFresh = Bun.spawn(
+      tmuxArgv("switch-client", "-c", clientTty, "-t", paneId),
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    // The window exists either way, so this is never an error. A stale
+    // captured tty fails here exactly as it does on the existing-window path,
+    // and the caller has to hear about it instead of exiting over a jump that
+    // did not happen.
+    if ((await switchFresh.exited) !== 0) {
+      return { ok: true, clientSwitched: false, reason: "switch-failed" };
+    }
+    return { ok: true, clientSwitched: true };
   } catch (err) {
     return {
       ok: false,
@@ -362,13 +478,29 @@ async function openDedupedCommandWindow(
   }
 }
 
-/** Notify the daemon about the active pane so all TUI clients stay in sync. */
-export function notifyActivePane(paneId: string): void {
-  fetch(`${getDaemonUrl()}/active-pane`, {
+/** Long enough for a local daemon to answer, short enough that a wedged one
+ *  costs the user half a second. */
+const ACTIVE_PANE_TIMEOUT_MS = 500;
+
+/** Notify the daemon about the active pane so all TUI clients stay in sync.
+ *  Never rejects. The promise is returned for the one caller that exits right
+ *  after (the one-shot picker), where an unawaited fetch would be killed
+ *  before it left the process; everyone else can ignore it.
+ *
+ *  Bounded because that caller AWAITS it: a daemon that accepts the connection
+ *  and never answers (mid-restart, wedged) would otherwise hold the picker
+ *  open after the user has already been switched away. A timeout rejects, and
+ *  the catch turns it back into a resolve: this is advisory, and nothing it
+ *  reports is worth a visible failure. */
+export function notifyActivePane(paneId: string): Promise<void> {
+  return fetch(`${getDaemonUrl()}/active-pane`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ paneId }),
-  }).catch(() => {});
+    signal: AbortSignal.timeout(ACTIVE_PANE_TIMEOUT_MS),
+  })
+    .then(() => {})
+    .catch(() => {});
 }
 
 /**

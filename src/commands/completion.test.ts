@@ -270,6 +270,7 @@ describe("completeWords: dynamic values", () => {
     expect(values(await complete("config", "get", "side"))).toEqual([
       "sidebar.width",
       "sidebar.position",
+      "sidebar.promptLines",
     ]);
     expect(values(await complete("config", "set", "theme", ""))).toContain(
       "dracula",

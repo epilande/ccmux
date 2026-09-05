@@ -25,6 +25,7 @@ interface TUIOptions {
   iconStyle?: IconStyle;
   previewWidth?: number;
   columns?: ColumnsConfig;
+  promptLines?: number;
   breakpoints?: BreakpointConfig;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
@@ -139,6 +140,7 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
         iconStyle={options.iconStyle}
         previewWidth={options.previewWidth}
         columns={options.columns}
+        promptLines={options.promptLines}
         breakpoints={options.breakpoints}
         searchPaneContent={options.searchPaneContent}
         searchPaneLines={options.searchPaneLines}

@@ -1,5 +1,5 @@
 import type { Component } from "solid-js";
-import { createMemo, For, Show } from "solid-js";
+import { createMemo, For, Index, Show } from "solid-js";
 import { useTick } from "../store";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { MouseButton, type MouseEvent } from "@opentui/core";
@@ -37,6 +37,8 @@ import {
   trailingLabelsWidth,
   fitProjectCell,
   ATTENTION_LABEL_MAX,
+  PROMPT_BLOCK_INDENT,
+  EMPTY_PROMPT_BLOCK,
 } from "./session-columns";
 import { theme } from "../theme";
 import type { MatchSource } from "../utils/grouping";
@@ -79,6 +81,12 @@ interface SessionItemProps {
   isActiveSession?: boolean;
   /** Pre-resolved layout shared by every row (computed in SessionList). */
   layout?: ResolvedColumns;
+  /**
+   * The wrapped prompt block, already measured by SessionList — the row draws
+   * these lines verbatim and reports its height as their count, so the two
+   * cannot drift. Absent (or empty) when the block is off.
+   */
+  promptBlock?: string[];
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   dimmed?: boolean;
@@ -1032,20 +1040,27 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   const row1 = createMemo(() => columns().row1);
   const row2 = createMemo(() => filterRow(columns().row2));
 
+  // The lines SessionList already wrapped and measured this row by. Rendering
+  // anything other than exactly these would desync the scroll math, so the
+  // row never re-wraps — it only draws what it was handed.
+  // The shared empty array rather than a fresh `[]`, so a row with no block
+  // reads the same reference every time and the `<For>` below stays still.
+  const promptBlock = () => props.promptBlock ?? EMPTY_PROMPT_BLOCK;
+  const rowHeight = () => 1 + (row2HasContent() ? 1 : 0) + promptBlock().length;
+
   return (
-    <box width="100%" height={row2HasContent() ? 2 : 1} flexDirection="column">
+    <box width="100%" height={rowHeight()} flexDirection="column">
       <Show when={props.isActiveSession}>
         <box
           position="absolute"
           left={0}
           top={0}
           width={1}
-          height={row2HasContent() ? 2 : 1}
+          height={rowHeight()}
         >
-          <text fg={agentColor()}>▎</text>
-          <Show when={row2HasContent()}>
-            <text fg={agentColor()}>▎</text>
-          </Show>
+          <Index each={Array.from({ length: rowHeight() })}>
+            {() => <text fg={agentColor()}>▎</text>}
+          </Index>
         </box>
       </Show>
       <box
@@ -1068,6 +1083,14 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
           showAttention
           attentionWidth={attentionWidth()}
         />
+        <For each={promptBlock()}>
+          {(line) => (
+            <box flexDirection="row">
+              <box width={PROMPT_BLOCK_INDENT} flexShrink={0} />
+              <text fg={dimColor(ctx, theme.overlay)}>{line}</text>
+            </box>
+          )}
+        </For>
         <Show when={row2HasContent()}>
           <RowRender
             row={row2()}

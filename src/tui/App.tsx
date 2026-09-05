@@ -48,8 +48,10 @@ import {
   openAgentsWindow,
   openAgentAttachWindow,
   resolveLaunchPane,
+  type ClientSwitchMiss,
   type OpenAgentsResult,
 } from "./utils/tmux";
+import type { SwitchToPaneResult } from "./utils/client-switch";
 import { tmuxArgv } from "../lib/tmux-exec";
 import { isSameServerCached, setDaemonSocketPath } from "./utils/server-guard";
 import { useSharedTerminalDimensions } from "./utils/use-shared-dimensions";
@@ -124,11 +126,16 @@ import { createIdleGcScheduler } from "./utils/idle-gc";
 import { setSpinnerPaused } from "./utils/useStatusIcon";
 import { markStartup, reportStartup } from "../lib/startup-timing";
 
+/** Long enough to read a sentence that sends the user to the README. The
+ *  legacy-popup refusal is the only warning a user on the old binding gets. */
+const LEGACY_BINDING_TOAST_MS = 6000;
+
 interface AppProps {
   initialPreview?: boolean;
   iconStyle?: IconStyle;
   previewWidth?: number;
   columns?: ColumnsConfig;
+  promptLines?: number;
   breakpoints?: BreakpointConfig;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
@@ -206,6 +213,38 @@ const SPAWN_SPLIT: Record<NewSessionPlacement, "h" | "v" | false> = {
   "split-v": "v",
 };
 
+/** One message per reason a background launch moved nobody. Keyed rather than
+ *  branched so a new miss reason cannot silently inherit another's blame.
+ *  Neither of these blames a binding: the launch refuses outright when the
+ *  binding is the problem (see `openDedupedCommandWindow`). */
+const CLIENT_SWITCH_MISS_TOAST: Record<
+  ClientSwitchMiss,
+  (label: string) => string
+> = {
+  "no-client-tty": (label) =>
+    `${label}: window opened, but no tmux client to switch`,
+  "switch-failed": (label) =>
+    `${label}: window opened, but the client could not be switched to it`,
+};
+
+/** One message per way an Enter can fail to move the user, for the same reason
+ *  the map above is keyed: only two of these are a binding's fault, and
+ *  "no-client" reaches sidebars and plain panes that have no binding at all. */
+const SWITCH_REFUSAL_TOAST: Record<
+  Exclude<SwitchToPaneResult, true>,
+  { text: string; ms?: number }
+> = {
+  "malformed-capture": {
+    text: "Cannot switch: the captured client tty is malformed, check the tmux binding in the README",
+  },
+  "legacy-popup": {
+    text: "Cannot switch: this popup was given no client tty and several clients are attached, update the tmux binding (see README)",
+    ms: LEGACY_BINDING_TOAST_MS,
+  },
+  "no-client": { text: "Cannot switch: no tmux client found" },
+  "switch-failed": { text: "Failed to switch: pane or client unavailable" },
+};
+
 export function App(props: AppProps) {
   const renderer = useRenderer();
   /** The viewport, for the handful of key handlers that have to agree with
@@ -223,6 +262,7 @@ export function App(props: AppProps) {
     iconStyle: props.iconStyle,
     previewWidth: props.previewWidth,
     columns: props.columns,
+    promptLines: props.promptLines,
     breakpoints: props.breakpoints,
     searchPaneContent: props.searchPaneContent,
     searchPaneLines: props.searchPaneLines,
@@ -269,20 +309,24 @@ export function App(props: AppProps) {
 
   function selectPane(pane: string) {
     if (!ensureSameServer()) return;
-    notifyActivePane(pane);
-    if (props.persistent || props.sidebar) {
-      flashPane(pane);
-    } else {
-      flashPaneDetached(pane);
-    }
-    switchToPane(pane).then((ok) => {
-      if (!ok) {
-        // Pane is gone (daemon holds the stale row until its liveness sweep).
-        // Surface it instead of exiting the one-shot picker as if it worked.
-        store.actions.showToast("Failed to switch: pane is gone");
+    switchToPane(pane).then(async (result) => {
+      if (result !== true) {
+        // Surface refusal/failure instead of exiting the picker as if it
+        // worked. Nothing has been flashed or marked active yet: a refused
+        // Enter used to leave both behind and then say nothing happened.
+        const toast = SWITCH_REFUSAL_TOAST[result];
+        store.actions.showToast(toast.text, toast.ms);
         return;
       }
-      if (!props.persistent && !props.sidebar) process.exit(0);
+      const notified = notifyActivePane(pane);
+      if (props.persistent || props.sidebar) {
+        flashPane(pane);
+        return;
+      }
+      flashPaneDetached(pane);
+      // The daemon call is a fetch; exiting first would kill it in flight.
+      await notified;
+      process.exit(0);
     });
   }
 
@@ -329,7 +373,8 @@ export function App(props: AppProps) {
    * Shared exit semantics for the background launchers (per-agent attach and
    * the global agent view). Mirrors selectPane: the picker exits after
    * switching, the sidebar/persistent board stays. On failure, stay and
-   * surface a toast.
+   * surface a toast. A window that opened without moving anyone is not a
+   * failure, but it is not a jump either: it toasts its own reason and stays.
    */
   function launchBackgroundWindow(
     label: string,
@@ -341,6 +386,12 @@ export function App(props: AppProps) {
       backgroundLaunchInFlight = false;
       if (!result.ok) {
         store.actions.showToast(`${label} failed: ${result.error}`);
+        return;
+      }
+      if (!result.clientSwitched) {
+        // The window is up but nobody was moved to it. Exiting here would
+        // close the picker over a jump that did not happen.
+        store.actions.showToast(CLIENT_SWITCH_MISS_TOAST[result.reason](label));
         return;
       }
       if (!props.persistent && !props.sidebar) process.exit(0);
@@ -4045,6 +4096,11 @@ export function App(props: AppProps) {
             activePaneId={store.state.activePaneId}
             activeSessionId={store.state.activeSessionId}
             columns={store.state.columns}
+            promptLines={store.state.promptLines}
+            // The same "a query is narrowing the list" the flat items are
+            // built from, so the block yields exactly when rows carry
+            // highlights to show instead.
+            searchActive={store.state.searchQuery.trim().length > 0}
             breakpoints={store.state.breakpoints}
             dimmed={store.state.previewFocused}
             sidebar={props.sidebar}

@@ -2,8 +2,7 @@ import type { Component } from "solid-js";
 import { createMemo, For } from "solid-js";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { MouseButton } from "@opentui/core";
-import { truncateText } from "../utils/format";
-import { wrapText } from "./NewSessionDialog";
+import { truncateText, wrapText } from "../utils/format";
 import { theme } from "../theme";
 
 const MAX_WIDTH = 72;

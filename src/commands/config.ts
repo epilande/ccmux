@@ -8,6 +8,7 @@ import {
   VALID_REVIEW_HANDBACK,
   BREAKPOINT_NAMES,
   COLUMN_FIELDS,
+  MAX_PROMPT_LINES,
   VALID_NOTIFICATION_BACKENDS,
   VALID_NOTIFICATION_EVENTS,
   type BreakpointConfig,
@@ -71,6 +72,11 @@ export const KNOWN_KEYS: Record<
     parse: (v) => v,
     description: `Prompt display mode (${VALID_PROMPT_DISPLAYS.join(", ")}; default inline)`,
     choices: VALID_PROMPT_DISPLAYS,
+  },
+  promptLines: {
+    validate: (v) => isPromptLines(v),
+    parse: (v) => Number(v),
+    description: `Wrapped prompt block height in lines (0-${MAX_PROMPT_LINES}; 0 disables, the default). Replaces the one-line \`prompt\` column.`,
   },
   backgroundAgents: {
     validate: (v) => v === "true" || v === "false",
@@ -152,6 +158,12 @@ export const KNOWN_KEYS: Record<
   },
 };
 
+/** Shared by the top-level `promptLines` key and the `sidebar.` override. */
+function isPromptLines(v: string): boolean {
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 0 && n <= MAX_PROMPT_LINES;
+}
+
 /**
  * Every key `config set`/`config get` accept by exact name: the flat
  * KNOWN_KEYS plus the dotted sidebar and notifications leaves. The
@@ -163,6 +175,7 @@ export function completableConfigKeys(): string[] {
     ...Object.keys(KNOWN_KEYS),
     "sidebar.width",
     "sidebar.position",
+    "sidebar.promptLines",
     "notifications.enabled",
     "notifications.events",
     "notifications.sound",
@@ -376,9 +389,20 @@ export function createConfigCommand(): Command {
           await setPreferences({
             sidebar: { ...prefs.sidebar, position: value },
           });
+        } else if (sidebarKey === "promptLines") {
+          if (!isPromptLines(value)) {
+            console.error(
+              `Invalid sidebar promptLines (must be integer 0-${MAX_PROMPT_LINES})`,
+            );
+            process.exit(1);
+          }
+          const prefs = await getPreferences();
+          await setPreferences({
+            sidebar: { ...prefs.sidebar, promptLines: Number(value) },
+          });
         } else {
           console.error(`Unknown sidebar key: ${sidebarKey}`);
-          console.error("Valid sidebar keys: width, position");
+          console.error("Valid sidebar keys: width, position, promptLines");
           process.exit(1);
         }
         console.log(`${key} = ${value}`);
