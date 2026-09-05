@@ -298,10 +298,10 @@ export function App(props: AppProps) {
     } else {
       flashPaneDetached(pane);
     }
-    switchToPane(
-      pane,
-      props.legacyPopupBinding ? { refuseUncapturedGuess: true } : undefined,
-    ).then((result) => {
+    const switched = props.legacyPopupBinding
+      ? switchToPane(pane, { refuseUncapturedGuess: true })
+      : switchToPane(pane);
+    switched.then((result) => {
       if (result !== true) {
         // Surface refusal/failure instead of exiting the picker as if it worked.
         store.actions.showToast(
