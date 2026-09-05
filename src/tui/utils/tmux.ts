@@ -392,9 +392,11 @@ async function resolveClientSessionId(
  * the session has to be read off an untargeted `list-clients`. When it cannot
  * answer for a tty we DID capture, the launch REFUSES with `ok: false` and
  * creates nothing, because an untargeted window is the very placement bug this
- * is here to fix. Having no tty at all is the one case that still opens an
+ * is here to fix. An ABSENT capture is the one case that still opens an
  * untargeted window, and only because there is then no client to misplace it
- * relative to, and nobody to move into it.
+ * relative to, and nobody to move into it. A capture that is PRESENT but
+ * malformed refuses before any of this, since the binding named a client and
+ * got it wrong, and that is worth a toast rather than a silent fallback.
  */
 async function openDedupedCommandWindow(
   windowName: string,
@@ -422,7 +424,19 @@ async function openDedupedCommandWindow(
       (await list.exited) === 0
         ? parseWindowIdByName(listOut, windowName)
         : null;
-    const { tty: clientTty } = await resolvePinnedTmuxClientTty();
+    const { tty: clientTty, captured } = await resolvePinnedTmuxClientTty();
+    // A capture that failed validation is NOT the same as no capture: the
+    // binding tried to name a client and got it wrong. Falling through would
+    // either switch nobody while claiming none was captured, or open an
+    // untargeted window, and both hide a broken binding the user can fix. The
+    // raw value stays out of the message because it is arbitrary text.
+    if (captured && !clientTty) {
+      return {
+        ok: false,
+        error:
+          "captured client tty is malformed, check the tmux binding in the README",
+      };
+    }
     if (existing) {
       if (!clientTty)
         return { ok: true, clientSwitched: false, reason: "no-client-tty" };

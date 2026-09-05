@@ -273,6 +273,23 @@ const clientList = (tty: string, sessionId: string) =>
     [tty, sessionId].join(PANE_FIELD_SEP),
   ].join("\n") + "\n";
 
+/** Mirrors `withClientTty` in client-switch.test.ts: the env var is
+ *  process-wide, so every test that sets it has to put it back. The flag slot
+ *  is the caller's to set, since the point of some of these is which one wins. */
+async function withClientTtyEnv<T>(
+  value: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = process.env.CCMUX_CLIENT_TTY;
+  process.env.CCMUX_CLIENT_TTY = value;
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) delete process.env.CCMUX_CLIENT_TTY;
+    else process.env.CCMUX_CLIENT_TTY = previous;
+  }
+}
+
 /** Both the flag slot and the env var have to be clear for the fallback
  *  cases, and put back for everything else in the suite. */
 function withNoCapturedTty<T>(run: () => Promise<T>): Promise<T> {
@@ -591,6 +608,86 @@ describe("openDedupedCommandWindow client pinning", () => {
         "new-window",
         "switch-client",
       ]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  // A malformed capture means the binding named a client and got it wrong.
+  // Treating it as "no capture" would either open an untargeted window or
+  // toast that nothing was captured, both of which hide the broken binding.
+  const MALFORMED =
+    "captured client tty is malformed, check the tmux binding in the README";
+
+  it("refuses a malformed --client-tty flag rather than opening a window", async () => {
+    const stubs = withTmuxStubs([{ stdout: "" }]);
+    try {
+      setPinnedTmuxClientTty("bogus");
+      const result = await openAgentsWindow("/tmp/proj");
+
+      expect(result).toEqual({ ok: false, error: MALFORMED });
+      // No display-message fallback either: a bad capture is never replaced by
+      // tmux's own guess, which inside a popup is the wrong client.
+      expect(stubs.calls.map((argv) => argv[1])).toEqual(["list-windows"]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("refuses a malformed flag even when the window already exists", async () => {
+    const stubs = withTmuxStubs([
+      { stdout: windowRow("@2", AGENTS_WINDOW_NAME) },
+    ]);
+    try {
+      setPinnedTmuxClientTty("bogus");
+      const result = await openAgentsWindow("/tmp/proj");
+
+      expect(result).toEqual({ ok: false, error: MALFORMED });
+      expect(stubs.calls.map((argv) => argv[1])).toEqual(["list-windows"]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("refuses a malformed CCMUX_CLIENT_TTY with no flag set", async () => {
+    const stubs = withTmuxStubs([{ stdout: "" }]);
+    try {
+      setPinnedTmuxClientTty(undefined);
+      const result = await withClientTtyEnv("bogus", () =>
+        openAgentsWindow("/tmp/proj"),
+      );
+
+      expect(result).toEqual({ ok: false, error: MALFORMED });
+      expect(stubs.calls.map((argv) => argv[1])).toEqual(["list-windows"]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("lets a valid flag win over a malformed environment value", async () => {
+    const stubs = withTmuxStubs([
+      { stdout: "" },
+      { stdout: clientList("/dev/ttys005", "$3") },
+      { stdout: "%9\n" },
+      {},
+    ]);
+    try {
+      setPinnedTmuxClientTty("/dev/ttys005");
+      const result = await withClientTtyEnv("bogus", () =>
+        openAgentsWindow("/tmp/proj"),
+      );
+
+      expect(result).toEqual({ ok: true, clientSwitched: true });
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-windows",
+        "list-clients",
+        "new-window",
+        "switch-client",
+      ]);
+      // The flag's session, not a refusal and not the env's bogus value.
+      const newWindow = stubs.calls[2] ?? [];
+      const target = newWindow.indexOf("-t");
+      expect(newWindow[target + 1]).toBe("$3");
     } finally {
       stubs.restore();
     }
