@@ -45,11 +45,7 @@ mock.module("./utils/sse", () => ({
 }));
 
 const switchToPaneSpy = mock(
-  async (
-    _target: string,
-    opts?: { refuseUncapturedGuess?: boolean },
-  ): Promise<SwitchToPaneResult> =>
-    opts?.refuseUncapturedGuess ? "client-unavailable" : true,
+  async (_target: string): Promise<SwitchToPaneResult> => true,
 );
 const sendKeysSpy = mock(
   async (
@@ -59,6 +55,9 @@ const sendKeysSpy = mock(
 );
 const flashPaneSpy = mock(() => {});
 const flashPaneDetachedSpy = mock(() => {});
+// Assertable because a refused switch must not mark the pane active
+// daemon-wide: the real one is a fetch to the daemon.
+const notifyActivePaneSpy = mock(async () => {});
 const isPaneInCurrentWindowSpy = mock(async () => true);
 const openAgentAttachWindowSpy = mock(
   async (): Promise<OpenAgentsResult> => ({
@@ -90,7 +89,7 @@ mock.module("./utils/tmux", () => ({
   flashPaneDetached: flashPaneDetachedSpy,
   isPaneInCurrentWindow: isPaneInCurrentWindowSpy,
   selectPane: async () => true,
-  notifyActivePane: () => {},
+  notifyActivePane: notifyActivePaneSpy,
   openAgentAttachWindow: openAgentAttachWindowSpy,
   openAgentsWindow: openAgentsWindowSpy,
   resolveLaunchPane: resolveLaunchPaneSpy,
@@ -210,14 +209,12 @@ let setup: Setup;
 beforeEach(() => {
   sseCallbacks = null;
   switchToPaneSpy.mockClear();
-  switchToPaneSpy.mockImplementation(
-    async (_target: string, opts?: { refuseUncapturedGuess?: boolean }) =>
-      opts?.refuseUncapturedGuess ? "client-unavailable" : true,
-  );
+  switchToPaneSpy.mockImplementation(async (_target: string) => true);
   sendKeysSpy.mockClear();
   sendKeysSpy.mockImplementation(async () => true);
   flashPaneSpy.mockClear();
   flashPaneDetachedSpy.mockClear();
+  notifyActivePaneSpy.mockClear();
   isPaneInCurrentWindowSpy.mockClear();
   isPaneInCurrentWindowSpy.mockImplementation(async () => true);
   openAgentAttachWindowSpy.mockClear();
@@ -937,7 +934,7 @@ describe("App sidebar mode", () => {
       await setup.renderOnce();
 
       expect(squish(setup.captureCharFrame())).toContain(
-        squish("no captured client tty to switch"),
+        squish("window opened, but no tmux client to switch"),
       );
       expect(exitSpy).not.toHaveBeenCalled();
     } finally {
@@ -971,33 +968,11 @@ describe("App sidebar mode", () => {
 
       const frame = squish(setup.captureCharFrame());
       expect(frame).toContain(squish("could not be switched"));
-      expect(frame).not.toContain(squish("no captured client tty"));
+      expect(frame).not.toContain(squish("no tmux client to switch"));
       expect(exitSpy).not.toHaveBeenCalled();
     } finally {
       process.exit = originalExit;
     }
-  });
-
-  it("hints once when the launcher detected a legacy popup binding", async () => {
-    // The prop is picker-only (`ccmux sidebar` never sets it); sidebar mode is
-    // borrowed here just for the Toast, same as the launcher tests above.
-    await renderApp(80, 20, { sidebar: true, legacyPopupBinding: true });
-    sseCallbacks!.onInit([backgroundSession()], null);
-    await setup.renderOnce();
-
-    expect(squish(setup.captureCharFrame())).toContain(
-      squish("Your tmux binding"),
-    );
-  });
-
-  it("says nothing about the binding when the launcher found nothing wrong", async () => {
-    await renderApp(80, 20, { sidebar: true });
-    sseCallbacks!.onInit([backgroundSession()], null);
-    await setup.renderOnce();
-
-    expect(squish(setup.captureCharFrame())).not.toContain(
-      squish("Your tmux binding"),
-    );
   });
 
   it("ignores a second background activation while a launch is in flight", async () => {
@@ -1708,8 +1683,27 @@ describe("App pane-switch feedback and server scoping", () => {
     }
   });
 
-  it("one-shot picker: an unknown caller client is refused with a specific toast", async () => {
-    switchToPaneSpy.mockImplementation(async () => "client-unavailable");
+  it("one-shot picker: no tmux client at all is refused without blaming a binding", async () => {
+    // The sidebar and a plain pane reach this too, and neither was launched by
+    // a binding there is anything to fix.
+    switchToPaneSpy.mockImplementation(async () => "no-client");
+    const restoreFetch = withServerInfo(null);
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    try {
+      await renderWithSession();
+      await selectFirstRowAndEnter();
+      const frame = squish(setup.captureCharFrame());
+      expect(frame).toContain(squish("Cannot switch: no tmux client found"));
+      expect(frame).not.toContain(squish("binding"));
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      restoreExit();
+      restoreFetch();
+    }
+  });
+
+  it("one-shot picker: a malformed capture names the capture, not the absence of one", async () => {
+    switchToPaneSpy.mockImplementation(async () => "malformed-capture");
     const restoreFetch = withServerInfo(null);
     const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
@@ -1717,7 +1711,7 @@ describe("App pane-switch feedback and server scoping", () => {
       await selectFirstRowAndEnter();
       expect(squish(setup.captureCharFrame())).toContain(
         squish(
-          "Cannot switch: no captured client tty, check the tmux binding in the README",
+          "Cannot switch: the captured client tty is malformed, check the tmux binding in the README",
         ),
       );
       expect(exitSpy).not.toHaveBeenCalled();
@@ -1727,14 +1721,17 @@ describe("App pane-switch feedback and server scoping", () => {
     }
   });
 
-  it("one-shot picker: a successful pane switch exits the process", async () => {
-    // switchToPaneSpy defaults to true (beforeEach).
+  it("one-shot picker: a successful pane switch flashes, notifies and exits", async () => {
+    // switchToPaneSpy defaults to true (beforeEach). The visual and daemon-side
+    // feedback belongs to the success path only.
     const restoreFetch = withServerInfo(null);
     const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
       await renderWithSession();
       await selectFirstRowAndEnter();
       expect(switchToPaneSpy).toHaveBeenCalledWith("%5");
+      expect(notifyActivePaneSpy).toHaveBeenCalledWith("%5");
+      expect(flashPaneDetachedSpy).toHaveBeenCalledWith("%5");
       expect(exitSpy).toHaveBeenCalledWith(0);
     } finally {
       restoreExit();
@@ -1742,22 +1739,26 @@ describe("App pane-switch feedback and server scoping", () => {
     }
   });
 
-  it("one-shot picker: Enter under a legacy popup binding refuses and does not exit", async () => {
-    // Users who see the hint are the ones #{client_tty} would wrong-switch.
-    // Enter must return client-unavailable, not succeed and close the picker.
+  it("one-shot picker: a legacy popup refusal points at the binding and leaves no trace", async () => {
+    // The only warning a user on the old binding now gets, so it has to name
+    // the fix. And nothing may have happened before the refusal: flashing the
+    // pane and marking it active daemon-wide, then saying nobody moved, is the
+    // worst of both.
+    switchToPaneSpy.mockImplementation(async () => "legacy-popup");
     const restoreFetch = withServerInfo(null);
     const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
-      await renderWithSession({ legacyPopupBinding: true });
+      await renderWithSession();
       await selectFirstRowAndEnter();
-      expect(switchToPaneSpy).toHaveBeenCalledWith("%5", {
-        refuseUncapturedGuess: true,
-      });
+      expect(switchToPaneSpy).toHaveBeenCalledWith("%5");
       expect(squish(setup.captureCharFrame())).toContain(
         squish(
-          "Cannot switch: no captured client tty, check the tmux binding in the README",
+          "Cannot switch: this popup was given no client tty and several clients are attached, update the tmux binding (see README)",
         ),
       );
+      expect(notifyActivePaneSpy).not.toHaveBeenCalled();
+      expect(flashPaneSpy).not.toHaveBeenCalled();
+      expect(flashPaneDetachedSpy).not.toHaveBeenCalled();
       expect(exitSpy).not.toHaveBeenCalled();
     } finally {
       restoreExit();

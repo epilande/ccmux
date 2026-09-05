@@ -11,10 +11,6 @@ import { markStartup } from "../lib/startup-timing";
 import { PICKER_PANE_TITLE } from "../lib/config";
 import { tmuxArgv } from "../lib/tmux-exec";
 import { setPinnedTmuxClientTty } from "../lib/tmux-client";
-import {
-  defaultPopupHintDeps,
-  detectLegacyPopupBinding,
-} from "../lib/popup-hint";
 import { forkableAgentNames } from "../lib/agents";
 
 /**
@@ -68,18 +64,12 @@ export function createPickerCommand(): Command {
         const reconcileDeps = defaultReconcileDeps({
           log: (line) => console.log(line),
         });
-        // The legacy-binding check rides along here: it costs two tmux
-        // queries and a `tty`, and only when no client tty was captured at
-        // all. Resolved out here so the TUI never probes tmux itself, and
-        // while fd 0 is still the interactive terminal.
-        const [daemonProbe, prefs, uiState, tui, legacyPopupBinding] =
-          await Promise.all([
-            probeDaemon(reconcileDeps),
-            getPreferences(),
-            getUIState(),
-            import("../tui"),
-            detectLegacyPopupBinding(defaultPopupHintDeps()),
-          ]);
+        const [daemonProbe, prefs, uiState, tui] = await Promise.all([
+          probeDaemon(reconcileDeps),
+          getPreferences(),
+          getUIState(),
+          import("../tui"),
+        ]);
         markStartup("parallel_init");
 
         await settleDaemon(daemonProbe, reconcileDeps);
@@ -123,7 +113,6 @@ export function createPickerCommand(): Command {
           reviewHandback: prefs.reviewHandback,
           forkableAgents: forkableAgentNames(prefs),
           theme: prefs.theme,
-          legacyPopupBinding,
         });
       },
     );

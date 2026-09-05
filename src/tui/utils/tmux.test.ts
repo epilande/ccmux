@@ -15,7 +15,7 @@ import { PANE_FIELD_SEP } from "../../lib/tmux-format";
 // reaches this file. A distinct cache entry always gets the implementation,
 // the same trick client-switch.test.ts uses.
 const REAL_TMUX_SPECIFIER = "./tmux" + "?real";
-const { openAgentsWindow } = (await import(
+const { openAgentsWindow, notifyActivePane } = (await import(
   REAL_TMUX_SPECIFIER
 )) as typeof import("./tmux");
 
@@ -290,6 +290,17 @@ async function withClientTtyEnv<T>(
   }
 }
 
+/** The three legacy-popup probes an uncaptured resolve runs, answered so the
+ *  launch is NOT a legacy popup: one client, and our own tty is a real pane.
+ *  They fire concurrently with the `display-message` guess and land in this
+ *  order behind it. */
+const NOT_A_POPUP: SpawnResponse[] = [
+  { stdout: "/dev/pts/7\n" },
+  { stdout: "/dev/pts/7\n" },
+  { stdout: "/dev/pts/7\n" },
+];
+const PROBE_VERBS = ["display-message", "list-clients", "list-panes", "tty"];
+
 /** Both the flag slot and the env var have to be clear for the fallback
  *  cases, and put back for everything else in the suite. */
 function withNoCapturedTty<T>(run: () => Promise<T>): Promise<T> {
@@ -506,8 +517,9 @@ describe("openDedupedCommandWindow client pinning", () => {
     // A bare `switch-client` here would move the most-recently-active client,
     // which inside a popup is whichever OTHER terminal typed last.
     const stubs = withTmuxStubs([
-      { stdout: "" },
       { exitCode: 1 },
+      ...NOT_A_POPUP,
+      { stdout: "" },
       { stdout: "%9\n" },
     ]);
     try {
@@ -520,11 +532,13 @@ describe("openDedupedCommandWindow client pinning", () => {
         clientSwitched: false,
         reason: "no-client-tty",
       });
-      const verbs = stubs.calls.map((argv) => argv[1]);
-      // Exactly one display-message, the tty fallback. With no tty there is no
-      // client whose session to ask about, so no placement query runs.
-      expect(verbs).toEqual(["list-windows", "display-message", "new-window"]);
-      const newWindow = stubs.calls[2] ?? [];
+      const verbs = stubs.calls.map((argv) =>
+        argv[0] === "tty" ? "tty" : argv[1],
+      );
+      // The resolve comes first and fails; with no tty there is no client
+      // whose session to ask about, so no placement query runs.
+      expect(verbs).toEqual([...PROBE_VERBS, "list-windows", "new-window"]);
+      const newWindow = stubs.calls[5] ?? [];
       expect(newWindow).toContain("-d");
       expect(newWindow).not.toContain("-t");
     } finally {
@@ -532,10 +546,39 @@ describe("openDedupedCommandWindow client pinning", () => {
     }
   });
 
+  it("refuses before looking at anything inside a legacy popup", async () => {
+    // Two clients, and our own tty is in no pane: the guess would name the
+    // other terminal, and an untargeted window would be born in ITS session.
+    const stubs = withTmuxStubs([
+      { stdout: "/dev/ttys010\n" },
+      { stdout: "/dev/ttys010\n/dev/ttys011\n" },
+      { stdout: "/dev/ttys002\n" },
+      { stdout: "/dev/ttys099\n" },
+    ]);
+    try {
+      const result = await withNoCapturedTty(() =>
+        openAgentsWindow("/tmp/proj"),
+      );
+
+      expect(result).toEqual({
+        ok: false,
+        error:
+          "no client tty was passed to this popup and several clients are attached, update the tmux binding (see README)",
+      });
+      // Nothing beyond the resolve: no listing, and above all no window.
+      expect(
+        stubs.calls.map((argv) => (argv[0] === "tty" ? "tty" : argv[1])),
+      ).toEqual(PROBE_VERBS);
+    } finally {
+      stubs.restore();
+    }
+  });
+
   it("refuses rather than switching when an existing window has no client", async () => {
     const stubs = withTmuxStubs([
-      { stdout: windowRow("@2", AGENTS_WINDOW_NAME) },
       { exitCode: 1 },
+      ...NOT_A_POPUP,
+      { stdout: windowRow("@2", AGENTS_WINDOW_NAME) },
     ]);
     try {
       const result = await withNoCapturedTty(() =>
@@ -547,12 +590,11 @@ describe("openDedupedCommandWindow client pinning", () => {
         clientSwitched: false,
         reason: "no-client-tty",
       });
-      // list-windows, then the failed display-message. Nothing else: no
-      // switch, and no duplicate window either.
-      expect(stubs.calls.map((argv) => argv[1])).toEqual([
-        "list-windows",
-        "display-message",
-      ]);
+      // The failed resolve, then the listing. Nothing else: no switch, and no
+      // duplicate window either.
+      expect(
+        stubs.calls.map((argv) => (argv[0] === "tty" ? "tty" : argv[1])),
+      ).toEqual([...PROBE_VERBS, "list-windows"]);
     } finally {
       stubs.restore();
     }
@@ -620,15 +662,16 @@ describe("openDedupedCommandWindow client pinning", () => {
     "captured client tty is malformed, check the tmux binding in the README";
 
   it("refuses a malformed --client-tty flag rather than opening a window", async () => {
-    const stubs = withTmuxStubs([{ stdout: "" }]);
+    const stubs = withTmuxStubs([]);
     try {
       setPinnedTmuxClientTty("bogus");
       const result = await openAgentsWindow("/tmp/proj");
 
       expect(result).toEqual({ ok: false, error: MALFORMED });
-      // No display-message fallback either: a bad capture is never replaced by
-      // tmux's own guess, which inside a popup is the wrong client.
-      expect(stubs.calls.map((argv) => argv[1])).toEqual(["list-windows"]);
+      // Not one command: no display-message fallback (a bad capture is never
+      // replaced by tmux's own guess, which inside a popup is the wrong
+      // client), and not even the dedupe listing.
+      expect(stubs.calls).toEqual([]);
     } finally {
       stubs.restore();
     }
@@ -643,14 +686,16 @@ describe("openDedupedCommandWindow client pinning", () => {
       const result = await openAgentsWindow("/tmp/proj");
 
       expect(result).toEqual({ ok: false, error: MALFORMED });
-      expect(stubs.calls.map((argv) => argv[1])).toEqual(["list-windows"]);
+      // The refusal lands before the listing, so the existing window is never
+      // even looked up.
+      expect(stubs.calls).toEqual([]);
     } finally {
       stubs.restore();
     }
   });
 
   it("refuses a malformed CCMUX_CLIENT_TTY with no flag set", async () => {
-    const stubs = withTmuxStubs([{ stdout: "" }]);
+    const stubs = withTmuxStubs([]);
     try {
       setPinnedTmuxClientTty(undefined);
       const result = await withClientTtyEnv("bogus", () =>
@@ -658,7 +703,7 @@ describe("openDedupedCommandWindow client pinning", () => {
       );
 
       expect(result).toEqual({ ok: false, error: MALFORMED });
-      expect(stubs.calls.map((argv) => argv[1])).toEqual(["list-windows"]);
+      expect(stubs.calls).toEqual([]);
     } finally {
       stubs.restore();
     }
@@ -690,6 +735,68 @@ describe("openDedupedCommandWindow client pinning", () => {
       expect(newWindow[target + 1]).toBe("$3");
     } finally {
       stubs.restore();
+    }
+  });
+});
+
+describe("notifyActivePane", () => {
+  /** Swap `fetch` for the duration of one test. */
+  function withFetch(
+    stub: (input: string, init: RequestInit) => Promise<Response>,
+  ): () => void {
+    const original = globalThis.fetch;
+    globalThis.fetch = stub as unknown as typeof fetch;
+    return () => {
+      globalThis.fetch = original;
+    };
+  }
+
+  it("posts the pane id to the daemon under a bounded signal", async () => {
+    let seen: { url: string; init: RequestInit } | null = null;
+    const restore = withFetch(async (url, init) => {
+      seen = { url, init };
+      return new Response("{}");
+    });
+    try {
+      await notifyActivePane("%5");
+
+      expect(seen!.url).toEndWith("/active-pane");
+      expect(seen!.init.method).toBe("POST");
+      expect(seen!.init.body).toBe(JSON.stringify({ paneId: "%5" }));
+      expect(seen!.init.signal).toBeInstanceOf(AbortSignal);
+    } finally {
+      restore();
+    }
+  });
+
+  it("gives up on a daemon that never answers", async () => {
+    // The one-shot picker AWAITS this before exiting, so an unbounded call
+    // would hold the popup open after the user has already been switched away.
+    const restore = withFetch(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () =>
+            reject(new Error("aborted")),
+          );
+        }),
+    );
+    try {
+      const started = Date.now();
+      await notifyActivePane("%5");
+      expect(Date.now() - started).toBeLessThan(3000);
+    } finally {
+      restore();
+    }
+  });
+
+  it("stays quiet when the daemon call fails outright", async () => {
+    const restore = withFetch(async () => {
+      throw new Error("connection refused");
+    });
+    try {
+      expect(await notifyActivePane("%5")).toBeUndefined();
+    } finally {
+      restore();
     }
   });
 });

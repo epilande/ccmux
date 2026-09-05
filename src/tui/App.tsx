@@ -51,6 +51,7 @@ import {
   type ClientSwitchMiss,
   type OpenAgentsResult,
 } from "./utils/tmux";
+import type { SwitchToPaneResult } from "./utils/client-switch";
 import { tmuxArgv } from "../lib/tmux-exec";
 import { isSameServerCached, setDaemonSocketPath } from "./utils/server-guard";
 import { useSharedTerminalDimensions } from "./utils/use-shared-dimensions";
@@ -125,8 +126,9 @@ import { createIdleGcScheduler } from "./utils/idle-gc";
 import { setSpinnerPaused } from "./utils/useStatusIcon";
 import { markStartup, reportStartup } from "../lib/startup-timing";
 
-/** Long enough to read a sentence that sends the user to the README. */
-const LEGACY_BINDING_HINT_MS = 6000;
+/** Long enough to read a sentence that sends the user to the README. The
+ *  legacy-popup refusal is the only warning a user on the old binding gets. */
+const LEGACY_BINDING_TOAST_MS = 6000;
 
 interface AppProps {
   initialPreview?: boolean;
@@ -151,12 +153,6 @@ interface AppProps {
    * Fork action, which is otherwise hidden rather than offered-then-refused.
    */
   forkableAgents?: string[];
-  /**
-   * The launcher decided we are a popup on a legacy binding that passes no
-   * client tty, with more than one client attached. Resolved before the mount
-   * (see `src/commands/picker.ts`) so the TUI does no tmux probing of its own.
-   */
-  legacyPopupBinding?: boolean;
 }
 
 /** Message text for a rejected fetch/parse, for a toast. */
@@ -217,16 +213,35 @@ const SPAWN_SPLIT: Record<NewSessionPlacement, "h" | "v" | false> = {
 };
 
 /** One message per reason a background launch moved nobody. Keyed rather than
- *  branched so a new miss reason cannot silently inherit another's blame:
- *  "no-client-tty" points at the tmux binding, "switch-failed" must not. */
+ *  branched so a new miss reason cannot silently inherit another's blame.
+ *  Neither of these blames a binding: the launch refuses outright when the
+ *  binding is the problem (see `openDedupedCommandWindow`). */
 const CLIENT_SWITCH_MISS_TOAST: Record<
   ClientSwitchMiss,
   (label: string) => string
 > = {
   "no-client-tty": (label) =>
-    `${label}: window opened, but no captured client tty to switch (check the tmux binding in the README)`,
+    `${label}: window opened, but no tmux client to switch`,
   "switch-failed": (label) =>
     `${label}: window opened, but the client could not be switched to it`,
+};
+
+/** One message per way an Enter can fail to move the user, for the same reason
+ *  the map above is keyed: only two of these are a binding's fault, and
+ *  "no-client" reaches sidebars and plain panes that have no binding at all. */
+const SWITCH_REFUSAL_TOAST: Record<
+  Exclude<SwitchToPaneResult, true>,
+  { text: string; ms?: number }
+> = {
+  "malformed-capture": {
+    text: "Cannot switch: the captured client tty is malformed, check the tmux binding in the README",
+  },
+  "legacy-popup": {
+    text: "Cannot switch: this popup was given no client tty and several clients are attached, update the tmux binding (see README)",
+    ms: LEGACY_BINDING_TOAST_MS,
+  },
+  "no-client": { text: "Cannot switch: no tmux client found" },
+  "switch-failed": { text: "Failed to switch: pane or client unavailable" },
 };
 
 export function App(props: AppProps) {
@@ -292,26 +307,24 @@ export function App(props: AppProps) {
 
   function selectPane(pane: string) {
     if (!ensureSameServer()) return;
-    notifyActivePane(pane);
-    if (props.persistent || props.sidebar) {
-      flashPane(pane);
-    } else {
-      flashPaneDetached(pane);
-    }
-    const switched = props.legacyPopupBinding
-      ? switchToPane(pane, { refuseUncapturedGuess: true })
-      : switchToPane(pane);
-    switched.then((result) => {
+    switchToPane(pane).then(async (result) => {
       if (result !== true) {
-        // Surface refusal/failure instead of exiting the picker as if it worked.
-        store.actions.showToast(
-          result === "client-unavailable"
-            ? "Cannot switch: no captured client tty, check the tmux binding in the README"
-            : "Failed to switch: pane or client unavailable",
-        );
+        // Surface refusal/failure instead of exiting the picker as if it
+        // worked. Nothing has been flashed or marked active yet: a refused
+        // Enter used to leave both behind and then say nothing happened.
+        const toast = SWITCH_REFUSAL_TOAST[result];
+        store.actions.showToast(toast.text, toast.ms);
         return;
       }
-      if (!props.persistent && !props.sidebar) process.exit(0);
+      const notified = notifyActivePane(pane);
+      if (props.persistent || props.sidebar) {
+        flashPane(pane);
+        return;
+      }
+      flashPaneDetached(pane);
+      // The daemon call is a fetch; exiting first would kill it in flight.
+      await notified;
+      process.exit(0);
     });
   }
 
@@ -3195,22 +3208,6 @@ export function App(props: AppProps) {
   const [previewRefreshKey, setPreviewRefreshKey] = createSignal(0);
   const [initialDataReceived, setInitialDataReceived] = createSignal(false);
 
-  /**
-   * The legacy-binding hint is one toast for the life of the picker. It rides
-   * on the first SSE payload rather than the raw mount so it is not already
-   * gone by the time the list paints, and the flag makes an SSE reconnect
-   * (which replays `init`) not repeat it.
-   */
-  let legacyBindingHintShown = false;
-  function hintLegacyPopupBinding() {
-    if (legacyBindingHintShown || !props.legacyPopupBinding) return;
-    legacyBindingHintShown = true;
-    store.actions.showToast(
-      "Your tmux binding does not pass the client tty; with several clients attached the wrong one may switch. See README.",
-      LEGACY_BINDING_HINT_MS,
-    );
-  }
-
   onMount(() => {
     sseClient = new SSEClient({
       onInit: (sessions, activePaneId, invocations) => {
@@ -3226,7 +3223,6 @@ export function App(props: AppProps) {
           }
         }
         setInitialDataReceived(true);
-        hintLegacyPopupBinding();
         // Reconcile invoke state against the daemon's init snapshot on every
         // (re)connect. SSE has no replay, so an `invocation_finished` missed
         // while the socket was down would otherwise strand the synthetic row
