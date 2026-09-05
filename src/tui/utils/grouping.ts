@@ -363,7 +363,9 @@ export function scrollTarget(
   if (visualLine < scrollTop) {
     return visualLine;
   } else if (lastLine >= scrollTop + viewportHeight) {
-    return lastLine - viewportHeight + 1;
+    // Never past the row's own first line: a row taller than the viewport
+    // keeps its identity line (index, status, active marker) on screen.
+    return Math.min(visualLine, lastLine - viewportHeight + 1);
   }
   return null;
 }

@@ -896,6 +896,25 @@ describe("scrollTarget with mixed session heights", () => {
     // viewport shows lines 0-2, selecting session(c) at visual line 2
     expect(scrollTarget(items1Line, 2, 0, 3, lineCountAlways)).toBeNull();
   });
+
+  it("stops at a too-tall row's first line instead of its last", () => {
+    // A row with a tall prompt block can outgrow a short sidebar pane. The
+    // bottom-align target would scroll its identity line (index, status,
+    // active marker) off the top, leaving an unidentifiable wall of prompt.
+    const tall = buildFlatItems(
+      [
+        toFiltered(mockSession({ id: "a", lastPrompt: null })),
+        toFiltered(mockSession({ id: "b", lastPrompt: "long" })),
+      ],
+      "none",
+      new Set(),
+      false,
+    );
+    // 12 lines each: session(b) spans visual lines 12-23 in a 5-line viewport.
+    const lineCount = () => 12;
+    // Bottom-aligning would give 23 - 5 + 1 = 19, four lines into the row.
+    expect(scrollTarget(tall, 1, 0, 5, lineCount)).toBe(12);
+  });
 });
 
 describe("buildFlatItems with pinnedGroups", () => {

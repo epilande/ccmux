@@ -187,9 +187,19 @@ export function truncateHighlighted(markup: string, maxLen: number): string {
  * Widths are display columns (`displayWidth`), so a line of wide glyphs (CJK,
  * emoji) fits its column like an ASCII one does, and mid-word breaks land on
  * grapheme boundaries (issue #91).
+ *
+ * `maxLines` stops the wrap once that many lines exist, so a caller that will
+ * only keep the first few does not pay to wrap a multi-KB prompt to the end.
+ * The result is exactly `wrapText(text, width).slice(0, maxLines)`; omitting
+ * it (every caller but {@link wrapToLines}) wraps the whole text as before.
  */
-export function wrapText(text: string, width: number): string[] {
+export function wrapText(
+  text: string,
+  width: number,
+  maxLines?: number,
+): string[] {
   if (width <= 0) return [text];
+  const cap = maxLines !== undefined && maxLines > 0 ? maxLines : Infinity;
   const lines: string[] = [];
   let line = "";
   let lineWidth = 0;
@@ -199,6 +209,7 @@ export function wrapText(text: string, width: number): string[] {
     while (displayWidth(rest) > width) {
       if (line) {
         lines.push(line);
+        if (lines.length >= cap) return lines;
         line = "";
         lineWidth = 0;
       }
@@ -209,9 +220,11 @@ export function wrapText(text: string, width: number): string[] {
         // rather than slice a cluster or spin on an empty head.
         lines.push(rest);
         rest = "";
+        if (lines.length >= cap) return lines;
         break;
       }
       lines.push(head);
+      if (lines.length >= cap) return lines;
       rest = rest.slice(head.length);
     }
     if (!rest) continue;
@@ -224,6 +237,7 @@ export function wrapText(text: string, width: number): string[] {
       lineWidth += 1 + restWidth;
     } else {
       lines.push(line);
+      if (lines.length >= cap) return lines;
       line = rest;
       lineWidth = restWidth;
     }
@@ -246,7 +260,9 @@ export function wrapToLines(
   maxLines: number,
 ): string[] {
   if (maxLines <= 0 || width <= 0 || !text) return [];
-  const lines = wrapText(text, width);
+  // One line past the cap is all the decision needs: its presence is what
+  // says text was dropped, and wrapping further would be thrown away.
+  const lines = wrapText(text, width, maxLines + 1);
   if (lines.length <= maxLines) return lines;
   const kept = lines.slice(0, maxLines);
   const last = kept[maxLines - 1];

@@ -4,7 +4,8 @@ import { createSignal } from "solid-js";
 import { SessionList } from "./SessionList";
 import { TickContext } from "../store";
 import { mockEnrichedSession } from "./test-helpers";
-import { promptBlockWidth } from "./session-columns";
+import { promptBlockWidth, PROMPT_BLOCK_MIN_WIDTH } from "./session-columns";
+import type { PromptDisplay } from "../../lib/preferences";
 import { wrapToLines } from "../utils/format";
 import type { FlatItem } from "../utils/grouping";
 
@@ -28,7 +29,17 @@ function item(id: string, lastPrompt: string | null): FlatItem {
   };
 }
 
-async function render(items: FlatItem[], promptLines: number, width = 60) {
+interface Opts {
+  promptDisplay?: PromptDisplay;
+  searchActive?: boolean;
+}
+
+async function render(
+  items: FlatItem[],
+  promptLines: number,
+  width = 60,
+  opts: Opts = {},
+) {
   const [tick] = createSignal(0);
   setup = await testRender(
     () => (
@@ -38,6 +49,8 @@ async function render(items: FlatItem[], promptLines: number, width = 60) {
           selectedIndex={0}
           previewWidth={30}
           promptLines={promptLines}
+          promptDisplay={opts.promptDisplay}
+          searchActive={opts.searchActive}
         />
       </TickContext.Provider>
     ),
@@ -45,6 +58,13 @@ async function render(items: FlatItem[], promptLines: number, width = 60) {
   );
   await setup.renderOnce();
   return setup.captureCharFrame();
+}
+
+/** Index of the frame line carrying row N's identity (its number + status). */
+function identityLine(frame: string, n: number): number {
+  return frame
+    .split("\n")
+    .findIndex((l) => new RegExp(`^\\s*${n} [●◐◑◒◓]`).test(l));
 }
 
 /** Lines of the frame that carry any of the prompt's own words. */
@@ -122,12 +142,42 @@ describe("wrapped prompt block", () => {
     expect(second - first).toBe(1);
   });
 
+  it("yields to the one-line prompt cell while a search is active", async () => {
+    // The cell is the only place a row draws its match highlights and its
+    // `[pane]`/`[transcript]`/`[cwd]` source tag, so the block stands down
+    // rather than hide why the row is in the result set at all.
+    const frame = await render([item("a", LONG)], 3, 60, {
+      searchActive: true,
+    });
+    expect(frame).not.toContain("pending pool");
+    expect(promptLinesIn(frame, "refactor")).toHaveLength(1);
+    expect(identityLine(frame, 1)).toBe(0);
+  });
+
+  it("draws no block when promptDisplay is off", async () => {
+    const frame = await render([item("a", LONG), item("b", "SECOND")], 3, 60, {
+      promptDisplay: "off",
+    });
+    expect(frame).not.toContain("pending pool");
+    expect(frame).not.toContain("refactor");
+    // Both rows collapse to their identity line, one directly under the other.
+    expect(identityLine(frame, 2) - identityLine(frame, 1)).toBe(1);
+  });
+
+  it("draws no block on a rail too narrow to wrap readably", async () => {
+    // promptBlockWidth(12) lands under the floor, where a wrap is word
+    // fragments rather than prose. The row keeps its one-line cell instead
+    // and stays a single line tall.
+    expect(promptBlockWidth(12)).toBeLessThan(PROMPT_BLOCK_MIN_WIDTH);
+    const frame = await render([item("a", LONG), item("b", "SECOND")], 3, 12);
+    expect(frame).not.toContain("pending");
+    expect(identityLine(frame, 2) - identityLine(frame, 1)).toBe(1);
+  });
+
   it("caps a runaway prompt at the configured height", async () => {
     const huge = Array.from({ length: 400 }, (_, i) => `word${i}`).join(" ");
     const frame = await render([item("a", huge), item("b", "SECOND")], 3);
-    const second = frame
-      .split("\n")
-      .findIndex((l) => /^\s*2 [●◐◑◒◓]/.test(l));
+    const second = frame.split("\n").findIndex((l) => /^\s*2 [●◐◑◒◓]/.test(l));
     // identity + 3 capped lines, no matter how long the prompt is.
     expect(second).toBe(4);
     expect(frame).toContain("…");

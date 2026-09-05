@@ -38,6 +38,7 @@ import {
   fitProjectCell,
   ATTENTION_LABEL_MAX,
   PROMPT_BLOCK_INDENT,
+  EMPTY_PROMPT_BLOCK,
 } from "./session-columns";
 import { theme } from "../theme";
 import type { MatchSource } from "../utils/grouping";
@@ -1042,7 +1043,9 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   // The lines SessionList already wrapped and measured this row by. Rendering
   // anything other than exactly these would desync the scroll math, so the
   // row never re-wraps — it only draws what it was handed.
-  const promptBlock = () => props.promptBlock ?? [];
+  // The shared empty array rather than a fresh `[]`, so a row with no block
+  // reads the same reference every time and the `<For>` below stays still.
+  const promptBlock = () => props.promptBlock ?? EMPTY_PROMPT_BLOCK;
   const rowHeight = () => 1 + (row2HasContent() ? 1 : 0) + promptBlock().length;
 
   return (

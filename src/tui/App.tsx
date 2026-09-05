@@ -4097,6 +4097,10 @@ export function App(props: AppProps) {
             activeSessionId={store.state.activeSessionId}
             columns={store.state.columns}
             promptLines={store.state.promptLines}
+            // The same "a query is narrowing the list" the flat items are
+            // built from, so the block yields exactly when rows carry
+            // highlights to show instead.
+            searchActive={store.state.searchQuery.trim().length > 0}
             breakpoints={store.state.breakpoints}
             dimmed={store.state.previewFocused}
             sidebar={props.sidebar}

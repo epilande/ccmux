@@ -1,6 +1,7 @@
 import { wrapToLines } from "../utils/format";
 
 interface Entry {
+  /** The RAW text the caller passed, so the key compare skips normalizing. */
   text: string;
   width: number;
   max: number;
@@ -20,6 +21,11 @@ interface Entry {
  * tuple (text, width, max), so a changed prompt, a resize or a new
  * `promptLines` all produce new content. An unchanged session gets back the
  * SAME array reference, which is what keeps the `<For>` still.
+ *
+ * `text` is the caller's RAW prompt: normalizing before the key compare would
+ * run two regex passes over the whole prompt on every one of those reads and
+ * save only the wrap. The injected `normalize` runs on a miss instead, which
+ * is also what keeps this module free of the TUI's column code.
  */
 export interface PromptBlockCache {
   /** The wrapped lines for `id`, reusing the stored array when nothing moved. */
@@ -30,7 +36,14 @@ export interface PromptBlockCache {
   readonly size: number;
 }
 
-export function createPromptBlockCache(): PromptBlockCache {
+/**
+ * @param normalize Applied to the raw text on a cache MISS only, before the
+ * wrap. Defaults to identity so a caller that has nothing to strip can omit
+ * it (the tests do).
+ */
+export function createPromptBlockCache(
+  normalize: (text: string) => string = (text) => text,
+): PromptBlockCache {
   const entries = new Map<string, Entry>();
   return {
     lines(id, text, width, max) {
@@ -43,7 +56,7 @@ export function createPromptBlockCache(): PromptBlockCache {
       ) {
         return cached.lines;
       }
-      const lines = wrapToLines(text, width, max);
+      const lines = wrapToLines(normalize(text), width, max);
       entries.set(id, { text, width, max, lines });
       return lines;
     },

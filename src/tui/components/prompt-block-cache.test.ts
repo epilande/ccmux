@@ -74,4 +74,25 @@ describe("prompt block cache", () => {
     cache.retain([]);
     expect(cache.size).toBe(0);
   });
+
+  it("normalizes on a miss only, never on the key compare", () => {
+    // The whole point of keying on the raw text: normalizing is two regex
+    // passes over the prompt, and the measurement pass reads every row's
+    // block many times per render.
+    let calls = 0;
+    const cache = createPromptBlockCache((text) => {
+      calls++;
+      return text.replace(/\s+/g, " ").trim();
+    });
+
+    const first = cache.lines("a", `  ${TEXT}  `, 30, 3);
+    expect(calls).toBe(1);
+    expect(first[0]).not.toStartWith(" ");
+
+    expect(cache.lines("a", `  ${TEXT}  `, 30, 3)).toBe(first);
+    expect(calls).toBe(1);
+
+    cache.lines("a", "a different prompt", 30, 3);
+    expect(calls).toBe(2);
+  });
 });
