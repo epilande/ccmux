@@ -308,8 +308,8 @@ async function windowStillExists(windowName: string): Promise<boolean> {
 }
 
 /** Ask tmux which session a client is attached to, so `new-window` can be
- *  aimed at it. Returns null on any failure, which the caller treats as "place
- *  it wherever tmux would have".
+ *  aimed at it. Returns null on any failure, which the caller turns into a
+ *  REFUSAL rather than an untargeted window: see `openDedupedCommandWindow`.
  *
  *  The placement matters because a popup's command client has no pane of its
  *  own, so an untargeted `new-window` falls through to tmux's
@@ -388,8 +388,13 @@ async function resolveClientSessionId(
  * window is born in that client's session, so our own switch lands us inside
  * it. Targeted and detached, nothing moves until the pinned `switch-client`
  * runs, and a bare pane id there selects the session, window and pane together.
- * `resolveClientSessionId` is what supplies that target, and its doc comment
- * covers why the session has to be read off an untargeted `list-clients`.
+ * `resolveClientSessionId` supplies that target, and its doc comment covers why
+ * the session has to be read off an untargeted `list-clients`. When it cannot
+ * answer for a tty we DID capture, the launch REFUSES with `ok: false` and
+ * creates nothing, because an untargeted window is the very placement bug this
+ * is here to fix. Having no tty at all is the one case that still opens an
+ * untargeted window, and only because there is then no client to misplace it
+ * relative to, and nobody to move into it.
  */
 async function openDedupedCommandWindow(
   windowName: string,
@@ -438,9 +443,22 @@ async function openDedupedCommandWindow(
       // Window really is gone: fall through and spawn.
     }
 
-    const sessionId = clientTty
-      ? await resolveClientSessionId(clientTty)
-      : null;
+    // Fail closed. Dropping `-t` here would put the window wherever tmux
+    // likes, which is the cross-session placement this path exists to remove,
+    // and whatever broke the lookup (a stale tty, an unreachable tmux) breaks
+    // the pinned switch too. The user would get a "switch failed" toast plus a
+    // window in somebody else's session. Better to create nothing and say so.
+    let placement: string[] = [];
+    if (clientTty) {
+      const sessionId = await resolveClientSessionId(clientTty);
+      if (!sessionId) {
+        return {
+          ok: false,
+          error: `no tmux session found for client ${clientTty}`,
+        };
+      }
+      placement = ["-t", sessionId];
+    }
     const spawn = Bun.spawn(
       tmuxArgv(
         "new-window",
@@ -449,7 +467,7 @@ async function openDedupedCommandWindow(
         windowName,
         "-c",
         cwd,
-        ...(sessionId ? ["-t", sessionId] : []),
+        ...placement,
         "-P",
         "-F",
         "#{pane_id}",

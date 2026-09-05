@@ -382,74 +382,74 @@ describe("openDedupedCommandWindow client pinning", () => {
     }
   });
 
-  it("skips placement when the listing has no line for the pinned tty", async () => {
+  it("refuses when the listing has no line for the pinned tty", async () => {
     // The captured client detached between capture and launch. Its session is
-    // unknowable, so we place nothing rather than borrow the decoy's session.
+    // unknowable, and neither other client's session is ours to borrow.
     const stubs = withTmuxStubs([
       { stdout: "" },
       { stdout: clientList("/dev/ttys099", "$7") },
-      { stdout: "%9\n" },
-      {},
     ]);
     try {
       setPinnedTmuxClientTty("/dev/ttys005");
       const result = await openAgentsWindow("/tmp/proj");
 
-      expect(result).toEqual({ ok: true, clientSwitched: true });
-      const newWindow = stubs.calls[2] ?? [];
-      expect(newWindow[1]).toBe("new-window");
-      expect(newWindow).toContain("-d");
-      expect(newWindow).not.toContain("-t");
-      expect(newWindow).not.toContain("$7");
-      expect(newWindow).not.toContain("$1");
+      expect(result).toEqual({
+        ok: false,
+        error: "no tmux session found for client /dev/ttys005",
+      });
+      // Nothing was created: an untargeted window would land in whatever
+      // session tmux likes, which is the bug this path removes.
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-windows",
+        "list-clients",
+      ]);
     } finally {
       stubs.restore();
     }
   });
 
-  it("still opens the window when the session query is refused", async () => {
-    const stubs = withTmuxStubs([
-      { stdout: "" },
-      { exitCode: 1 },
-      { stdout: "%9\n" },
-      {},
-    ]);
+  it("refuses to create anything when the session query fails", async () => {
+    const stubs = withTmuxStubs([{ stdout: "" }, { exitCode: 1 }]);
     try {
       setPinnedTmuxClientTty("/dev/ttys005");
       const result = await openAgentsWindow("/tmp/proj");
 
-      // Placement is a best effort: a failed query must not sink the launch.
-      expect(result).toEqual({ ok: true, clientSwitched: true });
-      const newWindow = stubs.calls[2] ?? [];
-      expect(newWindow[1]).toBe("new-window");
-      expect(newWindow).toContain("-d");
-      expect(newWindow).not.toContain("-t");
+      expect(result).toEqual({
+        ok: false,
+        error: "no tmux session found for client /dev/ttys005",
+      });
+      // Nothing was created: an untargeted window would land in whatever
+      // session tmux likes, which is the bug this path removes.
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-windows",
+        "list-clients",
+      ]);
     } finally {
       stubs.restore();
     }
   });
 
-  it("ignores a session query that answers with something else", async () => {
-    // Anything but a `$N` session id is a tmux message we cannot use as a
-    // target, and passing it through would fail the whole new-window.
+  it("refuses when the matching line holds something other than a session id", async () => {
+    // Anything but a `$N` is unusable as a target, and the decoy's `$1` is not
+    // a substitute: it belongs to a different client.
     const stubs = withTmuxStubs([
       { stdout: "" },
       { stdout: clientList("/dev/ttys005", "nope") },
-      { stdout: "%9\n" },
-      {},
     ]);
     try {
       setPinnedTmuxClientTty("/dev/ttys005");
       const result = await openAgentsWindow("/tmp/proj");
 
-      expect(result).toEqual({ ok: true, clientSwitched: true });
-      const newWindow = stubs.calls[2] ?? [];
-      expect(newWindow[1]).toBe("new-window");
-      expect(newWindow).toContain("-d");
-      expect(newWindow).not.toContain("-t");
-      // Not the decoy's session either: an unusable match line is no reason to
-      // reach for some other client's.
-      expect(newWindow).not.toContain("$1");
+      expect(result).toEqual({
+        ok: false,
+        error: "no tmux session found for client /dev/ttys005",
+      });
+      // Nothing was created: an untargeted window would land in whatever
+      // session tmux likes, which is the bug this path removes.
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-windows",
+        "list-clients",
+      ]);
     } finally {
       stubs.restore();
     }
