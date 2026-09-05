@@ -20,10 +20,15 @@
  *   wrapper, not at the long-lived cursor-agent process. Storing the
  *   wrapper PID in the marker makes `cleanupStaleMarkers` purge it on
  *   the next scan (wrapper dies when the script returns). We walk up
- *   the ancestry until we find a process whose `comm=` is cursor-agent
- *   or `agent`; if that walk fails we fall back to `$PPID` — the
- *   marker self-cleans within a scan cycle, which is better than
- *   silently no-oping on a process-shape surprise.
+ *   the ancestry to find the real cursor-agent: first a process whose
+ *   `comm=` is cursor-agent or `agent`, else the first ancestor with a
+ *   real controlling terminal. The comm match alone is NOT enough —
+ *   cursor-agent 2026.08.25 reports `comm=MainThread` (node sets the
+ *   thread name), so the name walk misses it and only the tty-bearing
+ *   ancestor walk finds it (the agent runs foreground in its pane and
+ *   owns the pane's pts, while the wrapper is tty-less). If both fail we
+ *   fall back to `$PPID` — the marker self-cleans within a scan cycle,
+ *   which is better than silently no-oping on a process-shape surprise.
  *
  * - **--resume does NOT fire sessionStart.** Cursor only emits
  *   sessionStart on fresh chats, not on `--resume`. So
@@ -45,11 +50,15 @@
  */
 const CURSOR_PID_WALK = `# Walk up process tree from $PPID to find cursor-agent. $PPID is the
 # transient /bin/zsh -c wrapper cursor spawns to invoke the hook, not the
-# agent itself. Falls back to $PPID if the walk finds nothing — the stale
-# marker self-cleans on the next scan rather than silently no-opping.
+# agent itself. Prefer an ancestor whose comm is cursor-agent/agent; but
+# cursor-agent 2026.08.25 reports comm=MainThread, so also record the first
+# ancestor with a real controlling terminal (the agent owns its pane's pts;
+# the wrapper is tty-less). Falls back to $PPID if the walk finds nothing —
+# the stale marker self-cleans on the next scan rather than silently no-opping.
 CURSOR_PID=""
+CURSOR_TTY_PID=""
 WALK="$PPID"
-for _ in 1 2 3 4 5 6; do
+for _ in 1 2 3 4 5 6 7 8; do
   [ -n "$WALK" ] || break
   [ "$WALK" = "1" ] && break
   [ "$WALK" = "0" ] && break
@@ -60,8 +69,15 @@ for _ in 1 2 3 4 5 6; do
       break
       ;;
   esac
+  WTTY=$(ps -o tty= -p "$WALK" 2>/dev/null | tr -d ' ')
+  # No controlling terminal prints "??" on macOS/BSD ps and "?" on Linux.
+  case "$WTTY" in
+    ""|"?"|"??"|"-") ;;
+    *) [ -z "$CURSOR_TTY_PID" ] && CURSOR_TTY_PID="$WALK" ;;
+  esac
   WALK=$(ps -o ppid= -p "$WALK" 2>/dev/null | tr -d ' ')
 done
+[ -n "$CURSOR_PID" ] || CURSOR_PID="$CURSOR_TTY_PID"
 [ -n "$CURSOR_PID" ] || CURSOR_PID="$PPID"`;
 
 /** sessionStart: writes the initial marker with state=idle. */

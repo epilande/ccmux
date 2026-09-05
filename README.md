@@ -71,6 +71,23 @@ ccmux setup
 
 `ccmux setup` installs agent hooks for authoritative session matching. ccmux works without it, but it's recommended; see [Session Matching with Hooks](#-session-matching-with-hooks). Bare `ccmux setup` only configures agents whose executable is found on PATH; use `ccmux setup --agent <name>` to install for a specific agent even if it isn't detected.
 
+### Shell Completions
+
+`ccmux completion <shell>` prints a completion script for zsh, bash, or fish. It completes commands and flags, and asks the running daemon for live values: session ids and `%pane` ids wherever a command takes one, agent names, invocation ids, config keys and their values. Directory flags such as `--cwd` fall through to the shell's own path completion.
+
+```sh
+# zsh (~/.zshrc, after compinit)
+eval "$(ccmux completion zsh)"
+
+# bash (~/.bashrc)
+eval "$(ccmux completion bash)"
+
+# fish
+ccmux completion fish > ~/.config/fish/completions/ccmux.fish
+```
+
+The zsh `eval` has to come after `compinit`, since the script registers itself with `compdef`. A file in `fpath` sidesteps that and avoids running ccmux at every shell start: `ccmux completion zsh > ~/.zfunc/_ccmux` with `fpath=(~/.zfunc $fpath)` before `compinit`. The Homebrew formula installs completions for all three shells.
+
 ## 🚀 Quick Start
 
 1. Start your AI coding sessions in tmux panes as usual
@@ -85,13 +102,13 @@ ccmux setup
 >
 > ```tmux
 > # Prefix + C-p: open ccmux in a centered popup
-> bind-key C-p display-popup -E -w 80% -h 75% "ccmux"
+> bind-key C-p run-shell -C 'display-popup -E -w 80% -h 75% "ccmux --client-tty #{client_tty}"'
 >
 > # Or skip the prefix entirely (Alt+p from any pane)
-> bind-key -n M-p display-popup -E -w 80% -h 75% "ccmux"
+> bind-key -n M-p run-shell -C 'display-popup -E -w 80% -h 75% "ccmux --client-tty #{client_tty}"'
 > ```
 >
-> The picker exits after you select a session, so the popup closes itself and drops you straight into that pane. (`display-popup` requires tmux 3.2+.)
+> The `run-shell -C` wrapper is what makes `#{client_tty}` expand, since `display-popup` never expands its own command. That hands the picker the client that opened the popup, so selecting a session never switches another attached client. The picker exits after selection, so the popup closes itself and drops you straight into that pane. (This binding needs tmux 3.2+.) The `-e "CCMUX_CLIENT_TTY=#{client_tty}"` form documented previously still works, on tmux 3.3+.
 
 ## 🎮 Usage
 
@@ -122,7 +139,7 @@ ccmux setup
 | `ccmux screen --grep <pattern>`             | Search across all session panes                                                                                                  |
 | `ccmux dismiss <id>`                        | Remove a session from tracking                                                                                                   |
 | `ccmux worktree list`                       | List every worktree of the repos ccmux knows about, plus the one you are in (`--repo <path>`)                                    |
-| `ccmux worktree prune`                      | Remove worktrees whose work is finished (`--dry-run`, `--state`, `--repo <path>`)                                                |
+| `ccmux worktree prune`                      | Remove worktrees whose work is finished (`--dry-run`, `--state`, `--end-idle`, `--repo <path>`)                                  |
 | `ccmux daemon start\|stop\|restart\|status` | Manage the background daemon                                                                                                     |
 | `ccmux config set <key> <value>`            | Set a preference                                                                                                                 |
 | `ccmux config get <key>`                    | Get a single preference value                                                                                                    |
@@ -133,6 +150,7 @@ ccmux setup
 | `ccmux setup --status`                      | Report install state without writing anything                                                                                    |
 | `ccmux setup --uninstall`                   | Remove hooks (preserves user-owned hook entries)                                                                                 |
 | `ccmux debug`                               | Diagnose session tracking discrepancies                                                                                          |
+| `ccmux completion <shell>`                  | Print the completion script for zsh, bash, or fish ([install](#shell-completions))                                               |
 | `ccmux notify [message]`                    | Send a notification via the configured backend (bare: test message + diagnostics)                                                |
 | `ccmux sidebar`                             | Launch narrow sidebar TUI (no preview/footer)                                                                                    |
 | `ccmux sidebar --toggle`                    | Smart toggle: spawn/kill sidebars in every window across all tmux sessions                                                       |
@@ -281,6 +299,7 @@ ccmux spawn --cwd ~/proj                                           # Set working
 ccmux spawn --resume <id>                                          # Resume an existing session
 ccmux spawn --fork <id>                                            # Branch an existing session into a new one
 ccmux spawn --prompt "fix the tests"                               # Send an initial prompt
+ccmux spawn --model opus                                           # Start the agent on a model (its own flag, e.g. claude --model)
 ccmux spawn --worktree --prompt "fix flicker"                      # Spawn into a git worktree (name derived from the prompt)
 ccmux spawn --worktree fix-flicker                                 # Spawn into a named worktree, creating it if needed
 ccmux spawn --worktree --base develop --prompt "fix flicker"       # Branch the new worktree from develop
@@ -312,6 +331,14 @@ It is supported for the agents whose interactive-with-prompt invocation ccmux
 has verified; for anything else (including custom agents) ccmux refuses the
 spawn rather than guessing a flag, and you can teach it the right shape with
 `promptCommand` in your agent config.
+
+`--model <name>` starts the agent on that model, passed through as the agent's
+own flag (`--model` for every built-in, read from each CLI's `--help`). An
+agent with no known flag, including a custom one, refuses the spawn; declare
+`modelFlag` in its config to teach it. A new window is named after the
+worktree when the spawn has one (`fix-flicker`, `issue-150-...`, `pr-154-...`)
+and after the agent otherwise, so a batch of spawns is tellable apart; the name
+pins tmux's `automatic-rename` off for that window.
 
 `--worktree [name]` spawns the agent into a git worktree at
 `<main>/.claude/worktrees/<name>`, creating it first if it doesn't exist yet.
@@ -345,15 +372,16 @@ in the picker shows the PR's actual diff.
 `--base` works as usual.
 
 Both seed the agent's opening prompt with the title and URL, and your own
-`--prompt` is appended after it. Both refuse rather than guess: a PR that is
-not open, an issue that is closed, a PR whose branch is already checked out in
-another worktree (ccmux names it), and a same-named local branch that is not
-that PR (a branch counts as the PR's only when its `merge` *and* `remote` config
+`--prompt` is appended after it. A PR whose branch is already checked out is
+opened rather than duplicated; a second `--issue` of the same number opens the
+existing `issue-<n>` worktree the same way. Both refuse rather than guess: a
+PR that is not open, an issue that is closed, and a same-named local branch
+that is not that PR (a branch counts as the PR's only when its `merge` _and_ `remote` config
 both already point at it, so a fork PR cannot ride in on a name collision with
 one of your origin-tracking branches). The remote is compared as a repository,
 not as text, so a branch you set up yourself with `git remote add fork <url>`
 and `git checkout -b <branch> fork/<branch>` is recognized as the PR's. A local
-branch that *is* the PR is fast-forwarded, never force-updated. If it has
+branch that _is_ the PR is fast-forwarded, never force-updated. If it has
 diverged, ccmux leaves it alone and says so.
 
 ccmux fetches the PR from `origin`, while `gh` resolves the number through its
@@ -461,6 +489,10 @@ After a branch is merged (and auto-deleted on GitHub), three leftovers stay on y
 
 <kbd>W</kbd> in the picker (or `Worktrees` on a group header) opens the Worktrees panel: every worktree of every repo in scope, main checkout first, with its branch, ahead/behind, uncommitted counts, open PR, and the agent living in it. <kbd>Enter</kbd> jumps to that agent, or starts one in a worktree that has none. <kbd>Tab</kbd> widens from the selected row's repo to all of them, <kbd>y</kbd> copies a path, and <kbd>d</kbd> reviews what the branch changed since it left its base (not just what is uncommitted, which is what <kbd>d</kbd> on a session row shows).
 
+The panel has a second view: <kbd>l</kbd> switches to **Pull Requests**, every open PR of the repos in scope, with its branch, author, review state and checks, and the worktree it is already checked out in where there is one. <kbd>Enter</kbd> there cuts a worktree from the PR (or jumps to the agent already in it), <kbd>o</kbd> opens it on GitHub, and <kbd>h</kbd> goes back to the worktrees. The two axes are independent: <kbd>Tab</kbd> still scopes either view to one repo or all of them, and the tab line under the title names both views with the live PR count.
+
+<kbd>N</kbd> in the picker (or <kbd>n</kbd> inside the Worktrees panel) opens the **source picker**: every open pull request and every open issue of the repos in scope, in one list, with the worktree that already holds each one where there is one. <kbd>/</kbd> filters across both at once, so a word you remember finds it whether it was filed as a PR or as an issue, and the section counts follow what you type. <kbd>Enter</kbd> starts work on the row: it cuts a worktree from a PR's head, or one named after an issue and seeded with it, and where a checkout already exists it goes there instead of starting a second agent in the same tree.
+
 https://github.com/user-attachments/assets/cc25199b-f563-4cda-8b59-6e95c449a94a
 
 The panel loads in two passes: the list paints immediately from local git state, then the prune classification (which fetches and asks GitHub) merges in and sinks the finished worktrees to the bottom of their group. Those, and only those, become selectable for removal, showing why each one is removable. <kbd>Space</kbd> selects a row, and <kbd>x</kbd> removes what you selected after a confirmation that spells out what goes with it; on a single clean removable row, <kbd>x</kbd> with nothing selected takes that row. `ccmux worktree prune` runs the same classification from the command line:
@@ -472,9 +504,9 @@ The panel loads in two passes: the list paints immediately from local git state,
 | `upstream gone`  | The branch had an upstream and it's gone after a `fetch --prune`       |
 | `PR closed`      | The PR was closed without merging; the branch is kept                  |
 
-Removing a worktree stops its agent (SIGTERM, escalating to SIGKILL if it does not exit) as a backstop, since a worktree with a bound live session is never offered in the first place, closes the leftover pane, deletes the directory, attempts to delete the local branch, prunes git's metadata, and drops the directory's entry from `~/.claude.json`. A worktree whose agent still won't die even after SIGKILL is refused rather than deleted, so nothing is removed out from under a process that may still be writing to it. Branch deletion follows the evidence rather than the reason: a merged PR is force-deleted (`git branch -D`, since a squash merge leaves the tip unmerged by git's definition), `merged locally` and `upstream gone` use the safe `git branch -d` and report a refusal if git says the branch still holds unmerged work, and `PR closed` keeps the branch entirely.
+A worktree an agent is **working** or **waiting** in is never offered. One whose only occupant is an **idle** agent is offered when GitHub reports its branch's PR merged, as an explicit opt-in: the panel labels the row, and the CLI needs `--end-idle`. Removing a worktree stops its agent (SIGTERM, escalating to SIGKILL if it does not exit) and closes its pane before the directory goes; the agent's transcript is its own file and survives the removal, though agents that resume by directory rather than by session id (`opencode --continue`, `pi -c`, `omp -c`) lose the way back to it once the worktree is gone. Removal then deletes the directory, attempts to delete the local branch, prunes git's metadata, and drops the directory's entry from `~/.claude.json`. A worktree whose agent still won't die even after SIGKILL is refused rather than deleted, so nothing is removed out from under a process that may still be writing to it. Branch deletion follows the evidence rather than the reason: a merged PR is force-deleted (`git branch -D`, since a squash merge leaves the tip unmerged by git's definition), `merged locally` and `upstream gone` use the safe `git branch -d` and report a refusal if git says the branch still holds unmerged work, and `PR closed` keeps the branch entirely.
 
-Safety rules, in short: a worktree with **any** bound session, working, idle, or waiting, is never offered, a branch still sitting on a base's tip is never classified as merged, a worktree whose PR state cannot be established (`gh` missing, logged out, offline, or pointed at a host it does not recognize) is skipped with the reason shown rather than treated as having no PR, nothing is pre-selected, dirty worktrees (uncommitted or untracked changes) need their own <kbd>D</kbd> opt-in on top of being selected and are re-checked immediately before deletion, a pane still working inside the worktree when the removal runs blocks that one removal (an editor counts as work; a bare shell left sitting there does not, and neither does a ccmux picker or sidebar), a `worktree.symlinkDirectories` symlink does not count as dirty (it is setup, not your work), gitignored files that would be deleted are surfaced before you confirm (the CLI lists them, the picker shows a count with up to two names on the row), and the main checkout is never a candidate.
+Safety rules, in short: a worktree with a working or waiting agent is never offered and an idle one is offered only on a merged PR and only behind an explicit opt-in (`--end-idle` in the CLI, the labeled row in the panel), a branch still sitting on a base's tip is never classified as merged, a worktree whose PR state cannot be established (`gh` missing, logged out, offline, or pointed at a host it does not recognize) is skipped with the reason shown rather than treated as having no PR, nothing is pre-selected, dirty worktrees (uncommitted or untracked changes) need their own <kbd>D</kbd> opt-in on top of being selected and are re-checked immediately before deletion, a pane still working inside the worktree when the removal runs blocks that one removal (an editor counts as work; a bare shell left sitting there does not, and neither does a ccmux picker or sidebar), a `worktree.symlinkDirectories` symlink does not count as dirty (it is setup, not your work), gitignored files that would be deleted are surfaced before you confirm (the CLI lists them, the picker shows a count with up to two names on the row), and the main checkout is never a candidate.
 
 Each directory is renamed to a `.ccmux-trash-<name>-<timestamp>` sibling before being deleted, so the path frees immediately and the contents survive for the length of the run. If ccmux is interrupted mid-run, look for that directory next to where the worktree was: `mv .ccmux-trash-<name>-<timestamp> <name>` restores it, and `git worktree repair <name>` re-links it to the repo.
 
@@ -482,6 +514,7 @@ Each directory is renamed to a `.ccmux-trash-<name>-<timestamp>` sibling before 
 ccmux worktree prune             # Interactive confirm list
 ccmux worktree prune --dry-run   # Show what would go, change nothing
 ccmux worktree prune --state     # Also drop agent state entries (see below)
+ccmux worktree prune --end-idle  # Also offer worktrees whose only agent is idle
 ccmux worktree prune --repo ~/p  # Limit to one repository
 ```
 
@@ -558,6 +591,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Kill all              | <kbd>X</kbd>                                                                       | Kill all tracked sessions                                                                                              |
 | Fork session          | <kbd>F</kbd>                                                                       | Branch the conversation into a pane of its own, leaving the original running                                           |
 | Worktrees             | <kbd>W</kbd>                                                                       | Open the Worktrees panel: jump, start an agent, copy a path, review, or prune (multi-select, confirmation)             |
+| Start from PR/issue   | <kbd>N</kbd>                                                                       | Open the source picker: every open PR and issue of the repos in scope, filtered, Enter starts work on one              |
 | Review and hand back  | <kbd>d</kbd> / <kbd>D</kbd>                                                        | Review with [hunk](https://github.com/modem-dev/hunk), then offer to send notes to the agent (requires `hunk` on PATH) |
 | Collapse/expand       | <kbd>h</kbd> / <kbd>l</kbd> or <kbd>Space</kbd>                                    | Toggle group collapsed state                                                                                           |
 | Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)                                                                                    |
@@ -977,6 +1011,8 @@ ccmux daemon status                        # prints the socket the running daemo
 ```
 
 A leading `/` means a socket path, anything else a label. Environment and config are the primary interface because the daemon is usually auto-started for you (it inherits your environment, so both reach it); the flag only applies to a `ccmux daemon start` you run yourself.
+
+After an upgrade you do not need to restart the daemon by hand: the next ccmux command notices the running daemon is on an older build and replaces it, as long as it has no running invocations or queued handoffs (a busy daemon is kept, with a one-line warning). A daemon started from a different checkout on the same version is left alone; switch with `ccmux daemon restart`. `ccmux daemon status` shows both builds.
 
 Inside tmux, the client half of ccmux ignores the setting and uses the server you are attached to; the daemon always honors it, which is the point of the setting.
 

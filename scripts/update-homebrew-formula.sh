@@ -62,6 +62,10 @@ class Ccmux < Formula
     binary_name = stable.url.split("/").last
     bin.install binary_name => "ccmux"
 
+    # \`ccmux completion <shell>\` only prints a static script: no daemon,
+    # tmux, or HOME involved, so it is safe to run in the build sandbox.
+    generate_completions_from_executable(bin/"ccmux", "completion")
+
     # Stage the notarized helper app alongside the binary. The ccmux daemon
     # resolves it at ../libexec/ccmux-notifier.app relative to bin/ccmux.
     # Homebrew strips a sole top-level directory when unpacking, so the

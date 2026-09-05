@@ -17,11 +17,16 @@ import type { TmuxSocketError } from "../types";
 import {
   createTUIStore,
   namesAWorktree,
+  sourcesReopenOptions,
+  sourcesReturnMarker,
   TickContext,
   type NewSessionDraft,
   type NewSessionField,
   type NewSessionFork,
+  type NewSessionIssue,
+  type NewSessionPR,
   type NewSessionPlacement,
+  type SourcesReturn,
 } from "./store";
 import { killActionPath, restartActionPath } from "./utils/invoke-actions";
 import {
@@ -43,8 +48,10 @@ import {
   openAgentsWindow,
   openAgentAttachWindow,
   resolveLaunchPane,
+  type ClientSwitchMiss,
   type OpenAgentsResult,
 } from "./utils/tmux";
+import type { SwitchToPaneResult } from "./utils/client-switch";
 import { tmuxArgv } from "../lib/tmux-exec";
 import { isSameServerCached, setDaemonSocketPath } from "./utils/server-guard";
 import { useSharedTerminalDimensions } from "./utils/use-shared-dimensions";
@@ -91,7 +98,12 @@ import {
 } from "../lib/move-report";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { HANDOFF_BADGE } from "./components/session-columns";
-import { WorktreesPanel, worktreeHoldsPath } from "./components/WorktreesPanel";
+import {
+  WorktreesPanel,
+  liveEffects,
+  worktreeHoldsPath,
+} from "./components/WorktreesPanel";
+import { SourcePicker } from "./components/SourcePicker";
 import type { WorktreeSession } from "../daemon/worktree-prune";
 import { HelpOverlay } from "./components/HelpOverlay";
 import type { SpawnableAgent } from "../lib/spawnable-agents";
@@ -113,6 +125,10 @@ import { createFlashScheduler } from "./utils/pane-flash";
 import { createIdleGcScheduler } from "./utils/idle-gc";
 import { setSpinnerPaused } from "./utils/useStatusIcon";
 import { markStartup, reportStartup } from "../lib/startup-timing";
+
+/** Long enough to read a sentence that sends the user to the README. The
+ *  legacy-popup refusal is the only warning a user on the old binding gets. */
+const LEGACY_BINDING_TOAST_MS = 6000;
 
 interface AppProps {
   initialPreview?: boolean;
@@ -197,6 +213,38 @@ const SPAWN_SPLIT: Record<NewSessionPlacement, "h" | "v" | false> = {
   "split-v": "v",
 };
 
+/** One message per reason a background launch moved nobody. Keyed rather than
+ *  branched so a new miss reason cannot silently inherit another's blame.
+ *  Neither of these blames a binding: the launch refuses outright when the
+ *  binding is the problem (see `openDedupedCommandWindow`). */
+const CLIENT_SWITCH_MISS_TOAST: Record<
+  ClientSwitchMiss,
+  (label: string) => string
+> = {
+  "no-client-tty": (label) =>
+    `${label}: window opened, but no tmux client to switch`,
+  "switch-failed": (label) =>
+    `${label}: window opened, but the client could not be switched to it`,
+};
+
+/** One message per way an Enter can fail to move the user, for the same reason
+ *  the map above is keyed: only two of these are a binding's fault, and
+ *  "no-client" reaches sidebars and plain panes that have no binding at all. */
+const SWITCH_REFUSAL_TOAST: Record<
+  Exclude<SwitchToPaneResult, true>,
+  { text: string; ms?: number }
+> = {
+  "malformed-capture": {
+    text: "Cannot switch: the captured client tty is malformed, check the tmux binding in the README",
+  },
+  "legacy-popup": {
+    text: "Cannot switch: this popup was given no client tty and several clients are attached, update the tmux binding (see README)",
+    ms: LEGACY_BINDING_TOAST_MS,
+  },
+  "no-client": { text: "Cannot switch: no tmux client found" },
+  "switch-failed": { text: "Failed to switch: pane or client unavailable" },
+};
+
 export function App(props: AppProps) {
   const renderer = useRenderer();
   /** The viewport, for the handful of key handlers that have to agree with
@@ -261,20 +309,24 @@ export function App(props: AppProps) {
 
   function selectPane(pane: string) {
     if (!ensureSameServer()) return;
-    notifyActivePane(pane);
-    if (props.persistent || props.sidebar) {
-      flashPane(pane);
-    } else {
-      flashPaneDetached(pane);
-    }
-    switchToPane(pane).then((ok) => {
-      if (!ok) {
-        // Pane is gone (daemon holds the stale row until its liveness sweep).
-        // Surface it instead of exiting the one-shot picker as if it worked.
-        store.actions.showToast("Failed to switch: pane is gone");
+    switchToPane(pane).then(async (result) => {
+      if (result !== true) {
+        // Surface refusal/failure instead of exiting the picker as if it
+        // worked. Nothing has been flashed or marked active yet: a refused
+        // Enter used to leave both behind and then say nothing happened.
+        const toast = SWITCH_REFUSAL_TOAST[result];
+        store.actions.showToast(toast.text, toast.ms);
         return;
       }
-      if (!props.persistent && !props.sidebar) process.exit(0);
+      const notified = notifyActivePane(pane);
+      if (props.persistent || props.sidebar) {
+        flashPane(pane);
+        return;
+      }
+      flashPaneDetached(pane);
+      // The daemon call is a fetch; exiting first would kill it in flight.
+      await notified;
+      process.exit(0);
     });
   }
 
@@ -321,7 +373,8 @@ export function App(props: AppProps) {
    * Shared exit semantics for the background launchers (per-agent attach and
    * the global agent view). Mirrors selectPane: the picker exits after
    * switching, the sidebar/persistent board stays. On failure, stay and
-   * surface a toast.
+   * surface a toast. A window that opened without moving anyone is not a
+   * failure, but it is not a jump either: it toasts its own reason and stays.
    */
   function launchBackgroundWindow(
     label: string,
@@ -333,6 +386,12 @@ export function App(props: AppProps) {
       backgroundLaunchInFlight = false;
       if (!result.ok) {
         store.actions.showToast(`${label} failed: ${result.error}`);
+        return;
+      }
+      if (!result.clientSwitched) {
+        // The window is up but nobody was moved to it. Exiting here would
+        // close the picker over a jump that did not happen.
+        store.actions.showToast(CLIENT_SWITCH_MISS_TOAST[result.reason](label));
         return;
       }
       if (!props.persistent && !props.sidebar) process.exit(0);
@@ -625,6 +684,23 @@ export function App(props: AppProps) {
     existingWorktree: string | null;
     panelRepo: string | null;
     panelScope: string | null;
+    /**
+     * The row's own KEY, where it is not simply the worktree's path.
+     *
+     * Sent by the Worktrees panel's Enter on a PR that IS checked out here:
+     * that row routes through this verb because the destination is the
+     * worktree holding it, but the row the user was standing on is the PR,
+     * and `initialView` reads the cursor to decide which view to reopen in.
+     * Without it a cancelled dialog returned to the WORKTREES view while the
+     * adjacent not-checked-out row returned correctly.
+     *
+     * The cursor and the view stay ONE decision, which is why this is a
+     * cursor and not a view flag: sending the view explicitly while the
+     * cursor stayed a path would reopen the PR view on a key its list cannot
+     * contain, and the re-seed would drop the cursor on the first row —
+     * trading a wrong view for a wrong row.
+     */
+    cursor?: string;
   }) {
     store.actions.hideWorktrees();
     const worktree = target.existingWorktree;
@@ -645,8 +721,186 @@ export function App(props: AppProps) {
       returnToWorktrees: {
         repo: target.panelRepo,
         scope: target.panelScope,
-        cursor: worktree ?? target.cwd,
+        cursor: target.cursor ?? worktree ?? target.cwd,
       },
+    });
+  }
+
+  /**
+   * The Worktrees panel's Enter on an open PR that is NOT checked out here
+   * (issue #151): open the dialog that cuts a worktree from its head.
+   *
+   * No revalidation of its own, unlike `spawnInWorktree`: the fact that could
+   * have changed is whether the PR is still open, and only GitHub knows.
+   * `POST /spawn` re-runs `lookupPR` and refuses a non-OPEN one, so a stale
+   * row fails safe with the daemon's own message instead of this client's
+   * guess about a state it cannot see.
+   *
+   * `cwd` is the repo root: `gh` resolves the PR from the directory the
+   * request names, and the worktree is cut under that repo.
+   */
+  function spawnFromPR(target: {
+    number: number;
+    title: string;
+    repoRoot: string;
+    cursor: string;
+    panelRepo: string | null;
+    panelScope: string | null;
+  }) {
+    store.actions.hideWorktrees();
+    openNewSession({
+      cwd: target.repoRoot,
+      pr: {
+        number: target.number,
+        title: target.title,
+        repoRoot: target.repoRoot,
+      },
+      // The PR row's own synthetic key, so a cancel lands the cursor back on
+      // the row it was opened from rather than on the top of the list.
+      returnToWorktrees: {
+        repo: target.panelRepo,
+        scope: target.panelScope,
+        cursor: target.cursor,
+      },
+    });
+  }
+
+  /**
+   * The source picker's Enter (issue #151), for each of the three things a
+   * row can be.
+   *
+   * Each hides the picker and opens the dialog in the matching mode, carrying
+   * back what a CANCEL needs to restore: the picker's scope, its cursor key,
+   * and its live filter text. The filter travels because a return that
+   * dropped it would put the user back in front of the whole list they had
+   * just narrowed.
+   */
+  function sourcesReturn(target: {
+    repoRoot: string;
+    cursor: string;
+    filter: string;
+  }) {
+    return sourcesReturnMarker(store.state.sourcePicker, target);
+  }
+
+  function spawnFromSourcePR(target: {
+    number: number;
+    title: string;
+    repoRoot: string;
+    cursor: string;
+    filter: string;
+  }) {
+    const marker = sourcesReturn(target);
+    store.actions.hideSourcePicker();
+    openNewSession({
+      cwd: target.repoRoot,
+      pr: {
+        number: target.number,
+        title: target.title,
+        repoRoot: target.repoRoot,
+      },
+      returnToSources: marker,
+    });
+  }
+
+  /**
+   * The same for an issue, whose daemon path skips everything a PR's needs:
+   * no head to fetch, no branch to reuse, no tracking to configure. The
+   * worktree is cut from the repo's default branch, named `issue-<n>-<slug>`
+   * and seeded with the issue.
+   *
+   * No revalidation here either, for `spawnFromPR`'s reason: whether the
+   * issue is still open is something only GitHub knows, and `POST /spawn`
+   * re-runs `lookupIssue` and refuses a closed one with its own message.
+   */
+  function spawnFromSourceIssue(target: {
+    number: number;
+    title: string;
+    repoRoot: string;
+    cursor: string;
+    filter: string;
+  }) {
+    const marker = sourcesReturn(target);
+    store.actions.hideSourcePicker();
+    openNewSession({
+      cwd: target.repoRoot,
+      issue: {
+        number: target.number,
+        title: target.title,
+        repoRoot: target.repoRoot,
+      },
+      returnToSources: marker,
+    });
+  }
+
+  /**
+   * A source the picker proved is already checked out here.
+   *
+   * Routed through the same live-session revalidation `spawnInWorktree` does
+   * rather than straight to a dialog: an agent may have moved into that
+   * checkout since the list was read, and the rule this whole surface obeys
+   * is that a worktree holds one agent.
+   */
+  function openWorktreeFromSources(target: {
+    path: string;
+    cursor: string;
+    filter: string;
+  }) {
+    const marker = sourcesReturn({ repoRoot: target.path, ...target });
+    store.actions.hideSourcePicker();
+    const live = store.state.sessions.find((session) =>
+      worktreeHoldsPath(target.path, sessionCwd(session)),
+    );
+    if (live) {
+      activateSession(live);
+      return;
+    }
+    openNewSession({
+      cwd: target.path,
+      existingWorktree: target.path,
+      returnToSources: marker,
+    });
+  }
+
+  /**
+   * The Worktrees panel's `n`: open the picker over the panel's LIVE scope,
+   * remembering where to come back to.
+   *
+   * `panelScope` and not `props.repo`: Tab's rescope is panel-local state
+   * this store never sees, so a picker opened from a widened panel has to be
+   * widened too, and the Esc back into the panel has to re-widen it.
+   */
+  function startFromSource(target: {
+    panelRepo: string | null;
+    panelScope: string | null;
+    cursor: string;
+  }) {
+    store.actions.hideWorktrees();
+    store.actions.showSourcePicker(target.panelScope, {
+      origin: {
+        panelRepo: target.panelRepo,
+        panelScope: target.panelScope,
+        panelCursor: target.cursor,
+      },
+    });
+  }
+
+  /**
+   * Esc out of the picker: back to the Worktrees panel that opened it, or
+   * simply closed.
+   *
+   * The panel reopens as a RETURN, so it seeds its prune scan from the last
+   * completed one instead of re-firing `gh` for a surface the user was
+   * looking at seconds ago.
+   */
+  function closeSourcePicker() {
+    const origin = store.state.sourcePicker?.origin ?? null;
+    store.actions.hideSourcePicker();
+    if (!origin) return;
+    store.actions.showWorktrees(origin.panelRepo, {
+      initialCursor: origin.panelCursor,
+      isReturn: true,
+      startWidened: origin.panelRepo !== null && origin.panelScope === null,
     });
   }
 
@@ -841,6 +1095,7 @@ export function App(props: AppProps) {
       store.state.previewFocused ||
       store.state.newSession !== null ||
       store.state.worktrees !== null ||
+      store.state.sourcePicker !== null ||
       store.state.notice !== null ||
       store.state.copyDialog !== null ||
       store.state.handoffDialog !== null
@@ -2145,6 +2400,15 @@ export function App(props: AppProps) {
      *  Worktrees panel's own entry point; it is the working directory too, so
      *  `cwd` may simply repeat it. */
     existingWorktree?: string;
+    /** Cut a worktree from this pull request's head (issue #151). The
+     *  Worktrees panel's Enter on a PR row that is not checked out here. */
+    pr?: NewSessionPR;
+    /** Cut a worktree for this issue (issue #151). The source picker's Enter
+     *  on an issue row that has no worktree yet. */
+    issue?: NewSessionIssue;
+    /** Origin marker set ONLY by the source picker's Enter: a cancel of this
+     *  dialog returns to the picker with its filter and cursor intact. */
+    returnToSources?: SourcesReturn;
     /** Origin marker set ONLY by the Worktrees panel's Enter: a cancel of
      *  this dialog returns to the panel, cursor on `cursor`, scoped to the
      *  live filter the panel had (`scope`, null when Tab had widened it). */
@@ -2182,19 +2446,34 @@ export function App(props: AppProps) {
       moveChanges: context.moveChanges,
       fork: context.fork,
       existingWorktree: context.existingWorktree,
+      pr: context.pr,
+      issue: context.issue,
+      returnToSources: context.returnToSources,
       returnToWorktrees: context.returnToWorktrees,
     });
   }
 
   /**
-   * Escape/cancel on the new-session dialog. A dialog the Worktrees panel
-   * opened returns there with the cursor back on its row; every other origin
-   * (n, the row menus) just closes, and SUBMIT never comes back here at all,
+   * Escape/cancel on the new-session dialog. A dialog the Worktrees panel or
+   * the source picker opened returns there with the cursor back on its row
+   * (and, for the picker, its filter still applied); every other origin (n,
+   * the row menus) just closes, and SUBMIT never comes back here at all,
    * because a successful spawn hands the board to the new session.
    */
   function cancelNewSession(): void {
+    // The picker is checked first only because a draft can carry at most one
+    // of the two: the dialog is opened by one surface, and each writes its
+    // own marker. Ordering here is belt and braces, not a precedence rule.
+    const sources = store.state.newSession?.returnToSources ?? null;
     const marker = store.state.newSession?.returnToWorktrees ?? null;
     store.actions.closeNewSessionDialog();
+    if (sources) {
+      store.actions.showSourcePicker(
+        sources.repo,
+        sourcesReopenOptions(sources),
+      );
+      return;
+    }
     if (marker) {
       store.actions.showWorktrees(marker.repo, {
         initialCursor: marker.cursor,
@@ -2242,6 +2521,8 @@ export function App(props: AppProps) {
           fork: draft.fork !== null,
           namesAWorktree: namesAWorktree(draft),
           existingWorktree: draft.existingWorktree !== null,
+          pr: draft.pr !== null,
+          issue: draft.issue !== null,
         }),
     });
   }
@@ -2513,8 +2794,18 @@ export function App(props: AppProps) {
     // says so ahead of the destination: that mode has no Where row to have
     // set it, so a `worktree` block built from a stale value would ask the
     // daemon to make a second checkout next to the one that was chosen.
+    // A PR spawn is excluded even though it creates a worktree: the daemon
+    // derives its name and its base from the PR, and `POST /spawn` refuses
+    // `pr` alongside `worktree.name`, `worktree.base` and
+    // `worktree.withChanges`. There is nothing for a `worktree` block to
+    // carry that would not be a 400.
     const toWorktree =
-      draft.existingWorktree === null && draft.destination === "worktree";
+      draft.existingWorktree === null &&
+      draft.pr === null &&
+      // An issue spawn is excluded on the same terms: `POST /spawn` refuses
+      // `issue` alongside `worktree.name`, and derives the name itself.
+      draft.issue === null &&
+      draft.destination === "worktree";
     // The name the request will carry. Empty means an untouched field: let
     // the daemon derive one.
     const worktreeName = toWorktree ? draftWorktreeName(draft) : "";
@@ -2567,6 +2858,18 @@ export function App(props: AppProps) {
           callerPane: callerPane ?? undefined,
           prompt: prompt || undefined,
           detach,
+          // The whole of a PR spawn's request: the daemon re-runs `lookupPR`,
+          // refuses a PR that is no longer OPEN, derives the worktree name
+          // with `slugForPR` and seeds the prompt under its own header. No
+          // openness is proved here on purpose — a row seconds out of date
+          // then fails with the daemon's own message rather than this
+          // client's guess.
+          pr: draft.pr?.number,
+          // The whole of an issue spawn's request, for the same reason: the
+          // daemon re-runs `lookupIssue`, refuses one that has been closed
+          // since the list was read, derives the worktree name with
+          // `slugForIssue` and seeds the prompt under its own header.
+          issue: draft.issue?.number,
           // A name is sent only when one was TYPED. Left out, the daemon
           // derives it from the prompt by the same rule the row previews and
           // numbers it past a collision; sent, it means that worktree
@@ -2593,9 +2896,14 @@ export function App(props: AppProps) {
       if (response.ok) {
         spawned = body ?? {};
       } else {
-        // Leave the dialog open either way: every refusal here (agent can't
-        // take a prompt, cwd is gone, that worktree name is taken) is
+        // Leave the dialog open either way: most refusals here (agent can't
+        // take a prompt, cwd is gone, that worktree name is taken) are
         // something the user can fix in the fields they are still looking at.
+        // A PR spawn is the exception, and deliberately behaves the same: the
+        // daemon re-runs `lookupPR`, so a PR that closed or merged since the
+        // panel listed it refuses with nothing on this dialog to change. Esc
+        // back to the panel is the remedy, and the daemon's own wording says
+        // what happened.
         //
         // What changes is how the message is delivered. A move can fail with
         // the user's work parked in a stash, or after it has already been
@@ -3226,6 +3534,13 @@ export function App(props: AppProps) {
       return;
     }
 
+    // The source picker likewise — and it must NOT preventDefault here, the
+    // way the panel does: its filter is an `<input>`, and a key defaulted on
+    // the way past would never reach it.
+    if (store.state.sourcePicker) {
+      return;
+    }
+
     if (store.state.confirmMode) {
       if (key === "y" || key === "Y" || key === "return" || key === "enter") {
         confirmDialogAction();
@@ -3411,15 +3726,23 @@ export function App(props: AppProps) {
         break;
       }
 
+      case "N":
       case "n":
         if (event.ctrl) {
           store.actions.moveSelection(1);
-        } else if (!event.shift) {
+        } else if (key === "N" || event.shift) {
+          // The key this switch reserved for "some later feature". The
+          // mnemonic is exact: `n` starts something new from nothing, `N`
+          // starts it from something that already exists on GitHub. Scoped
+          // like `W` is, to the selected row's repo where there is one.
+          //
+          // Both spellings are matched for the reason `W`/`w` and `D`/`d`
+          // are: terminals disagree about whether a shifted letter arrives
+          // as `"N"` or as `"n"` with `shift` set.
+          store.actions.showSourcePicker(selectedRepoRoot());
+        } else {
           openNewSession(newSessionContext(store.selectedFlatItem()));
         }
-        // Shift+N falls through deliberately: every other capital in this
-        // switch is its own action, so silently treating `N` as `n` would
-        // claim a key some later feature wants.
         event.preventDefault();
         break;
 
@@ -3939,10 +4262,31 @@ export function App(props: AppProps) {
               onClose={store.actions.hideWorktrees}
               onJump={jumpToWorktreeSession}
               onSpawn={spawnInWorktree}
+              onSpawnFromPR={spawnFromPR}
+              onStartFromSource={startFromSource}
+              effects={liveEffects}
               // Review suspends the renderer into a full-screen tool, which
               // the sidebar has neither the room nor the focus for — the same
               // reason its `d` key is inert on a session row.
               onReview={props.sidebar ? undefined : reviewWorktree}
+            />
+          )}
+        </Show>
+
+        <Show when={store.state.sourcePicker}>
+          {(picker: () => NonNullable<typeof store.state.sourcePicker>) => (
+            <SourcePicker
+              repo={picker().repo}
+              cwd={pickerCwd()}
+              compact={props.sidebar}
+              iconStyle={store.state.iconStyle}
+              initialCursor={picker().initialCursor}
+              initialFilter={picker().initialFilter}
+              origin={picker().origin}
+              onClose={closeSourcePicker}
+              onPickPR={spawnFromSourcePR}
+              onPickIssue={spawnFromSourceIssue}
+              onOpenWorktree={openWorktreeFromSources}
             />
           )}
         </Show>

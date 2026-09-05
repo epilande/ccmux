@@ -170,6 +170,27 @@ describe("HandoffDialog", () => {
     expect(frame).toContain("CancelSend");
   });
 
+  it("scrolls a long note inside the control instead of widening it", async () => {
+    // An OpenTUI input measures its own width from its text, and Yoga's
+    // default `flexShrink` is 0, so a value longer than the control used to
+    // widen it (and the wrapper box behind it) straight through the right
+    // border. The border column must survive on the Note row, with the
+    // value's tail shown and its head scrolled off.
+    const note =
+      "default very long text what happening here and beyond the border";
+    const lines = (await render({ note, field: "note", width: 60 })).split(
+      "\n",
+    );
+    const noteLine = lines.find((line) => line.includes("Note"));
+    expect(noteLine).toBeDefined();
+    const borderLine = lines.find((line) => line.includes("Hand off"));
+    const rightEdge = borderLine!.lastIndexOf("│");
+    expect(noteLine![rightEdge]).toBe("│");
+    expect(noteLine!.trimEnd().length).toBe(borderLine!.trimEnd().length);
+    expect(noteLine).toContain("beyond the border");
+    expect(noteLine).not.toContain("default very");
+  });
+
   it("draws the rows in order: title, turns, note, From, To, buttons", async () => {
     // By ORDER rather than presence: nothing here clips, so a row the budget
     // did not account for draws OVER its neighbour instead of disappearing.

@@ -32,7 +32,16 @@ a task you judge wants human eyes (launch it, tell the user, stop), or workspace
 ```bash
 # Launch a live pane for the user, then stop. Do NOT poll or drive it.
 ccmux spawn codex --cwd /path/to/repo --prompt "Long refactor: <brief>"
+ccmux spawn claude --issue 163 --detach          # worktree issue-163-<slug>, prompt seeded from the issue
+ccmux spawn codex --pr 155 --detach              # worktree on the PR's branch
+ccmux spawn --worktree fix-flicker --model opus  # named worktree; the agent's own model flag
 ```
+
+`--issue <n>` / `--pr <n>` cut a worktree from GitHub (via `gh`) and seed the prompt;
+`--worktree [name]` cuts one from the current branch (name derived from `--prompt` if omitted).
+Pass `--detach` when dispatching so the user's view stays put. The new window is named after
+the worktree, else the agent, so a batch of spawns is tellable apart in tmux. `--model <name>`
+maps onto each built-in's model flag and is refused for agents without a known one.
 
 **Do not drive a spawned pane as a worker** (spawn -> `ccmux send` -> poll -> `ccmux screen`
 -> parse scrollback). It is a brittle scrape loop: no completion signal, render races, and
@@ -176,6 +185,23 @@ Two rejections share `kind: "agent_error"` / exit 4; disambiguate on the **messa
   few seconds (or wait for a worker to finish via `list`), then retry the _same_ invoke.
 - Contains `already in flight`: you reused a running id. **Mint a fresh id** and retry;
   do not back off.
+
+## Cleaning up after a merge
+
+Once the PR merges, `ccmux worktree prune --end-idle` removes the worktree, the local branch,
+the idle agent sitting in it and that agent's pane. A worktree whose agent is working or
+waiting is never offered, so this cannot pull a job out from under itself.
+
+**You cannot run the removal yourself.** It is interactive by design: there is no `--yes`,
+and the command exits 1 when stdin is not a TTY, which a Bash tool never is. What you can run
+is `ccmux worktree prune --end-idle --dry-run`, which reports what would go without touching
+anything. Hand the removal to the human: the picker's Worktrees panel (`W`, select the row,
+then `x`), or the same command in their terminal, where it prompts for a selection and then
+`Proceed? [y/N]`.
+
+The agent's transcript file survives its pane, but that is not the same as the session being
+resumable: `opencode`, `pi` and `omp` resume by DIRECTORY, and the directory is what the
+removal deletes.
 
 ## Gotchas (read before a long run)
 

@@ -195,7 +195,15 @@ export interface InitialBatchObservation {
   getTranscriptCwd(path: string): string | null;
 }
 
-/** Ordered actions the watcher applies after the batch decision. */
+/**
+ * Ordered actions the watcher applies after the batch decision.
+ *
+ * The creating arms carry `cwd`: the session's REAL working directory, from
+ * the transcript's own `cwd` field or the bound pane's process cwd. Null only
+ * when neither was available, and then the applier falls back to decoding the
+ * project dir name — a guess that cannot tell a `-` in a directory name from
+ * the `/` it encodes (issue #156).
+ */
 export type InitialBatchAction =
   | { type: "process-existing"; sessionId: string; path: string }
   | {
@@ -206,6 +214,8 @@ export type InitialBatchAction =
       pid: number;
       provenance: BindingProvenance;
       confidence: BindingConfidence;
+      /** The session's real cwd, when known; see the type's doc comment. */
+      cwd: string | null;
     }
   | {
       /**
@@ -216,6 +226,8 @@ export type InitialBatchAction =
       type: "create-unbound";
       sessionId: string;
       path: string;
+      /** The session's real cwd, when known; see the type's doc comment. */
+      cwd: string | null;
     }
   | {
       type: "replace";
@@ -225,6 +237,8 @@ export type InitialBatchAction =
       path: string;
       paneId: string;
       pid: number;
+      /** The session's real cwd, when known; see the type's doc comment. */
+      cwd: string | null;
     }
   | { type: "skip"; path: string };
 

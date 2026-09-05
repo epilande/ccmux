@@ -1,6 +1,5 @@
 import { Command } from "commander";
-import { isDaemonRunningAsync } from "../daemon";
-import { launchDaemon } from "./shared";
+import { defaultReconcileDeps, probeDaemon, settleDaemon } from "./shared";
 import { getPreferences } from "../lib/preferences";
 import { getUIState, resolvePromptDisplay } from "../lib/state";
 import {
@@ -11,6 +10,7 @@ import {
 import { markStartup } from "../lib/startup-timing";
 import { PICKER_PANE_TITLE } from "../lib/config";
 import { tmuxArgv } from "../lib/tmux-exec";
+import { setPinnedTmuxClientTty } from "../lib/tmux-client";
 import { forkableAgentNames } from "../lib/agents";
 
 /**
@@ -33,13 +33,23 @@ export function createPickerCommand(): Command {
     .option("--icons <style>", "Icon style: none, emoji, nerdfont, dot")
     .option("--persistent", "Keep picker open after switching sessions")
     .option("--no-persistent", "Close picker after switching sessions")
+    .option(
+      "--client-tty <tty>",
+      "tmux client tty to act on (set by the popup keybinding)",
+    )
     .action(
       async (options: {
         preview?: boolean;
         icons?: string;
         persistent?: boolean;
+        clientTty?: string;
       }) => {
         markStartup("cli_parse");
+
+        // Before anything can switch a client. The value is validated where it
+        // is consumed, not here: a malformed one must be refused with a toast
+        // the user can act on, never silently replaced by tmux's guess.
+        setPinnedTmuxClientTty(options.clientTty);
 
         if (options.icons && !isValidIconStyle(options.icons)) {
           console.error(
@@ -48,19 +58,21 @@ export function createPickerCommand(): Command {
           process.exit(1);
         }
 
-        // Run daemon check, config loading, and TUI import in parallel
-        const [daemonOk, prefs, uiState, tui] = await Promise.all([
-          isDaemonRunningAsync(),
+        // Run daemon probe, config loading, and TUI import in parallel. The
+        // probe has no side effects; starting or replacing the daemon waits
+        // for the join below.
+        const reconcileDeps = defaultReconcileDeps({
+          log: (line) => console.log(line),
+        });
+        const [daemonProbe, prefs, uiState, tui] = await Promise.all([
+          probeDaemon(reconcileDeps),
           getPreferences(),
           getUIState(),
           import("../tui"),
         ]);
         markStartup("parallel_init");
 
-        if (!daemonOk) {
-          console.log("Starting daemon...");
-          await launchDaemon();
-        }
+        await settleDaemon(daemonProbe, reconcileDeps);
         markStartup("daemon_ready");
 
         const showPreview =

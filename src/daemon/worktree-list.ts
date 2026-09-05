@@ -22,6 +22,7 @@ import { basename } from "node:path";
 import { mapWithConcurrency } from "../lib/concurrency";
 import {
   listWorktrees,
+  readBranchTips,
   normalizePath,
   readDirtyState,
   readSymlinkDirectories,
@@ -54,6 +55,16 @@ export interface WorktreeRow {
   name: string;
   /** Short branch name, null when detached. */
   branch: string | null;
+  /**
+   * `branch`'s tip commit, null when there is no branch or git did not answer.
+   *
+   * Local and cheap (a `for-each-ref` over `refs/heads`), so it costs the
+   * module's no-network contract nothing — and it is the ONLY thing that can
+   * say a pull request is checked out HERE. Optional on the wire: a daemon
+   * older than this build omits it, and a missing tip must read as "cannot
+   * tell", never as a match.
+   */
+  tip?: string | null;
   detached: boolean;
   isMain: boolean;
   /** `git worktree lock`ed — the user asked for it to be left alone. */
@@ -126,6 +137,9 @@ export async function listRepoWorktrees(
   if (present.length === 0) return null;
 
   const upstreams = await readUpstreamStates(repoRoot, git);
+  // Once per repo, like the upstream states: both are one `for-each-ref` over
+  // the same refs, and every worktree of the repo reads out of them.
+  const tips = await readBranchTips(repoRoot, git);
   // Read once per repo, not per worktree: it is the same file for all of them,
   // and without it every tooling-created worktree reads as dirty on the
   // `node_modules` symlink the tooling itself made.
@@ -151,6 +165,7 @@ export async function listRepoWorktrees(
           modified: state.modified,
           untracked: state.untracked,
         },
+        tip: entry.branch ? (tips.get(entry.branch) ?? null) : null,
         upstream: entry.branch ? (upstreams.get(entry.branch) ?? null) : null,
         sessions: deps.sessionsFor?.(normalizePath(entry.path)) ?? [],
       };

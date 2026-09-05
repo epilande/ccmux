@@ -166,11 +166,111 @@ export interface NewSessionFork {
  * `NewSessionDraft` satisfies it, and a mode added later fails to compile at
  * each site until it says what it means there.
  */
+/**
+ * The pull request a dialog is cutting a worktree from (issue #151).
+ *
+ * The whole mode hangs off this one nullable field, like `fork` does, and it
+ * carries only what the dialog SHOWS. Everything else about the worktree —
+ * its name, its base, the branch — is the daemon's: `POST /spawn` derives the
+ * name with `slugForPR` and refuses `pr` alongside `worktree.name` and
+ * `worktree.base`, so a client that offered either would be offering a 400.
+ */
+export interface NewSessionPR {
+  number: number;
+  /** What the note row calls it. */
+  title: string;
+  /** The repo the PR belongs to, which is also the request's `cwd`. */
+  repoRoot: string;
+}
+
+/**
+ * The issue a dialog is cutting a worktree from (issue #151).
+ *
+ * The exact mirror of {@link NewSessionPR}, and separate from it because the
+ * two are not the same request: a PR has a HEAD to check out, so the daemon
+ * fetches it and configures tracking, while an issue has only a number and a
+ * title, so the worktree is cut from the repo's default branch and the issue
+ * survives only as the derived name and the seeded prompt.
+ *
+ * What they share is why the field exists: the daemon derives the name
+ * (`slugForIssue`) and `POST /spawn` refuses `issue` alongside
+ * `worktree.name`, so a dialog that offered one would be offering a 400.
+ */
+export interface NewSessionIssue {
+  number: number;
+  /** What the note row calls it. */
+  title: string;
+  /** The repo the issue belongs to, which is also the request's `cwd`. */
+  repoRoot: string;
+}
+
+/**
+ * Where the SOURCE PICKER itself was opened from, when the Worktrees panel
+ * opened it (issue #151).
+ *
+ * Named once and shared, because the nav stack it describes is two deep and
+ * every step has to agree on the shape: the panel writes it, the picker holds
+ * it, a dialog's cancel marker carries it, and Esc reads it back.
+ */
+export interface SourcePickerOrigin {
+  panelRepo: string | null;
+  /** The panel's LIVE scope, null when Tab had widened it. */
+  panelScope: string | null;
+  panelCursor: string;
+}
+
+/** What a cancelled dialog needs to put the source picker back as it was. */
+export interface SourcesReturn {
+  repo: string | null;
+  cursor: string;
+  filter: string;
+  origin: SourcePickerOrigin | null;
+}
+
+/**
+ * Build the marker a source-picker Enter hands to the dialog.
+ *
+ * Reads the PICKER's scope and origin, never the row's: reopening scoped to
+ * the row would silently narrow an all-repos picker, and the origin cannot be
+ * rebuilt from a row at all — the panel it names is gone by the time a cancel
+ * runs. Paired with {@link sourcesReopenOptions} rather than inlined at both
+ * ends, which sit three handlers apart.
+ */
+export function sourcesReturnMarker(
+  picker: { repo: string | null; origin: SourcePickerOrigin | null } | null,
+  target: { cursor: string; filter: string },
+): SourcesReturn {
+  return {
+    repo: picker?.repo ?? null,
+    cursor: target.cursor,
+    filter: target.filter,
+    origin: picker?.origin ?? null,
+  };
+}
+
+/**
+ * The reopen options that marker implies. A reopen that drops `origin` leaves
+ * the picker unable to say where Esc goes, and the panel unreachable.
+ */
+export function sourcesReopenOptions(marker: SourcesReturn): {
+  initialCursor: string;
+  initialFilter: string;
+  origin: SourcePickerOrigin | null;
+} {
+  return {
+    initialCursor: marker.cursor,
+    initialFilter: marker.filter,
+    origin: marker.origin,
+  };
+}
+
 export interface NewSessionShape {
   moveChanges: boolean;
   destination: NewSessionDestination;
   fork: NewSessionFork | null;
   existingWorktree: string | null;
+  pr: NewSessionPR | null;
+  issue: NewSessionIssue | null;
 }
 
 /**
@@ -192,6 +292,15 @@ export interface NewSessionShape {
  */
 export function namesAWorktree(draft: NewSessionShape): boolean {
   if (draft.existingWorktree !== null) return false;
+  // A PR spawn makes a worktree and still names nothing: the daemon derives
+  // the name from the PR (`slugForPR`), and `POST /spawn` refuses `pr`
+  // together with `worktree.name`. A Name row here would post one and earn a
+  // 400 on a dialog whose fields all looked answerable.
+  if (draft.pr !== null) return false;
+  // An issue spawn names nothing for the same reason and by the same rule:
+  // `slugForIssue` derives `issue-144-<slug>` daemon-side, and `POST /spawn`
+  // refuses `issue` together with `worktree.name`.
+  if (draft.issue !== null) return false;
   return draft.destination === "worktree" || draft.moveChanges;
 }
 
@@ -227,6 +336,13 @@ export function newSessionFields(
       return (
         draft.existingWorktree === null &&
         !draft.moveChanges &&
+        // A PR decides its own destination, exactly the way it decides the
+        // name: the worktree is cut from its head, so "here" is not an option
+        // the request has.
+        draft.pr === null &&
+        // Nor does an issue: its worktree is cut from the repo's default
+        // branch, so "here" is not an option the request has either.
+        draft.issue === null &&
         (draft.fork === null || draft.fork.canWorktree)
       );
     }
@@ -292,6 +408,42 @@ export interface NewSessionDraft {
    * MADE.
    */
   existingWorktree: string | null;
+  /**
+   * The open pull request this spawn cuts a worktree from, or null (issue
+   * #151). Set only by the Worktrees panel's Enter on a PR row.
+   *
+   * Keeps the agent, the placement and the prompt — a prompt is legal and is
+   * APPENDED under the daemon's PR header by `seedPrompt` — and drops every
+   * row about the worktree, which the daemon derives from the PR itself.
+   */
+  pr: NewSessionPR | null;
+  /**
+   * The open issue this spawn cuts a worktree from, or null (issue #151).
+   * Set only by the source picker.
+   *
+   * Keeps the agent, the placement and the prompt, exactly as a PR does — a
+   * typed prompt is APPENDED under the daemon's own issue header by
+   * `seedPrompt` — and drops every row about the worktree, which the daemon
+   * derives from the issue itself.
+   */
+  issue: NewSessionIssue | null;
+  /**
+   * Where a CANCEL returns when the SOURCE PICKER opened this dialog, or null
+   * (issue #151). A separate nullable sibling of `returnToWorktrees` and not
+   * a second shape of it, because the two return to different surfaces and a
+   * draft that could name both would have to be asked which it meant.
+   *
+   * Same contract as its sibling: an origin marker, never a mode. It reaches
+   * no policy function, no field keys off it, and submit ignores it, since a
+   * spawn hands the board to the new session. It carries the picker's own
+   * cursor key and its live filter text, because a return that dropped the
+   * query would put the user back in front of the whole list they had just
+   * narrowed. The picker's own {@link SourcePickerOrigin} rides along too,
+   * because this nav stack is two deep: a marker that restored only the
+   * picker would rebuild the middle of it and drop the bottom, so Esc out of
+   * the reopened picker would land on the session list rather than the panel.
+   */
+  returnToSources: SourcesReturn | null;
   /**
    * Where a CANCEL returns, or null for a dialog the Worktrees panel did not
    * open (issue #102 follow-up). An origin marker, deliberately NOT a mode:
@@ -370,6 +522,23 @@ interface TUIState {
     initialCursor: string | null;
     isReturn: boolean;
     startWidened: boolean;
+  } | null;
+  /**
+   * The source picker, or null when closed (issue #151).
+   *
+   * `repo` scopes it exactly as the panel's does, and everything the picker
+   * fetches is local to the component for the same reason. What travels
+   * through the store is only what a REOPEN needs: `initialCursor` and
+   * `initialFilter` put the user back where they were after a cancelled
+   * dialog, and `origin` is the Worktrees panel that opened it, so Esc
+   * reopens that panel on the row it was opened from instead of dropping the
+   * user on the session list two surfaces away.
+   */
+  sourcePicker: {
+    repo: string | null;
+    initialCursor: string | null;
+    initialFilter: string;
+    origin: SourcePickerOrigin | null;
   } | null;
   /**
    * A message that waits to be acknowledged, or null.
@@ -793,6 +962,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     previewFocused: false,
     showHelp: false,
     worktrees: null,
+    sourcePicker: null,
     notice: null,
     iconStyle: options.iconStyle ?? "dot",
     previewWidth: options.previewWidth ?? 40,
@@ -1422,8 +1592,17 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         // a worktree off — there the lock is the other way round. A spawn into
         // a worktree that already exists has no destination row at all, and a
         // write that reached one anyway would put the Name row back with it.
+        // A PR spawn is the same shape for a different reason: the daemon
+        // derives its worktree from the PR, and `POST /spawn` refuses `pr`
+        // alongside a name. An issue spawn is the same again, from the repo's
+        // default branch, and `POST /spawn` refuses `issue` the same way.
+        // Unreachable today, and enumerated because this comment names every
+        // other mode and the omission is what a later mode-aware change would
+        // trip over.
         if (draft.moveChanges) return;
         if (draft.existingWorktree !== null) return;
+        if (draft.pr !== null) return;
+        if (draft.issue !== null) return;
         if (draft.fork && !draft.fork.canWorktree) return;
         batch(() => {
           setState("newSession", "destination", option.value);
@@ -1916,6 +2095,18 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
        *  this worktree, with every row about CREATING one gone. The path is
        *  the working directory too, so `cwd` need not repeat it. */
       existingWorktree?: string;
+      /** Open in PR mode: cut a worktree from this pull request's head. The
+       *  destination, the name and the untracked choice are all the daemon's
+       *  to decide, so none of their rows appear. */
+      pr?: NewSessionPR;
+      /** Open in issue mode: cut a worktree from the repo's default branch,
+       *  named after this issue and seeded with it. Same rows gone as PR
+       *  mode, and for the same reason: the daemon decides all of them. */
+      issue?: NewSessionIssue;
+      /** Origin marker for a dialog the SOURCE PICKER opened: cancel returns
+       *  there, with its filter and cursor. See
+       *  {@link NewSessionDraft.returnToSources}. */
+      returnToSources?: SourcesReturn;
       /** Origin marker for a dialog the Worktrees panel opened: cancel
        *  returns there. See {@link NewSessionDraft.returnToWorktrees}. */
       returnToWorktrees?: {
@@ -1930,17 +2121,35 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       // draft claiming two of them is not a state any consumer should have to
       // answer for.
       const existingWorktree = init.existingWorktree ?? null;
+      // A PR is normalized alongside the other three for the same reason: it
+      // decides the destination AND the name, so a draft claiming it plus a
+      // move or a fork is not a state any consumer should have to answer for.
+      const pr = existingWorktree === null ? (init.pr ?? null) : null;
+      // An issue is normalized after the PR and yields to it: both derive the
+      // same fields from different sources, so a draft claiming two would be
+      // asking the daemon to name one worktree twice. No caller sends both;
+      // the order is what makes that unrepresentable rather than merely
+      // unlikely.
+      const issue =
+        existingWorktree === null && pr === null ? (init.issue ?? null) : null;
+      const derivesWorktree = pr !== null || issue !== null;
       const moveChanges =
-        existingWorktree === null && init.moveChanges === true;
-      const fork = existingWorktree === null ? (init.fork ?? null) : null;
+        existingWorktree === null &&
+        !derivesWorktree &&
+        init.moveChanges === true;
+      const fork =
+        existingWorktree === null && !derivesWorktree
+          ? (init.fork ?? null)
+          : null;
       // A move exists to put the changes somewhere new; everything else
       // defaults to the directory it was opened over, a fork included — the
       // key that opens it used to fork in place with no dialog at all, and
       // Enter on an untouched dialog still does exactly that. An existing
       // worktree IS that directory, which is why it needs no choice of its own.
-      const destination: NewSessionDestination = moveChanges
-        ? "worktree"
-        : "here";
+      // A PR's worktree is as forced as a move's; the row is gone either way,
+      // and the value has to say the true thing for anything that reads it.
+      const destination: NewSessionDestination =
+        moveChanges || derivesWorktree ? "worktree" : "here";
       batch(() => {
         setState("contextMenu", null);
         setState("groupContextMenu", null);
@@ -1967,12 +2176,17 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           worktreeName: null,
           fork,
           existingWorktree,
+          pr,
+          issue,
+          returnToSources: init.returnToSources ?? null,
           returnToWorktrees: init.returnToWorktrees ?? null,
           field: newSessionFields({
             moveChanges,
             destination,
             fork,
             existingWorktree,
+            pr,
+            issue,
           })[0]!,
           dropdown: null,
         });
@@ -2192,6 +2406,26 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     hideWorktrees() {
       setState("worktrees", null);
+    },
+
+    showSourcePicker(
+      repo: string | null,
+      opts: {
+        initialCursor?: string | null;
+        initialFilter?: string;
+        origin?: SourcePickerOrigin | null;
+      } = {},
+    ) {
+      setState("sourcePicker", {
+        repo,
+        initialCursor: opts.initialCursor ?? null,
+        initialFilter: opts.initialFilter ?? "",
+        origin: opts.origin ?? null,
+      });
+    },
+
+    hideSourcePicker() {
+      setState("sourcePicker", null);
     },
 
     resizePreview(delta: number) {

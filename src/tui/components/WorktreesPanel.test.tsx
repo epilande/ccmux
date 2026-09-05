@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { createMockKeys } from "@opentui/core/testing";
+import { RGBA, type CapturedFrame, type CapturedSpan } from "@opentui/core";
+import { createMockKeys, createMockMouse } from "@opentui/core/testing";
+import { deliverEscape } from "./test-helpers";
 import type {
   PruneCandidate,
   PruneOutcome,
@@ -12,6 +14,7 @@ import type {
   WorktreeListResponse,
   WorktreeRow,
 } from "../../daemon/worktree-list";
+import type { OpenPR, PRListResponse } from "../../daemon/pr-list";
 import {
   WorktreesPanel,
   clipboardArgv,
@@ -21,13 +24,13 @@ import {
   describeSessions,
   describeSkip,
   detailSegments,
-  fitSegments,
-  titleSegments,
+  headerLayout,
+  headerParts,
+  fitTabs,
   dirtyPhrases,
   formatTracking,
   isLivenessSkip,
   cachedScanFor,
-  orderRepos,
   partitionSelection,
   pruneFullySucceeded,
   removalDetails,
@@ -40,7 +43,6 @@ import {
   rowBranch,
   rowLabel,
   rowVisualHeight,
-  scrollTargetFor,
   dividerText,
   headerRule,
   sortWorktreeRows,
@@ -48,8 +50,39 @@ import {
   splitRemovable,
   visualLayout,
   worktreeHoldsPath,
+  browserArgv,
+  CURSOR_BAR,
+  detailPhrases,
+  openInBrowser,
+  prStatusText,
+  prStatusRowKey,
+  prStatusRowRepo,
+  type HeaderLayout,
+  type ViewTab,
+  initialView,
+  PRS_TAB,
+  WORKTREES_TAB,
+  PRS_TAB_SHORT,
+  rowPRUrl,
+  type PanelRepo,
   type PanelRow,
+  type PRPanelRow,
+  type WorktreePanelRow,
 } from "./WorktreesPanel";
+import {
+  fitSegments,
+  oneLine,
+  orderRepos,
+  scrollTargetFor,
+} from "./row-segments";
+import {
+  PR_MARKER,
+  checkoutHolding,
+  describeChecks,
+  describeReview,
+  isPRRowKey,
+  prRowKey,
+} from "./pr-rows";
 import { theme } from "../theme";
 import { displayWidth } from "../utils/format";
 import { DOT_SPINNER_FRAMES, getStatusIcon } from "../../lib/icons";
@@ -141,8 +174,75 @@ function candidate(overrides: Partial<PruneCandidate> = {}): PruneCandidate {
   };
 }
 
-function panelRow(overrides: Partial<PanelRow> = {}): PanelRow {
-  return { row: row(), candidate: null, skip: null, pr: null, ...overrides };
+function panelRow(overrides: Partial<WorktreePanelRow> = {}): WorktreePanelRow {
+  const base = {
+    kind: "worktree" as const,
+    row: row(),
+    candidate: null,
+    skip: null,
+    pr: null,
+  };
+  const merged = { ...base, ...overrides };
+  // The key follows the row unless a test names one, which is what every
+  // caller means: `panelRow({ row: row({ path: "/x" }) })` is a row at `/x`.
+  return { key: overrides.key ?? merged.row.path, ...merged };
+}
+
+function openPR(overrides: Partial<OpenPR> = {}): OpenPR {
+  return {
+    number: 151,
+    title: "Worktrees panel: open-PR list",
+    url: "https://github.com/o/r/pull/151",
+    author: "epilande",
+    isDraft: false,
+    reviewDecision: null,
+    ciStatus: "none",
+    headRefName: "feat/pr-list-panel",
+    headRefOid: "sha-151",
+    ...overrides,
+  };
+}
+
+function prRow(overrides: Partial<PRPanelRow> = {}): PRPanelRow {
+  const base = {
+    kind: "pr" as const,
+    repoRoot: "/repo",
+    pr: openPR(),
+    checkedOutPath: null,
+    checkedOutName: null,
+  };
+  const merged = { ...base, ...overrides };
+  return {
+    key: overrides.key ?? prRowKey(merged.repoRoot, merged.pr.number),
+    ...merged,
+  };
+}
+
+/** One `GET /prs` body, grouping every PR under one repo. */
+function prsOf(prs: OpenPR[], repoRoot = "/repo"): PRListResponse {
+  return {
+    repos: [{ repoRoot, repoName: repoRoot.split("/").pop() ?? "", prs }],
+    errors: [],
+  };
+}
+
+const noPRs: PRListResponse = { repos: [], errors: [] };
+
+/** What a sorted row is called, whichever kind it is. */
+function sortedName(entry: PanelRow): string {
+  if (entry.kind === "pr") return `#${entry.pr.number}`;
+  if (entry.kind === "pr-status") return "(pr-status)";
+  return entry.row.name;
+}
+
+/** A repo group for the pure layout helpers, PR section off by default. */
+function panelRepo(
+  repoRoot: string,
+  repoName: string,
+  rows: PanelRow[],
+  prSection: PanelRepo["prSection"] = { kind: "ready", count: 0 },
+): PanelRepo {
+  return { repoRoot, repoName, rows, prSection };
 }
 
 function outcome(overrides: Partial<PruneOutcome> = {}): PruneOutcome {
@@ -189,6 +289,8 @@ function json(body: unknown): Response {
 interface Handlers {
   list: () => Promise<Response>;
   scan: () => Promise<Response>;
+  /** Phase 3; defaults to a repo with no open PRs. */
+  prs?: () => Promise<Response>;
   prune?: () => Promise<Response>;
 }
 
@@ -208,6 +310,9 @@ function installFetch(handlers: Handlers): void {
     if (url.includes("/worktrees/prune")) {
       return handlers.prune?.() ?? json({ outcomes: [] });
     }
+    // Before the `/worktrees` fallback, and `/prs` shares no substring with
+    // it, so the ordering here is not the trap `prune-candidates` is.
+    if (url.includes("/prs")) return handlers.prs?.() ?? json(noPRs);
     return handlers.list();
   }) as unknown as typeof fetch);
 }
@@ -234,10 +339,50 @@ interface PanelOptions {
     panelRepo: string | null;
     panelScope: string | null;
   }) => void;
+  onSpawnFromPR?: (t: {
+    number: number;
+    title: string;
+    repoRoot: string;
+    cursor: string;
+    panelRepo: string | null;
+    panelScope: string | null;
+  }) => void;
+  /** Whether the stubbed opener reports success; see {@link recordEffects}. */
+  opensUrls?: boolean;
+}
+
+/**
+ * The panel's side effects, recorded instead of performed.
+ *
+ * Every mount goes through here, which is the point: the component's
+ * `effects` prop is REQUIRED, so a test cannot reach the real `open` or
+ * `pbcopy` by forgetting something. It has to be handed a recorder.
+ */
+function recordEffects(opensUrls: boolean) {
+  const openedUrls: string[] = [];
+  const copiedText: string[] = [];
+  return {
+    openedUrls,
+    copiedText,
+    effects: {
+      openUrl: (url: string) => {
+        openedUrls.push(url);
+        return opensUrls;
+      },
+      copyText: (text: string) => {
+        copiedText.push(text);
+        return { osc52: true, local: false };
+      },
+    },
+  };
 }
 
 async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
+  // BEFORE `testRender`, so the component's first `load()` cannot reach a
+  // real daemon. The prune POST it also covers would run a real `git worktree
+  // remove` against this machine.
   installFetch(handlers);
+  const recorder = recordEffects(opts.opensUrls ?? true);
   setup = await testRender(
     () => (
       <WorktreesPanel
@@ -251,13 +396,24 @@ async function mountPanel(handlers: Handlers, opts: PanelOptions = {}) {
         onJump={opts.onJump ?? (() => {})}
         onSpawn={opts.onSpawn ?? (() => {})}
         onReview={opts.onReview}
+        onSpawnFromPR={opts.onSpawnFromPR ?? (() => {})}
+        effects={recorder.effects}
       />
     ),
     { width: opts.width ?? 90, height: opts.height ?? 24 },
   );
   await setup.renderOnce();
   return {
+    ...recorder,
     keys: createMockKeys(setup.renderer),
+    /** Escape, actually delivered (see `deliverEscape`). */
+    escape: () => deliverEscape(setup!.renderer),
+    mouse: createMockMouse(setup.renderer),
+    /** Cell-level colours, for the things a char frame cannot show: the view
+     *  tabs are filled CHIPS, and a chip is its background. */
+    spans: () => setup!.captureSpans(),
+    /** Re-render at a new terminal size, as a real resize does. */
+    resize: (width: number, height: number) => setup!.resize(width, height),
     /** Drain every pending microtask, then repaint. */
     frame: async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -272,9 +428,14 @@ async function mountSettled(
   list: WorktreeListResponse,
   scan: ScanResponse = emptyScan,
   opts: PanelOptions = {},
+  prs: PRListResponse = noPRs,
 ) {
   const harness = await mountPanel(
-    { list: async () => json(list), scan: async () => json(scan) },
+    {
+      list: async () => json(list),
+      scan: async () => json(scan),
+      prs: async () => json(prs),
+    },
     opts,
   );
   return { ...harness, settled: await harness.frame() };
@@ -333,7 +494,7 @@ describe("WorktreesPanel loading", () => {
     const shown = await frame();
     expect(shown).toContain("main checkout");
     expect(shown).toContain("alpha");
-    // The in-flight scan is said once, on the title line above the list.
+    // The in-flight scan is said once, on the header line above the list.
     const [scanningAt, mainAt, alphaAt] = orderOf(
       shown,
       "scanning",
@@ -428,7 +589,7 @@ describe("WorktreesPanel scanning indicator", () => {
   /** A landed scan that moves `alpha` into the removable section. */
   const merged: ScanResponse = { candidates: [candidate()], skipped: [] };
 
-  it("carries the suffix on the title line while the scan is pending", async () => {
+  it("carries the announcement on the header while the scan is pending", async () => {
     const pending = deferred<Response>();
     const { frame } = await mountPanel({
       list: async () => json(twoRows),
@@ -532,8 +693,8 @@ describe("WorktreesPanel scanning indicator", () => {
     expect(after).not.toBe(before);
   });
 
-  // At sidebar widths the title is the thing worth keeping. OpenTUI wraps
-  // rather than clips, so an overlong title line does not truncate, it
+  // At sidebar widths the chips are the thing worth keeping. OpenTUI wraps
+  // rather than clips, so an overlong header line does not truncate, it
   // vanishes out of its `height={1}` box.
   it("drops the suffix rather than the title when it cannot fit", async () => {
     const pending = deferred<Response>();
@@ -581,24 +742,30 @@ describe("WorktreesPanel scanning indicator", () => {
 });
 
 /**
- * The muted count on the title line: the list's size, said once, where the
- * scoped view's repo name already lives. Counts describe the LOADED list, so
- * phase 1 in flight says nothing rather than a number about to change.
+ * The count on the `Worktrees` chip: the list's size, said once and on the
+ * chip that names its subject. Counts describe the LOADED list, so a load
+ * in flight says nothing rather than a number about to change.
  */
-describe("WorktreesPanel title counts", () => {
-  it("counts one repo's worktrees on the title line", async () => {
+describe("WorktreesPanel header counts", () => {
+  it("wears one repo's worktree count on its own chip", async () => {
     const { settled } = await mountSettled(listOf([mainRow(), row()]));
-    expect(lineWith(settled, "Worktrees · repo")).toContain("2 worktrees");
+    expect(lineWith(settled, WORKTREES_TAB)).toContain("Worktrees 2");
   });
 
-  it("pluralizes for real", async () => {
+  // A bare number, because the chip it sits in already names its subject.
+  // The old title needed the noun and so said `Worktrees` twice over.
+  it("says the number and not the noun", async () => {
     const { settled } = await mountSettled(listOf([mainRow()]));
-    const title = lineWith(settled, "Worktrees · repo");
-    expect(title).toContain("1 worktree");
-    expect(title).not.toContain("1 worktrees");
+    const header = lineWith(settled, WORKTREES_TAB);
+    expect(header).toContain("Worktrees 1");
+    expect(header).not.toContain("1 worktree");
+    expect(header).not.toContain("Worktrees · 1");
   });
 
-  it("counts repos and worktrees across a widened panel", async () => {
+  // The scope leads. Across a widened panel it is the axis Tab flips, not a
+  // repo count: the number was dropped when the header became one line,
+  // because a lead that arrives with the data shifts both chips sideways.
+  it("leads with the scope, and counts every repo's worktrees at once", async () => {
     const { settled } = await mountSettled(
       listOf([
         mainRow(),
@@ -606,18 +773,20 @@ describe("WorktreesPanel title counts", () => {
         mainRow({ path: "/other", repoRoot: "/other", repoName: "other" }),
       ]),
     );
-    expect(lineWith(settled, "Worktrees")).toContain("2 repos · 3 worktrees");
+    const header = lineWith(settled, WORKTREES_TAB);
+    expect(header).toContain("all repos");
+    expect(header).toContain("Worktrees 3");
   });
 
-  it("says the counts and the scan together, counts first", async () => {
+  it("says the count and the scan together, the count first", async () => {
     const { frame } = await mountPanel({
       list: async () => json(listOf([mainRow(), row()])),
       scan: () => new Promise<Response>(() => {}),
     });
     const shown = await frame();
-    const title = lineWith(shown, "scanning");
-    const [countsAt, scanningAt] = orderOf(title, "2 worktrees", "scanning");
-    expect(countsAt).toBeLessThan(scanningAt!);
+    const header = lineWith(shown, "scanning");
+    const [countAt, scanningAt] = orderOf(header, "Worktrees 2", "scanning");
+    expect(countAt).toBeLessThan(scanningAt!);
   });
 
   it("says nothing while the list itself is loading", async () => {
@@ -625,18 +794,151 @@ describe("WorktreesPanel title counts", () => {
       list: () => new Promise<Response>(() => {}),
       scan: () => new Promise<Response>(() => {}),
     });
-    // "Reading worktrees..." is on screen; a COUNT is not.
-    expect(await frame()).not.toMatch(/\d+ worktrees/);
+    // "Reading worktrees..." is on screen; a COUNT is not. The chip goes
+    // bare rather than showing the previous scope's number.
+    const shown = await frame();
+    expect(lineWith(shown, WORKTREES_TAB)).toContain(
+      `${WORKTREES_TAB}   ${PRS_TAB}`,
+    );
   });
 
-  it("drops the counts whole with the rest of the suffix when narrow", async () => {
+  // A count CAN go stale where a scope name cannot: `load()` is what a
+  // finished prune calls, so a held number states `Worktrees 2` for a panel
+  // that has just removed one of the two. The rows are not on screen to
+  // contradict it either — the loading body reads `Reading worktrees...`.
+  it("blanks the count while any reload is in flight", async () => {
+    let lists = 0;
+    const { keys, frame } = await mountPanel({
+      list: async () =>
+        ++lists === 1
+          ? json(listOf([mainRow(), row()]))
+          : await new Promise<Response>(() => {}),
+      scan: async () => json(emptyScan),
+    });
+    const settled = await frame();
+    expect(lineWith(settled, WORKTREES_TAB)).toContain("Worktrees 2");
+    keys.pressKey("r");
+    expect(lists).toBe(2);
+    expect(lineWith(await frame(), WORKTREES_TAB)).not.toMatch(/Worktrees \d/);
+  });
+
+  // The same rule, at the moment it actually costs something: the reload a
+  // successful prune fires is the one where the old number is WRONG.
+  it("never states the pre-prune count while the reload is in flight", async () => {
+    let lists = 0;
+    const { keys, frame } = await mountPanel({
+      list: async () =>
+        ++lists === 1
+          ? json(listOf([mainRow(), row()]))
+          : await new Promise<Response>(() => {}),
+      scan: async () => json({ candidates: [candidate()], skipped: [] }),
+      prune: async () => json(runResult([outcome()])),
+    });
+    await frame();
+    keys.pressKey("j");
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    await frame();
+    keys.pressKey("y");
+    await frame();
+    const after = await frame();
+    expect(after).toContain("removed 1 worktree");
+    expect(lineWith(after, WORKTREES_TAB)).not.toContain("Worktrees 2");
+  });
+
+  // A Tab IS a rescope: the rows on screen now answer a different question,
+  // so the count that describes them has to go rather than tick from one
+  // scope's number to another's.
+  it("blanks the count while a rescope is in flight", async () => {
+    let lists = 0;
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () =>
+          ++lists === 1
+            ? json(listOf([mainRow(), row()]))
+            : await new Promise<Response>(() => {}),
+        scan: async () => json(emptyScan),
+      },
+      { repo: "/repo" },
+    );
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("Worktrees 2");
+    keys.pressTab();
+    const rescoping = await frame();
+    expect(lists).toBe(2);
+    expect(lineWith(rescoping, WORKTREES_TAB)).not.toMatch(/Worktrees \d/);
+  });
+
+  // The SCOPED lead is `props.repo` and a flag, so no request can change it:
+  // it holds across a reload and both chips stay where the user aimed. This
+  // is the half of the split that can make that promise.
+  it("holds a scoped lead across a refresh", async () => {
+    let lists = 0;
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () =>
+          ++lists === 1
+            ? json(listOf([mainRow(), row()]))
+            : await new Promise<Response>(() => {}),
+        scan: async () => json(emptyScan),
+      },
+      { repo: "/repo" },
+    );
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("repo ");
+    keys.pressKey("r");
+    expect(lists).toBe(2);
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("repo ");
+  });
+
+  // The UNSCOPED lone-repo lead is the one derived from ROWS, and what it
+  // really reports is how many repos answered — so a reload about to return
+  // a second repo makes a held name wrong, exactly as a reload about to
+  // return one fewer worktree makes a held count wrong. It blanks to `all
+  // repos`, which is never untrue: the panel IS unscoped, and the name only
+  // stands in for the group header a lone group does not draw.
+  it("blanks an unscoped lone repo's name while reloading", async () => {
+    let lists = 0;
+    const { keys, frame } = await mountPanel({
+      list: async () =>
+        ++lists === 1
+          ? json(listOf([mainRow(), row()]))
+          : await new Promise<Response>(() => {}),
+      scan: async () => json(emptyScan),
+    });
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("repo ");
+    keys.pressKey("r");
+    expect(lists).toBe(2);
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("all repos");
+  });
+
+  it("flips the lead on the rescope, in the frame Tab produced", async () => {
+    let lists = 0;
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () =>
+          ++lists === 1
+            ? json(listOf([mainRow(), row()]))
+            : await new Promise<Response>(() => {}),
+        scan: async () => json(emptyScan),
+      },
+      { repo: "/repo" },
+    );
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("repo ");
+    keys.pressTab();
+    // The reload has not answered and never will, so this is the label
+    // during the rescope: it states what the panel is now fetching, which is
+    // the question Tab just asked, rather than the repo it left.
+    expect(lists).toBe(2);
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("all repos");
+  });
+
+  it("drops the counts whole, a rung above the scope, when narrow", async () => {
     const { settled } = await mountSettled(
       listOf([mainRow(), row()]),
       emptyScan,
       { compact: true, width: 24 },
     );
-    expect(settled).toContain("Worktrees");
-    expect(settled).not.toMatch(/\d+ worktrees/);
+    expect(settled).toContain(WORKTREES_TAB);
+    expect(lineWith(settled, WORKTREES_TAB)).not.toMatch(/Worktrees \d/);
   });
 });
 
@@ -996,13 +1298,17 @@ describe("WorktreesPanel structure", () => {
     );
   });
 
-  it("puts a single repo in the title instead of a header line", async () => {
+  it("leads the header with a single repo instead of a header line", async () => {
     const { settled } = await mountSettled(listOf([mainRow(), row()]));
-    expect(settled).toContain("Worktrees · repo");
-    // The header line that would repeat it directly underneath is gone.
+    const header = lineWith(settled, WORKTREES_TAB);
+    // The scope leads the very line the chips are on: one row, not two.
+    expect(header).toContain("repo ");
+    expect(header).toContain(PRS_TAB);
+    // The repo header line that would repeat it underneath is gone, and the
+    // list starts on the very next line.
     const lines = settled.split("\n");
-    const title = lines.findIndex((l) => l.includes("Worktrees · repo"));
-    expect(lines[title + 1]).toContain("main checkout");
+    const at = lines.findIndex((l) => l.includes(PRS_TAB));
+    expect(lines[at + 1]).toContain("main checkout");
   });
 
   it("keeps a header per repo once there are several", async () => {
@@ -1019,10 +1325,12 @@ describe("WorktreesPanel structure", () => {
       ],
     });
     expect(settled).toContain("Worktrees");
-    // The title carries the panel-wide counts, but never a repo NAME: with
-    // several repos on screen, naming one of them up there would lie.
-    expect(settled).not.toContain("Worktrees · repo");
-    expect(settled).not.toContain("Worktrees · other");
+    // The lead says the SCOPE, never a repo NAME: with several repos on
+    // screen, naming one of them up there would lie.
+    const header = lineWith(settled, WORKTREES_TAB);
+    expect(header).toContain("all repos");
+    expect(header).not.toContain("repo   Worktrees");
+    expect(header).not.toContain("other   Worktrees");
     expect(settled).toContain("other");
     expect(settled).toContain("repo");
   });
@@ -1486,16 +1794,17 @@ describe("WorktreesPanel keys", () => {
     );
 
     await frame();
-    expect(requested).toHaveLength(2);
+    // Three phases now: the local list, the open-PR list and the prune scan.
+    expect(requested).toHaveLength(3);
     expect(requested.every((url) => url.includes("repo=%2Frepo"))).toBe(true);
     expect(await frame()).toContain("tab all repos");
 
     keys.pressTab();
     const widened = await frame();
-    expect(requested).toHaveLength(4);
-    expect(requested.slice(2).some((url) => url.includes("repo="))).toBe(false);
+    expect(requested).toHaveLength(6);
+    expect(requested.slice(3).some((url) => url.includes("repo="))).toBe(false);
     // Discovery by cwd is additive and survives the widening.
-    expect(requested.slice(2).every((url) => url.includes("cwd=%2Frepo"))).toBe(
+    expect(requested.slice(3).every((url) => url.includes("cwd=%2Frepo"))).toBe(
       true,
     );
     expect(widened).toContain("tab this repo");
@@ -1620,15 +1929,38 @@ describe("removal confirm", () => {
 
   it("lists only the consequences that apply", () => {
     expect(
-      removalDetails({ includedDirty: 0, blockedDirty: 0, ignoredFiles: 0 }),
+      removalDetails({
+        includedDirty: 0,
+        blockedDirty: 0,
+        ignoredFiles: 0,
+        endingSessions: 0,
+      }),
     ).toEqual([]);
     expect(
-      removalDetails({ includedDirty: 1, blockedDirty: 2, ignoredFiles: 3 }),
+      removalDetails({
+        includedDirty: 1,
+        blockedDirty: 2,
+        ignoredFiles: 3,
+        endingSessions: 4,
+      }),
     ).toEqual([
       "including 1 worktree with uncommitted work",
+      "ending 4 idle agent sessions",
       "skipping 2 dirty worktrees (needs D)",
       "3 ignored files go too",
     ]);
+  });
+
+  // The line only the sessions produce, in both of its numbers.
+  it("counts the idle agents a removal would end", () => {
+    const base = { includedDirty: 0, blockedDirty: 0, ignoredFiles: 0 };
+    expect(removalDetails({ ...base, endingSessions: 1 })).toEqual([
+      "ending 1 idle agent session",
+    ]);
+    expect(removalDetails({ ...base, endingSessions: 2 })).toEqual([
+      "ending 2 idle agent sessions",
+    ]);
+    expect(removalDetails({ ...base, endingSessions: 0 })).toEqual([]);
   });
 
   it("centers over a list that stays visible underneath", async () => {
@@ -1644,14 +1976,14 @@ describe("removal confirm", () => {
     expect(shown).toContain("Remove worktrees?");
     expect(shown).toContain("Y confirm");
     expect(shown).toContain("N cancel");
-    // The panel is still the panel: title above, list behind, hints below.
-    expect(shown).toContain("Worktrees · repo");
+    // The panel is still the panel: header above, list behind, hints below.
+    expect(lineWith(shown, WORKTREES_TAB)).toContain("repo ");
     expect(shown).toContain("main checkout");
     expect(shown).toContain("j/k move");
   });
 
   it("restores the list on esc with the selection intact", async () => {
-    const { keys, frame } = await mountPanel({
+    const { keys, escape, frame } = await mountPanel({
       list: async () => json(listOf([mainRow(), row()])),
       scan: async () => json({ candidates: [candidate()], skipped: [] }),
     });
@@ -1660,11 +1992,7 @@ describe("removal confirm", () => {
     keys.pressKey(" ");
     keys.pressKey("x");
     expect(await frame()).toContain("Remove worktrees?");
-    // A bare ESC is the prefix of every CSI sequence, so the parser holds it
-    // briefly to see whether more bytes follow. `frame()`'s single macrotask
-    // is not long enough (App.test.tsx waits the same way).
-    keys.pressEscape();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    escape();
     const back = await frame();
     expect(back).not.toContain("Remove worktrees?");
     expect(back).toContain("x remove 1");
@@ -1796,7 +2124,7 @@ describe("sortWorktreeRows", () => {
       panelRow({ row: mainRow() }),
     ];
 
-    expect(sortWorktreeRows(rows).map((r) => r.row.name)).toEqual([
+    expect(sortWorktreeRows(rows).map(sortedName)).toEqual([
       "main checkout",
       "active",
       "idle",
@@ -1810,10 +2138,7 @@ describe("sortWorktreeRows", () => {
       panelRow({ row: row({ name: "zulu" }) }),
       panelRow({ row: row({ name: "alpha" }) }),
     ];
-    expect(sortWorktreeRows(rows).map((r) => r.row.name)).toEqual([
-      "alpha",
-      "zulu",
-    ]);
+    expect(sortWorktreeRows(rows).map(sortedName)).toEqual(["alpha", "zulu"]);
   });
 });
 
@@ -1870,40 +2195,92 @@ describe("fitSegments", () => {
   });
 });
 
-describe("titleSegments", () => {
-  const title = "Worktrees · ccmux";
-  const suffix = " · ◐ scanning";
+/** The header as a reader sees it: scope, chips, status, gaps and all. */
+function headerText(layout: HeaderLayout): string {
+  const chips = layout.tabs
+    .map((tab) => tab.segments.map((seg) => seg.text).join(""))
+    .join(" ");
+  return [layout.lead, chips, layout.tail]
+    .filter((zone) => zone !== null && zone !== "")
+    .join("  ");
+}
 
-  it("keeps the scanning suffix when both fit", () => {
-    expect(titleSegments(title, suffix, 40).map((s) => s.text)).toEqual([
-      title,
-      suffix,
-    ]);
+/** Columns the header occupies, which is what the ladder is measured on. */
+function headerWidthOf(layout: HeaderLayout): number {
+  return displayWidth(headerText(layout));
+}
+
+describe("header zones", () => {
+  const base = {
+    view: "worktrees" as const,
+    lead: "all repos",
+    worktrees: "42",
+    prs: "7",
+    tail: null as string | null,
+    width: 80,
+  };
+
+  it("leads with the scope and trails with the status", () => {
+    const layout = headerLayout({ ...base, tail: "◐ scanning" });
+    expect(layout.lead).toBe("all repos");
+    expect(layout.tail).toBe("◐ scanning");
   });
 
-  // Whole, not truncated: half a word ("· ◐ scann…") is noise, and the columns
-  // it eats are the ones naming the repo.
-  it("drops the suffix rather than truncating it", () => {
-    const fitted = titleSegments(title, suffix, displayWidth(title) + 4);
-    expect(fitted.map((s) => s.text)).toEqual([title]);
+  // Whole, not truncated: half a word ("◐ scann…") is noise, and the columns
+  // it eats are the ones carrying the chips.
+  it("drops the tail rather than truncating it", () => {
+    const full = headerLayout({ ...base, tail: "◐ scanning" });
+    const exact = headerWidthOf(full);
+    expect(
+      headerLayout({ ...base, tail: "◐ scanning", width: exact }).tail,
+    ).toBe("◐ scanning");
+    expect(
+      headerLayout({ ...base, tail: "◐ scanning", width: exact - 1 }).tail,
+    ).toBeNull();
   });
 
-  it("keeps the whole suffix at the exact width it fits in", () => {
-    const exact = displayWidth(title) + displayWidth(suffix);
-    expect(titleSegments(title, suffix, exact)).toHaveLength(2);
-    expect(titleSegments(title, suffix, exact - 1)).toHaveLength(1);
+  // The tail goes first and the lead last, because a count whose scope is
+  // unknown is not a smaller truth but a misleading one.
+  it("gives up the tail, then the counts, then the scope", () => {
+    const at = (width: number) =>
+      headerLayout({ ...base, tail: "◐ scanning", width });
+    expect(at(55).tail).toBe("◐ scanning");
+    expect(at(43).tail).toBeNull();
+    expect(at(43).lead).toBe("all repos");
+    expect(headerText(at(33))).toBe("all repos   Worktrees 42   PRs 7 ");
+    expect(headerText(at(28))).toBe("all repos   Worktrees   PRs ");
+    expect(at(17).lead).toBeNull();
   });
 
-  it("still fits the title itself, which OpenTUI would wrap away", () => {
-    for (let width = 1; width <= displayWidth(title) + 2; width++) {
-      const fitted = titleSegments(title, suffix, width);
-      const used = fitted.reduce((n, s) => n + displayWidth(s.text), 0);
+  // Every rung has to be narrower than the one above it, or a rung is
+  // unreachable and the panel jumps straight past it.
+  it("narrows at every rung, and never overflows its box", () => {
+    let previous = Infinity;
+    for (const width of [55, 43, 33, 28, 17]) {
+      const used = headerWidthOf(
+        headerLayout({ ...base, tail: "◐ scanning", width }),
+      );
+      expect(used).toBeLessThanOrEqual(width);
+      expect(used).toBeLessThan(previous);
+      previous = used;
+    }
+  });
+
+  it("still fits itself at widths no rung survives", () => {
+    for (let width = 1; width <= 20; width++) {
+      const used = headerWidthOf(
+        headerLayout({ ...base, tail: "◐ scanning", width }),
+      );
       expect(used).toBeLessThanOrEqual(width);
     }
   });
 
-  it("renders the bare title when nothing is scanning", () => {
-    expect(titleSegments(title, null, 40).map((s) => s.text)).toEqual([title]);
+  // A count is not known until phase 1 lands, and the chip simply goes
+  // without one rather than showing the previous scope's number.
+  it("wears no count when there is none to wear", () => {
+    expect(headerText(headerLayout({ ...base, worktrees: "", prs: "" }))).toBe(
+      "all repos   Worktrees   Pull Requests ",
+    );
   });
 });
 
@@ -1927,30 +2304,46 @@ describe("row line 1", () => {
   // The loudest thing on the old screen was a worktree named after its branch
   // saying both, twice per row, for rows that had nothing else to report.
   it("omits a branch that only repeats the worktree name", () => {
-    expect(rowBranch(row({ name: "fix-codex", branch: "fix-codex" }))).toBe("");
     expect(
-      rowBranch(row({ name: "worktree-panel", branch: "feat/worktree-panel" })),
+      rowBranch(
+        panelRow({ row: row({ name: "fix-codex", branch: "fix-codex" }) }),
+      ),
+    ).toBe("");
+    expect(
+      rowBranch(
+        panelRow({
+          row: row({ name: "worktree-panel", branch: "feat/worktree-panel" }),
+        }),
+      ),
     ).toBe("feat/worktree-panel");
   });
 
   it("names the main checkout for what it is, not for its directory", () => {
-    expect(rowLabel(mainRow())).toBe("main checkout");
-    expect(rowLabel(row())).toBe("alpha");
+    expect(rowLabel(panelRow({ row: mainRow() }))).toBe("main checkout");
+    expect(rowLabel(panelRow({ row: row() }))).toBe("alpha");
   });
 
   // `main checkout  main` in every repo group said nothing. The branch is
   // news only when the main checkout sits somewhere unexpected.
   it("hides the main checkout's default branch, keeps an unexpected one", () => {
-    expect(rowBranch(mainRow())).toBe("");
-    expect(rowBranch(mainRow({ branch: "master" }))).toBe("");
-    expect(rowBranch(mainRow({ branch: "feat/overlay" }))).toBe("feat/overlay");
+    expect(rowBranch(panelRow({ row: mainRow() }))).toBe("");
+    expect(rowBranch(panelRow({ row: mainRow({ branch: "master" }) }))).toBe(
+      "",
+    );
+    expect(
+      rowBranch(panelRow({ row: mainRow({ branch: "feat/overlay" }) })),
+    ).toBe("feat/overlay");
     // The heuristic is scoped to the main checkout: a WORKTREE sitting on
     // main is unusual enough to say so.
-    expect(rowBranch(row({ name: "wt-a", branch: "main" }))).toBe("main");
+    expect(
+      rowBranch(panelRow({ row: row({ name: "wt-a", branch: "main" }) })),
+    ).toBe("main");
   });
 
   it("says detached rather than leaving the branch blank", () => {
-    expect(rowBranch(row({ branch: null, detached: true }))).toBe("detached");
+    expect(
+      rowBranch(panelRow({ row: row({ branch: null, detached: true }) })),
+    ).toBe("detached");
   });
 
   it("gives the main checkout a home icon and an agent row a dot", () => {
@@ -2393,6 +2786,153 @@ describe("row detail line", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// The idle-agent consent (issue #175)
+// ---------------------------------------------------------------------------
+
+/** The detail line for a row the removal would end an agent in. */
+function consentText(
+  entry: PanelRow,
+  opts: { selected?: boolean; compact?: boolean; dirtyOk?: boolean } = {},
+): string {
+  return detailSegments(entry, {
+    compact: opts.compact === true,
+    dirtyOk: opts.dirtyOk === true,
+    selected: opts.selected,
+  })
+    .map((s) => s.text)
+    .join("");
+}
+
+/** The colour the sessions phrase is drawn in, wherever it sits in the line. */
+function sessionPhraseColor(
+  entry: PanelRow,
+  opts: { selected?: boolean } = {},
+): string | undefined {
+  return detailSegments(entry, {
+    compact: false,
+    dirtyOk: false,
+    selected: opts.selected,
+  }).find((s) => s.text.includes("claude idle"))?.fg;
+}
+
+describe("idle agent consent", () => {
+  /** What the daemon now offers: a merged PR whose agents are all idle. */
+  function endsAgent(
+    sessions = [session({ status: "idle" })],
+  ): WorktreePanelRow {
+    return panelRow({
+      row: row({ sessions }),
+      candidate: candidate({ sessions }),
+    });
+  }
+
+  it("says the removal ends the agent, and says it differently once picked", () => {
+    expect(consentText(endsAgent())).toBe(
+      "PR #68 merged · claude idle (x ends it)",
+    );
+    expect(consentText(endsAgent(), { selected: true })).toBe(
+      "PR #68 merged · claude idle (will be ended)",
+    );
+  });
+
+  it("counts the agents the note is about", () => {
+    const two = [
+      session({ status: "idle" }),
+      session({ id: "s2", status: "idle" }),
+    ];
+    expect(consentText(endsAgent(two))).toContain(
+      "2 agents idle (x ends them)",
+    );
+  });
+
+  // The phrase reads the LIST's sessions and the note gates on the SCAN's,
+  // fetched once at mount and seconds apart, so an agent that went
+  // `working -> idle` in that window rendered `claude working (x ends it)`.
+  it("withholds the note when the phrase it would ride disagrees", () => {
+    const stale = panelRow({
+      row: row({ sessions: [session({ status: "working" })] }),
+      candidate: candidate({ sessions: [session({ status: "idle" })] }),
+    });
+    const text = detailSegments(stale, { compact: false, dirtyOk: false })
+      .map((s) => s.text)
+      .join(" ");
+    expect(text).toContain("claude working");
+    expect(text).not.toContain("(x ends it)");
+    expect(text).not.toContain("(will be ended)");
+  });
+
+  // A kept row's sessions phrase is untouched: nothing is going to end there.
+  it("leaves a row nobody can remove saying only what is true of it", () => {
+    expect(consentText(panelRow({ row: row({ sessions: [session()] }) }))).toBe(
+      "claude idle",
+    );
+  });
+
+  // The scan's own copy stands in when the list's read has not caught up, so
+  // the note always has a phrase to ride.
+  it("borrows the scan's sessions when the list read has none", () => {
+    const sessions = [session({ status: "idle" })];
+    expect(
+      consentText(panelRow({ row: row(), candidate: candidate({ sessions }) })),
+    ).toContain("claude idle (x ends it)");
+  });
+
+  // Yellow, like the dirty counts on a row that would delete them, and never
+  // red: an ended session resumes and its transcript survives.
+  it("warns in yellow without borrowing the colour of lost work", () => {
+    expect(sessionPhraseColor(endsAgent())).toBe(theme.yellow);
+    expect(sessionPhraseColor(endsAgent(), { selected: true })).toBe(
+      theme.yellow,
+    );
+    expect(
+      sessionPhraseColor(panelRow({ row: row({ sessions: [session()] }) })),
+    ).not.toBe(theme.yellow);
+  });
+
+  // At sidebar widths the tail is what truncates, so the consequence has to
+  // lead, by the same rule the dirty phrase already follows.
+  it("leads the compact line with the consequence, not the reason", () => {
+    expect(consentText(endsAgent(), { compact: true })).toBe(
+      "claude idle (x ends it) · PR #68 merged",
+    );
+  });
+
+  // Both consents on one row: the dirty one is the higher stakes and leads.
+  it("orders both consents by what they cost", () => {
+    const sessions = [session({ status: "idle" })];
+    const both = panelRow({
+      row: row({ dirty: { dirty: true, modified: 2, untracked: 0 }, sessions }),
+      candidate: candidate({ dirty: true, modified: 2, sessions }),
+    });
+    expect(consentText(both, { compact: true })).toBe(
+      "2 modified (D deletes them) · claude idle (x ends it) · PR #68 merged",
+    );
+  });
+
+  // `rowVisualHeight` derives the height from `detailPhrases` WITHOUT a
+  // selection, so a row that grew a note by being picked would be measured
+  // one line short and overlap its neighbour. The invariant is not
+  // expressible through `rowVisualHeight` itself (its second argument is
+  // `compact`, not `selected`): what has to hold is that selecting a row
+  // changes the phrases' TEXT and never their count.
+  it("keeps the row two lines tall selected or not, at either width", () => {
+    for (const compact of [false, true]) {
+      const unselected = detailPhrases(endsAgent(), { dirtyOk: false, compact });
+      const selected = detailPhrases(endsAgent(), {
+        dirtyOk: false,
+        compact,
+        selected: true,
+      });
+      expect(selected).toHaveLength(unselected.length);
+      expect(selected.map((p) => p.text)).not.toEqual(
+        unselected.map((p) => p.text),
+      );
+      expect(rowVisualHeight(endsAgent(), compact)).toBe(2);
+    }
+  });
+});
+
 describe("removable section", () => {
   it("splits a group at the classified rows", () => {
     const kept = panelRow({ row: row({ path: "/a", name: "a" }) });
@@ -2452,11 +2992,12 @@ describe("removable section", () => {
     });
     const other = panelRow({ row: row({ path: "/c", name: "c" }) });
     const repos = [
-      { repoRoot: "/r1", repoName: "r1", rows: [kept, gone] },
-      { repoRoot: "/r2", repoName: "r2", rows: [other] },
+      panelRepo("/r1", "r1", [kept, gone]),
+      panelRepo("/r2", "r2", [other]),
     ];
     const layout = visualLayout(repos, () => 1);
-    // header(0) | a(1) | divider(2) | b(3) | header(4) | c(5)
+    // The Worktrees view draws no PR line at all, which is the whole line it
+    // reclaimed per repo: header(0) a(1) divider(2) b(3) | header(4) c(5).
     expect(layout.get("/a")).toEqual({ line: 1, height: 1 });
     expect(layout.get("/b")).toEqual({ line: 3, height: 1 });
     expect(layout.get("/c")).toEqual({ line: 5, height: 1 });
@@ -2464,7 +3005,7 @@ describe("removable section", () => {
 
   it("drops the group header line when there is only one repo", () => {
     const only = panelRow({ row: row({ path: "/a", name: "a" }) });
-    const one = [{ repoRoot: "/r", repoName: "r", rows: [only] }];
+    const one = [panelRepo("/r", "r", [only])];
     expect(showsGroupHeaders(one)).toBe(false);
     expect(visualLayout(one, () => 1).get("/a")).toEqual({
       line: 0,
@@ -2472,11 +3013,9 @@ describe("removable section", () => {
     });
     const two = [
       ...one,
-      {
-        repoRoot: "/r2",
-        repoName: "r2",
-        rows: [panelRow({ row: row({ path: "/b", name: "b" }) })],
-      },
+      panelRepo("/r2", "r2", [
+        panelRow({ row: row({ path: "/b", name: "b" }) }),
+      ]),
     ];
     expect(showsGroupHeaders(two)).toBe(true);
     expect(visualLayout(two, () => 1).get("/a")).toEqual({
@@ -2513,14 +3052,11 @@ describe("visual scrolling", () => {
     });
     const next = panelRow({ row: row({ path: "/c", name: "c" }) });
     const layout = visualLayout(
-      [
-        { repoRoot: "/r1", repoName: "r1", rows: [plain, tall] },
-        { repoRoot: "/r2", repoName: "r2", rows: [next] },
-      ],
+      [panelRepo("/r1", "r1", [plain, tall]), panelRepo("/r2", "r2", [next])],
       (entry) => rowVisualHeight(entry, false),
     );
-    // header(0) | a(1) | divider(2) | b(3,4) | header(5) | c(6). `b` is
-    // classified, so it sits under its group's removable divider.
+    // header(0) a(1) divider(2) b(3,4) | header(5) c(6). `b` is classified,
+    // so it sits under its group's removable divider.
     expect(layout.get("/a")).toEqual({ line: 1, height: 1 });
     expect(layout.get("/b")).toEqual({ line: 3, height: 2 });
     expect(layout.get("/c")).toEqual({ line: 6, height: 1 });
@@ -2553,9 +3089,8 @@ describe("visual scrolling", () => {
         candidate: candidate({ path: `/w/${i}` }),
       }),
     );
-    const layout = visualLayout(
-      [{ repoRoot: "/r", repoName: "r", rows }],
-      (entry) => rowVisualHeight(entry, false),
+    const layout = visualLayout([panelRepo("/r", "r", rows)], (entry) =>
+      rowVisualHeight(entry, false),
     );
     const viewport = 10;
     let scrollTop = 0;
@@ -2579,18 +3114,12 @@ describe("visual scrolling", () => {
     const rows = Array.from({ length: 12 }, (_, i) =>
       panelRow({ row: row({ path: `/w/${i}`, name: `w${i}` }) }),
     );
-    const before = visualLayout(
-      [{ repoRoot: "/r", repoName: "r", rows }],
-      () => 1,
-    );
+    const before = visualLayout([panelRepo("/r", "r", rows)], () => 1);
     // Cursor on the first row, viewport at the top: nothing to scroll.
     expect(scrollTargetFor(before, "/w/0", 0, 6)).toBeNull();
     // Classification sinks it to the bottom, as a prunable candidate does.
     const resorted = [...rows.slice(1), rows[0]!];
-    const after = visualLayout(
-      [{ repoRoot: "/r", repoName: "r", rows: resorted }],
-      () => 1,
-    );
+    const after = visualLayout([panelRepo("/r", "r", resorted)], () => 1);
     // One repo, so no header line: eleven rows above it, and its own line is
     // the twelfth (index 11), which must sit on the viewport's last line.
     expect(scrollTargetFor(after, "/w/0", 0, 6)).toBe(6);
@@ -2632,6 +3161,54 @@ describe("worktreeHoldsPath", () => {
     expect(
       worktreeHoldsPath("/repo/wt/feature", "/repo/wt/feature/../other"),
     ).toBe(false);
+  });
+
+  /**
+   * ccmux's linked worktrees physically nest under the main checkout, so a
+   * plain descendant test lets a main checkout on a PR's head claim a session
+   * living in `.claude/worktrees/<name>` on a different branch — and Enter's
+   * revalidation then activates the wrong agent. A descendant that crosses
+   * into a nested checkout belongs to that checkout, not this root.
+   */
+  it("does not hold a session inside a nested checkout", () => {
+    expect(worktreeHoldsPath("/repo", "/repo/.claude/worktrees/foo")).toBe(
+      false,
+    );
+  });
+
+  // An agent that cd-ed deeper into the nested checkout is still ITS session.
+  it("does not hold a subdirectory of a nested checkout", () => {
+    expect(worktreeHoldsPath("/repo", "/repo/.claude/worktrees/foo/src")).toBe(
+      false,
+    );
+  });
+
+  // Only the RELATIVE path from root to candidate decides: a nested root's
+  // own path contains the segments, and it still claims its own children.
+  it("lets a nested root hold its own children", () => {
+    expect(
+      worktreeHoldsPath(
+        "/repo/.claude/worktrees/foo",
+        "/repo/.claude/worktrees/foo/src",
+      ),
+    ).toBe(true);
+  });
+
+  // Segments, not substrings: `worktrees-old` is not the checkout parent.
+  it("does not treat a segment that merely starts with worktrees as a boundary", () => {
+    expect(worktreeHoldsPath("/repo", "/repo/.claude/worktrees-old/x")).toBe(
+      true,
+    );
+  });
+
+  it("does not treat .claude alone as a boundary", () => {
+    expect(worktreeHoldsPath("/repo", "/repo/.claude/other")).toBe(true);
+  });
+
+  // The container directory itself belongs to the containing tree: no nested
+  // checkout starts until one segment further.
+  it("holds a session sitting on the container directory itself", () => {
+    expect(worktreeHoldsPath("/repo", "/repo/.claude/worktrees")).toBe(true);
   });
 });
 
@@ -2848,6 +3425,37 @@ describe("WorktreesPanel prune outcome", () => {
     expect(after).toContain("main checkout");
     // ...with the run's one-line record riding the title.
     expect(after).toContain("removed 1 worktree");
+  });
+
+  // A successful prune reloads in place, so its notice rides the very rescan
+  // it triggered and the two share the tail. The notice leads: it is what
+  // just happened, where the spinner is only what has not finished yet.
+  it("says the removal notice ahead of the scan it triggered", async () => {
+    let scans = 0;
+    const { keys, frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      // The reload's scan never answers, so both live on the tail at once.
+      scan: async () =>
+        ++scans === 1
+          ? json({ candidates: [candidate()], skipped: [] })
+          : await new Promise<Response>(() => {}),
+      prune: async () => json(runResult([outcome()])),
+    });
+    await frame();
+    keys.pressKey("j");
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    await frame();
+    keys.pressKey("y");
+    await frame();
+    const tail = lineWith(await frame(), "removed 1 worktree");
+    const [noticeAt, scanningAt] = orderOf(
+      tail,
+      "removed 1 worktree",
+      "scanning",
+    );
+    expect(scanningAt).not.toBeUndefined();
+    expect(noticeAt).toBeLessThan(scanningAt!);
   });
 
   it("keeps the outcome screen when anything failed", async () => {
@@ -3211,5 +3819,2068 @@ describe("WorktreesPanel dirty gate", () => {
     } finally {
       if (original !== undefined) process.env.TMUX_PANE = original;
     }
+  });
+});
+
+describe("WorktreesPanel idle agent gate", () => {
+  const idle = [session({ status: "idle" })];
+  const agentList = listOf([row({ sessions: idle })]);
+  const agentScan: ScanResponse = {
+    candidates: [candidate({ sessions: idle })],
+    skipped: [],
+  };
+
+  it("shows the consent on the row, under the removable divider", async () => {
+    const { settled } = await mountSettled(agentList, agentScan);
+    expect(settled).toContain("removable");
+    const line = lineWith(settled, "claude idle");
+    expect(isDetailLine(line)).toBe(true);
+    expect(line).toContain("claude idle (x ends it)");
+    // Still a checkbox row, so the consent is something to pick.
+    expect(lineWith(settled, "alpha")).toContain("[ ]");
+  });
+
+  it("changes the wording once the row is picked", async () => {
+    const { keys, frame } = await mountSettled(agentList, agentScan);
+    keys.pressKey(" ");
+    const shown = await frame();
+    expect(lineWith(shown, "alpha")).toContain("[x]");
+    expect(shown).toContain("claude idle (will be ended)");
+    expect(shown).not.toContain("(x ends it)");
+    expect(shown).toContain("x remove 1");
+  });
+
+  // A bulk key is never the consent, and it says so rather than leaving an
+  // empty box on a row that is otherwise clean.
+  it("leaves the row for space, and a says why", async () => {
+    const { keys, frame } = await mountSettled(agentList, agentScan);
+    keys.pressKey("a");
+    const afterAll = await frame();
+    expect(afterAll).not.toContain("[x]");
+    // The note owns the hint line for a couple of seconds, which is why the
+    // selection is read off the box rather than off `x remove N` here.
+    expect(afterAll).toContain("a skips idle agent rows");
+    keys.pressKey(" ");
+    const afterSpace = await frame();
+    expect(lineWith(afterSpace, "alpha")).toContain("[x]");
+    expect(afterSpace).toContain("claude idle (will be ended)");
+  });
+
+  // `a` still takes every row it is allowed to, alongside the one it skips.
+  it("still selects the agent-free rows beside it", async () => {
+    const { keys, frame } = await mountSettled(
+      listOf([row({ sessions: idle }), row({ path: "/repo/wt/b", name: "b" })]),
+      {
+        candidates: [
+          candidate({ sessions: idle }),
+          candidate({ path: "/repo/wt/b", name: "b" }),
+        ],
+        skipped: [],
+      },
+    );
+    keys.pressKey("a");
+    const shown = await frame();
+    expect(lineWith(shown, "alpha")).toContain("[ ]");
+    expect(lineWith(shown, " b ")).toContain("[x]");
+  });
+
+  it("names the ended sessions at the confirmation step", async () => {
+    const { keys, frame } = await mountSettled(agentList, agentScan);
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    const confirm = await frame();
+    expect(confirm).toContain("Remove worktrees?");
+    expect(confirm).toContain("ending 1 idle agent session");
+  });
+
+  // `x` on the cursor row is the single-target shortcut, and the confirm it
+  // opens is what names the consequence.
+  it("reaches the confirm from the cursor row alone", async () => {
+    const { keys, frame } = await mountSettled(agentList, agentScan);
+    keys.pressKey("x");
+    expect(await frame()).toContain("ending 1 idle agent session");
+  });
+
+  it("sends the consent with the run, for exactly the picked rows", async () => {
+    let body: Record<string, unknown> = {};
+    const { keys, frame } = await mountSettled(
+      listOf([row({ sessions: idle }), row({ path: "/repo/wt/b", name: "b" })]),
+      {
+        candidates: [
+          candidate({ sessions: idle }),
+          candidate({ path: "/repo/wt/b", name: "b" }),
+        ],
+        skipped: [],
+      },
+    );
+    fetchSpy!.mockImplementation((async (
+      input: unknown,
+      init?: RequestInit,
+    ) => {
+      if (String(input).includes("/worktrees/prune") && init?.body) {
+        body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      }
+      return json({ outcomes: [] });
+    }) as unknown as typeof fetch);
+
+    keys.pressKey(" "); // the agent row
+    keys.pressKey("j");
+    keys.pressKey(" "); // the plain one
+    keys.pressKey("x");
+    keys.pressKey("y");
+    await frame();
+
+    expect(body).toMatchObject({
+      paths: ["/repo/wt/alpha", "/repo/wt/b"],
+      allowDirty: [],
+      allowEndIdle: ["/repo/wt/alpha"],
+    });
+  });
+
+  // A daemon predating the change offers no such candidate, and the field
+  // rides along empty rather than disappearing.
+  it("sends an empty consent when nothing ends an agent", async () => {
+    let body: Record<string, unknown> = {};
+    const { keys, frame } = await mountSettled(listOf([row()]), {
+      candidates: [candidate()],
+      skipped: [],
+    });
+    fetchSpy!.mockImplementation((async (
+      input: unknown,
+      init?: RequestInit,
+    ) => {
+      if (String(input).includes("/worktrees/prune") && init?.body) {
+        body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      }
+      return json({ outcomes: [] });
+    }) as unknown as typeof fetch);
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    keys.pressKey("y");
+    await frame();
+    expect(body).toMatchObject({ allowEndIdle: [] });
+  });
+
+  // The sidebar's width, where the tail truncates: the consequence has to be
+  // the half that survives.
+  it("keeps the consent readable at sidebar width", async () => {
+    const { settled } = await mountSettled(agentList, agentScan, {
+      compact: true,
+      width: 44,
+    });
+    expect(lineWith(settled, "claude idle")).toContain(
+      "claude idle (x ends it)",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The open-PR section (issue #151)
+// ---------------------------------------------------------------------------
+
+describe("PR row identity", () => {
+  // Real keys are absolute paths, so a synthetic one starting with `pr:`
+  // cannot collide with a worktree's.
+  it("keys a PR row on its repo and number", () => {
+    expect(prRowKey("/repo", 151)).toBe("pr:/repo#151");
+    expect(prRowKey("/repo", 151).startsWith("/")).toBe(false);
+  });
+
+  // The whole point of carrying a tip: a branch NAME match would mark a PR as
+  // checked out because someone else's fork reuses the word.
+  it("marks a PR checked out only when the head SHA is a local tip", () => {
+    const held = row({ path: "/wt/pr", branch: "feat/x", tip: "sha-a" });
+    const other = row({ path: "/wt/other", branch: "feat/y", tip: "sha-b" });
+    const pr = openPR({ headRefName: "feat/x", headRefOid: "sha-a" });
+
+    expect(checkoutHolding(pr, [other, held])?.path).toBe("/wt/pr");
+    // Same branch NAME, different commit: not this PR.
+    expect(
+      checkoutHolding(openPR({ headRefName: "feat/x", headRefOid: "sha-z" }), [
+        held,
+      ]),
+    ).toBeNull();
+  });
+
+  // Both directions of "cannot tell" leave the row unmarked rather than
+  // guessing: an old daemon sends no tip, and gh can withhold headRefOid.
+  it("leaves the row unmarked when either side does not resolve", () => {
+    const noTip = row({ path: "/wt/pr", branch: "feat/x" });
+    delete noTip.tip;
+    expect(
+      checkoutHolding(openPR({ headRefOid: "sha-a" }), [noTip]),
+    ).toBeNull();
+    expect(
+      checkoutHolding(openPR({ headRefOid: null }), [
+        row({ tip: "sha-a", branch: "feat/x" }),
+      ]),
+    ).toBeNull();
+  });
+
+  // A worktree just cut from the branch shares its tip. Both are SHA-proven,
+  // so the branch name is only a tie-break between them.
+  it("prefers the branch that is actually the PR's head among tied tips", () => {
+    const fresh = row({ path: "/wt/fresh", branch: "scratch", tip: "sha-a" });
+    const real = row({ path: "/wt/real", branch: "feat/x", tip: "sha-a" });
+    const pr = openPR({ headRefName: "feat/x", headRefOid: "sha-a" });
+    expect(checkoutHolding(pr, [fresh, real])?.path).toBe("/wt/real");
+  });
+});
+
+describe("PR row presentation", () => {
+  it("puts the number and title on line 1 and drops the branch column", () => {
+    const entry = prRow();
+    expect(rowLabel(entry)).toBe("#151 Worktrees panel: open-PR list");
+    // The head ref goes on the detail line: the label is already a title.
+    expect(rowBranch(entry)).toBe("");
+  });
+
+  // A long PR title would otherwise push every worktree's branch column to
+  // the cap, over a row that has no branch column of its own.
+  it("keeps PR titles out of the worktree label column", () => {
+    const long = prRow({
+      pr: openPR({ title: "a".repeat(60) }),
+    });
+    const rows = [panelRow({ row: row({ name: "alpha" }) }), long];
+    expect(labelColumnWidth(rows)).toBe(displayWidth("alpha"));
+  });
+
+  it("gives a PR row its own marker so the left edge stays a legend", () => {
+    const segments = primarySegments(prRow(), {
+      isCursor: false,
+      labelWidth: 10,
+      markerBase: 2,
+    });
+    expect(segments[0]?.text).toBe(`${PR_MARKER} `);
+    // Not any of the four markers already spelled in that slot.
+    expect([`⌂ `, `· `, `[ ] `, `[x] `]).not.toContain(segments[0]?.text);
+  });
+
+  it("says the branch, the author and only the states that are news", () => {
+    const quiet = detailPhrases(prRow(), { dirtyOk: false }).map((p) => p.text);
+    expect(quiet).toEqual(["feat/pr-list-panel", "@epilande"]);
+
+    const loud = detailPhrases(
+      prRow({
+        pr: openPR({
+          isDraft: true,
+          reviewDecision: "CHANGES_REQUESTED",
+          ciStatus: "failing",
+        }),
+      }),
+      { dirtyOk: false },
+    ).map((p) => p.text);
+    expect(loud).toContain("draft");
+    expect(loud).toContain("changes requested");
+    expect(loud).toContain("checks fail");
+  });
+
+  // Both would appear on nearly every row and say nothing about that row.
+  it("stays silent on REVIEW_REQUIRED and on a PR with no checks", () => {
+    expect(
+      describeReview(openPR({ reviewDecision: "REVIEW_REQUIRED" })),
+    ).toBeNull();
+    expect(describeReview(openPR({ reviewDecision: null }))).toBeNull();
+    expect(describeChecks(openPR({ ciStatus: "none" }))).toBeNull();
+    expect(describeChecks(openPR({ ciStatus: "passing" }))?.text).toBe(
+      "checks pass",
+    );
+  });
+
+  it("names the worktree a checked-out PR lives in, last on the line", () => {
+    const phrases = detailPhrases(
+      prRow({ checkedOutPath: "/wt/pr-151", checkedOutName: "pr-151" }),
+      { dirtyOk: false },
+    );
+    expect(phrases[phrases.length - 1]?.text).toBe("checked out in pr-151");
+  });
+
+  // What a repo with no open PRs says. `0` is the answer the PR view exists
+  // to give, so it takes a ROW there where the Worktrees view says nothing.
+  it("says what a repo with no PR rows has to say", () => {
+    expect(prStatusText({ kind: "pending" }, "◐")).toBe("◐ checking GitHub");
+    // No spinner to spend: `rowLabel` is pure and has none to pass.
+    expect(prStatusText({ kind: "pending" }, "")).toBe("checking GitHub");
+    expect(prStatusText({ kind: "ready", count: 0 }, "◐")).toBe("no open PRs");
+    // The cause travels with the failure, because the row sits under the
+    // repo it applies to and a shared line below the list cannot say which.
+    expect(
+      prStatusText({ kind: "unavailable", reason: "gh is logged out" }, "◐"),
+    ).toBe("unavailable: gh is logged out");
+    expect(prStatusText({ kind: "unavailable", reason: null }, "◐")).toBe(
+      "unavailable",
+    );
+  });
+
+  // A newline is ZERO columns wide to `Bun.stringWidth`, so a two-line `gh`
+  // stderr passes every width guard and then loses everything after the
+  // break inside a `height={1}` box, with no ellipsis to say so.
+  // Unauthenticated `gh` prints exactly two lines.
+  it("flattens a multi-line gh failure to one line", () => {
+    const text = prStatusText(
+      {
+        kind: "unavailable",
+        reason: "gh auth login required\nTo get started with GitHub CLI, run:",
+      },
+      "◐",
+    );
+    expect(text).not.toContain("\n");
+    expect(text).toBe(
+      "unavailable: gh auth login required To get started with GitHub CLI, run:",
+    );
+    expect(oneLine("  a\n\tb  ")).toBe("a b");
+  });
+});
+
+describe("view tabs", () => {
+  const tabsOf = (view: "worktrees" | "prs", prs: string, width: number) =>
+    headerLayout({
+      view,
+      lead: "all repos",
+      worktrees: "42",
+      prs,
+      width,
+      tail: null,
+    }).tabs;
+  // Chips are separated by one column that belongs to neither of them, so the
+  // rendered strip is their texts joined by a space.
+  const tabText = (view: "worktrees" | "prs", prs: string, width: number) =>
+    tabsOf(view, prs, width)
+      .map((tab) => tab.segments.map((s) => s.text).join(""))
+      .join(" ");
+  const labelFg = (tab: ViewTab) => tab.segments[0]!.fg;
+
+  it("marks the showing view active and dims the other", () => {
+    const [wtA, prA] = tabsOf("worktrees", "7", 60);
+    expect(wtA!.active).toBe(true);
+    expect(prA!.active).toBe(false);
+    expect(labelFg(wtA!)).toBe(theme.text);
+    expect(labelFg(prA!)).toBe(theme.overlay);
+    const [wtB, prB] = tabsOf("prs", "7", 60);
+    expect(wtB!.active).toBe(false);
+    expect(prB!.active).toBe(true);
+    expect(labelFg(wtB!)).toBe(theme.overlay);
+    expect(labelFg(prB!)).toBe(theme.text);
+  });
+
+  // Each chip names the view its click selects. The render reads this and
+  // nothing else, so a chip can never be wired to the view beside it.
+  it("names the view each chip selects, in both views", () => {
+    for (const view of ["worktrees", "prs"] as const) {
+      expect(tabsOf(view, "7", 60).map((t) => t.view)).toEqual([
+        "worktrees",
+        "prs",
+      ]);
+    }
+  });
+
+  // No key badge, in either view. A `[l]` on the inactive tab was tried and
+  // rejected: keyboard notation inside a label reads as documentation leaking
+  // into the interface. The keys are taught on the hint line instead.
+  it("carries labels and a count, never a key", () => {
+    expect(tabText("worktrees", "7", 60)).toBe(
+      " Worktrees 42   Pull Requests 7 ",
+    );
+    expect(tabText("prs", "7", 60)).toBe(" Worktrees 42   Pull Requests 7 ");
+  });
+
+  // The dot in this TUI divides PEERS (`9 untracked · 1 waiting`). Gluing a
+  // count to the label it belongs to made one fact read as two, which is
+  // also where two of `Worktrees`' three appearances came from.
+  it("glues a count to its label with a space, never a dot", () => {
+    expect(tabText("worktrees", "7", 60)).not.toContain("·");
+    expect(tabText("worktrees", "unavailable", 60)).toContain(
+      "Pull Requests unavailable",
+    );
+  });
+
+  it("dims the count one step below its own label", () => {
+    const [, active] = tabsOf("prs", "7", 60);
+    expect(active!.segments[1]).toEqual({ text: " 7", fg: theme.subtext });
+    const [, inactive] = tabsOf("worktrees", "7", 60);
+    expect(inactive!.segments[1]).toEqual({ text: " 7", fg: theme.overlay });
+  });
+
+  // A ladder of WHOLE swaps: a `Pull Request…` cut mid-word would spend the
+  // columns that carry everything after it.
+  it("degrades one whole rung at a time", () => {
+    expect(tabText("worktrees", "7", 43)).toBe(
+      " Worktrees 42   Pull Requests 7 ",
+    );
+    expect(tabText("worktrees", "7", 33)).toBe(" Worktrees 42   PRs 7 ");
+    expect(tabText("worktrees", "7", 33)).toContain(PRS_TAB_SHORT);
+    expect(tabText("worktrees", "7", 28)).toBe(" Worktrees   PRs ");
+  });
+
+  // A 40-column sidebar's content width, which is the ladder's whole reason
+  // for existing: both labels survive there, and so does the cause of a
+  // failed lookup, which is the one count the body cannot restate as cheaply.
+  it("keeps both labels and the count at sidebar width", () => {
+    expect(tabText("worktrees", "7", 36)).toBe(" Worktrees 42   PRs 7 ");
+    expect(tabText("worktrees", "unavailable", 36)).toBe(" Worktrees   PRs ");
+  });
+
+  // What survives when only one chip can is the ACTIVE one. The flat-label
+  // version kept the LEFTMOST, which left `Worktrees` alone on the line while
+  // the PR view was showing — harmless for a word, not for a chip that
+  // carries a fill, since the strip would then show nothing filled at all.
+  it("fits to its box, keeping the chip that is showing", () => {
+    for (const width of [16, 14, 12, 8, 4]) {
+      for (const view of ["worktrees", "prs"] as const) {
+        const fitted = tabsOf(view, "7", width);
+        const used =
+          fitted.reduce(
+            (n, tab) =>
+              n + tab.segments.reduce((m, s) => m + displayWidth(s.text), 0),
+            0,
+          ) + Math.max(0, fitted.length - 1);
+        expect(used).toBeLessThanOrEqual(width);
+        // Whatever is left on the line, the view showing is on it.
+        expect(fitted.some((tab) => tab.active)).toBe(true);
+      }
+    }
+    expect(tabText("worktrees", "7", 12)).toStartWith(" Worktrees");
+    expect(tabText("prs", "7", 12)).toStartWith(" PRs");
+  });
+
+  // Narrowing the panel may never WIDEN the header, and no width may produce
+  // a header that overflows it. (The ladder also refuses to BUILD a rung no
+  // narrower than its predecessor, which nothing here can see: an unreachable
+  // rung is unreachable, so its absence and its presence look identical from
+  // out here. That guard is construction safety, not tested behaviour.)
+  it("never widens as the panel narrows, and never overflows", () => {
+    for (const tail of [null, "◐ scanning"]) {
+      for (const counts of [
+        { worktrees: "42", prs: "7" },
+        { worktrees: "", prs: "" },
+      ]) {
+        let previous = Infinity;
+        // Descending widths walk the ladder rung by rung; every distinct
+        // layout it yields has to be strictly narrower than the last.
+        for (let width = 80; width >= 1; width--) {
+          const used = headerWidthOf(
+            headerLayout({
+              view: "prs",
+              lead: "all repos",
+              tail,
+              width,
+              ...counts,
+            }),
+          );
+          expect(used).toBeLessThanOrEqual(width);
+          expect(used).toBeLessThanOrEqual(previous);
+          previous = used;
+        }
+      }
+    }
+  });
+
+  // The flat-segment version left the separator dangling with nothing after
+  // it below about fifteen columns. A chip carries a BACKGROUND, so the same
+  // shortfall would paint an empty block of colour where a label belongs.
+  // `fitTabs` drops the chip it cannot fill instead.
+  //
+  // Called DIRECTLY, not through `headerLayout`. The ladder's last rung hands
+  // it a single chip, so a test that goes through the layout cannot reach the
+  // multi-chip walk at all: its `toHaveLength(1)` would be true no matter
+  // what this function did. That is how this test quietly stopped proving
+  // anything when the last rung changed.
+  it("drops a chip it cannot fill rather than painting an empty one", () => {
+    const strip = (width: number) =>
+      fitTabs(
+        headerLayout({
+          view: "worktrees",
+          lead: "all repos",
+          worktrees: "",
+          prs: "",
+          tail: null,
+          width: 200,
+        }).tabs,
+        width,
+      );
+    for (const width of [17, 16, 14, 12, 8, 4]) {
+      for (const tab of strip(width)) {
+        const text = tab.segments.map((s) => s.text).join("");
+        // A chip fitted down to padding and an ellipsis is the same failure
+        // wearing a character: on the active fill it is a block of colour
+        // that names nothing. Every surviving chip keeps a real letter.
+        expect(text.replace(/[\s…]/gu, "")).not.toBe("");
+      }
+    }
+    // Two chips need seventeen columns; below that the second is dropped
+    // whole rather than fitted into a block of colour with no label in it.
+    expect(strip(17)).toHaveLength(2);
+    expect(strip(14)).toHaveLength(1);
+    expect(strip(12)).toHaveLength(1);
+  });
+});
+
+/**
+ * The tabs as they REACH THE SCREEN: a chip is its background and its click,
+ * and a char frame can show neither. `captureSpans` carries per-run colours
+ * and `createMockMouse` drives real pointer events at real coordinates.
+ */
+describe("view tabs on screen", () => {
+  const onePR = prsOf([openPR()]);
+
+  /**
+   * The screen row the chips are drawn on.
+   *
+   * Identified by carrying BOTH labels, because the TITLE line directly above
+   * also says `Worktrees` and matching on that alone silently pointed every
+   * helper here at the title. One of these tests passed that way while
+   * clicking a cell no tab occupies.
+   */
+  function tabRow(frame: string): number {
+    const y = frame
+      .split("\n")
+      .findIndex(
+        (line) => line.includes(WORKTREES_TAB) && line.includes(PRS_TAB),
+      );
+    if (y < 0) throw new Error("tab line not on screen");
+    return y;
+  }
+
+  function tabLine(spans: CapturedFrame, frame: string): CapturedSpan[] {
+    return spans.lines[tabRow(frame)]!.spans;
+  }
+
+  function bgOf(spans: CapturedSpan[], needle: string): number[] {
+    const span = spans.find((s) => s.text.includes(needle));
+    if (!span) throw new Error(`no span carrying "${needle}"`);
+    return span.bg.toInts();
+  }
+
+  function fgOf(spans: CapturedSpan[], needle: string): number[] {
+    const span = spans.find((s) => s.text.includes(needle));
+    if (!span) throw new Error(`no span carrying "${needle}"`);
+    return span.fg.toInts();
+  }
+
+  /** Where a chip's label sits on screen, as the mouse sees it. */
+  function cellOf(frame: string, needle: string): { x: number; y: number } {
+    const y = tabRow(frame);
+    const x = frame.split("\n")[y]!.indexOf(needle);
+    if (x < 0) throw new Error(`"${needle}" is not on the header line`);
+    return { x, y };
+  }
+
+  // ONE fill, not two: `border` is darker than `surface` in dracula and
+  // rose-pine, so a second fill on the inactive chip would draw it RAISED
+  // above the active one in those palettes.
+  it("fills only the tab that is showing", async () => {
+    const { settled, spans } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    expect(settled).toContain(WORKTREES_TAB);
+    const line = tabLine(spans(), settled);
+    expect(bgOf(line, WORKTREES_TAB)).toEqual(
+      RGBA.fromHex(theme.border).toInts(),
+    );
+    expect(bgOf(line, PRS_TAB)).toEqual(RGBA.fromHex(theme.base).toInts());
+  });
+
+  it("switches the view when the other tab is clicked", async () => {
+    const { settled, frame, spans, mouse } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    expect(settled).toContain("main checkout");
+    expect(settled).not.toContain("#151");
+
+    const at = cellOf(settled, PRS_TAB);
+    await mouse.click(at.x, at.y);
+    const after = await frame();
+    expect(after).toContain("#151");
+    expect(after).not.toContain("main checkout");
+    // And the chip that is now showing carries the brighter ground.
+    const line = tabLine(spans(), after);
+    expect(bgOf(line, PRS_TAB)).toEqual(RGBA.fromHex(theme.border).toInts());
+    expect(bgOf(line, WORKTREES_TAB)).toEqual(
+      RGBA.fromHex(theme.base).toInts(),
+    );
+  });
+
+  // Clicking where you already are must not re-seed the cursor or reload:
+  // `switchView` returns early on its own view, and this is what proves the
+  // chip is wired through it rather than to a bare `setView`.
+  it("does nothing when the tab already showing is clicked", async () => {
+    const { settled, frame, mouse } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    const at = cellOf(settled, WORKTREES_TAB);
+    await mouse.click(at.x, at.y);
+    expect(await frame()).toBe(settled);
+  });
+
+  // The width arithmetic lives in `headerLayout`, but the LINE is assembled
+  // from separate `<text>` nodes for the zone gap and the chip gap — columns
+  // the math has to account for and the JSX has to spend exactly once. Get
+  // that wrong and the header does not overflow visibly: OpenTUI wraps, and
+  // a wrapped line inside a `height={1}` box VANISHES. So the check is that
+  // the header is still on screen at every width, and still one line, with
+  // the list's first row directly beneath it.
+  //
+  // Swept rather than sampled, and across both views, because the rungs
+  // change at different widths in each and an extra column shows up only at
+  // the exact boundary where a rung is chosen.
+  it("stays on one visible line at every width, in both views", async () => {
+    for (const width of [
+      90, 60, 47, 46, 45, 40, 37, 36, 35, 32, 30, 29, 24, 21, 20,
+    ]) {
+      for (const view of ["worktrees", "prs"] as const) {
+        const { settled, frame, keys } = await mountSettled(
+          listOf([mainRow(), row()]),
+          emptyScan,
+          { width },
+          // A title carrying none of the header's words, so "the header did
+          // not wrap onto the next line" cannot be satisfied or defeated by
+          // a row that happens to mention them.
+          prsOf([openPR({ title: "a pull request" })]),
+        );
+        let shown = settled;
+        if (view === "prs") {
+          keys.pressKey("l");
+          shown = await frame();
+        }
+        const lines = shown.split("\n");
+        const at = lines.findIndex(
+          (line) => line.includes("Worktrees") || line.includes("PRs"),
+        );
+        expect({ width, view, at }).toEqual({ width, view, at: 1 });
+        // One line, not two: the row under the header carries list content
+        // and no second helping of the header (a wrapped chip strip would
+        // land there, and a header that vanished would put a list row on
+        // line 1 and pass the check above for the wrong reason).
+        const under = lines[at + 1]!;
+        expect({
+          width,
+          view,
+          under: under.replace(/[│┌┐└┘\s]/gu, ""),
+        }).not.toEqual({ width, view, under: "" });
+        expect(under).not.toMatch(/Worktrees|PRs|Pull Requests/);
+
+        // And what is drawn is EXACTLY what the ladder measured. The border
+        // and one column of padding sit either side; everything between is
+        // the header. An extra drawn column that the math never counted is
+        // the failure this guards: it does not look wrong until the width
+        // where it tips the line over into a wrap, and then the line is gone
+        // entirely rather than clipped. (An empty `<text>` costs one column
+        // in OpenTUI, which is how three "emptied" zones once did it.)
+        const drawn = lines[at]!.slice(2).replace(/[│\s]+$/u, "");
+        const expected = headerText(
+          headerLayout({
+            view,
+            lead: "repo",
+            worktrees: "2",
+            prs: "1",
+            tail: null,
+            width: Math.max(8, width - 4),
+          }),
+        ).replace(/\s+$/u, "");
+        expect({ width, view, drawn }).toEqual({
+          width,
+          view,
+          drawn: expected,
+        });
+
+        // The same equality for the shapes the mount above cannot produce:
+        // a tail present, and a lead that spells nothing (`basename("/")`).
+        // Both are ways to smuggle an unmeasured column onto the line.
+        for (const shape of [
+          { lead: "repo", tail: "◐ scanning" },
+          { lead: "", tail: null as string | null },
+          { lead: "", tail: "◐ scanning" as string | null },
+        ]) {
+          const layout = headerLayout({
+            view,
+            worktrees: "2",
+            prs: "1",
+            width: Math.max(8, width - 4),
+            ...shape,
+          });
+          // Measured against the BUDGET handed to the layout, not the
+          // terminal width: the four columns of border and padding between
+          // them are free slack an overflow could hide in.
+          for (const part of headerParts(layout)) {
+            if (part.kind !== "chip") expect(part.text).not.toBe("");
+          }
+          const spelled = headerParts(layout)
+            .map((part) =>
+              part.kind === "chip"
+                ? part.tab.segments.map((seg) => seg.text).join("")
+                : part.text,
+            )
+            .join("");
+          const budget = Math.max(8, width - 4);
+          expect({ width, view, over: displayWidth(spelled) > budget }).toEqual(
+            { width, view, over: false },
+          );
+        }
+        // Each width gets its own renderer; the shared afterEach only ever
+        // reaches the last one this loop mounted.
+        setup?.renderer.destroy();
+        setup = undefined;
+      }
+    }
+  });
+
+  // The zones were once drawn as SIBLINGS of a `<For>`, and a `<Show>`
+  // sibling that unmounts does not necessarily come back where it was:
+  // dropped at a narrow width and restored on the way out, the scope lead
+  // reappeared at the END of the row, reading `Worktrees 16   Pull Requests
+  // 2   ccmux`.
+  //
+  // What holds that line now is ONE `<For>` over a flat parts list, where a
+  // zone with nothing to say is simply ABSENT. Emptying the zones instead
+  // was tried first and is wrong: an empty `<text>` occupies one column in
+  // OpenTUI, so three emptied zones put the line three columns over what
+  // `headerWidth` measured, and a line that overruns wraps and then vanishes
+  // out of its `height={1}` box. Do not "simplify" this back toward always
+  // rendering every zone.
+  it("keeps the zones in order across a width round trip", async () => {
+    const { frame, resize } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      { width: 90 },
+      prsOf([openPR({ title: "a pull request" })]),
+    );
+    const before = lineWith(await frame(), WORKTREES_TAB);
+    expect(before.replace(/^[│\s]+/u, "")).toStartWith("repo");
+    // Narrow enough that the ladder drops the lead entirely...
+    resize(24, 24);
+    const narrow = await frame();
+    expect(lineWith(narrow, WORKTREES_TAB)).not.toContain("repo ");
+    // ...and wide again, where every zone has to come back where it was.
+    // Compared WHOLE, not just by the lead's position: a chip or the tail
+    // landing out of order is the same bug wearing a different zone.
+    resize(90, 24);
+    expect(lineWith(await frame(), WORKTREES_TAB)).toBe(before);
+  });
+
+  // A click is a second way into `switchView`, so it has to refuse wherever
+  // the keys refuse. It did not: with `Remove worktrees?` up, the keyboard
+  // ignores `l` (the confirm handler returns before the view keys), but a
+  // click switched the list behind the dialog — and `y` then prunes a
+  // selection that is no longer on screen, which is precisely what gating
+  // the removal keys on the VIEW exists to prevent. Asserted as PARITY
+  // rather than as two separate facts, so the two paths cannot drift again.
+  it("refuses a tab click wherever the tab keys are refused", async () => {
+    const { keys, frame, mouse, settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      { candidates: [candidate()], skipped: [] },
+      {},
+      prsOf([openPR({ title: "a pull request" })]),
+    );
+    const at = cellOf(settled, PRS_TAB);
+    keys.pressKey("j");
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    const confirming = await frame();
+    expect(confirming).toContain("Remove worktrees?");
+
+    keys.pressKey("l");
+    const afterKey = await frame();
+    await mouse.click(at.x, at.y);
+    const afterClick = await frame();
+
+    // Neither reaches the PR view, and the confirm is still the thing on
+    // screen. Compared to each other as well as to the truth, because a
+    // guard that stopped BOTH by accident (say, by unmounting the chips)
+    // would satisfy the first two assertions alone.
+    expect(afterKey).not.toContain("#151");
+    expect(afterClick).not.toContain("#151");
+    expect(afterClick).toContain("Remove worktrees?");
+    expect(afterClick).toBe(afterKey);
+  });
+
+  // The guard is exactly the confirm, not "anything but the list". A reload
+  // also leaves the list phase, and the keys go on working through one — the
+  // key handler only returns early for the confirm — so a guard written as
+  // `phase() !== "list"` would silently stop both paths mid-refresh. Read
+  // off the FILL, because the body is showing `Reading worktrees...` and has
+  // no rows either way.
+  it("still switches view while a reload is in flight", async () => {
+    let lists = 0;
+    const { keys, frame, spans } = await mountPanel({
+      list: async () =>
+        ++lists === 1
+          ? json(listOf([mainRow(), row()]))
+          : await new Promise<Response>(() => {}),
+      scan: async () => json(emptyScan),
+    });
+    await frame();
+    keys.pressKey("r");
+    const reloading = await frame();
+    expect(reloading).toContain("Reading worktrees...");
+    keys.pressKey("l");
+    const switched = await frame();
+    expect(bgOf(tabLine(spans(), switched), PRS_TAB)).toEqual(
+      RGBA.fromHex(theme.border).toInts(),
+    );
+  });
+
+  // The affordance: a filled block that answers nothing until it is clicked
+  // reads as decoration.
+  it("brightens the tab under the pointer", async () => {
+    const { settled, frame, spans, mouse } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    const at = cellOf(settled, PRS_TAB);
+    expect(fgOf(tabLine(spans(), settled), PRS_TAB)).toEqual(
+      RGBA.fromHex(theme.overlay).toInts(),
+    );
+    await mouse.moveTo(at.x, at.y);
+    const hovered = await frame();
+    expect(fgOf(tabLine(spans(), hovered), PRS_TAB)).toEqual(
+      RGBA.fromHex(theme.subtext).toInts(),
+    );
+  });
+});
+
+describe("initialView", () => {
+  // One derivation covers all three return paths (a review reopen, a
+  // spawn-from-PR cursor, a cancelled dialog) without any of them growing a
+  // prop.
+  it("opens the PR view only for a PR cursor", () => {
+    expect(initialView(prRowKey("/repo", 151))).toBe("prs");
+    expect(initialView("/repo/wt/alpha")).toBe("worktrees");
+    expect(initialView(null)).toBe("worktrees");
+    expect(initialView(undefined)).toBe("worktrees");
+  });
+});
+
+describe("PR section layout", () => {
+  it("sorts PRs below every worktree, newest first", () => {
+    const rows: PanelRow[] = [
+      prRow({ pr: openPR({ number: 7 }) }),
+      panelRow({ row: row({ name: "alpha" }) }),
+      prRow({ pr: openPR({ number: 151 }) }),
+      panelRow({ row: mainRow() }),
+    ];
+    expect(sortWorktreeRows(rows).map(sortedName)).toEqual([
+      "main checkout",
+      "alpha",
+      "#151",
+      "#7",
+    ]);
+  });
+
+  it("splits PR rows out of the worktree sections", () => {
+    const split = splitRemovable([
+      panelRow({ row: row({ path: "/a" }) }),
+      panelRow({
+        row: row({ path: "/b" }),
+        candidate: candidate({ path: "/b" }),
+      }),
+      prRow(),
+    ]);
+    expect(split.kept.map((e) => e.key)).toEqual(["/a"]);
+    expect(split.removable.map((e) => e.key)).toEqual(["/b"]);
+    expect(split.prs.map((e) => e.key)).toEqual(["pr:/repo#151"]);
+  });
+
+  // The line each repo used to spend on an always-drawn PR header is the
+  // whole reason the section became a view: thirteen repos meant thirteen
+  // lines of a forty-five-line viewport spent mostly saying `0`.
+  it("places no PR line at all in the worktrees view", () => {
+    const a = panelRow({ row: row({ path: "/a", name: "a" }) });
+    const b = panelRow({ row: row({ path: "/b", name: "b" }) });
+    const layout = visualLayout(
+      [
+        panelRepo("/r1", "r1", [a, prRow()], { kind: "ready", count: 1 }),
+        panelRepo("/r2", "r2", [b], { kind: "ready", count: 0 }),
+      ],
+      () => 1,
+      "worktrees",
+    );
+    // header(0) a(1) | header(2) b(3) — no third section anywhere.
+    expect(layout.get("/a")).toEqual({ line: 1, height: 1 });
+    expect(layout.get("/b")).toEqual({ line: 3, height: 1 });
+    expect(layout.get(prRow().key)).toBeUndefined();
+  });
+
+  // The PR view counts repo headers plus either the rows or the ONE line
+  // standing in for them, and it places only PR rows: a layout that measured
+  // both views' lines would put every row after the first group out of true.
+  it("counts a repo's PR rows, or the one line that stands in", () => {
+    const wt = panelRow({ row: row({ path: "/a", name: "a" }) });
+    const pr = prRow();
+    const layout = visualLayout(
+      [
+        panelRepo("/r1", "r1", [wt, pr], { kind: "ready", count: 1 }),
+        panelRepo("/r2", "r2", [
+          panelRow({ row: row({ path: "/b", name: "b" }) }),
+        ]),
+      ],
+      () => 1,
+      "prs",
+    );
+    // header(0) pr(1) | header(2) "no open PRs"(3)
+    expect(layout.get(pr.key)).toEqual({ line: 1, height: 1 });
+    expect(layout.get("/a")).toBeUndefined();
+    expect(layout.get("/b")).toBeUndefined();
+  });
+
+  // Whichever answer phase 3 gives, the repo that has no open PRs spends
+  // exactly one line saying so, so the groups below it do not move as it
+  // resolves. It spends that line as a ROW now, which is what makes it
+  // reachable; the layout has no arm for "a repo with no rows" at all.
+  it("spends one line on every rowless PR-section state", () => {
+    const pr = prRow({ pr: openPR({ number: 9 }), repoRoot: "/r2" });
+    const states: PanelRepo["prSection"][] = [
+      { kind: "pending" },
+      { kind: "ready", count: 0 },
+      { kind: "unavailable", reason: "gh is logged out" },
+    ];
+    const lines = states.map((prSection) => {
+      const standIn: PanelRow = {
+        kind: "pr-status",
+        key: prStatusRowKey("/r1"),
+        repoRoot: "/r1",
+        status: prSection,
+      };
+      return visualLayout(
+        [
+          panelRepo("/r1", "r1", [standIn], prSection),
+          panelRepo("/r2", "r2", [pr], { kind: "ready", count: 1 }),
+        ],
+        (entry) => rowVisualHeight(entry, false),
+        "prs",
+      ).get(pr.key)?.line;
+    });
+    // header(0) stand-in(1) | header(2) pr(3), in all three.
+    expect(lines).toEqual([3, 3, 3]);
+  });
+});
+
+describe("WorktreesPanel PR view", () => {
+  const onePR = prsOf([openPR()]);
+
+  // The whole reason the section became a view: the Worktrees view is exactly
+  // what it was before phase 3 existed, and every line it used to spend on a
+  // per-repo PR header is back.
+  it("shows no trace of the PR section in the worktrees view", async () => {
+    const { settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    expect(settled).toContain("main checkout");
+    expect(settled).not.toContain("open PRs");
+    expect(settled).not.toContain("#151");
+  });
+
+  it("swaps the rows for the repo's PRs on l, and back on h", async () => {
+    const { keys, frame, settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    expect(settled).toContain("main checkout");
+
+    keys.pressKey("l");
+    const prs = await frame();
+    expect(prs).toContain("#151 Worktrees panel: open-PR list");
+    expect(prs).not.toContain("main checkout");
+
+    keys.pressKey("h");
+    const back = await frame();
+    expect(back).toContain("main checkout");
+    expect(back).not.toContain("#151");
+  });
+
+  // The count is the PANEL's, not the active view's: the inactive tab has to
+  // state the other view's number, which is what it is there for.
+  it("carries the live PR count on the tab from the worktrees view", async () => {
+    const { settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      prsOf([openPR(), openPR({ number: 150 })]),
+    );
+    expect(settled).toContain("Pull Requests 2");
+  });
+
+  // The spinner rides the LABEL rather than a row, so nothing takes a line
+  // and gives it back when GitHub answers.
+  it("spins on the tab while phase 3 is in flight", async () => {
+    let answer: ((r: Response) => void) | null = null;
+    const { frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => json(emptyScan),
+      prs: () => new Promise<Response>((resolve) => (answer = resolve)),
+    });
+
+    const pending = await frame();
+    expect(pending).toContain("Pull Requests ");
+    expect(pending).not.toContain("Pull Requests 0");
+    // The worktrees are usable throughout that window, unchanged.
+    expect(pending).toContain("main checkout");
+
+    answer!(json(onePR));
+    expect(await frame()).toContain("Pull Requests 1");
+  });
+
+  // The reversal that is the point: `0` is noise in the Worktrees view and
+  // the ANSWER in this one, so it gets a line here and none there.
+  it("says a repo has no open PRs, in the PR view only", async () => {
+    const { keys, frame, settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+    );
+    expect(settled).not.toContain("no open PRs");
+
+    keys.pressKey("l");
+    expect(await frame()).toContain("no open PRs");
+  });
+
+  // ONE cause for every repo, so it is said ONCE and the groups go with it.
+  // Under each repo it filled the whole viewport with copies of the same
+  // sentence, and that is the FIRST-RUN state for every existing user, whose
+  // daemon predates `/prs` until they restart it. Bare headers over the line
+  // would be the same noise in a different shape: in this view a repo whose
+  // PRs are entirely unknown carries no information.
+  it("says a whole-request failure once, without the repo groups", async () => {
+    const { keys, frame } = await mountPanel({
+      list: async () =>
+        json({
+          repos: [
+            { repoRoot: "/repo", repoName: "repo", worktrees: [mainRow()] },
+            {
+              repoRoot: "/other",
+              repoName: "other",
+              worktrees: [
+                row({
+                  path: "/other/wt/d",
+                  repoRoot: "/other",
+                  repoName: "other",
+                }),
+              ],
+            },
+          ],
+        }),
+      scan: async () => json(emptyScan),
+      prs: async () => {
+        throw new Error("gh is logged out");
+      },
+    });
+    const worktrees = await frame();
+    expect(worktrees).toContain("Pull Requests unavailable");
+    // Nothing leaks into the Worktrees view, which has no PR presence at all.
+    expect(worktrees).not.toContain("gh is logged out");
+    expect(worktrees).toContain("main checkout");
+    // Both repo headers are there, since the Worktrees view still has rows.
+    expect(worktrees).toContain("other ─");
+
+    keys.pressKey("l");
+    const prs = await frame();
+    expect(prs).toContain("Open PRs unavailable: gh is logged out");
+    // Said once, and the groups are gone with it.
+    expect(prs.match(/gh is logged out/g)).toHaveLength(1);
+    expect(prs).not.toContain("other ─");
+    expect(prs).not.toContain("no open PRs");
+  });
+
+  // Per-repo failures arrive as HTTP 200 with `repos: []`, so `prError()` is
+  // null and a naive count is 0: the tab asserted `· 0` while every line
+  // beneath it said the answer was unknown, and the Worktrees view, which has
+  // no such lines, showed only the fabricated zero.
+  it("never asserts a count of zero it cannot stand behind", async () => {
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(listOf([mainRow(), row()])),
+        scan: async () => json(emptyScan),
+        prs: async () =>
+          json({
+            repos: [],
+            errors: [
+              {
+                repoRoot: "/repo",
+                repoName: "repo",
+                error: "no GitHub remote",
+              },
+            ],
+          }),
+      },
+      {},
+    );
+    const shown = await frame();
+    expect(shown).toContain("Pull Requests unavailable");
+    expect(shown).not.toContain("Pull Requests 0");
+    // And the body agrees, because both read the same sections.
+    keys.pressKey("l");
+    expect(await frame()).toContain("unavailable: no GitHub remote");
+  });
+
+  // A repo's own error rides inside an otherwise fine response, so only that
+  // repo's line is marked and the others still answer. This is the steady
+  // state with a current daemon, and it keeps the per-repo line the
+  // whole-request case gives up.
+  it("marks only the repo whose own PR lookup failed", async () => {
+    const { keys, frame } = await mountPanel({
+      list: async () =>
+        json({
+          repos: [
+            { repoRoot: "/repo", repoName: "repo", worktrees: [mainRow()] },
+            {
+              repoRoot: "/other",
+              repoName: "other",
+              worktrees: [
+                row({
+                  path: "/other/wt/d",
+                  repoRoot: "/other",
+                  repoName: "other",
+                }),
+              ],
+            },
+          ],
+        }),
+      scan: async () => json(emptyScan),
+      prs: async () =>
+        json({
+          repos: [{ repoRoot: "/other", repoName: "other", prs: [] }],
+          errors: [
+            { repoRoot: "/repo", repoName: "repo", error: "no GitHub remote" },
+          ],
+        }),
+    });
+    keys.pressKey("l");
+    const shown = await frame();
+    // The groups survive here, because they are what tells the two apart.
+    expect(shown).toContain("unavailable: no GitHub remote");
+    expect(shown).toContain("no open PRs");
+    expect(shown).toContain("other ─");
+  });
+
+  // Degrades like phase 2: the panel never reaches its error phase, and the
+  // worktrees are still the thing the user came for.
+  it("keeps the panel usable when the PR list fails", async () => {
+    const { frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => json(emptyScan),
+      prs: async () => {
+        throw new Error("gh is logged out");
+      },
+    });
+    const shown = await frame();
+    expect(shown).toContain("main checkout");
+    expect(shown).toContain("enter open");
+    // Not the error phase: `r retry · q close` is what that renders.
+    expect(shown).not.toContain("r retry");
+  });
+
+  it("marks a PR whose head is a local branch tip as checked out", async () => {
+    const held = row({
+      path: "/repo/wt/pr",
+      name: "pr-151",
+      branch: "feat/pr-list-panel",
+      tip: "sha-151",
+    });
+    const { keys, frame } = await mountSettled(
+      listOf([mainRow(), held]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    keys.pressKey("l");
+    expect(await frame()).toContain("checked out in pr-151");
+  });
+
+  // A FIRST visit to a view has nothing remembered, so it seeds on row 1.
+  it("seeds the cursor on the new view's first row on a first visit", async () => {
+    const { keys, frame } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      prsOf([openPR(), openPR({ number: 150 })]),
+    );
+    keys.pressKey("l");
+    const prs = await frame();
+    // The cursor bar sits in the rail's column on the row it is on.
+    expect(lineWith(prs, "#151")).toContain(CURSOR_BAR);
+
+    keys.pressKey("j");
+    expect(lineWith(await frame(), "#150")).toContain(CURSOR_BAR);
+  });
+
+  // And a RETURN restores what the view was left on, both ways.
+  it("remembers each view's cursor across a round trip", async () => {
+    const { keys, frame } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      prsOf([openPR(), openPR({ number: 150 })]),
+    );
+    // Leave the worktrees view on its SECOND row.
+    keys.pressKey("j");
+    expect(lineWith(await frame(), "alpha")).toContain(CURSOR_BAR);
+
+    keys.pressKey("l");
+    keys.pressKey("j");
+    expect(lineWith(await frame(), "#150")).toContain(CURSOR_BAR);
+
+    // Back, and not to row 1.
+    keys.pressKey("h");
+    expect(lineWith(await frame(), "alpha")).toContain(CURSOR_BAR);
+    expect(lineWith(await frame(), "main checkout")).not.toContain(CURSOR_BAR);
+
+    // Forward, and not to row 1 either.
+    keys.pressKey("l");
+    expect(lineWith(await frame(), "#150")).toContain(CURSOR_BAR);
+  });
+
+  // The memory is a PREFERENCE, not an assignment. The PR view's keys change
+  // under it — a `pr-status` row vanishes the moment its repo gains a PR, and
+  // a PR that merges between visits takes its row with it — so a remembered
+  // key that is no longer there falls back to the ordinary re-seed.
+  it("falls back to the first row when the remembered row is gone", async () => {
+    let answer: ((r: Response) => void) | null = null;
+    const { keys, frame } = await mountPanel({
+      list: async () => json(listOf([mainRow(), row()])),
+      scan: async () => json(emptyScan),
+      prs: () => new Promise<Response>((resolve) => (answer = resolve)),
+    });
+    await frame();
+
+    // While pending the PR view is a list of stand-in rows; leave it on one.
+    keys.pressKey("l");
+    expect(lineWith(await frame(), "checking GitHub")).toContain(CURSOR_BAR);
+    keys.pressKey("h");
+    await frame();
+
+    // Phase 3 lands and that stand-in row is REPLACED by a real PR row, so
+    // the remembered key names nothing.
+    answer!(json(prsOf([openPR()])));
+    await frame();
+    keys.pressKey("l");
+    expect(lineWith(await frame(), "#151")).toContain(CURSOR_BAR);
+  });
+
+  // j/k walk the ACTIVE view's rows and nothing else. A consumer left on the
+  // unfiltered list is a key acting on a row that is not on screen.
+  it("never walks the cursor off the active view's rows", async () => {
+    const { keys, frame } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      onePR,
+    );
+    for (let i = 0; i < 6; i++) keys.pressKey("j");
+    const shown = await frame();
+    expect(shown).not.toContain("#151");
+    // Still on a worktree row, and the last one at that.
+    expect(lineWith(shown, "alpha")).toContain(CURSOR_BAR);
+  });
+});
+
+describe("PR row return cursor", () => {
+  // `initialView` is the single authority on which view an open lands in, so
+  // the fix is to feed it the right KEY rather than to send a view alongside
+  // it. A view sent explicitly with the cursor still a path would reopen the
+  // PR view on a key its list cannot hold, and the re-seed would drop the
+  // cursor on row 1 — a wrong row instead of a wrong view.
+  it("derives the PR view from the key a checked-out PR row sends", () => {
+    expect(initialView(prRowKey("/repo", 151))).toBe("prs");
+    // What the branch used to send, and why it came back to the wrong view.
+    expect(initialView("/repo/wt/pr")).toBe("worktrees");
+  });
+});
+
+describe("WorktreesPanel PR view reachability", () => {
+  /** N repos, each with only its main checkout and no open PRs. */
+  function prLessRepos(n: number): WorktreeListResponse {
+    return listOf(
+      Array.from({ length: n }, (_, i) =>
+        mainRow({
+          path: `/r${i}`,
+          repoRoot: `/r${i}`,
+          repoName: `repo-${i}`,
+          name: `repo-${i}`,
+        }),
+      ),
+    );
+  }
+
+  // The High this commit exists for. The stand-in line used to be a LINE:
+  // the render drew it and `visualLayout` counted it, but `flatRows()` did
+  // not contain it, so `moveCursor` returned on an empty list, the scroll
+  // effect had no cursor to chase, and every repo past the first screenful
+  // was unreachable from the keyboard while a scrollbar drew itself
+  // alongside. As a ROW it is simply walked to.
+  it("walks the cursor to the last repo when no repo has open PRs", async () => {
+    const { keys, frame } = await mountSettled(
+      prLessRepos(8),
+      emptyScan,
+      { height: 12 },
+      noPRs,
+    );
+    keys.pressKey("l");
+    const top = await frame();
+    expect(top).toContain("repo-0");
+    expect(top).not.toContain("repo-7");
+
+    for (let i = 0; i < 30; i++) keys.pressKey("j");
+    const bottom = await frame();
+    expect(bottom).toContain("repo-7");
+    expect(bottom).toContain("no open PRs");
+  });
+
+  // The mixed case from the same bug: the cursor used to pin to the single
+  // PR row because it was the only thing in `flatRows()`.
+  it("walks past a repo that does have PRs to the repos below it", async () => {
+    const list = prLessRepos(8);
+    const { keys, frame } = await mountSettled(
+      list,
+      emptyScan,
+      { height: 12 },
+      {
+        repos: [{ repoRoot: "/r0", repoName: "repo-0", prs: [openPR()] }],
+        errors: [],
+      },
+    );
+    keys.pressKey("l");
+    for (let i = 0; i < 30; i++) keys.pressKey("j");
+    expect(await frame()).toContain("repo-7");
+  });
+
+  // The status row is an ordinary row, so it is keyed, sorted and placed by
+  // the same machinery as every other one.
+  it("gives the stand-in a key the layout places and nothing else claims", () => {
+    const key = prStatusRowKey("/r0");
+    expect(key).toBe("pr-status:/r0");
+    // Not a worktree path, and NOT a PR key — the re-seed effect's hold must
+    // not claim it, since no return path ever asks to land here.
+    expect(isPRRowKey(key)).toBe(false);
+    const statusRow: PanelRow = {
+      kind: "pr-status",
+      key,
+      repoRoot: "/r0",
+      status: { kind: "ready", count: 0 },
+    };
+    const layout = visualLayout(
+      [
+        panelRepo("/r0", "r0", [
+          panelRow({ row: row({ path: "/a" }) }),
+          statusRow,
+        ]),
+      ],
+      (entry) => rowVisualHeight(entry, false),
+      "prs",
+    );
+    expect(layout.get(key)).toEqual({ line: 0, height: 1 });
+    // One line tall, derived from `detailPhrases` like every other row.
+    expect(rowVisualHeight(statusRow, false)).toBe(1);
+    // Never measured into the label column: a long `unavailable: …` would
+    // otherwise stretch every worktree's branch column in the panel.
+    expect(
+      labelColumnWidth([
+        statusRow,
+        {
+          ...statusRow,
+          key: "pr-status:/r1",
+          status: { kind: "unavailable", reason: "x".repeat(60) },
+        },
+      ]),
+    ).toBe(0);
+  });
+
+  // Behaviour this commit deliberately introduces: while phase 3 is in
+  // flight the PR view is a list of spinner rows, one per repo, and the
+  // cursor sits on one. That is what makes the pending view scrollable.
+  it("is a walkable list of spinner rows while phase 3 is pending", async () => {
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(prLessRepos(3)),
+        scan: async () => json(emptyScan),
+        prs: () => new Promise<Response>(() => {}),
+      },
+      { height: 16 },
+    );
+    keys.pressKey("l");
+    const shown = await frame();
+    expect(shown).toContain("checking GitHub");
+    expect(lineWith(shown, "checking GitHub")).toContain(CURSOR_BAR);
+  });
+
+  // Enter has nothing to open here, and says which of the three things the
+  // row is reporting rather than doing nothing.
+  it("says what the stand-in row is reporting when Enter cannot act", async () => {
+    const { keys, frame } = await mountSettled(
+      prLessRepos(2),
+      emptyScan,
+      {},
+      noPRs,
+    );
+    keys.pressKey("l");
+    keys.pressEnter();
+    expect(await frame()).toContain("no open PRs here");
+  });
+});
+
+describe("WorktreesPanel PR view cursor under phase 3", () => {
+  /** N repos, each with only its main checkout. */
+  function repos(n: number): WorktreeListResponse {
+    return listOf(
+      Array.from({ length: n }, (_, i) =>
+        mainRow({
+          path: `/r${i}`,
+          repoRoot: `/r${i}`,
+          repoName: `repo-${i}`,
+          name: `repo-${i}`,
+        }),
+      ),
+    );
+  }
+
+  // A `pr-status` key does not go missing because its row was removed: it
+  // goes missing because that repo ANSWERED and its stand-in was replaced by
+  // real PR rows. Falling back to `rows[0]` yanked the cursor to the top of
+  // the list and dragged the viewport with it, away from the very rows the
+  // user had parked on waiting for.
+  it("keeps the cursor in the repo whose PRs just arrived", async () => {
+    let answer: ((r: Response) => void) | null = null;
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(repos(4)),
+        scan: async () => json(emptyScan),
+        prs: () => new Promise<Response>((resolve) => (answer = resolve)),
+      },
+      { height: 24 },
+    );
+    await frame();
+
+    // Park on the THIRD repo's stand-in row while GitHub is still thinking.
+    keys.pressKey("l");
+    keys.pressKey("j");
+    keys.pressKey("j");
+    const parked = await frame();
+    expect(parked).toContain("repo-2");
+
+    // That repo, and only that repo, answers.
+    answer!(
+      json({
+        repos: [{ repoRoot: "/r2", repoName: "repo-2", prs: [openPR()] }],
+        errors: [],
+      }),
+    );
+    const settled = await frame();
+
+    // The cursor is on the row that replaced the one it was parked on, not
+    // at the top of the list.
+    expect(lineWith(settled, "#151")).toContain(CURSOR_BAR);
+    expect(lineWith(settled, "no open PRs")).not.toContain(CURSOR_BAR);
+  });
+
+  // Bounded: a repo OTHER than the cursor's answering leaves the key intact,
+  // so the re-seed never runs at all.
+  it("does not move the cursor when a different repo answers", async () => {
+    let answer: ((r: Response) => void) | null = null;
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(repos(4)),
+        scan: async () => json(emptyScan),
+        prs: () => new Promise<Response>((resolve) => (answer = resolve)),
+      },
+      { height: 24 },
+    );
+    await frame();
+    keys.pressKey("l");
+    keys.pressKey("j");
+    await frame();
+
+    answer!(
+      json({
+        repos: [{ repoRoot: "/r3", repoName: "repo-3", prs: [openPR()] }],
+        errors: [],
+      }),
+    );
+    const settled = await frame();
+    // Still on repo-1's stand-in, which never changed.
+    const line = settled.split("\n").findIndex((l) => l.includes(CURSOR_BAR));
+    expect(settled.split("\n")[line - 1]).toContain("repo-1");
+  });
+
+  // The whole-request failure replaces the list with one banner line, so
+  // there is nothing on screen for a cursor to be on. The row list used to
+  // hold a stand-in per repo anyway: the cursor seeded onto one and `j`
+  // walked it invisibly. Nothing destructive is reachable there, but it is
+  // exactly the shape this panel is built to avoid.
+  it("holds no cursor at all behind the whole-request banner", async () => {
+    const { keys, frame } = await mountPanel({
+      list: async () => json(repos(4)),
+      scan: async () => json(emptyScan),
+      prs: async () => {
+        throw new Error("gh is logged out");
+      },
+    });
+    keys.pressKey("l");
+    const shown = await frame();
+    expect(shown).toContain("Open PRs unavailable: gh is logged out");
+    // Nothing is DRAWN either way here, since the banner replaces the list.
+    // What the gate changes is whether a cursor exists behind it, and the
+    // way to see that is to press a key that reports on the row it is on:
+    // `y` answered "nothing to copy on this line" for a line that was not
+    // on any line. With no cursor there is no row and no flash at all.
+    keys.pressKey("j");
+    keys.pressKey("j");
+    keys.pressKey("y");
+    const walked = await frame();
+    expect(walked).not.toContain("nothing to copy on this line");
+    expect(walked).toContain("Open PRs unavailable: gh is logged out");
+    expect(walked).not.toContain(CURSOR_BAR);
+
+    // The worktrees view is untouched by the gate.
+    keys.pressKey("h");
+    expect(await frame()).toContain(CURSOR_BAR);
+  });
+
+  it("maps a stand-in key back to the repo that owns it", () => {
+    expect(prStatusRowRepo(prStatusRowKey("/r2"))).toBe("/r2");
+    expect(prStatusRowRepo(prRowKey("/r2", 151))).toBeNull();
+    expect(prStatusRowRepo("/repo/wt/alpha")).toBeNull();
+  });
+});
+
+describe("WorktreesPanel PR view safety gate", () => {
+  const removable = () => {
+    const gone = row({ path: "/repo/wt/gone", name: "gone" });
+    return {
+      list: listOf([mainRow(), gone]),
+      scan: {
+        candidates: [candidate({ path: "/repo/wt/gone", name: "gone" })],
+        skipped: [],
+      } as ScanResponse,
+    };
+  };
+
+  // The one way this panel could delete something the user cannot see. `x`
+  // acts on the SELECTION, not on the cursor, so a selection made in the
+  // Worktrees view is still live after `l` — the view is what has to gate it.
+  it("refuses x in the PR view with a non-empty selection", async () => {
+    const { list, scan } = removable();
+    const { keys, frame } = await mountSettled(
+      list,
+      scan,
+      {},
+      prsOf([openPR()]),
+    );
+    // Select the removable row.
+    keys.pressKey("j");
+    keys.pressKey(" ");
+    expect(await frame()).toContain("x remove 1");
+
+    keys.pressKey("l");
+    keys.pressKey("x");
+    const shown = await frame();
+    // The confirm never opened: its headline is what the phase renders.
+    expect(shown).not.toContain("Delete 1 worktree");
+    expect(shown).toContain("removal lives in the worktrees view");
+  });
+
+  // The selection is deliberately NOT cleared by a view switch: the gate is
+  // the only thing that changed, so `h` gets the selection back intact.
+  it("keeps the selection across a view round trip", async () => {
+    const { list, scan } = removable();
+    const { keys, frame } = await mountSettled(
+      list,
+      scan,
+      {},
+      prsOf([openPR()]),
+    );
+    keys.pressKey("j");
+    keys.pressKey(" ");
+    keys.pressKey("l");
+    keys.pressKey("h");
+    expect(await frame()).toContain("x remove 1");
+
+    keys.pressKey("x");
+    expect(await frame()).toContain("Delete 1 worktree");
+  });
+
+  it("makes space, a and D inert in the PR view", async () => {
+    const { list, scan } = removable();
+    const { keys, frame } = await mountSettled(
+      list,
+      scan,
+      {},
+      prsOf([openPR()]),
+    );
+    keys.pressKey("l");
+    keys.pressKey(" ");
+    keys.pressKey("a");
+    keys.pressKey("D");
+    await frame();
+
+    keys.pressKey("h");
+    const shown = await frame();
+    // Nothing was selected while the PR view was up, so the hint still reads
+    // the bare `x remove` it does with an empty selection.
+    expect(shown).not.toContain("x remove 1");
+  });
+
+  // The keys are taught on the hint line, never on the chips. The `[l]`
+  // badge that briefly lived there was rejected in live use.
+  it("teaches the view key in the footer, and never on the tab", async () => {
+    const { list, scan } = removable();
+    const { settled } = await mountSettled(list, scan, {
+      repo: "/repo",
+      width: 90,
+      onReview: () => {},
+    });
+    expect(settled).toContain("l PRs");
+    // The chips carry their own padding, so what reaches the screen is the
+    // two labels three columns apart, with no separator glyph between them
+    // and no dot gluing either count to its own label.
+    expect(lineWith(settled, WORKTREES_TAB)).toMatch(
+      /Worktrees \d   Pull Requests \d/,
+    );
+    expect(settled).not.toContain("[l]");
+  });
+
+  // The accepted cost, asserted so it cannot regress silently in either
+  // direction. What decides it at 80 columns is the CURSOR, not the width
+  // alone: the removal keys are advertised only under the removable divider,
+  // so the line is at its fullest there and the view hint is what gives way.
+  // Deliberate — nothing that ACTS is displaced to keep it.
+  it("keeps the view hint at 80 columns on an ordinary row", async () => {
+    const { list, scan } = removable();
+    const { settled } = await mountSettled(list, scan, {
+      repo: "/repo",
+      width: 80,
+      onReview: () => {},
+    });
+    expect(settled).toContain("l PRs");
+  });
+
+  it("gives the view hint up before an acting key on a removable row", async () => {
+    const { list, scan } = removable();
+    const { keys, frame } = await mountSettled(list, scan, {
+      repo: "/repo",
+      width: 80,
+      onReview: () => {},
+    });
+    keys.pressKey("j");
+    const shown = await frame();
+    expect(shown).not.toContain("l PRs");
+    expect(shown).toContain("x remove");
+    expect(shown).toContain("space select");
+    expect(shown).toContain("enter open");
+    expect(shown).toContain("q close");
+  });
+
+  // The footer teaches the keys that are live, and only those.
+  it("drops the removal keys from the PR view's hint line", async () => {
+    const { list, scan } = removable();
+    const { keys, frame } = await mountSettled(
+      list,
+      scan,
+      {},
+      prsOf([openPR()]),
+    );
+    keys.pressKey("l");
+    const shown = await frame();
+    expect(shown).toContain("enter checkout");
+    // This view's line is short enough to carry the way back at a rank that
+    // survives the narrow widths.
+    expect(shown).toContain("h worktrees");
+    expect(shown).not.toContain("space select");
+    expect(shown).not.toContain("x remove");
+    expect(shown).not.toContain("y copy");
+    expect(shown).not.toContain("d review");
+  });
+});
+
+describe("PR section title and cursor", () => {
+  const onePR = prsOf([openPR()]);
+
+  // `flatRows()` has held PR rows since the section landed, so the chip said
+  // `Worktrees 4` for two worktrees and two PRs, and the number JUMPED from 2
+  // to 4 when phase 3 answered - the exact flicker the loading gate exists
+  // to prevent.
+  it("counts worktrees on the chip, never PR rows", async () => {
+    const { keys, frame, settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      {},
+      prsOf([openPR(), openPR({ number: 150 })]),
+    );
+    expect(lineWith(settled, WORKTREES_TAB)).toContain("Worktrees 2");
+    expect(settled).not.toContain("Worktrees 4");
+
+    // The count is the PANEL's and not the active view's, so the chip says
+    // the same thing in both. Counting `flatRows()` here said `Worktrees 0`
+    // under the PR view.
+    keys.pressKey("l");
+    expect(lineWith(await frame(), WORKTREES_TAB)).toContain("Worktrees 2");
+  });
+
+  // Phase 1 is local git and phase 3 is a `gh` round trip, so phase 1 lands
+  // first with worktrees only. Re-seeding on that frame threw away the cursor
+  // restoration a cancelled PR-spawn dialog depends on.
+  it("holds a PR cursor seed until phase 3 can deliver its row", async () => {
+    let answer: ((r: Response) => void) | null = null;
+    const { frame } = await mountPanel(
+      {
+        list: async () => json(listOf([mainRow(), row()])),
+        scan: async () => json(emptyScan),
+        prs: () => new Promise<Response>((resolve) => (answer = resolve)),
+      },
+      { initialCursor: prRowKey("/repo", 151) },
+    );
+
+    // A PR cursor opens the PR VIEW, which is the only one that can show it.
+    // Phase 1 has painted and the seeded row does not exist yet; what must
+    // survive is the seeded KEY, and the frame after phase 3 proves it did.
+    const pending = await frame();
+    expect(pending).toContain("checking GitHub");
+    expect(pending).not.toContain("main checkout");
+
+    answer!(json(onePR));
+    const settled = await frame();
+    expect(lineWith(settled, "#151")).toContain(CURSOR_BAR);
+  });
+
+  // The hold is scoped to the PR VIEW as well as to the key. In the
+  // Worktrees view the row can never arrive however long phase 3 takes, so
+  // holding there would leave `cursorPath` naming a row the list does not
+  // have while the highlight sat on row 0 — the disagreement the re-seed
+  // exists to repair.
+  it("re-seeds when a held PR cursor is carried into the worktrees view", async () => {
+    const { keys, frame } = await mountPanel(
+      {
+        list: async () => json(listOf([mainRow(), row()])),
+        scan: async () => json(emptyScan),
+        prs: () => new Promise<Response>(() => {}),
+      },
+      { initialCursor: prRowKey("/repo", 151) },
+    );
+    await frame();
+
+    keys.pressKey("h");
+    const shown = await frame();
+    expect(lineWith(shown, "main checkout")).toContain(CURSOR_BAR);
+  });
+
+  // The hold is scoped to "phase 3 has not answered". A PR that merged
+  // between the two opens is genuinely gone, and the cursor falls back.
+  it("says so once phase 3 reports the seeded PR is gone", async () => {
+    const { keys, frame, settled } = await mountSettled(
+      listOf([mainRow(), row()]),
+      emptyScan,
+      { initialCursor: prRowKey("/repo", 151) },
+      noPRs,
+    );
+    // The view stays where it was asked to open and ANSWERS. Silently
+    // switching views would move the panel under a user who is looking at it
+    // for a reason.
+    expect(settled).toContain("no open PRs");
+
+    keys.pressKey("h");
+    expect(lineWith(await frame(), "main checkout")).toContain(CURSOR_BAR);
+  });
+
+  it("classifies a key without needing its row", () => {
+    expect(isPRRowKey(prRowKey("/repo", 151))).toBe(true);
+    // Every worktree key is an absolute path, so the prefix cannot collide.
+    expect(isPRRowKey("/repo/wt/alpha")).toBe(false);
+  });
+});
+
+describe("WorktreesPanel r refresh", () => {
+  // `r` already meant reload on the done and error phases and simply never
+  // reached the list, where the panel spends all its time.
+  it("refetches all three phases from the list phase", async () => {
+    const { keys, frame } = await mountSettled(listOf([mainRow(), row()]));
+    const before = requested.length;
+
+    keys.pressKey("r");
+    await frame();
+
+    const after = requested.slice(before);
+    expect(after).toHaveLength(3);
+    expect(after.some((url) => url.includes("/worktrees?"))).toBe(true);
+    expect(after.some((url) => url.includes("prune-candidates"))).toBe(true);
+    expect(after.some((url) => url.includes("/prs"))).toBe(true);
+  });
+
+  // A refresh key that answers from a 60s cache does nothing for the one
+  // thing here that goes stale on its own, so the explicit press says so.
+  it("asks the daemon to skip the PR cache, and only on an explicit press", async () => {
+    const { keys, frame } = await mountSettled(listOf([mainRow()]));
+    // The opening load is an ordinary one: the TTL is what makes a reopen and
+    // a Tab rescope cheap.
+    expect(requested.filter((u) => u.includes("refresh=1"))).toHaveLength(0);
+
+    keys.pressKey("r");
+    await frame();
+    const prs = requested.filter((u) => u.includes("/prs"));
+    expect(prs[prs.length - 1]).toContain("refresh=1");
+    // Only the PR read: the other two have no cache to skip.
+    expect(
+      requested.filter((u) => u.includes("refresh=1") && !u.includes("/prs")),
+    ).toHaveLength(0);
+  });
+
+  // The key was justified on "one key, one meaning, on every phase". A retry
+  // from done or error that answered the PR section from a 60s cache would
+  // have been the context-sensitive version of exactly that.
+  it("refreshes the same way from the error phase", async () => {
+    const { keys, frame } = await mountPanel({
+      list: async () => {
+        throw new Error("daemon is down");
+      },
+      scan: async () => json(emptyScan),
+    });
+    expect(await frame()).toContain("daemon is down");
+    const before = requested.length;
+
+    keys.pressKey("r");
+    await frame();
+
+    const prs = requested.slice(before).filter((u) => u.includes("/prs"));
+    expect(prs).toHaveLength(1);
+    expect(prs[0]).toContain("refresh=1");
+  });
+
+  it("matches both spellings of the capital", async () => {
+    const { keys, frame } = await mountSettled(listOf([mainRow()]));
+    const before = requested.length;
+    keys.pressKey("R");
+    await frame();
+    expect(requested.length).toBeGreaterThan(before);
+  });
+});
+
+describe("PR row keys", () => {
+  async function onPRRow(opts: PanelOptions = {}, prs = prsOf([openPR()])) {
+    const harness = await mountSettled(
+      listOf([mainRow()]),
+      emptyScan,
+      opts,
+      prs,
+    );
+    // The PR view's first row, which the cursor re-seeds onto.
+    harness.keys.pressKey("l");
+    await harness.frame();
+    return harness;
+  }
+
+  it("cuts a worktree from a PR that is not checked out", async () => {
+    const spawns: unknown[] = [];
+    const fromPR: unknown[] = [];
+    const { keys, frame } = await onPRRow({
+      repo: "/repo",
+      onSpawn: (t) => spawns.push(t),
+      onSpawnFromPR: (t) => fromPR.push(t),
+    });
+    keys.pressEnter();
+    await frame();
+
+    expect(spawns).toHaveLength(0);
+    expect(fromPR[0]).toMatchObject({
+      number: 151,
+      title: "Worktrees panel: open-PR list",
+      repoRoot: "/repo",
+      cursor: "pr:/repo#151",
+      panelRepo: "/repo",
+      panelScope: "/repo",
+    });
+  });
+
+  // Not a second jump path: a checked-out PR IS the worktree holding it, so
+  // Enter takes the existing revalidated verb.
+  it("routes a checked-out PR through the ordinary worktree spawn", async () => {
+    const held = row({
+      path: "/repo/wt/pr",
+      name: "pr-151",
+      branch: "feat/pr-list-panel",
+      tip: "sha-151",
+    });
+    const spawns: unknown[] = [];
+    const fromPR: unknown[] = [];
+    const harness = await mountSettled(
+      listOf([mainRow(), held]),
+      emptyScan,
+      { onSpawn: (t) => spawns.push(t), onSpawnFromPR: (t) => fromPR.push(t) },
+      prsOf([openPR()]),
+    );
+    harness.keys.pressKey("l");
+    harness.keys.pressEnter();
+    await harness.frame();
+
+    expect(fromPR).toHaveLength(0);
+    expect(spawns[0]).toMatchObject({
+      cwd: "/repo/wt/pr",
+      existingWorktree: "/repo/wt/pr",
+      // The ROW's key, not the destination path: a cancelled dialog reopens
+      // through `initialView`, which reads the cursor, so a path here sent
+      // the user back to the Worktrees view while the adjacent
+      // not-checked-out row returned correctly.
+      cursor: prRowKey("/repo", 151),
+    });
+  });
+
+  // Explicitly guarded, not left to fall through: both act on a directory a
+  // PR row does not have, and a silent key reads as broken.
+  it("guards y and d on a PR row and says why", async () => {
+    const reviewed: unknown[] = [];
+    const { keys, frame } = await onPRRow({
+      onReview: (t) => reviewed.push(t),
+    });
+
+    keys.pressKey("y");
+    expect(await frame()).toContain("no directory yet");
+
+    keys.pressKey("d");
+    expect(await frame()).toContain("d reviews a worktree");
+    expect(reviewed).toHaveLength(0);
+  });
+
+  it("leaves the removal keys inert on a PR row", async () => {
+    const { keys, frame } = await onPRRow();
+    keys.pressKey(" ");
+    keys.pressKey("x");
+    const shown = await frame();
+    // No checkbox appeared, and `x` named the view that owns removal rather
+    // than opening a confirm over rows that are not on screen.
+    expect(shown).not.toContain("[x]");
+    expect(shown).toContain("removal lives in the worktrees view");
+  });
+});
+
+describe("rowPRUrl", () => {
+  // ONE meaning on every row is the rule; `o` never reads the row to decide
+  // what it does.
+  it("answers with the PR a row points at, whichever kind it is", () => {
+    expect(rowPRUrl(prRow())).toBe("https://github.com/o/r/pull/151");
+    expect(
+      rowPRUrl(
+        panelRow({
+          pr: {
+            number: 9,
+            url: "https://github.com/o/r/pull/9",
+            state: "OPEN",
+          },
+        }),
+      ),
+    ).toBe("https://github.com/o/r/pull/9");
+    // A merged PR reaches the row through `merged()`, which folds the
+    // candidate's PR into `entry.pr` — so it is the SAME field, not a second
+    // one to fall back to.
+    expect(
+      rowPRUrl(
+        panelRow({
+          pr: {
+            number: 8,
+            url: "https://github.com/o/r/pull/8",
+            state: "MERGED",
+          },
+          candidate: candidate(),
+        }),
+      ),
+    ).toBe("https://github.com/o/r/pull/8");
+    expect(rowPRUrl(panelRow())).toBeNull();
+  });
+
+  it("picks the platform's opener, and reports where there is none", () => {
+    expect(browserArgv("https://x", "darwin")).toEqual(["open", "https://x"]);
+    expect(browserArgv("https://x", "linux")).toEqual([
+      "xdg-open",
+      "https://x",
+    ]);
+    expect(browserArgv("https://x", "win32")).toBeNull();
+
+    const argv: string[][] = [];
+    expect(
+      openInBrowser(
+        "https://x",
+        (a) => {
+          argv.push(a);
+          return true;
+        },
+        "darwin",
+      ),
+    ).toBe(true);
+    expect(argv).toEqual([["open", "https://x"]]);
+    expect(openInBrowser("https://x", () => true, "win32")).toBe(false);
+  });
+});
+
+describe("WorktreesPanel o key", () => {
+  /**
+   * Through the recorder, never the real opener. The first version of this
+   * test called the live default and put real browser windows on the
+   * developer's screen; its assertion was a disjunction that passed either
+   * way, so a green suite said nothing about which had happened.
+   */
+  it("hands the row's PR to the opener and names the URL it opened", async () => {
+    const { keys, frame, openedUrls } = await mountSettled(
+      listOf([mainRow()]),
+      emptyScan,
+      {},
+      prsOf([openPR()]),
+    );
+    keys.pressKey("l");
+    keys.pressKey("o");
+    const shown = await frame();
+
+    expect(openedUrls).toEqual(["https://github.com/o/r/pull/151"]);
+    expect(shown).toContain("opened https://github.com/o/r/pull/151");
+  });
+
+  // Forced by the stub, so it cannot stand in for the success case above.
+  it("says so when the machine has no opener", async () => {
+    const { keys, frame, openedUrls } = await mountSettled(
+      listOf([mainRow()]),
+      emptyScan,
+      { opensUrls: false },
+      prsOf([openPR()]),
+    );
+    keys.pressKey("l");
+    keys.pressKey("o");
+    const shown = await frame();
+
+    expect(openedUrls).toEqual(["https://github.com/o/r/pull/151"]);
+    expect(shown).toContain("no browser opener here");
+    expect(shown).not.toContain("opened https://");
+  });
+
+  /**
+   * The same hazard on the other key, closed by the same seam. `y` was never
+   * pressed on a worktree row by any test (every other `y` here is the
+   * confirm phase's), so this was latent rather than live — one keypress from
+   * writing to the developer's real clipboard through `pbcopy`.
+   */
+  it("copies through the seam rather than through pbcopy", async () => {
+    const { keys, frame, copiedText } = await mountSettled(
+      listOf([mainRow(), row()]),
+    );
+    keys.pressKey("j");
+    keys.pressKey("y");
+
+    expect(await frame()).toContain("copied alpha");
+    expect(copiedText).toEqual(["/repo/wt/alpha"]);
+  });
+
+  it("says so on a row with no PR at all, without reaching the opener", async () => {
+    const { keys, frame, openedUrls } = await mountSettled(
+      listOf([mainRow(), row()]),
+    );
+    keys.pressKey("o");
+    expect(await frame()).toContain("no PR on this row");
+    expect(openedUrls).toEqual([]);
   });
 });

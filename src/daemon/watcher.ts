@@ -523,6 +523,7 @@ export class LogWatcher {
             action.sessionId,
             action.path,
             "claude",
+            action.cwd,
           );
           this.sessionManager.setTmuxPane(action.sessionId, action.paneId);
           this.sessionManager.setPid(action.sessionId, action.pid);
@@ -538,6 +539,7 @@ export class LogWatcher {
             action.sessionId,
             action.path,
             "claude",
+            action.cwd,
           );
           this.fileOffsets.set(action.path, 0);
           await this.processFile(action.path, action.sessionId);
@@ -567,6 +569,7 @@ export class LogWatcher {
     sessionId: string,
     path: string,
     markerPid: number,
+    transcriptCwd: string | null,
   ): Promise<boolean> {
     const decision = decideReplaceHeuristic(
       this.buildReplaceableSlices(),
@@ -581,6 +584,7 @@ export class LogWatcher {
       path,
       paneId: decision.paneId,
       pid: markerPid,
+      cwd: transcriptCwd,
     });
     return true;
   }
@@ -593,6 +597,8 @@ export class LogWatcher {
     path: string;
     paneId: string;
     pid: number;
+    /** The session's real cwd; see {@link InitialBatchAction}. */
+    cwd: string | null;
   }): Promise<void> {
     this.adapter.onSessionRemoved?.(action.removeSessionId);
     this.sessionManager.removeSession(action.removeSessionId);
@@ -600,7 +606,12 @@ export class LogWatcher {
     this.encodingDriftWarned.delete(action.removeSessionId);
     this.unwatchFile(action.removeLogPath);
 
-    this.sessionManager.createSession(action.sessionId, action.path, "claude");
+    this.sessionManager.createSession(
+      action.sessionId,
+      action.path,
+      "claude",
+      action.cwd,
+    );
     this.sessionManager.setTmuxPane(action.sessionId, action.paneId);
     this.sessionManager.setPid(action.sessionId, action.pid);
     this.fileOffsets.set(action.path, 0);
@@ -690,10 +701,21 @@ export class LogWatcher {
     }
 
     const marker = getSessionPidMarker(sessionId);
+    // Read up front rather than only on the fallback path below: the
+    // marker-claimed branch is the one that USED to create the session with a
+    // decoded project dir name, so a hyphenated cwd came out corrupted
+    // precisely when hooks were installed (issue #156). Claude's marker
+    // carries no cwd, so the transcript is the authoritative source here.
+    const transcriptCwd = readTranscriptCwd(path);
     const paneInfo = await findPaneByMarker(sessionId);
 
     if (paneInfo) {
-      this.sessionManager.createSession(sessionId, path, "claude");
+      this.sessionManager.createSession(
+        sessionId,
+        path,
+        "claude",
+        transcriptCwd,
+      );
       this.sessionManager.setTmuxPane(sessionId, paneInfo.paneId);
       const processPid = await this.findProcessPidForPane(paneInfo.paneId);
       this.sessionManager.setPid(sessionId, marker?.pid ?? processPid ?? null);
@@ -702,7 +724,6 @@ export class LogWatcher {
       return;
     }
 
-    const transcriptCwd = readTranscriptCwd(path);
     this.warnOnEncodingDrift(sessionId, transcriptCwd, encodedProjectPath);
 
     const decision = await findPaneForNewSession(
@@ -713,7 +734,12 @@ export class LogWatcher {
     );
 
     if (decision.kind === "bound") {
-      this.sessionManager.createSession(sessionId, path, "claude");
+      this.sessionManager.createSession(
+        sessionId,
+        path,
+        "claude",
+        transcriptCwd,
+      );
       this.sessionManager.setTmuxPane(sessionId, decision.pane.paneId);
       this.sessionManager.setPid(sessionId, decision.pid);
       this.fileOffsets.set(path, 0);
@@ -722,7 +748,12 @@ export class LogWatcher {
     }
 
     if (decision.kind === "ambiguous") {
-      this.sessionManager.createSession(sessionId, path, "claude");
+      this.sessionManager.createSession(
+        sessionId,
+        path,
+        "claude",
+        transcriptCwd,
+      );
       this.fileOffsets.set(path, 0);
       await this.processFile(path, sessionId);
       return;
@@ -736,6 +767,7 @@ export class LogWatcher {
         sessionId,
         path,
         marker.pid,
+        transcriptCwd,
       );
       if (replaced) return;
     }

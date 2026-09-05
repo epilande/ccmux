@@ -31,12 +31,32 @@ import { displayWidth } from "../tui/utils/format";
  * confirmation is exactly the automatic mode the design rules out. `--dry-run`
  * covers every scripted use (see what would go), and the confirmation itself
  * is the one thing that cannot be delegated to a flag.
+ *
+ * `--end-idle` is an INCLUSION opt-in, not a confirmation skip. It widens the
+ * offered list to worktrees whose only occupant is an idle agent on a merged
+ * PR, and removing one of those ends that agent. The confirmation still runs,
+ * and the daemon still refuses such a removal unless the request names the
+ * path in `allowEndIdle`.
  */
 
 function describeSessions(candidate: PruneCandidate): string {
   if (candidate.sessions.length === 0) return "";
   const parts = candidate.sessions.map((s) => `${s.agentType} ${s.status}`);
   return ` [${parts.join(", ")}]`;
+}
+
+/**
+ * What removing a candidate an idle agent still occupies actually does.
+ *
+ * Spelled out on the row rather than left to the ` [claude idle]` tag, which
+ * reads as a status while the consequence is that the agent is stopped. Only
+ * reachable under `--end-idle`, since nothing else offers these rows.
+ */
+function describeEndIdle(candidate: PruneCandidate): string {
+  if (candidate.sessions.length === 0) return "";
+  return candidate.sessions.length === 1
+    ? "  removal ends this session"
+    : "  removal ends these sessions";
 }
 
 function describeDirty(candidate: PruneCandidate): string {
@@ -60,7 +80,7 @@ function printCandidates(candidates: PruneCandidate[]): void {
       `  ${index}. ${candidate.repoName}/${candidate.name}  (${candidate.branch ?? "detached"})`,
     );
     console.log(
-      `     ${candidate.detail}${describeSessions(candidate)}${describeDirty(candidate)}${describeIgnored(candidate)}`,
+      `     ${candidate.detail}${describeSessions(candidate)}${describeEndIdle(candidate)}${describeDirty(candidate)}${describeIgnored(candidate)}`,
     );
     console.log(`     ${candidate.path}`);
   });
@@ -131,6 +151,73 @@ export function resolveRepoOption(
 }
 
 /**
+ * Why a worktree an idle agent occupies is withheld without `--end-idle`.
+ *
+ * Names the flag, because the daemon offered this row and the user cannot
+ * otherwise tell a withheld candidate from one that was never removable.
+ */
+export const END_IDLE_SKIP_REASON =
+  "an agent is idle here; pass --end-idle to include it (removal ends the session)";
+
+/**
+ * Split the daemon's scan by the `--end-idle` opt-in.
+ *
+ * The daemon offers a worktree whose bound sessions are ALL idle when the
+ * branch's PR is verifiably merged; removing it ends that agent. Without the
+ * flag those rows move to the withheld list in one move, which is what keeps
+ * them out of the count, out of `--dry-run`'s paths, and out of the selection
+ * the user types a number into.
+ */
+export function planPrune(
+  scan: PruneScan,
+  endIdle: boolean,
+): { candidates: PruneCandidate[]; skipped: PruneSkip[] } {
+  if (endIdle) return { candidates: scan.candidates, skipped: scan.skipped };
+  const withheld = scan.candidates.filter((c) => c.sessions.length > 0);
+  return {
+    candidates: scan.candidates.filter((c) => c.sessions.length === 0),
+    skipped: [
+      ...scan.skipped,
+      ...withheld.map((c) => ({
+        path: c.path,
+        repoRoot: c.repoRoot,
+        branch: c.branch,
+        reason: END_IDLE_SKIP_REASON,
+      })),
+    ],
+  };
+}
+
+/** The paths of the candidates an agent still occupies, for `allowEndIdle`. */
+function pathsWithSessions(candidates: PruneCandidate[]): string[] {
+  return candidates.filter((c) => c.sessions.length > 0).map((c) => c.path);
+}
+
+/**
+ * The confirmation line for selected worktrees an idle agent occupies, or
+ * null when none were selected.
+ *
+ * At the decision point rather than only on the rows, for the same reason the
+ * ignored files are: someone who selected with 'a' never read them.
+ *
+ * It says the transcript FILE survives and names who cannot get back to it,
+ * rather than promising the session resumes: `opencode --continue`, `omp -c`
+ * and `pi -c` resume by DIRECTORY (see `resumeCommand` in `src/lib/agents.ts`),
+ * and the directory is what this removal deletes.
+ */
+export function endIdleSummary(selected: PruneCandidate[]): string | null {
+  const count = selected.reduce((n, c) => n + c.sessions.length, 0);
+  if (count === 0) return null;
+  const one = count === 1;
+  return (
+    `It will also end ${count} idle agent session${one ? "" : "s"}. ` +
+    `${one ? "The transcript persists" : "Transcripts persist"} on disk, but ` +
+    `agents that resume by directory (opencode, pi, omp) lose the way back ` +
+    `once the worktree is gone.`
+  );
+}
+
+/**
  * Parse a selection like `1,3-5` into candidate indices. Returns null on
  * anything unparseable or out of range, so a typo cancels the run instead of
  * silently removing a different worktree than the user meant.
@@ -182,9 +269,17 @@ async function fetchCandidates(
   return normalizeScan(await daemonBody<ScanResponse>(response, "scan"));
 }
 
-async function postPrune(body: {
+export interface PrunePostBody {
   paths: string[];
   allowDirty: string[];
+  /**
+   * Worktree paths the user opted in to removing even though an idle agent
+   * lives in them, the mirror of `allowDirty` on its own axis. Sent raw; the
+   * daemon normalizes both lists before comparing them, and re-checks each
+   * session's live status right before signalling, so this consent can never
+   * outrun an agent that started working since the scan.
+   */
+  allowEndIdle: string[];
   dryRun: boolean;
   cleanState: boolean;
   repo?: string;
@@ -205,7 +300,9 @@ async function postPrune(body: {
    * the user just chose from and refuses the selection with a 409.
    */
   cwd?: string;
-}): Promise<PruneRunResult> {
+}
+
+async function postPrune(body: PrunePostBody): Promise<PruneRunResult> {
   const response = await fetch(`${getDaemonUrl()}/worktrees/prune`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -222,10 +319,44 @@ interface PruneOptions {
   dryRun?: boolean;
   state?: boolean;
   repo?: string;
+  endIdle?: boolean;
 }
 
-async function runPruneCommand(options: PruneOptions): Promise<void> {
-  await ensureDaemon();
+/**
+ * The daemon-facing edges of the command, injectable so the flag's effect on
+ * the request body can be asserted without a running daemon. Defaults are the
+ * real ones; nothing production passes this.
+ */
+export interface PruneCommandDeps {
+  ensureDaemon?: () => Promise<void>;
+  fetchScan?: (repo?: string, cwd?: string) => Promise<PruneScan>;
+  postPrune?: (body: PrunePostBody) => Promise<PruneRunResult>;
+  /**
+   * Answer a confirmation prompt. Supplying it also stands in for the TTY:
+   * the non-interactive refusal below exists to stop an unattended removal,
+   * and a caller that can answer is by definition not one.
+   */
+  ask?: (question: string) => Promise<string>;
+}
+
+interface Asker {
+  ask: (question: string) => Promise<string>;
+  close: () => void;
+}
+
+function readlineAsker(): Asker {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return { ask: (question) => rl.question(question), close: () => rl.close() };
+}
+
+export async function runPruneCommand(
+  options: PruneOptions,
+  deps: PruneCommandDeps = {},
+): Promise<void> {
+  const startDaemon = deps.ensureDaemon ?? ensureDaemon;
+  const fetchScan = deps.fetchScan ?? fetchCandidates;
+  const post = deps.postPrune ?? postPrune;
+  await startDaemon();
 
   const cleanState = options.state === true;
   const repo = resolveRepoOption(options.repo);
@@ -235,23 +366,29 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
   // lets you prune the repo you are standing in when no agent session has
   // ever run there.
   const cwd = repo ? undefined : callerCwd();
-  const scan = await fetchCandidates(repo, cwd);
-  const { candidates } = scan;
+  const endIdle = options.endIdle === true;
+  const { candidates, skipped } = planPrune(
+    await fetchScan(repo, cwd),
+    endIdle,
+  );
 
   if (candidates.length === 0) {
     console.log("No worktrees are ready to prune.");
-    printSkipped(scan.skipped);
+    printSkipped(skipped);
     if (!cleanState) return;
   } else {
     console.log(`\nPrunable worktrees (${candidates.length}):\n`);
     printCandidates(candidates);
-    printSkipped(scan.skipped);
+    printSkipped(skipped);
   }
 
   if (options.dryRun) {
-    const result = await postPrune({
+    const result = await post({
       paths: candidates.map((c) => c.path),
       allowDirty: [],
+      // Sent under `--dry-run` too, so the run reports the agent it would
+      // stop rather than the refusal it would hit without the opt-in.
+      allowEndIdle: endIdle ? pathsWithSessions(candidates) : [],
       dryRun: true,
       cleanState,
       repo,
@@ -262,18 +399,20 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
     return;
   }
 
-  if (!process.stdin.isTTY) {
+  if (!deps.ask && !process.stdin.isTTY) {
     console.error(
       "\nRefusing to prune without a confirmation prompt. Run this in a terminal, or use --dry-run.",
     );
     process.exit(1);
   }
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const asker: Asker = deps.ask
+    ? { ask: deps.ask, close: () => {} }
+    : readlineAsker();
   try {
     let selected: PruneCandidate[] = [];
     if (candidates.length > 0) {
-      const answer = await rl.question(
+      const answer = await asker.ask(
         "\nPrune which? (numbers like 1,3-4, 'a' for all, empty to cancel): ",
       );
       const indices = parseSelection(answer, candidates.length);
@@ -295,7 +434,7 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
       for (const candidate of dirty) {
         console.log(`  ${candidate.path}${describeDirty(candidate)}`);
       }
-      const answer = await rl.question(
+      const answer = await asker.ask(
         "Delete that work too? Type 'yes' to include them, anything else to skip them: ",
       );
       if (answer.trim().toLowerCase() === "yes") {
@@ -342,18 +481,21 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
         );
       }
     }
+    const endingSessions = endIdleSummary(selected);
+    if (endingSessions) console.log(endingSessions);
     if (cleanState) {
       console.log("It will also drop state entries for paths already deleted.");
     }
-    const confirm = await rl.question("Proceed? [y/N] ");
+    const confirm = await asker.ask("Proceed? [y/N] ");
     if (confirm.trim().toLowerCase() !== "y") {
       console.log("Cancelled.");
       return;
     }
 
-    const result = await postPrune({
+    const result = await post({
       paths: selected.map((c) => c.path),
       allowDirty,
+      allowEndIdle: endIdle ? pathsWithSessions(selected) : [],
       dryRun: false,
       cleanState,
       repo,
@@ -362,7 +504,7 @@ async function runPruneCommand(options: PruneOptions): Promise<void> {
     });
     printResult(result);
   } finally {
-    rl.close();
+    asker.close();
   }
 }
 
@@ -514,6 +656,10 @@ export function createWorktreeCommand(): Command {
     .option(
       "--state",
       "Also drop agent state entries for recorded directories that do not exist right now",
+    )
+    .option(
+      "--end-idle",
+      "Include worktrees whose only occupant is an idle agent on a merged PR; removal ends that agent session",
     )
     .option("--repo <path>", "Limit to one repository's worktrees")
     .action(async (options: PruneOptions) => {

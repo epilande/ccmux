@@ -64,6 +64,17 @@ describe("cursor hook script templates", () => {
       expect(script).toContain("cursor-agent|*/cursor-agent|agent|*/agent");
       expect(script).toContain("CURSOR_PID=");
     });
+
+    it("falls back to a tty-bearing ancestor when comm is not cursor-agent", () => {
+      // Regression: cursor-agent 2026.08.25 reports comm=MainThread, so the
+      // comm walk misses it. The first ancestor with a real controlling
+      // terminal is what resolves the live agent pid instead of the dead
+      // $PPID wrapper.
+      const script = renderSessionStartScript(markersDir);
+      expect(script).toContain("CURSOR_TTY_PID");
+      // Every no-tty spelling is rejected: macOS/BSD ps prints "??", Linux "?".
+      expect(script).toContain('""|"?"|"??"|"-"');
+    });
   });
 
   describe("renderSessionEndScript", () => {

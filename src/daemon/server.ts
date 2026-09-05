@@ -50,6 +50,7 @@ import {
   MAX_SPAWN_PROMPT_BYTES,
   normalizeBoolean,
   normalizeClientTty,
+  normalizeModel,
   normalizePrompt,
   resolveSpawnFocusArgv,
   normalizeSplit,
@@ -66,6 +67,7 @@ import {
   createWorktree,
   ensureWorktreesExcluded,
   existingWorktreeFor,
+  pickIssueWorktree,
   readCheckoutHead,
   slugForFork,
   slugForIssue,
@@ -83,6 +85,7 @@ import {
   type PRSource,
 } from "./gh-spawn-source";
 import { getAgents, type AgentDef } from "../lib/agents";
+import { BUILD_IDENTITY } from "../lib/build-identity";
 import { listSpawnableAgents, spawnBinaryFor } from "../lib/spawnable-agents";
 import {
   getMarkerKey,
@@ -132,6 +135,14 @@ import {
 } from "./worktree-prune";
 import { fetchPrune, listWorktrees, normalizePath } from "./worktree-git";
 import { listAllWorktrees } from "./worktree-list";
+import { listOpenPRs, type OpenPR, type PRListResponse } from "./pr-list";
+import {
+  listOpenIssues,
+  type IssueListResponse,
+  type OpenIssue,
+} from "./issue-list";
+import { RepoAnswerCache } from "./repo-answer-cache";
+import { mapWithConcurrency } from "../lib/concurrency";
 import {
   moveChangesToWorktree,
   readUncommitted,
@@ -376,6 +387,40 @@ const PR_SWEEP_INTERVAL_MS = 2 * 60_000;
  */
 const WORKTREE_FETCH_TTL_MS = 60_000;
 
+/**
+ * How long one repo's open-PR or open-issue list is served from cache.
+ *
+ * Modelled on `worktreeFetchedAt` above, but it caches the ANSWER rather than
+ * rate-limiting a side effect: `GET /prs` and `GET /issues` have nothing to do
+ * but the `gh` call, so a hit has to be able to reply without one. That is
+ * what makes a Tab rescope and a return-open free, which is why the TTL lives
+ * here and no client keeps a cache of its own.
+ */
+const SOURCE_LIST_TTL_MS = 60_000;
+
+/**
+ * A failed list is held for a SHORT window, deliberately shorter than a
+ * success.
+ *
+ * `pr-resolver.ts` backs failures off HARDER than successes, and is right to:
+ * it refreshes in the background, where a doomed retry costs a spawn and buys
+ * nothing. This one is in front of someone who is looking at the error and
+ * fixing it (`gh auth login` in another pane), and their next open of the
+ * panel is the retry. Long enough that a Tab or a reopen a second later does
+ * not re-spawn a doomed `gh`; short enough that the fix shows.
+ */
+const SOURCE_LIST_FAILURE_TTL_MS = 15_000;
+
+/** What one `listOpenPRs` call answers with. */
+type PRListAnswer = Awaited<ReturnType<typeof listOpenPRs>>;
+
+/** What one `listOpenIssues` call answers with. */
+type IssueListAnswer = Awaited<ReturnType<typeof listOpenIssues>>;
+
+/** How many repos one source list asks about at once, matching
+ *  `worktree-list.ts`. Shared by `GET /prs` and `GET /issues`. */
+const SOURCE_REPO_CONCURRENCY = 3;
+
 /** Upper bound on worktrees one prune request may name. Far above any real
  *  repo's worktree count; exists so a malformed body can't ask the daemon to
  *  normalize an unbounded list. */
@@ -568,6 +613,32 @@ export class DaemonServer {
   private getScanHealth: () => DaemonHealth;
   /** When each repo last had `git fetch --prune` run for a prune scan. */
   private worktreeFetchedAt = new Map<string, number>();
+  /**
+   * One repo's open-PR answer, keyed by repo root.
+   *
+   * The concurrent misses this deduplicates are real and ordinary: a picker
+   * and a sidebar with the panel open at once, a Tab rescope, a close and
+   * reopen on a cold or expired entry, the panel's `r`, and any direct
+   * caller. Why the entry holds the in-flight promise rather than only the
+   * settled result, and every other rule the cache keeps, is documented once
+   * on {@link RepoAnswerCache}.
+   */
+  private prListCache = new RepoAnswerCache<OpenPR[]>({
+    ttlMs: SOURCE_LIST_TTL_MS,
+    failureTtlMs: SOURCE_LIST_FAILURE_TTL_MS,
+  });
+  /**
+   * The same, for open issues, and on the same TTLs.
+   *
+   * A separate instance rather than a shared one keyed by source, so a
+   * refresh of one list cannot evict or re-spawn the other. Issues churn
+   * slower than PRs, but a different number here would be one more thing to
+   * justify with nothing observed to justify it.
+   */
+  private issueListCache = new RepoAnswerCache<OpenIssue[]>({
+    ttlMs: SOURCE_LIST_TTL_MS,
+    failureTtlMs: SOURCE_LIST_FAILURE_TTL_MS,
+  });
   /**
    * Home directory, for the `project` $HOME-boundary guard (S4). A plain
    * field rather than a constructor param, so a test can stub it directly
@@ -1133,11 +1204,25 @@ export class DaemonServer {
       // The probe runs first so its outcome, not a stale scan verdict, decides
       // `socketError`: a tmux that has come back up clears the diagnostic here.
       const socketPath = await this.getServerSocketPath();
+      // Sweep first: a handoff that has already expired is not work in
+      // progress, and would otherwise read as busy until the periodic sweep.
+      this.handoffQueue.sweep();
+      // `build` and `busy` are what the CLI's auto-start path reads to decide
+      // whether to replace this daemon (issue #163). Both are additive: a
+      // missing `build` is outdated, and a missing `busy` on an identified
+      // daemon is busy (fail safe — `/invocations` cannot see queued handoffs).
       return Response.json(
         {
           socketPath,
           socketError: this.socketError,
           health: this.getScanHealth(),
+          build: BUILD_IDENTITY,
+          busy: {
+            invocations: this.invocationManager
+              .listInvocations()
+              .filter((record) => record.status === "running").length,
+            handoffs: this.handoffQueue.size(),
+          },
         },
         { headers: corsHeaders },
       );
@@ -1153,6 +1238,14 @@ export class DaemonServer {
 
     if (path === "/search" && req.method === "GET") {
       return await this.handleSearch(url, corsHeaders);
+    }
+
+    if (path === "/prs" && req.method === "GET") {
+      return await this.handlePRList(url, corsHeaders);
+    }
+
+    if (path === "/issues" && req.method === "GET") {
+      return await this.handleIssueList(url, corsHeaders);
     }
 
     if (path === "/worktrees" && req.method === "GET") {
@@ -1597,6 +1690,139 @@ export class DaemonServer {
     }
   }
 
+  /**
+   * `GET /prs` — every open pull request of every repo in scope.
+   *
+   * `repo` and `cwd` mean exactly what they mean on `GET /worktrees` and the
+   * prune scan, and go through the SAME `worktreeRepoRoots`: the panel merges
+   * all three answers into one list, so a repo one of them can see and
+   * another cannot is a section attached to nothing.
+   *
+   * A repo's failure is reported per repo and never fails the response. The
+   * commonest one is structural (a checkout with no GitHub remote sitting
+   * beside one that has), and taking every other repo's list down with it
+   * would empty most of the multi-repo view over a fact about one row.
+   */
+  private async handlePRList(
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    try {
+      const sessions = await this.enrichSessions(
+        this.sessionManager.getSessions(),
+      );
+      const repoRoots = await this.worktreeRepoRoots(
+        sessions,
+        url.searchParams.get("repo"),
+        url.searchParams.get("cwd"),
+      );
+      // An EXPLICIT user refresh skips the freshness check, because a refresh
+      // key that answers from a 60s cache is a key that does nothing for the
+      // one thing on this panel that goes stale on its own: a PR merged a
+      // moment ago still reads open. It cannot stampede, because a live call
+      // is still JOINED rather than duplicated, and that is a property of the
+      // entry rather than of the TTL.
+      const refresh = url.searchParams.get("refresh") === "1";
+      const response: PRListResponse = { repos: [], errors: [] };
+      const answers = await mapWithConcurrency(
+        repoRoots,
+        SOURCE_REPO_CONCURRENCY,
+        async (repoRoot) => ({
+          repoRoot,
+          result: await this.openPRsFor(repoRoot, refresh),
+        }),
+      );
+      for (const { repoRoot, result } of answers) {
+        const repoName = basename(repoRoot);
+        if (result.ok) {
+          response.repos.push({ repoRoot, repoName, prs: result.value });
+        } else {
+          response.errors.push({ repoRoot, repoName, error: result.error });
+        }
+      }
+      response.repos.sort((a, b) => a.repoName.localeCompare(b.repoName));
+      return Response.json(response, { headers });
+    } catch (err) {
+      return Response.json(
+        { error: `Failed to list PRs: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
+    }
+  }
+
+  /** One repo's open PRs, through the cache that is also the per-repo lock. */
+  private openPRsFor(repoRoot: string, refresh = false): Promise<PRListAnswer> {
+    return this.prListCache.answer(repoRoot, refresh, () =>
+      listOpenPRs(repoRoot),
+    );
+  }
+
+  /**
+   * `GET /issues` — every open issue of every repo in scope.
+   *
+   * A structural clone of {@link handlePRList}, down to the scoping knobs and
+   * the per-repo errors, and that is the point: the source picker draws both
+   * lists as one surface, so a repo one endpoint can see and the other cannot
+   * would be a section attached to nothing.
+   *
+   * Deliberately NOT folded into `/prs` as an `include=` parameter. The
+   * panel's PR view is a consumer that would pay for issue data it drops on
+   * the floor; the two lists want independent failure, since a repo with
+   * issues disabled must still be able to answer about its PRs; and `refresh`
+   * stays per source, so refreshing PRs after a merge does not re-spawn a
+   * `gh issue list` too.
+   */
+  private async handleIssueList(
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    try {
+      const sessions = await this.enrichSessions(
+        this.sessionManager.getSessions(),
+      );
+      const repoRoots = await this.worktreeRepoRoots(
+        sessions,
+        url.searchParams.get("repo"),
+        url.searchParams.get("cwd"),
+      );
+      const refresh = url.searchParams.get("refresh") === "1";
+      const response: IssueListResponse = { repos: [], errors: [] };
+      const answers = await mapWithConcurrency(
+        repoRoots,
+        SOURCE_REPO_CONCURRENCY,
+        async (repoRoot) => ({
+          repoRoot,
+          result: await this.openIssuesFor(repoRoot, refresh),
+        }),
+      );
+      for (const { repoRoot, result } of answers) {
+        const repoName = basename(repoRoot);
+        if (result.ok) {
+          response.repos.push({ repoRoot, repoName, issues: result.value });
+        } else {
+          response.errors.push({ repoRoot, repoName, error: result.error });
+        }
+      }
+      response.repos.sort((a, b) => a.repoName.localeCompare(b.repoName));
+      return Response.json(response, { headers });
+    } catch (err) {
+      return Response.json(
+        { error: `Failed to list issues: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
+    }
+  }
+
+  /** One repo's open issues, through its own instance of the same cache. */
+  private openIssuesFor(
+    repoRoot: string,
+    refresh = false,
+  ): Promise<IssueListAnswer> {
+    return this.issueListCache.answer(repoRoot, refresh, () =>
+      listOpenIssues(repoRoot),
+    );
+  }
+
   private async handlePruneCandidates(
     url: URL,
     headers: Record<string, string>,
@@ -1634,6 +1860,7 @@ export class DaemonServer {
     let body: {
       paths?: unknown;
       allowDirty?: unknown;
+      allowEndIdle?: unknown;
       dryRun?: unknown;
       cleanState?: unknown;
       repo?: unknown;
@@ -1685,9 +1912,15 @@ export class DaemonServer {
     if (pathsCapError) return pathsCapError;
     const allowDirtyCapError = overCap(body.allowDirty, "allowDirty entries");
     if (allowDirtyCapError) return allowDirtyCapError;
+    const allowEndIdleCapError = overCap(
+      body.allowEndIdle,
+      "allowEndIdle entries",
+    );
+    if (allowEndIdleCapError) return allowEndIdleCapError;
 
     const paths = asPaths(body.paths);
     const allowDirty = asPaths(body.allowDirty);
+    const allowEndIdle = asPaths(body.allowEndIdle);
     const cleanState = body.cleanState === true;
 
     // Validated the same way the spawn endpoint validates its own pane ids: a
@@ -1747,10 +1980,43 @@ export class DaemonServer {
         // resolved through symlinks, so an opt-in echoed back through a client
         // still matches the candidate it was granted for.
         allowDirtyPaths: allowDirty.map(normalizePath),
+        // The second opt-in, on its own axis: the paths whose idle agent
+        // sessions the caller agreed to end. Normalized like the dirty list.
+        allowEndIdlePaths: allowEndIdle.map(normalizePath),
+        // Read at the moment of removal, not from the scan. The candidate's
+        // sessions were idle when they were listed, and the confirmation that
+        // followed took as long as a user takes; an agent that went back to
+        // work in that window refuses the removal even though its path was
+        // opted in.
+        //
+        // It answers with the pid as well as the status, and the run signals
+        // THAT pid: the reconciler may have moved this row onto a different
+        // process since the scan, and the check and the kill have to be about
+        // one process to mean anything (`handleKillSession` keeps the same
+        // rule for the same reason).
+        //
+        // With the pane and the cwd, because a row moves as well as changes
+        // process. A marker claim re-points a session at whatever pane now
+        // holds it, so an id the scan found in this worktree can be answering
+        // from a sibling checkout by now — idle there, and none of this run's
+        // business. `runPrune` compares the cwd against the worktree it is
+        // removing and signals nothing that has left.
+        liveSession: (id) => {
+          const session = this.sessionManager.getSession(id);
+          return session
+            ? {
+                status: session.status,
+                pid: session.pid,
+                tmuxPane: session.tmuxPane,
+                cwd: session.cwd,
+              }
+            : undefined;
+        },
         // The caller's own pane, exempt from the last-moment occupancy guard
         // so pruning from a pane inside the worktree still works. It never
-        // widens what is prunable: a worktree with a bound session is already
-        // skipped at classification.
+        // widens what is prunable: a worktree with a non-idle session is
+        // already skipped at classification, and an all-idle one is gated on
+        // `allowEndIdle` above.
         callerPane: callerPaneResult.value,
         source: typeof body.source === "string" ? body.source : "api",
       });
@@ -3888,6 +4154,7 @@ export class DaemonServer {
       worktree?: unknown;
       pr?: unknown;
       issue?: unknown;
+      model?: unknown;
     };
     try {
       body = (await req.json()) as typeof body;
@@ -3977,6 +4244,18 @@ export class DaemonServer {
       );
     }
     const prompt = promptResult.value;
+
+    // The value is spliced unquoted into the agent command, so the pattern
+    // check here is what keeps it inert. Whether the agent takes a model
+    // flag at all is the builders' call, once the agent is resolved.
+    const modelResult = normalizeModel(body.model);
+    if (!modelResult.ok) {
+      return Response.json(
+        { error: modelResult.error },
+        { status: 400, headers },
+      );
+    }
+    const model = modelResult.value;
 
     // Every other spawn field goes through a normalizer; `detach` used to be
     // an unchecked cast, so `{"detach":"false"}` (a truthy string) reached
@@ -4208,12 +4487,14 @@ export class DaemonServer {
           // Everything here runs before the first side effect, so that
           // refusal is a 400 with no pane and no worktree behind it.
           logPath: forkSource.session.logPath,
+          model,
         })
       : buildAgentSpawnCommand({
           agent,
           binary: cmd,
           resume,
           prompt: spawnPrompt,
+          model,
         });
     if (!commandResult.ok) {
       return Response.json(
@@ -4378,17 +4659,20 @@ export class DaemonServer {
 
       // A `--pr` spawn checks out the PR's OWN head ref, so its branch is
       // decided here rather than by the worktree's name. Two steps, in this
-      // order, because the first is the last thing that can refuse before
-      // anything is written:
+      // order:
       //
-      // 1. The branch already being checked out somewhere is OUR refusal,
-      //    naming the directory, rather than git's at the end of a create.
-      //    Ahead of `ensureWorktreesExcluded`, which writes to the repo.
+      // 1. The branch already being checked out somewhere is opened rather
+      //    than refused: Enter on a checked-out PR goes THERE. Confirmed
+      //    again under the repo lock inside `createWorktree`.
       // 2. The fetch and the branch decision, which `preparePRBranch` runs
       //    under the repo lock and releases before returning — it must not
       //    still hold it when `createWorktree` takes the same lock below.
       let prBranch: string | undefined;
-      let prBase: string | null = null;
+      let prBranchExisted: boolean | undefined;
+      // `undefined` until prepare looks the base up. Occupied skips prepare,
+      // and `configurePRBranch` must not treat that as a decline (a `null`
+      // would unset the `ccmux-base` the first spawn recorded).
+      let prBase: string | null | undefined;
       if (prSource) {
         // Before the branch check and well before the fetch: `gh` resolved
         // the number through its own repo selection, and the fetch below is
@@ -4403,27 +4687,32 @@ export class DaemonServer {
           prSource.headRefName,
         );
         if (occupied) {
-          return Response.json(
-            {
-              error:
-                `PR #${prSource.number}'s branch '${prSource.headRefName}' is already checked out ` +
-                `at ${occupied}. Spawn an agent there instead, or remove that worktree first.`,
-            },
-            { status: 400, headers },
-          );
+          // Open that checkout rather than refusing. `createWorktree` will
+          // confirm under the repo lock and open it; skip the fetch — the
+          // branch is already here. Leave `prBase` unset so the later
+          // `configurePRBranch` does not wipe a still-correct `ccmux-base`.
+          prBranch = prSource.headRefName;
+          // Occupied means the branch exists; carried, not re-derived
+          // (see `branchExists` in `worktree-create.ts`).
+          prBranchExisted = true;
+        } else {
+          const prepared = await preparePRBranch(mainRepoRoot, prSource);
+          if (!prepared.ok) {
+            return Response.json(
+              { error: prepared.error },
+              { status: 400, headers },
+            );
+          }
+          prBranch = prSource.headRefName;
+          // Only this answer came through the checks that prove the branch is
+          // this PR's, and the prep released the repo lock before returning,
+          // so the create must not re-derive it (issue #157).
+          prBranchExisted = prepared.value.branchExisted;
+          // The SHA, never `FETCH_HEAD`: the base-branch fetch inside the prep
+          // has already overwritten that ref.
+          creation.base = prepared.value.head;
+          prBase = prepared.value.baseRemoteRef;
         }
-        const prepared = await preparePRBranch(mainRepoRoot, prSource);
-        if (!prepared.ok) {
-          return Response.json(
-            { error: prepared.error },
-            { status: 400, headers },
-          );
-        }
-        prBranch = prSource.headRefName;
-        // The SHA, never `FETCH_HEAD`: the base-branch fetch inside the prep
-        // has already overwritten that ref.
-        creation.base = prepared.value.head;
-        prBase = prepared.value.baseRemoteRef;
       }
 
       // Here rather than only inside the creation engine, because ORDER
@@ -4535,6 +4824,7 @@ export class DaemonServer {
           ...(moved.flattenedIndex ? { flattenedIndex: true } : {}),
         };
       } else {
+        const issueNumber = issueResult.value;
         const created = await createWorktree(mainRepoRoot, {
           ...creation,
           // No prompt on the pr/issue paths, deliberately:
@@ -4549,7 +4839,21 @@ export class DaemonServer {
           // own review base. `configurePRBranch` writes that key here with
           // the branch the PR targets, and when it cannot, no key is what
           // lets the picker's `D` fall back to its heuristic base.
-          ...(prBranch ? { branch: prBranch, recordBase: false } : {}),
+          ...(prBranch
+            ? {
+                branch: prBranch,
+                branchExists: prBranchExisted,
+                recordBase: false,
+              }
+            : {}),
+          // Under the lock, so a checkout that appeared while the picker
+          // sat open is still found: numbering `issue-<n>-<slug>-2` would
+          // break Enter's "already checked out → open it" guarantee.
+          ...(issueNumber !== undefined
+            ? {
+                reuseExisting: (trees) => pickIssueWorktree(issueNumber, trees),
+              }
+            : {}),
         });
         if (!created.ok) {
           return Response.json(
@@ -4650,11 +4954,15 @@ export class DaemonServer {
     }
 
     // Create tmux pane
+    // A new window is named after the worktree when the spawn has one (the
+    // `--worktree` name, `issue-<n>-...`, `pr-<n>-...`, a reused checkout),
+    // else after the agent; `buildTmuxSpawnArgv` ignores it for a split.
     const spawnArgv = buildTmuxSpawnArgv({
       split,
       cwd: spawnCwd,
       placement,
       detach,
+      windowName: worktreeInfo?.name ?? agent.name,
     });
     const tmuxCmd = spawnArgv[0];
     // Hoisted so the outer catch (below) can kill a pane that was created

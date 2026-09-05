@@ -271,6 +271,13 @@ export const SCAN_DEGRADED_THRESHOLD = 10;
 export const WATCHER_DEBOUNCE_MS = 200;
 export const HEARTBEAT_INTERVAL_MS = 15000;
 export const HEALTH_CHECK_TIMEOUT_MS = 100;
+/**
+ * Budget for the best-effort `/server-info` read that follows a successful
+ * `/health` probe on the auto-start path. Longer than the liveness probe
+ * because a slow answer here must never evict a live daemon: on timeout the
+ * caller treats the build as current.
+ */
+export const DAEMON_INFO_TIMEOUT_MS = 1000;
 
 /**
  * Pane activity threshold — pane silent longer than this means not actively working

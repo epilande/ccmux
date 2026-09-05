@@ -14,6 +14,7 @@ import {
   MAX_SPAWN_PROMPT_BYTES,
   normalizeBoolean,
   normalizeClientTty,
+  normalizeModel,
   normalizePrompt,
   normalizeSplit,
   normalizeTarget,
@@ -1508,5 +1509,240 @@ describe("normalizeWorktreeRequest", () => {
     const bad = normalizeWorktreeRequest({ withChanges: "yes" });
     expect(bad.ok).toBe(false);
     if (!bad.ok) expect(bad.error).toContain("worktree.withChanges");
+  });
+});
+
+describe("normalizeModel", () => {
+  it("passes absent through and accepts every built-in's vocabulary", () => {
+    expect(normalizeModel(undefined)).toEqual({ ok: true, value: undefined });
+    expect(normalizeModel(null)).toEqual({ ok: true, value: undefined });
+    for (const model of [
+      "opus",
+      "gpt-5",
+      "anthropic/claude-sonnet-4",
+      "sonnet:high",
+      "gemini-2.5-pro",
+      "claude-opus-4-1-20250805",
+    ]) {
+      expect(normalizeModel(model)).toEqual({ ok: true, value: model });
+    }
+  });
+
+  it("rejects anything the shell or the agent could misread", () => {
+    // The value is spliced UNQUOTED after the binary, so the pattern is the
+    // whole of its safety: no leading `-` (a flag), no whitespace or quote.
+    for (const bad of ["-x", "--model", "a b", "x'y", 'x"y', "x;y", "$(x)", ""]) {
+      const result = normalizeModel(bad);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("Invalid 'model' field");
+    }
+    expect(normalizeModel(42)).toEqual({
+      ok: false,
+      error: "Invalid 'model' field: expected a string",
+    });
+    expect(normalizeModel("a".repeat(129)).ok).toBe(false);
+  });
+});
+
+describe("buildTmuxSpawnArgv window name", () => {
+  it("names a new window with -n right after new-window", () => {
+    expect(
+      buildTmuxSpawnArgv({
+        split: false,
+        cwd: "/w",
+        windowName: "issue-171",
+        detach: true,
+        placement: { kind: "session", id: "$3" },
+      }),
+    ).toEqual([
+      "new-window",
+      "-n",
+      "issue-171",
+      "-d",
+      "-t",
+      "$3:",
+      "-c",
+      "/w",
+      "-P",
+      "-F",
+      "#{pane_id}",
+    ]);
+  });
+
+  it("never names a split, whose window belongs to someone else", () => {
+    expect(
+      buildTmuxSpawnArgv({ split: "h", cwd: "/w", windowName: "issue-171" }),
+    ).toEqual(["split-window", "-h", "-c", "/w", "-P", "-F", "#{pane_id}"]);
+  });
+});
+
+describe("buildAgentSpawnCommand with a model", () => {
+  function agentWith(overrides: Partial<AgentDef>): AgentDef {
+    return { ...claudeAgent, ...overrides };
+  }
+
+  it("splices the flag after the binary on the bare path", () => {
+    expect(
+      buildAgentSpawnCommand({
+        agent: claudeAgent,
+        binary: "claude",
+        model: "opus",
+      }),
+    ).toEqual({ ok: true, value: "claude --model opus" });
+  });
+
+  it("keeps the flag ahead of the prompt", () => {
+    expect(
+      buildAgentSpawnCommand({
+        agent: claudeAgent,
+        binary: "/my/wrapper",
+        model: "opus",
+        prompt: "go",
+      }),
+    ).toEqual({ ok: true, value: "/my/wrapper --model opus 'go'" });
+  });
+
+  it("appends the flag to a resume, whose template names its own binary", () => {
+    expect(
+      buildAgentSpawnCommand({
+        agent: getBuiltinAgent("codex"),
+        binary: "codex",
+        resume: "abc-123",
+        model: "gpt-5",
+      }),
+    ).toEqual({ ok: true, value: "codex resume abc-123 --model gpt-5" });
+    expect(
+      buildAgentSpawnCommand({
+        agent: agentWith({ resumeCommand: undefined }),
+        binary: "claude",
+        resume: "abc-123",
+        model: "opus",
+      }),
+    ).toEqual({ ok: true, value: "claude --resume abc-123 --model opus" });
+  });
+
+  it("refuses an agent without a verified model flag", () => {
+    const result = buildAgentSpawnCommand({
+      agent: agentWith({ name: "custom", modelFlag: undefined }),
+      binary: "custom",
+      model: "opus",
+    });
+    expect(result).toEqual({
+      ok: false,
+      error:
+        "Agent 'custom' has no known model flag, so --model cannot be passed to it. " +
+        'Set \'agents.custom.modelFlag\' in ccmux.json (e.g. "--model").',
+    });
+  });
+
+  it("refuses a non-string modelFlag from config", () => {
+    expect(
+      buildAgentSpawnCommand({
+        agent: agentWith({ modelFlag: 5 as unknown as string }),
+        binary: "claude",
+        model: "opus",
+      }),
+    ).toEqual({
+      ok: false,
+      error: "Invalid 'agents.claude.modelFlag': expected a string.",
+    });
+  });
+
+  it("honors a custom flag spelling", () => {
+    expect(
+      buildAgentSpawnCommand({
+        agent: agentWith({ modelFlag: "-m" }),
+        binary: "codex",
+        model: "gpt-5",
+      }),
+    ).toEqual({ ok: true, value: "codex -m gpt-5" });
+  });
+
+  it("refuses a modelFlag that could break out of the {bin} slot", () => {
+    // The flag is spliced unquoted after the binary and substituted for
+    // `{bin}` after the template scan skipped that token as inert. A
+    // semicolon, space, quote, or `$(` would run as shell, not as a flag;
+    // whitespace-only is the same hole after trim.
+    for (const modelFlag of [
+      "--model;rm",
+      "--model && rm",
+      "--model'",
+      '--model"',
+      "   ",
+      "--model$(id)",
+    ]) {
+      const result = buildAgentSpawnCommand({
+        agent: agentWith({ name: "custom", modelFlag }),
+        binary: "custom",
+        model: "opus",
+        prompt: "seed from an issue",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("agents.custom.modelFlag");
+    }
+  });
+
+  it("uses --model on every built-in", () => {
+    for (const agent of BUILTIN_AGENTS) {
+      expect(agent.modelFlag).toBe("--model");
+      const binary = agent.executable ?? agent.name;
+      expect(
+        buildAgentSpawnCommand({ agent, binary, model: "x" }),
+      ).toEqual({ ok: true, value: `${binary} --model x` });
+    }
+  });
+});
+
+describe("buildAgentForkCommand with a model", () => {
+  it("splices the flag into {bin} ahead of the resume", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ccmux-fork-"));
+    const path = join(dir, "abc.jsonl");
+    writeFileSync(path, "{}\n");
+    try {
+      expect(
+        buildAgentForkCommand({
+          agent: claudeAgent,
+          binary: "claude",
+          sessionId: "abc-123",
+          logPath: path,
+          model: "opus",
+        }),
+      ).toEqual({
+        ok: true,
+        value: `claude --model opus --resume '${path}' --fork-session`,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("splices the flag into an id-form template, which has no transcript path", () => {
+    // The id form is what the codebase itself recommends as the fallback
+    // (see the {path}-resolution refusal), so it must carry the model too.
+    expect(
+      buildAgentForkCommand({
+        agent: {
+          ...claudeAgent,
+          forkCommand: "{bin} --resume {id} --fork-session",
+        },
+        binary: "claude",
+        sessionId: "abc-123",
+        model: "opus",
+      }),
+    ).toEqual({
+      ok: true,
+      value: "claude --model opus --resume abc-123 --fork-session",
+    });
+  });
+
+  it("refuses an agent without a verified model flag", () => {
+    const result = buildAgentForkCommand({
+      agent: { ...claudeAgent, modelFlag: undefined },
+      binary: "claude",
+      sessionId: "abc-123",
+      model: "opus",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("no known model flag");
   });
 });

@@ -20,6 +20,9 @@ const {
   createTUIStore: _createTUIStore,
   NEW_SESSION_FIELDS,
   namesAWorktree,
+  newSessionFields,
+  sourcesReopenOptions,
+  sourcesReturnMarker,
 } = await import("./store");
 
 function headerLabels(items: FlatItem[]): string[] {
@@ -3091,6 +3094,9 @@ describe("store", () => {
         // And not aimed at a worktree that already exists, which is the
         // Worktrees panel's own way in.
         existingWorktree: null,
+        pr: null,
+        issue: null,
+        returnToSources: null,
         returnToWorktrees: null,
         field: "agent",
         dropdown: null,
@@ -3155,6 +3161,9 @@ describe("store", () => {
         worktreeName: null,
         fork: null,
         existingWorktree: null,
+        pr: null,
+        issue: null,
+        returnToSources: null,
         returnToWorktrees: null,
         field: "prompt",
         dropdown: null,
@@ -3233,6 +3242,9 @@ describe("store", () => {
         worktreeName: null,
         fork: null,
         existingWorktree: null,
+        pr: null,
+        issue: null,
+        returnToSources: null,
         returnToWorktrees: null,
         field: "agent",
         dropdown: null,
@@ -3347,8 +3359,11 @@ describe("store", () => {
           worktreeName: null,
           fork: FORK,
           existingWorktree: null,
+          pr: null,
+          issue: null,
           // Not `agent`: the fork continues the source's agent, so that row
           // does not exist and focus cannot start on it.
+          returnToSources: null,
           returnToWorktrees: null,
           field: "placement",
           dropdown: null,
@@ -3473,6 +3488,9 @@ describe("store", () => {
           worktreeName: null,
           fork: null,
           existingWorktree: PATH,
+          pr: null,
+          issue: null,
+          returnToSources: null,
           returnToWorktrees: null,
           field: "agent",
           dropdown: null,
@@ -3577,6 +3595,8 @@ describe("store", () => {
             destination: "worktree",
             fork: null,
             existingWorktree: null,
+            pr: null,
+            issue: null,
           }),
         ).toBe(true);
       });
@@ -3588,6 +3608,8 @@ describe("store", () => {
             destination: "here",
             fork: null,
             existingWorktree: null,
+            pr: null,
+            issue: null,
           }),
         ).toBe(true);
       });
@@ -3603,6 +3625,8 @@ describe("store", () => {
             destination: "worktree",
             fork: null,
             existingWorktree: "/repo/.claude/worktrees/panel",
+            pr: null,
+            issue: null,
           }),
         ).toBe(false);
       });
@@ -3622,6 +3646,8 @@ describe("store", () => {
               pane: "%5",
             },
             existingWorktree: null,
+            pr: null,
+            issue: null,
           }),
         ).toBe(false);
       });
@@ -3633,6 +3659,8 @@ describe("store", () => {
             destination: "here",
             fork: null,
             existingWorktree: null,
+            pr: null,
+            issue: null,
           }),
         ).toBe(false);
       });
@@ -4158,5 +4186,244 @@ describe("new session dialog origin marker", () => {
       scope: null,
       cursor: "/repo/.claude/worktrees/panel",
     });
+  });
+
+  /**
+   * The picker's marker carries the picker's OWN origin, so a two-deep nav
+   * stack survives the round trip.
+   *
+   * `W` → `n` → Enter → Esc → Esc is the sequence: the panel opens the
+   * picker, the picker opens this dialog, and cancelling has to rebuild BOTH
+   * steps. A marker holding only repo/cursor/filter restores the middle of
+   * the stack and silently drops its bottom, so the second Esc closes to the
+   * session list instead of returning to the panel — taking the panel's
+   * Tab-widened scope with it.
+   */
+  it("carries the picker's own origin through the dialog round trip", () => {
+    const store = createTUIStore();
+    const origin = {
+      panelRepo: "/repo",
+      panelScope: null,
+      panelCursor: "/repo/.claude/worktrees/panel",
+    };
+
+    // The BUILD half, through the helper `sourcesReturn` calls. This is the
+    // line that regressed: a marker built without `origin` type-checks and
+    // reads correctly everywhere until the second Esc.
+    const built = sourcesReturnMarker(
+      { repo: "/repo", origin },
+      { cursor: "issue:/repo#144", filter: "notif" },
+    );
+    expect(built.origin).toEqual(origin);
+    // The PICKER's scope, never the row's.
+    expect(built.repo).toBe("/repo");
+
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      issue: { number: 144, title: "Notifications", repoRoot: "/repo" },
+      returnToSources: built,
+    });
+
+    expect(store.state.newSession?.returnToSources).toEqual({
+      repo: "/repo",
+      cursor: "issue:/repo#144",
+      filter: "notif",
+      origin,
+    });
+
+    // And the reopen puts it back where Esc reads it from, through the SAME
+    // helper `cancelNewSession` calls — replaying its argument list by hand
+    // here would pass even if App dropped the field.
+    const marker = store.state.newSession!.returnToSources!;
+    store.actions.closeNewSessionDialog();
+    store.actions.showSourcePicker(
+      marker.repo,
+      sourcesReopenOptions(marker),
+    );
+
+    expect(store.state.sourcePicker?.origin).toEqual(origin);
+    expect(store.state.sourcePicker?.initialFilter).toBe("notif");
+  });
+});
+
+describe("new-session dialog in PR mode (issue #151)", () => {
+  const PR = {
+    number: 151,
+    title: "Worktrees panel: open-PR list",
+    repoRoot: "/repo",
+  };
+
+  it("keeps the agent, placement and prompt, and nothing else", () => {
+    const store = createTUIStore();
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      pr: PR,
+    });
+
+    const draft = store.state.newSession!;
+    expect(draft.pr).toEqual(PR);
+    // Forced, and it has to SAY the true thing for whatever reads it, even
+    // though no row shows it.
+    expect(draft.destination).toBe("worktree");
+    expect(newSessionFields(draft)).toEqual(["agent", "placement", "prompt"]);
+  });
+
+  // `POST /spawn` refuses `pr` alongside `worktree.name`; a Name row here
+  // would post one and earn a 400 on a dialog whose fields all looked
+  // answerable.
+  it("names no worktree, whatever the destination says", () => {
+    const store = createTUIStore();
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      pr: PR,
+    });
+    expect(namesAWorktree(store.state.newSession!)).toBe(false);
+  });
+
+  // Normalized at the one place that opens the dialog, so no consumer has to
+  // answer for a draft claiming two modes at once.
+  it("is exclusive with the other three modes", () => {
+    const store = createTUIStore();
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      pr: PR,
+      moveChanges: true,
+      fork: {
+        sessionId: "s1",
+        label: "claude",
+        branch: "feat/x",
+        canWorktree: true,
+        pane: "%1",
+      },
+    });
+    const draft = store.state.newSession!;
+    expect(draft.pr).toEqual(PR);
+    expect(draft.moveChanges).toBe(false);
+    expect(draft.fork).toBeNull();
+
+    // An existing worktree is where the session STARTS, so it wins over a PR
+    // that exists to create one.
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      pr: PR,
+      existingWorktree: "/repo/wt/a",
+    });
+    expect(store.state.newSession!.pr).toBeNull();
+    expect(store.state.newSession!.existingWorktree).toBe("/repo/wt/a");
+  });
+});
+
+describe("new-session dialog in issue mode (issue #151)", () => {
+  const ISSUE = {
+    number: 144,
+    title: "Notifications are swallowed inside nested tmux",
+    repoRoot: "/repo",
+  };
+  const PR = {
+    number: 151,
+    title: "Worktrees panel: open-PR list",
+    repoRoot: "/repo",
+  };
+
+  it("keeps the agent, placement and prompt, and nothing else", () => {
+    const store = createTUIStore();
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      issue: ISSUE,
+    });
+
+    const draft = store.state.newSession!;
+    expect(draft.issue).toEqual(ISSUE);
+    // Forced, and it has to SAY the true thing for whatever reads it, even
+    // though no row shows it: an issue's worktree comes off the repo's
+    // default branch, so "here" is not an option the request has.
+    expect(draft.destination).toBe("worktree");
+    expect(newSessionFields(draft)).toEqual(["agent", "placement", "prompt"]);
+  });
+
+  it("refuses a destination it has no row for", () => {
+    const store = createTUIStore();
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      issue: ISSUE,
+    });
+
+    // Forced to the worktree the daemon will cut. A write that landed would
+    // flip the draft to `here` on a dialog whose request cannot spawn into
+    // `cwd`: `POST /spawn` refuses `issue` without a worktree.
+    store.actions.setNewSessionDestination("here");
+    expect(store.state.newSession?.destination).toBe("worktree");
+  });
+
+  // `POST /spawn` refuses `issue` alongside `worktree.name`; a Name row here
+  // would post one and earn a 400 on a dialog whose fields all looked
+  // answerable.
+  it("names no worktree, whatever the destination says", () => {
+    const store = createTUIStore();
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      issue: ISSUE,
+    });
+    expect(namesAWorktree(store.state.newSession!)).toBe(false);
+  });
+
+  it("is exclusive with every other mode", () => {
+    const store = createTUIStore();
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      issue: ISSUE,
+      moveChanges: true,
+      fork: {
+        sessionId: "s1",
+        label: "claude",
+        branch: "feat/x",
+        canWorktree: true,
+        pane: "%1",
+      },
+    });
+    const draft = store.state.newSession!;
+    expect(draft.issue).toEqual(ISSUE);
+    expect(draft.moveChanges).toBe(false);
+    expect(draft.fork).toBeNull();
+
+    // An existing worktree is where the session STARTS, so it wins over an
+    // issue that exists to create one.
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      issue: ISSUE,
+      existingWorktree: "/repo/wt/a",
+    });
+    expect(store.state.newSession!.issue).toBeNull();
+    expect(store.state.newSession!.existingWorktree).toBe("/repo/wt/a");
+  });
+
+  /**
+   * No caller sends both, and the precedence is pinned so that a draft
+   * cannot end up claiming two sources for one derived worktree name. The PR
+   * wins because it is the more specific request: it has a HEAD to check
+   * out, where an issue only names a branch to cut from.
+   */
+  it("yields to a PR rather than claiming the same worktree twice", () => {
+    const store = createTUIStore();
+    store.actions.openNewSessionDialog({
+      cwd: "/repo",
+      agent: "claude",
+      pr: PR,
+      issue: ISSUE,
+    });
+
+    const draft = store.state.newSession!;
+    expect(draft.pr).toEqual(PR);
+    expect(draft.issue).toBeNull();
   });
 });

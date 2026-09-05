@@ -52,7 +52,7 @@ const SKIP_BRANCHES = new Set(["main", "master", "HEAD"]);
 /** One `statusCheckRollup` entry as gh flattens it: a union of CheckRun
  * (Actions/checks; read `status` then `conclusion`) and StatusContext
  * (legacy commit statuses; read `state`), discriminated by `__typename`. */
-interface RollupEntry {
+export interface RollupEntry {
   __typename?: string;
   status?: string | null;
   conclusion?: string | null;
@@ -107,7 +107,7 @@ export function foldChecks(
 
 /** gh returns `""` for "no review decision" (e.g. unprotected branch with
  * no submitted review); normalize that and anything unexpected to null. */
-function normalizeReviewDecision(
+export function normalizeReviewDecision(
   raw: string | null | undefined,
 ): BranchPR["reviewDecision"] {
   return raw === "APPROVED" ||

@@ -1,6 +1,7 @@
 import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { AgentDef } from "../lib/agents";
+import { CLIENT_TTY_PATTERN } from "../lib/tmux-client";
 import {
   isUntrackedMode,
   UNTRACKED_MODES,
@@ -34,6 +35,23 @@ export const PANE_ID_PATTERN = /^%\d+$/;
  * needed downstream and no template can be broken out of.
  */
 export const NATIVE_SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * The only accepted shape for a `--model` value. It is spliced UNQUOTED
+ * after the launcher binary, so everything in it must be inert to the shell,
+ * and it may not start with `-`, which the agent would read as a flag. Wide
+ * enough for every built-in's vocabulary: opencode's `provider/model`, pi's
+ * `sonnet:high`, dotted version suffixes.
+ */
+export const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+
+/**
+ * The only accepted shape for `agents.<name>.modelFlag`. It is spliced
+ * UNQUOTED after the launcher binary (and then into `{bin}`), so a
+ * semicolon, space, quote, or `$(` would run as shell, not as a flag.
+ * Wide enough for every built-in (`--model`) and the short form (`-m`).
+ */
+export const MODEL_FLAG_PATTERN = /^--?[A-Za-z][A-Za-z0-9-]*$/;
 
 export type BuildResult<T> =
   | { ok: true; value: T }
@@ -72,15 +90,10 @@ export function normalizeTarget(
 }
 
 /**
- * The only accepted shape for a tmux client tty (`callerTty`). tmux reports
- * `#{client_tty}` as an absolute device path (`/dev/ttys004` on macOS,
- * `/dev/pts/3` on Linux), and the value travels straight into a tmux argv, so
- * anything outside that shape is a caller mistake worth naming rather than a
- * flag to hand to tmux.
+ * Validate a wire tmux-client-tty field (`callerTty`). Anything outside the
+ * accepted shape is a caller mistake worth naming rather than a flag to hand
+ * to tmux.
  */
-export const CLIENT_TTY_PATTERN = /^\/dev\/[A-Za-z0-9._/-]{1,64}$/;
-
-/** Validate a wire tmux-client-tty field (`callerTty`). */
 export function normalizeClientTty(
   value: unknown,
   field = "callerTty",
@@ -188,6 +201,31 @@ export function normalizePrompt(
       error:
         `Invalid 'prompt' field: exceeds maximum size of ` +
         `${MAX_SPAWN_PROMPT_BYTES} bytes (got ${byteLength})`,
+    };
+  }
+  return { ok: true, value };
+}
+
+/**
+ * Validate the wire `model` field. Absent stays absent; anything present
+ * must match `MODEL_PATTERN`, since the value lands unquoted in a shell
+ * command and the pattern is the whole of its safety.
+ */
+export function normalizeModel(
+  value: unknown,
+): BuildResult<string | undefined> {
+  if (value === undefined || value === null)
+    return { ok: true, value: undefined };
+  if (typeof value !== "string") {
+    return { ok: false, error: `Invalid 'model' field: expected a string` };
+  }
+  if (!MODEL_PATTERN.test(value)) {
+    return {
+      ok: false,
+      error:
+        `Invalid 'model' field: expected a model name such as opus, gpt-5, ` +
+        `or provider/model (letters, digits, '.', '_', ':', '/', '-'; ` +
+        `no leading '-')`,
     };
   }
   return { ok: true, value };
@@ -428,6 +466,56 @@ function binaryIsQuoteNeutral(binary: string): boolean {
   return !/['"`\\]/.test(binary) && !binary.includes("$(");
 }
 
+/**
+ * The launcher with the agent's model flag spliced in, or why it cannot be.
+ *
+ * Placement: directly after the binary (`claude --model opus 'prompt'`),
+ * where every built-in accepts its global flags, by substituting the result
+ * for `{bin}`. The one template shape without `{bin}` is `resumeCommand`,
+ * whose callers append the flag pair at the end instead (also accepted by
+ * every verified built-in, including `codex resume`).
+ *
+ * `model` needs no quoting: `MODEL_PATTERN` makes it inert. The flag is
+ * constrained to `MODEL_FLAG_PATTERN` for the same reason, and the composed
+ * launcher (`binary + flag + model`) is required to be quote-neutral
+ * wherever `{bin}` is substituted into a quoted template.
+ */
+function modelLauncher(
+  agent: AgentDef,
+  binary: string,
+  model: string | undefined,
+): BuildResult<{ launcher: string; suffix: string }> {
+  if (model === undefined) return { ok: true, value: { launcher: binary, suffix: "" } };
+  const flag = agent.modelFlag;
+  if (flag === undefined) {
+    return {
+      ok: false,
+      error:
+        `Agent '${agent.name}' has no known model flag, so --model cannot be passed to it. ` +
+        `Set 'agents.${agent.name}.modelFlag' in ccmux.json (e.g. "--model").`,
+    };
+  }
+  // A config file can hold any JSON, and this runs outside the route's try
+  // block, so a non-string would surface as an opaque 500.
+  if (typeof flag !== "string") {
+    return {
+      ok: false,
+      error: `Invalid 'agents.${agent.name}.modelFlag': expected a string.`,
+    };
+  }
+  const trimmed = flag.trim();
+  if (!MODEL_FLAG_PATTERN.test(trimmed)) {
+    return {
+      ok: false,
+      error:
+        `Invalid 'agents.${agent.name}.modelFlag': expected a flag such as ` +
+        `"--model" or "-m".`,
+    };
+  }
+  const suffix = ` ${trimmed} ${model}`;
+  return { ok: true, value: { launcher: `${binary}${suffix}`, suffix } };
+}
+
 export interface AgentCommandInput {
   agent: AgentDef;
   /**
@@ -438,6 +526,8 @@ export interface AgentCommandInput {
   binary: string;
   resume?: string;
   prompt?: string;
+  /** A `--model` value, already validated against `MODEL_PATTERN`. */
+  model?: string;
 }
 
 /**
@@ -453,15 +543,21 @@ export interface AgentCommandInput {
 export function buildAgentSpawnCommand(
   input: AgentCommandInput,
 ): BuildResult<string> {
-  const { agent, binary, resume, prompt } = input;
+  const { agent, binary, resume, prompt, model } = input;
+
+  // Resolved first so an agent without a model flag is refused before any
+  // other shape-specific check, whichever path the spawn takes.
+  const launcherResult = modelLauncher(agent, binary, model);
+  if (!launcherResult.ok) return launcherResult;
+  const { launcher, suffix } = launcherResult.value;
 
   if (resume) {
-    return {
-      ok: true,
-      value: agent.resumeCommand
-        ? substitutePlaceholders(agent.resumeCommand, { id: resume })
-        : `${binary} --resume ${resume}`,
-    };
+    // Appended rather than spliced: `resumeCommand` names its own binary
+    // and has no `{bin}` (see `modelLauncher`).
+    const base = agent.resumeCommand
+      ? substitutePlaceholders(agent.resumeCommand, { id: resume })
+      : `${binary} --resume ${resume}`;
+    return { ok: true, value: `${base}${suffix}` };
   }
 
   // `prompt !== undefined`, not truthiness: an empty prompt must reach the
@@ -485,11 +581,11 @@ export function buildAgentSpawnCommand(
         error: `Invalid 'agents.${agent.name}.promptCommand': expected a string.`,
       };
     }
-    if (!binaryIsQuoteNeutral(binary)) {
+    if (!binaryIsQuoteNeutral(launcher)) {
       return {
         ok: false,
         error:
-          `Cannot spawn '${agent.name}' with a prompt: its launcher (${binary}) contains ` +
+          `Cannot spawn '${agent.name}' with a prompt: its launcher (${launcher}) contains ` +
           `a quote, a backslash, or a command substitution, which would break the quoting ` +
           `around the prompt.`,
       };
@@ -517,11 +613,11 @@ export function buildAgentSpawnCommand(
     }
     return {
       ok: true,
-      value: substituteQuotedTemplate(template, { bin: binary, prompt }),
+      value: substituteQuotedTemplate(template, { bin: launcher, prompt }),
     };
   }
 
-  return { ok: true, value: binary };
+  return { ok: true, value: launcher };
 }
 
 export interface AgentForkCommandInput {
@@ -537,6 +633,8 @@ export interface AgentForkCommandInput {
    * the check.
    */
   logPath?: string | null;
+  /** A `--model` value, already validated against `MODEL_PATTERN`. */
+  model?: string;
 }
 
 /**
@@ -635,8 +733,12 @@ export function forkResumesByIdAlone(agent: AgentDef): boolean {
 export function buildAgentForkCommand(
   input: AgentForkCommandInput,
 ): BuildResult<string> {
-  const { agent, binary, sessionId, logPath } = input;
+  const { agent, binary, sessionId, logPath, model } = input;
   const template = agent.forkCommand;
+
+  const launcherResult = modelLauncher(agent, binary, model);
+  if (!launcherResult.ok) return launcherResult;
+  const { launcher } = launcherResult.value;
 
   // Empty string shares this branch, not the placeholder check below. It is
   // the config-file way to say "do not offer this" (the picker's gate reads
@@ -686,7 +788,7 @@ export function buildAgentForkCommand(
   if (!templateUsesTranscriptPath(template)) {
     return {
       ok: true,
-      value: substitutePlaceholders(template, { id: sessionId, bin: binary }),
+      value: substitutePlaceholders(template, { id: sessionId, bin: launcher }),
     };
   }
 
@@ -702,11 +804,11 @@ export function buildAgentForkCommand(
         `("{bin} --resume {id} --fork-session") to resume by session id instead.`,
     };
   }
-  if (!binaryIsQuoteNeutral(binary)) {
+  if (!binaryIsQuoteNeutral(launcher)) {
     return {
       ok: false,
       error:
-        `Cannot fork '${agent.name}': its launcher (${binary}) contains a quote, a ` +
+        `Cannot fork '${agent.name}': its launcher (${launcher}) contains a quote, a ` +
         `backslash, or a command substitution, which would break the quoting around the ` +
         `transcript path.`,
     };
@@ -727,7 +829,7 @@ export function buildAgentForkCommand(
     ok: true,
     value: substituteQuotedTemplate(template, {
       id: sessionId,
-      bin: binary,
+      bin: launcher,
       path: transcript.value,
     }),
   };
@@ -767,11 +869,19 @@ export interface TmuxSpawnArgvInput {
    * yanking the caller to the new window.
    */
   detach?: boolean;
+  /**
+   * Name for a NEW window (`-n`): the worktree's name when the spawn has
+   * one, else the agent's, so a batch of spawns is tellable apart. Setting
+   * it turns `automatic-rename` off for that window, which is the point:
+   * left on, every Claude window is its version string. A split pane lives
+   * in someone else's window, so it never gets one.
+   */
+  windowName?: string;
 }
 
 /** argv for the tmux command that creates the pane, minus the binary. */
 export function buildTmuxSpawnArgv(input: TmuxSpawnArgvInput): string[] {
-  const { split, cwd, placement, detach = false } = input;
+  const { split, cwd, placement, detach = false, windowName } = input;
   const argv: string[] = [];
 
   if (split) {
@@ -780,6 +890,7 @@ export function buildTmuxSpawnArgv(input: TmuxSpawnArgvInput): string[] {
     if (placement?.kind === "pane") argv.push("-t", placement.id);
   } else {
     argv.push("new-window");
+    if (windowName !== undefined) argv.push("-n", windowName);
     if (detach) argv.push("-d");
     if (placement?.kind === "window") argv.push("-a", "-t", placement.id);
     else if (placement?.kind === "session") argv.push("-t", `${placement.id}:`);

@@ -47,10 +47,13 @@ import {
   invocationEventToSSE,
 } from "./server";
 import type { InvocationRecord } from "./invocation-manager";
+import type { PRListResponse } from "./pr-list";
+import type { IssueListResponse } from "./issue-list";
 import { SessionManager } from "./sessions";
 import type { SessionEvent } from "./sessions";
 import type { SSEEvent, DaemonHealth } from "../types";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
+import { BUILD_IDENTITY } from "../lib/build-identity";
 import type { SpawnableAgent } from "../lib/spawnable-agents";
 import type { Session, TmuxPane, EnrichedSession } from "../types/session";
 import { AttentionTracker } from "./attention-tracker";
@@ -88,6 +91,15 @@ type ServerInternals = {
   sweepOffset: number;
   /** Exposed so a test can expire git facts the way the TTL does. */
   gitInfoCache: Map<string, unknown>;
+  /** Same, for the open-PR cache: its entries hold the in-flight promise as
+   *  well as the settled answer, so a test can watch a concurrent miss join
+   *  rather than start a second call. */
+  prListCache: {
+    entries: Map<
+      string,
+      { answer: Promise<unknown>; done: { at: number; result: unknown } | null }
+    >;
+  };
   onBranchPRsChanged(cwd: string, branch: string): Promise<void>;
   visibleSessions: Set<string>;
   lastSidebarState: {
@@ -3269,6 +3281,25 @@ describe("getServerSocketPath and /server-info", () => {
     }
   });
 
+  it("carries this process's build identity and idle busy counts on GET /server-info", async () => {
+    const { internals } = createServer();
+    const { restore } = withSpawnQueue([{ code: 0, out: "/tmp/sock\n" }]);
+    try {
+      const res = await internals.handleRequest(
+        new Request("http://localhost/server-info"),
+      );
+      const data = (await res.json()) as {
+        build: unknown;
+        busy: { invocations: number; handoffs: number };
+      };
+      expect(data.build).toEqual(BUILD_IDENTITY);
+      // Nothing invoked, nothing handed off: the CLI may replace this daemon.
+      expect(data.busy).toEqual({ invocations: 0, handoffs: 0 });
+    } finally {
+      restore();
+    }
+  });
+
   it("serves the degraded health snapshot via GET /server-info", async () => {
     const degraded: DaemonHealth = {
       degraded: true,
@@ -3818,6 +3849,8 @@ describe("POST /spawn", () => {
       expect(argv[0]).toEqual([
         "tmux",
         "new-window",
+        "-n",
+        "prompty",
         "-d",
         "-c",
         cwd,
@@ -3893,6 +3926,8 @@ describe("POST /spawn", () => {
       expect(argv[1]).toEqual([
         "tmux",
         "new-window",
+        "-n",
+        "prompty",
         "-d",
         "-a",
         "-t",
@@ -3923,6 +3958,8 @@ describe("POST /spawn", () => {
       expect(argv[1]).toEqual([
         "tmux",
         "new-window",
+        "-n",
+        "prompty",
         "-d",
         "-t",
         "$3:",
@@ -4574,6 +4611,55 @@ describe("POST /spawn", () => {
     }
   });
 
+  it("threads --model through to the composed agent command", async () => {
+    // `normalizeModel` and the builders are each unit-tested, but nothing
+    // proved the wire field travels between them: dropping `model` from the
+    // `buildAgentSpawnCommand` call left every other test green.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({
+          agent: "prompty",
+          cwd,
+          prompt: "go",
+          model: "opus",
+          detach: true,
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(argv[1]).toEqual([
+        "tmux",
+        "send-keys",
+        "-t",
+        "%99",
+        "prompty --model opus 'go'",
+        "Enter",
+      ]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("refuses a flag-shaped model with nothing created", async () => {
+    // The value is spliced unquoted, so the refusal has to land before the
+    // pane exists rather than after it.
+    const { internals } = serverForAgents([promptAgent]);
+    const { argv, restore } = withTmuxRecorder();
+    try {
+      const res = await internals.handleRequest(
+        spawnRequest({ agent: "prompty", cwd, model: "-x", detach: true }),
+      );
+      expect(res.status).toBe(400);
+      const { error } = (await res.json()) as { error: string };
+      expect(error).toContain("Invalid 'model' field");
+      expect(argv).toHaveLength(0);
+    } finally {
+      restore();
+    }
+  });
+
+
   it("refuses a prompt spawn for an agent with no promptCommand", async () => {
     // The old code emitted `--prompt` for every agent, which silently
     // means one-shot print mode (Copilot) or an unknown flag (pi).
@@ -4738,6 +4824,31 @@ describe("POST /spawn", () => {
         restore();
       }
     });
+
+    it("carries --model into the fork command", async () => {
+      // Same wire-threading gap as the spawn path, on the other builder:
+      // `forkAgent` uses the id form, so this also pins that branch.
+      const { manager, internals } = serverForAgents([forkAgent]);
+      const source = trackedSession(manager, "forky");
+      const { argv, restore } = withTmuxRecorder();
+      try {
+        const res = await internals.handleRequest(
+          spawnRequest({ fork: source.id, model: "opus", detach: true }),
+        );
+        expect(res.status).toBe(200);
+        expect(argv[1]).toEqual([
+          "tmux",
+          "send-keys",
+          "-t",
+          "%99",
+          "forky --model opus --resume src-sid --fork-session",
+          "Enter",
+        ]);
+      } finally {
+        restore();
+      }
+    });
+
 
     it("takes the agent from the source, ignoring the caller's", async () => {
       const { manager, internals } = serverForAgents([forkAgent, noForkAgent]);
@@ -6051,6 +6162,154 @@ describe("worktree prune endpoints", () => {
     expect(res.status).toBe(400);
     expect(body.error).toContain("501");
     expect(body.error).toContain("500");
+  });
+
+  it("rejects an over-cap allowEndIdle list too", async () => {
+    const { repo, worktree } = makePruneFixture();
+    const { internals } = serverFor(repo);
+    const over = Array.from({ length: 501 }, (_, i) => join(root, `p${i}`));
+
+    const res = await post(internals, {
+      paths: [worktree],
+      allowEndIdle: over,
+    });
+    const body = (await res.json()) as { error: string };
+
+    expect(res.status).toBe(400);
+    expect(body.error).toContain("allowEndIdle");
+    expect(body.error).toContain("501");
+    expect(existsSync(worktree)).toBe(true);
+  });
+
+  /**
+   * A `gh` on PATH reporting a MERGED PR at this worktree's tip, which is what
+   * `selectPRForBranch` demands as proof and the only thing that offers a
+   * worktree an agent lives in. Returns the PATH restore.
+   */
+  function withMergedPR(worktree: string): () => void {
+    const head = Bun.spawnSync(["git", "-C", worktree, "rev-parse", "HEAD"], {
+      env: GIT_FIXTURE_ENV,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+      .stdout.toString()
+      .trim();
+    const binDir = join(root, "fakebin");
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(
+      join(binDir, "gh"),
+      "#!/bin/bash\n" +
+        // The daemon's open-PR resolver asks with `--state open`; only the
+        // `--state all` lookup should see the merged PR.
+        'for a in "$@"; do [ "$a" = "open" ] && { echo "[]"; exit 0; }; done\n' +
+        `cat <<'JSON'\n${JSON.stringify([
+          {
+            number: 3,
+            url: "https://github.com/o/r/pull/3",
+            state: "MERGED",
+            isCrossRepository: false,
+            headRefOid: head,
+          },
+        ])}\nJSON\n`,
+      { mode: 0o755 },
+    );
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${originalPath}`;
+    return () => {
+      process.env.PATH = originalPath;
+    };
+  }
+
+  /**
+   * The end-idle gate at the endpoint (#175). A worktree whose only session
+   * is idle IS offered once `gh` says its PR merged, so the request that acts
+   * on it must carry a second opt-in: removing it ends that session, which
+   * selecting a row does not agree to.
+   *
+   * Only the refusal is driven here, deliberately. Letting the run proceed
+   * would reach `runPrune`'s real `closePane`, and the endpoint injects no
+   * seam for it, so the test would send `tmux kill-pane` at whatever `%1`
+   * happens to be on the developer's own tmux server. The removal side is
+   * covered against injected seams in worktree-prune.test.ts.
+   */
+  it("refuses a candidate whose idle session was not opted in, without a 409", async () => {
+    const { worktree } = makePruneFixture();
+    const restore = withMergedPR(worktree);
+    try {
+      // The session lives IN the worktree, and a fresh pane-tracked session
+      // is idle, which is exactly the row the gate offers.
+      const { internals } = serverFor(worktree);
+
+      const listed = await internals.handleRequest(
+        new Request("http://127.0.0.1:2269/worktrees/prune-candidates"),
+      );
+      const scan = (await listed.json()) as {
+        candidates: Array<{ path: string; sessions: unknown[] }>;
+      };
+      const offered = scan.candidates.find(
+        (c) => c.path === realpathSync(worktree),
+      );
+      expect(offered?.sessions).toHaveLength(1);
+
+      const res = await post(internals, { paths: [worktree] });
+      const body = (await res.json()) as {
+        outcomes: Array<{ removed: boolean; error?: string }>;
+      };
+
+      // A refusal from inside the run, not a 409: the path IS currently
+      // removable, it just needs the consent the request did not carry.
+      expect(res.status).toBe(200);
+      expect(body.outcomes[0]?.removed).toBe(false);
+      expect(body.outcomes[0]?.error).toContain("idle agent session");
+      expect(existsSync(worktree)).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  /**
+   * The endpoint's own `liveSession` supplier, which every test that reaches
+   * the gate elsewhere replaces with a stub. It fails OPEN if it ever stops
+   * resolving — an `undefined` answer means "the daemon no longer has this
+   * session", and the run proceeds without signalling anything — so a broken
+   * wiring would go unnoticed rather than break a test.
+   *
+   * Driven under `dryRun`, which reports the pid the real run would signal
+   * and touches nothing: no process, no pane, no directory. A supplier that
+   * answered `undefined` would report a session with no pid instead.
+   */
+  it("resolves the live session, pid included, through its own supplier", async () => {
+    const { worktree } = makePruneFixture();
+    const restore = withMergedPR(worktree);
+    try {
+      const ctx = createServer();
+      ctx.manager.createPaneTrackedSession({
+        agentType: "claude",
+        paneId: "%1",
+        cwd: worktree,
+        pid: 4242,
+      });
+
+      const res = await post(ctx.internals, {
+        paths: [worktree],
+        allowEndIdle: [worktree],
+        dryRun: true,
+      });
+      const body = (await res.json()) as {
+        outcomes: Array<{
+          removed: boolean;
+          steps: Array<{ step: string; detail: string }>;
+        }>;
+      };
+
+      const stop = body.outcomes[0]?.steps.find(
+        (s) => s.step === "would stop agent",
+      );
+      expect(stop?.detail).toContain("pid 4242");
+      expect(existsSync(worktree)).toBe(true);
+    } finally {
+      restore();
+    }
   });
 
   it("rejects an over-cap allowDirty list too, not just paths", async () => {
@@ -7845,14 +8104,22 @@ describe("POST /spawn with --pr and --issue", () => {
    * the process env, and a developer's global config (a rewrite rule, a
    * default branch, a hook) would otherwise decide whether this passes.
    */
-  function withStubbedEnv(pr: object = PR_JSON, issue: object = ISSUE_JSON) {
+  function withStubbedEnv(
+    pr: object = PR_JSON,
+    issue: object = ISSUE_JSON,
+    prList: object[] = [PR_JSON],
+  ) {
     const bin = join(root, "bin");
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "pr.json"), JSON.stringify(pr));
     writeFileSync(join(bin, "issue.json"), JSON.stringify(issue));
+    writeFileSync(join(bin, "pr-list.json"), JSON.stringify(prList));
+    // Branches on `$2` as well as `$1`: `pr view` and `pr list` are both
+    // `gh pr ...`, so a stub that reads only the first word answers a list
+    // request with a single object and the caller refuses it as not-an-array.
     writeFileSync(
       join(bin, "gh"),
-      `#!/bin/sh\nif [ "$1" = "pr" ]; then cat '${join(bin, "pr.json")}'; else cat '${join(bin, "issue.json")}'; fi\n`,
+      `#!/bin/sh\nif [ "$1" = "pr" ] && [ "$2" = "list" ]; then cat '${join(bin, "pr-list.json")}'; elif [ "$1" = "pr" ]; then cat '${join(bin, "pr.json")}'; else cat '${join(bin, "issue.json")}'; fi\n`,
       { mode: 0o755 },
     );
     const previous = {
@@ -8018,10 +8285,10 @@ describe("POST /spawn with --pr and --issue", () => {
     }
   });
 
-  // OUR refusal naming the directory, rather than git's "already used by
-  // worktree at" at the end of a create — and raised before anything is
-  // fetched or written.
-  it("refuses when the PR's branch is already checked out elsewhere", async () => {
+  // A second `--pr` of a branch already checked out used to 400. Opening
+  // that checkout is what the source picker promises on Enter, and POST
+  // /spawn does the same under the repo lock — skip the fetch, spawn there.
+  it("opens the existing checkout when the PR's branch is already here", async () => {
     const repo = makeRepo();
     const elsewhere = join(root, "elsewhere");
     runFixtureGit(repo, "worktree", "add", "-b", "fix/flaky-binder", elsewhere);
@@ -8036,10 +8303,49 @@ describe("POST /spawn with --pr and --issue", () => {
       });
       const body = (await res.json()) as SpawnBody;
 
-      expect(res.status).toBe(400);
-      expect(body.error).toContain("already checked out at");
-      expect(body.error).toContain(elsewhere);
+      expect(res.status).toBe(200);
+      expect(body.worktree?.created).toBe(false);
+      expect(body.worktree?.path).toBe(realpathSync(elsewhere));
+      expect(body.worktree?.branch).toBe("fix/flaky-binder");
+      // No sibling under `.claude/worktrees`: the existing checkout is it.
       expect(existsSync(join(repo, ".claude", "worktrees"))).toBe(false);
+    } finally {
+      restoreEnv();
+      restoreTmux();
+    }
+  });
+
+  // Occupied skips prepare, so `prBase` used to stay at its `null`
+  // initializer and `configurePRBranch` would UNSET the key the first
+  // spawn recorded. A second `--pr` / source-picker Enter must keep it.
+  it("keeps the recorded review base when the PR's branch is already checked out", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv();
+    try {
+      const first = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      expect(first.status).toBe(200);
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.ccmux-base"),
+      ).toBe("origin/main");
+
+      const second = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      const body = (await second.json()) as SpawnBody;
+
+      expect(second.status).toBe(200);
+      expect(body.worktree?.created).toBe(false);
+      expect(
+        gitOut(repo, "config", "--get", "branch.fix/flaky-binder.ccmux-base"),
+      ).toBe("origin/main");
     } finally {
       restoreEnv();
       restoreTmux();
@@ -8643,6 +8949,667 @@ describe("POST /spawn with --pr and --issue", () => {
       }
     } finally {
       restoreTmux();
+    }
+  });
+});
+
+/**
+ * `GET /prs`, end to end against a real repo and the same PATH-stubbed `gh`
+ * the spawn tests use — which is why that stub had to learn to tell `pr list`
+ * from `pr view`.
+ */
+describe("GET /prs", () => {
+  let root: string;
+
+  const LIST_ROW = {
+    number: 151,
+    title: "Worktrees panel: open-PR list",
+    url: "https://github.com/o/r/pull/151",
+    author: { login: "epilande" },
+    isDraft: false,
+    reviewDecision: "APPROVED",
+    statusCheckRollup: [
+      { __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" },
+    ],
+    headRefName: "feat/pr-list-panel",
+    headRefOid: "sha-151",
+  };
+
+  function makeRepo(): string {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-prs-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    return repo;
+  }
+
+  /** A `gh` on PATH that answers `pr list` from `body`. */
+  function withStubbedGh(body: unknown, exitCode = 0) {
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "prs.json"), JSON.stringify(body));
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/bin/sh\ncat '${join(bin, "prs.json")}'\nexit ${exitCode}\n`,
+      { mode: 0o755 },
+    );
+    const previous = process.env.PATH;
+    process.env.PATH = `${bin}:${previous ?? ""}`;
+    return () => {
+      if (previous === undefined) delete process.env.PATH;
+      else process.env.PATH = previous;
+    };
+  }
+
+  async function listPRs(
+    internals: ServerInternals,
+    query: string,
+  ): Promise<Response> {
+    return internals.handleRequest(
+      new Request(`http://127.0.0.1:2269/prs?${query}`),
+    );
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("answers with the repo's open PRs, flattened", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh([LIST_ROW]);
+    try {
+      const res = await listPRs(internals, `repo=${encodeURIComponent(repo)}`);
+      const body = (await res.json()) as PRListResponse;
+
+      expect(res.status).toBe(200);
+      expect(body.errors).toEqual([]);
+      expect(body.repos).toHaveLength(1);
+      expect(body.repos[0]?.repoName).toBe("repo");
+      expect(body.repos[0]?.prs[0]).toMatchObject({
+        number: 151,
+        author: "epilande",
+        reviewDecision: "APPROVED",
+        ciStatus: "passing",
+        headRefOid: "sha-151",
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  // The same resolver `GET /worktrees` and the prune scan take, so all three
+  // surfaces agree on scope — a repo one can see and another cannot is a
+  // section attached to nothing.
+  it("takes `repo` as a resolved filter and `cwd` as additive", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh([LIST_ROW]);
+    try {
+      const byCwd = await listPRs(
+        internals,
+        `cwd=${encodeURIComponent(repo)}`,
+      );
+      expect(
+        ((await byCwd.json()) as PRListResponse).repos[0]?.repoRoot,
+      ).toContain("repo");
+
+      // A directory that is not a repo scans nothing rather than falling back
+      // to every repo.
+      const nowhere = await listPRs(
+        internals,
+        `repo=${encodeURIComponent(root)}`,
+      );
+      expect(((await nowhere.json()) as PRListResponse).repos).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  // The distinction the module exists for: a repo that could not answer is
+  // an ERROR row, never an empty PR list, and it costs only its own section.
+  it("reports a repo's failure per repo, with a 200", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh({ message: "not authenticated" }, 1);
+    try {
+      const res = await listPRs(internals, `repo=${encodeURIComponent(repo)}`);
+      const body = (await res.json()) as PRListResponse;
+
+      expect(res.status).toBe(200);
+      expect(body.repos).toEqual([]);
+      expect(body.errors[0]?.repoName).toBe("repo");
+      expect(body.errors[0]?.error).toContain("gh pr list exited 1");
+    } finally {
+      restore();
+    }
+  });
+
+  // The TTL holds the ANSWER, not a timestamp: a hit has to reply without
+  // touching gh at all, which is what makes a Tab rescope free.
+  it("serves a repeat read from cache without running gh again", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh([LIST_ROW]);
+    try {
+      await listPRs(internals, `repo=${encodeURIComponent(repo)}`);
+      // gh is gone now; a cache miss would surface as an error row.
+      rmSync(join(root, "bin", "gh"));
+      const res = await listPRs(internals, `repo=${encodeURIComponent(repo)}`);
+      const body = (await res.json()) as PRListResponse;
+
+      expect(body.errors).toEqual([]);
+      expect(body.repos[0]?.prs[0]?.number).toBe(151);
+    } finally {
+      restore();
+    }
+  });
+});
+
+/**
+ * The open-PR cache is a LOCK as well as a cache.
+ *
+ * A result-only cache is written on completion, so it can only deduplicate
+ * calls that start after one finishes: a picker and a sidebar with the panel
+ * open at once, a Tab rescope, a close and reopen on a cold or expired entry,
+ * the panel's `r`, and any direct caller of the endpoint each spawned their
+ * own `gh pr list`.
+ *
+ * `r` is here for completeness, not as the original motivation: it did not
+ * exist when this was written, and now that it does it JOINS a live call like
+ * any other caller. What it can still do is drive the RATE, which is why the
+ * refresh bypass is gated on a fresh SUCCESS rather than on any fresh entry.
+ */
+describe("GET /prs caching", () => {
+  let root: string;
+
+  const ROW = {
+    number: 151,
+    title: "Worktrees panel: open-PR list",
+    url: "https://github.com/o/r/pull/151",
+    author: { login: "epilande" },
+    isDraft: false,
+    reviewDecision: null,
+    statusCheckRollup: [],
+    headRefName: "feat/pr-list-panel",
+    headRefOid: "sha-151",
+  };
+
+  function makeRepo(): string {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-prs-cache-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    return repo;
+  }
+
+  /**
+   * A `gh` that COUNTS its invocations in a file and can be made slow, so a
+   * concurrent miss has a window to arrive in.
+   */
+  function withCountingGh(sleepSeconds = 0, exitCode = 0) {
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "prs.json"), JSON.stringify([ROW]));
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/bin/sh\necho x >> '${join(bin, "calls")}'\nsleep ${sleepSeconds}\ncat '${join(bin, "prs.json")}'\nexit ${exitCode}\n`,
+      { mode: 0o755 },
+    );
+    writeFileSync(join(bin, "calls"), "");
+    const previous = process.env.PATH;
+    process.env.PATH = `${bin}:${previous ?? ""}`;
+    return {
+      calls: () =>
+        readFileSync(join(bin, "calls"), "utf8").split("\n").filter(Boolean)
+          .length,
+      restore: () => {
+        if (previous === undefined) delete process.env.PATH;
+        else process.env.PATH = previous;
+      },
+    };
+  }
+
+  async function listPRs(
+    internals: ServerInternals,
+    repo: string,
+  ): Promise<PRListResponse> {
+    const res = await internals.handleRequest(
+      new Request(
+        `http://127.0.0.1:2269/prs?repo=${encodeURIComponent(repo)}`,
+      ),
+    );
+    return (await res.json()) as PRListResponse;
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("shares one gh invocation across concurrent misses for a repo", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh(1);
+    try {
+      // Four requests in flight at once, all missing. Without the in-flight
+      // entry each starts its own `gh pr list`.
+      const answers = await Promise.all(
+        [0, 1, 2, 3].map(() => listPRs(internals, repo)),
+      );
+
+      expect(gh.calls()).toBe(1);
+      for (const body of answers) {
+        expect(body.errors).toEqual([]);
+        expect(body.repos[0]?.prs[0]?.number).toBe(151);
+      }
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
+
+  // The write-ordering hazard is removed rather than guarded: two calls for
+  // one repo can no longer overlap, so a slow one cannot land after a fast
+  // one and stamp its stale answer fresh.
+  it("never has two calls in flight for the same repo", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh(1);
+    try {
+      const first = listPRs(internals, repo);
+      // POLLED, not slept on. The entry appears after the handler's own
+      // awaits (session enrichment, repo resolution), and a fixed delay tuned
+      // to that is a flake waiting for a loaded machine. `gh` sleeps a second,
+      // so there is a wide window to catch the entry unsettled in.
+      let inFlight: { done: unknown }[] = [];
+      for (let i = 0; i < 100 && inFlight.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        // Read by iteration, not by key: the cache is keyed on the root git
+        // resolves, which need not be the spelling this test passed in.
+        inFlight = [...internals.prListCache.entries.values()];
+      }
+      expect(inFlight).toHaveLength(1);
+      expect(inFlight[0]?.done).toBeNull();
+
+      // Arriving mid-flight, it must join rather than start a second `gh`.
+      const second = listPRs(internals, repo);
+      await Promise.all([first, second]);
+      expect(gh.calls()).toBe(1);
+      expect([...internals.prListCache.entries.values()][0]?.done).not.toBeNull();
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
+
+  // A failure is held for a SHORT window, deliberately inverted from
+  // `pr-resolver`'s backoff: the reader is looking at the error and fixing
+  // it, and their next open of the panel is the retry.
+  it("holds a failure for less time than a success", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh(0, 1);
+    try {
+      expect((await listPRs(internals, repo)).errors).toHaveLength(1);
+      expect(gh.calls()).toBe(1);
+
+      // Inside the failure TTL: served from cache, no second `gh`.
+      await listPRs(internals, repo);
+      expect(gh.calls()).toBe(1);
+
+      // Rewound past the FAILURE ttl but well inside the SUCCESS one. A
+      // cache that used one TTL for both would still be serving this.
+      const entry = internals.prListCache.entries.get(repo);
+      expect(entry?.done).not.toBeNull();
+      entry!.done!.at = Date.now() - 30_000;
+      await listPRs(internals, repo);
+      expect(gh.calls()).toBe(2);
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
+
+  // An explicit user refresh must actually refresh: the whole reason the
+  // panel has a refresh key is that a PR merges on GitHub with nothing local
+  // to show for it, and a 60s cache would make the key a lie.
+  it("skips a fresh cache entry for an explicit refresh", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh();
+    try {
+      await listPRs(internals, repo);
+      expect(gh.calls()).toBe(1);
+
+      // Inside the TTL: an ordinary read is still served from cache.
+      await listPRs(internals, repo);
+      expect(gh.calls()).toBe(1);
+
+      const res = await internals.handleRequest(
+        new Request(
+          `http://127.0.0.1:2269/prs?repo=${encodeURIComponent(repo)}&refresh=1`,
+        ),
+      );
+      expect(res.status).toBe(200);
+      expect(gh.calls()).toBe(2);
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
+
+  // The bypass is for a SUCCESS going stale on its own. A failure has no such
+  // argument, and the backoff exists so a rapid reopen does not re-spawn a
+  // doomed `gh` — which key-repeat on `r` would otherwise do, once per press.
+  it("does not let a refresh defeat the failure backoff", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh(0, 1);
+    try {
+      expect((await listPRs(internals, repo)).errors).toHaveLength(1);
+      expect(gh.calls()).toBe(1);
+
+      for (let i = 0; i < 4; i++) {
+        const res = await internals.handleRequest(
+          new Request(
+            `http://127.0.0.1:2269/prs?repo=${encodeURIComponent(repo)}&refresh=1`,
+          ),
+        );
+        expect(res.status).toBe(200);
+      }
+      // Still one: the backoff holds against every one of them.
+      expect(gh.calls()).toBe(1);
+
+      // And it is a BACKOFF, not a lockout: past the failure TTL a refresh
+      // retries like any other read.
+      const entry = [...internals.prListCache.entries.values()][0];
+      entry!.done!.at = Date.now() - 30_000;
+      await listPRs(internals, repo);
+      expect(gh.calls()).toBe(2);
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
+
+  // The lock is a property of the entry, not of the TTL, so a refresh cannot
+  // be used to start a second `gh` alongside a live one.
+  it("still joins a live call rather than racing it", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh(1);
+    try {
+      const first = listPRs(internals, repo);
+      let inFlight: { done: unknown }[] = [];
+      for (let i = 0; i < 100 && inFlight.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight = [...internals.prListCache.entries.values()];
+      }
+      expect(inFlight[0]?.done).toBeNull();
+
+      const refreshed = internals.handleRequest(
+        new Request(
+          `http://127.0.0.1:2269/prs?repo=${encodeURIComponent(repo)}&refresh=1`,
+        ),
+      );
+      await Promise.all([first, refreshed]);
+      expect(gh.calls()).toBe(1);
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
+
+  it("holds a success across the window a failure would have expired in", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withCountingGh();
+    try {
+      await listPRs(internals, repo);
+      expect(gh.calls()).toBe(1);
+
+      const entry = internals.prListCache.entries.get(repo);
+      entry!.done!.at = Date.now() - 30_000;
+      await listPRs(internals, repo);
+      // Still one: 30s is past the 15s failure TTL and inside the 60s
+      // success one.
+      expect(gh.calls()).toBe(1);
+    } finally {
+      gh.restore();
+    }
+  }, 20_000);
+});
+
+/**
+ * `GET /issues`, the sibling of `GET /prs`, tested for what is genuinely its
+ * own rather than for what it inherits.
+ *
+ * The cache DISCIPLINE (join an in-flight call, the refresh bypass, the two
+ * TTLs, the drop on an unforeseen throw) is unit-tested once on
+ * `RepoAnswerCache` and is not re-tested per endpoint. What is tested here is
+ * everything that could still be wired up wrongly: the scoping, the per-repo
+ * failure, and the fact that the two lists hold SEPARATE caches, which is the
+ * one claim no unit test on a single cache instance can make.
+ */
+describe("GET /issues", () => {
+  let root: string;
+
+  const ISSUE_ROW = {
+    number: 151,
+    title: "Open-PR list in the Worktrees panel",
+    url: "https://github.com/o/r/issues/151",
+    author: { login: "epilande" },
+    labels: [{ name: "enhancement" }],
+  };
+
+  function makeRepo(): string {
+    root = mkdtempSync(join(realpathSync(tmpdir()), "ccmux-issues-"));
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    runFixtureGit(root, "init", "--initial-branch=main", repo);
+    writeFileSync(join(repo, "README.md"), "hi\n");
+    runFixtureGit(repo, "add", "README.md");
+    runFixtureGit(repo, "commit", "-m", "init");
+    return repo;
+  }
+
+  /** A `gh` on PATH that answers `issue list` from `body`. */
+  function withStubbedGh(body: unknown, exitCode = 0) {
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "issues.json"), JSON.stringify(body));
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/bin/sh\ncat '${join(bin, "issues.json")}'\nexit ${exitCode}\n`,
+      { mode: 0o755 },
+    );
+    const previous = process.env.PATH;
+    process.env.PATH = `${bin}:${previous ?? ""}`;
+    return () => {
+      if (previous === undefined) delete process.env.PATH;
+      else process.env.PATH = previous;
+    };
+  }
+
+  /**
+   * A `gh` that tells `pr list` from `issue list` and COUNTS each separately,
+   * so the two caches can be shown not to be one.
+   */
+  function withSplitGh() {
+    const bin = join(root, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gh"), [
+      "#!/bin/sh",
+      `echo "$1" >> '${join(bin, "calls")}'`,
+      'if [ "$1" = "issue" ]; then',
+      `  cat '${join(bin, "issues.json")}'`,
+      "else",
+      `  cat '${join(bin, "prs.json")}'`,
+      "fi",
+    ].join("\n") + "\n", { mode: 0o755 });
+    writeFileSync(join(bin, "issues.json"), JSON.stringify([ISSUE_ROW]));
+    writeFileSync(join(bin, "prs.json"), JSON.stringify([]));
+    writeFileSync(join(bin, "calls"), "");
+    const previous = process.env.PATH;
+    process.env.PATH = `${bin}:${previous ?? ""}`;
+    return {
+      calls: (kind: string) =>
+        readFileSync(join(bin, "calls"), "utf8")
+          .split("\n")
+          .filter((line) => line === kind).length,
+      restore: () => {
+        if (previous === undefined) delete process.env.PATH;
+        else process.env.PATH = previous;
+      },
+    };
+  }
+
+  async function listIssues(
+    internals: ServerInternals,
+    query: string,
+  ): Promise<Response> {
+    return internals.handleRequest(
+      new Request(`http://127.0.0.1:2269/issues?${query}`),
+    );
+  }
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("answers with the repo's open issues, flattened", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh([ISSUE_ROW]);
+    try {
+      const res = await listIssues(
+        internals,
+        `repo=${encodeURIComponent(repo)}`,
+      );
+      const body = (await res.json()) as IssueListResponse;
+
+      expect(res.status).toBe(200);
+      expect(body.errors).toEqual([]);
+      expect(body.repos).toHaveLength(1);
+      expect(body.repos[0]?.repoName).toBe("repo");
+      expect(body.repos[0]?.issues[0]).toMatchObject({
+        number: 151,
+        author: "epilande",
+        labels: ["enhancement"],
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  // The same resolver `GET /prs`, `GET /worktrees` and the prune scan take:
+  // the picker draws PRs and issues as one surface, so a repo one endpoint
+  // can see and the other cannot is a section attached to nothing.
+  it("takes `repo` as a resolved filter and `cwd` as additive", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh([ISSUE_ROW]);
+    try {
+      const byCwd = await listIssues(
+        internals,
+        `cwd=${encodeURIComponent(repo)}`,
+      );
+      expect(
+        ((await byCwd.json()) as IssueListResponse).repos[0]?.repoRoot,
+      ).toContain("repo");
+
+      const nowhere = await listIssues(
+        internals,
+        `repo=${encodeURIComponent(root)}`,
+      );
+      expect(((await nowhere.json()) as IssueListResponse).repos).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  // A repo with issues DISABLED fails this call while its PRs still answer.
+  // Drawing that as an empty list would be a lie about the repo.
+  it("reports a repo's failure per repo, with a 200", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh({ message: "not authenticated" }, 1);
+    try {
+      const res = await listIssues(
+        internals,
+        `repo=${encodeURIComponent(repo)}`,
+      );
+      const body = (await res.json()) as IssueListResponse;
+
+      expect(res.status).toBe(200);
+      expect(body.repos).toEqual([]);
+      expect(body.errors[0]?.repoName).toBe("repo");
+      expect(body.errors[0]?.error).toContain("gh issue list exited 1");
+    } finally {
+      restore();
+    }
+  });
+
+  it("serves a repeat read from cache without running gh again", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const restore = withStubbedGh([ISSUE_ROW]);
+    try {
+      await listIssues(internals, `repo=${encodeURIComponent(repo)}`);
+      // gh is gone now; a cache miss would surface as an error row.
+      rmSync(join(root, "bin", "gh"));
+      const res = await listIssues(
+        internals,
+        `repo=${encodeURIComponent(repo)}`,
+      );
+      const body = (await res.json()) as IssueListResponse;
+
+      expect(body.errors).toEqual([]);
+      expect(body.repos[0]?.issues[0]?.number).toBe(151);
+    } finally {
+      restore();
+    }
+  });
+
+  /**
+   * The two lists hold separate caches, and that is why they are separate
+   * endpoints: a refresh of one must not evict or re-spawn the other. A
+   * shared cache keyed only by repo root would make either of these
+   * assertions fail — one list would serve the other's answer, or one
+   * refresh would cost two `gh` calls.
+   */
+  it("caches issues independently of PRs", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const gh = withSplitGh();
+    const query = `repo=${encodeURIComponent(repo)}`;
+    try {
+      await listIssues(internals, query);
+      await internals.handleRequest(
+        new Request(`http://127.0.0.1:2269/prs?${query}`),
+      );
+      expect(gh.calls("issue")).toBe(1);
+      expect(gh.calls("pr")).toBe(1);
+
+      // Refreshing PRs bypasses the PR cache and leaves the issue cache alone.
+      await internals.handleRequest(
+        new Request(`http://127.0.0.1:2269/prs?${query}&refresh=1`),
+      );
+      expect(gh.calls("pr")).toBe(2);
+      expect(gh.calls("issue")).toBe(1);
+
+      // And the reverse.
+      await listIssues(internals, `${query}&refresh=1`);
+      expect(gh.calls("issue")).toBe(2);
+      expect(gh.calls("pr")).toBe(2);
+
+      // The answers did not cross wires either.
+      const issues = (await (
+        await listIssues(internals, query)
+      ).json()) as IssueListResponse;
+      expect(issues.repos[0]?.issues[0]?.number).toBe(151);
+    } finally {
+      gh.restore();
     }
   });
 });

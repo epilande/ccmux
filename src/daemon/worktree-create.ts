@@ -54,8 +54,9 @@ import {
   symlinkSync,
 } from "node:fs";
 import { cp, rmdir } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
+  listWorktrees,
   normalizePath,
   readSymlinkDirectories,
   runGit,
@@ -191,6 +192,38 @@ export function slugForIssue(number: number, title: string): string {
     .slice(0, SLUG_MAX_CHARS - prefix.length - 1)
     .replace(/-+$/g, "");
   return slug ? `${prefix}-${slug}` : prefix;
+}
+
+/**
+ * Whether `name` is a worktree this tool cut for issue `number`.
+ *
+ * Family-exact, never a bare `startsWith`: `issue-14` must not claim
+ * `issue-144-foo`. The separator is part of the prefix. Same rule the
+ * source picker uses to mark a row as already checked out.
+ */
+export function isIssueWorktreeName(name: string, number: number): boolean {
+  const exact = `issue-${number}`;
+  return name === exact || name.startsWith(`${exact}-`);
+}
+
+/**
+ * The worktree a previous `--issue <n>` spawn cut, if any.
+ *
+ * The SHORTEST name wins — that is the first spawn — matching
+ * `worktreeForIssue` in the source picker so Enter and `POST /spawn` agree.
+ */
+export function pickIssueWorktree<T extends { name: string }>(
+  number: number,
+  worktrees: T[],
+): T | null {
+  const matches = worktrees.filter((row) =>
+    isIssueWorktreeName(row.name, number),
+  );
+  if (matches.length === 0) return null;
+  const [first] = [...matches].sort(
+    (a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name),
+  );
+  return first ?? null;
 }
 
 /**
@@ -728,9 +761,9 @@ async function recordBranchBase(
  * `git push` works out of the box, while its directory is named after the PR
  * number. Overriding here rather than duplicating the creation logic is what
  * keeps the lock, the numbering, the occupied-path refusals and the file
- * setup shared. With an override the branch is reused whenever it exists,
- * derived name or not: the caller has already decided which branch it means,
- * and the checks that make that safe are its own (see `gh-spawn-source.ts`).
+ * setup shared. The checks that make reuse safe are the caller's own (see
+ * `gh-spawn-source.ts`), which is why it also settles whether the branch
+ * exists; see `branchExists`.
  */
 export async function createWorktree(
   mainRepoRoot: string,
@@ -742,6 +775,26 @@ export async function createWorktree(
     derivedName?: string;
     /** The branch to check out, when it must differ from the name. */
     branch?: string;
+    /**
+     * Whether `branch` already exists, as the CALLER settled it. Only read
+     * alongside `branch`; omitted, the answer is derived here.
+     *
+     * The point is that it is a DECISION carried forward, not a fact
+     * re-measured. `preparePRBranch` validates the branch and releases the
+     * repo lock before this function takes it (`withRepoLock` is not
+     * reentrant), so a branch created inside that window would otherwise be
+     * checked out unconditionally and then reconfigured to track the PR —
+     * without ever passing the upstream checks that exist to prove it IS the
+     * PR (issue #157). Carrying the decision makes either race direction a
+     * refusal instead. `-b` refuses a branch that appeared, but git alone
+     * does NOT cover the other direction: `git worktree add <path> <branch>`
+     * with the local branch gone DWIMs it back into existence from
+     * `<remote>/<branch>` (git-worktree(1), default behaviour), silently
+     * checking out history that never passed those checks. So the create
+     * re-measures under its own lock, only ever to refuse on disagreement,
+     * never to reuse the newer answer.
+     */
+    branchExists?: boolean;
     /**
      * Whether to write `branch.<branch>.ccmux-base` for a branch this cut.
      * Defaults to true; only a caller whose base is NOT a review base opts
@@ -760,6 +813,18 @@ export async function createWorktree(
      * writer wants the record, and inference would silently deny it.
      */
     recordBase?: boolean;
+    /**
+     * Open a registered worktree this pick returns, instead of numbering a
+     * sibling of the derived name.
+     *
+     * `--issue` is the caller: a second spawn of the same issue must land
+     * in the first checkout, not `issue-<n>-<slug>-2`. Runs under the repo
+     * lock, so a checkout that appeared since the picker was opened is
+     * still found.
+     */
+    reuseExisting?: (
+      worktrees: { name: string; path: string }[],
+    ) => { name: string; path: string } | null;
   },
   options: CreateWorktreeOptions = {},
 ): Promise<
@@ -781,6 +846,49 @@ export async function createWorktree(
     // running it on the open path too costs one `check-ignore` and heals a
     // repo whose worktrees predate this.
     await ensureWorktreesExcluded(mainRepoRoot, git);
+
+    const openIfPresent = async (
+      path: string,
+      name: string,
+    ): Promise<{ ok: true; result: WorktreeCreation } | null> => {
+      if (!existsSync(path)) return null;
+      if (!(await isRegisteredWorktree(mainRepoRoot, path, git))) return null;
+      const branch = await currentBranch(path, git);
+      return {
+        ok: true as const,
+        result: {
+          path,
+          name,
+          branch: branch ?? name,
+          created: false,
+          branchCreated: false,
+          symlinked: [],
+          included: [],
+        },
+      };
+    };
+
+    // A `--pr` spawn names the branch itself. git will not check the same
+    // branch out in two worktrees, so if it is already here, OPEN that
+    // checkout rather than numbering a sibling that git would refuse.
+    if (request.branch !== undefined) {
+      for (const entry of await listWorktrees(mainRepoRoot, git)) {
+        if (entry.bare || entry.branch !== request.branch) continue;
+        const opened = await openIfPresent(entry.path, basename(entry.path));
+        if (opened) return opened;
+      }
+    }
+
+    if (request.reuseExisting) {
+      const listed = (await listWorktrees(mainRepoRoot, git))
+        .filter((entry) => !entry.bare)
+        .map((entry) => ({ name: basename(entry.path), path: entry.path }));
+      const hit = request.reuseExisting(listed);
+      if (hit) {
+        const opened = await openIfPresent(hit.path, hit.name);
+        if (opened) return opened;
+      }
+    }
 
     // Inside the lock, so two spawns of one prompt cannot both settle on the
     // same free number.
@@ -876,12 +984,24 @@ export async function createWorktree(
     // nobody chose. `-b` makes git refuse instead, which is a loud failure
     // the user can act on rather than a silent one they discover later.
     //
-    // An OVERRIDDEN branch reuses unconditionally, for the reason in this
-    // function's doc comment: the name it collides with is the caller's own
-    // choice rather than a slug that happened to match.
+    // An OVERRIDDEN branch takes the caller's own settled answer when it has
+    // one, and is measured again only to refuse on disagreement; see
+    // `branchExists` for why either direction of that race is a refusal.
+    if (request.branch !== undefined && request.branchExists !== undefined) {
+      const measured = await localBranchExists(mainRepoRoot, branchName, git);
+      if (measured !== request.branchExists) {
+        return {
+          ok: false as const,
+          error:
+            `Branch '${branchName}' ${measured ? "appeared" : "vanished"} while this ` +
+            `spawn was preparing it; nothing was checked out, try again`,
+        };
+      }
+    }
     const reusingBranch =
       request.branch !== undefined
-        ? await localBranchExists(mainRepoRoot, branchName, git)
+        ? (request.branchExists ??
+          (await localBranchExists(mainRepoRoot, branchName, git)))
         : named.derived
           ? false
           : await localBranchExists(mainRepoRoot, name, git);

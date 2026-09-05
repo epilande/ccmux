@@ -20,6 +20,7 @@ interface SpawnBody {
   cwd?: string;
   fork?: string;
   prompt?: string;
+  model?: string;
   split: unknown;
   target?: string;
   callerPane?: string;
@@ -456,6 +457,37 @@ describe("ccmux spawn --split parsing", () => {
     await expect(
       command.parseAsync(["node", "spawn", "--split", "codex"]),
     ).rejects.toThrow(/ccmux spawn codex --split/);
+  });
+});
+
+describe("ccmux spawn --model parsing", () => {
+  it("sends a valid model on the wire and refuses a flag-shaped one", async () => {
+    console.log = () => {};
+    const { bodies, restore } = withFetchCapture();
+    const restoreEnv = withEnv({
+      TMUX_PANE: undefined,
+      CCMUX_CALLER_PWD: "/caller/dir",
+    });
+    try {
+      await runSpawn(["--model", "opus"]);
+      await runSpawn(["codex", "--model", "openai/gpt-5"]);
+      expect(bodies[0]?.model).toBe("opus");
+      expect(bodies[1]?.model).toBe("openai/gpt-5");
+      expect(bodies.some((b) => "model" in b && b.model === undefined)).toBe(
+        false,
+      );
+    } finally {
+      restoreEnv();
+      restore();
+    }
+    // Rejected by the option parser, so it never reaches ensureDaemon.
+    const command = createSpawnCommand().exitOverride();
+    await expect(
+      command.parseAsync(["node", "spawn", "--model", "-x"]),
+    ).rejects.toThrow(/Expected a model name/);
+    await expect(
+      command.parseAsync(["node", "spawn", "--model", "a b"]),
+    ).rejects.toThrow(/Expected a model name/);
   });
 });
 

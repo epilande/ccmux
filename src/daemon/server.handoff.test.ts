@@ -854,6 +854,28 @@ describe("POST /handoff — queue on busy", () => {
     });
   });
 
+  it("a queued handoff shows up as busy on GET /server-info, and leaves once delivered", async () => {
+    const { manager, internals } = createServer();
+    pair(manager);
+    manager.updateSession("dst", { status: "working" });
+    const response = await post(internals, { from: "src", to: "dst" });
+    expect(response.status).toBe(200);
+
+    const read = async () => {
+      const res = await internals.handleRequest(
+        new Request("http://localhost/server-info"),
+      );
+      return ((await res.json()) as { busy: { handoffs: number } }).busy;
+    };
+    expect((await read()).handoffs).toBe(1);
+
+    // Delivered on the working -> idle transition, so the count drops.
+    manager.updateSession("dst", { status: "idle" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(internals.handoffQueue.size()).toBe(0);
+    expect((await read()).handoffs).toBe(0);
+  });
+
   it("queues the text already composed, turns and note included", async () => {
     const { manager, internals, sendPromptToPane } = createServer();
     manager.createSession(

@@ -16,4 +16,9 @@ jobs:
       - run: bun run typecheck
       - run: bun run check:unused
       - run: bun run build
+      # The completion suite drives the generated fish script through fish's
+      # own completion engine. Without fish on the runner those tests skip
+      # silently, which is how a bad line in that script shipped once: every
+      # other assertion about it is a substring match on the script text.
+      - run: sudo apt-get update && sudo apt-get install -y fish
       - run: bun test

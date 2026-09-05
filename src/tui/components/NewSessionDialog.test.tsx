@@ -40,11 +40,40 @@ const draft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft => ({
   worktreeName: null,
   fork: null,
   existingWorktree: null,
+  pr: null,
+  issue: null,
+  returnToSources: null,
   returnToWorktrees: null,
   field: "agent",
   dropdown: null,
   ...overrides,
 });
+
+/** A draft as the Worktrees panel's Enter on a PR row opens it. */
+const prDraft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft =>
+  draft({
+    destination: "worktree",
+    pr: {
+      number: 151,
+      title: "Worktrees panel: open-PR list",
+      repoRoot: "/repo",
+    },
+    ...overrides,
+  });
+
+/** A draft as the source picker's Enter on an issue row opens it. */
+const issueDraft = (
+  overrides: Partial<NewSessionDraft> = {},
+): NewSessionDraft =>
+  draft({
+    destination: "worktree",
+    issue: {
+      number: 144,
+      title: "Notifications are swallowed inside nested tmux",
+      repoRoot: "/repo",
+    },
+    ...overrides,
+  });
 
 /** A draft as the row menu's "Move changes" opens it. */
 const moveDraft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft =>
@@ -178,6 +207,8 @@ describe("planDialogRows", () => {
     fork: false,
     namesAWorktree: true,
     existingWorktree: false,
+    pr: false,
+    issue: false,
     agentRows: 1,
   };
 
@@ -256,6 +287,8 @@ describe("planDialogRows", () => {
       fork: false,
       namesAWorktree: false,
       existingWorktree: false,
+      pr: false,
+      issue: false,
       agentRows: 1,
     };
     expect(newSessionFloorRows(plain)).toBe(7);
@@ -278,6 +311,8 @@ describe("planDialogRows", () => {
       fork: true,
       namesAWorktree: true,
       existingWorktree: false,
+      pr: false,
+      issue: false,
       agentRows: 3,
     };
 
@@ -325,6 +360,8 @@ describe("planDialogRows", () => {
         moveChanges: false,
         namesAWorktree: true,
         existingWorktree: false,
+        pr: false,
+        issue: false,
       };
       expect(newSessionFloorRows({ ...shape, fork: true })).toBe(6);
       expect(newSessionFloorRows({ ...shape, fork: false })).toBe(8);
@@ -358,6 +395,8 @@ describe("planDialogRows", () => {
       fork: false,
       namesAWorktree: false,
       existingWorktree: true,
+      pr: false,
+      issue: false,
       agentRows: 1,
     };
 
@@ -384,7 +423,13 @@ describe("planDialogRows", () => {
       // the same agent, placement and prompt. A floor that still counted it
       // would report a row this mode does not need, and one SHORT of what is
       // drawn lands a row on its neighbour instead of clipping.
-      const shape = { moveChanges: false, fork: false, namesAWorktree: false };
+      const shape = {
+        moveChanges: false,
+        fork: false,
+        namesAWorktree: false,
+        pr: false,
+        issue: false,
+      };
       expect(newSessionFloorRows({ ...shape, existingWorktree: true })).toBe(6);
       expect(newSessionFloorRows({ ...shape, existingWorktree: false })).toBe(
         7,
@@ -403,6 +448,164 @@ describe("planDialogRows", () => {
         agentRows: 1,
       });
       expect(planDialogRows(existing, 5).tooShort).toBe(true);
+    });
+  });
+
+  /**
+   * PR mode's budget (issue #151). `DialogModeShape` is a HAND-MAINTAINED
+   * mirror of `NewSessionShape`, so a new MODE compiles fine while being
+   * invisible to the row budget — and an unbudgeted row does not clip, it
+   * lands on its neighbour and walks the bottom border off screen. These
+   * per-shape tests are the only thing that catches it.
+   */
+  describe("in PR mode", () => {
+    const fromPR = {
+      moveChanges: false,
+      fork: false,
+      namesAWorktree: false,
+      existingWorktree: false,
+      pr: true,
+      issue: false,
+      agentRows: 1,
+    };
+
+    it("spends its rows on three fields and a PR note", () => {
+      expect(planDialogRows(fromPR, 40)).toEqual({
+        tooShort: false,
+        // Border and title (3), the spacer, the directory, the PR note, the
+        // button row with its two blanks, one row each for Agent, Placement
+        // and Prompt, and the three blanks airing that four-block stack.
+        // Exactly existing-worktree mode's shape: both drop the Where row,
+        // and neither names a worktree.
+        height: 15,
+        showTitleSpacer: true,
+        showFieldSpacers: true,
+        showButtons: true,
+        showDirectory: true,
+        // Which PR, which nothing else on the dialog says.
+        showModeNote: true,
+        agentRows: 1,
+      });
+    });
+
+    it("drops the Where and Name rows from its floor", () => {
+      const shape = { moveChanges: false, fork: false, existingWorktree: false };
+      // Agent, Placement, Prompt, and the border plus title.
+      expect(
+        newSessionFloorRows({
+          ...shape,
+          pr: true,
+          issue: false,
+          namesAWorktree: false,
+        }),
+      ).toBe(6);
+      // The same spawn without a PR keeps Where, and a worktree destination
+      // adds Name on top of it.
+      expect(
+        newSessionFloorRows({
+          ...shape,
+          pr: false,
+          issue: false,
+          namesAWorktree: false,
+        }),
+      ).toBe(7);
+      expect(
+        newSessionFloorRows({
+          ...shape,
+          pr: false,
+          issue: false,
+          namesAWorktree: true,
+        }),
+      ).toBe(8);
+    });
+
+    it("gives up everything optional at its floor and still fits", () => {
+      expect(planDialogRows(fromPR, 6)).toEqual({
+        tooShort: false,
+        height: 6,
+        showTitleSpacer: false,
+        showFieldSpacers: false,
+        showButtons: false,
+        showDirectory: false,
+        showModeNote: false,
+        agentRows: 1,
+      });
+      expect(planDialogRows(fromPR, 5).tooShort).toBe(true);
+    });
+  });
+
+  /**
+   * Issue mode's budget (issue #151). Identical to PR mode's by construction
+   * — both drop the Where and Name rows and keep a note — which is exactly
+   * why it is asserted separately: `DialogModeShape` is a HAND-MAINTAINED
+   * mirror of `NewSessionShape`, so a mode that forgot to zero a row would
+   * compile and then draw that row over its neighbour.
+   */
+  describe("in issue mode", () => {
+    const fromIssue = {
+      moveChanges: false,
+      fork: false,
+      namesAWorktree: false,
+      existingWorktree: false,
+      pr: false,
+      issue: true,
+      agentRows: 1,
+    };
+
+    it("spends its rows on three fields and an issue note", () => {
+      expect(planDialogRows(fromIssue, 40)).toEqual({
+        tooShort: false,
+        // Border and title (3), the spacer, the directory, the issue note,
+        // the button row with its two blanks, one row each for Agent,
+        // Placement and Prompt, and the three blanks airing that stack.
+        height: 15,
+        showTitleSpacer: true,
+        showFieldSpacers: true,
+        showButtons: true,
+        showDirectory: true,
+        // Which issue, which nothing else on the dialog says.
+        showModeNote: true,
+        agentRows: 1,
+      });
+    });
+
+    it("drops the Where and Name rows from its floor", () => {
+      const shape = {
+        moveChanges: false,
+        fork: false,
+        existingWorktree: false,
+        pr: false,
+      };
+      // Agent, Placement, Prompt, and the border plus title.
+      expect(
+        newSessionFloorRows({
+          ...shape,
+          issue: true,
+          namesAWorktree: false,
+        }),
+      ).toBe(6);
+      // The same spawn without an issue keeps Where.
+      expect(
+        newSessionFloorRows({
+          ...shape,
+          issue: false,
+          namesAWorktree: false,
+        }),
+      ).toBe(7);
+    });
+
+    it("gives up everything optional at its floor and still fits", () => {
+      expect(planDialogRows(fromIssue, 6)).toEqual({
+        tooShort: false,
+        height: 6,
+        showTitleSpacer: false,
+        showFieldSpacers: false,
+        showButtons: false,
+        showDirectory: false,
+        showModeNote: false,
+        agentRows: 1,
+      });
+      expect(planDialogRows(fromIssue, 5).tooShort).toBe(true);
     });
   });
 });
@@ -533,6 +736,28 @@ describe("NewSessionDialog", () => {
     const frame = await renderDialog({ width: 60 });
     expect(frame).toMatch(/Window\s+▾/);
     expect(frame).not.toContain("New window");
+  });
+
+  it("scrolls a long prompt inside its control instead of widening it", async () => {
+    // Same defect the handoff dialog's Note field had: the input measures
+    // itself from its text, and with Yoga's default `flexShrink` of 0 a long
+    // value pushed the control (and its wrapper) through the right border.
+    const prompt =
+      "a very long prompt that keeps going well past the width of the dialog box";
+    const frame = await renderDialog({
+      draft: draft({ prompt, field: "prompt" }),
+      width: 60,
+    });
+    const lines = frame.split("\n");
+    const promptLine = lines.find((line) => line.includes("Prompt"));
+    const titleLine = lines.find((line) => line.includes("New session"));
+    expect(promptLine).toBeDefined();
+    expect(titleLine).toBeDefined();
+    const rightEdge = titleLine!.lastIndexOf("│");
+    expect(promptLine![rightEdge]).toBe("│");
+    expect(promptLine!.trimEnd().length).toBe(titleLine!.trimEnd().length);
+    expect(promptLine).toContain("dialog box");
+    expect(promptLine).not.toContain("a very long");
   });
 
   it("keeps the placements distinguishable at the real sidebar rail", async () => {
@@ -1582,6 +1807,8 @@ describe("NewSessionDialog fork mode", () => {
         namesAWorktree: true,
         fork: true,
         existingWorktree: false,
+        pr: false,
+        issue: false,
       }),
     ).toBe(6);
 
@@ -1608,6 +1835,8 @@ describe("NewSessionDialog fork mode", () => {
         namesAWorktree: false,
         fork: true,
         existingWorktree: false,
+        pr: false,
+        issue: false,
       }),
     ).toBe(5);
 
@@ -1726,5 +1955,156 @@ describe("NewSessionDialog existing worktree mode", () => {
     expectFrameIntegrity(frame);
     expect(frame).not.toContain("Needs");
     expect(frame).toContain("Prompt");
+  });
+});
+
+describe("NewSessionDialog in PR mode", () => {
+  it("names the PR and drops every row about the worktree", async () => {
+    const frame = await renderDialog({
+      draft: prDraft(),
+      agents: [agent("claude")],
+    });
+
+    expect(frame).toContain("New session on PR");
+    expect(frame).toContain("#151 Worktrees panel: open-PR list");
+    // Kept: a prompt is legal here and is appended under the daemon's own
+    // PR header by `seedPrompt`.
+    expect(frame).toContain("Agent");
+    expect(frame).toContain("Placement");
+    expect(frame).toContain("Prompt");
+    // Gone: the daemon derives the name and the base from the PR, and
+    // `POST /spawn` refuses a request that names either alongside `pr`.
+    expect(frame).not.toContain("Where");
+    expect(frame).not.toContain("Name");
+  });
+
+  /**
+   * The mode note and the Directory row are indented one column further than
+   * a field row, so fitting them to the field width overflows by one. OpenTUI
+   * WRAPS rather than clipping, and a wrapped line inside a `height={1}` box
+   * disappears along with its ellipsis: at width 46 this rendered
+   * `#151 Worktrees panel:` with nothing to say the title was cut, on the one
+   * row that identifies which PR is about to be checked out.
+   *
+   * Pre-existing (the fork Source note and Directory truncate identically),
+   * but the PR note is the first whose text is long and arbitrary.
+   */
+  it("keeps the ellipsis on a PR note too long for the row", async () => {
+    const frame = await renderDialog({
+      draft: prDraft(),
+      agents: [agent("claude")],
+      width: 46,
+    });
+
+    const note = frame
+      .split("\n")
+      .find((line) => line.includes("#151"));
+    expect(note).toBeDefined();
+    // Cut, and SAYING it was cut.
+    expect(note).toContain("…");
+    expect(note).not.toContain("open-PR list");
+  });
+
+  // The fifth derived row, missed when the other four were fixed. The LOCKED
+  // Where row renders with the derived indent too, and at these widths it cut
+  // `Worktree` to `Worktre` with no ellipsis.
+  it("keeps the ellipsis on the locked Where row at narrow widths", async () => {
+    for (const width of [24, 26, 28]) {
+      const frame = await renderDialog({
+        draft: moveDraft(),
+        agents: [agent("claude")],
+        width,
+      });
+      const row = frame
+        .split("\n")
+        .find((line) => line.includes("Where"));
+      expect(row, `no Where row at width ${width}`).toBeDefined();
+      // Either it fits whole, or it SAYS it was cut. Never a bare stub, which
+      // is what fitting it to the field width produced (`Worktre`).
+      expect(
+        row!.includes("Worktree") || row!.includes("…"),
+        `width ${width}: ${row}`,
+      ).toBe(true);
+    }
+  });
+
+  // The same row at a width that fits says the whole thing, so the fit above
+  // is not just a narrower cap applied unconditionally.
+  it("says the whole title when it fits", async () => {
+    const frame = await renderDialog({
+      draft: prDraft(),
+      agents: [agent("claude")],
+      width: 70,
+    });
+    expect(frame).toContain("#151 Worktrees panel: open-PR list");
+  });
+});
+
+describe("NewSessionDialog in issue mode", () => {
+  it("names the issue and drops every row about the worktree", async () => {
+    const frame = await renderDialog({
+      draft: issueDraft(),
+      agents: [agent("claude")],
+    });
+
+    expect(frame).toContain("New session on issue");
+    expect(frame).toContain("#144 Notifications are swallowed");
+    // Kept: a prompt is legal here and is appended under the daemon's own
+    // issue header by `seedPrompt`.
+    expect(frame).toContain("Agent");
+    expect(frame).toContain("Placement");
+    expect(frame).toContain("Prompt");
+    // Gone: the daemon derives the name with `slugForIssue`, and
+    // `POST /spawn` refuses `issue` alongside `worktree.name`.
+    expect(frame).not.toContain("Where");
+    expect(frame).not.toContain("Name");
+  });
+
+  // Same one-column overflow the PR note has: these rows are indented one
+  // further than a field row, and OpenTUI wraps rather than clipping, so a
+  // row fitted to the field width vanishes instead of ellipsing.
+  it("keeps the ellipsis on an issue note too long for the row", async () => {
+    const frame = await renderDialog({
+      draft: issueDraft(),
+      agents: [agent("claude")],
+      width: 46,
+    });
+
+    const note = frame.split("\n").find((line) => line.includes("#144"));
+    expect(note).toBeDefined();
+    expect(note).toContain("…");
+    expect(note).not.toContain("nested tmux");
+  });
+
+  it("labels the note as an issue rather than a PR", async () => {
+    const frame = await renderDialog({
+      draft: issueDraft(),
+      agents: [agent("claude")],
+    });
+
+    const note = frame.split("\n").find((line) => line.includes("#144"));
+    // The two modes look alike on every other row, so the label is the only
+    // thing on screen that says which kind of thing is about to be started.
+    expect(note).toContain("Issue");
+    expect(note).not.toContain("PR");
+  });
+
+  // A PR and an issue cannot both be set by any caller, but the draft type
+  // permits it, and the rows they hide are the same rows. Pinning the
+  // precedence keeps a future third source from silently reordering it.
+  it("prefers the PR when a draft somehow carries both", async () => {
+    const frame = await renderDialog({
+      draft: issueDraft({
+        pr: {
+          number: 151,
+          title: "Worktrees panel: open-PR list",
+          repoRoot: "/repo",
+        },
+      }),
+      agents: [agent("claude")],
+    });
+
+    expect(frame).toContain("New session on PR");
+    expect(frame).not.toContain("New session on issue");
   });
 });

@@ -77,6 +77,16 @@ export interface DialogModeShape {
    *  and so drops the destination row along with the name and untracked
    *  rows that the other two modes hide on their own terms. */
   existingWorktree: boolean;
+  /** Cutting a worktree from a pull request's head (issue #151). It CREATES
+   *  one, unlike the mode above, and still drops the destination and name
+   *  rows: the daemon derives both from the PR, and `POST /spawn` refuses a
+   *  request that names either alongside `pr`. */
+  pr: boolean;
+  /** Cutting a worktree for an ISSUE (issue #151). Same rows gone as the mode
+   *  above and for the same reason, but a different source: there is no head
+   *  to check out, so the worktree comes off the repo's default branch and
+   *  the issue survives as the derived name and the seeded prompt. */
+  issue: boolean;
 }
 
 /** What a draft needs from the row budget, without any of the width-dependent
@@ -111,7 +121,8 @@ function floorFieldRows(shape: DialogModeShape): FieldRows {
     // A locked one-row restatement where the destination is fixed (a move, a
     // fork), the choice otherwise — and nothing at all where the session is
     // going into a checkout that already exists, which is neither.
-    destination: shape.existingWorktree ? 0 : 1,
+    destination:
+      shape.existingWorktree || shape.pr || shape.issue ? 0 : 1,
     worktreeName: shape.namesAWorktree ? 1 : 0,
     untracked: shape.moveChanges ? 1 : 0,
   };
@@ -201,7 +212,12 @@ export function planDialogRows(
     showFieldSpacers: true,
     showButtons: true,
     showDirectory: true,
-    showModeNote: shape.moveChanges || shape.fork || shape.existingWorktree,
+    showModeNote:
+      shape.moveChanges ||
+      shape.fork ||
+      shape.existingWorktree ||
+      shape.pr ||
+      shape.issue,
     // A fork has no agent row at all, so it asks for none rather than for the
     // one row `Math.max` would floor an empty list at.
     agentRows: shape.fork ? 0 : Math.max(1, shape.agentRows),
@@ -279,6 +295,23 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dims().width - 4));
   const contentWidth = () =>
     Math.max(1, width() - LABEL_WIDTH - CONTROL_GAP - 4);
+
+  /**
+   * What a DERIVED row's value may occupy: the Directory row and the mode
+   * note, which are not fields.
+   *
+   * One column narrower than {@link contentWidth}, because they are indented
+   * one column further: a field row spends `LABEL_WIDTH + CONTROL_GAP` before
+   * its control, while these spend `LABEL_WIDTH + 1 + CONTROL_GAP` so their
+   * text lines up with the controls above rather than with the labels.
+   *
+   * Fitting them to the field width is not a cosmetic overflow. OpenTUI wraps
+   * rather than clipping, and a wrapped line inside a `height={1}` box
+   * DISAPPEARS, taking the ellipsis with it: at width 46 the PR note rendered
+   * `#151 Worktrees panel:` with no marker to say anything was missing, which
+   * on the one row identifying which PR this is reads as the whole title.
+   */
+  const derivedWidth = () => Math.max(1, contentWidth() - 1);
   const compact = () => contentWidth() < COMPACT_CONTENT_WIDTH;
   const narrow = () => contentWidth() < NARROW_CONTENT_WIDTH;
 
@@ -316,10 +349,17 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    *  about creating a worktree is gone. */
   const existingWorktree = () => props.draft.existingWorktree;
 
+  /** The pull request this spawn cuts a worktree from (issue #151). */
+  const prSource = () => props.draft.pr;
+
+  /** The issue this spawn cuts a worktree for (issue #151). */
+  const issueSource = () => props.draft.issue;
+
   /** Whether the Where row exists at all. The same condition
    *  `newSessionFields` filters on and the budget counts zero rows for: a row
    *  drawn past the budget lands on its neighbour rather than clipping. */
-  const showDestination = () => existingWorktree() === null;
+  const showDestination = () =>
+    existingWorktree() === null && !prSource() && !issueSource();
 
   /**
    * What to call the worktree a session is being started in: the last segment
@@ -502,6 +542,8 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     fork: forking() !== null,
     namesAWorktree: namesAWorktree(),
     existingWorktree: existingWorktree() !== null,
+    pr: prSource() !== null,
+    issue: issueSource() !== null,
   }));
 
   /**
@@ -708,7 +750,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   };
 
   const cwdLabel = () =>
-    truncateText(shortenCwd(props.draft.cwd), contentWidth());
+    truncateText(shortenCwd(props.draft.cwd), derivedWidth());
 
   /**
    * The locked destination row's text. Only where the session is going: the
@@ -722,9 +764,13 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
   const lockedDestinationLabel = () => {
     const [here, worktree] = DESTINATION_OPTIONS;
     const option = moveChanges() ? worktree! : here!;
+    // The locked row renders with the DERIVED indent, like Directory and the
+    // mode note, so it takes the derived width. Missed when the other four
+    // were fixed: in move-changes mode at widths 24 to 28 this rendered
+    // `Worktre` with no ellipsis, the same silent cut.
     return truncateText(
       narrow() ? option.compactLabel : option.label,
-      contentWidth(),
+      derivedWidth(),
     );
   };
 
@@ -734,10 +780,30 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
    *  existing worktree names the worktree, which the path above only spells
    *  out. */
   const modeNote = (): { label: string; text: string; color: string } => {
+    const pr = prSource();
+    if (pr) {
+      // The number AND the title: the number is what the request carries and
+      // the title is the only thing that says what it is.
+      return {
+        label: "PR",
+        text: truncateText(`#${pr.number} ${pr.title}`, derivedWidth()),
+        color: theme.mauve,
+      };
+    }
+    const issue = issueSource();
+    if (issue) {
+      // The number AND the title, for the PR arm's reason: the number is what
+      // the request carries, the title is the only thing that says what it is.
+      return {
+        label: "Issue",
+        text: truncateText(`#${issue.number} ${issue.title}`, derivedWidth()),
+        color: theme.blue,
+      };
+    }
     if (existingWorktree()) {
       return {
         label: "Worktree",
-        text: truncateText(existingWorktreeName(), contentWidth()),
+        text: truncateText(existingWorktreeName(), derivedWidth()),
         color: theme.green,
       };
     }
@@ -745,7 +811,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     if (fork) {
       return {
         label: "Source",
-        text: truncateText(fork.label, contentWidth()),
+        text: truncateText(fork.label, derivedWidth()),
         color: theme.blue,
       };
     }
@@ -753,7 +819,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
       label: "Changes",
       text: truncateText(
         narrow() ? "Moved out" : "Moved out of this checkout",
-        contentWidth(),
+        derivedWidth(),
       ),
       color: theme.peach,
     };
@@ -831,9 +897,13 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 ? "Fork session"
                 : moveChanges()
                   ? truncateText("Move changes to worktree", width() - 4)
-                  : existingWorktree()
-                    ? truncateText("New session in worktree", width() - 4)
-                    : "New session"}
+                  : prSource()
+                    ? truncateText("New session on PR", width() - 4)
+                    : issueSource()
+                      ? truncateText("New session on issue", width() - 4)
+                      : existingWorktree()
+                      ? truncateText("New session in worktree", width() - 4)
+                      : "New session"}
             </strong>
           </text>
         </box>
@@ -902,6 +972,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               height={1}
               flexDirection="row"
               flexGrow={1}
+              flexShrink={1}
               paddingLeft={1}
               paddingRight={1}
               backgroundColor={
@@ -919,6 +990,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 backgroundColor="transparent"
                 focusedBackgroundColor="transparent"
                 flexGrow={1}
+                flexShrink={1}
               />
             </box>
           </box>
@@ -972,6 +1044,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               height={1}
               flexDirection="row"
               flexGrow={1}
+              flexShrink={1}
               paddingLeft={1}
               paddingRight={1}
               backgroundColor={
@@ -991,6 +1064,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 backgroundColor="transparent"
                 focusedBackgroundColor="transparent"
                 flexGrow={1}
+                flexShrink={1}
               />
             </box>
             <Show when={nameHint()}>

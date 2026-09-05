@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, rmSync, readFileSync, existsSync, readdirSync } from "fs";
+import {
+  mkdirSync,
+  rmSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  readdirSync,
+} from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -95,12 +102,16 @@ afterEach(() => {
 });
 
 describe("makePlugin: eager seed", () => {
-  it("writes one marker per persisted session with status-derived state", async () => {
+  it("writes one marker per hosted session with status-derived state", async () => {
+    // `s4` is listed but has no status entry: `session.list` is project-wide
+    // over the shared db, so it also returns history and sibling processes'
+    // sessions. Only the three this server reports a status for are ours.
     const client = makeClient(
       [
         { id: "s1", directory: "/tmp/a", title: "Alpha" },
         { id: "s2", directory: "/tmp/b", title: "Beta" },
         { id: "s3", directory: "/tmp/c", title: "Gamma" },
+        { id: "s4", directory: "/tmp/d", title: "Delta" },
       ],
       {
         s1: { type: "idle" },
@@ -131,6 +142,7 @@ describe("makePlugin: eager seed", () => {
     });
     expect(m2).toMatchObject({ state: "working", title: "Beta" });
     expect(m3).toMatchObject({ state: "working", title: "Gamma" });
+    expect(readMarker(markersDir, "s4")).toBeNull();
   });
 
   it("writes state_timestamp with sub-second precision from the injected clock", async () => {
@@ -154,7 +166,11 @@ describe("makePlugin: eager seed", () => {
     expect(m1?.timestamp).toBeCloseTo(1_700_000_000.123, 3);
   });
 
-  it("defaults to idle when a session has no status entry", async () => {
+  it("skips a listed session this server reports no status for", async () => {
+    // No status entry means this process is not running the session (the
+    // status map is per-process and idle entries are deleted), so claiming
+    // it with our pid would be a false hosting claim. The skip must also
+    // leave `sessionState` unprimed: a later status event still writes.
     const client = makeClient(
       [{ id: "s1", directory: "/tmp/a", title: "Alpha" }],
       {},
@@ -163,7 +179,53 @@ describe("makePlugin: eager seed", () => {
     const hooks = await plugin({ client });
     await awaitSeed(hooks);
 
-    expect(readMarker(markersDir, "s1")).toMatchObject({ state: "idle" });
+    expect(readMarker(markersDir, "s1")).toBeNull();
+
+    await dispatchAll(hooks, [
+      {
+        type: "session.status",
+        properties: { sessionID: "s1", status: { type: "busy" } },
+      },
+    ]);
+    expect(readMarker(markersDir, "s1")).toMatchObject({ state: "working" });
+  });
+
+  it("leaves a sibling process's marker byte-identical (issue #177)", async () => {
+    // Two `opencode` processes in one directory share the SQLite db, so
+    // `session.list` here returns the OTHER process's live session. Its
+    // marker already carries that process's pid and last_prompt; a blanket
+    // seed rewrote both, stealing the row and dropping the prompt.
+    mkdirSync(markersDir, { recursive: true });
+    const foreignPath = join(markersDir, "opencode-ses_foreign.json");
+    const foreignBody = JSON.stringify({
+      agent_type: "opencode",
+      pid: process.pid + 1,
+      session_id: "ses_foreign",
+      timestamp: 1_700_000_000.5,
+      state_timestamp: 1_700_000_000.5,
+      state: "working",
+      directory: "/tmp/shared",
+      title: "Sibling session",
+      last_prompt: "sibling's prompt",
+    });
+    writeFileSync(foreignPath, foreignBody);
+
+    const client = makeClient(
+      [
+        { id: "ses_foreign", directory: "/tmp/shared", title: "Renamed" },
+        { id: "ses_mine", directory: "/tmp/shared", title: "Mine" },
+      ],
+      { ses_mine: { type: "busy" } },
+    );
+    const plugin = makePlugin({ markersDir, version: "1.0.0" });
+    const hooks = await plugin({ client, directory: "/tmp/shared" });
+    await awaitSeed(hooks);
+
+    expect(readFileSync(foreignPath, "utf-8")).toBe(foreignBody);
+    expect(readMarker(markersDir, "ses_mine")).toMatchObject({
+      state: "working",
+      pid: process.pid,
+    });
   });
 
   it("logs-and-continues when session.list rejects", async () => {

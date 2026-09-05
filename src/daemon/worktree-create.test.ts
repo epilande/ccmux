@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   readlinkSync,
   rmSync,
   symlinkSync,
@@ -25,6 +26,8 @@ import {
   slugForPR,
   slugFromPrompt,
   slugify,
+  pickIssueWorktree,
+  isIssueWorktreeName,
   withRepoLock,
   worktreePathFor,
 } from "./worktree-create";
@@ -1168,6 +1171,19 @@ describe("slugForPR / slugForIssue", () => {
   });
 });
 
+describe("pickIssueWorktree", () => {
+  it("takes the shortest family-exact name", () => {
+    const rows = [
+      { name: "issue-144-notifications-2", path: "/b" },
+      { name: "issue-144-notifications", path: "/a" },
+      { name: "issue-1444-other", path: "/c" },
+    ];
+    expect(pickIssueWorktree(144, rows)?.path).toBe("/a");
+    expect(isIssueWorktreeName("issue-1444-other", 144)).toBe(false);
+    expect(pickIssueWorktree(14, rows)).toBeNull();
+  });
+});
+
 describe("createWorktree with a branch override", () => {
   // A `--pr` spawn's directory is named after the PR while its branch has to
   // be the PR's own head ref, so `git push` works out of the box.
@@ -1278,5 +1294,145 @@ describe("createWorktree with a branch override", () => {
     expect(created.result.branchCreated).toBe(true);
     expect(await readConfig(repo, CONFIG_KEY("fix/flaky-binder"))).toBeNull();
     expect(await readConfig(repo, CONFIG_KEY("pr-7-fix-flaky"))).toBeNull();
+  });
+
+  // The caller validated the branch under a DIFFERENT acquisition of the repo
+  // lock, so a branch that appears in the window between the two must not be
+  // checked out as if it had passed those checks (issue #157).
+  it("refuses a branch that appeared after the caller settled it as absent", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "fix/flaky-binder"]);
+
+    const created = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+      branchExists: false,
+    });
+
+    // The re-measure under the create's own lock refuses before git runs.
+    expect(created.ok).toBe(false);
+    if (created.ok) return;
+    expect(created.error).toContain("fix/flaky-binder");
+  });
+
+  // The other direction of the same race, and the one git does not refuse on
+  // its own: with a remote-tracking ref of the same name present, a plain
+  // `git worktree add <path> <branch>` DWIMs the deleted branch back into
+  // existence from `origin/<branch>` and exits 0. The fixture therefore has
+  // the remote-tracking ref, which is what makes this test about the create's
+  // own re-measure rather than about an error git happens to produce.
+  it("refuses a branch that vanished after the caller settled it as present", async () => {
+    const repo = await makeRepo();
+    await git(repo, [
+      "remote",
+      "add",
+      "origin",
+      "https://example.invalid/x.git",
+    ]);
+    await git(repo, [
+      "update-ref",
+      "refs/remotes/origin/fix/flaky-binder",
+      "HEAD",
+    ]);
+
+    const created = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+      branchExists: true,
+    });
+
+    expect(created.ok).toBe(false);
+    if (created.ok) return;
+    expect(created.error).toContain("fix/flaky-binder");
+    // `git` throws on a non-zero exit, so the absent case needs the raw runner.
+    const local = await runGit(repo, [
+      "show-ref",
+      "--verify",
+      "--quiet",
+      "refs/heads/fix/flaky-binder",
+    ]);
+    expect(local.exitCode).not.toBe(0);
+  });
+
+  it("still derives the answer for a caller that settles nothing", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "fix/flaky-binder"]);
+
+    const created = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+    });
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.branchCreated).toBe(false);
+  });
+
+  // A second `--pr` of a branch already checked out used to 400. Opening
+  // that checkout is what the source picker promises on Enter.
+  it("opens the worktree already holding the overridden branch", async () => {
+    const repo = await makeRepo();
+    const first = await createWorktree(repo, {
+      name: "parking",
+      branch: "fix/flaky-binder",
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const second = await createWorktree(repo, {
+      derivedName: "pr-7-fix-flaky",
+      branch: "fix/flaky-binder",
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.result.created).toBe(false);
+    expect(realpathSync(second.result.path)).toBe(
+      realpathSync(first.result.path),
+    );
+    expect(existsSync(worktreePathFor(repo, "pr-7-fix-flaky"))).toBe(false);
+  });
+});
+
+describe("createWorktree reuseExisting", () => {
+  // The source picker's guarantee: a second `--issue` spawn opens the first
+  // checkout rather than numbering `issue-<n>-<slug>-2`.
+  it("opens the existing issue worktree instead of numbering a sibling", async () => {
+    const repo = await makeRepo();
+    const first = await createWorktree(repo, {
+      derivedName: "issue-144-old-title",
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const second = await createWorktree(repo, {
+      derivedName: "issue-144-new-title",
+      reuseExisting: (trees) => pickIssueWorktree(144, trees),
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.result.created).toBe(false);
+    expect(realpathSync(second.result.path)).toBe(
+      realpathSync(first.result.path),
+    );
+    expect(existsSync(worktreePathFor(repo, "issue-144-new-title"))).toBe(
+      false,
+    );
+  });
+
+  it("does not claim a longer issue number that merely starts with this one", async () => {
+    const repo = await makeRepo();
+    const other = await createWorktree(repo, {
+      derivedName: "issue-1444-other",
+    });
+    expect(other.ok).toBe(true);
+
+    const created = await createWorktree(repo, {
+      derivedName: "issue-144-notifications",
+      reuseExisting: (trees) => pickIssueWorktree(144, trees),
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.result.created).toBe(true);
+    expect(created.result.name).toBe("issue-144-notifications");
   });
 });
