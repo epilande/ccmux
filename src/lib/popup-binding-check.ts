@@ -8,10 +8,11 @@
  * switches the wrong terminal as soon as a second client is attached. Passing
  * `--client-tty #{client_tty}` (or the older `-e CCMUX_CLIENT_TTY=`) pins it.
  *
- * `src/lib/popup-hint.ts` catches this at picker startup, but only for a user
- * who happens to have two clients attached at that moment. `ccmux setup` is what
- * people run after upgrading, so it reports the binding itself: the check reads
- * `tmux list-keys` and looks for the shapes that cannot pin a client.
+ * `src/lib/legacy-popup.ts` catches this at the moment of a switch, but only
+ * for a user who has two clients attached right then, and only by refusing the
+ * switch. `ccmux setup` is what people run after upgrading, so it reports the
+ * binding itself: the check reads `tmux list-keys` and looks for the shapes
+ * that cannot pin a client.
  */
 
 import { tmuxArgv } from "./tmux-exec";
@@ -67,8 +68,10 @@ function basename(token: string): string {
 /**
  * Does this command launch the ccmux PICKER?
  *
- * `ccmux sidebar` is not a popup picker (it lays out a pane and switches
- * nothing), so a binding whose every ccmux call is a sidebar is left alone.
+ * A binding whose every ccmux call is `ccmux sidebar` is left alone. Not
+ * because a sidebar switches nothing (activating a background row does switch a
+ * client), but because it takes no `--client-tty`: a sidebar belongs in a pane,
+ * and one in a popup is unsupported either way.
  */
 function invokesPicker(command: string): boolean {
   const tokens = words(command);

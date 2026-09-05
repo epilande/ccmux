@@ -102,6 +102,10 @@ describe("findLegacyPopupBindings", () => {
   });
 });
 
+/** `RECOMMENDED_POPUP_BINDING` after tmux has parsed and reprinted it, i.e.
+ *  what `list-keys` shows for the binding README tells people to write. */
+const RECOMMENDED_AS_LIST_KEYS = String.raw`bind-key    -T prefix       C-p                       run-shell -C "display-popup -E -w 80% -h 75% \"ccmux --client-tty #{client_tty}\""`;
+
 describe("RECOMMENDED_POPUP_BINDING", () => {
   it("matches the binding README documents", async () => {
     const readme = await Bun.file(
@@ -111,6 +115,9 @@ describe("RECOMMENDED_POPUP_BINDING", () => {
   });
 
   it("is a binding the checker itself accepts", () => {
-    expect(findLegacyPopupBindings(RECOMMENDED_POPUP_BINDING)).toEqual([]);
+    // Fed in the shape `list-keys` prints it back, since that is the only text
+    // the checker ever sees: the config-file form has no `-T <table>` and would
+    // pass through the unparsed-line fallback instead of the real path.
+    expect(findLegacyPopupBindings(RECOMMENDED_AS_LIST_KEYS)).toEqual([]);
   });
 });

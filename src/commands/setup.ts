@@ -61,8 +61,9 @@ function plural(word: string, n: number): string {
  *
  * Advisory: it prints nothing when tmux is unreachable or every binding is
  * fine, and never touches the exit code. `setup` is the command people run
- * after upgrading, which is the only reason this lives here rather than in the
- * picker alone (the picker's own hint needs two clients attached to fire).
+ * after upgrading, which is what makes this the proactive half: the picker only
+ * finds out at the moment a switch is refused, and only with two clients
+ * attached.
  */
 async function printPopupBindingWarning(): Promise<void> {
   const listing = await readTmuxKeyBindings();
@@ -80,7 +81,7 @@ async function printPopupBindingWarning(): Promise<void> {
   console.log(
     "\nA popup that is handed no client tty can switch the wrong client when",
   );
-  console.log("more than one is attached. Rebind it in ~/.tmux.conf:");
+  console.log("more than one is attached. Rebind it in your tmux config:");
   console.log(`\n  ${RECOMMENDED_POPUP_BINDING}`);
 }
 

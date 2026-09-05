@@ -9,9 +9,9 @@
  * The popup gets the resolved tty handed to it as `--client-tty`, not just as
  * `-c`. `-c` decides which client the popup DRAWS on; the picker inside it
  * still has to know which client to switch, and asking tmux from inside a
- * popup returns whichever other attached client typed last. As a positional
- * argument it needs no `display-popup -e` and therefore no tmux 3.3 floor:
- * every flag on this line exists in 3.2.
+ * popup returns whichever other attached client typed last. Passing it as the
+ * picker's own option needs no `display-popup -e` and therefore no tmux 3.3
+ * floor: every flag on this line exists in 3.2.
  */
 
 import type { SpawnFn } from "../lib/notify";
