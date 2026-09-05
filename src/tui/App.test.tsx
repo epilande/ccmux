@@ -45,7 +45,11 @@ mock.module("./utils/sse", () => ({
 }));
 
 const switchToPaneSpy = mock(
-  async (_target: string): Promise<SwitchToPaneResult> => true,
+  async (
+    _target: string,
+    opts?: { refuseUncapturedGuess?: boolean },
+  ): Promise<SwitchToPaneResult> =>
+    opts?.refuseUncapturedGuess ? "client-unavailable" : true,
 );
 const sendKeysSpy = mock(
   async (
@@ -206,7 +210,10 @@ let setup: Setup;
 beforeEach(() => {
   sseCallbacks = null;
   switchToPaneSpy.mockClear();
-  switchToPaneSpy.mockImplementation(async () => true);
+  switchToPaneSpy.mockImplementation(
+    async (_target: string, opts?: { refuseUncapturedGuess?: boolean }) =>
+      opts?.refuseUncapturedGuess ? "client-unavailable" : true,
+  );
   sendKeysSpy.mockClear();
   sendKeysSpy.mockImplementation(async () => true);
   flashPaneSpy.mockClear();
@@ -1727,7 +1734,31 @@ describe("App pane-switch feedback and server scoping", () => {
     try {
       await renderWithSession();
       await selectFirstRowAndEnter();
+      expect(switchToPaneSpy).toHaveBeenCalledWith("%5");
       expect(exitSpy).toHaveBeenCalledWith(0);
+    } finally {
+      restoreExit();
+      restoreFetch();
+    }
+  });
+
+  it("one-shot picker: Enter under a legacy popup binding refuses and does not exit", async () => {
+    // Users who see the hint are the ones #{client_tty} would wrong-switch.
+    // Enter must return client-unavailable, not succeed and close the picker.
+    const restoreFetch = withServerInfo(null);
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    try {
+      await renderWithSession({ legacyPopupBinding: true });
+      await selectFirstRowAndEnter();
+      expect(switchToPaneSpy).toHaveBeenCalledWith("%5", {
+        refuseUncapturedGuess: true,
+      });
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish(
+          "Cannot switch: no captured client tty, check the tmux binding in the README",
+        ),
+      );
+      expect(exitSpy).not.toHaveBeenCalled();
     } finally {
       restoreExit();
       restoreFetch();

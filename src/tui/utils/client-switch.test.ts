@@ -87,7 +87,7 @@ describe("switchToPane", () => {
     }
   });
 
-  it("falls back to the current tmux client for legacy picker launches", async () => {
+  it("falls back to the current tmux client in a real pane or with a single client", async () => {
     const spawn = withSpawn([{ stdout: "/dev/pts/7\n" }, {}]);
     try {
       const result = await withClientTty(undefined, () => switchToPane("%8"));
@@ -96,6 +96,39 @@ describe("switchToPane", () => {
       expect(spawn.calls).toEqual([
         ["tmux", "display-message", "-p", "#{client_tty}"],
         ["tmux", "switch-client", "-c", "/dev/pts/7", "-t", "%8"],
+      ]);
+    } finally {
+      spawn.restore();
+    }
+  });
+
+  it("refuses an uncaptured guess inside a legacy multi-client popup", async () => {
+    // The same condition the picker toasts as legacyPopupBinding: no
+    // captured tty, a popup, more than one client. #{client_tty} would
+    // name the other client that typed last.
+    const spawn = withSpawn([{ stdout: "/dev/pts/7\n" }, {}]);
+    try {
+      const result = await withClientTty(undefined, () =>
+        switchToPane("%8", { refuseUncapturedGuess: true }),
+      );
+
+      expect(result).toBe("client-unavailable");
+      expect(spawn.calls).toEqual([]);
+    } finally {
+      spawn.restore();
+    }
+  });
+
+  it("still switches on a captured tty even when the uncaptured guess is refused", async () => {
+    const spawn = withSpawn([{}]);
+    try {
+      const result = await withClientTty("/dev/ttys005", () =>
+        switchToPane("%42", { refuseUncapturedGuess: true }),
+      );
+
+      expect(result).toBe(true);
+      expect(spawn.calls).toEqual([
+        ["tmux", "switch-client", "-c", "/dev/ttys005", "-t", "%42"],
       ]);
     } finally {
       spawn.restore();
