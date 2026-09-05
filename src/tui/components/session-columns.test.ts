@@ -13,7 +13,7 @@ import {
   prLabel,
   prColorState,
   rowHasContent,
-  rowHasFlexText,
+  rowHasPrompt,
   SIDEBAR_DEFAULT_COLUMNS,
   trailingLabelsWidth,
   fitProjectCell,
@@ -684,36 +684,24 @@ describe("rowHasContent", () => {
   });
 });
 
-describe("rowHasFlexText", () => {
-  it("counts title as flexible filler, like prompt", () => {
-    expect(rowHasFlexText({ left: [{ field: "title" }], right: [] })).toBe(
-      true,
-    );
-    expect(rowHasFlexText({ left: [], right: [{ field: "title" }] })).toBe(
-      true,
-    );
-    expect(rowHasFlexText({ left: [{ field: "status" }], right: [] })).toBe(
-      false,
-    );
-  });
-
+describe("rowHasPrompt", () => {
   it("is true when the prompt sits on the left side", () => {
-    expect(rowHasFlexText(resolveColumns(120).row2)).toBe(true);
+    expect(rowHasPrompt(resolveColumns(120).row2)).toBe(true);
   });
 
   it("is true when the prompt sits on the right side", () => {
-    expect(rowHasFlexText({ left: [], right: [{ field: "prompt" }] })).toBe(true);
+    expect(rowHasPrompt({ left: [], right: [{ field: "prompt" }] })).toBe(true);
   });
 
   it("is false when no prompt entry is present", () => {
-    expect(rowHasFlexText(resolveColumns(120).row1)).toBe(false);
-    expect(rowHasFlexText({ left: [], right: [] })).toBe(false);
+    expect(rowHasPrompt(resolveColumns(120).row1)).toBe(false);
+    expect(rowHasPrompt({ left: [], right: [] })).toBe(false);
   });
 
   it("sees the prompt after inline flatten moves it onto row 1", () => {
     const inline = applyPromptDisplay(resolveColumns(120), "inline", false);
-    expect(rowHasFlexText(inline.row1)).toBe(true);
-    expect(rowHasFlexText(inline.row2)).toBe(false);
+    expect(rowHasPrompt(inline.row1)).toBe(true);
+    expect(rowHasPrompt(inline.row2)).toBe(false);
   });
 });
 

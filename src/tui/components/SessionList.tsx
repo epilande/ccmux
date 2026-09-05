@@ -26,7 +26,7 @@ import {
   promptBlockWidth,
   withoutPrompt,
 } from "./session-columns";
-import { wrapToLines } from "../utils/format";
+import { createPromptBlockCache } from "./prompt-block-cache";
 import { theme } from "../theme";
 import { socketErrorMessage } from "../../lib/tmux-socket";
 
@@ -85,8 +85,13 @@ export function isActivePaneRow(
  *  the row it belongs to is still identifiable underneath it. */
 const ROW_MENU_INDENT = 2;
 
+/** One shared array for every session that has no block, so a row whose
+ *  block is off never re-keys on an identity-only change. */
+const EMPTY_PROMPT_BLOCK: string[] = [];
+
 export const SessionList: Component<SessionListProps> = (props) => {
   let scrollboxRef: ScrollBoxRenderable | undefined;
+  const promptBlockCache = createPromptBlockCache();
   const [scrollboxLayout, setScrollboxLayout] = createSignal(0);
   const dims = useSharedTerminalDimensions();
   const effectiveWidth = () =>
@@ -120,16 +125,34 @@ export const SessionList: Component<SessionListProps> = (props) => {
    * agree on the row's height, and the only way they cannot disagree is to
    * derive both from one array. The row draws exactly these lines; the row
    * is exactly this many lines tall.
+   *
+   * Memoized per session (see `prompt-block-cache.ts`): the measurement pass
+   * asks for every preceding row's block on every call, and an unchanged
+   * session must hand back the same array so the row's `<For>` stays still.
    */
   const promptBlock = (session: EnrichedSession): string[] => {
     const max = props.promptLines ?? 0;
     // `promptDisplay: "off"` means no prompt anywhere, and the `p` key cycles
     // it live — so it hides the block too rather than leaving one prompt
     // surface the toggle cannot reach.
-    if (max <= 0 || props.promptDisplay === "off") return [];
+    if (max <= 0 || props.promptDisplay === "off") return EMPTY_PROMPT_BLOCK;
     const text = normalizePrompt(session.lastPrompt ?? "");
-    return wrapToLines(text, promptBlockWidth(effectiveWidth()), max);
+    return promptBlockCache.lines(
+      session.id,
+      text,
+      promptBlockWidth(effectiveWidth()),
+      max,
+    );
   };
+
+  // The cache only ever grows by session id, so retire the ids that left.
+  createEffect(() => {
+    promptBlockCache.retain(
+      props.items.flatMap((item) =>
+        item.type === "session" ? [item.filteredSession.session.id] : [],
+      ),
+    );
+  });
 
   const sessionLines = (session: EnrichedSession) =>
     1 +

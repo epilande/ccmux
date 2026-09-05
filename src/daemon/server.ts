@@ -1005,7 +1005,6 @@ export class DaemonServer {
       ...session,
       tmuxTarget,
       paneCwd,
-      paneTitle: paneInfo?.paneTitle ?? null,
       // One read, one answer: when git resolved this cwd, the repo name is
       // the main checkout's basename from that SAME read, so `project` and
       // the worktree facts below cannot contradict each other.
