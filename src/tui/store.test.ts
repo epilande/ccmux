@@ -4433,13 +4433,16 @@ describe("new-session dialog in issue mode (issue #151)", () => {
  * there has to be searchable. Issue #183.
  */
 describe("search over the agent's summary", () => {
-  const claude = (id: string, paneTitle: string, lastPrompt: string | null) =>
+  // `summary` is the normalized field the daemon ships, already through the
+  // per-agent rule; the raw title rides along and nothing here reads it.
+  const claude = (id: string, summary: string, lastPrompt: string | null) =>
     createMockSession({
       id,
       agentType: "claude",
       project: "proj",
       gitBranch: null,
-      paneTitle,
+      paneTitle: `✳ ${summary}`,
+      summary,
       lastPrompt,
       prompts: lastPrompt ? [lastPrompt] : [],
     });
@@ -4447,8 +4450,8 @@ describe("search over the agent's summary", () => {
   it("matches a session on its summary text alone", () => {
     const store = createTUIStore({ groupBy: "none" });
     store.actions.setSessions([
-      claude("s1", "✳ Wire up the summary column", "commit and push"),
-      claude("s2", "✳ Fix the scroll math", "commit and push"),
+      claude("s1", "Wire up the summary column", "commit and push"),
+      claude("s2", "Fix the scroll math", "commit and push"),
     ]);
 
     store.actions.setSearchQuery("scroll math");
@@ -4460,7 +4463,7 @@ describe("search over the agent's summary", () => {
   it("carries a summary highlight so the cell can show the match", () => {
     const store = createTUIStore({ groupBy: "none" });
     store.actions.setSessions([
-      claude("s1", "✳ Wire up the summary column", "commit and push"),
+      claude("s1", "Wire up the summary column", "commit and push"),
     ]);
 
     store.actions.setSearchQuery("summary");
@@ -4474,6 +4477,8 @@ describe("search over the agent's summary", () => {
   it("finds nothing in the pane title of an agent with no rule", () => {
     // codex writes its cwd basename there; the `project` column already
     // carries that, and matching it would make the query mean two things.
+    // The daemon ships `summary: null` for it, and the raw title is not a
+    // search field.
     const store = createTUIStore({ groupBy: "none" });
     store.actions.setSessions([
       createMockSession({
@@ -4482,6 +4487,7 @@ describe("search over the agent's summary", () => {
         project: "proj",
         gitBranch: null,
         paneTitle: "probe-codex-x7",
+        summary: null,
         lastPrompt: null,
         prompts: [],
       }),
@@ -4497,7 +4503,7 @@ describe("search over the agent's summary", () => {
     // smallest tier gap and let corroboration outrank a stronger tier.
     const store = createTUIStore({ groupBy: "none" });
     store.actions.setSessions([
-      claude("s1", "✳ Wire up the summary column", "commit and push"),
+      claude("s1", "Wire up the summary column", "commit and push"),
     ]);
 
     store.actions.setSearchQuery("summary");

@@ -1,64 +1,13 @@
+import { hostname } from "node:os";
 import { basename } from "node:path";
 import { BUILTIN_AGENTS } from "./agents";
+import type { SummaryTitleRule } from "./agents";
+import { stripAnsi } from "./strip-ansi";
 
 /**
- * How one agent's tmux pane title reduces to a session summary.
- *
- * Every agent writes something to `pane_title`, but only five write a
- * generated summary of the work; the rest echo the cwd (already the `project`
- * column), their own run state (already `status`), or a static app name. So
- * this is a per-agent rule rather than a generic filter — the same shape
- * `terminalRules`, `errorRules` and `readyPattern` already take, for the same
- * reason: once one agent needs its own pattern there is a table either way.
- *
- * An agent with no rule has no summary, and its cell falls back to the prompt.
- */
-export interface SummaryTitleRule {
-  /**
-   * Decoration around the summary: a status glyph, a spinner frame, an app
-   * name the agent appends. Every pattern that matches is removed.
-   *
-   * Declaring any pattern also makes the rule STRICT: a title matching none
-   * of them yields no summary. tmux seeds `pane_title` to the hostname, so a
-   * pane whose agent has not written a title yet reads back as the machine
-   * name, and a strip-only rule would happily show it as the session's
-   * summary. Requiring the agent's own marker is what keeps that out.
-   */
-  strip?: RegExp[];
-  /**
-   * Whole titles that carry no summary — the app's own name, the placeholder
-   * it shows before the first turn. Tested against the title both before and
-   * after {@link strip}, so a rule can name either spelling.
-   */
-  empty?: RegExp[];
-  /**
-   * Whether a summary equal to the pane's cwd basename reads as empty.
-   *
-   * For omp, whose title is `π > <summary>` after a turn but `π > <cwd>`
-   * before one: the prefix is present either way, so only the cwd comparison
-   * separates a real session title from the directory name that the `project`
-   * column already carries.
-   */
-  cwdBasenameIsEmpty?: boolean;
-}
-
-/**
- * The agent's own summary of what a session is doing, read off its tmux pane
- * title, or null when this agent writes nothing worth showing.
- *
- * Pure, and deliberately in `src/lib` rather than the TUI: the daemon runs it
- * too, to decide whether a title change is worth an SSE broadcast (the raw
- * string churns on every spinner frame, the normalized one does not).
- *
- * Built-in rules only. Custom agents get no summary for now — a rule shape on
- * `AgentConfig` can come when someone asks — so the lookup reads
- * `BUILTIN_AGENTS` directly, which also means a user who overrides `claude`
- * to recolor it cannot accidentally drop the rule.
- */
-/**
- * Built once. Every row asks for its summary several times per measurement
- * pass (the row's own height, the flex budget, the cell), so a linear scan of
- * the agent table per call would land in the picker's hot path.
+ * Built once. The daemon asks for a session's summary on every enrich and
+ * again on every scan tick's `syncPaneSummaries`, so a linear scan of the
+ * agent table per call would land in a hot path.
  */
 const RULES = new Map<string, SummaryTitleRule>(
   BUILTIN_AGENTS.flatMap((a) =>
@@ -66,35 +15,73 @@ const RULES = new Map<string, SummaryTitleRule>(
   ),
 );
 
+/**
+ * This machine's name, read once. tmux seeds a new pane's title with it, so
+ * every visible session on a scan tick would otherwise pay a syscall to learn
+ * the same string.
+ */
+const HOSTNAME = hostname();
+
+/**
+ * The summary as it will be stored and rendered: no escape sequences, no
+ * runs of whitespace, no surrounding space.
+ *
+ * A pane title is free text the agent wrote, exactly like the prompt, and it
+ * reaches us through the same `#{pane_title}` read that can carry an escape
+ * an agent embedded. Deliberately NOT the TUI's `normalizePrompt`: that one
+ * also unwraps Claude's `<command-name>` log markup, which is a property of
+ * Claude's JSONL transcript and has no business being applied to a title.
+ */
+function normalizeTitle(text: string): string {
+  return stripAnsi(text).replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The agent's own summary of what a session is doing, read off its tmux pane
+ * title, or null when this agent writes nothing worth showing.
+ *
+ * Pure, and deliberately in `src/lib` rather than the TUI: the DAEMON runs it,
+ * once per enrich, and ships the result as `EnrichedSession.summary`. Clients
+ * render the shipped field; nothing in the TUI re-derives it.
+ *
+ * Built-in rules only. Custom agents get no summary for now (a rule shape on
+ * `AgentConfig` can come when someone asks), so the lookup reads
+ * `BUILTIN_AGENTS` directly, which also means a user who overrides `claude`
+ * to recolor it cannot accidentally drop the rule.
+ *
+ * `host` is injectable for tests only; production always wants this machine.
+ */
 export function summaryFromPaneTitle(
   agentType: string | null | undefined,
   paneTitle: string | null | undefined,
   paneCwd: string | null | undefined,
+  host: string = HOSTNAME,
 ): string | null {
   if (!agentType || !paneTitle) return null;
   const rule = RULES.get(agentType);
   if (!rule) return null;
 
-  const raw = paneTitle.trim();
-  if (raw === "") return null;
-  if (rule.empty?.some((re) => re.test(raw))) return null;
+  // Normalize the WHOLE title, not just the capture: every rule anchors on
+  // `^`, so an escape sequence ahead of the agent's own marker would defeat
+  // the match itself. Idempotent, so the capture comes out clean too.
+  const title = normalizeTitle(paneTitle);
+  if (title === "") return null;
+  if (rule.empty?.some((re) => re.test(title))) return null;
 
-  let text = raw;
-  if (rule.strip && rule.strip.length > 0) {
-    let matched = false;
-    for (const re of rule.strip) {
-      if (!re.test(text)) continue;
-      matched = true;
-      text = text.replace(re, "");
-    }
-    if (!matched) return null;
-  }
-
-  text = text.trim();
-  if (text === "") return null;
+  const text = rule.match.exec(title)?.[1]?.trim();
+  if (!text) return null;
   if (rule.empty?.some((re) => re.test(text))) return null;
   if (rule.cwdBasenameIsEmpty && paneCwd && text === basename(paneCwd)) {
     return null;
   }
+  // A pane whose agent never sets a title keeps tmux's hostname seed forever
+  // (`allow-set-title off` is one way to get there), and a permissive rule
+  // like cursor's would read that as the session's summary. Both spellings,
+  // since tmux may seed the short name while `os.hostname()` answers the FQDN
+  // or the reverse; case-insensitive because the two do not always agree
+  // there either.
+  const lower = text.toLowerCase();
+  const lowerHost = host.toLowerCase();
+  if (lower === lowerHost || lower === lowerHost.split(".")[0]) return null;
   return text;
 }

@@ -46,7 +46,6 @@ import type { UntrackedMode } from "../daemon/worktree-move-changes";
 import { slugify } from "../daemon/worktree-create";
 import {
   normalizePrompt,
-  sessionSummary,
 } from "./components/session-columns";
 import { capturePane } from "./utils/tmux";
 import { isSameServerCached } from "./utils/server-guard";
@@ -782,6 +781,7 @@ export function fabricateInvokeSession(
     tmuxTarget: null,
     paneCwd: null,
     paneTitle: null,
+    summary: null,
     isWorktree: event.isWorktree ?? false,
     mainRepoRoot: event.mainRepoRoot ?? null,
     worktreeRoot: event.worktreeRoot ?? null,
@@ -1231,7 +1231,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     // produces single-char spans HighlightedText cannot lay out.
     const summaryMatches = new Map<string, string>();
     for (const s of sorted) {
-      const summary = sessionSummary(s);
+      const summary = s.summary;
       if (!summary) continue;
       if (!summary.toLowerCase().includes(lowerQuery)) continue;
       summaryMatches.set(s.id, wrapFirstMatch(summary, lowerQuery));

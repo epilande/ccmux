@@ -4,29 +4,43 @@ import { summaryFromPaneTitle } from "./pane-summary";
 /**
  * The per-agent rule table from issue #183's survey. Every case below is a
  * real pane title one of the built-ins wrote on an isolated tmux server.
+ *
+ * Every helper pins the hostname rather than taking the machine's own, so
+ * the guard that reads tmux's seed as no summary is tested against a known
+ * value instead of whatever laptop runs the suite.
  */
+const HOST = "probe-host.local";
+
 describe("summaryFromPaneTitle", () => {
   describe("claude", () => {
     const claude = (title: string | null) =>
-      summaryFromPaneTitle("claude", title, "/tmp/probe-claude");
+      summaryFromPaneTitle("claude", title, "/tmp/probe-claude", HOST);
 
-    it("strips the idle glyph from the generated summary", () => {
+    it("takes the summary after the idle glyph", () => {
       expect(claude("✳ Add dark mode toggle to settings")).toBe(
         "Add dark mode toggle to settings",
       );
     });
 
-    it("strips the braille spinner shown while working", () => {
+    it("takes the summary after the braille spinner shown while working", () => {
       expect(claude("⠂ cache-invalidation-fix")).toBe("cache-invalidation-fix");
       expect(claude("⣾ Fix pagination off-by-one")).toBe(
         "Fix pagination off-by-one",
       );
     });
 
-    it("keeps digits and punctuation inside the summary", () => {
+    it("keeps a summary that itself starts with a digit", () => {
       expect(claude("✳ 3 failing tests in parser/")).toBe(
         "3 failing tests in parser/",
       );
+    });
+
+    it("keeps a summary that itself starts with punctuation", () => {
+      // The glyph class is greedy, so a leading `-` or `#` has to survive it.
+      expect(claude("✳ -- dry-run the migration")).toBe(
+        "-- dry-run the migration",
+      );
+      expect(claude("⠂ #183 summary column")).toBe("#183 summary column");
     });
 
     it("reads the placeholder title as no summary", () => {
@@ -43,12 +57,18 @@ describe("summaryFromPaneTitle", () => {
 
   describe("copilot", () => {
     const copilot = (title: string | null) =>
-      summaryFromPaneTitle("copilot", title, "/tmp/probe-copilot");
+      summaryFromPaneTitle("copilot", title, "/tmp/probe-copilot", HOST);
 
-    it("strips the app-name suffix", () => {
+    it("takes the summary before the app-name suffix", () => {
       expect(copilot("Implement Hello Function - GitHub Copilot")).toBe(
         "Implement Hello Function",
       );
+    });
+
+    it("keeps a dash inside the summary itself", () => {
+      expect(
+        copilot("Fix the off-by-one - and its test - GitHub Copilot"),
+      ).toBe("Fix the off-by-one - and its test");
     });
 
     it("reads the bare app name as no summary", () => {
@@ -61,8 +81,8 @@ describe("summaryFromPaneTitle", () => {
   });
 
   describe("cursor", () => {
-    const cursor = (title: string | null) =>
-      summaryFromPaneTitle("cursor", title, "/tmp/probe-cursor");
+    const cursor = (title: string | null, host = HOST) =>
+      summaryFromPaneTitle("cursor", title, "/tmp/probe-cursor", host);
 
     it("takes the bare summary, which cursor writes unadorned", () => {
       expect(cursor("Hello Bot")).toBe("Hello Bot");
@@ -71,19 +91,35 @@ describe("summaryFromPaneTitle", () => {
     it("reads the app name it shows before the first turn as no summary", () => {
       expect(cursor("Cursor Agent")).toBeNull();
     });
+
+    it("reads tmux's hostname seed as no summary", () => {
+      // Nothing in cursor's title proves cursor wrote it, so a pane whose
+      // agent never sets one (`allow-set-title off`) keeps tmux's seed
+      // forever. Both spellings of the machine name, and either case.
+      expect(cursor("probe-host.local")).toBeNull();
+      expect(cursor("probe-host")).toBeNull();
+      expect(cursor("Probe-Host")).toBeNull();
+      expect(cursor("probe-host", "probe-host")).toBeNull();
+    });
+
+    it("keeps a summary that merely contains the hostname", () => {
+      expect(cursor("fix probe-host boot order")).toBe(
+        "fix probe-host boot order",
+      );
+    });
   });
 
   describe("omp", () => {
     const omp = (title: string | null, cwd = "/tmp/probe-omp-w5") =>
-      summaryFromPaneTitle("omp", title, cwd);
+      summaryFromPaneTitle("omp", title, cwd, HOST);
 
-    it("strips the prompt prefix", () => {
+    it("takes the summary after the prompt prefix", () => {
       expect(omp("π > Say hello and nothing else")).toBe(
         "Say hello and nothing else",
       );
     });
 
-    it("strips the spinner frame shown while working", () => {
+    it("takes the summary after the spinner frame shown while working", () => {
       expect(omp("π ⠧ Say hello and nothing else")).toBe(
         "Say hello and nothing else",
       );
@@ -102,9 +138,9 @@ describe("summaryFromPaneTitle", () => {
 
   describe("opencode", () => {
     const opencode = (title: string | null) =>
-      summaryFromPaneTitle("opencode", title, "/tmp/probe-opencode");
+      summaryFromPaneTitle("opencode", title, "/tmp/probe-opencode", HOST);
 
-    it("strips the session-title prefix", () => {
+    it("takes the summary after the session-title prefix", () => {
       expect(opencode("OC | Banana request")).toBe("Banana request");
     });
 
@@ -121,25 +157,69 @@ describe("summaryFromPaneTitle", () => {
     });
   });
 
+  describe("normalization", () => {
+    it("strips an ANSI escape the agent left in the title", () => {
+      // The title is free text on the same footing as the prompt, and it
+      // reaches us through a `#{pane_title}` read that carries whatever the
+      // agent wrote. Stripped from the WHOLE title, since every rule anchors
+      // on `^` and an escape ahead of the glyph would defeat the match.
+      expect(
+        summaryFromPaneTitle(
+          "claude",
+          "\x1b[32m✳ Wire up the summary column\x1b[0m",
+          "/tmp/p",
+          HOST,
+        ),
+      ).toBe("Wire up the summary column");
+    });
+
+    it("collapses tabs and runs of whitespace", () => {
+      expect(
+        summaryFromPaneTitle(
+          "cursor",
+          "  Fix\tthe   scroll   math  ",
+          "/tmp/p",
+          HOST,
+        ),
+      ).toBe("Fix the scroll math");
+    });
+
+    it("normalizes before the cwd comparison", () => {
+      expect(
+        summaryFromPaneTitle(
+          "omp",
+          "π >  probe-omp-w5 ",
+          "/tmp/probe-omp-w5",
+          HOST,
+        ),
+      ).toBeNull();
+    });
+  });
+
   describe("agents with no rule", () => {
     it("has no summary for codex, pi or gemini", () => {
       expect(
-        summaryFromPaneTitle("codex", "probe-codex-x7", "/tmp/p"),
+        summaryFromPaneTitle("codex", "probe-codex-x7", "/tmp/p", HOST),
       ).toBeNull();
       expect(
-        summaryFromPaneTitle("codex", "⠏ probe-codex-x7", "/tmp/p"),
+        summaryFromPaneTitle("codex", "⠏ probe-codex-x7", "/tmp/p", HOST),
       ).toBeNull();
       expect(
-        summaryFromPaneTitle("pi", "π - probe-pi-z3", "/tmp/p"),
+        summaryFromPaneTitle("pi", "π - probe-pi-z3", "/tmp/p", HOST),
       ).toBeNull();
       expect(
-        summaryFromPaneTitle("gemini", "◇  Ready (probe-gemini-t6)", "/tmp/p"),
+        summaryFromPaneTitle(
+          "gemini",
+          "◇  Ready (probe-gemini-t6)",
+          "/tmp/p",
+          HOST,
+        ),
       ).toBeNull();
     });
 
     it("has no summary for a custom agent", () => {
       expect(
-        summaryFromPaneTitle("my-agent", "Doing a thing", "/tmp/p"),
+        summaryFromPaneTitle("my-agent", "Doing a thing", "/tmp/p", HOST),
       ).toBeNull();
     });
   });
@@ -147,14 +227,29 @@ describe("summaryFromPaneTitle", () => {
   describe("absent input", () => {
     it("reads null, empty and whitespace-only titles as no summary", () => {
       // gemini emits "" during boot.
-      expect(summaryFromPaneTitle("claude", null, "/tmp/p")).toBeNull();
-      expect(summaryFromPaneTitle("claude", "", "/tmp/p")).toBeNull();
-      expect(summaryFromPaneTitle("claude", "   ", "/tmp/p")).toBeNull();
-      expect(summaryFromPaneTitle("claude", "✳ ", "/tmp/p")).toBeNull();
+      expect(summaryFromPaneTitle("claude", null, "/tmp/p", HOST)).toBeNull();
+      expect(summaryFromPaneTitle("claude", "", "/tmp/p", HOST)).toBeNull();
+      expect(summaryFromPaneTitle("claude", "   ", "/tmp/p", HOST)).toBeNull();
+      expect(summaryFromPaneTitle("claude", "✳ ", "/tmp/p", HOST)).toBeNull();
     });
 
     it("reads an unknown agent type as no summary", () => {
-      expect(summaryFromPaneTitle(null, "✳ Anything", "/tmp/p")).toBeNull();
+      expect(
+        summaryFromPaneTitle(null, "✳ Anything", "/tmp/p", HOST),
+      ).toBeNull();
+    });
+  });
+
+  describe("rule hygiene", () => {
+    it("never uses a global regex, whose lastIndex would leak between calls", () => {
+      const claude = (title: string) =>
+        summaryFromPaneTitle("claude", title, "/tmp/p", HOST);
+      // A `/g` rule answers correctly once and then intermittently null.
+      for (let i = 0; i < 5; i++) {
+        expect(claude("✳ Wire up the summary column")).toBe(
+          "Wire up the summary column",
+        );
+      }
     });
   });
 });

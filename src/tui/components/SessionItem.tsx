@@ -28,7 +28,6 @@ import {
   prColorState,
   hasFieldData,
   normalizePrompt,
-  sessionSummary,
   rowHasContent,
   rowHasFlexText,
   isFlexTextField,
@@ -90,13 +89,6 @@ interface SessionItemProps {
    * cannot drift. Absent (or empty) when the block is off.
    */
   promptBlock?: string[];
-  /**
-   * Whether SessionList is drawing the wrapped block at all — decided once for
-   * the whole list, so every row's cell, height and scroll offset answer the
-   * question the same way. NOT derivable from `promptBlock`: a session with no
-   * prompt contributes zero lines while the block is very much on.
-   */
-  promptBlockActive?: boolean;
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   dimmed?: boolean;
@@ -327,10 +319,6 @@ interface FieldRenderContext {
   maxPromptLen: number;
   /** Char budget for the project cell; drives its `…` truncation. */
   maxProjectLen: number;
-  /** Whether the wrapped prompt block is drawn for this list. Read only by
-   * the `summary` cell, which yields the identity line to the block when it
-   * would print the block's own text. */
-  promptBlockActive: boolean;
 }
 
 function dimColor(ctx: FieldRenderContext, color?: string): string | undefined {
@@ -372,24 +360,25 @@ const PromptCell: Component<{ ctx: FieldRenderContext }> = (props) => {
   // field) keep their spot. Search highlights are windowed the same way by
   // `truncateHighlighted`, which trims to a visible-char budget while
   // keeping the matched span whole.
-  // Match-source cue: a pane/transcript/cwd-ranked match leaves no
-  // highlight anywhere on the row, so a dim `[source]` tag says why it is
-  // here. Suppressed whenever any highlight is visible (identity or
-  // prompt), which already explains the match. The tag's width comes out
-  // of the prompt budget so truncation still lands inside the row.
+  // Match cue: a match that leaves no highlight anywhere on the row gets a
+  // dim `[source]` tag saying why the row is here. Suppressed whenever a
+  // highlight IS visible (identity or prompt), which already explains it.
+  // The tag's width comes out of the prompt budget so truncation still lands
+  // inside the row.
   const sourceTag = (): string | null => {
-    const src = ctx.matchSource;
-    if (src !== "pane" && src !== "transcript" && src !== "cwd") {
-      return null;
-    }
     const h = ctx.highlights;
     if (h?.project || h?.gitBranch || h?.lastPrompt || h?.prompts) {
       return null;
     }
-    if (h?.summary) {
-      return null;
-    }
-    return src;
+    const src = ctx.matchSource;
+    if (src === "pane" || src === "transcript" || src === "cwd") return src;
+    // A summary-only hit under the `prompt` opt-out layout: the summary is
+    // not rendered anywhere on the row, so nothing else would say why it
+    // matched. Never doubles up with the summary cell's own highlight, which
+    // renders only where that cell did NOT defer to this one (see
+    // `deferToPrompt`, false whenever `highlights.summary` is set).
+    if (h?.summary && !ctx.transcriptSnippet) return "summary";
+    return null;
   };
   const promptBudget = () => {
     const tag = sourceTag();
@@ -694,31 +683,19 @@ const FieldCell: Component<{
       // Thunks, not consts, for the same reason as `branch` below: rows stay
       // mounted across SSE deltas, so a const would freeze the cell at its
       // mount-time value and never track the agent's next turn.
-      const summary = () => sessionSummary(ctx.session);
+      const summary = () => ctx.session.summary;
       // Search wins over the summary: a matched row has to show why it
       // matched, and the prompt cell is where that evidence lives. A hit on
       // the summary TEXT is the one exception — it is its own evidence.
       const deferToPrompt = () =>
         !ctx.highlights?.summary &&
-        (promptCellShowsMatch(ctx) || summary() === null);
-      // With the wrapped block drawn, a fallback cell would print the block's
-      // own text on the identity line, so it yields and renders nothing. A
-      // real summary is not the block's text and stays. `hasFieldData` makes
-      // the same call for row 2, which collapses instead of rendering blank;
-      // this is the row-1 case, where the empty flex box holds the row's
-      // shape so the right-aligned metadata keeps its place.
+        (promptCellShowsMatch(ctx) || summary() == null);
+      // Nothing here knows about the wrapped prompt block. A row whose cell
+      // could only repeat the block's text is not given a `summary` entry in
+      // the first place (SessionList's per-row layout), so if this renders,
+      // it has something of its own to say.
       return (
-        <Show
-          when={!deferToPrompt()}
-          fallback={
-            <Show
-              when={!ctx.promptBlockActive}
-              fallback={<box flexGrow={1} flexShrink={1} />}
-            >
-              <PromptCell ctx={ctx} />
-            </Show>
-          }
-        >
+        <Show when={!deferToPrompt()} fallback={<PromptCell ctx={ctx} />}>
           <box flexGrow={1} flexShrink={1} flexDirection="row">
             <Show
               when={ctx.highlights?.summary}
@@ -964,12 +941,10 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     );
     if (!entry) return "";
     // Exactly what the cell will draw, so the floor reserves against real
-    // content: a `summary` that falls back is prompt-width, and one that
-    // yields to the block draws nothing at all.
-    if (entry.field === "summary") {
-      const summary = sessionSummary(props.session);
-      if (summary !== null) return summary;
-      if (props.promptBlockActive) return "";
+    // content: a `summary` with no summary to show falls back to the prompt,
+    // and one that would only repeat the block is not on the row at all.
+    if (entry.field === "summary" && props.session.summary != null) {
+      return props.session.summary;
     }
     return normalizePrompt(props.session.lastPrompt ?? "");
   };
@@ -1142,23 +1117,16 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     get maxProjectLen() {
       return maxProjectLen();
     },
-    get promptBlockActive() {
-      return !!props.promptBlockActive;
-    },
   };
 
   const row2HasContent = createMemo(() =>
-    rowHasContent(props.session, columns().row2, !!props.promptBlockActive),
+    rowHasContent(props.session, columns().row2),
   );
 
   /** Filter out entries whose field has no data — keeps row 2 from rendering blanks. */
   const filterRow = (row: ResolvedRow): ResolvedRow => ({
-    left: row.left.filter((e) =>
-      visibleField(props.session, e.field, !!props.promptBlockActive),
-    ),
-    right: row.right.filter((e) =>
-      visibleField(props.session, e.field, !!props.promptBlockActive),
-    ),
+    left: row.left.filter((e) => visibleField(props.session, e.field)),
+    right: row.right.filter((e) => visibleField(props.session, e.field)),
   });
 
   const row1 = createMemo(() => columns().row1);
@@ -1207,6 +1175,20 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
           showAttention
           attentionWidth={attentionWidth()}
         />
+        <Show when={row2HasContent()}>
+          <RowRender
+            row={row2()}
+            ctx={ctx}
+            leadingIndent={row2LeadingIndent(row1().left)}
+          />
+        </Show>
+        {/* LAST, below row 2 rather than between the two rows. Row 2 is the
+            row's other identity line (the agent's summary, the PR, the
+            timestamp) and the block is a paragraph of prompt, so putting the
+            paragraph first buried the short line that names the session and
+            left a list of rows hard to scan. The row now reads shortest to
+            longest. Height is a sum, so neither `rowHeight` here nor
+            SessionList's `sessionLines` changes. */}
         <For each={promptBlock()}>
           {(line) => (
             <box flexDirection="row">
@@ -1215,13 +1197,6 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
             </box>
           )}
         </For>
-        <Show when={row2HasContent()}>
-          <RowRender
-            row={row2()}
-            ctx={ctx}
-            leadingIndent={row2LeadingIndent(row1().left)}
-          />
-        </Show>
       </box>
     </box>
   );
@@ -1232,18 +1207,14 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
  * Row-1 fields like `status` always render (they have a state to display);
  * pure-text fields like `prompt` would render an empty cell, so we hide them.
  */
-function visibleField(
-  session: EnrichedSession,
-  field: ColumnField,
-  promptBlockActive: boolean,
-): boolean {
+function visibleField(session: EnrichedSession, field: ColumnField): boolean {
   switch (field) {
     case "prompt":
     case "cwd":
     case "branch":
     case "pr":
     case "summary":
-      return hasFieldData(session, field, promptBlockActive);
+      return hasFieldData(session, field);
     default:
       return true;
   }

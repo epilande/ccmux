@@ -854,6 +854,55 @@ describe("DaemonServer", () => {
       expect(enriched.paneCwd).toBeNull();
     });
 
+    it("ships the normalized summary beside the raw pane title", async () => {
+      // Clients render `summary`; the daemon owns the per-agent rule, and the
+      // raw title rides along for `ccmux show --json`.
+      const paneCache = new Map<string, TmuxPane>();
+      paneCache.set(
+        "%1",
+        fakePane({ paneTitle: "✳ Wire up the summary column" }),
+      );
+      const { internals } = createServer(undefined, paneCache);
+      const session = fakeSession("s1", "%1");
+      session.agentType = "claude";
+
+      const enriched = await internals.enrichSession(session);
+
+      expect(enriched.summary).toBe("Wire up the summary column");
+      expect(enriched.paneTitle).toBe("✳ Wire up the summary column");
+    });
+
+    it("ships a null summary for an agent with no rule", async () => {
+      const paneCache = new Map<string, TmuxPane>();
+      paneCache.set("%1", fakePane({ paneTitle: "probe-codex-x7" }));
+      const { internals } = createServer(undefined, paneCache);
+      const session = fakeSession("s1", "%1");
+      session.agentType = "codex";
+
+      const enriched = await internals.enrichSession(session);
+
+      expect(enriched.summary).toBeNull();
+      expect(enriched.paneTitle).toBe("probe-codex-x7");
+    });
+
+    it("reads omp's pre-first-turn title against the PANE cwd", async () => {
+      // The pane's cwd is where the agent really is; `cwd` is the log-derived
+      // fallback, which can lag a `cd`.
+      const paneCache = new Map<string, TmuxPane>();
+      paneCache.set(
+        "%1",
+        fakePane({ paneTitle: "π > live-dir", currentPath: "/tmp/live-dir" }),
+      );
+      const { internals } = createServer(undefined, paneCache);
+      const session = fakeSession("s1", "%1");
+      session.agentType = "omp";
+      session.cwd = "/tmp/stale-dir";
+
+      const enriched = await internals.enrichSession(session);
+
+      expect(enriched.summary).toBeNull();
+    });
+
     it("should fall back to session.gitBranch when live git returns null", async () => {
       const { internals } = createServer();
       const session = fakeSession("s1");
@@ -9656,7 +9705,7 @@ describe("syncPaneSummaries", () => {
     // handing the array over — every count below is about this pass alone.
     await drain();
     events.length = 0;
-    return { server, events, setTitle };
+    return { server, events, setTitle, manager };
   }
 
   const drain = () => new Promise((r) => setTimeout(r, 50));
@@ -9690,6 +9739,49 @@ describe("syncPaneSummaries", () => {
     setTitle("✳ Fix the scroll math");
     server.syncPaneSummaries();
     await settle(events, 1);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("session_updated");
+  });
+
+  it("broadcasts once when the status and the title change together", async () => {
+    // The common turn end: the reconciler moves the session to idle AND the
+    // agent rewrote its title. Both halves of one scan, so the row must
+    // update once. `recordBroadcast` is what makes the event's own send
+    // count as having told the clients.
+    //
+    // Nothing is awaited between the update and the sync: that is the whole
+    // point. A recording that waited for the enrich (which reads git, and a
+    // cold cache means a `git` spawn) would land after this sync and
+    // broadcast twice.
+    const { server, events, setTitle, manager } = await setup(
+      "✳ Wire up the summary column",
+    );
+    server.syncPaneSummaries();
+    await settle(events);
+
+    setTitle("✳ Fix the scroll math");
+    manager.updateSession("claude_pane1", { status: "working" });
+    server.syncPaneSummaries();
+    await settle(events, 1);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("session_updated");
+  });
+
+  it("broadcasts a title-only change on an idle row exactly once", async () => {
+    // No session event of its own, so the scan's sync is the only thing that
+    // will say it; and it says it once, not on every tick afterwards.
+    const { server, events, setTitle } = await setup(
+      "✳ Wire up the summary column",
+    );
+    server.syncPaneSummaries();
+    setTitle("✳ Fix the scroll math");
+    server.syncPaneSummaries();
+    await settle(events, 1);
+    server.syncPaneSummaries();
+    server.syncPaneSummaries();
+    await settle(events);
 
     expect(events).toHaveLength(1);
     expect(events[0].type).toBe("session_updated");

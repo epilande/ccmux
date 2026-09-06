@@ -18,6 +18,7 @@ import {
 } from "../utils/grouping";
 import { SessionItem } from "./SessionItem";
 import { GroupHeader } from "./GroupHeader";
+import type { ResolvedColumns } from "./session-columns";
 import {
   resolveLayout,
   applyPromptDisplay,
@@ -25,6 +26,7 @@ import {
   normalizePrompt,
   promptBlockWidth,
   withoutPrompt,
+  withoutFlexText,
   EMPTY_PROMPT_BLOCK,
   PROMPT_BLOCK_MIN_WIDTH,
 } from "./session-columns";
@@ -136,21 +138,46 @@ export const SessionList: Component<SessionListProps> = (props) => {
       props.columns,
       props.breakpoints,
     );
-    const cols = applyPromptDisplay(
+    return applyPromptDisplay(
       resolved,
       props.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
       !!props.sidebar,
     );
-    // The block renders the same text a `prompt` cell would, so the cell
-    // goes, but only while the block is actually drawn. Otherwise the row
-    // would lose its prompt entirely.
-    //
-    // `summary` is NOT stripped here: whether it would print the block's text
-    // depends on the session, not on the layout — a row whose agent wrote a
-    // real summary keeps its cell on the identity line with the block below.
-    // That per-session call is `hasFieldData`'s, via `blockActive` below.
-    return blockActive() ? withoutPrompt(cols) : cols;
   });
+
+  /**
+   * The layout for a row whose block is drawn and whose agent DID write a
+   * summary: the block renders the same text a `prompt` cell would, so that
+   * cell goes, while `summary` keeps its place on the identity line.
+   */
+  const withBlock = createMemo(() => withoutPrompt(layout()));
+
+  /**
+   * The layout for a row whose block is drawn and whose agent wrote NO
+   * summary: its `summary` cell could only fall back to the prompt, which is
+   * exactly what the block below is already printing, so the row lays out
+   * with no flexible text cell at all.
+   */
+  const withBlockNoSummary = createMemo(() => withoutFlexText(layout()));
+
+  /**
+   * The layout THIS row is measured and drawn by.
+   *
+   * Per row rather than per list because the block's yield rule is a property
+   * of the session: two rows in one list can disagree about whether their
+   * flexible cell would merely repeat the block. Both the height math below
+   * and the `layout` prop read this same call, so a row can never be measured
+   * by one shape and drawn by another.
+   */
+  const rowLayout = (session: EnrichedSession): ResolvedColumns => {
+    if (!blockActive()) return layout();
+    // `== null`, not `=== null`: a picker on this build can be talking to a
+    // daemon that predates the field (the machine-wide daemon runs whatever
+    // was linked until it auto-restarts), and `undefined` there means "no
+    // summary", not "a summary I must make room for". Every other read of
+    // the field is loose or truthy for the same reason.
+    return session.summary == null ? withBlockNoSummary() : withBlock();
+  };
 
   /**
    * The wrapped prompt block, resolved HERE rather than in the row, for the
@@ -186,7 +213,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
 
   const sessionLines = (session: EnrichedSession) =>
     1 +
-    (rowHasContent(session, layout().row2, blockActive()) ? 1 : 0) +
+    (rowHasContent(session, rowLayout(session).row2) ? 1 : 0) +
     promptBlock(session).length;
 
   createEffect(() => {
@@ -295,9 +322,8 @@ export const SessionList: Component<SessionListProps> = (props) => {
         isActiveSession={
           item.filteredSession.session.id === props.activeSessionId
         }
-        layout={layout()}
+        layout={rowLayout(item.filteredSession.session)}
         promptBlock={promptBlock(item.filteredSession.session)}
-        promptBlockActive={blockActive()}
         dimmed={props.dimmed}
         sidebar={props.sidebar}
         onActivate={onActivate}

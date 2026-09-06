@@ -719,7 +719,7 @@ Pass an empty string to clear a side: `ccmux config set columns.row2.left ""`.
 | `pr`      | `short`/`full`        | `full`       | Open PRs for the branch (`#25`/`PR #25`)                                                 |
 | `summary` | —                     | —            | The agent's own summary of the session, falling back to the last prompt (truncated)      |
 
-`summary` is the default subtitle cell, and shows what the agent says it is doing. Claude Code, Copilot, Cursor, OpenCode and oh-my-pi each keep a generated summary in their tmux pane title; the column reads that through a per-agent rule that drops the status glyph, the spinner frame and the app name, so what lands on the row is the summary alone. Every other agent writes its cwd, its own state or a static app name there, and for those the cell falls back to the last prompt. Never both on one line.
+`summary` is the default subtitle cell, and shows what the agent says it is doing. Claude Code, Copilot, Cursor, OpenCode and oh-my-pi each keep a generated summary in their tmux pane title; the column reads that through a per-agent rule that drops the status glyph, the spinner frame and the app name, so what lands on the row is the summary alone. Every other agent writes its cwd, its own state or a static app name there, and for those the cell falls back to the last prompt. A pane title equal to the machine's own hostname is never shown either: that is the seed tmux gives a pane whose agent never set a title. Never both on one line.
 
 `prompt` is unchanged and still shows the raw last prompt. To keep it as the subtitle, name it in the column config:
 
@@ -734,7 +734,7 @@ The `project` cell reads `path:branch`, and a session running in a git worktree 
 
 ### Wrapped prompt block
 
-`promptLines` renders the last prompt as a wrapped block of up to N lines, between the identity row and row 2 — the same text the one-line `prompt` column shows, given room to actually be read.
+`promptLines` renders the last prompt as a wrapped block of up to N lines, below the row's other lines — the same text the one-line `prompt` column shows, given room to actually be read.
 
 ```bash
 ccmux config set promptLines 3          # picker and sidebar

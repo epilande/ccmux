@@ -567,6 +567,26 @@ export function rejectCrossOriginBrowser(req: Request): Response | null {
 /**
  * HTTP/SSE Server for the daemon
  */
+/**
+ * One session's normalized pane-title summary, from the pane the caller
+ * already has in hand.
+ *
+ * The single derivation: `enrichSession` puts it on the wire and
+ * `syncPaneSummaries` decides whether a change is worth a broadcast, and if
+ * those two read the title differently a row either never updates or updates
+ * forever.
+ */
+function paneSummaryOf(
+  session: Session,
+  paneInfo: TmuxPane | null | undefined,
+): string | null {
+  return summaryFromPaneTitle(
+    session.agentType,
+    paneInfo?.paneTitle ?? null,
+    paneInfo?.currentPath ?? session.cwd,
+  );
+}
+
 export class DaemonServer {
   private server: ReturnType<typeof Bun.serve> | null = null;
   private sessionManager: SessionManager;
@@ -579,7 +599,9 @@ export class DaemonServer {
   /**
    * Last NORMALIZED pane-title summary broadcast for each visible session, so
    * `syncPaneSummaries` can tell a real change from the churn around it.
-   * Keyed by session id, cleared wherever `visibleSessions` is.
+   * Written by `recordBroadcast` on every all-client send, never by the send
+   * sites themselves. Keyed by session id, cleared wherever `visibleSessions`
+   * is.
    */
   private lastPaneSummary = new Map<string, string | null>();
   /** Rotating start index for `sweepBranchPRs`, see its docstring. */
@@ -811,6 +833,10 @@ export class DaemonServer {
       if (this.effectiveCwd(session, paneCache) !== cwd) continue;
       const enriched = await this.enrichSession(session);
       if (enriched.gitBranch !== branch) continue;
+      // Recorded off the enriched value rather than through
+      // `recordBroadcast`: the send is conditional, and a session this loop
+      // skips must keep whatever the last real broadcast told the clients.
+      this.lastPaneSummary.set(session.id, enriched.summary);
       this.broadcastEvent({
         type: "session_updated",
         timestamp,
@@ -1013,6 +1039,7 @@ export class DaemonServer {
       tmuxTarget,
       paneCwd,
       paneTitle: paneInfo?.paneTitle ?? null,
+      summary: paneSummaryOf(session, paneInfo),
       // One read, one answer: when git resolved this cwd, the repo name is
       // the main checkout's basename from that SAME read, so `project` and
       // the worktree facts below cannot contradict each other.
@@ -1058,11 +1085,40 @@ export class DaemonServer {
   private async rebroadcastSession(sessionId: string): Promise<void> {
     const session = this.sessionManager.getSession(sessionId);
     if (!session || !this.visibleSessions.has(sessionId)) return;
+    this.recordBroadcast(session);
     this.broadcastEvent({
       type: "session_updated",
       timestamp: new Date().toISOString(),
       session: await this.enrichSession(session),
     });
+  }
+
+  /**
+   * Note that every SSE client is about to be told this session's CURRENT
+   * summary, so the next `syncPaneSummaries` does not say it again.
+   *
+   * Every all-client send of an enriched session goes through here (the three
+   * session-event arms, `rebroadcastSession`, `onBranchPRsChanged`) and only
+   * those: the per-client `init` snapshot reaches one new client, and
+   * recording off it would suppress the broadcast the OTHER clients still
+   * need. Without this funnel a turn that ends by changing status and title
+   * together broadcast twice, once on the event and once on the next scan.
+   *
+   * Called BEFORE the enrich a send waits on, never after: `enrichSession`
+   * reads git, whose cache expires in 30s, so a send can resolve a whole
+   * `git` spawn later than the `syncPaneSummaries` that runs at the end of
+   * the very same scan. The recorded value is exactly what that enrich will
+   * put on the wire, since both read the pane cache in the same tick.
+   */
+  private recordBroadcast(session: Session): void {
+    const paneCache = this.getPaneCache();
+    this.lastPaneSummary.set(
+      session.id,
+      paneSummaryOf(
+        session,
+        session.tmuxPane ? paneCache.get(session.tmuxPane) : null,
+      ),
+    );
   }
 
   /**
@@ -1082,20 +1138,18 @@ export class DaemonServer {
    * every scan tick and this would broadcast the whole roster continuously.
    *
    * A session with no recorded value yet is recorded and NOT broadcast: the
-   * `init` or `session_created` that made it visible already carried its
-   * current title.
+   * `init` that made it visible already carried its current title.
+   *
+   * Runs after the reconcile that may have broadcast the same session for its
+   * own reasons; `recordBroadcast` is what keeps this from saying it twice.
    */
   syncPaneSummaries(): void {
     const paneCache = this.getPaneCache();
     for (const session of this.sessionManager.getSessions()) {
       if (!this.visibleSessions.has(session.id)) continue;
-      const paneInfo = session.tmuxPane
-        ? paneCache.get(session.tmuxPane)
-        : null;
-      const summary = summaryFromPaneTitle(
-        session.agentType,
-        paneInfo?.paneTitle ?? null,
-        paneInfo?.currentPath ?? session.cwd,
+      const summary = paneSummaryOf(
+        session,
+        session.tmuxPane ? paneCache.get(session.tmuxPane) : null,
       );
       const had = this.lastPaneSummary.has(session.id);
       const previous = this.lastPaneSummary.get(session.id) ?? null;
@@ -3904,6 +3958,7 @@ export class DaemonServer {
         // (promoted in the "updated" branch).
         if (this.isVisibleSession(session)) {
           this.visibleSessions.add(session.id);
+          this.recordBroadcast(session);
           return {
             type: "session_created",
             timestamp,
@@ -3921,6 +3976,7 @@ export class DaemonServer {
         if (isVisibleNow && !wasVisible) {
           // Pane just assigned — promote to visible as "created"
           this.visibleSessions.add(session.id);
+          this.recordBroadcast(session);
           return {
             type: "session_created",
             timestamp,
@@ -3928,6 +3984,7 @@ export class DaemonServer {
           };
         }
         if (isVisibleNow && wasVisible) {
+          this.recordBroadcast(session);
           return {
             type: "session_updated",
             timestamp,

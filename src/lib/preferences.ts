@@ -334,7 +334,7 @@ export interface Preferences {
   promptDisplay?: PromptDisplay;
   /**
    * Render the last prompt as a wrapped block of up to this many lines,
-   * between the identity row and row 2 (default 0, off).
+   * below the row's other lines (default 0, off).
    *
    * The `prompt` COLUMN is one truncated line; this is the same text given
    * room to be read. They are the same content, so turning this on removes

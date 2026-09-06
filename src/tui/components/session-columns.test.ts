@@ -6,7 +6,8 @@ import {
   resolveEntry,
   resolveRowSide,
   hasFieldData,
-  sessionSummary,
+  withoutPrompt,
+  withoutFlexText,
   entryRightWidth,
   stripPrompt,
   applyPromptDisplay,
@@ -15,6 +16,7 @@ import {
   prColorState,
   rowHasContent,
   rowHasFlexText,
+  isFlexTextField,
   SIDEBAR_DEFAULT_COLUMNS,
   trailingLabelsWidth,
   fitProjectCell,
@@ -625,15 +627,31 @@ describe("applyPromptDisplay", () => {
     expect(cols.row2).toEqual({ left: [], right: [] });
   });
 
-  it("inline does not duplicate a prompt already on row 1 (custom config)", () => {
-    // User puts prompt on row 1 but leaves the default row2 prompt in place.
+  it("inline leaves row 1 exactly one flexible text cell (custom config)", () => {
+    // User puts `prompt` on row 1 and leaves the default `row2.left:
+    // [summary]` in place. The two are different names for the same filler
+    // and share one width budget, so the flatten drops row 2's rather than
+    // landing two unreadable cells side by side.
     const resolved = resolveColumns(120, {
       row1: { left: ["index", "status", "project", "prompt"] },
     });
     const cols = applyPromptDisplay(resolved, "inline", false);
-    const prompts = cols.row1.left.filter((e) => e.field === "prompt");
-    expect(prompts).toHaveLength(1);
+    const flex = [...cols.row1.left, ...cols.row1.right].filter((e) =>
+      isFlexTextField(e.field),
+    );
+    expect(flex.map((e) => e.field)).toEqual(["prompt"]);
     expect(cols.row2).toEqual({ left: [], right: [] });
+  });
+
+  it("inline drops a duplicate of the same flexible field too", () => {
+    const resolved = resolveColumns(120, {
+      row1: { left: ["index", "status", "project", "summary"] },
+      row2: { left: ["summary"] },
+    });
+    const cols = applyPromptDisplay(resolved, "inline", false);
+    expect(
+      cols.row1.left.filter((e) => e.field === "summary"),
+    ).toHaveLength(1);
   });
 
   it("inline appends pr then prompt when row 1 has no project cell", () => {
@@ -1529,50 +1547,23 @@ describe("fitProjectCell with wide glyphs", () => {
   });
 });
 
-describe("sessionSummary", () => {
-  it("reads the agent's summary off the pane title", () => {
-    const session = mockEnrichedSession({
-      agentType: "claude",
-      paneTitle: "✳ Add dark mode toggle",
-    });
-    expect(sessionSummary(session)).toBe("Add dark mode toggle");
-  });
-
-  it("is null for an agent with no rule", () => {
-    const session = mockEnrichedSession({
-      agentType: "codex",
-      paneTitle: "probe-codex-x7",
-    });
-    expect(sessionSummary(session)).toBeNull();
-  });
-
-  it("compares omp's pre-first-turn title against the PANE cwd", () => {
-    // The pane's cwd is where the agent really is; `cwd` is the log-derived
-    // fallback, which can lag a `cd`.
-    const session = mockEnrichedSession({
-      agentType: "omp",
-      paneTitle: "π > live-dir",
-      cwd: "/Users/test/stale-dir",
-      paneCwd: "/Users/test/live-dir",
-    });
-    expect(sessionSummary(session)).toBeNull();
-  });
-});
-
 describe("hasFieldData(summary)", () => {
   const withSummary = mockEnrichedSession({
     agentType: "claude",
     paneTitle: "✳ Add dark mode toggle",
+    summary: "Add dark mode toggle",
     lastPrompt: "commit and push",
   });
   const fallback = mockEnrichedSession({
     agentType: "codex",
     paneTitle: "probe-codex-x7",
+    summary: null,
     lastPrompt: "commit and push",
   });
   const neither = mockEnrichedSession({
     agentType: "codex",
     paneTitle: "probe-codex-x7",
+    summary: null,
     lastPrompt: null,
   });
 
@@ -1588,43 +1579,87 @@ describe("hasFieldData(summary)", () => {
     expect(hasFieldData(neither, "summary")).toBe(false);
   });
 
-  it("keeps a real summary while the wrapped prompt block is drawn", () => {
-    // The block is the prompt; a real summary is different text, so the cell
-    // stays on the identity line with the block below it. That pairing is the
-    // one way to see both at once (issue #183).
-    expect(hasFieldData(withSummary, "summary", true)).toBe(true);
-  });
-
-  it("yields to the block when it would only repeat the prompt", () => {
-    expect(hasFieldData(fallback, "summary", true)).toBe(false);
-  });
-
-  it("leaves every other field's answer alone under the block", () => {
-    expect(hasFieldData(fallback, "prompt", true)).toBe(true);
-    expect(hasFieldData(fallback, "status", true)).toBe(true);
-  });
-});
-
-describe("rowHasContent with the prompt block drawn", () => {
-  const row = { left: [{ field: "summary" as const }], right: [] };
-
-  it("keeps row 2 for a session whose agent wrote a summary", () => {
-    const session = mockEnrichedSession({
+  it("falls back to the prompt when the daemon ships no field at all", () => {
+    // A picker on this build can briefly talk to a daemon that predates
+    // `summary` (the machine-wide daemon runs whatever was linked until it
+    // auto-restarts). `undefined` there means the row has no summary, not
+    // that it has one worth a cell.
+    const legacy = mockEnrichedSession({
       agentType: "claude",
       paneTitle: "✳ Add dark mode toggle",
       lastPrompt: "commit and push",
     });
-    expect(rowHasContent(session, row, true)).toBe(true);
+    delete (legacy as { summary?: string | null }).summary;
+    expect(legacy.summary).toBeUndefined();
+    expect(hasFieldData(legacy, "summary")).toBe(true);
+
+    const legacyNoPrompt = mockEnrichedSession({
+      agentType: "claude",
+      lastPrompt: null,
+    });
+    delete (legacyNoPrompt as { summary?: string | null }).summary;
+    expect(hasFieldData(legacyNoPrompt, "summary")).toBe(false);
   });
 
-  it("collapses row 2 for a session whose cell would repeat the prompt", () => {
-    const session = mockEnrichedSession({
+  it("reads the shipped field, never the raw title", () => {
+    // The daemon owns the per-agent rule (`summaryFromPaneTitle`); a client
+    // that re-derived it could disagree with the broadcast that carried it.
+    const shipped = mockEnrichedSession({
       agentType: "codex",
-      paneTitle: "probe-codex-x7",
+      paneTitle: "✳ Looks like a claude title",
+      summary: null,
+      lastPrompt: null,
+    });
+    expect(hasFieldData(shipped, "summary")).toBe(false);
+  });
+});
+
+/**
+ * The wrapped prompt block's yield rule is a LAYOUT decision, made per row by
+ * SessionList: a row whose cell could only repeat the block loses the cell
+ * (`withoutFlexText`), a row with a real summary keeps it (`withoutPrompt`).
+ * Row 2 then collapses or not on the layout it was handed, with no separate
+ * flag for the two to disagree about.
+ */
+describe("withoutFlexText", () => {
+  const cols = () =>
+    resolveColumns(120, {
+      row1: { left: ["index", "status", "project"], right: ["pane"] },
+      row2: { left: ["summary"], right: ["pr"] },
+    });
+
+  it("drops both flexible text cells, keeping the rest of each row", () => {
+    const stripped = withoutFlexText(
+      resolveColumns(120, {
+        row1: { left: ["index", "prompt", "project"] },
+        row2: { left: ["summary"], right: ["pr"] },
+      }),
+    );
+    expect(stripped.row1.left.map((e) => e.field)).toEqual([
+      "index",
+      "project",
+    ]);
+    expect(stripped.row2.left).toEqual([]);
+    expect(stripped.row2.right.map((e) => e.field)).toEqual(["pr"]);
+  });
+
+  it("collapses row 2 for a session whose cell would repeat the block", () => {
+    const fallback = mockEnrichedSession({
+      agentType: "codex",
+      summary: null,
       lastPrompt: "commit and push",
     });
-    expect(rowHasContent(session, row, false)).toBe(true);
-    expect(rowHasContent(session, row, true)).toBe(false);
+    expect(rowHasContent(fallback, cols().row2)).toBe(true);
+    expect(rowHasContent(fallback, withoutFlexText(cols()).row2)).toBe(false);
+  });
+
+  it("keeps row 2 for a session whose agent wrote a summary", () => {
+    const withSummary = mockEnrichedSession({
+      agentType: "claude",
+      summary: "Add dark mode toggle",
+      lastPrompt: "commit and push",
+    });
+    expect(rowHasContent(withSummary, withoutPrompt(cols()).row2)).toBe(true);
   });
 });
 

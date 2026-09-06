@@ -1,4 +1,3 @@
-import type { SummaryTitleRule } from "./pane-summary";
 import { MARKERS_DIR } from "./config";
 import type {
   AgentConfig,
@@ -6,6 +5,50 @@ import type {
   TerminalRuleConfig,
 } from "./preferences";
 import type { AttentionType, SessionStatus } from "../types/session";
+
+/**
+ * How one agent's tmux pane title reduces to a session summary.
+ *
+ * Every agent writes something to `pane_title`, but only five write a
+ * generated summary of the work; the rest echo the cwd (already the `project`
+ * column), their own run state (already `status`), or a static app name. So
+ * this is a per-agent rule rather than a generic filter, the same shape
+ * `terminalRules`, `errorRules` and `readyPattern` already take, for the same
+ * reason: once one agent needs its own pattern there is a table either way.
+ *
+ * An agent with no rule has no summary, and its cell falls back to the prompt.
+ * Applied by `summaryFromPaneTitle` (`src/lib/pane-summary.ts`), which is why
+ * the shape lives here and that module imports it, never the reverse.
+ */
+export interface SummaryTitleRule {
+  /**
+   * Matches a title this agent wrote; capture group 1 is the summary. A title
+   * that does not match has no summary.
+   *
+   * One regex, rather than a list of decorations to remove, because the match
+   * is what proves the title is the AGENT'S. tmux seeds `pane_title` to the
+   * hostname, so a pane whose agent has not written a title yet reads back as
+   * the machine name, and anything that merely stripped decoration would show
+   * that as the session's summary. Never `/g`: these are `test`ed and
+   * `exec`ed repeatedly, and a global regex carries `lastIndex` between calls.
+   */
+  match: RegExp;
+  /**
+   * Whole titles that carry no summary: the app's own name, the placeholder it
+   * shows before the first turn. Tested against the whole title and against
+   * the captured summary, so a rule can name either spelling.
+   */
+  empty?: RegExp[];
+  /**
+   * Whether a summary equal to the pane's cwd basename reads as empty.
+   *
+   * For omp, whose title is `π > <summary>` after a turn but
+   * `π > <cwd>` before one: the prefix is present either way, so only the
+   * cwd comparison separates a real session title from the directory name
+   * that the `project` column already carries.
+   */
+  cwdBasenameIsEmpty?: boolean;
+}
 
 export interface TerminalRule {
   matchAny?: string[];
@@ -616,8 +659,9 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // `✳ Say hello` after a turn, `✳ Claude Code` before one; the glyph is a
     // braille spinner frame while working. `status` already draws that state,
     // so the glyph goes, and the placeholder title is not a summary.
+    // `✳` idle, a braille spinner frame while working, then the summary.
     summaryTitle: {
-      strip: [/^[\u2733\u2800-\u28FF\s]+/],
+      match: /^[\u2733\u2800-\u28FF\s]+(.+)$/,
       empty: [/^Claude Code$/],
     },
     hooks: { markerDir: MARKERS_DIR, type: "claude" },
@@ -763,8 +807,9 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // Verified live on OpenCode 1.18.29: pane title is `OpenCode` before the
     // first turn, `OC | <session title>` after. Requiring the prefix (not
     // just stripping it) keeps tmux's hostname seed from reading as a summary.
+    // `OC | <session title>` on 1.18.29; the bare app name before the first.
     summaryTitle: {
-      strip: [/^OC \| /],
+      match: /^OC \| (.+)$/,
       empty: [/^OpenCode$/],
     },
   },
@@ -1038,7 +1083,10 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // `Hello Bot` after a turn, the app's own name before one. Nothing to
     // strip: cursor writes the bare summary, which is also why a pane it has
     // not titled yet still reads back as tmux's hostname seed.
-    summaryTitle: { empty: [/^Cursor Agent$/] },
+    // cursor writes the bare summary with no decoration at all, so any title
+    // is taken as one. Nothing in the title proves cursor wrote it, which is
+    // what the hostname guard in `summaryFromPaneTitle` is there to cover.
+    summaryTitle: { match: /^(.+)$/, empty: [/^Cursor Agent$/] },
     hooks: { markerDir: MARKERS_DIR, type: "cursor" },
   },
   {
@@ -1301,8 +1349,10 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // `π > <cwd basename>` before the first turn — the prefix is there either
     // way, so only the cwd comparison separates a session title from the
     // directory name `project` already carries.
+    // `π > <summary>` idle, `π <braille> <summary>` while working; the same
+    // prefix wraps the cwd before the first turn, hence `cwdBasenameIsEmpty`.
     summaryTitle: {
-      strip: [/^π\s*[>\u2800-\u28FF]\s*/],
+      match: /^π\s*[>\u2800-\u28FF]\s*(.+)$/,
       cwdBasenameIsEmpty: true,
     },
     hooks: { markerDir: MARKERS_DIR, type: "omp" },
@@ -1513,8 +1563,10 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // `Implement Hello Function - GitHub Copilot`: the summary with the app
     // name appended. Bare, the app name is the placeholder it shows before a
     // turn.
+    // `<summary> - GitHub Copilot`; lazy capture so a summary of its own
+    // containing " - " keeps every part but the trailing app name.
     summaryTitle: {
-      strip: [/\s*-\s*GitHub Copilot$/],
+      match: /^(.+?)\s*-\s*GitHub Copilot$/,
       empty: [/^GitHub Copilot$/],
     },
     hooks: { markerDir: MARKERS_DIR, type: "copilot" },

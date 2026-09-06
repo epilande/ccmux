@@ -15,7 +15,6 @@ import {
   COLUMN_FIELDS,
   DEFAULT_BREAKPOINTS,
 } from "../../lib/preferences";
-import { summaryFromPaneTitle } from "../../lib/pane-summary";
 import type { EnrichedSession, BranchPR } from "../../types";
 import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
 
@@ -293,13 +292,20 @@ function flattenToRow1(cols: ResolvedColumns): ResolvedColumns {
   // reads as the branch metadata it is, rather than floating past the
   // timestamp at the far right; the prompt becomes the flexible filler at the
   // end of the left side. A field already on row 1 is dropped so nothing is
-  // doubled (a custom `prompt` on row 1 plus the default `row2: [prompt]`
-  // would otherwise render it twice, putting two flex fillers on one row).
+  // doubled.
   const present = new Set(
     [...cols.row1.left, ...cols.row1.right].map((e) => e.field),
   );
+  // Row 1 can hold ONE flexible text cell: they share a single budget, and a
+  // second one leaves both too narrow to read. So a flex field is dropped
+  // when row 1 already carries ANY of them, not merely the same one: a custom
+  // `row1.left: [prompt]` against the default `row2.left: [summary]` is two
+  // different names for the same filler.
+  const row1HasFlexText = rowHasFlexText(cols.row1);
   const fresh = (entries: ResolvedEntry[]) =>
-    entries.filter((e) => !present.has(e.field));
+    entries.filter((e) =>
+      isFlexTextField(e.field) ? !row1HasFlexText : !present.has(e.field),
+    );
   const meta = fresh(cols.row2.right);
   const prompt = fresh(cols.row2.left);
   const projectIdx = cols.row1.left.findIndex((e) => e.field === "project");
@@ -431,38 +437,16 @@ export function prLabel(session: EnrichedSession, mode?: string): string {
 }
 
 /**
- * The agent's own summary of what this session is doing, or null when its
- * agent writes none. Five built-ins keep a generated summary in the tmux pane
- * title; the rest echo the cwd, their run state, or a static app name, and
- * `summaryFromPaneTitle` is the per-agent rule that tells them apart.
- *
- * The `summary` cell falls back to the prompt whenever this is null, so this
- * returns null rather than "" — absent, not blank.
- */
-export function sessionSummary(session: EnrichedSession): string | null {
-  return summaryFromPaneTitle(
-    session.agentType,
-    session.paneTitle,
-    session.paneCwd ?? session.cwd,
-  );
-}
-
-/**
  * Whether a single field has displayable data on this session.
  *
- * `promptBlockActive` says the wrapped prompt block is being DRAWN for this
- * list. Only `summary` reads it, and only to answer the #159 yield rule from
- * the far side: the block already prints the prompt, so a cell that would
- * print it again has nothing of its own to show. A `summary` carrying a real
- * agent summary is not that cell and keeps its place on the row.
- *
- * A literal `prompt` cell needs no such test — `withoutPrompt` removes it from
- * the layout outright whenever the block is drawn.
+ * Nothing here knows about the wrapped prompt block: a row that would only
+ * repeat the block's own text drops the cell from its LAYOUT instead (see
+ * `withoutFlexText` and SessionList's per-row choice), so both the measured
+ * height and the drawn row read one object rather than agreeing by hand.
  */
 export function hasFieldData(
   session: EnrichedSession,
   field: ColumnField,
-  promptBlockActive = false,
 ): boolean {
   switch (field) {
     case "index":
@@ -488,9 +472,11 @@ export function hasFieldData(
     case "pr":
       return sessionPRs(session).length > 0;
     case "summary":
-      if (sessionSummary(session) !== null) return true;
-      if (promptBlockActive) return false;
-      return hasFieldData(session, "prompt");
+      // The cell falls back to the prompt, so it has data whenever either
+      // does. The daemon ships `summary` already normalized; `!= null` also
+      // covers a daemon too old to ship it at all, whose `undefined` means
+      // no summary rather than one this cell should try to render.
+      return session.summary != null || hasFieldData(session, "prompt");
   }
 }
 
@@ -503,10 +489,9 @@ export function hasFieldData(
 export function rowHasContent(
   session: EnrichedSession,
   row: ResolvedRow,
-  promptBlockActive = false,
 ): boolean {
   const counts = (e: ResolvedEntry) =>
-    e.field !== "time" && hasFieldData(session, e.field, promptBlockActive);
+    e.field !== "time" && hasFieldData(session, e.field);
   return row.left.some(counts) || row.right.some(counts);
 }
 
@@ -538,11 +523,32 @@ export function rowHasFlexText(row: ResolvedRow): boolean {
  * too narrow for a readable block), the one-line cell comes back.
  */
 export function withoutPrompt(cols: ResolvedColumns): ResolvedColumns {
-  const drop = (entries: ResolvedEntry[]) =>
-    entries.filter((e) => e.field !== "prompt");
+  return withoutFields(cols, (field) => field === "prompt");
+}
+
+/**
+ * Drop BOTH flexible text cells from both rows: the `prompt` the block
+ * replaces and the `summary` that would fall back to it.
+ *
+ * The per-ROW half of the block's yield rule, chosen per session by
+ * SessionList: a row whose agent wrote no summary has a `summary` cell that
+ * can only print the block's own text, so that row lays out without it. A row
+ * whose agent DID write one keeps `withoutPrompt`'s layout, summary on the
+ * identity line and the block below.
+ */
+export function withoutFlexText(cols: ResolvedColumns): ResolvedColumns {
+  return withoutFields(cols, isFlexTextField);
+}
+
+function withoutFields(
+  cols: ResolvedColumns,
+  drop: (field: ColumnField) => boolean,
+): ResolvedColumns {
+  const keep = (entries: ResolvedEntry[]) =>
+    entries.filter((e) => !drop(e.field));
   return {
-    row1: { left: drop(cols.row1.left), right: drop(cols.row1.right) },
-    row2: { left: drop(cols.row2.left), right: drop(cols.row2.right) },
+    row1: { left: keep(cols.row1.left), right: keep(cols.row1.right) },
+    row2: { left: keep(cols.row2.left), right: keep(cols.row2.right) },
   };
 }
 

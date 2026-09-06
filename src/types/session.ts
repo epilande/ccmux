@@ -315,14 +315,25 @@ export interface EnrichedSession extends Session {
   /** The pane's current working directory (preferred over log-derived cwd) */
   paneCwd: string | null;
   /**
-   * The tmux pane title, raw. Five built-in agents keep a generated summary
-   * of the session in it, each behind its own decoration (a status glyph, a
-   * spinner frame, an appended app name); the rest write their cwd, their own
-   * run state, or a static app name. `summaryFromPaneTitle`
-   * (`lib/pane-summary.ts`) is the per-agent rule that tells those apart, and
-   * the `summary` column is what renders the result.
+   * The tmux pane title, raw. Kept on the wire beside the normalized
+   * {@link summary} below: it is what `ccmux show --json` has to show anyone
+   * working out what a new agent's rule should match.
    */
   paneTitle: string | null;
+  /**
+   * The agent's own summary of what this session is doing, normalized, or
+   * null when this agent writes none.
+   *
+   * Five built-in agents keep a generated summary in {@link paneTitle}, each
+   * behind its own decoration (a status glyph, a spinner frame, an appended
+   * app name); the rest write their cwd, their own run state, or a static app
+   * name. `summaryFromPaneTitle` (`lib/pane-summary.ts`) is the per-agent rule
+   * that tells those apart, and the DAEMON is what runs it: clients render
+   * this field and never re-derive it, so the rule table, the SSE broadcast
+   * decision and the `summary` column can never disagree about what a title
+   * means.
+   */
+  summary: string | null;
   /** Whether the session's cwd is a linked git worktree */
   isWorktree: boolean;
   /**
