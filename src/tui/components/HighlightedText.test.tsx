@@ -20,6 +20,30 @@ async function renderHighlight(text: string) {
   return setup.captureCharFrame();
 }
 
+/** Issue #186: a windowed prompt whose match sits one column past the box.
+ *  Visible width of this markup (tags stripped) is 50. */
+const WINDOWED_PROMPT =
+  "…laining what a terminal <b>multiplexer</b> is to someone";
+
+async function renderHighlightInRowBox(width: number) {
+  setup = await testRender(
+    () => (
+      <box width={width} height={1} flexDirection="row">
+        <box flexGrow={1} flexShrink={1} flexDirection="row">
+          <HighlightedText
+            text={WINDOWED_PROMPT}
+            highlightColor="yellow"
+            baseColor="white"
+          />
+        </box>
+      </box>
+    ),
+    { width, height: 2 },
+  );
+  await setup.renderOnce();
+  return setup.captureCharFrame();
+}
+
 describe("HighlightedText", () => {
   it("renders plain text without markers", async () => {
     const frame = await renderHighlight("hello world");
@@ -51,5 +75,15 @@ describe("HighlightedText", () => {
     const frame = await renderHighlight("<b>all bold</b>");
     expect(frame).toContain("all bold");
     expect(frame).not.toContain("<b>");
+  });
+
+  // SessionItem's prompt cell is a flexGrow/flexShrink row. When the
+  // windowed markup fills the budget exactly, Yoga shrinks the box by 1–2
+  // cols. A sibling-per-segment render used to eat the space before <b>
+  // (`terminalmultiplexer`). One Text node must keep that space.
+  it("keeps the space before a highlight when the row box is 1 col short", async () => {
+    const frame = await renderHighlightInRowBox(49);
+    expect(frame).toContain("terminal multiplexer");
+    expect(frame).not.toContain("terminalmultiplexer");
   });
 });

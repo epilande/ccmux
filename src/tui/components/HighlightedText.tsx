@@ -1,4 +1,4 @@
-import type { Component } from "solid-js";
+import type { Component, JSX } from "solid-js";
 import { For } from "solid-js";
 
 interface HighlightedTextProps {
@@ -33,20 +33,32 @@ function parseHighlight(text: string): Segment[] {
   return segments;
 }
 
+// TextNodeRenderable accepts `fg`; @opentui/solid 0.1.97's SpanProps is
+// ComponentProps<{}, TextNodeRenderable> and drops it.
+function spanFg(color?: string): JSX.IntrinsicElements["span"] {
+  return { fg: color } as unknown as JSX.IntrinsicElements["span"];
+}
+
 export const HighlightedText: Component<HighlightedTextProps> = (props) => {
   const segments = () => parseHighlight(props.text);
 
+  // One Text node, not one per segment. Sibling Texts in a flexShrink row
+  // let Yoga eat the space before a highlight when the box is 1–2 cols
+  // short of the windowed line (issue #186). Shrink then happens once,
+  // at the end of the line.
   return (
-    <For each={segments()}>
-      {(segment) =>
-        segment.bold ? (
-          <text fg={props.highlightColor}>
-            <b>{segment.text}</b>
-          </text>
-        ) : (
-          <text fg={props.baseColor}>{segment.text}</text>
-        )
-      }
-    </For>
+    <text fg={props.baseColor}>
+      <For each={segments()}>
+        {(segment) =>
+          segment.bold ? (
+            <span {...spanFg(props.highlightColor)}>
+              <b>{segment.text}</b>
+            </span>
+          ) : (
+            segment.text
+          )
+        }
+      </For>
+    </text>
   );
 };
