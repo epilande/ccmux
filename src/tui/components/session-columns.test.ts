@@ -649,9 +649,26 @@ describe("applyPromptDisplay", () => {
       row2: { left: ["summary"] },
     });
     const cols = applyPromptDisplay(resolved, "inline", false);
-    expect(
-      cols.row1.left.filter((e) => e.field === "summary"),
-    ).toHaveLength(1);
+    expect(cols.row1.left.filter((e) => e.field === "summary")).toHaveLength(1);
+  });
+
+  it("inline keeps one flex cell when row 2 carries two of its own", () => {
+    // The other way a second flexible cell reaches the collapsed row: row 1
+    // has none, and row 2 names both. The slot is claimed once, so the first
+    // entry survives and the second goes.
+    const resolved = resolveColumns(120, {
+      row2: { left: ["summary", "prompt"] },
+    });
+    expect(resolved.row2.left.map((e) => e.field)).toEqual([
+      "summary",
+      "prompt",
+    ]);
+    const cols = applyPromptDisplay(resolved, "inline", false);
+    const flex = [...cols.row1.left, ...cols.row1.right].filter((e) =>
+      isFlexTextField(e.field),
+    );
+    expect(flex.map((e) => e.field)).toEqual(["summary"]);
+    expect(cols.row2).toEqual({ left: [], right: [] });
   });
 
   it("inline appends pr then prompt when row 1 has no project cell", () => {
@@ -721,7 +738,9 @@ describe("rowHasFlexText", () => {
   });
 
   it("is true when the prompt sits on the right side", () => {
-    expect(rowHasFlexText({ left: [], right: [{ field: "prompt" }] })).toBe(true);
+    expect(rowHasFlexText({ left: [], right: [{ field: "prompt" }] })).toBe(
+      true,
+    );
   });
 
   it("is false when no prompt entry is present", () => {

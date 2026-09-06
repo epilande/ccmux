@@ -265,9 +265,14 @@ export function resolveLayout(
 }
 
 /**
- * Drop the prompt entirely (the `off` prompt mode): row 2 is dropped
+ * Drop the per-turn text entirely (the `off` prompt mode): row 2 is dropped
  * wholesale (density is the point of turning it off, so the PR cell goes
- * too), and a prompt placed on row 1 by a custom layout is stripped as well.
+ * too), and a flexible text cell placed on row 1 by a custom layout is
+ * stripped as well.
+ *
+ * BOTH flexible cells go, not just `prompt`: `summary` falls back to the
+ * prompt, so leaving it behind would keep showing the very text the toggle
+ * was pressed to hide.
  */
 export function stripPrompt(cols: ResolvedColumns): ResolvedColumns {
   // Both flexible text cells go: `summary` falls back to the prompt, so
@@ -284,7 +289,7 @@ export function stripPrompt(cols: ResolvedColumns): ResolvedColumns {
  * Collapse row 2 onto row 1 for single-line (`inline`) display: every row-2
  * entry joins the end of the matching row-1 side, and row 2 is emptied. The
  * prompt cell flexes to fill row 1's middle gap (see SessionItem's
- * `promptOnRow` handling), so the per-turn subtitle rides the identity line
+ * `flexOnRow` handling), so the per-turn subtitle rides the identity line
  * instead of earning its own row.
  */
 function flattenToRow1(cols: ResolvedColumns): ResolvedColumns {
@@ -296,16 +301,24 @@ function flattenToRow1(cols: ResolvedColumns): ResolvedColumns {
   const present = new Set(
     [...cols.row1.left, ...cols.row1.right].map((e) => e.field),
   );
-  // Row 1 can hold ONE flexible text cell: they share a single budget, and a
-  // second one leaves both too narrow to read. So a flex field is dropped
-  // when row 1 already carries ANY of them, not merely the same one: a custom
-  // `row1.left: [prompt]` against the default `row2.left: [summary]` is two
-  // different names for the same filler.
-  const row1HasFlexText = rowHasFlexText(cols.row1);
+  // The collapsed row can hold ONE flexible text cell: they share a single
+  // budget, and a second one leaves both too narrow to read. So the slot is
+  // claimed once and every later flex field is dropped, whichever name it
+  // goes by. That covers both ways a second one arrives: row 1 already
+  // carrying one (a custom `row1.left: [prompt]` against the default
+  // `row2.left: [summary]` is two names for the same filler), and row 2
+  // carrying two of its own (`row2.left: [summary, prompt]`).
+  //
+  // Stateful, so the order here has to match the assembly order below: `meta`
+  // is filtered first and lands first, ahead of `prompt`.
+  let flexTaken = rowHasFlexText(cols.row1);
   const fresh = (entries: ResolvedEntry[]) =>
-    entries.filter((e) =>
-      isFlexTextField(e.field) ? !row1HasFlexText : !present.has(e.field),
-    );
+    entries.filter((e) => {
+      if (!isFlexTextField(e.field)) return !present.has(e.field);
+      if (flexTaken) return false;
+      flexTaken = true;
+      return true;
+    });
   const meta = fresh(cols.row2.right);
   const prompt = fresh(cols.row2.left);
   const projectIdx = cols.row1.left.findIndex((e) => e.field === "project");
@@ -514,13 +527,20 @@ export function rowHasFlexText(row: ResolvedRow): boolean {
 
 /**
  * Drop every `prompt` cell from both rows, leaving the rest of each row
- * intact — unlike `stripPrompt`, which also clears row 2 wholesale because
- * `promptDisplay: "off"` means "no prompt anywhere, collapse the row".
+ * intact, `summary` included. Unlike `stripPrompt`, which also clears row 2
+ * wholesale because `promptDisplay: "off"` means "no per-turn text anywhere,
+ * collapse the row".
  *
- * Used when the wrapped prompt block is DRAWN: the block IS the prompt, so a
- * `prompt` column alongside it would print the same text twice. Whenever the
- * block yields instead (a search is active, `promptDisplay: "off"`, or a rail
- * too narrow for a readable block), the one-line cell comes back.
+ * Used when the wrapped prompt block is DRAWN and the row has a real summary
+ * to keep: the block IS the prompt, so a `prompt` column alongside it would
+ * print the same text twice, while the summary is different text and earns
+ * its place on the identity line. A row whose agent wrote no summary takes
+ * `withoutFlexText` instead, since its `summary` cell could only fall back to
+ * the block's own text. SessionList picks between the two per session.
+ *
+ * Whenever the block yields entirely (a search is active, `promptDisplay:
+ * "off"`, or a rail too narrow for a readable block), neither applies and the
+ * one-line cell comes back.
  */
 export function withoutPrompt(cols: ResolvedColumns): ResolvedColumns {
   return withoutFields(cols, (field) => field === "prompt");

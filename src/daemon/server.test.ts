@@ -102,6 +102,9 @@ type ServerInternals = {
   };
   onBranchPRsChanged(cwd: string, branch: string): Promise<void>;
   visibleSessions: Set<string>;
+  /** Exposed so a test can read what was last put on the wire for a session,
+   *  which is the invariant the three writers of this map all keep. */
+  lastPaneSummary: Map<string, string | null>;
   lastSidebarState: {
     selectedSessionId: string | null;
     selectedHeaderKey: string | null;
@@ -821,6 +824,49 @@ describe("DaemonServer", () => {
       // handler fires once per key, so this filter is what keeps a cold
       // cache from going sessions × keys.
       expect(seen).toEqual(["match"]);
+      spy.mockRestore();
+    });
+
+    it("drops a session removed during the enrich await", async () => {
+      const { manager, internals } = createServer();
+      manager.createSession(
+        "match",
+        "/Users/test/.claude/projects/-Users-test-proj/match.jsonl",
+      );
+      internals.visibleSessions.add("match");
+
+      const events: SSEEvent[] = [];
+      internals.broadcastEvent = (event: SSEEvent) => {
+        events.push(event);
+      };
+      // The manager's own created-event fan-out is async and already runs this
+      // session through `recordBroadcast`. Drain it, then clear both, so what
+      // the assertions see is about this handler alone.
+      await Bun.sleep(50);
+      events.length = 0;
+      internals.lastPaneSummary.delete("match");
+
+      // The removal lands inside the await, exactly where the pre-await
+      // visibility check cannot see it.
+      const spy = spyOn(
+        internals as unknown as { enrichSession: (s: Session) => unknown },
+        "enrichSession",
+      ).mockImplementation((s: Session) => {
+        internals.visibleSessions.delete(s.id);
+        return Promise.resolve({
+          id: s.id,
+          gitBranch: "feat/x",
+          summary: "Wire up the summary column",
+        } as unknown as EnrichedSession);
+      });
+
+      await internals.onBranchPRsChanged("/Users/test/proj", "feat/x");
+
+      // No announcement for a session that is already gone, and no map entry
+      // for it either: the sync iterates visible sessions only, so nothing
+      // would ever reap it.
+      expect(events).toEqual([]);
+      expect(internals.lastPaneSummary.has("match")).toBe(false);
       spy.mockRestore();
     });
   });
@@ -4708,7 +4754,6 @@ describe("POST /spawn", () => {
     }
   });
 
-
   it("refuses a prompt spawn for an agent with no promptCommand", async () => {
     // The old code emitted `--prompt` for every agent, which silently
     // means one-shot print mode (Copilot) or an unknown flag (pi).
@@ -4897,7 +4942,6 @@ describe("POST /spawn", () => {
         restore();
       }
     });
-
 
     it("takes the agent from the source, ignoring the caller's", async () => {
       const { manager, internals } = serverForAgents([forkAgent, noForkAgent]);
@@ -9098,10 +9142,7 @@ describe("GET /prs", () => {
     const { internals } = createServer();
     const restore = withStubbedGh([LIST_ROW]);
     try {
-      const byCwd = await listPRs(
-        internals,
-        `cwd=${encodeURIComponent(repo)}`,
-      );
+      const byCwd = await listPRs(internals, `cwd=${encodeURIComponent(repo)}`);
       expect(
         ((await byCwd.json()) as PRListResponse).repos[0]?.repoRoot,
       ).toContain("repo");
@@ -9230,9 +9271,7 @@ describe("GET /prs caching", () => {
     repo: string,
   ): Promise<PRListResponse> {
     const res = await internals.handleRequest(
-      new Request(
-        `http://127.0.0.1:2269/prs?repo=${encodeURIComponent(repo)}`,
-      ),
+      new Request(`http://127.0.0.1:2269/prs?repo=${encodeURIComponent(repo)}`),
     );
     return (await res.json()) as PRListResponse;
   }
@@ -9289,7 +9328,9 @@ describe("GET /prs caching", () => {
       const second = listPRs(internals, repo);
       await Promise.all([first, second]);
       expect(gh.calls()).toBe(1);
-      expect([...internals.prListCache.entries.values()][0]?.done).not.toBeNull();
+      expect(
+        [...internals.prListCache.entries.values()][0]?.done,
+      ).not.toBeNull();
     } finally {
       gh.restore();
     }
@@ -9487,15 +9528,19 @@ describe("GET /issues", () => {
   function withSplitGh() {
     const bin = join(root, "bin");
     mkdirSync(bin, { recursive: true });
-    writeFileSync(join(bin, "gh"), [
-      "#!/bin/sh",
-      `echo "$1" >> '${join(bin, "calls")}'`,
-      'if [ "$1" = "issue" ]; then',
-      `  cat '${join(bin, "issues.json")}'`,
-      "else",
-      `  cat '${join(bin, "prs.json")}'`,
-      "fi",
-    ].join("\n") + "\n", { mode: 0o755 });
+    writeFileSync(
+      join(bin, "gh"),
+      [
+        "#!/bin/sh",
+        `echo "$1" >> '${join(bin, "calls")}'`,
+        'if [ "$1" = "issue" ]; then',
+        `  cat '${join(bin, "issues.json")}'`,
+        "else",
+        `  cat '${join(bin, "prs.json")}'`,
+        "fi",
+      ].join("\n") + "\n",
+      { mode: 0o755 },
+    );
     writeFileSync(join(bin, "issues.json"), JSON.stringify([ISSUE_ROW]));
     writeFileSync(join(bin, "prs.json"), JSON.stringify([]));
     writeFileSync(join(bin, "calls"), "");
@@ -9686,6 +9731,13 @@ describe("syncPaneSummaries", () => {
       pid: 42,
     });
     internals.visibleSessions.add("claude_pane1");
+    // `syncPaneSummaries` early-returns with nobody listening, so the whole
+    // describe needs one connected client. The stub below replaces
+    // `broadcastEvent`, so this controller never actually receives anything.
+    internals.sseClients.set("client-0", {
+      id: "client-0",
+      controller: { enqueue() {} },
+    });
 
     const events: SSEEvent[] = [];
     internals.broadcastEvent = (event: SSEEvent) => {
@@ -9705,7 +9757,7 @@ describe("syncPaneSummaries", () => {
     // handing the array over — every count below is about this pass alone.
     await drain();
     events.length = 0;
-    return { server, events, setTitle, manager };
+    return { server, events, setTitle, manager, internals };
   }
 
   const drain = () => new Promise((r) => setTimeout(r, 50));
@@ -9734,7 +9786,9 @@ describe("syncPaneSummaries", () => {
   });
 
   it("broadcasts when the summary changes", async () => {
-    const { server, events, setTitle } = await setup("✳ Wire up the summary column");
+    const { server, events, setTitle } = await setup(
+      "✳ Wire up the summary column",
+    );
     server.syncPaneSummaries();
     setTitle("✳ Fix the scroll math");
     server.syncPaneSummaries();
@@ -9790,7 +9844,9 @@ describe("syncPaneSummaries", () => {
   it("stays quiet while only the spinner frame turns", async () => {
     // codex and omp rewrite the title on every frame. Comparing the raw
     // string would broadcast the whole roster on every scan tick.
-    const { server, events, setTitle } = await setup("⠂ Wire up the summary column");
+    const { server, events, setTitle } = await setup(
+      "⠂ Wire up the summary column",
+    );
     server.syncPaneSummaries();
     for (const glyph of ["⠄", "⡀", "⢀", "⠠", "✳"]) {
       setTitle(`${glyph} Wire up the summary column`);
@@ -9831,7 +9887,9 @@ describe("syncPaneSummaries", () => {
   });
 
   it("broadcasts when a summary disappears", async () => {
-    const { server, events, setTitle } = await setup("✳ Wire up the summary column");
+    const { server, events, setTitle } = await setup(
+      "✳ Wire up the summary column",
+    );
     server.syncPaneSummaries();
     setTitle("✳ Claude Code");
     server.syncPaneSummaries();
@@ -9855,6 +9913,12 @@ describe("syncPaneSummaries", () => {
     internals.broadcastEvent = (event: SSEEvent) => {
       events.push(event);
     };
+    // Without a client the sync early-returns and this would pass for the
+    // wrong reason: the visibility filter is what it is here to test.
+    internals.sseClients.set("client-0", {
+      id: "client-0",
+      controller: { enqueue() {} },
+    });
     // Drop it back out of visibility: the manager's own created-event pass
     // promotes a pane-bound row on its way through `sessionEventToSSE`.
     await drain();
@@ -9867,5 +9931,33 @@ describe("syncPaneSummaries", () => {
     await settle(events);
 
     expect(events).toHaveLength(0);
+  });
+
+  it("does no work at all with no SSE client connected", async () => {
+    // The daemon's usual state, and the same gate `broadcastEvent` already
+    // has one step later.
+    const { server, events, setTitle, internals } = await setup("✳ One");
+    server.syncPaneSummaries();
+    internals.sseClients.clear();
+
+    setTitle("✳ Two");
+    server.syncPaneSummaries();
+    setTitle("✳ Three");
+    server.syncPaneSummaries();
+    await settle(events);
+    expect(events).toHaveLength(0);
+    // Skipping the bookkeeping is the point, not a compromise: the recorded
+    // value still says "✳ One", so the next sync that HAS someone to tell
+    // ships the whole accumulated change in one broadcast.
+    expect(internals.lastPaneSummary.get("claude_pane1")).toBe("One");
+
+    internals.sseClients.set("client-0", {
+      id: "client-0",
+      controller: { enqueue() {} },
+    });
+    server.syncPaneSummaries();
+    await settle(events, 1);
+    expect(events).toHaveLength(1);
+    expect(internals.lastPaneSummary.get("claude_pane1")).toBe("Three");
   });
 });

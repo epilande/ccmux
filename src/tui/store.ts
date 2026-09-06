@@ -44,9 +44,7 @@ import type { UntrackedMode } from "../daemon/worktree-move-changes";
 // dialog settles differently from the one that gets created is worse than
 // showing no name at all.
 import { slugify } from "../daemon/worktree-create";
-import {
-  normalizePrompt,
-} from "./components/session-columns";
+import { normalizePrompt } from "./components/session-columns";
 import { capturePane } from "./utils/tmux";
 import { isSameServerCached } from "./utils/server-guard";
 import { stripAnsi } from "../lib/strip-ansi";

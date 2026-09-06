@@ -656,10 +656,10 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // `agents.claude.readyPattern` in ccmux.json when Claude's glyph
     // changes again.
     readyPattern: /^[>❯]\s*$/,
-    // `✳ Say hello` after a turn, `✳ Claude Code` before one; the glyph is a
-    // braille spinner frame while working. `status` already draws that state,
-    // so the glyph goes, and the placeholder title is not a summary.
-    // `✳` idle, a braille spinner frame while working, then the summary.
+    // `✳ Say hello` idle, a braille spinner frame in the glyph's place while
+    // working, `✳ Claude Code` before the first turn. The glyph is stripped
+    // because `status` already draws that state, and the placeholder title is
+    // not a summary.
     summaryTitle: {
       match: /^[\u2733\u2800-\u28FF\s]+(.+)$/,
       empty: [/^Claude Code$/],
@@ -804,10 +804,10 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       resumeArgs: ["opencode", "run", "--format", "json", "--session", "{id}"],
       output: { kind: "opencode-json" },
     },
-    // Verified live on OpenCode 1.18.29: pane title is `OpenCode` before the
-    // first turn, `OC | <session title>` after. Requiring the prefix (not
-    // just stripping it) keeps tmux's hostname seed from reading as a summary.
-    // `OC | <session title>` on 1.18.29; the bare app name before the first.
+    // Verified live on OpenCode 1.18.29: `OC | <session title>` after the
+    // first turn, the bare app name before it. Requiring the prefix rather
+    // than just stripping it keeps tmux's hostname seed from reading as a
+    // summary.
     summaryTitle: {
       match: /^OC \| (.+)$/,
       empty: [/^OpenCode$/],
@@ -1080,13 +1080,24 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       resumeArgs: ["cursor-agent", "--print", "--resume", "{id}"],
       output: { kind: "stdout" },
     },
-    // `Hello Bot` after a turn, the app's own name before one. Nothing to
-    // strip: cursor writes the bare summary, which is also why a pane it has
-    // not titled yet still reads back as tmux's hostname seed.
-    // cursor writes the bare summary with no decoration at all, so any title
-    // is taken as one. Nothing in the title proves cursor wrote it, which is
-    // what the hostname guard in `summaryFromPaneTitle` is there to cover.
-    summaryTitle: { match: /^(.+)$/, empty: [/^Cursor Agent$/] },
+    // `Hello Bot` after a turn, `Cursor Agent` before one. cursor writes the
+    // bare summary with no decoration at all, so any title is taken as one,
+    // and NOTHING in a title proves cursor wrote it. Two other writers reach
+    // the same pane_title and both need excluding: tmux's hostname seed,
+    // covered by the generic guard in `summaryFromPaneTitle`, and the shell,
+    // which on a common zsh/bash setup writes the cwd there on every prompt
+    // (`:/Users/me/Code/foo`, `:~/Code/foo`, the bare path, or bash's
+    // default `user@host:~/foo`). The path shapes are anchored so a real
+    // summary starting with a tilde, say `~50 lines`, still comes through.
+    summaryTitle: {
+      match: /^(.+)$/,
+      empty: [
+        /^Cursor Agent$/,
+        /^:?\//,
+        /^:?~(?:\/|$)/,
+        /^[^\s@]+@[^\s:]+:[~/]/,
+      ],
+    },
     hooks: { markerDir: MARKERS_DIR, type: "cursor" },
   },
   {
@@ -1346,11 +1357,9 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       output: { kind: "stdout" },
     },
     // `π > Say hello` after a turn, `π ⠧ Say hello` while working, and
-    // `π > <cwd basename>` before the first turn — the prefix is there either
+    // `π > <cwd basename>` before the first turn. The prefix is there either
     // way, so only the cwd comparison separates a session title from the
     // directory name `project` already carries.
-    // `π > <summary>` idle, `π <braille> <summary>` while working; the same
-    // prefix wraps the cwd before the first turn, hence `cwdBasenameIsEmpty`.
     summaryTitle: {
       match: /^π\s*[>\u2800-\u28FF]\s*(.+)$/,
       cwdBasenameIsEmpty: true,
@@ -1561,10 +1570,9 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       output: { kind: "stdout" },
     },
     // `Implement Hello Function - GitHub Copilot`: the summary with the app
-    // name appended. Bare, the app name is the placeholder it shows before a
-    // turn.
-    // `<summary> - GitHub Copilot`; lazy capture so a summary of its own
-    // containing " - " keeps every part but the trailing app name.
+    // name appended, and bare it is the placeholder shown before a turn. The
+    // capture is lazy, so a summary carrying a " - " of its own keeps every
+    // part but the trailing app name.
     summaryTitle: {
       match: /^(.+?)\s*-\s*GitHub Copilot$/,
       empty: [/^GitHub Copilot$/],

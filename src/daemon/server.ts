@@ -565,9 +565,6 @@ export function rejectCrossOriginBrowser(req: Request): Response | null {
 }
 
 /**
- * HTTP/SSE Server for the daemon
- */
-/**
  * One session's normalized pane-title summary, from the pane the caller
  * already has in hand.
  *
@@ -587,6 +584,9 @@ function paneSummaryOf(
   );
 }
 
+/**
+ * HTTP/SSE Server for the daemon
+ */
 export class DaemonServer {
   private server: ReturnType<typeof Bun.serve> | null = null;
   private sessionManager: SessionManager;
@@ -599,9 +599,19 @@ export class DaemonServer {
   /**
    * Last NORMALIZED pane-title summary broadcast for each visible session, so
    * `syncPaneSummaries` can tell a real change from the churn around it.
-   * Written by `recordBroadcast` on every all-client send, never by the send
-   * sites themselves. Keyed by session id, cleared wherever `visibleSessions`
-   * is.
+   * Keyed by session id, cleared wherever `visibleSessions` is.
+   *
+   * The one invariant: the value recorded here equals what was last put ON
+   * THE WIRE for that session. Three writers keep it, each satisfying that
+   * differently. `recordBroadcast` runs before the enrich on the session-event
+   * arms and in `rebroadcastSession`, reading the same pane cache the enrich
+   * will. `onBranchPRsChanged` records after its await, straight off
+   * `enriched.summary`, because its send is conditional. `syncPaneSummaries`
+   * records the value it just compared.
+   *
+   * The per-client `init` snapshot is deliberately NOT recorded: it reaches
+   * one new client, and recording off it would suppress the broadcast the
+   * other clients still need.
    */
   private lastPaneSummary = new Map<string, string | null>();
   /** Rotating start index for `sweepBranchPRs`, see its docstring. */
@@ -832,6 +842,11 @@ export class DaemonServer {
       // enriching every visible session here is sessions × keys calls.
       if (this.effectiveCwd(session, paneCache) !== cwd) continue;
       const enriched = await this.enrichSession(session);
+      // A removal can land during that await, and it clears both sets. Re-read
+      // rather than trusting the pre-await check: otherwise the set below
+      // re-inserts a key nothing ever reaps (the sync iterates visible
+      // sessions only) and the send announces a session that is already gone.
+      if (!this.visibleSessions.has(session.id)) continue;
       if (enriched.gitBranch !== branch) continue;
       // Recorded off the enriched value rather than through
       // `recordBroadcast`: the send is conditional, and a session this loop
@@ -1095,20 +1110,20 @@ export class DaemonServer {
 
   /**
    * Note that every SSE client is about to be told this session's CURRENT
-   * summary, so the next `syncPaneSummaries` does not say it again.
+   * summary, so the next `syncPaneSummaries` does not say it again. Without
+   * this funnel a turn that ends by changing status and title together
+   * broadcast twice, once on the event and once on the next scan.
    *
-   * Every all-client send of an enriched session goes through here (the three
-   * session-event arms, `rebroadcastSession`, `onBranchPRsChanged`) and only
-   * those: the per-client `init` snapshot reaches one new client, and
-   * recording off it would suppress the broadcast the OTHER clients still
-   * need. Without this funnel a turn that ends by changing status and title
-   * together broadcast twice, once on the event and once on the next scan.
-   *
-   * Called BEFORE the enrich a send waits on, never after: `enrichSession`
-   * reads git, whose cache expires in 30s, so a send can resolve a whole
-   * `git` spawn later than the `syncPaneSummaries` that runs at the end of
-   * the very same scan. The recorded value is exactly what that enrich will
-   * put on the wire, since both read the pane cache in the same tick.
+   * Used by the sends whose enriched session is unconditional: the three
+   * session-event arms and `rebroadcastSession`. It is called BEFORE the
+   * enrich each of those awaits, which is what makes it exact rather than
+   * merely close. `enrichSession` reads git, whose cache expires in 30s, so a
+   * send can resolve a whole `git` spawn later than the `syncPaneSummaries`
+   * at the end of the very same scan, and recording after that await would
+   * record a summary read from a later tick's pane cache. Recording before it
+   * lands the value the enrich itself will ship, since both read the pane
+   * cache in this tick. See `lastPaneSummary` for the invariant and for how
+   * the other two writers meet it.
    */
   private recordBroadcast(session: Session): void {
     const paneCache = this.getPaneCache();
@@ -1142,8 +1157,17 @@ export class DaemonServer {
    *
    * Runs after the reconcile that may have broadcast the same session for its
    * own reasons; `recordBroadcast` is what keeps this from saying it twice.
+   *
+   * With no SSE client connected (the daemon's usual state) the whole pass is
+   * skipped, `broadcastEvent`'s own gate one step earlier. Skipping the map
+   * bookkeeping along with it is deliberate and costs nothing: the first sync
+   * that has a client finds `had === true` against a stale recorded value and
+   * ships the accumulated change as ONE broadcast. Redundant, since that
+   * client already read the current summary out of its own `init`, but
+   * bounded at one event per session and self-correcting from there.
    */
   syncPaneSummaries(): void {
+    if (this.sseClients.size === 0) return;
     const paneCache = this.getPaneCache();
     for (const session of this.sessionManager.getSessions()) {
       if (!this.visibleSessions.has(session.id)) continue;

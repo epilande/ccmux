@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { summaryFromPaneTitle } from "./pane-summary";
+import { BUILTIN_AGENTS } from "./agents";
 
 /**
  * The per-agent rule table from issue #183's survey. Every case below is a
@@ -107,6 +108,28 @@ describe("summaryFromPaneTitle", () => {
         "fix probe-host boot order",
       );
     });
+
+    it("reads a shell-written cwd title as no summary", () => {
+      // The shell writes the cwd into pane_title on every prompt, and cursor
+      // only overwrites it once it has a summary of its own. Colon-prefixed
+      // (zsh's default `print -Pn`), tilde-abbreviated, and bare, all of it.
+      expect(cursor(":/Users/x/y")).toBeNull();
+      expect(cursor("/tmp/x")).toBeNull();
+      expect(cursor(":~/Code/ccmux")).toBeNull();
+      expect(cursor("~/x")).toBeNull();
+      expect(cursor("~")).toBeNull();
+      expect(cursor(":~")).toBeNull();
+      // bash's default PROMPT_COMMAND shape.
+      expect(cursor("me@erp-mac-mini:~/Code/ccmux")).toBeNull();
+      expect(cursor("me@host.local:/tmp")).toBeNull();
+    });
+
+    it("keeps a real summary that carries a slash or a tilde", () => {
+      // The path guards are anchored, so a slash mid-string and a leading
+      // tilde that is not a path both survive.
+      expect(cursor("Fix src/foo.ts import")).toBe("Fix src/foo.ts import");
+      expect(cursor("~50 lines of drift")).toBe("~50 lines of drift");
+    });
   });
 
   describe("omp", () => {
@@ -184,6 +207,20 @@ describe("summaryFromPaneTitle", () => {
       ).toBe("Fix the scroll math");
     });
 
+    it("strips the controls stripAnsi leaves behind", () => {
+      // `stripAnsi` handles CSI only. A BEL, a lone ESC and a C1 byte (here
+      // U+0085 NEL, which JS `\s` does not match) would otherwise ride into a
+      // rendered cell. Each becomes a space, so the words stay apart.
+      expect(
+        summaryFromPaneTitle(
+          "cursor",
+          "Fix\x07the\x85scroll\x1bmath",
+          "/tmp/p",
+          HOST,
+        ),
+      ).toBe("Fix the scroll math");
+    });
+
     it("normalizes before the cwd comparison", () => {
       expect(
         summaryFromPaneTitle(
@@ -242,9 +279,25 @@ describe("summaryFromPaneTitle", () => {
 
   describe("rule hygiene", () => {
     it("never uses a global regex, whose lastIndex would leak between calls", () => {
+      // Every rule, not just the one below: `exec` on a `/g` regex advances
+      // `lastIndex`, so such a rule answers correctly once and then
+      // intermittently null. The `empty` patterns run through `test`, which
+      // has the same hazard.
+      for (const agent of BUILTIN_AGENTS) {
+        const rule = agent.summaryTitle;
+        if (!rule) continue;
+        expect([agent.name, rule.match.global]).toEqual([agent.name, false]);
+        for (const re of rule.empty ?? []) {
+          expect([agent.name, re.source, re.global]).toEqual([
+            agent.name,
+            re.source,
+            false,
+          ]);
+        }
+      }
+      // And the behavior the guard protects, on a repeat call.
       const claude = (title: string) =>
         summaryFromPaneTitle("claude", title, "/tmp/p", HOST);
-      // A `/g` rule answers correctly once and then intermittently null.
       for (let i = 0; i < 5; i++) {
         expect(claude("✳ Wire up the summary column")).toBe(
           "Wire up the summary column",
