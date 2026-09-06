@@ -174,14 +174,14 @@ const DEFAULT_COLUMNS: ColumnsConfig = {
     },
   },
   // Row 2 renders only when some field has data (see `rowHasContent`), so
-  // sessions with no prompt stay single-line. `pr` is right-aligned branch
-  // metadata; the prompt cell shrinks (see SessionItem) so long prompts
-  // truncate instead of pushing the PR ids off-screen. The `PR ` prefix is
+  // sessions with nothing to subtitle stay single-line. `pr` is right-aligned
+  // branch metadata; the summary cell shrinks (see SessionItem) so long text
+  // truncates instead of pushing the PR ids off-screen. The `PR ` prefix is
   // dropped (`short`) below the `lg` breakpoint to save room on smaller
   // screens; inline collapse drops it too (see `flattenToRow1`), so the bare
   // colored `#id` rides next to the branch instead of reading as "PR".
   row2: {
-    left: ["prompt"],
+    left: ["summary"],
     right: [{ field: "pr", mode: { default: "short", lg: "full" } }],
   },
 };
@@ -191,7 +191,7 @@ const DEFAULT_COLUMNS: ColumnsConfig = {
  * session-level metadata that must survive the `p` toggle and the
  * no-prompt collapse: PR rides row 1 (in `short` mode — the `PR ` prefix
  * is too wide for a 30-col rail) next to the agent code. Row 2 is the
- * per-turn activity line (prompt + time); the pane target is dropped from
+ * per-turn activity line (summary + time); the pane target is dropped from
  * the defaults since selection, not the address, drives navigation —
  * restorable via `sidebar.columns`.
  */
@@ -201,7 +201,7 @@ export const SIDEBAR_DEFAULT_COLUMNS: ColumnsConfig = {
     right: ["pr:short", "agent:short"],
   },
   row2: {
-    left: ["prompt"],
+    left: ["summary"],
     right: ["time"],
   },
 };
@@ -265,16 +265,22 @@ export function resolveLayout(
 }
 
 /**
- * Drop the prompt entirely (the `off` prompt mode): row 2 is dropped
+ * Drop the per-turn text entirely (the `off` prompt mode): row 2 is dropped
  * wholesale (density is the point of turning it off, so the PR cell goes
- * too), and a prompt placed on row 1 by a custom layout is stripped as well.
+ * too), and a flexible text cell placed on row 1 by a custom layout is
+ * stripped as well.
+ *
+ * BOTH flexible cells go, not just `prompt`: `summary` falls back to the
+ * prompt, so leaving it behind would keep showing the very text the toggle
+ * was pressed to hide.
  */
 export function stripPrompt(cols: ResolvedColumns): ResolvedColumns {
+  // Both flexible text cells go: `summary` falls back to the prompt, so
+  // leaving it behind would keep showing the very text the toggle turned off.
+  const drop = (entries: ResolvedEntry[]) =>
+    entries.filter((e) => !isFlexTextField(e.field));
   return {
-    row1: {
-      left: cols.row1.left.filter((e) => e.field !== "prompt"),
-      right: cols.row1.right.filter((e) => e.field !== "prompt"),
-    },
+    row1: { left: drop(cols.row1.left), right: drop(cols.row1.right) },
     row2: { left: [], right: [] },
   };
 }
@@ -283,7 +289,7 @@ export function stripPrompt(cols: ResolvedColumns): ResolvedColumns {
  * Collapse row 2 onto row 1 for single-line (`inline`) display: every row-2
  * entry joins the end of the matching row-1 side, and row 2 is emptied. The
  * prompt cell flexes to fill row 1's middle gap (see SessionItem's
- * `promptOnRow` handling), so the per-turn subtitle rides the identity line
+ * `flexOnRow` handling), so the per-turn subtitle rides the identity line
  * instead of earning its own row.
  */
 function flattenToRow1(cols: ResolvedColumns): ResolvedColumns {
@@ -291,13 +297,28 @@ function flattenToRow1(cols: ResolvedColumns): ResolvedColumns {
   // reads as the branch metadata it is, rather than floating past the
   // timestamp at the far right; the prompt becomes the flexible filler at the
   // end of the left side. A field already on row 1 is dropped so nothing is
-  // doubled (a custom `prompt` on row 1 plus the default `row2: [prompt]`
-  // would otherwise render it twice, putting two flex fillers on one row).
+  // doubled.
   const present = new Set(
     [...cols.row1.left, ...cols.row1.right].map((e) => e.field),
   );
+  // The collapsed row can hold ONE flexible text cell: they share a single
+  // budget, and a second one leaves both too narrow to read. So the slot is
+  // claimed once and every later flex field is dropped, whichever name it
+  // goes by. That covers both ways a second one arrives: row 1 already
+  // carrying one (a custom `row1.left: [prompt]` against the default
+  // `row2.left: [summary]` is two names for the same filler), and row 2
+  // carrying two of its own (`row2.left: [summary, prompt]`).
+  //
+  // Stateful, so the order here has to match the assembly order below: `meta`
+  // is filtered first and lands first, ahead of `prompt`.
+  let flexTaken = rowHasFlexText(cols.row1);
   const fresh = (entries: ResolvedEntry[]) =>
-    entries.filter((e) => !present.has(e.field));
+    entries.filter((e) => {
+      if (!isFlexTextField(e.field)) return !present.has(e.field);
+      if (flexTaken) return false;
+      flexTaken = true;
+      return true;
+    });
   const meta = fresh(cols.row2.right);
   const prompt = fresh(cols.row2.left);
   const projectIdx = cols.row1.left.findIndex((e) => e.field === "project");
@@ -428,7 +449,14 @@ export function prLabel(session: EnrichedSession, mode?: string): string {
   return mode === "short" ? ids : `PR ${ids}`;
 }
 
-/** Whether a single field has displayable data on this session. */
+/**
+ * Whether a single field has displayable data on this session.
+ *
+ * Nothing here knows about the wrapped prompt block: a row that would only
+ * repeat the block's own text drops the cell from its LAYOUT instead (see
+ * `withoutFlexText` and SessionList's per-row choice), so both the measured
+ * height and the drawn row read one object rather than agreeing by hand.
+ */
 export function hasFieldData(
   session: EnrichedSession,
   field: ColumnField,
@@ -456,6 +484,12 @@ export function hasFieldData(
       return !!session.gitBranch;
     case "pr":
       return sessionPRs(session).length > 0;
+    case "summary":
+      // The cell falls back to the prompt, so it has data whenever either
+      // does. The daemon ships `summary` already normalized; `!= null` also
+      // covers a daemon too old to ship it at all, whose `undefined` means
+      // no summary rather than one this cell should try to render.
+      return session.summary != null || hasFieldData(session, "prompt");
   }
 }
 
@@ -474,30 +508,67 @@ export function rowHasContent(
   return row.left.some(counts) || row.right.some(counts);
 }
 
-/** Whether the prompt cell lands on this resolved row (either side). */
-export function rowHasPrompt(row: ResolvedRow): boolean {
+/**
+ * Fields that flex to fill their row rather than occupying a fixed width:
+ * free text of unbounded length, truncated to whatever the row has left.
+ * They share one budget, so a row should carry at most one of them.
+ */
+export function isFlexTextField(field: ColumnField): boolean {
+  return field === "prompt" || field === "summary";
+}
+
+/** Whether a flexible text cell lands on this resolved row (either side). */
+export function rowHasFlexText(row: ResolvedRow): boolean {
   return (
-    row.left.some((e) => e.field === "prompt") ||
-    row.right.some((e) => e.field === "prompt")
+    row.left.some((e) => isFlexTextField(e.field)) ||
+    row.right.some((e) => isFlexTextField(e.field))
   );
 }
 
 /**
  * Drop every `prompt` cell from both rows, leaving the rest of each row
- * intact — unlike `stripPrompt`, which also clears row 2 wholesale because
- * `promptDisplay: "off"` means "no prompt anywhere, collapse the row".
+ * intact, `summary` included. Unlike `stripPrompt`, which also clears row 2
+ * wholesale because `promptDisplay: "off"` means "no per-turn text anywhere,
+ * collapse the row".
  *
- * Used when the wrapped prompt block is DRAWN: the block IS the prompt, so a
- * `prompt` column alongside it would print the same text twice. Whenever the
- * block yields instead (a search is active, `promptDisplay: "off"`, or a rail
- * too narrow for a readable block), the one-line cell comes back.
+ * Used when the wrapped prompt block is DRAWN and the row has a real summary
+ * to keep: the block IS the prompt, so a `prompt` column alongside it would
+ * print the same text twice, while the summary is different text and earns
+ * its place on the identity line. A row whose agent wrote no summary takes
+ * `withoutFlexText` instead, since its `summary` cell could only fall back to
+ * the block's own text. SessionList picks between the two per session.
+ *
+ * Whenever the block yields entirely (a search is active, `promptDisplay:
+ * "off"`, or a rail too narrow for a readable block), neither applies and the
+ * one-line cell comes back.
  */
 export function withoutPrompt(cols: ResolvedColumns): ResolvedColumns {
-  const drop = (entries: ResolvedEntry[]) =>
-    entries.filter((e) => e.field !== "prompt");
+  return withoutFields(cols, (field) => field === "prompt");
+}
+
+/**
+ * Drop BOTH flexible text cells from both rows: the `prompt` the block
+ * replaces and the `summary` that would fall back to it.
+ *
+ * The per-ROW half of the block's yield rule, chosen per session by
+ * SessionList: a row whose agent wrote no summary has a `summary` cell that
+ * can only print the block's own text, so that row lays out without it. A row
+ * whose agent DID write one keeps `withoutPrompt`'s layout, summary on the
+ * identity line and the block below.
+ */
+export function withoutFlexText(cols: ResolvedColumns): ResolvedColumns {
+  return withoutFields(cols, isFlexTextField);
+}
+
+function withoutFields(
+  cols: ResolvedColumns,
+  drop: (field: ColumnField) => boolean,
+): ResolvedColumns {
+  const keep = (entries: ResolvedEntry[]) =>
+    entries.filter((e) => !drop(e.field));
   return {
-    row1: { left: drop(cols.row1.left), right: drop(cols.row1.right) },
-    row2: { left: drop(cols.row2.left), right: drop(cols.row2.right) },
+    row1: { left: keep(cols.row1.left), right: keep(cols.row1.right) },
+    row2: { left: keep(cols.row2.left), right: keep(cols.row2.right) },
   };
 }
 

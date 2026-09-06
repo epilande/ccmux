@@ -652,6 +652,11 @@ export class Daemon {
       // event. Idempotent: unchanged fields no-op.
       this.backgroundSource?.syncFromRoster();
 
+      // Pane titles are enrichment, not tracked `Session` state, so a summary
+      // that changed while nothing else did reaches no client on its own.
+      // Runs last, on the pane cache this scan just refreshed.
+      this.server.syncPaneSummaries();
+
       DaemonPerf.scanEnd(scanStartNs);
       DaemonPerf.report();
 
