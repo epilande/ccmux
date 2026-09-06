@@ -13,6 +13,7 @@ import type { ResolvedColumns } from "./session-columns";
 import type { EnrichedSession } from "../../types";
 import type { SessionItemHighlights } from "./SessionItem";
 import type { MatchSource } from "../utils/grouping";
+import type { ColumnsConfig } from "../../lib/preferences";
 
 /**
  * The `summary` cell: one line that shows the agent's own summary of the
@@ -218,5 +219,65 @@ describe("the prompt cell's match tags", () => {
       matchSource: "prompt",
     });
     expect(frame).not.toContain("[summary]");
+  });
+});
+
+/**
+ * The width budget for a flexible text cell is per ROW, not per item. A
+ * custom layout can flex on both (`summary` on the identity line, the raw
+ * `prompt` on its own row below), and the two rows have different siblings,
+ * a different leading indent, and only one attention reserve between them.
+ * Budgeting them together charged row 2 for row 1's furniture and truncated
+ * the prompt with most of its line still empty.
+ */
+describe("the flexible cell's per-row width budget", () => {
+  const BOTH_ROWS_FLEX: ColumnsConfig = {
+    row1: { left: ["index", "status", "project", "summary"] },
+    row2: { left: ["prompt"] },
+  };
+  const SIXTY = "Please implement the retry queue and cover it with tests";
+
+  async function renderRows(lastPrompt: string, width = 100): Promise<string> {
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionItem
+            session={mockEnrichedSession({ ...WITH_SUMMARY, lastPrompt })}
+            selected={false}
+            index={0}
+            previewWidth={30}
+            columns={BOTH_ROWS_FLEX}
+            promptDisplay="row2"
+          />
+        </TickContext.Provider>
+      ),
+      { width, height: 4 },
+    );
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  }
+
+  /** The rendered line carrying the row-2 prompt. */
+  const promptLine = (frame: string): string =>
+    frame.split("\n").find((l) => l.includes("Please implement")) ?? "";
+
+  it("gives row 2 its own line, so a prompt that fits is not truncated", async () => {
+    const frame = await renderRows(SIXTY);
+    // Row 1 keeps the summary, row 2 prints the prompt whole.
+    expect(frame).toContain("Wire up the summary column");
+    expect(promptLine(frame)).toContain(SIXTY);
+    expect(promptLine(frame)).not.toContain("…");
+  });
+
+  it("truncates a too-long prompt at its own row's edge, not row 1's", async () => {
+    const long = `${SIXTY} and then keep going well past the right edge of the row`;
+    const frame = await renderRows(long);
+    const line = promptLine(frame);
+    expect(line).toContain("…");
+    // The cell used nearly the whole 100-column row. Against row 1's budget
+    // (its siblings, its project cell, its attention reserve) this landed
+    // around 20 columns, leaving most of row 2 blank.
+    expect(line.trimEnd().length).toBeGreaterThan(70);
   });
 });

@@ -315,8 +315,16 @@ interface FieldRenderContext {
   agentShortLabel: string;
   timeLabel: string;
   maxBranchLen: number;
-  /** Char budget for the prompt cell; keeps it from overflowing its row. */
-  maxPromptLen: number;
+  /**
+   * Char budget for a flexible text cell (`prompt`, `summary`), BY ROW.
+   *
+   * Per row, not per item: a custom layout can put a flex cell on both rows
+   * (`row1.left: [summary]` with `row2.left: [prompt]`), and the two rows
+   * have different siblings, a different leading indent and only one
+   * attention reserve between them. One shared budget truncated row 2
+   * against row 1's furniture and left most of its line blank.
+   */
+  maxPromptLen: (row: 1 | 2) => number;
   /** Char budget for the project cell; drives its `…` truncation. */
   maxProjectLen: number;
 }
@@ -353,8 +361,14 @@ export function alignText(
  * back to exactly this — same text, same normalization, same evidence — and
  * two copies would drift.
  */
-const PromptCell: Component<{ ctx: FieldRenderContext }> = (props) => {
+const PromptCell: Component<{
+  ctx: FieldRenderContext;
+  /** Which row this cell sits on, so it budgets against that row's own
+   *  siblings. */
+  row: 1 | 2;
+}> = (props) => {
   const ctx = props.ctx;
+  const budget = () => ctx.maxPromptLen(props.row);
   // Pre-truncate in JS (the idiom used by project/branch): rendered
   // text never overflows its row, so right-aligned siblings (the `pr`
   // field) keep their spot. Search highlights are windowed the same way by
@@ -382,7 +396,7 @@ const PromptCell: Component<{ ctx: FieldRenderContext }> = (props) => {
   };
   const promptBudget = () => {
     const tag = sourceTag();
-    return ctx.maxPromptLen - (tag ? tag.length + 3 : 0);
+    return budget() - (tag ? tag.length + 3 : 0);
   };
   const text = () =>
     ctx.session.lastPrompt
@@ -444,10 +458,7 @@ const PromptCell: Component<{ ctx: FieldRenderContext }> = (props) => {
             }
           >
             <HighlightedText
-              text={truncateHighlighted(
-                promptMatchLine()!,
-                ctx.maxPromptLen,
-              )}
+              text={truncateHighlighted(promptMatchLine()!, budget())}
               highlightColor={dimColor(ctx, theme.yellow)}
               baseColor={dimColor(ctx, theme.overlay)}
             />
@@ -455,10 +466,7 @@ const PromptCell: Component<{ ctx: FieldRenderContext }> = (props) => {
         }
       >
         <HighlightedText
-          text={truncateHighlighted(
-            ctx.highlights!.lastPrompt!,
-            ctx.maxPromptLen,
-          )}
+          text={truncateHighlighted(ctx.highlights!.lastPrompt!, budget())}
           highlightColor={dimColor(ctx, theme.yellow)}
           baseColor={dimColor(ctx, theme.overlay)}
         />
@@ -487,11 +495,14 @@ const FieldCell: Component<{
   entry: ResolvedEntry;
   ctx: FieldRenderContext;
   side: "left" | "right";
+  /** Which row this cell renders on; a flexible text cell budgets against
+   *  that row rather than against the item. */
+  row: 1 | 2;
   /** True when a flexing prompt shares this row: the project cell yields its
    * flex-grow so the prompt fills the middle gap instead. */
   promptOnRow?: boolean;
 }> = (props) => {
-  const { entry, ctx, side } = props;
+  const { entry, ctx, side, row } = props;
   const width = entryRightWidth(entry);
   switch (entry.field) {
     case "index":
@@ -675,7 +686,7 @@ const FieldCell: Component<{
         </box>
       );
     case "prompt":
-      return <PromptCell ctx={ctx} />;
+      return <PromptCell ctx={ctx} row={row} />;
     case "summary": {
       // The agent's own summary of the session, or the prompt when its agent
       // writes none. One cell, one or the other, never both on a line.
@@ -695,20 +706,23 @@ const FieldCell: Component<{
       // the first place (SessionList's per-row layout), so if this renders,
       // it has something of its own to say.
       return (
-        <Show when={!deferToPrompt()} fallback={<PromptCell ctx={ctx} />}>
+        <Show
+          when={!deferToPrompt()}
+          fallback={<PromptCell ctx={ctx} row={row} />}
+        >
           <box flexGrow={1} flexShrink={1} flexDirection="row">
             <Show
               when={ctx.highlights?.summary}
               fallback={
                 <text fg={dimColor(ctx, theme.overlay)}>
-                  {truncateText(summary() ?? "", ctx.maxPromptLen)}
+                  {truncateText(summary() ?? "", ctx.maxPromptLen(row))}
                 </text>
               }
             >
               <HighlightedText
                 text={truncateHighlighted(
                   ctx.highlights!.summary!,
-                  ctx.maxPromptLen,
+                  ctx.maxPromptLen(row),
                 )}
                 highlightColor={dimColor(ctx, theme.yellow)}
                 baseColor={dimColor(ctx, theme.overlay)}
@@ -784,6 +798,9 @@ const RowRender: Component<{
   attentionWidth?: number;
   /** Optional fixed-width spacer prepended after the active indicator. */
   leadingIndent?: number;
+  /** Which of the item's two rows this is; flexible text cells budget
+   *  against their own row. */
+  rowIndex: 1 | 2;
 }> = (props) => {
   // A prompt on this row is the flexible filler (its cell grows into the gap),
   // so the standalone spacer would double up and split the space. Drop it, and
@@ -810,6 +827,7 @@ const RowRender: Component<{
             entry={entry}
             ctx={props.ctx}
             side="left"
+            row={props.rowIndex}
             promptOnRow={hasPrompt()}
           />
         )}
@@ -864,6 +882,7 @@ const RowRender: Component<{
             entry={entry}
             ctx={props.ctx}
             side="right"
+            row={props.rowIndex}
             promptOnRow={hasPrompt()}
           />
         )}
@@ -982,17 +1001,16 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     return Math.max(12, effectiveWidth() - reserved);
   });
 
-  // Budget for the prompt cell: full width minus the item's horizontal
-  // padding, the leading indent, every sibling cell on the prompt's row, and
-  // the inter-cell gaps. The prompt rides row 1 when inline (sharing it with
-  // project, and with the reserved attention cell) and row 2 otherwise; budget
-  // against whichever row it landed on so the `…` truncation lands just before
-  // the right-aligned metadata. Conservative floor so tiny viewports still
-  // show something identifiable.
-  const maxPromptLen = createMemo(() => {
-    const cols = columns();
-    const onRow1 = rowHasFlexText(cols.row1);
-    const row = onRow1 ? cols.row1 : cols.row2;
+  // Budget for a flexible text cell on ONE row: full width minus the item's
+  // horizontal padding, that row's leading indent, its own sibling cells and
+  // the inter-cell gaps. Conservative floor so tiny viewports still show
+  // something identifiable.
+  //
+  // Per row, because a custom layout can flex on both (`row1.left:
+  // [summary]` over `row2.left: [prompt]`). Budgeting them together charged
+  // row 2 for row 1's siblings and for an attention cell it does not have,
+  // truncating a prompt with most of its line still empty.
+  const flexBudgetFor = (row: ResolvedRow, isRow1: boolean): number => {
     const siblings = [...row.left, ...row.right].filter(
       (e) => !isFlexTextField(e.field),
     );
@@ -1010,17 +1028,28 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
             : entryRightWidth(e);
       return acc + (w > 0 ? w + 1 : 0); // +1 for the inter-cell gap
     }, 0);
-    // The reserved attention cell only exists on row 1, so it eats into the
-    // prompt budget only when the prompt shares that row (inline mode).
-    const attn = onRow1 ? attentionWidth() : 0;
+    // The reserved attention cell is drawn on row 1 only, so it eats into a
+    // flex budget only there.
+    const attn = isRow1 ? attentionWidth() : 0;
     const reserved =
       2 + // item paddingLeft/paddingRight
-      (onRow1 ? 0 : row2LeadingIndent(cols.row1.left)) +
+      (isRow1 ? 0 : row2LeadingIndent(columns().row1.left)) +
       cells +
       (attn > 0 ? attn + 1 : 0) +
       2; // small margin so the `…` lands inside the flexed box, not clipped
     return Math.max(16, effectiveWidth() - reserved);
-  });
+  };
+
+  // One memo per row rather than one per cell: both rows recompute on the
+  // same inputs, and a row's cells all share the answer.
+  const maxPromptLenRow1 = createMemo(() =>
+    flexBudgetFor(columns().row1, true),
+  );
+  const maxPromptLenRow2 = createMemo(() =>
+    flexBudgetFor(columns().row2, false),
+  );
+  const maxPromptLen = (row: 1 | 2) =>
+    row === 1 ? maxPromptLenRow1() : maxPromptLenRow2();
 
   const agentColor = () => agentColorFor(props.session.agentType);
 
@@ -1112,7 +1141,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
       return maxBranchLen();
     },
     get maxPromptLen() {
-      return maxPromptLen();
+      return maxPromptLen;
     },
     get maxProjectLen() {
       return maxProjectLen();
@@ -1171,6 +1200,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
       >
         <RowRender
           row={row1()}
+          rowIndex={1}
           ctx={ctx}
           showAttention
           attentionWidth={attentionWidth()}
@@ -1178,6 +1208,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
         <Show when={row2HasContent()}>
           <RowRender
             row={row2()}
+            rowIndex={2}
             ctx={ctx}
             leadingIndent={row2LeadingIndent(row1().left)}
           />
