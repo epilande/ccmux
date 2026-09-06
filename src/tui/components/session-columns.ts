@@ -432,7 +432,7 @@ export function prLabel(session: EnrichedSession, mode?: string): string {
 
 /**
  * The agent's own summary of what this session is doing, or null when its
- * agent writes none. Four built-ins keep a generated summary in the tmux pane
+ * agent writes none. Five built-ins keep a generated summary in the tmux pane
  * title; the rest echo the cwd, their run state, or a static app name, and
  * `summaryFromPaneTitle` is the per-agent rule that tells them apart.
  *

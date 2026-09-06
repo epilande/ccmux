@@ -760,6 +760,13 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       resumeArgs: ["opencode", "run", "--format", "json", "--session", "{id}"],
       output: { kind: "opencode-json" },
     },
+    // Verified live on OpenCode 1.18.29: pane title is `OpenCode` before the
+    // first turn, `OC | <session title>` after. Requiring the prefix (not
+    // just stripping it) keeps tmux's hostname seed from reading as a summary.
+    summaryTitle: {
+      strip: [/^OC \| /],
+      empty: [/^OpenCode$/],
+    },
   },
   {
     name: "codex",

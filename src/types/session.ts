@@ -315,7 +315,7 @@ export interface EnrichedSession extends Session {
   /** The pane's current working directory (preferred over log-derived cwd) */
   paneCwd: string | null;
   /**
-   * The tmux pane title, raw. Four built-in agents keep a generated summary
+   * The tmux pane title, raw. Five built-in agents keep a generated summary
    * of the session in it, each behind its own decoration (a status glyph, a
    * spinner frame, an appended app name); the rest write their cwd, their own
    * run state, or a static app name. `summaryFromPaneTitle`

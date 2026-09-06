@@ -100,19 +100,47 @@ describe("summaryFromPaneTitle", () => {
     });
   });
 
+  describe("opencode", () => {
+    const opencode = (title: string | null) =>
+      summaryFromPaneTitle("opencode", title, "/tmp/probe-opencode");
+
+    it("strips the session-title prefix", () => {
+      expect(opencode("OC | Banana request")).toBe("Banana request");
+    });
+
+    it("reads the app name it shows before the first turn as no summary", () => {
+      expect(opencode("OpenCode")).toBeNull();
+    });
+
+    it("reads tmux's hostname seed as no summary", () => {
+      expect(opencode("erp-mac-mini.local")).toBeNull();
+    });
+
+    it("reads the prefix with no title after it as no summary", () => {
+      expect(opencode("OC | ")).toBeNull();
+    });
+  });
+
   describe("agents with no rule", () => {
-    it("has no summary for codex, pi, gemini or opencode", () => {
-      expect(summaryFromPaneTitle("codex", "probe-codex-x7", "/tmp/p")).toBeNull();
-      expect(summaryFromPaneTitle("codex", "⠏ probe-codex-x7", "/tmp/p")).toBeNull();
-      expect(summaryFromPaneTitle("pi", "π - probe-pi-z3", "/tmp/p")).toBeNull();
+    it("has no summary for codex, pi or gemini", () => {
+      expect(
+        summaryFromPaneTitle("codex", "probe-codex-x7", "/tmp/p"),
+      ).toBeNull();
+      expect(
+        summaryFromPaneTitle("codex", "⠏ probe-codex-x7", "/tmp/p"),
+      ).toBeNull();
+      expect(
+        summaryFromPaneTitle("pi", "π - probe-pi-z3", "/tmp/p"),
+      ).toBeNull();
       expect(
         summaryFromPaneTitle("gemini", "◇  Ready (probe-gemini-t6)", "/tmp/p"),
       ).toBeNull();
-      expect(summaryFromPaneTitle("opencode", "OpenCode", "/tmp/p")).toBeNull();
     });
 
     it("has no summary for a custom agent", () => {
-      expect(summaryFromPaneTitle("my-agent", "Doing a thing", "/tmp/p")).toBeNull();
+      expect(
+        summaryFromPaneTitle("my-agent", "Doing a thing", "/tmp/p"),
+      ).toBeNull();
     });
   });
 

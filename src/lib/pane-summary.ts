@@ -4,7 +4,7 @@ import { BUILTIN_AGENTS } from "./agents";
 /**
  * How one agent's tmux pane title reduces to a session summary.
  *
- * Every agent writes something to `pane_title`, but only four write a
+ * Every agent writes something to `pane_title`, but only five write a
  * generated summary of the work; the rest echo the cwd (already the `project`
  * column), their own run state (already `status`), or a static app name. So
  * this is a per-agent rule rather than a generic filter — the same shape
@@ -61,7 +61,9 @@ export interface SummaryTitleRule {
  * the agent table per call would land in the picker's hot path.
  */
 const RULES = new Map<string, SummaryTitleRule>(
-  BUILTIN_AGENTS.flatMap((a) => (a.summaryTitle ? [[a.name, a.summaryTitle]] : [])),
+  BUILTIN_AGENTS.flatMap((a) =>
+    a.summaryTitle ? [[a.name, a.summaryTitle]] : [],
+  ),
 );
 
 export function summaryFromPaneTitle(
