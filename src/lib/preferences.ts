@@ -165,7 +165,7 @@ export const COLUMN_FIELDS = [
   "cwd",
   "branch",
   "pr",
-  "title",
+  "summary",
 ] as const;
 export type ColumnField = (typeof COLUMN_FIELDS)[number];
 

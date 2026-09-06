@@ -6,6 +6,7 @@ import {
   resolveEntry,
   resolveRowSide,
   hasFieldData,
+  sessionSummary,
   entryRightWidth,
   stripPrompt,
   applyPromptDisplay,
@@ -252,16 +253,16 @@ describe("resolveColumns defaults", () => {
     const cols = resolveColumns(120, {
       row1: { right: [] },
     });
-    // Default row2 carries the last-prompt subtitle with `pr` (branch PRs /
+    // Default row2 carries the summary subtitle with `pr` (branch PRs /
     // background children) pinned right; see DEFAULT_COLUMNS.
-    expect(cols.row2.left.map((e) => e.field)).toEqual(["prompt"]);
+    expect(cols.row2.left.map((e) => e.field)).toEqual(["summary"]);
     expect(cols.row2.right.map((e) => e.field)).toEqual(["pr"]);
   });
 
-  it("includes the prompt subtitle on row 2 at every width", () => {
+  it("includes the summary subtitle on row 2 at every width", () => {
     for (const width of [40, 60, 80, 120, 200]) {
       const fields = resolveColumns(width).row2.left.map((e) => e.field);
-      expect(fields).toContain("prompt");
+      expect(fields).toContain("summary");
     }
   });
 
@@ -279,7 +280,7 @@ describe("resolveSidebarColumns", () => {
     expect(cols.row1.right.map((e) => e.field)).toEqual(["pr", "agent"]);
     expect(cols.row1.right[0]?.mode).toBe("short");
     expect(cols.row1.right[1]?.mode).toBe("short");
-    expect(cols.row2.left.map((e) => e.field)).toEqual(["prompt"]);
+    expect(cols.row2.left.map((e) => e.field)).toEqual(["summary"]);
     expect(cols.row2.right.map((e) => e.field)).toEqual(["time"]);
   });
 
@@ -437,9 +438,9 @@ describe("resolveColumns row2 right side (subtitle split)", () => {
     expect(cols.row2.right.map((e) => e.field)).toEqual(["time"]);
   });
 
-  it("row2 defaults to prompt on the left, pr on the right", () => {
+  it("row2 defaults to summary on the left, pr on the right", () => {
     const cols = resolveColumns(120);
-    expect(cols.row2.left.map((e) => e.field)).toEqual(["prompt"]);
+    expect(cols.row2.left.map((e) => e.field)).toEqual(["summary"]);
     expect(cols.row2.right.map((e) => e.field)).toEqual(["pr"]);
   });
 
@@ -574,7 +575,7 @@ describe("stripPrompt", () => {
 describe("applyPromptDisplay", () => {
   it("inline flattens row 2 onto row 1 in the picker", () => {
     const cols = applyPromptDisplay(resolveColumns(120), "inline", false);
-    expect(cols.row1.left.map((e) => e.field)).toContain("prompt");
+    expect(cols.row1.left.map((e) => e.field)).toContain("summary");
     // pr tucks onto row 1 next to the branch, not the far-right metadata.
     expect(cols.row1.left.map((e) => e.field)).toContain("pr");
     expect(cols.row1.right.map((e) => e.field)).not.toContain("pr");
@@ -582,10 +583,10 @@ describe("applyPromptDisplay", () => {
     expect(cols.row2.right).toEqual([]);
   });
 
-  it("inline puts pr right after project and the prompt last on row 1 left", () => {
+  it("inline puts pr right after project and the summary last on row 1 left", () => {
     const cols = applyPromptDisplay(resolveColumns(120), "inline", false);
     const left = cols.row1.left.map((e) => e.field);
-    expect(left).toEqual(["index", "status", "project", "pr", "prompt"]);
+    expect(left).toEqual(["index", "status", "project", "pr", "summary"]);
   });
 
   it("inline forces pr to short (no `PR ` prefix) even at wide widths", () => {
@@ -608,8 +609,8 @@ describe("applyPromptDisplay", () => {
   it("inline falls back to the two-row layout in the sidebar", () => {
     const resolved = resolveSidebarColumns(40);
     const cols = applyPromptDisplay(resolved, "inline", true);
-    // No room to inline on a 30-col rail: prompt stays on row 2.
-    expect(cols.row2.left.map((e) => e.field)).toContain("prompt");
+    // No room to inline on a 30-col rail: the subtitle stays on row 2.
+    expect(cols.row2.left.map((e) => e.field)).toContain("summary");
     expect(cols).toEqual(resolved);
   });
 
@@ -647,7 +648,7 @@ describe("applyPromptDisplay", () => {
       "index",
       "status",
       "pr",
-      "prompt",
+      "summary",
     ]);
     // pr is still forced to short even without a project anchor.
     expect(cols.row1.left.find((e) => e.field === "pr")?.mode).toBe("short");
@@ -685,11 +686,11 @@ describe("rowHasContent", () => {
 });
 
 describe("rowHasFlexText", () => {
-  it("counts title as flexible filler, like prompt", () => {
-    expect(rowHasFlexText({ left: [{ field: "title" }], right: [] })).toBe(
+  it("counts summary as flexible filler, like prompt", () => {
+    expect(rowHasFlexText({ left: [{ field: "summary" }], right: [] })).toBe(
       true,
     );
-    expect(rowHasFlexText({ left: [], right: [{ field: "title" }] })).toBe(
+    expect(rowHasFlexText({ left: [], right: [{ field: "summary" }] })).toBe(
       true,
     );
     expect(rowHasFlexText({ left: [{ field: "status" }], right: [] })).toBe(
@@ -726,8 +727,8 @@ describe("SIDEBAR_DEFAULT_COLUMNS", () => {
     ]);
   });
 
-  it("has prompt on row2 left and time on row2 right", () => {
-    expect(SIDEBAR_DEFAULT_COLUMNS.row2?.left).toEqual(["prompt"]);
+  it("has summary on row2 left and time on row2 right", () => {
+    expect(SIDEBAR_DEFAULT_COLUMNS.row2?.left).toEqual(["summary"]);
     expect(SIDEBAR_DEFAULT_COLUMNS.row2?.right).toEqual(["time"]);
   });
 });
@@ -1525,5 +1526,122 @@ describe("fitProjectCell with wide glyphs", () => {
       }
     }
     expect(checked).toBeGreaterThan(1000);
+  });
+});
+
+describe("sessionSummary", () => {
+  it("reads the agent's summary off the pane title", () => {
+    const session = mockEnrichedSession({
+      agentType: "claude",
+      paneTitle: "✳ Add dark mode toggle",
+    });
+    expect(sessionSummary(session)).toBe("Add dark mode toggle");
+  });
+
+  it("is null for an agent with no rule", () => {
+    const session = mockEnrichedSession({
+      agentType: "codex",
+      paneTitle: "probe-codex-x7",
+    });
+    expect(sessionSummary(session)).toBeNull();
+  });
+
+  it("compares omp's pre-first-turn title against the PANE cwd", () => {
+    // The pane's cwd is where the agent really is; `cwd` is the log-derived
+    // fallback, which can lag a `cd`.
+    const session = mockEnrichedSession({
+      agentType: "omp",
+      paneTitle: "π > live-dir",
+      cwd: "/Users/test/stale-dir",
+      paneCwd: "/Users/test/live-dir",
+    });
+    expect(sessionSummary(session)).toBeNull();
+  });
+});
+
+describe("hasFieldData(summary)", () => {
+  const withSummary = mockEnrichedSession({
+    agentType: "claude",
+    paneTitle: "✳ Add dark mode toggle",
+    lastPrompt: "commit and push",
+  });
+  const fallback = mockEnrichedSession({
+    agentType: "codex",
+    paneTitle: "probe-codex-x7",
+    lastPrompt: "commit and push",
+  });
+  const neither = mockEnrichedSession({
+    agentType: "codex",
+    paneTitle: "probe-codex-x7",
+    lastPrompt: null,
+  });
+
+  it("has data when the agent wrote a summary", () => {
+    expect(hasFieldData(withSummary, "summary")).toBe(true);
+  });
+
+  it("has data when it falls back to a prompt", () => {
+    expect(hasFieldData(fallback, "summary")).toBe(true);
+  });
+
+  it("has no data when there is neither a summary nor a prompt", () => {
+    expect(hasFieldData(neither, "summary")).toBe(false);
+  });
+
+  it("keeps a real summary while the wrapped prompt block is drawn", () => {
+    // The block is the prompt; a real summary is different text, so the cell
+    // stays on the identity line with the block below it. That pairing is the
+    // one way to see both at once (issue #183).
+    expect(hasFieldData(withSummary, "summary", true)).toBe(true);
+  });
+
+  it("yields to the block when it would only repeat the prompt", () => {
+    expect(hasFieldData(fallback, "summary", true)).toBe(false);
+  });
+
+  it("leaves every other field's answer alone under the block", () => {
+    expect(hasFieldData(fallback, "prompt", true)).toBe(true);
+    expect(hasFieldData(fallback, "status", true)).toBe(true);
+  });
+});
+
+describe("rowHasContent with the prompt block drawn", () => {
+  const row = { left: [{ field: "summary" as const }], right: [] };
+
+  it("keeps row 2 for a session whose agent wrote a summary", () => {
+    const session = mockEnrichedSession({
+      agentType: "claude",
+      paneTitle: "✳ Add dark mode toggle",
+      lastPrompt: "commit and push",
+    });
+    expect(rowHasContent(session, row, true)).toBe(true);
+  });
+
+  it("collapses row 2 for a session whose cell would repeat the prompt", () => {
+    const session = mockEnrichedSession({
+      agentType: "codex",
+      paneTitle: "probe-codex-x7",
+      lastPrompt: "commit and push",
+    });
+    expect(rowHasContent(session, row, false)).toBe(true);
+    expect(rowHasContent(session, row, true)).toBe(false);
+  });
+});
+
+describe("stripPrompt with the summary cell", () => {
+  it("drops a row-1 summary too, since it falls back to the prompt", () => {
+    // `promptDisplay: "off"` means no prompt anywhere; a summary cell left
+    // behind would keep showing the very text the toggle turned off.
+    const stripped = stripPrompt(
+      resolveColumns(120, {
+        row1: { left: ["index", "status", "project", "summary"] },
+      }),
+    );
+    expect(stripped.row1.left.map((e) => e.field)).toEqual([
+      "index",
+      "status",
+      "project",
+    ]);
+    expect(stripped.row2).toEqual({ left: [], right: [] });
   });
 });

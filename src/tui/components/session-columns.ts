@@ -15,6 +15,7 @@ import {
   COLUMN_FIELDS,
   DEFAULT_BREAKPOINTS,
 } from "../../lib/preferences";
+import { summaryFromPaneTitle } from "../../lib/pane-summary";
 import type { EnrichedSession, BranchPR } from "../../types";
 import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
 
@@ -174,14 +175,14 @@ const DEFAULT_COLUMNS: ColumnsConfig = {
     },
   },
   // Row 2 renders only when some field has data (see `rowHasContent`), so
-  // sessions with no prompt stay single-line. `pr` is right-aligned branch
-  // metadata; the prompt cell shrinks (see SessionItem) so long prompts
-  // truncate instead of pushing the PR ids off-screen. The `PR ` prefix is
+  // sessions with nothing to subtitle stay single-line. `pr` is right-aligned
+  // branch metadata; the summary cell shrinks (see SessionItem) so long text
+  // truncates instead of pushing the PR ids off-screen. The `PR ` prefix is
   // dropped (`short`) below the `lg` breakpoint to save room on smaller
   // screens; inline collapse drops it too (see `flattenToRow1`), so the bare
   // colored `#id` rides next to the branch instead of reading as "PR".
   row2: {
-    left: ["prompt"],
+    left: ["summary"],
     right: [{ field: "pr", mode: { default: "short", lg: "full" } }],
   },
 };
@@ -191,7 +192,7 @@ const DEFAULT_COLUMNS: ColumnsConfig = {
  * session-level metadata that must survive the `p` toggle and the
  * no-prompt collapse: PR rides row 1 (in `short` mode — the `PR ` prefix
  * is too wide for a 30-col rail) next to the agent code. Row 2 is the
- * per-turn activity line (prompt + time); the pane target is dropped from
+ * per-turn activity line (summary + time); the pane target is dropped from
  * the defaults since selection, not the address, drives navigation —
  * restorable via `sidebar.columns`.
  */
@@ -201,7 +202,7 @@ export const SIDEBAR_DEFAULT_COLUMNS: ColumnsConfig = {
     right: ["pr:short", "agent:short"],
   },
   row2: {
-    left: ["prompt"],
+    left: ["summary"],
     right: ["time"],
   },
 };
@@ -270,11 +271,12 @@ export function resolveLayout(
  * too), and a prompt placed on row 1 by a custom layout is stripped as well.
  */
 export function stripPrompt(cols: ResolvedColumns): ResolvedColumns {
+  // Both flexible text cells go: `summary` falls back to the prompt, so
+  // leaving it behind would keep showing the very text the toggle turned off.
+  const drop = (entries: ResolvedEntry[]) =>
+    entries.filter((e) => !isFlexTextField(e.field));
   return {
-    row1: {
-      left: cols.row1.left.filter((e) => e.field !== "prompt"),
-      right: cols.row1.right.filter((e) => e.field !== "prompt"),
-    },
+    row1: { left: drop(cols.row1.left), right: drop(cols.row1.right) },
     row2: { left: [], right: [] },
   };
 }
@@ -429,21 +431,38 @@ export function prLabel(session: EnrichedSession, mode?: string): string {
 }
 
 /**
- * The displayable part of a tmux pane title. Claude Code writes its generated
- * session summary here behind a status glyph — a braille spinner (U+2800–
- * U+28FF) while working, U+2733 otherwise — which ccmux already renders as the
- * `status` column, so it is stripped rather than shown twice. Returns "" when
- * nothing legible is left.
+ * The agent's own summary of what this session is doing, or null when its
+ * agent writes none. Four built-ins keep a generated summary in the tmux pane
+ * title; the rest echo the cwd, their run state, or a static app name, and
+ * `summaryFromPaneTitle` is the per-agent rule that tells them apart.
+ *
+ * The `summary` cell falls back to the prompt whenever this is null, so this
+ * returns null rather than "" — absent, not blank.
  */
-export function paneTitleText(title: string | null | undefined): string {
-  if (!title) return "";
-  return title.replace(/^[\u2733\u2800-\u28FF\s]+/, "").trim();
+export function sessionSummary(session: EnrichedSession): string | null {
+  return summaryFromPaneTitle(
+    session.agentType,
+    session.paneTitle,
+    session.paneCwd ?? session.cwd,
+  );
 }
 
-/** Whether a single field has displayable data on this session. */
+/**
+ * Whether a single field has displayable data on this session.
+ *
+ * `promptBlockActive` says the wrapped prompt block is being DRAWN for this
+ * list. Only `summary` reads it, and only to answer the #159 yield rule from
+ * the far side: the block already prints the prompt, so a cell that would
+ * print it again has nothing of its own to show. A `summary` carrying a real
+ * agent summary is not that cell and keeps its place on the row.
+ *
+ * A literal `prompt` cell needs no such test — `withoutPrompt` removes it from
+ * the layout outright whenever the block is drawn.
+ */
 export function hasFieldData(
   session: EnrichedSession,
   field: ColumnField,
+  promptBlockActive = false,
 ): boolean {
   switch (field) {
     case "index":
@@ -468,8 +487,10 @@ export function hasFieldData(
       return !!session.gitBranch;
     case "pr":
       return sessionPRs(session).length > 0;
-    case "title":
-      return paneTitleText(session.paneTitle) !== "";
+    case "summary":
+      if (sessionSummary(session) !== null) return true;
+      if (promptBlockActive) return false;
+      return hasFieldData(session, "prompt");
   }
 }
 
@@ -482,9 +503,10 @@ export function hasFieldData(
 export function rowHasContent(
   session: EnrichedSession,
   row: ResolvedRow,
+  promptBlockActive = false,
 ): boolean {
   const counts = (e: ResolvedEntry) =>
-    e.field !== "time" && hasFieldData(session, e.field);
+    e.field !== "time" && hasFieldData(session, e.field, promptBlockActive);
   return row.left.some(counts) || row.right.some(counts);
 }
 
@@ -494,7 +516,7 @@ export function rowHasContent(
  * They share one budget, so a row should carry at most one of them.
  */
 export function isFlexTextField(field: ColumnField): boolean {
-  return field === "prompt" || field === "title";
+  return field === "prompt" || field === "summary";
 }
 
 /** Whether a flexible text cell lands on this resolved row (either side). */

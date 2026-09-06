@@ -315,9 +315,12 @@ export interface EnrichedSession extends Session {
   /** The pane's current working directory (preferred over log-derived cwd) */
   paneCwd: string | null;
   /**
-   * The tmux pane title. Claude Code sets this to its generated summary of
-   * the session, prefixed with a status glyph (a braille spinner while
-   * working, U+2733 otherwise). Surfaced by the `title` column.
+   * The tmux pane title, raw. Four built-in agents keep a generated summary
+   * of the session in it, each behind its own decoration (a status glyph, a
+   * spinner frame, an appended app name); the rest write their cwd, their own
+   * run state, or a static app name. `summaryFromPaneTitle`
+   * (`lib/pane-summary.ts`) is the per-agent rule that tells those apart, and
+   * the `summary` column is what renders the result.
    */
   paneTitle: string | null;
   /** Whether the session's cwd is a linked git worktree */

@@ -1,3 +1,4 @@
+import type { SummaryTitleRule } from "./pane-summary";
 import { MARKERS_DIR } from "./config";
 import type {
   AgentConfig,
@@ -158,6 +159,12 @@ export interface AgentDef {
    * history and override path.
    */
   readyPattern?: RegExp;
+  /**
+   * How this agent's tmux pane title reduces to the `summary` column's text.
+   * Absent means the agent writes no summary worth showing, and the cell
+   * falls back to the last prompt. See `src/lib/pane-summary.ts`.
+   */
+  summaryTitle?: SummaryTitleRule;
   hooks?: {
     markerDir?: string;
     type?: string;
@@ -606,6 +613,13 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // `agents.claude.readyPattern` in ccmux.json when Claude's glyph
     // changes again.
     readyPattern: /^[>❯]\s*$/,
+    // `✳ Say hello` after a turn, `✳ Claude Code` before one; the glyph is a
+    // braille spinner frame while working. `status` already draws that state,
+    // so the glyph goes, and the placeholder title is not a summary.
+    summaryTitle: {
+      strip: [/^[\u2733\u2800-\u28FF\s]+/],
+      empty: [/^Claude Code$/],
+    },
     hooks: { markerDir: MARKERS_DIR, type: "claude" },
     // Stops a paneless `claude --bg` worker via Claude's own supervisor CLI.
     // The worker pid belongs to that supervisor, not ccmux, so a direct
@@ -1014,6 +1028,10 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       resumeArgs: ["cursor-agent", "--print", "--resume", "{id}"],
       output: { kind: "stdout" },
     },
+    // `Hello Bot` after a turn, the app's own name before one. Nothing to
+    // strip: cursor writes the bare summary, which is also why a pane it has
+    // not titled yet still reads back as tmux's hostname seed.
+    summaryTitle: { empty: [/^Cursor Agent$/] },
     hooks: { markerDir: MARKERS_DIR, type: "cursor" },
   },
   {
@@ -1272,6 +1290,14 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       args: ["omp", "-p", "{prompt}"],
       output: { kind: "stdout" },
     },
+    // `π > Say hello` after a turn, `π ⠧ Say hello` while working, and
+    // `π > <cwd basename>` before the first turn — the prefix is there either
+    // way, so only the cwd comparison separates a session title from the
+    // directory name `project` already carries.
+    summaryTitle: {
+      strip: [/^π\s*[>\u2800-\u28FF]\s*/],
+      cwdBasenameIsEmpty: true,
+    },
     hooks: { markerDir: MARKERS_DIR, type: "omp" },
   },
   {
@@ -1476,6 +1502,13 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         "{id}",
       ],
       output: { kind: "stdout" },
+    },
+    // `Implement Hello Function - GitHub Copilot`: the summary with the app
+    // name appended. Bare, the app name is the placeholder it shows before a
+    // turn.
+    summaryTitle: {
+      strip: [/\s*-\s*GitHub Copilot$/],
+      empty: [/^GitHub Copilot$/],
     },
     hooks: { markerDir: MARKERS_DIR, type: "copilot" },
   },

@@ -4427,3 +4427,83 @@ describe("new-session dialog in issue mode (issue #151)", () => {
     expect(draft.issue).toBeNull();
   });
 });
+
+/**
+ * `summary` is what a stock layout puts on the row, so what the user can read
+ * there has to be searchable. Issue #183.
+ */
+describe("search over the agent's summary", () => {
+  const claude = (id: string, paneTitle: string, lastPrompt: string | null) =>
+    createMockSession({
+      id,
+      agentType: "claude",
+      project: "proj",
+      gitBranch: null,
+      paneTitle,
+      lastPrompt,
+      prompts: lastPrompt ? [lastPrompt] : [],
+    });
+
+  it("matches a session on its summary text alone", () => {
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([
+      claude("s1", "✳ Wire up the summary column", "commit and push"),
+      claude("s2", "✳ Fix the scroll math", "commit and push"),
+    ]);
+
+    store.actions.setSearchQuery("scroll math");
+    const filtered = store.filteredSessions();
+
+    expect(filtered.map((f) => f.session.id)).toEqual(["s2"]);
+  });
+
+  it("carries a summary highlight so the cell can show the match", () => {
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([
+      claude("s1", "✳ Wire up the summary column", "commit and push"),
+    ]);
+
+    store.actions.setSearchQuery("summary");
+    const filtered = store.filteredSessions();
+
+    expect(filtered[0].highlights?.summary).toBe(
+      "Wire up the <b>summary</b> column",
+    );
+  });
+
+  it("finds nothing in the pane title of an agent with no rule", () => {
+    // codex writes its cwd basename there; the `project` column already
+    // carries that, and matching it would make the query mean two things.
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([
+      createMockSession({
+        id: "s1",
+        agentType: "codex",
+        project: "proj",
+        gitBranch: null,
+        paneTitle: "probe-codex-x7",
+        lastPrompt: null,
+        prompts: [],
+      }),
+    ]);
+
+    store.actions.setSearchQuery("probe-codex");
+    expect(store.filteredSessions()).toHaveLength(0);
+  });
+
+  it("scores a summary hit in the prompt tier, not as a sixth source", () => {
+    // Summary and prompt share one cell, so they share one contribution. A
+    // separate source would raise the maximum cross-source bonus past the
+    // smallest tier gap and let corroboration outrank a stronger tier.
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([
+      claude("s1", "✳ Wire up the summary column", "commit and push"),
+    ]);
+
+    store.actions.setSearchQuery("summary");
+    const [row] = store.filteredSessions();
+
+    expect(row.matchSources).toEqual(["prompt"]);
+    expect(row.primarySource).toBe("prompt");
+  });
+});

@@ -44,7 +44,10 @@ import type { UntrackedMode } from "../daemon/worktree-move-changes";
 // dialog settles differently from the one that gets created is worse than
 // showing no name at all.
 import { slugify } from "../daemon/worktree-create";
-import { normalizePrompt } from "./components/session-columns";
+import {
+  normalizePrompt,
+  sessionSummary,
+} from "./components/session-columns";
 import { capturePane } from "./utils/tmux";
 import { isSameServerCached } from "./utils/server-guard";
 import { stripAnsi } from "../lib/strip-ansi";
@@ -1220,6 +1223,20 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       }
     }
 
+    // Summary matches (substring over the agent's pane-title summary). The
+    // `summary` cell is what a stock layout shows, so the text on screen has
+    // to be searchable; without this a user searching for what they can read
+    // on the row gets nothing back. Substring, not fuzzysort, for the same
+    // reason `lastPrompt` renders that way: a scatter match over free text
+    // produces single-char spans HighlightedText cannot lay out.
+    const summaryMatches = new Map<string, string>();
+    for (const s of sorted) {
+      const summary = sessionSummary(s);
+      if (!summary) continue;
+      if (!summary.toLowerCase().includes(lowerQuery)) continue;
+      summaryMatches.set(s.id, wrapFirstMatch(summary, lowerQuery));
+    }
+
     // Pane content matches (from async cache)
     const cache = paneCache();
     const paneMatches = new Set<string>();
@@ -1238,6 +1255,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     const allMatchIds = new Set([
       ...results.map((r) => r.obj.id),
       ...promptMatches.keys(),
+      ...summaryMatches.keys(),
       ...paneMatches,
       ...transcript.keys(),
     ]);
@@ -1254,6 +1272,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       .map((s) => {
         const fzResult = metadataMap.get(s.id);
         const promptMatch = promptMatches.get(s.id);
+        const summaryMatch = summaryMatches.get(s.id);
         const tMatches = transcript.get(s.id);
         // `lastPrompt` renders as a substring highlight on normalized text
         // (like `prompts`), NOT fuzzysort markup: a fuzzy scatter-match over a
@@ -1272,13 +1291,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         // (with the four metadata fields null). project/cwd/gitBranch keep
         // fuzzysort markup (short strings, few segments, render fine).
         const highlights =
-          fzResult || promptMatch
+          fzResult || promptMatch || summaryMatch
             ? {
                 project: fzResult?.[0]?.highlight("<b>", "</b>") || null,
                 cwd: fzResult?.[1]?.highlight("<b>", "</b>") || null,
                 gitBranch: fzResult?.[2]?.highlight("<b>", "</b>") || null,
                 lastPrompt: lastPromptHl,
                 prompts: promptMatch?.line ?? null,
+                summary: summaryMatch ?? null,
               }
             : null;
 
@@ -1315,13 +1335,19 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         if (cwdFz > 0) {
           contributions.push({ source: "cwd", value: 2000 + 500 * cwdFz });
         }
-        if (promptMatch) {
-          contributions.push({
-            source: "prompt",
-            value: 1000 + 500 * promptMatch.recency,
-          });
-        } else if (lastPromptFz > 0) {
-          contributions.push({ source: "prompt", value: 500 * lastPromptFz });
+        // Summary and prompt share ONE contribution because they share one
+        // cell: a second source would make the maximum cross-source bonus
+        // 250, which crosses the smallest tier gap (pane 600 - transcript
+        // 400) and would let corroboration lift a row past a stronger tier.
+        // The summary is always current, so it scores as a newest-prompt
+        // substring hit does.
+        const promptTier = Math.max(
+          promptMatch ? 1000 + 500 * promptMatch.recency : 0,
+          summaryMatch ? 1500 : 0,
+          lastPromptFz > 0 ? 500 * lastPromptFz : 0,
+        );
+        if (promptTier > 0) {
+          contributions.push({ source: "prompt", value: promptTier });
         }
         if (paneMatches.has(s.id)) {
           contributions.push({ source: "pane", value: 600 });

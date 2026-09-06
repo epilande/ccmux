@@ -598,7 +598,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Move group top/bottom | <kbd><</kbd> / <kbd>></kbd>                                                        | Pin group to top / bottom                                                                                              |
 | Collapse/expand all   | <kbd>z</kbd><kbd>M</kbd> / <kbd>z</kbd><kbd>R</kbd> or <kbd>-</kbd> / <kbd>=</kbd> | Collapse or expand all groups                                                                                          |
 | Hide idle             | <kbd>f</kbd>                                                                       | Toggle hiding idle sessions                                                                                            |
-| Cycle prompt          | <kbd>p</kbd>                                                                       | Prompt display: inline → own row → off                                                                                 |
+| Cycle prompt          | <kbd>p</kbd>                                                                       | Prompt display for the `summary`/`prompt` cell: inline → own row → off                                                 |
 | Cycle group-by        | <kbd>b</kbd>                                                                       | Cycle through group-by modes                                                                                           |
 | Help                  | <kbd>?</kbd>                                                                       | Show keyboard shortcuts overlay                                                                                        |
 | Quit                  | <kbd>q</kbd> / <kbd>Esc</kbd>                                                      | Exit the picker                                                                                                        |
@@ -698,7 +698,7 @@ Each session item has up to two rows (`row1`, `row2`), and each row has a `left`
 ```bash
 ccmux config set columns.row1.left  "index,status:icon,project"
 ccmux config set columns.row1.right "agent:short,pane,time"
-ccmux config set columns.row2.left  "prompt"
+ccmux config set columns.row2.left  "summary"
 ccmux config set columns.row2.right "branch"
 ```
 
@@ -717,9 +717,18 @@ Pass an empty string to clear a side: `ccmux config set columns.row2.left ""`.
 | `cwd`     | —                     | —            | Working directory                                                                        |
 | `branch`  | —                     | —            | Git branch, suffixed `+` in a worktree                                                   |
 | `pr`      | `short`/`full`        | `full`       | Open PRs for the branch (`#25`/`PR #25`)                                                 |
-| `title`   | —                     | —            | The agent's own summary of the session, from its tmux pane title (truncated)             |
+| `summary` | —                     | —            | The agent's own summary of the session, falling back to the last prompt (truncated)      |
 
-`title` shows what the agent says it is doing: Claude Code keeps its tmux pane title updated with a generated summary of the session, and the column renders that with the leading status glyph stripped (the `status` column already draws that state). Agents that do not set a pane title leave the cell empty, and it is hidden rather than rendered blank. Like `prompt` it flexes to fill its row, so the two share one budget — put at most one of them on a row.
+`summary` is the default subtitle cell, and shows what the agent says it is doing. Claude Code, Copilot, Cursor and oh-my-pi each keep a generated summary in their tmux pane title; the column reads that through a per-agent rule that drops the status glyph, the spinner frame and the app name, so what lands on the row is the summary alone. Every other agent writes its cwd, its own state or a static app name there, and for those the cell falls back to the last prompt. Never both on one line.
+
+`prompt` is unchanged and still shows the raw last prompt. To keep it as the subtitle, name it in the column config:
+
+```bash
+ccmux config set columns.row2.left prompt
+ccmux config set sidebar.columns.row2.left prompt
+```
+
+Both cells flex to fill their row, so they share one budget — put at most one of them on a row.
 
 The `project` cell reads `path:branch`, and a session running in a git worktree marks it twice: the branch gains a trailing `+` (also on the standalone `branch` column), and the path is replaced by `<repo>/<worktree>` — `ccmux/parking` rather than the `worktrees/parking` the directory happens to spell, so worktrees of different repos stay distinguishable. Both survive the `dirname` mode, since they are identity rather than path context; when the cell is too narrow for both, the repo yields before the worktree's own name does.
 
@@ -732,11 +741,11 @@ ccmux config set promptLines 3          # picker and sidebar
 ccmux config set sidebar.promptLines 4  # sidebar only
 ```
 
-`0` (the default) disables it; the cap is 10. Turning it on removes the `prompt` cell from both rows rather than printing the same text twice, and `promptDisplay: "off"` (the <kbd>p</kbd> key) still hides it. While a search is active the block yields to the one-line `prompt` cell, so the match highlights and the `[pane]`/`[transcript]`/`[cwd]` source tag stay visible; a rail too narrow for a readable wrap keeps the cell for the same reason. A session with no prompt gets no extra lines. The preview pane already shows the selected row's full last prompt, so the block earns its keep mostly in the sidebar. The block is wrapped and measured before layout, so a row's reported height and its drawn lines are always the same number — the scroll and row-menu geometry stay exact at any height.
+`0` (the default) disables it; the cap is 10. Turning it on removes the `prompt` cell from both rows rather than printing the same text twice, and `promptDisplay: "off"` (the <kbd>p</kbd> key) still hides it. The `summary` cell yields the same way, but per session: a row whose agent wrote a real summary keeps it on the identity line with the block below, which is the one way to see both at once, while a row whose cell would fall back to the prompt drops it. While a search is active the block yields to the one-line `prompt` cell, so the match highlights and the `[pane]`/`[transcript]`/`[cwd]` source tag stay visible; a rail too narrow for a readable wrap keeps the cell for the same reason. A session with no prompt gets no extra lines. The preview pane already shows the selected row's full last prompt, so the block earns its keep mostly in the sidebar. The block is wrapped and measured before layout, so a row's reported height and its drawn lines are always the same number — the scroll and row-menu geometry stay exact at any height.
 
-Defaults: `row1.left` is `index, status, project` (status badge widens icon→short→full as the terminal grows). `row1.right` cascades by breakpoint: just `pane` below `xs`, then `agent:short, pane` at `xs`, `agent:short, pane, time` at `sm`, and `agent:full, version, pane, time` at `md`+. The `prompt` and `pr` cells are configured on `row2`, but `promptDisplay` (default `inline`, cycled live by <kbd>p</kbd>) controls how they render: `inline` flattens them onto `row1` so each session stays a single line, `row2` gives the prompt its own line with `pr` at the right edge, and `off` hides both. Sessions with no prompt stay single-line in `inline` mode; in `row2` mode the second line still appears when another row-2 field (such as an open PR) has data.
+Defaults: `row1.left` is `index, status, project` (status badge widens icon→short→full as the terminal grows). `row1.right` cascades by breakpoint: just `pane` below `xs`, then `agent:short, pane` at `xs`, `agent:short, pane, time` at `sm`, and `agent:full, version, pane, time` at `md`+. The `summary` and `pr` cells are configured on `row2`, but `promptDisplay` (default `inline`, cycled live by <kbd>p</kbd>) controls how they render: `inline` flattens them onto `row1` so each session stays a single line, `row2` gives the subtitle its own line with `pr` at the right edge, and `off` hides both. Sessions with no prompt stay single-line in `inline` mode; in `row2` mode the second line still appears when another row-2 field (such as an open PR) has data.
 
-Sidebar defaults differ to fit the narrow rail: `row1` is `status, project` with `pr:short, agent:short` on the right (PR stays visible even with the prompt hidden), and `row2` is `prompt` / `time` (a lone `time` never earns the row; it rides along when some other field has data). The 30-col rail has no room to inline, so the sidebar always uses the two-row layout (`inline` behaves like `row2`). Override these under the `sidebar.columns` key in `~/.config/ccmux/ccmux.json` (e.g. `"sidebar": { "columns": { "row2": { "left": ["pane"] } } }` to bring the pane target back).
+Sidebar defaults differ to fit the narrow rail: `row1` is `status, project` with `pr:short, agent:short` on the right (PR stays visible even with the prompt hidden), and `row2` is `summary` / `time` (a lone `time` never earns the row; it rides along when some other field has data). The 30-col rail has no room to inline, so the sidebar always uses the two-row layout (`inline` behaves like `row2`). Override these under the `sidebar.columns` key in `~/.config/ccmux/ccmux.json` (e.g. `"sidebar": { "columns": { "row2": { "left": ["pane"] } } }` to bring the pane target back).
 
 The CLI's comma-separated form sets one mode per entry. To vary the layout by terminal width (responsive cascade), edit `~/.config/ccmux/ccmux.json` directly and use the `default`/`xs`/`sm`/`md`/`lg` keys on either a row side (whole array) or an entry's `mode`.
 

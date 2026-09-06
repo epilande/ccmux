@@ -9613,3 +9613,167 @@ describe("GET /issues", () => {
     }
   });
 });
+
+/**
+ * The agent's pane-title summary is enrichment: it is read off the pane cache
+ * in `enrichSession` and never lands on `Session`, so no tracked-field
+ * comparison in `SessionManager` can see it move. Without this pass a
+ * long-lived sidebar holds the previous turn's summary on an otherwise idle
+ * row (issue #183, carried over from the #159 review).
+ */
+describe("syncPaneSummaries", () => {
+  async function setup(paneTitle: string | null) {
+    const manager = new SessionManager();
+    const cache = new Map<string, TmuxPane>();
+    cache.set(
+      "%1",
+      fakePane({ paneId: "%1", paneTitle, currentPath: "/Users/test/proj" }),
+    );
+    const { server, internals } = createServer(manager, cache);
+    manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd: "/Users/test/proj",
+      pid: 42,
+    });
+    internals.visibleSessions.add("claude_pane1");
+
+    const events: SSEEvent[] = [];
+    internals.broadcastEvent = (event: SSEEvent) => {
+      events.push(event);
+    };
+    const setTitle = (next: string | null) => {
+      cache.set(
+        "%1",
+        fakePane({
+          paneId: "%1",
+          paneTitle: next,
+          currentPath: "/Users/test/proj",
+        }),
+      );
+    };
+    // The manager's own `session_created` fan-out is async, so drain it before
+    // handing the array over — every count below is about this pass alone.
+    await drain();
+    events.length = 0;
+    return { server, events, setTitle };
+  }
+
+  const drain = () => new Promise((r) => setTimeout(r, 50));
+
+  /**
+   * Let the void-ed `rebroadcastSession` promises settle. It enriches before
+   * it broadcasts, and enrichment reads git, so a bare microtask tick is not
+   * enough; poll for the expected count and fall through on the deadline so a
+   * "stays quiet" assertion still gets to fail loudly.
+   */
+  async function settle(events: SSEEvent[], expected = 0): Promise<void> {
+    const deadline = Date.now() + 2000;
+    while (events.length < expected && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    await drain();
+  }
+
+  it("records the first reading without broadcasting", async () => {
+    // The `init` or `session_created` that made the row visible already
+    // carried its current title.
+    const { server, events } = await setup("✳ Wire up the summary column");
+    server.syncPaneSummaries();
+    await settle(events);
+    expect(events).toHaveLength(0);
+  });
+
+  it("broadcasts when the summary changes", async () => {
+    const { server, events, setTitle } = await setup("✳ Wire up the summary column");
+    server.syncPaneSummaries();
+    setTitle("✳ Fix the scroll math");
+    server.syncPaneSummaries();
+    await settle(events, 1);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("session_updated");
+  });
+
+  it("stays quiet while only the spinner frame turns", async () => {
+    // codex and omp rewrite the title on every frame. Comparing the raw
+    // string would broadcast the whole roster on every scan tick.
+    const { server, events, setTitle } = await setup("⠂ Wire up the summary column");
+    server.syncPaneSummaries();
+    for (const glyph of ["⠄", "⡀", "⢀", "⠠", "✳"]) {
+      setTitle(`${glyph} Wire up the summary column`);
+      server.syncPaneSummaries();
+    }
+    await settle(events);
+
+    expect(events).toHaveLength(0);
+  });
+
+  it("stays quiet for an agent that writes no summary", async () => {
+    const manager = new SessionManager();
+    const cache = new Map<string, TmuxPane>();
+    const pane = (title: string) =>
+      fakePane({ paneId: "%1", paneTitle: title, currentPath: "/tmp/proj" });
+    cache.set("%1", pane("probe-codex-x7"));
+    const { server, internals } = createServer(manager, cache);
+    manager.createPaneTrackedSession({
+      agentType: "codex",
+      paneId: "%1",
+      cwd: "/tmp/proj",
+      pid: 42,
+    });
+    internals.visibleSessions.add("codex_pane1");
+    const events: SSEEvent[] = [];
+    internals.broadcastEvent = (event: SSEEvent) => {
+      events.push(event);
+    };
+    await drain();
+    events.length = 0;
+
+    server.syncPaneSummaries();
+    cache.set("%1", pane("⠏ probe-codex-x7"));
+    server.syncPaneSummaries();
+    await settle(events);
+
+    expect(events).toHaveLength(0);
+  });
+
+  it("broadcasts when a summary disappears", async () => {
+    const { server, events, setTitle } = await setup("✳ Wire up the summary column");
+    server.syncPaneSummaries();
+    setTitle("✳ Claude Code");
+    server.syncPaneSummaries();
+    await settle(events, 1);
+
+    expect(events).toHaveLength(1);
+  });
+
+  it("ignores sessions the clients cannot see", async () => {
+    const manager = new SessionManager();
+    const cache = new Map<string, TmuxPane>();
+    cache.set("%1", fakePane({ paneId: "%1", paneTitle: "✳ One" }));
+    const { server, internals } = createServer(manager, cache);
+    manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd: "/Users/test/proj",
+      pid: 42,
+    });
+    const events: SSEEvent[] = [];
+    internals.broadcastEvent = (event: SSEEvent) => {
+      events.push(event);
+    };
+    // Drop it back out of visibility: the manager's own created-event pass
+    // promotes a pane-bound row on its way through `sessionEventToSSE`.
+    await drain();
+    events.length = 0;
+    internals.visibleSessions.clear();
+
+    server.syncPaneSummaries();
+    cache.set("%1", fakePane({ paneId: "%1", paneTitle: "✳ Two" }));
+    server.syncPaneSummaries();
+    await settle(events);
+
+    expect(events).toHaveLength(0);
+  });
+});

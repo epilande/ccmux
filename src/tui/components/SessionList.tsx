@@ -144,6 +144,11 @@ export const SessionList: Component<SessionListProps> = (props) => {
     // The block renders the same text a `prompt` cell would, so the cell
     // goes, but only while the block is actually drawn. Otherwise the row
     // would lose its prompt entirely.
+    //
+    // `summary` is NOT stripped here: whether it would print the block's text
+    // depends on the session, not on the layout — a row whose agent wrote a
+    // real summary keeps its cell on the identity line with the block below.
+    // That per-session call is `hasFieldData`'s, via `blockActive` below.
     return blockActive() ? withoutPrompt(cols) : cols;
   });
 
@@ -181,7 +186,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
 
   const sessionLines = (session: EnrichedSession) =>
     1 +
-    (rowHasContent(session, layout().row2) ? 1 : 0) +
+    (rowHasContent(session, layout().row2, blockActive()) ? 1 : 0) +
     promptBlock(session).length;
 
   createEffect(() => {
@@ -292,6 +297,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
         }
         layout={layout()}
         promptBlock={promptBlock(item.filteredSession.session)}
+        promptBlockActive={blockActive()}
         dimmed={props.dimmed}
         sidebar={props.sidebar}
         onActivate={onActivate}

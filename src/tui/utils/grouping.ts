@@ -46,6 +46,11 @@ export interface FilteredSession {
      * whose text matched, rendered here when `lastPrompt` (the newest) did not
      * itself match. Not the whole index, and never multi-line. */
     prompts?: string | null;
+    /** The agent's pane-title summary with the matched span wrapped, when the
+     * query hit the summary text itself. Substring highlights like
+     * `lastPrompt`, not fuzzysort markup: the `summary` cell shows this
+     * instead of deferring to the prompt, since the hit IS the evidence. */
+    summary?: string | null;
   } | null;
   paneMatch?: boolean;
   /** The session matched a live transcript search (daemon `/search`). */

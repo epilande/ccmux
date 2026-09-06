@@ -85,6 +85,7 @@ import {
   type PRSource,
 } from "./gh-spawn-source";
 import { getAgents, type AgentDef } from "../lib/agents";
+import { summaryFromPaneTitle } from "../lib/pane-summary";
 import { BUILD_IDENTITY } from "../lib/build-identity";
 import { listSpawnableAgents, spawnBinaryFor } from "../lib/spawnable-agents";
 import {
@@ -575,6 +576,12 @@ export class DaemonServer {
   private getPaneCache: PaneCacheGetter;
   private getAgentByType: AgentLookup;
   private visibleSessions = new Set<string>();
+  /**
+   * Last NORMALIZED pane-title summary broadcast for each visible session, so
+   * `syncPaneSummaries` can tell a real change from the churn around it.
+   * Keyed by session id, cleared wherever `visibleSessions` is.
+   */
+  private lastPaneSummary = new Map<string, string | null>();
   /** Rotating start index for `sweepBranchPRs`, see its docstring. */
   private sweepOffset = 0;
   private gitInfoCache = new Map<string, GitInfoCacheEntry>();
@@ -1056,6 +1063,47 @@ export class DaemonServer {
       timestamp: new Date().toISOString(),
       session: await this.enrichSession(session),
     });
+  }
+
+  /**
+   * Re-broadcast every visible session whose agent-written pane-title summary
+   * changed since the last scan.
+   *
+   * The summary is enrichment: it is read off the pane cache in
+   * `enrichSession` and never lands on `Session`, so no tracked-field
+   * comparison in `SessionManager` can see it move. Without this, a row that
+   * is otherwise idle would hold the summary it had when it was last
+   * broadcast for some other reason, and a long-lived sidebar would show the
+   * previous turn's title indefinitely. Exactly the shape `onBranchPRsChanged`
+   * already uses for PR enrichment: enrichment changed, so re-broadcast.
+   *
+   * Compares the NORMALIZED summary, not the raw title. codex and omp rewrite
+   * the title on every spinner frame, so the raw string differs on nearly
+   * every scan tick and this would broadcast the whole roster continuously.
+   *
+   * A session with no recorded value yet is recorded and NOT broadcast: the
+   * `init` or `session_created` that made it visible already carried its
+   * current title.
+   */
+  syncPaneSummaries(): void {
+    const paneCache = this.getPaneCache();
+    for (const session of this.sessionManager.getSessions()) {
+      if (!this.visibleSessions.has(session.id)) continue;
+      const paneInfo = session.tmuxPane
+        ? paneCache.get(session.tmuxPane)
+        : null;
+      const summary = summaryFromPaneTitle(
+        session.agentType,
+        paneInfo?.paneTitle ?? null,
+        paneInfo?.currentPath ?? session.cwd,
+      );
+      const had = this.lastPaneSummary.has(session.id);
+      const previous = this.lastPaneSummary.get(session.id) ?? null;
+      this.lastPaneSummary.set(session.id, summary);
+      if (had && previous !== summary) {
+        void this.rebroadcastSession(session.id);
+      }
+    }
   }
 
   private async enrichSessions(
@@ -3889,6 +3937,7 @@ export class DaemonServer {
         if (!isVisibleNow && wasVisible) {
           // Pane lost — demote from visible
           this.visibleSessions.delete(session.id);
+          this.lastPaneSummary.delete(session.id);
           return {
             type: "session_removed",
             timestamp,
@@ -3903,6 +3952,7 @@ export class DaemonServer {
         const sessionId = event.sessionId!;
         if (this.visibleSessions.has(sessionId)) {
           this.visibleSessions.delete(sessionId);
+          this.lastPaneSummary.delete(sessionId);
           return {
             type: "session_removed",
             timestamp,
