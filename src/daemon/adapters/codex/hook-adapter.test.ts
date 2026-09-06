@@ -96,11 +96,11 @@ describe("CodexHookAdapter", () => {
       );
 
       expect(readConfigFile()).toContain("[features]");
-      expect(readConfigFile()).toContain("codex_hooks = true");
+      expect(readConfigFile()).toContain("hooks = true");
 
       expect(lines.some((l) => l.includes("Created hook script"))).toBe(true);
       expect(
-        lines.some((l) => l.includes("Enabled [features] codex_hooks")),
+        lines.some((l) => l.includes("Enabled the codex hooks feature")),
       ).toBe(true);
     });
 
@@ -170,7 +170,7 @@ describe("CodexHookAdapter", () => {
       expect(content).toContain("# provider choice");
       expect(content).toContain("[providers.openai]");
       expect(content).toContain("[features]");
-      expect(content).toContain("codex_hooks = true");
+      expect(content).toContain("hooks = true");
     });
 
     it("backs up existing hooks.json and config.toml before mutating", async () => {
