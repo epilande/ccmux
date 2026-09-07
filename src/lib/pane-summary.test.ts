@@ -208,7 +208,8 @@ describe("summaryFromPaneTitle", () => {
     });
 
     it("strips the controls stripAnsi leaves behind", () => {
-      // `stripAnsi` handles CSI only. A BEL, a lone ESC and a C1 byte (here
+      // `stripAnsi` handles well-formed sequences. A BEL, a lone ESC and a
+      // C1 byte (here
       // U+0085 NEL, which JS `\s` does not match) would otherwise ride into a
       // rendered cell. Each becomes a space, so the words stay apart.
       expect(

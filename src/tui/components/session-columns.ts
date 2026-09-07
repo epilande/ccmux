@@ -18,6 +18,7 @@ import {
 import type { EnrichedSession, BranchPR } from "../../types";
 import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
 import { stripAnsi } from "../../lib/strip-ansi";
+import { stripControlChars } from "../../daemon/notify-text";
 import { HANDOFF_PREFIX } from "../../daemon/handoff";
 
 const RESPONSIVE_KEYS = new Set([
@@ -362,6 +363,22 @@ export function applyPromptDisplay(
 }
 
 /**
+ * Text that came from a terminal, reduced to what a cell can paint.
+ *
+ * `stripAnsi` takes out the well-formed sequences; the control sweep behind
+ * it is for the residue a real pane still carries, a lone ESC, a BEL, a DEL,
+ * or a C1 byte, none of which belong to a sequence the pattern can
+ * recognize. Each becomes a SPACE rather than nothing, so two words never
+ * weld together, which is also why the collapse runs again here:
+ * `normalizePrompt` already collapsed before it could see any of this.
+ */
+function cleanTerminalText(text: string): string {
+  return stripControlChars(stripAnsi(text), { replacement: " " })
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
  * Claude logs store slash-command turns as XML-ish markup
  * (`<command-name>/clear</command-name><command-args>…</command-args>`),
  * local-command output wrapped in `<local-command-stdout>` (which can carry
@@ -369,6 +386,17 @@ export function applyPromptDisplay(
  * wrapped in `<task-notification>` (only the `<summary>` inside is worth
  * showing; a notification with none is dropped rather than shown raw).
  * Reduce those to the text that reads as the user's intent.
+ *
+ * A `!` shell turn is a THIRD pair of shapes, not the local-command one:
+ * Claude Code 2.1.x writes the command as `<bash-input>` and its result as
+ * `<bash-stdout>…</bash-stdout><bash-stderr>…</bash-stderr>`, and reserves
+ * `<local-command-stdout>` for built-ins like `/model`. The bash pair is
+ * where raw escapes actually arrive, since the payload is a real command's
+ * output. stdout wins over input when one text carries both, and stderr is
+ * the fallback for a command that only complained; a turn with neither
+ * reduces to "" so the row drops like the other empty shapes. `<bash-input>`
+ * renders with its `!` restored, the shape Claude's own last-prompt records
+ * use.
  */
 function stripCommandMarkup(text: string): string {
   const command = text.match(/<command-name>([\s\S]*?)<\/command-name>/);
@@ -379,7 +407,19 @@ function stripCommandMarkup(text: string): string {
   const stdout = text.match(
     /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/,
   );
-  if (stdout) return stripAnsi(stdout[1]);
+  if (stdout) return cleanTerminalText(stdout[1]);
+  const bashOut = text.match(/<bash-stdout>([\s\S]*?)<\/bash-stdout>/);
+  const bashErr = text.match(/<bash-stderr>([\s\S]*?)<\/bash-stderr>/);
+  if (bashOut || bashErr)
+    return (
+      cleanTerminalText(bashOut?.[1] ?? "") ||
+      cleanTerminalText(bashErr?.[1] ?? "")
+    );
+  const bashIn = text.match(/<bash-input>([\s\S]*?)<\/bash-input>/);
+  if (bashIn) {
+    const cmd = cleanTerminalText(bashIn[1]);
+    return cmd ? `! ${cmd}` : "";
+  }
   const notification = text.match(
     /<task-notification>([\s\S]*?)<\/task-notification>/,
   );

@@ -32,12 +32,12 @@ const HOSTNAME = hostname();
  * also unwraps Claude's `<command-name>` log markup, which is a property of
  * Claude's JSONL transcript and has no business being applied to a title.
  *
- * `stripAnsi` handles CSI only, so the control sweep after it is what catches
- * the rest: a lone ESC, a BEL, and the C1 block (U+0080-U+009F), which is the
- * practical residue once tmux's own title validation has had its say. Each
- * becomes a SPACE rather than nothing, so the `\s+` collapse behind it still
- * sees a separator: `\n` and `\t` fall under both rules, and deleting them
- * outright would weld two words together.
+ * `stripAnsi` handles well-formed sequences, so the control sweep after it is
+ * what catches the rest: a lone ESC, a BEL, and the C1 block (U+0080-U+009F),
+ * which is the practical residue once tmux's own title validation has had its
+ * say. Each becomes a SPACE rather than nothing, so the `\s+` collapse behind
+ * it still sees a separator: `\n` and `\t` fall under both rules, and
+ * deleting them outright would weld two words together.
  */
 function normalizeTitle(text: string): string {
   return stripAnsi(text)

@@ -411,6 +411,58 @@ describe("normalizePrompt", () => {
     ).toBe("OK");
   });
 
+  it("strips private-mode CSI, OSC hyperlinks and a BEL from stdout", () => {
+    // What a real pane hands `<local-command-stdout>`: a cursor hide/show
+    // pair, an OSC 8 hyperlink around the text, and a stray BEL. None of it
+    // is plain CSI, so none of it may reach the cell as `[?25l` or `]8;;…`.
+    expect(
+      normalizePrompt(
+        "<local-command-stdout>" +
+          "\x1b[?25l\x1b]8;;https://example.com\x07green\x1b]8;;\x07\x07 file" +
+          "\x1b[0m\x1b[?25h" +
+          "</local-command-stdout>",
+      ),
+    ).toBe("green file");
+  });
+
+  it("strips ANSI from a `!` shell turn's bash-stdout", () => {
+    // The exact shape a live Claude 2.1.263 logged for
+    // `! printf '\033]8;;…\aLINKED\033]8;;\a \033[32mgreen\033[0m file'`.
+    expect(
+      normalizePrompt(
+        "<bash-stdout>\x1b]8;;https://example.com\x07LINKED\x1b]8;;\x07 " +
+          "\x1b[?25l\x1b[32mgreen\x1b[0m\x1b[?25h file</bash-stdout>" +
+          "<bash-stderr></bash-stderr>",
+      ),
+    ).toBe("LINKED green file");
+  });
+
+  it("falls back to bash-stderr when the command printed nothing", () => {
+    expect(
+      normalizePrompt(
+        "<bash-stdout></bash-stdout><bash-stderr>no such file</bash-stderr>",
+      ),
+    ).toBe("no such file");
+  });
+
+  it("drops a `!` shell turn that produced no output at all", () => {
+    expect(
+      normalizePrompt("<bash-stdout></bash-stdout><bash-stderr></bash-stderr>"),
+    ).toBe("");
+  });
+
+  it("restores the `!` on a bash-input turn", () => {
+    expect(normalizePrompt("<bash-input>ls -la</bash-input>")).toBe("! ls -la");
+  });
+
+  it("prefers bash-stdout over bash-input in one text", () => {
+    expect(
+      normalizePrompt(
+        "<bash-input>ls</bash-input><bash-stdout>README.md</bash-stdout>",
+      ),
+    ).toBe("README.md");
+  });
+
   it("reduces a task notification to its summary", () => {
     expect(
       normalizePrompt(
