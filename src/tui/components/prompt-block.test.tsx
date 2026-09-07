@@ -183,3 +183,116 @@ describe("wrapped prompt block", () => {
     expect(frame).toContain("…");
   });
 });
+
+/**
+ * The #159 yield rule, now decided per session (issue #183): the block is the
+ * prompt, so a cell that would print the prompt yields to it, and one showing
+ * the agent's own summary does not. Row HEIGHT is where that shows up, and the
+ * scroll math is measured from the same number, so an over-reported row would
+ * push every row below it out of place.
+ */
+function summaryItem(
+  id: string,
+  agentType: string,
+  summary: string | null,
+  lastPrompt: string,
+): FlatItem {
+  return {
+    type: "session",
+    groupKey: "g",
+    filteredSession: {
+      session: mockEnrichedSession({ id, agentType, summary, lastPrompt }),
+      highlights: null,
+    },
+  };
+}
+
+describe("the summary cell's per-session yield to the block", () => {
+  const PROMPT = "commit and push";
+  const SUMMARY = "Wire up the summary column";
+  const pair = (agentType: string, summary: string | null) => [
+    summaryItem("a", agentType, summary, PROMPT),
+    summaryItem("b", agentType, summary, PROMPT),
+  ];
+  // The daemon ships `summary`; an agent with no rule ships null.
+  const noRule = () => pair("codex", null);
+  const withSummary = () => pair("claude", SUMMARY);
+
+  describe("on its own row (`row2`)", () => {
+    const opts = { promptDisplay: "row2" as const };
+
+    it("collapses row 2 when the cell would only repeat the block", async () => {
+      const frame = await render(noRule(), 1, 60, opts);
+      expect(identityLine(frame, 2) - identityLine(frame, 1)).toBe(2);
+      expect(promptLinesIn(frame, PROMPT)).toHaveLength(2);
+    });
+
+    it("keeps row 2 for a real summary, with the block below it", async () => {
+      const frame = await render(withSummary(), 1, 60, opts);
+      expect(identityLine(frame, 2) - identityLine(frame, 1)).toBe(3);
+      expect(promptLinesIn(frame, SUMMARY)).toHaveLength(2);
+      expect(promptLinesIn(frame, PROMPT)).toHaveLength(2);
+    });
+
+    it("hands the cell back when the block is off", async () => {
+      const frame = await render(noRule(), 0, 60, opts);
+      expect(identityLine(frame, 2) - identityLine(frame, 1)).toBe(2);
+      expect(promptLinesIn(frame, PROMPT)).toHaveLength(2);
+    });
+  });
+
+  it("treats a daemon-too-old row (no field at all) as having no summary", async () => {
+    // A picker on this build can briefly talk to a daemon that predates the
+    // field. `undefined` must read as "no summary", or the row keeps a cell
+    // that can only reprint the block below it.
+    const legacy = summaryItem("a", "claude", null, PROMPT);
+    if (legacy.type !== "session") throw new Error("unreachable");
+    delete (
+      legacy.filteredSession.session as { summary?: string | null }
+    ).summary;
+    const frame = await render([legacy], 1, 60, { promptDisplay: "row2" });
+    // Row 2 collapsed, and the prompt appears once (in the block).
+    expect(promptLinesIn(frame, PROMPT)).toHaveLength(1);
+  });
+
+  it("gives two rows in ONE list their own layouts", async () => {
+    // The yield is a property of the session, not of the list: a row with a
+    // summary and a row without sit side by side, and each is measured by the
+    // layout it is drawn with. `row2` mode, where the difference is a whole
+    // line of height.
+    const frame = await render(
+      [
+        summaryItem("a", "claude", SUMMARY, PROMPT),
+        summaryItem("b", "codex", null, PROMPT),
+      ],
+      1,
+      60,
+      { promptDisplay: "row2" },
+    );
+    // Row 1 keeps its summary line AND the block: identity + summary + block.
+    expect(identityLine(frame, 2) - identityLine(frame, 1)).toBe(3);
+    expect(promptLinesIn(frame, SUMMARY)).toHaveLength(1);
+    // Row 2 collapsed to identity + block, and its prompt appears once.
+    expect(promptLinesIn(frame, PROMPT)).toHaveLength(2);
+  });
+
+  describe("on the identity line (`inline`)", () => {
+    it("lays out row 1 without the cell rather than repeating the block", async () => {
+      // Row 1 has no row to collapse, so this row's LAYOUT simply has no
+      // flexible text cell (`withoutFlexText`), exactly as `promptDisplay:
+      // "off"` already renders: the project cell takes the slack.
+      const frame = await render(noRule(), 1, 60);
+      expect(identityLine(frame, 2) - identityLine(frame, 1)).toBe(2);
+      expect(promptLinesIn(frame, PROMPT)).toHaveLength(2);
+    });
+
+    it("keeps a real summary beside the identity, block below", async () => {
+      const frame = await render(withSummary(), 1, 60);
+      expect(identityLine(frame, 2) - identityLine(frame, 1)).toBe(2);
+      // Both on screen at once: the summary names the row, the block carries
+      // the prompt.
+      expect(promptLinesIn(frame, "Wire up the summary")).toHaveLength(2);
+      expect(promptLinesIn(frame, PROMPT)).toHaveLength(2);
+    });
+  });
+});
