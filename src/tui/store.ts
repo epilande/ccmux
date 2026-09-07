@@ -1226,7 +1226,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     // to be searchable; without this a user searching for what they can read
     // on the row gets nothing back. Substring, not fuzzysort, for the same
     // reason `lastPrompt` renders that way: a scatter match over free text
-    // produces single-char spans HighlightedText cannot lay out.
+    // produces single-char spans that read as noise.
     const summaryMatches = new Map<string, string>();
     for (const s of sorted) {
       const summary = s.summary;
@@ -1274,12 +1274,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         const tMatches = transcript.get(s.id);
         // `lastPrompt` renders as a substring highlight on normalized text
         // (like `prompts`), NOT fuzzysort markup: a fuzzy scatter-match over a
-        // long prompt produces dozens of single-char <b> fragments that
-        // HighlightedText can't lay out (dropped/mispositioned chars), and a
-        // multi-line prompt would render raw newlines. Fuzzy still controls
-        // MEMBERSHIP via the four keys; this only changes what renders. A
-        // scatter-only hit shows the plain truncated lastPrompt (null here,
-        // via SessionItem's text() fallback).
+        // long prompt produces dozens of single-char <b> fragments that read
+        // as noise, and a multi-line prompt would render raw newlines. Fuzzy
+        // still controls MEMBERSHIP via the four keys; this only changes what
+        // renders. A scatter-only hit shows the plain truncated lastPrompt
+        // (null here, via SessionItem's text() fallback).
         const lpNorm = normalizePrompt(s.lastPrompt ?? "");
         const lastPromptHl = lpNorm.toLowerCase().includes(lowerQuery)
           ? wrapFirstMatch(lpNorm, lowerQuery)
@@ -1723,9 +1722,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       const killedIndex = wasSelected ? selectedIndex() : -1;
       const previousKeys =
         killedIndex > 0
-          ? flatItems()
-              .slice(0, killedIndex)
-              .map(flatItemIdentity)
+          ? flatItems().slice(0, killedIndex).map(flatItemIdentity)
           : [];
       batch(() => {
         setState("sessions", (s) =>

@@ -36,17 +36,23 @@ function parseHighlight(text: string): Segment[] {
 export const HighlightedText: Component<HighlightedTextProps> = (props) => {
   const segments = () => parseHighlight(props.text);
 
+  // One Text node, not one per segment. Sibling Texts in a flexShrink row
+  // let Yoga eat the space before a highlight when the box is 1–2 cols
+  // short of the windowed line (issue #186). Shrink then happens once,
+  // at the end of the line.
   return (
-    <For each={segments()}>
-      {(segment) =>
-        segment.bold ? (
-          <text fg={props.highlightColor}>
-            <b>{segment.text}</b>
-          </text>
-        ) : (
-          <text fg={props.baseColor}>{segment.text}</text>
-        )
-      }
-    </For>
+    // `wrapMode="none"` because the row is one line tall: a wrap would hide
+    // the tail (a whole trailing word) instead of clipping it mid-word.
+    <text fg={props.baseColor} wrapMode="none">
+      <For each={segments()}>
+        {(segment) =>
+          segment.bold ? (
+            <b style={{ fg: props.highlightColor }}>{segment.text}</b>
+          ) : (
+            segment.text
+          )
+        }
+      </For>
+    </text>
   );
 };

@@ -427,9 +427,8 @@ const PromptCell: Component<{
   // gap between the identity cells and the right-aligned metadata,
   // shrinking (and letting OpenTUI clip) before it can shove a sibling
   // off-row. Pre-truncation adds the `…`; the box is the hard backstop.
-  // `flexDirection="row"` so HighlightedText's sibling <text> segments lay
-  // out left-to-right instead of stacking/overlapping (matches the project
-  // cell); without it a multi-span highlight renders as garbled overlap.
+  // `flexDirection="row"` so the optional `[tag]` box and the prompt text
+  // sit side by side instead of stacking (matches the project cell).
   return (
     <box flexGrow={1} flexShrink={1} flexDirection="row">
       <Show when={sourceTag()}>
