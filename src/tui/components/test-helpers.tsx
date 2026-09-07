@@ -24,6 +24,8 @@ export function mockEnrichedSession(
     tmuxPane: null,
     tmuxTarget: null,
     paneCwd: null,
+    paneTitle: null,
+    summary: null,
     updatedAt: new Date(FIXED_DATE),
     lastActivityAt: null,
     lastUserInputAt: null,

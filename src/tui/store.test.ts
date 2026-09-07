@@ -1061,6 +1061,158 @@ describe("store", () => {
       expect(store.selectedIndex()).toBe(0);
     });
 
+    it("removeSession should select the previous row, not jump to the top", () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", lastUserInputAt: "2024-01-01T14:00:00Z" }),
+        createMockSession({ id: "b", lastUserInputAt: "2024-01-01T13:00:00Z" }),
+        createMockSession({ id: "c", lastUserInputAt: "2024-01-01T12:00:00Z" }),
+        createMockSession({ id: "d", lastUserInputAt: "2024-01-01T11:00:00Z" }),
+      ]);
+
+      store.actions.setSelectedIndex(3);
+      expect(store.selectedSession()?.id).toBe("d");
+      expect(store.selectedIndex()).toBe(3);
+
+      store.actions.removeSession("d");
+      expect(store.selectedSession()?.id).toBe("c");
+      expect(store.selectedIndex()).toBe(2);
+
+      store.actions.removeSession("c");
+      expect(store.selectedSession()?.id).toBe("b");
+      expect(store.selectedIndex()).toBe(1);
+
+      store.actions.removeSession("b");
+      expect(store.selectedSession()?.id).toBe("a");
+      expect(store.selectedIndex()).toBe(0);
+
+      store.actions.removeSession("a");
+      expect(store.selectedSession()).toBeNull();
+      expect(store.selectedIndex()).toBe(-1);
+
+      store.actions.setSessions([
+        createMockSession({ id: "a", lastUserInputAt: "2024-01-01T14:00:00Z" }),
+        createMockSession({ id: "b", lastUserInputAt: "2024-01-01T13:00:00Z" }),
+        createMockSession({ id: "c", lastUserInputAt: "2024-01-01T12:00:00Z" }),
+      ]);
+      store.actions.setSelectedIndex(0);
+      expect(store.selectedSession()?.id).toBe("a");
+
+      store.actions.removeSession("a");
+      expect(store.selectedSession()?.id).toBe("b");
+      expect(store.selectedIndex()).toBe(0);
+    });
+
+    it("removeSession last-of-middle-group should not land on the next group's header", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "a",
+          project: "alpha",
+          lastUserInputAt: "2024-01-01T14:00:00Z",
+        }),
+        createMockSession({
+          id: "b",
+          project: "beta",
+          lastUserInputAt: "2024-01-01T13:00:00Z",
+        }),
+        createMockSession({
+          id: "c",
+          project: "charlie",
+          lastUserInputAt: "2024-01-01T12:00:00Z",
+        }),
+      ]);
+
+      // [header(alpha), a, header(beta), b, header(charlie), c]
+      expect(store.flatItems()).toHaveLength(6);
+      store.actions.setSelectedIndex(3);
+      expect(store.selectedSession()?.id).toBe("b");
+
+      store.actions.removeSession("b");
+
+      // beta's header is gone. Do not jump forward onto charlie's header —
+      // next x would be kill-group on the wrong project.
+      expect(store.selectedHeaderKey()).toBeNull();
+      expect(store.selectedGroupHeader()).toBeNull();
+      expect(store.selectedSession()?.id).toBe("a");
+      expect(store.selectedIndex()).toBe(1);
+    });
+
+    it("removeSession first-of-many should land on the living group header", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "a1",
+          project: "alpha",
+          lastUserInputAt: "2024-01-01T14:00:00Z",
+        }),
+        createMockSession({
+          id: "a2",
+          project: "alpha",
+          lastUserInputAt: "2024-01-01T13:00:00Z",
+        }),
+        createMockSession({
+          id: "a3",
+          project: "alpha",
+          lastUserInputAt: "2024-01-01T12:00:00Z",
+        }),
+      ]);
+
+      // [header(alpha), a1, a2, a3]
+      expect(store.flatItems()).toHaveLength(4);
+      store.actions.setSelectedIndex(1);
+      expect(store.selectedSession()?.id).toBe("a1");
+
+      store.actions.removeSession("a1");
+
+      // Literal previous living row is the header. Next x is kill-group.
+      expect(store.selectedSession()).toBeNull();
+      expect(store.selectedHeaderKey()).toBe("alpha");
+      expect(store.selectedGroupHeader()?.groupKey).toBe("alpha");
+      expect(store.selectedIndex()).toBe(0);
+      expect(store.selectedGroupSessions().map((s) => s.id)).toEqual([
+        "a2",
+        "a3",
+      ]);
+    });
+
+    it("removeSession sole-of-first-group should land on the next living session, not its header", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "a",
+          project: "alpha",
+          lastUserInputAt: "2024-01-01T14:00:00Z",
+        }),
+        createMockSession({
+          id: "b1",
+          project: "beta",
+          lastUserInputAt: "2024-01-01T13:00:00Z",
+        }),
+        createMockSession({
+          id: "b2",
+          project: "beta",
+          lastUserInputAt: "2024-01-01T12:00:00Z",
+        }),
+      ]);
+
+      // [header(alpha), a, header(beta), b1, b2]
+      expect(store.flatItems()).toHaveLength(5);
+      store.actions.setSelectedIndex(1);
+      expect(store.selectedSession()?.id).toBe("a");
+
+      store.actions.removeSession("a");
+
+      // No predecessor survives (alpha's header went with its only
+      // session). The index-0 fallback would be beta's header, where the
+      // next x is kill-group on a project the user never moved to.
+      expect(store.selectedHeaderKey()).toBeNull();
+      expect(store.selectedGroupHeader()).toBeNull();
+      expect(store.selectedSession()?.id).toBe("b1");
+      expect(store.selectedIndex()).toBe(1);
+      expect(store.state.selectedSessionId).toBe("b1");
+    });
+
     it("should reset to first when setSessions drops selected", () => {
       const store = createTUIStore({ groupBy: "none" });
       store.actions.setSessions([
@@ -1261,7 +1413,7 @@ describe("store", () => {
       // Remove the focused session
       store.actions.removeSession("b");
       expect(store.state.previewFocused).toBe(false);
-      expect(store.state.selectedSessionId).toBeNull();
+      expect(store.selectedSession()?.id).toBe("a");
     });
 
     it("removeSession should not exit preview focus when a different session is removed", () => {
@@ -4425,5 +4577,91 @@ describe("new-session dialog in issue mode (issue #151)", () => {
     const draft = store.state.newSession!;
     expect(draft.pr).toEqual(PR);
     expect(draft.issue).toBeNull();
+  });
+});
+
+/**
+ * `summary` is what a stock layout puts on the row, so what the user can read
+ * there has to be searchable. Issue #183.
+ */
+describe("search over the agent's summary", () => {
+  // `summary` is the normalized field the daemon ships, already through the
+  // per-agent rule; the raw title rides along and nothing here reads it.
+  const claude = (id: string, summary: string, lastPrompt: string | null) =>
+    createMockSession({
+      id,
+      agentType: "claude",
+      project: "proj",
+      gitBranch: null,
+      paneTitle: `✳ ${summary}`,
+      summary,
+      lastPrompt,
+      prompts: lastPrompt ? [lastPrompt] : [],
+    });
+
+  it("matches a session on its summary text alone", () => {
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([
+      claude("s1", "Wire up the summary column", "commit and push"),
+      claude("s2", "Fix the scroll math", "commit and push"),
+    ]);
+
+    store.actions.setSearchQuery("scroll math");
+    const filtered = store.filteredSessions();
+
+    expect(filtered.map((f) => f.session.id)).toEqual(["s2"]);
+  });
+
+  it("carries a summary highlight so the cell can show the match", () => {
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([
+      claude("s1", "Wire up the summary column", "commit and push"),
+    ]);
+
+    store.actions.setSearchQuery("summary");
+    const filtered = store.filteredSessions();
+
+    expect(filtered[0].highlights?.summary).toBe(
+      "Wire up the <b>summary</b> column",
+    );
+  });
+
+  it("finds nothing in the pane title of an agent with no rule", () => {
+    // codex writes its cwd basename there; the `project` column already
+    // carries that, and matching it would make the query mean two things.
+    // The daemon ships `summary: null` for it, and the raw title is not a
+    // search field.
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([
+      createMockSession({
+        id: "s1",
+        agentType: "codex",
+        project: "proj",
+        gitBranch: null,
+        paneTitle: "probe-codex-x7",
+        summary: null,
+        lastPrompt: null,
+        prompts: [],
+      }),
+    ]);
+
+    store.actions.setSearchQuery("probe-codex");
+    expect(store.filteredSessions()).toHaveLength(0);
+  });
+
+  it("scores a summary hit in the prompt tier, not as a sixth source", () => {
+    // Summary and prompt share one cell, so they share one contribution. A
+    // separate source would raise the maximum cross-source bonus past the
+    // smallest tier gap and let corroboration outrank a stronger tier.
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([
+      claude("s1", "Wire up the summary column", "commit and push"),
+    ]);
+
+    store.actions.setSearchQuery("summary");
+    const [row] = store.filteredSessions();
+
+    expect(row.matchSources).toEqual(["prompt"]);
+    expect(row.primarySource).toBe("prompt");
   });
 });
