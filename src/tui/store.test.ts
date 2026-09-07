@@ -1176,6 +1176,43 @@ describe("store", () => {
       ]);
     });
 
+    it("removeSession sole-of-first-group should land on the next living session, not its header", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "a",
+          project: "alpha",
+          lastUserInputAt: "2024-01-01T14:00:00Z",
+        }),
+        createMockSession({
+          id: "b1",
+          project: "beta",
+          lastUserInputAt: "2024-01-01T13:00:00Z",
+        }),
+        createMockSession({
+          id: "b2",
+          project: "beta",
+          lastUserInputAt: "2024-01-01T12:00:00Z",
+        }),
+      ]);
+
+      // [header(alpha), a, header(beta), b1, b2]
+      expect(store.flatItems()).toHaveLength(5);
+      store.actions.setSelectedIndex(1);
+      expect(store.selectedSession()?.id).toBe("a");
+
+      store.actions.removeSession("a");
+
+      // No predecessor survives (alpha's header went with its only
+      // session). The index-0 fallback would be beta's header, where the
+      // next x is kill-group on a project the user never moved to.
+      expect(store.selectedHeaderKey()).toBeNull();
+      expect(store.selectedGroupHeader()).toBeNull();
+      expect(store.selectedSession()?.id).toBe("b1");
+      expect(store.selectedIndex()).toBe(1);
+      expect(store.state.selectedSessionId).toBe("b1");
+    });
+
     it("should reset to first when setSessions drops selected", () => {
       const store = createTUIStore({ groupBy: "none" });
       store.actions.setSessions([

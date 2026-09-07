@@ -1690,7 +1690,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       // killedIndex-1, which indexes the new list with the old index and
       // jumps forward onto the next group's header when an emptied group's
       // header is omitted. Killing the top row stays on the new 0. Empty
-      // list is fine. Do not wrap.
+      // list is fine. Do not wrap. If no predecessor survives (the killed
+      // row was the sole session of the first group, so its header went
+      // with it), pin the first living session row rather than letting the
+      // index-0 fallback park the cursor on the next group's header, where
+      // the next x is kill-group on a project the user never moved to.
       const killedIndex = wasSelected ? selectedIndex() : -1;
       const previousKeys =
         killedIndex > 0
@@ -1722,6 +1726,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
             return;
           }
         }
+        const firstSession = remaining.findIndex(
+          (item) => item.type === "session",
+        );
+        if (firstSession !== -1) selectItemAt(firstSession);
       });
     },
 
