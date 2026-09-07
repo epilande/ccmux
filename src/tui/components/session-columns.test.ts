@@ -6,6 +6,8 @@ import {
   resolveEntry,
   resolveRowSide,
   hasFieldData,
+  withoutPrompt,
+  withoutFlexText,
   entryRightWidth,
   stripPrompt,
   applyPromptDisplay,
@@ -13,7 +15,8 @@ import {
   prLabel,
   prColorState,
   rowHasContent,
-  rowHasPrompt,
+  rowHasFlexText,
+  isFlexTextField,
   SIDEBAR_DEFAULT_COLUMNS,
   trailingLabelsWidth,
   fitProjectCell,
@@ -252,16 +255,16 @@ describe("resolveColumns defaults", () => {
     const cols = resolveColumns(120, {
       row1: { right: [] },
     });
-    // Default row2 carries the last-prompt subtitle with `pr` (branch PRs /
+    // Default row2 carries the summary subtitle with `pr` (branch PRs /
     // background children) pinned right; see DEFAULT_COLUMNS.
-    expect(cols.row2.left.map((e) => e.field)).toEqual(["prompt"]);
+    expect(cols.row2.left.map((e) => e.field)).toEqual(["summary"]);
     expect(cols.row2.right.map((e) => e.field)).toEqual(["pr"]);
   });
 
-  it("includes the prompt subtitle on row 2 at every width", () => {
+  it("includes the summary subtitle on row 2 at every width", () => {
     for (const width of [40, 60, 80, 120, 200]) {
       const fields = resolveColumns(width).row2.left.map((e) => e.field);
-      expect(fields).toContain("prompt");
+      expect(fields).toContain("summary");
     }
   });
 
@@ -279,7 +282,7 @@ describe("resolveSidebarColumns", () => {
     expect(cols.row1.right.map((e) => e.field)).toEqual(["pr", "agent"]);
     expect(cols.row1.right[0]?.mode).toBe("short");
     expect(cols.row1.right[1]?.mode).toBe("short");
-    expect(cols.row2.left.map((e) => e.field)).toEqual(["prompt"]);
+    expect(cols.row2.left.map((e) => e.field)).toEqual(["summary"]);
     expect(cols.row2.right.map((e) => e.field)).toEqual(["time"]);
   });
 
@@ -437,9 +440,9 @@ describe("resolveColumns row2 right side (subtitle split)", () => {
     expect(cols.row2.right.map((e) => e.field)).toEqual(["time"]);
   });
 
-  it("row2 defaults to prompt on the left, pr on the right", () => {
+  it("row2 defaults to summary on the left, pr on the right", () => {
     const cols = resolveColumns(120);
-    expect(cols.row2.left.map((e) => e.field)).toEqual(["prompt"]);
+    expect(cols.row2.left.map((e) => e.field)).toEqual(["summary"]);
     expect(cols.row2.right.map((e) => e.field)).toEqual(["pr"]);
   });
 
@@ -574,7 +577,7 @@ describe("stripPrompt", () => {
 describe("applyPromptDisplay", () => {
   it("inline flattens row 2 onto row 1 in the picker", () => {
     const cols = applyPromptDisplay(resolveColumns(120), "inline", false);
-    expect(cols.row1.left.map((e) => e.field)).toContain("prompt");
+    expect(cols.row1.left.map((e) => e.field)).toContain("summary");
     // pr tucks onto row 1 next to the branch, not the far-right metadata.
     expect(cols.row1.left.map((e) => e.field)).toContain("pr");
     expect(cols.row1.right.map((e) => e.field)).not.toContain("pr");
@@ -582,10 +585,10 @@ describe("applyPromptDisplay", () => {
     expect(cols.row2.right).toEqual([]);
   });
 
-  it("inline puts pr right after project and the prompt last on row 1 left", () => {
+  it("inline puts pr right after project and the summary last on row 1 left", () => {
     const cols = applyPromptDisplay(resolveColumns(120), "inline", false);
     const left = cols.row1.left.map((e) => e.field);
-    expect(left).toEqual(["index", "status", "project", "pr", "prompt"]);
+    expect(left).toEqual(["index", "status", "project", "pr", "summary"]);
   });
 
   it("inline forces pr to short (no `PR ` prefix) even at wide widths", () => {
@@ -608,8 +611,8 @@ describe("applyPromptDisplay", () => {
   it("inline falls back to the two-row layout in the sidebar", () => {
     const resolved = resolveSidebarColumns(40);
     const cols = applyPromptDisplay(resolved, "inline", true);
-    // No room to inline on a 30-col rail: prompt stays on row 2.
-    expect(cols.row2.left.map((e) => e.field)).toContain("prompt");
+    // No room to inline on a 30-col rail: the subtitle stays on row 2.
+    expect(cols.row2.left.map((e) => e.field)).toContain("summary");
     expect(cols).toEqual(resolved);
   });
 
@@ -624,14 +627,47 @@ describe("applyPromptDisplay", () => {
     expect(cols.row2).toEqual({ left: [], right: [] });
   });
 
-  it("inline does not duplicate a prompt already on row 1 (custom config)", () => {
-    // User puts prompt on row 1 but leaves the default row2 prompt in place.
+  it("inline leaves row 1 exactly one flexible text cell (custom config)", () => {
+    // User puts `prompt` on row 1 and leaves the default `row2.left:
+    // [summary]` in place. The two are different names for the same filler
+    // and share one width budget, so the flatten drops row 2's rather than
+    // landing two unreadable cells side by side.
     const resolved = resolveColumns(120, {
       row1: { left: ["index", "status", "project", "prompt"] },
     });
     const cols = applyPromptDisplay(resolved, "inline", false);
-    const prompts = cols.row1.left.filter((e) => e.field === "prompt");
-    expect(prompts).toHaveLength(1);
+    const flex = [...cols.row1.left, ...cols.row1.right].filter((e) =>
+      isFlexTextField(e.field),
+    );
+    expect(flex.map((e) => e.field)).toEqual(["prompt"]);
+    expect(cols.row2).toEqual({ left: [], right: [] });
+  });
+
+  it("inline drops a duplicate of the same flexible field too", () => {
+    const resolved = resolveColumns(120, {
+      row1: { left: ["index", "status", "project", "summary"] },
+      row2: { left: ["summary"] },
+    });
+    const cols = applyPromptDisplay(resolved, "inline", false);
+    expect(cols.row1.left.filter((e) => e.field === "summary")).toHaveLength(1);
+  });
+
+  it("inline keeps one flex cell when row 2 carries two of its own", () => {
+    // The other way a second flexible cell reaches the collapsed row: row 1
+    // has none, and row 2 names both. The slot is claimed once, so the first
+    // entry survives and the second goes.
+    const resolved = resolveColumns(120, {
+      row2: { left: ["summary", "prompt"] },
+    });
+    expect(resolved.row2.left.map((e) => e.field)).toEqual([
+      "summary",
+      "prompt",
+    ]);
+    const cols = applyPromptDisplay(resolved, "inline", false);
+    const flex = [...cols.row1.left, ...cols.row1.right].filter((e) =>
+      isFlexTextField(e.field),
+    );
+    expect(flex.map((e) => e.field)).toEqual(["summary"]);
     expect(cols.row2).toEqual({ left: [], right: [] });
   });
 
@@ -647,7 +683,7 @@ describe("applyPromptDisplay", () => {
       "index",
       "status",
       "pr",
-      "prompt",
+      "summary",
     ]);
     // pr is still forced to short even without a project anchor.
     expect(cols.row1.left.find((e) => e.field === "pr")?.mode).toBe("short");
@@ -684,24 +720,38 @@ describe("rowHasContent", () => {
   });
 });
 
-describe("rowHasPrompt", () => {
+describe("rowHasFlexText", () => {
+  it("counts summary as flexible filler, like prompt", () => {
+    expect(rowHasFlexText({ left: [{ field: "summary" }], right: [] })).toBe(
+      true,
+    );
+    expect(rowHasFlexText({ left: [], right: [{ field: "summary" }] })).toBe(
+      true,
+    );
+    expect(rowHasFlexText({ left: [{ field: "status" }], right: [] })).toBe(
+      false,
+    );
+  });
+
   it("is true when the prompt sits on the left side", () => {
-    expect(rowHasPrompt(resolveColumns(120).row2)).toBe(true);
+    expect(rowHasFlexText(resolveColumns(120).row2)).toBe(true);
   });
 
   it("is true when the prompt sits on the right side", () => {
-    expect(rowHasPrompt({ left: [], right: [{ field: "prompt" }] })).toBe(true);
+    expect(rowHasFlexText({ left: [], right: [{ field: "prompt" }] })).toBe(
+      true,
+    );
   });
 
   it("is false when no prompt entry is present", () => {
-    expect(rowHasPrompt(resolveColumns(120).row1)).toBe(false);
-    expect(rowHasPrompt({ left: [], right: [] })).toBe(false);
+    expect(rowHasFlexText(resolveColumns(120).row1)).toBe(false);
+    expect(rowHasFlexText({ left: [], right: [] })).toBe(false);
   });
 
   it("sees the prompt after inline flatten moves it onto row 1", () => {
     const inline = applyPromptDisplay(resolveColumns(120), "inline", false);
-    expect(rowHasPrompt(inline.row1)).toBe(true);
-    expect(rowHasPrompt(inline.row2)).toBe(false);
+    expect(rowHasFlexText(inline.row1)).toBe(true);
+    expect(rowHasFlexText(inline.row2)).toBe(false);
   });
 });
 
@@ -714,8 +764,8 @@ describe("SIDEBAR_DEFAULT_COLUMNS", () => {
     ]);
   });
 
-  it("has prompt on row2 left and time on row2 right", () => {
-    expect(SIDEBAR_DEFAULT_COLUMNS.row2?.left).toEqual(["prompt"]);
+  it("has summary on row2 left and time on row2 right", () => {
+    expect(SIDEBAR_DEFAULT_COLUMNS.row2?.left).toEqual(["summary"]);
     expect(SIDEBAR_DEFAULT_COLUMNS.row2?.right).toEqual(["time"]);
   });
 });
@@ -1513,5 +1563,139 @@ describe("fitProjectCell with wide glyphs", () => {
       }
     }
     expect(checked).toBeGreaterThan(1000);
+  });
+});
+
+describe("hasFieldData(summary)", () => {
+  const withSummary = mockEnrichedSession({
+    agentType: "claude",
+    paneTitle: "✳ Add dark mode toggle",
+    summary: "Add dark mode toggle",
+    lastPrompt: "commit and push",
+  });
+  const fallback = mockEnrichedSession({
+    agentType: "codex",
+    paneTitle: "probe-codex-x7",
+    summary: null,
+    lastPrompt: "commit and push",
+  });
+  const neither = mockEnrichedSession({
+    agentType: "codex",
+    paneTitle: "probe-codex-x7",
+    summary: null,
+    lastPrompt: null,
+  });
+
+  it("has data when the agent wrote a summary", () => {
+    expect(hasFieldData(withSummary, "summary")).toBe(true);
+  });
+
+  it("has data when it falls back to a prompt", () => {
+    expect(hasFieldData(fallback, "summary")).toBe(true);
+  });
+
+  it("has no data when there is neither a summary nor a prompt", () => {
+    expect(hasFieldData(neither, "summary")).toBe(false);
+  });
+
+  it("falls back to the prompt when the daemon ships no field at all", () => {
+    // A picker on this build can briefly talk to a daemon that predates
+    // `summary` (the machine-wide daemon runs whatever was linked until it
+    // auto-restarts). `undefined` there means the row has no summary, not
+    // that it has one worth a cell.
+    const legacy = mockEnrichedSession({
+      agentType: "claude",
+      paneTitle: "✳ Add dark mode toggle",
+      lastPrompt: "commit and push",
+    });
+    delete (legacy as { summary?: string | null }).summary;
+    expect(legacy.summary).toBeUndefined();
+    expect(hasFieldData(legacy, "summary")).toBe(true);
+
+    const legacyNoPrompt = mockEnrichedSession({
+      agentType: "claude",
+      lastPrompt: null,
+    });
+    delete (legacyNoPrompt as { summary?: string | null }).summary;
+    expect(hasFieldData(legacyNoPrompt, "summary")).toBe(false);
+  });
+
+  it("reads the shipped field, never the raw title", () => {
+    // The daemon owns the per-agent rule (`summaryFromPaneTitle`); a client
+    // that re-derived it could disagree with the broadcast that carried it.
+    const shipped = mockEnrichedSession({
+      agentType: "codex",
+      paneTitle: "✳ Looks like a claude title",
+      summary: null,
+      lastPrompt: null,
+    });
+    expect(hasFieldData(shipped, "summary")).toBe(false);
+  });
+});
+
+/**
+ * The wrapped prompt block's yield rule is a LAYOUT decision, made per row by
+ * SessionList: a row whose cell could only repeat the block loses the cell
+ * (`withoutFlexText`), a row with a real summary keeps it (`withoutPrompt`).
+ * Row 2 then collapses or not on the layout it was handed, with no separate
+ * flag for the two to disagree about.
+ */
+describe("withoutFlexText", () => {
+  const cols = () =>
+    resolveColumns(120, {
+      row1: { left: ["index", "status", "project"], right: ["pane"] },
+      row2: { left: ["summary"], right: ["pr"] },
+    });
+
+  it("drops both flexible text cells, keeping the rest of each row", () => {
+    const stripped = withoutFlexText(
+      resolveColumns(120, {
+        row1: { left: ["index", "prompt", "project"] },
+        row2: { left: ["summary"], right: ["pr"] },
+      }),
+    );
+    expect(stripped.row1.left.map((e) => e.field)).toEqual([
+      "index",
+      "project",
+    ]);
+    expect(stripped.row2.left).toEqual([]);
+    expect(stripped.row2.right.map((e) => e.field)).toEqual(["pr"]);
+  });
+
+  it("collapses row 2 for a session whose cell would repeat the block", () => {
+    const fallback = mockEnrichedSession({
+      agentType: "codex",
+      summary: null,
+      lastPrompt: "commit and push",
+    });
+    expect(rowHasContent(fallback, cols().row2)).toBe(true);
+    expect(rowHasContent(fallback, withoutFlexText(cols()).row2)).toBe(false);
+  });
+
+  it("keeps row 2 for a session whose agent wrote a summary", () => {
+    const withSummary = mockEnrichedSession({
+      agentType: "claude",
+      summary: "Add dark mode toggle",
+      lastPrompt: "commit and push",
+    });
+    expect(rowHasContent(withSummary, withoutPrompt(cols()).row2)).toBe(true);
+  });
+});
+
+describe("stripPrompt with the summary cell", () => {
+  it("drops a row-1 summary too, since it falls back to the prompt", () => {
+    // `promptDisplay: "off"` means no prompt anywhere; a summary cell left
+    // behind would keep showing the very text the toggle turned off.
+    const stripped = stripPrompt(
+      resolveColumns(120, {
+        row1: { left: ["index", "status", "project", "summary"] },
+      }),
+    );
+    expect(stripped.row1.left.map((e) => e.field)).toEqual([
+      "index",
+      "status",
+      "project",
+    ]);
+    expect(stripped.row2).toEqual({ left: [], right: [] });
   });
 });
