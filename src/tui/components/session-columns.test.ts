@@ -474,6 +474,21 @@ describe("normalizePrompt", () => {
     ).toBe("Agent finished the audit");
   });
 
+  it("keeps the summary when the result quotes an inner tag", () => {
+    // `<task-notification>` is the outermost wrapper and its `<result>` is
+    // an agent's own prose, so it can quote any tag the later branches
+    // match. Tested last, the bash branch would answer with the quote.
+    expect(
+      normalizePrompt(
+        "<task-notification><task-id>abc123</task-id>" +
+          "<status>completed</status>" +
+          "<summary>Agent finished the audit</summary>" +
+          "<result>the cell painted <bash-stdout>x</bash-stdout> raw" +
+          "</result></task-notification>",
+      ),
+    ).toBe("Agent finished the audit");
+  });
+
   it("drops a task notification with no summary", () => {
     expect(
       normalizePrompt(

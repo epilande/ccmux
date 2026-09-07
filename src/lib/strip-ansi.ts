@@ -27,3 +27,28 @@ const ANSI_PATTERN =
 export function stripAnsi(text: string): string {
   return text.replace(ANSI_PATTERN, "");
 }
+
+/**
+ * Text that came off a terminal, reduced to what a single-line cell can
+ * paint: no escape sequences, no control bytes, no runs of whitespace, no
+ * surrounding space.
+ *
+ * `stripAnsi` takes out the well-formed sequences. The sweep behind it is
+ * for the residue a real pane still carries, a lone ESC, a BEL, a DEL, or a
+ * C1 byte (U+0080-U+009F), none of which belong to a sequence the pattern
+ * can recognize. Each becomes a SPACE rather than nothing, so two words a
+ * stray byte sat between never weld into one, and the collapse behind THAT
+ * is what turns the spaces it just introduced back into single separators.
+ * `\n` and `\t` fall under both rules for the same reason.
+ *
+ * The sweep is a regex here rather than `daemon/notify-text.ts`'s
+ * `stripControlChars`, which does the same job by codepoint scan: `lib` must
+ * not import from `daemon`. The two are deliberately independent; that one
+ * has newline and tab policy this has no use for.
+ */
+export function stripTerminalNoise(text: string): string {
+  return stripAnsi(text)
+    .replace(/[\x00-\x1F\x7F-\x9F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}

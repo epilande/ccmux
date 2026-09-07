@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { stripAnsi } from "./strip-ansi";
+import { stripAnsi, stripTerminalNoise } from "./strip-ansi";
 
 describe("stripAnsi", () => {
   it("removes color codes", () => {
@@ -49,5 +49,28 @@ describe("stripAnsi", () => {
     // would weld `scroll` and `math` into one word. The caller's control
     // sweep turns the surviving ESC into a separator.
     expect(stripAnsi("scroll\x1Bmath")).toBe("scroll\x1Bmath");
+  });
+});
+
+describe("stripTerminalNoise", () => {
+  it("removes escape sequences and collapses what is left", () => {
+    expect(
+      stripTerminalNoise(
+        "  \x1B[?25l\x1B]8;;https://example.com\x07LINKED\x1B]8;;\x07 " +
+          "\x1B[32mgreen\x1B[0m   file\x1B[?25h  ",
+      ),
+    ).toBe("LINKED green file");
+  });
+
+  it("turns a stray control byte into a separator, not a weld", () => {
+    // A BEL, a lone ESC and a C1 byte (U+0085 NEL, which JS `\s` does not
+    // match) each become a space, so the words stay apart.
+    expect(stripTerminalNoise("Fix\x07the\x85scroll\x1Bmath")).toBe(
+      "Fix the scroll math",
+    );
+  });
+
+  it("reduces text that is nothing but noise to the empty string", () => {
+    expect(stripTerminalNoise("\x1B[2J\x1B[H \t\n\x07")).toBe("");
   });
 });

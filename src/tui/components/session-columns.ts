@@ -17,8 +17,7 @@ import {
 } from "../../lib/preferences";
 import type { EnrichedSession, BranchPR } from "../../types";
 import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
-import { stripAnsi } from "../../lib/strip-ansi";
-import { stripControlChars } from "../../daemon/notify-text";
+import { stripTerminalNoise } from "../../lib/strip-ansi";
 import { HANDOFF_PREFIX } from "../../daemon/handoff";
 
 const RESPONSIVE_KEYS = new Set([
@@ -363,22 +362,6 @@ export function applyPromptDisplay(
 }
 
 /**
- * Text that came from a terminal, reduced to what a cell can paint.
- *
- * `stripAnsi` takes out the well-formed sequences; the control sweep behind
- * it is for the residue a real pane still carries, a lone ESC, a BEL, a DEL,
- * or a C1 byte, none of which belong to a sequence the pattern can
- * recognize. Each becomes a SPACE rather than nothing, so two words never
- * weld together, which is also why the collapse runs again here:
- * `normalizePrompt` already collapsed before it could see any of this.
- */
-function cleanTerminalText(text: string): string {
-  return stripControlChars(stripAnsi(text), { replacement: " " })
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/**
  * Claude logs store slash-command turns as XML-ish markup
  * (`<command-name>/clear</command-name><command-args>…</command-args>`),
  * local-command output wrapped in `<local-command-stdout>` (which can carry
@@ -397,8 +380,25 @@ function cleanTerminalText(text: string): string {
  * reduces to "" so the row drops like the other empty shapes. `<bash-input>`
  * renders with its `!` restored, the shape Claude's own last-prompt records
  * use.
+ *
+ * ORDER IS THE POLICY, not a formality. `<task-notification>` is tested
+ * FIRST because it is the outermost wrapper: its `<result>` carries an
+ * agent's own prose, which can quote any of the tags below it. Tested last,
+ * a notification that mentioned `<bash-stdout>` would be answered by the
+ * bash branch reading the quote. Every other shape is a leaf, so among them
+ * order is only the stdout-beats-input preference above.
+ *
+ * `stripTerminalNoise` is what makes an escape-carrying payload paintable;
+ * its own comment carries the why.
  */
 function stripCommandMarkup(text: string): string {
+  const notification = text.match(
+    /<task-notification>([\s\S]*?)<\/task-notification>/,
+  );
+  if (notification) {
+    const summary = notification[1].match(/<summary>([\s\S]*?)<\/summary>/);
+    return summary ? summary[1] : "";
+  }
   const command = text.match(/<command-name>([\s\S]*?)<\/command-name>/);
   if (command) {
     const args = text.match(/<command-args>([\s\S]*?)<\/command-args>/);
@@ -407,25 +407,18 @@ function stripCommandMarkup(text: string): string {
   const stdout = text.match(
     /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/,
   );
-  if (stdout) return cleanTerminalText(stdout[1]);
+  if (stdout) return stripTerminalNoise(stdout[1]);
   const bashOut = text.match(/<bash-stdout>([\s\S]*?)<\/bash-stdout>/);
   const bashErr = text.match(/<bash-stderr>([\s\S]*?)<\/bash-stderr>/);
   if (bashOut || bashErr)
     return (
-      cleanTerminalText(bashOut?.[1] ?? "") ||
-      cleanTerminalText(bashErr?.[1] ?? "")
+      stripTerminalNoise(bashOut?.[1] ?? "") ||
+      stripTerminalNoise(bashErr?.[1] ?? "")
     );
   const bashIn = text.match(/<bash-input>([\s\S]*?)<\/bash-input>/);
   if (bashIn) {
-    const cmd = cleanTerminalText(bashIn[1]);
+    const cmd = stripTerminalNoise(bashIn[1]);
     return cmd ? `! ${cmd}` : "";
-  }
-  const notification = text.match(
-    /<task-notification>([\s\S]*?)<\/task-notification>/,
-  );
-  if (notification) {
-    const summary = notification[1].match(/<summary>([\s\S]*?)<\/summary>/);
-    return summary ? summary[1] : "";
   }
   return text;
 }
