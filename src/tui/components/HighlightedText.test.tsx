@@ -33,7 +33,10 @@ const BASE_HEX = "#00ff00";
 async function renderHighlightInRowBox(width: number) {
   setup = await testRender(
     () => (
-      <box width={width} height={1} flexDirection="row">
+      // Height 3 with one logical line of content: a wrap has room to spill
+      // onto row 2, so the test can tell clipping from wrapping. The real
+      // row is 1 tall, where a wrapped tail would just vanish.
+      <box width={width} height={3} flexDirection="row">
         <box flexGrow={1} flexShrink={1} flexDirection="row">
           <HighlightedText
             text={WINDOWED_PROMPT}
@@ -43,7 +46,7 @@ async function renderHighlightInRowBox(width: number) {
         </box>
       </box>
     ),
-    { width, height: 2 },
+    { width, height: 3 },
   );
   await setup.renderOnce();
   return { frame: setup.captureCharFrame(), spans: setup.captureSpans() };
@@ -101,8 +104,14 @@ describe("HighlightedText", () => {
     const { frame } = await renderHighlightInRowBox(49);
     expect(frame).toContain("terminal multiplexer");
     expect(frame).not.toContain("terminalmultiplexer");
-    // The overflow is clipped, not wrapped onto a second row.
-    expect(frame.split("\n")[1]?.trim() ?? "").toBe("");
+    // The overflow is clipped mid-word at the box edge, not word-wrapped
+    // onto a second row. A wrap would push the whole trailing word down,
+    // where the real 1-line-tall row would drop it (`who has` for
+    // `who has neve…`).
+    const lines = frame.split("\n");
+    expect(lines[0]).toContain("is to someon");
+    expect(lines[1]?.trim() ?? "").toBe("");
+    expect(frame).not.toContain("someone");
   });
 
   // captureCharFrame() is text-only, so the highlight's color and bold have

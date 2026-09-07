@@ -41,7 +41,9 @@ export const HighlightedText: Component<HighlightedTextProps> = (props) => {
   // short of the windowed line (issue #186). Shrink then happens once,
   // at the end of the line.
   return (
-    <text fg={props.baseColor}>
+    // `wrapMode="none"` because the row is one line tall: a wrap would hide
+    // the tail (a whole trailing word) instead of clipping it mid-word.
+    <text fg={props.baseColor} wrapMode="none">
       <For each={segments()}>
         {(segment) =>
           segment.bold ? (
