@@ -96,33 +96,31 @@ describe("isCodexHooksEnabled", () => {
 
 describe("ensureCodexHooksEnabled", () => {
   it("creates a minimal file when content is empty", () => {
-    expect(ensureCodexHooksEnabled("")).toBe(
-      "[features]\ncodex_hooks = true\n",
-    );
+    expect(ensureCodexHooksEnabled("")).toBe("[features]\nhooks = true\n");
   });
 
   it("appends a [features] section when none exists", () => {
     const input = `model = "o3"\n`;
     const output = ensureCodexHooksEnabled(input);
-    expect(output).toBe(`model = "o3"\n\n[features]\ncodex_hooks = true\n`);
+    expect(output).toBe(`model = "o3"\n\n[features]\nhooks = true\n`);
   });
 
   it("appends correctly even when the original content has no trailing newline", () => {
     const input = `model = "o3"`;
     const output = ensureCodexHooksEnabled(input);
-    expect(output).toBe(`model = "o3"\n\n[features]\ncodex_hooks = true\n`);
+    expect(output).toBe(`model = "o3"\n\n[features]\nhooks = true\n`);
   });
 
   it("does not double up blank lines when content already ends with a blank line", () => {
     const input = `model = "o3"\n\n`;
     const output = ensureCodexHooksEnabled(input);
-    expect(output).toBe(`model = "o3"\n\n[features]\ncodex_hooks = true\n`);
+    expect(output).toBe(`model = "o3"\n\n[features]\nhooks = true\n`);
   });
 
   it("inserts the key after the header when [features] exists without it", () => {
     const input = `[features]\nother = true\n`;
     const output = ensureCodexHooksEnabled(input);
-    expect(output).toBe(`[features]\ncodex_hooks = true\nother = true\n`);
+    expect(output).toBe(`[features]\nhooks = true\nother = true\n`);
   });
 
   it("flips codex_hooks = false to true in place", () => {
@@ -146,7 +144,7 @@ describe("ensureCodexHooksEnabled", () => {
     const input = `# user notes\nmodel = "o3"\n\n[features]\nother = true\n`;
     const output = ensureCodexHooksEnabled(input);
     expect(output).toBe(
-      `# user notes\nmodel = "o3"\n\n[features]\ncodex_hooks = true\nother = true\n`,
+      `# user notes\nmodel = "o3"\n\n[features]\nhooks = true\nother = true\n`,
     );
   });
 
@@ -154,7 +152,7 @@ describe("ensureCodexHooksEnabled", () => {
     const input = `[providers.openai]\nmodel = "o3"\n\n[features]\nother = true\n\n[logging]\nlevel = "debug"\n`;
     const output = ensureCodexHooksEnabled(input);
     expect(output).toBe(
-      `[providers.openai]\nmodel = "o3"\n\n[features]\ncodex_hooks = true\nother = true\n\n[logging]\nlevel = "debug"\n`,
+      `[providers.openai]\nmodel = "o3"\n\n[features]\nhooks = true\nother = true\n\n[logging]\nlevel = "debug"\n`,
     );
   });
 
@@ -162,21 +160,21 @@ describe("ensureCodexHooksEnabled", () => {
     const input = `[features.experimental]\nfoo = true\n\n[features]\nbar = true\n`;
     const output = ensureCodexHooksEnabled(input);
     expect(output).toBe(
-      `[features.experimental]\nfoo = true\n\n[features]\ncodex_hooks = true\nbar = true\n`,
+      `[features.experimental]\nfoo = true\n\n[features]\nhooks = true\nbar = true\n`,
     );
   });
 
   it("produces a no-section-yet file when content is only blank lines", () => {
     const input = "\n\n";
     const output = ensureCodexHooksEnabled(input);
-    expect(output).toBe("[features]\ncodex_hooks = true\n");
+    expect(output).toBe("[features]\nhooks = true\n");
   });
 
   it("is idempotent across repeat calls", () => {
     let out = ensureCodexHooksEnabled("");
     out = ensureCodexHooksEnabled(out);
     out = ensureCodexHooksEnabled(out);
-    expect(out).toBe("[features]\ncodex_hooks = true\n");
+    expect(out).toBe("[features]\nhooks = true\n");
   });
 
   it("leaves existing `hooks = true` (Codex 0.124+) untouched", () => {
@@ -204,5 +202,16 @@ describe("ensureCodexHooksEnabled", () => {
     const input = `[features]\ncodex_hooks = false\nhooks = false\n`;
     const output = ensureCodexHooksEnabled(input);
     expect(output).toBe(`[features]\ncodex_hooks = true\nhooks = false\n`);
+  });
+
+  it("writes the modern `hooks` name, never the deprecated `codex_hooks`", () => {
+    // Current Codex warns on `codex_hooks`, so a fresh install must not
+    // author it. Applies to every insertion path, not just the empty file.
+    const inputs = ["", "\n\n", `model = "o3"`, `[features]\nother = true\n`];
+    for (const input of inputs) {
+      const output = ensureCodexHooksEnabled(input);
+      expect(output).toContain("hooks = true");
+      expect(output).not.toContain("codex_hooks");
+    }
   });
 });

@@ -5,15 +5,28 @@
  * Codex renamed the flag from `codex_hooks` to `hooks` (under `[features]`)
  * around release 0.124, and made it stable/default-on by 0.130. The read
  * side recognizes either name; the write side preserves whichever name is
- * already present, and falls back to `codex_hooks = true` for new writes
- * so older Codex versions that still gate on the original name keep
- * working. New-codex users see a harmless orphan key (documented as
- * cosmetic).
+ * already present, and uses `hooks = true` for new writes.
+ *
+ * New writes used to use `codex_hooks = true`, so pre-0.124 Codex kept
+ * working and newer Codex saw a harmless orphan key. That tradeoff has
+ * expired: current Codex prints a deprecation warning for `codex_hooks`
+ * on every run, so the compat write now costs every current user a
+ * visible warning to serve a version ~30 releases back that also
+ * predates the flag going default-on. Fresh installs write the modern
+ * name; pre-0.124 Codex is no longer served by `ccmux setup`.
+ *
+ * Existing configs are deliberately NOT migrated. The writer preserves
+ * whichever key a user already has (including flipping a `codex_hooks =
+ * false` back to `codex_hooks = true`) rather than silently rewriting a
+ * user-authored value -- the same reasoning that keeps uninstall from
+ * touching the flag. Renaming in place would also risk a duplicate-key
+ * TOML error on a config carrying both names, which Codex rejects at
+ * load.
  *
  * Supported form: the standard table form
  *
  *   [features]
- *   codex_hooks = true     # or `hooks = true` on Codex 0.124+
+ *   hooks = true           # or `codex_hooks = true` pre-0.124
  *
  * Unsupported alternate forms (a user hand-editing their config may still
  * produce these; detection treats them as absent):
@@ -74,12 +87,12 @@ export function isCodexHooksEnabled(content: string): boolean {
  *      left alone so we don't silently rewrite user-authored values.
  *   2. Otherwise, if any `(codex_hooks|hooks) = false` exists, flip the
  *      first one to `true` in place, preserving its key name.
- *   3. Otherwise, insert `codex_hooks = true` so older Codex versions
- *      (pre-0.124) still pick up the flag.
+ *   3. Otherwise, insert `hooks = true`, the name current Codex expects
+ *      and the only one it does not warn about.
  */
 export function ensureCodexHooksEnabled(content: string): string {
   if (content === "") {
-    return "[features]\ncodex_hooks = true\n";
+    return "[features]\nhooks = true\n";
   }
 
   const lines = content.split("\n");
@@ -94,8 +107,8 @@ export function ensureCodexHooksEnabled(content: string): string {
 
   if (featuresStart === -1) {
     const trimmed = content.replace(/\n+$/, "");
-    if (trimmed === "") return "[features]\ncodex_hooks = true\n";
-    return `${trimmed}\n\n[features]\ncodex_hooks = true\n`;
+    if (trimmed === "") return "[features]\nhooks = true\n";
+    return `${trimmed}\n\n[features]\nhooks = true\n`;
   }
 
   let sectionEnd = lines.length;
@@ -122,7 +135,7 @@ export function ensureCodexHooksEnabled(content: string): string {
     }
   }
 
-  lines.splice(featuresStart + 1, 0, "codex_hooks = true");
+  lines.splice(featuresStart + 1, 0, "hooks = true");
   return ensureTrailingNewline(lines.join("\n"));
 }
 

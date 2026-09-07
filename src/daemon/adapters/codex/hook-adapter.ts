@@ -163,7 +163,7 @@ export class CodexHookAdapter implements HookAdapter {
         lines.push(`Backed up config to ${CODEX_CONFIG_FILE}.backup`);
       }
       writeFileSync(CODEX_CONFIG_FILE, ensureCodexHooksEnabled(currentConfig));
-      lines.push(`Enabled [features] codex_hooks in ${CODEX_CONFIG_FILE}`);
+      lines.push(`Enabled the codex hooks feature in ${CODEX_CONFIG_FILE}`);
       changed = true;
     }
 
