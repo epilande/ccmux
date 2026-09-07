@@ -127,8 +127,9 @@ import { setSpinnerPaused } from "./utils/useStatusIcon";
 import { markStartup, reportStartup } from "../lib/startup-timing";
 
 /** Long enough to read a sentence that sends the user to the README. The
- *  legacy-popup refusal is the only warning a user on the old binding gets. */
-const LEGACY_BINDING_TOAST_MS = 6000;
+ *  shared-session refusal is the only place a user hears that a popup on a
+ *  session with two terminals needs a binding that names the client. */
+const BINDING_HINT_TOAST_MS = 6000;
 
 interface AppProps {
   initialPreview?: boolean;
@@ -237,9 +238,13 @@ const SWITCH_REFUSAL_TOAST: Record<
   "malformed-capture": {
     text: "Cannot switch: the captured client tty is malformed, check the tmux binding in the README",
   },
-  "legacy-popup": {
-    text: "Cannot switch: this popup was given no client tty and several clients are attached, update the tmux binding (see README)",
-    ms: LEGACY_BINDING_TOAST_MS,
+  "shared-session-popup": {
+    text: "Cannot switch: several terminals are attached to this tmux session, so ccmux cannot tell which one opened the popup. Pass --client-tty in the tmux binding (see README)",
+    ms: BINDING_HINT_TOAST_MS,
+  },
+  "popup-client-unknown": {
+    text: "Cannot switch: could not work out which terminal opened this popup. Pass --client-tty in the tmux binding (see README)",
+    ms: BINDING_HINT_TOAST_MS,
   },
   "no-client": { text: "Cannot switch: no tmux client found" },
   "switch-failed": { text: "Failed to switch: pane or client unavailable" },

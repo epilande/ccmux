@@ -290,16 +290,15 @@ async function withClientTtyEnv<T>(
   }
 }
 
-/** The three legacy-popup probes an uncaptured resolve runs, answered so the
- *  launch is NOT a legacy popup: one client, and our own tty is a real pane.
- *  They fire concurrently with the `display-message` guess and land in this
- *  order behind it. */
+/** The three popup probes an uncaptured resolve runs, answered so the launch is
+ *  NOT a popup: our own tty is a real pane. They fire concurrently with the
+ *  `display-message` guess and land in this order behind it. */
 const NOT_A_POPUP: SpawnResponse[] = [
   { stdout: "/dev/pts/7\n" },
   { stdout: "/dev/pts/7\n" },
   { stdout: "/dev/pts/7\n" },
 ];
-const PROBE_VERBS = ["display-message", "list-clients", "list-panes", "tty"];
+const PROBE_VERBS = ["display-message", "list-panes", "tty", "list-clients"];
 
 /** Both the flag slot and the env var have to be clear for the fallback
  *  cases, and put back for everything else in the suite. */
@@ -546,14 +545,15 @@ describe("openDedupedCommandWindow client pinning", () => {
     }
   });
 
-  it("refuses before looking at anything inside a legacy popup", async () => {
-    // Two clients, and our own tty is in no pane: the guess would name the
-    // other terminal, and an untargeted window would be born in ITS session.
+  it("refuses before looking at anything inside a shared-session popup", async () => {
+    // Our own tty is in no pane, and the session that launched the popup has
+    // two terminals on it: nothing names the one to act on, and an untargeted
+    // window would be born in whichever session typed last.
     const stubs = withTmuxStubs([
       { stdout: "/dev/ttys010\n" },
-      { stdout: "/dev/ttys010\n/dev/ttys011\n" },
       { stdout: "/dev/ttys002\n" },
       { stdout: "/dev/ttys099\n" },
+      { stdout: "/dev/ttys010\n/dev/ttys011\n" },
     ]);
     try {
       const result = await withNoCapturedTty(() =>
@@ -563,9 +563,36 @@ describe("openDedupedCommandWindow client pinning", () => {
       expect(result).toEqual({
         ok: false,
         error:
-          "no client tty was passed to this popup and several clients are attached, update the tmux binding (see README)",
+          "several terminals are attached to this tmux session, so ccmux cannot tell which one opened the popup. Pass --client-tty in the tmux binding (see README)",
       });
       // Nothing beyond the resolve: no listing, and above all no window.
+      expect(
+        stubs.calls.map((argv) => (argv[0] === "tty" ? "tty" : argv[1])),
+      ).toEqual(PROBE_VERBS);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("refuses a popup whose launching client could not be worked out", async () => {
+    // A client exists and we cannot name it: an untargeted window would be
+    // born in whichever session tmux picks, which is the placement bug.
+    const stubs = withTmuxStubs([
+      { stdout: "/dev/ttys010\n" },
+      { stdout: "/dev/ttys002\n" },
+      { stdout: "/dev/ttys099\n" },
+      { exitCode: 1 },
+    ]);
+    try {
+      const result = await withNoCapturedTty(() =>
+        openAgentsWindow("/tmp/proj"),
+      );
+
+      expect(result).toEqual({
+        ok: false,
+        error:
+          "could not work out which terminal opened this popup. Pass --client-tty in the tmux binding (see README)",
+      });
       expect(
         stubs.calls.map((argv) => (argv[0] === "tty" ? "tty" : argv[1])),
       ).toEqual(PROBE_VERBS);

@@ -17,10 +17,7 @@
  * tests stub `Bun.spawn` globally instead.
  */
 
-import {
-  defaultLegacyPopupDeps,
-  detectLegacyPopupLaunch,
-} from "./legacy-popup";
+import { defaultPopupProbeDeps, resolvePopupClient } from "./popup-client";
 import { tmuxArgv } from "./tmux-exec";
 import { PANE_FIELD_SEP } from "./tmux-format";
 
@@ -217,12 +214,18 @@ export function setPinnedTmuxClientTty(value: string | undefined): void {
 }
 
 /** Why a resolve produced no client tty. Each one wants its own message: they
- *  blame different things, and only two of them blame a tmux binding. */
+ *  blame different things, and only three of them blame a tmux binding. */
 export type ClientTtyRefusal =
   /** A tty was captured, but it is not a device path (broken binding). */
   | "malformed-capture"
-  /** A popup with no captured tty, several clients attached (old binding). */
-  | "legacy-popup"
+  /** A popup whose session has several clients, so none of them is "the one
+   *  that opened it". Only a binding that passes the tty can say. */
+  | "shared-session-popup"
+  /** A popup whose launching client we could not work out at all: `$TMUX` in a
+   *  shape we do not recognize, another server, or a query that failed. A
+   *  client exists, we just cannot name it, so this is NOT `no-client`: acting
+   *  untargeted here moves or places things relative to some other terminal. */
+  | "popup-client-unknown"
   /** Nothing captured and tmux names no current client (no binding to blame). */
   | "no-client";
 
@@ -235,21 +238,33 @@ export type ResolvedClientTty =
 
 /**
  * The one client tty every ccmux surface should act on behalf of:
- * `--client-tty` first, then `CCMUX_CLIENT_TTY`, then whatever tmux calls the
- * current client.
+ * `--client-tty` first, then `CCMUX_CLIENT_TTY`, then the client that opened
+ * the popup we are running in, then whatever tmux calls the current client.
  *
- * A captured value is never fallen through on. `#{client_tty}` inside a popup
- * resolves to whichever OTHER attached client typed last (a popup's own
- * keystrokes do not advance its client's activity time), so silently
- * substituting the guess for a malformed capture would move a client the user
- * never touched. A capture that fails {@link CLIENT_TTY_PATTERN} means the
- * user's tmux binding is broken, and they should hear about it.
+ * A captured value is never fallen through on. A capture that fails
+ * {@link CLIENT_TTY_PATTERN} means the user's tmux binding is broken, and they
+ * should hear about it rather than have some other client moved for them.
  *
- * With nothing captured the guess is only usable when it cannot be that same
- * wrong client, so {@link detectLegacyPopupLaunch} runs alongside it and
- * outranks it. The two are concurrent because the probes cost nothing next to
- * the round trip, and this runs on the keypress rather than at launch so that
- * a client attaching or detaching mid-session is seen.
+ * With nothing captured, a popup answers for itself (see `popup-client.ts`):
+ * `$TMUX` names the session the popup command targets, which for a binding
+ * with no `-t` is the session the pressing client was looking at, and the
+ * clients of that one session are the candidates. Exactly one is the launcher.
+ * Several means the user has two terminals on the same session and nothing
+ * here can tell them apart, which is what the `--client-tty` binding is still
+ * for. Nobody attached is `no-client`; a lookup that could not answer at all
+ * is `popup-client-unknown`, which is a different thing to tell a caller: a
+ * client exists and we cannot name it, so acting untargeted would act on some
+ * other terminal.
+ *
+ * Inside a popup the guess is never the fallback: `#{client_tty}` resolves to
+ * whichever OTHER attached client typed last (a popup's own keystrokes do not
+ * advance its client's activity time), so it adds nothing when the session has
+ * one client and is wrong when it has more. It stays the answer everywhere
+ * else, where the current client is unambiguous.
+ *
+ * The guess runs concurrently with the popup probes because it costs nothing
+ * next to the round trip, and the whole resolve happens on the keypress rather
+ * than at launch, so a client attaching or detaching mid-session is seen.
  */
 export async function resolvePinnedTmuxClientTty(): Promise<ResolvedClientTty> {
   const captured = pinnedClientTty ?? process.env.CCMUX_CLIENT_TTY;
@@ -257,11 +272,27 @@ export async function resolvePinnedTmuxClientTty(): Promise<ResolvedClientTty> {
     if (CLIENT_TTY_PATTERN.test(captured)) return { tty: captured };
     return { tty: null, refusal: "malformed-capture" };
   }
-  const [current, legacyPopup] = await Promise.all([
+  const [current, popup] = await Promise.all([
     resolveCurrentTmuxClientTty(),
-    detectLegacyPopupLaunch(defaultLegacyPopupDeps()),
+    resolvePopupClient({
+      ...defaultPopupProbeDeps(),
+      listSessionClientTtys: listTmuxClientTtys,
+    }),
   ]);
-  if (legacyPopup) return { tty: null, refusal: "legacy-popup" };
+  if (popup.kind === "unknown") {
+    return { tty: null, refusal: "popup-client-unknown" };
+  }
+  if (popup.kind === "clients") {
+    // Count first, validate second: two clients are two clients whatever shape
+    // their ttys are in, and a lone candidate we cannot pass to `switch-client`
+    // leaves us with nobody to name rather than with a choice to make.
+    if (popup.ttys.length > 1) {
+      return { tty: null, refusal: "shared-session-popup" };
+    }
+    const only = popup.ttys[0];
+    if (only && CLIENT_TTY_PATTERN.test(only)) return { tty: only };
+    return { tty: null, refusal: "no-client" };
+  }
   if (current && CLIENT_TTY_PATTERN.test(current)) return { tty: current };
   return { tty: null, refusal: "no-client" };
 }

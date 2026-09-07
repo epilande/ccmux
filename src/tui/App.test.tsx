@@ -1739,12 +1739,13 @@ describe("App pane-switch feedback and server scoping", () => {
     }
   });
 
-  it("one-shot picker: a legacy popup refusal points at the binding and leaves no trace", async () => {
-    // The only warning a user on the old binding now gets, so it has to name
-    // the fix. And nothing may have happened before the refusal: flashing the
-    // pane and marking it active daemon-wide, then saying nobody moved, is the
-    // worst of both.
-    switchToPaneSpy.mockImplementation(async () => "legacy-popup");
+  it("one-shot picker: a shared-session popup refusal points at the binding and leaves no trace", async () => {
+    // The only place a user hears that a session with two terminals on it
+    // needs a binding that names the client, so it has to name the fix. And
+    // nothing may have happened before the refusal: flashing the pane and
+    // marking it active daemon-wide, then saying nobody moved, is the worst of
+    // both.
+    switchToPaneSpy.mockImplementation(async () => "shared-session-popup");
     const restoreFetch = withServerInfo(null);
     const { exitSpy, restore: restoreExit } = withExitSpy();
     try {
@@ -1753,11 +1754,36 @@ describe("App pane-switch feedback and server scoping", () => {
       expect(switchToPaneSpy).toHaveBeenCalledWith("%5");
       expect(squish(setup.captureCharFrame())).toContain(
         squish(
-          "Cannot switch: this popup was given no client tty and several clients are attached, update the tmux binding (see README)",
+          "Cannot switch: several terminals are attached to this tmux session, so ccmux cannot tell which one opened the popup. Pass --client-tty in the tmux binding (see README)",
         ),
       );
       expect(notifyActivePaneSpy).not.toHaveBeenCalled();
       expect(flashPaneSpy).not.toHaveBeenCalled();
+      expect(flashPaneDetachedSpy).not.toHaveBeenCalled();
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      restoreExit();
+      restoreFetch();
+    }
+  });
+
+  it("one-shot picker: an unknown popup client refuses without a trace", async () => {
+    // The launcher exists and could not be named. Silently switching whatever
+    // tmux calls current is exactly the wrong-terminal move the popup path
+    // exists to avoid, so the toast sends the user to the binding instead.
+    switchToPaneSpy.mockImplementation(async () => "popup-client-unknown");
+    const restoreFetch = withServerInfo(null);
+    const { exitSpy, restore: restoreExit } = withExitSpy();
+    try {
+      await renderWithSession();
+      await selectFirstRowAndEnter();
+      expect(switchToPaneSpy).toHaveBeenCalledWith("%5");
+      expect(squish(setup.captureCharFrame())).toContain(
+        squish(
+          "Cannot switch: could not work out which terminal opened this popup. Pass --client-tty in the tmux binding (see README)",
+        ),
+      );
+      expect(notifyActivePaneSpy).not.toHaveBeenCalled();
       expect(flashPaneDetachedSpy).not.toHaveBeenCalled();
       expect(exitSpy).not.toHaveBeenCalled();
     } finally {

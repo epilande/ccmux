@@ -67,9 +67,10 @@ async function withClientTtyFlag<T>(
 }
 
 /**
- * Pin `$TMUX`, which the resolver reads to decide whether the legacy-popup
- * probes are worth running at all. Left to the ambient environment these tests
- * would pass or fail depending on whether the suite itself runs inside tmux.
+ * Pin `$TMUX`, which the resolver reads to decide whether the popup probes are
+ * worth running at all, and whose third field names the launching session.
+ * Left to the ambient environment these tests would pass or fail depending on
+ * whether the suite itself runs inside tmux.
  */
 async function withTmux<T>(
   value: string | undefined,
@@ -89,12 +90,13 @@ async function withTmux<T>(
 const INSIDE_TMUX = "/private/tmp/tmux-501/default,1,0";
 const PANE_TTY = "/dev/pts/7";
 /** The probe order behind an uncaptured resolve: the guess, then the three
- *  legacy-popup inputs, which run concurrently with it. */
+ *  popup inputs, which run concurrently with it. The client listing is scoped
+ *  to the session `$TMUX` names ($0 here), which is the launching one. */
 const PROBE_CALLS = [
   ["tmux", "display-message", "-p", "#{client_tty}"],
-  ["tmux", "list-clients", "-F", "#{client_tty}"],
   ["tmux", "list-panes", "-a", "-F", "#{pane_tty}"],
   ["tty"],
+  ["tmux", "list-clients", "-t", "$0", "-F", "#{client_tty}"],
 ];
 
 afterEach(() => {
@@ -122,9 +124,9 @@ describe("switchToPane", () => {
     // Our own tty IS a pane, so the guess cannot be some other client.
     const spawn = withSpawn([
       { stdout: `${PANE_TTY}\n` },
+      { stdout: `${PANE_TTY}\n` },
+      { stdout: `${PANE_TTY}\n` },
       { stdout: "/dev/ttys010\n/dev/ttys011\n" },
-      { stdout: `${PANE_TTY}\n` },
-      { stdout: `${PANE_TTY}\n` },
       {},
     ]);
     try {
@@ -142,22 +144,67 @@ describe("switchToPane", () => {
     }
   });
 
-  it("refuses the guess inside a legacy multi-client popup", async () => {
-    // No captured tty, a popup (our tty is in no pane), more than one client:
-    // #{client_tty} names the other client that typed last, so nobody moves.
+  it("switches the client that opened the popup, not tmux's guess", async () => {
+    // No captured tty, a popup (our tty is in no pane): #{client_tty} names
+    // whichever other client typed last, while the session `$TMUX` names has
+    // exactly one client, and that is the terminal the popup came from.
     const spawn = withSpawn([
-      { stdout: "/dev/pts/7\n" },
-      { stdout: "/dev/ttys010\n/dev/ttys011\n" },
+      { stdout: "/dev/ttys011\n" },
       { stdout: "/dev/ttys002\n" },
       { stdout: "/dev/ttys099\n" },
+      { stdout: "/dev/ttys010\n" },
+      {},
     ]);
     try {
       const result = await withTmux(INSIDE_TMUX, () =>
         withClientTty(undefined, () => switchToPane("%8")),
       );
 
-      expect(result).toBe("legacy-popup");
+      expect(result).toBe(true);
+      expect(spawn.calls).toEqual([
+        ...PROBE_CALLS,
+        ["tmux", "switch-client", "-c", "/dev/ttys010", "-t", "%8"],
+      ]);
+    } finally {
+      spawn.restore();
+    }
+  });
+
+  it("refuses inside a popup whose session has two terminals on it", async () => {
+    // Both are attached to the launching session, so nothing distinguishes
+    // them and nobody moves.
+    const spawn = withSpawn([
+      { stdout: "/dev/ttys011\n" },
+      { stdout: "/dev/ttys002\n" },
+      { stdout: "/dev/ttys099\n" },
+      { stdout: "/dev/ttys010\n/dev/ttys011\n" },
+    ]);
+    try {
+      const result = await withTmux(INSIDE_TMUX, () =>
+        withClientTty(undefined, () => switchToPane("%8")),
+      );
+
+      expect(result).toBe("shared-session-popup");
       // The probes ran; the switch did not.
+      expect(spawn.calls).toEqual(PROBE_CALLS);
+    } finally {
+      spawn.restore();
+    }
+  });
+
+  it("refuses inside a popup whose session nobody is attached to", async () => {
+    const spawn = withSpawn([
+      { stdout: "/dev/ttys011\n" },
+      { stdout: "/dev/ttys002\n" },
+      { stdout: "/dev/ttys099\n" },
+      { stdout: "" },
+    ]);
+    try {
+      const result = await withTmux(INSIDE_TMUX, () =>
+        withClientTty(undefined, () => switchToPane("%8")),
+      );
+
+      expect(result).toBe("no-client");
       expect(spawn.calls).toEqual(PROBE_CALLS);
     } finally {
       spawn.restore();
