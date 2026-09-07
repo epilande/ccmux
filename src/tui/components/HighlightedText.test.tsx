@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
+import { RGBA, TextAttributes, type CapturedFrame } from "@opentui/core";
 import { HighlightedText } from "./HighlightedText";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
@@ -25,6 +26,10 @@ async function renderHighlight(text: string) {
 const WINDOWED_PROMPT =
   "…laining what a terminal <b>multiplexer</b> is to someone";
 
+/** Unambiguous hexes so a span's fg identifies which segment drew it. */
+const HIGHLIGHT_HEX = "#ff0000";
+const BASE_HEX = "#00ff00";
+
 async function renderHighlightInRowBox(width: number) {
   setup = await testRender(
     () => (
@@ -32,8 +37,8 @@ async function renderHighlightInRowBox(width: number) {
         <box flexGrow={1} flexShrink={1} flexDirection="row">
           <HighlightedText
             text={WINDOWED_PROMPT}
-            highlightColor="yellow"
-            baseColor="white"
+            highlightColor={HIGHLIGHT_HEX}
+            baseColor={BASE_HEX}
           />
         </box>
       </box>
@@ -41,8 +46,19 @@ async function renderHighlightInRowBox(width: number) {
     { width, height: 2 },
   );
   await setup.renderOnce();
-  return setup.captureCharFrame();
+  return { frame: setup.captureCharFrame(), spans: setup.captureSpans() };
 }
+
+function spanContaining(frame: CapturedFrame, needle: string) {
+  for (const line of frame.lines) {
+    for (const span of line.spans) {
+      if (span.text.includes(needle)) return span;
+    }
+  }
+  throw new Error(`no span containing ${JSON.stringify(needle)} in frame`);
+}
+
+const hex = (h: string) => RGBA.fromHex(h).toInts();
 
 describe("HighlightedText", () => {
   it("renders plain text without markers", async () => {
@@ -82,8 +98,25 @@ describe("HighlightedText", () => {
   // cols. A sibling-per-segment render used to eat the space before <b>
   // (`terminalmultiplexer`). One Text node must keep that space.
   it("keeps the space before a highlight when the row box is 1 col short", async () => {
-    const frame = await renderHighlightInRowBox(49);
+    const { frame } = await renderHighlightInRowBox(49);
     expect(frame).toContain("terminal multiplexer");
     expect(frame).not.toContain("terminalmultiplexer");
+    // The overflow is clipped, not wrapped onto a second row.
+    expect(frame.split("\n")[1]?.trim() ?? "").toBe("");
+  });
+
+  // captureCharFrame() is text-only, so the highlight's color and bold have
+  // to be read off captureSpans(). A `<b>` inside the single Text node only
+  // carries `fg` through `style`: 0.1.97's text-node setProperty honors
+  // `href` and `style` and drops a bare `fg` prop.
+  it("colors the highlight and leaves the surrounding text in the base color", async () => {
+    const { spans } = await renderHighlightInRowBox(49);
+
+    const bold = spanContaining(spans, "multiplexer");
+    expect(bold.fg.toInts()).toEqual(hex(HIGHLIGHT_HEX));
+    expect(bold.attributes & TextAttributes.BOLD).not.toBe(0);
+
+    const base = spanContaining(spans, "terminal ");
+    expect(base.fg.toInts()).toEqual(hex(BASE_HEX));
   });
 });

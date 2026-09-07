@@ -1,4 +1,4 @@
-import type { Component, JSX } from "solid-js";
+import type { Component } from "solid-js";
 import { For } from "solid-js";
 
 interface HighlightedTextProps {
@@ -33,12 +33,6 @@ function parseHighlight(text: string): Segment[] {
   return segments;
 }
 
-// TextNodeRenderable accepts `fg`; @opentui/solid 0.1.97's SpanProps is
-// ComponentProps<{}, TextNodeRenderable> and drops it.
-function spanFg(color?: string): JSX.IntrinsicElements["span"] {
-  return { fg: color } as unknown as JSX.IntrinsicElements["span"];
-}
-
 export const HighlightedText: Component<HighlightedTextProps> = (props) => {
   const segments = () => parseHighlight(props.text);
 
@@ -51,9 +45,7 @@ export const HighlightedText: Component<HighlightedTextProps> = (props) => {
       <For each={segments()}>
         {(segment) =>
           segment.bold ? (
-            <span {...spanFg(props.highlightColor)}>
-              <b>{segment.text}</b>
-            </span>
+            <b style={{ fg: props.highlightColor }}>{segment.text}</b>
           ) : (
             segment.text
           )
