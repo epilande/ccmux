@@ -17,6 +17,8 @@ import {
 } from "../../lib/preferences";
 import type { EnrichedSession, BranchPR } from "../../types";
 import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
+import { stripAnsi } from "../../lib/strip-ansi";
+import { HANDOFF_PREFIX } from "../../daemon/handoff";
 
 const RESPONSIVE_KEYS = new Set([
   "default",
@@ -361,32 +363,57 @@ export function applyPromptDisplay(
 
 /**
  * Claude logs store slash-command turns as XML-ish markup
- * (`<command-name>/clear</command-name><command-args>…</command-args>`) and
- * local-command output wrapped in `<local-command-stdout>`. Reduce those to
- * the command line / inner text so the subtitle reads as the user's intent.
+ * (`<command-name>/clear</command-name><command-args>…</command-args>`),
+ * local-command output wrapped in `<local-command-stdout>` (which can carry
+ * ANSI escapes straight from the terminal), and background-task completions
+ * wrapped in `<task-notification>` (only the `<summary>` inside is worth
+ * showing; a notification with none is dropped rather than shown raw).
+ * Reduce those to the text that reads as the user's intent.
  */
 function stripCommandMarkup(text: string): string {
-  const command = text.match(/<command-name>(.*?)<\/command-name>/);
+  const command = text.match(/<command-name>([\s\S]*?)<\/command-name>/);
   if (command) {
-    const args = text.match(/<command-args>(.*?)<\/command-args>/);
+    const args = text.match(/<command-args>([\s\S]*?)<\/command-args>/);
     return [command[1], args?.[1]].filter(Boolean).join(" ");
   }
   const stdout = text.match(
-    /<local-command-stdout>(.*?)<\/local-command-stdout>/,
+    /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/,
   );
-  if (stdout) return stdout[1];
+  if (stdout) return stripAnsi(stdout[1]);
+  const notification = text.match(
+    /<task-notification>([\s\S]*?)<\/task-notification>/,
+  );
+  if (notification) {
+    const summary = notification[1].match(/<summary>([\s\S]*?)<\/summary>/);
+    return summary ? summary[1] : "";
+  }
   return text;
+}
+
+/**
+ * A relayed `[ccmux handoff]` message (see `daemon/handoff.ts`) is the
+ * frozen provenance header, a blank line, then the payload a peer session
+ * actually sent. Surface the payload, not the header, as the prompt.
+ */
+function stripHandoffHeader(text: string): string {
+  if (!text.startsWith(HANDOFF_PREFIX)) return text;
+  const separator = text.indexOf("\n\n");
+  return separator === -1 ? "" : text.slice(separator + 2);
 }
 
 /**
  * The prompt as the subtitle renders it. Lives here (not SessionItem) so
  * `hasFieldData` can apply the same reduction: a prompt that normalizes
- * to "" (whitespace-only, or empty-inner markup like a quiet
- * `<local-command-stdout></local-command-stdout>`) must not earn row 2 a
- * line it would render blank.
+ * to "" (whitespace-only, empty-inner markup like a quiet
+ * `<local-command-stdout></local-command-stdout>`, or a task notification
+ * with no summary) must not earn row 2 a line it would render blank.
+ *
+ * The handoff header is stripped before whitespace is collapsed: its
+ * header/payload boundary is a blank line, which collapsing would destroy.
  */
 export function normalizePrompt(text: string): string {
-  return stripCommandMarkup(text.replace(/\s+/g, " ").trim()).trim();
+  const payload = stripHandoffHeader(text.trim());
+  return stripCommandMarkup(payload.replace(/\s+/g, " ").trim()).trim();
 }
 
 /**
