@@ -232,10 +232,12 @@ export type OpenAgentsResult =
   | { ok: false; error: string };
 
 /** The resolver refusals that stop a launch before it creates anything.
- *  `"no-client"` is not among them: with nobody to move, an untargeted window
- *  is still the right outcome. A client we merely could not NAME is a
- *  different case and does refuse, since the window would be placed relative
- *  to whichever session tmux picks instead. */
+ *  `"no-client"` is not among them: it means no popup and no current client,
+ *  so with nobody to move an untargeted window is still the right outcome. A
+ *  client we merely could not NAME is a different case and does refuse, since
+ *  the window would be placed relative to whichever session tmux picks
+ *  instead. That is why the resolver never answers `"no-client"` from inside a
+ *  popup, where a client provably exists however the listing came back. */
 const WINDOW_LAUNCH_REFUSAL: Record<
   Exclude<ClientTtyRefusal, "no-client">,
   string

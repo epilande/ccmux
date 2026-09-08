@@ -40,8 +40,13 @@ import { currentTmuxSocket } from "./tmux-server";
  * How long any one probe may take before it is treated as unanswered. They sit
  * in front of every uncaptured switch, so a wedged tmux server must not wedge
  * the key that gets the user out of the picker.
+ *
+ * Exported because the resolver in `tmux-client.ts` puts its own
+ * `#{client_tty}` guess on the same clock. That query runs alongside these and
+ * is just as capable of hanging, so a budget that covered only the three
+ * probes would leave the claim above untrue.
  */
-const PROBE_TIMEOUT_MS = 500;
+export const PROBE_TIMEOUT_MS = 500;
 
 export interface PopupLaunchInputs {
   /** `$TMUX` is set, so this process was launched by tmux itself. */
@@ -135,8 +140,10 @@ export type PopupClientLookup =
   | { kind: "unknown" };
 
 /** Give up on a probe rather than hold up the switch behind it. A timed-out
- *  query reads as unanswered, which every arm below already handles. */
-async function withTimeout<T>(
+ *  query reads as unanswered, the same as one that failed, and every caller
+ *  already has an arm for that. Exported for the resolver's current-client
+ *  guess, which shares this budget. */
+export async function withTimeout<T>(
   probe: Promise<T>,
   ms: number,
 ): Promise<T | null> {

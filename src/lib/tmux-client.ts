@@ -17,7 +17,12 @@
  * tests stub `Bun.spawn` globally instead.
  */
 
-import { defaultPopupProbeDeps, resolvePopupClient } from "./popup-client";
+import {
+  defaultPopupProbeDeps,
+  PROBE_TIMEOUT_MS,
+  resolvePopupClient,
+  withTimeout,
+} from "./popup-client";
 import { tmuxArgv } from "./tmux-exec";
 import { PANE_FIELD_SEP } from "./tmux-format";
 
@@ -221,12 +226,16 @@ export type ClientTtyRefusal =
   /** A popup whose session has several clients, so none of them is "the one
    *  that opened it". Only a binding that passes the tty can say. */
   | "shared-session-popup"
-  /** A popup whose launching client we could not work out at all: `$TMUX` in a
-   *  shape we do not recognize, another server, or a query that failed. A
-   *  client exists, we just cannot name it, so this is NOT `no-client`: acting
+  /** A popup whose launching client we could not put a usable tty to: `$TMUX`
+   *  in a shape we do not recognize, another server, a query that failed, a
+   *  session the listing came back empty for, or a lone candidate that is not
+   *  a device path. Inside a popup a client provably exists (one of them is
+   *  drawing it), we just cannot name it, so this is NEVER `no-client`: acting
    *  untargeted here moves or places things relative to some other terminal. */
   | "popup-client-unknown"
-  /** Nothing captured and tmux names no current client (no binding to blame). */
+  /** Nothing captured, not a popup, and tmux names no current client. Nobody
+   *  to move and nobody to misplace a window relative to, so there is no
+   *  binding to blame and no reason to refuse. */
   | "no-client";
 
 /** A validated tty safe to pass as `switch-client -c`, or the reason there is
@@ -251,10 +260,15 @@ export type ResolvedClientTty =
  * clients of that one session are the candidates. Exactly one is the launcher.
  * Several means the user has two terminals on the same session and nothing
  * here can tell them apart, which is what the `--client-tty` binding is still
- * for. Nobody attached is `no-client`; a lookup that could not answer at all
- * is `popup-client-unknown`, which is a different thing to tell a caller: a
- * client exists and we cannot name it, so acting untargeted would act on some
- * other terminal.
+ * for.
+ *
+ * Every other popup answer is `popup-client-unknown`, nobody attached
+ * included.
+ * A popup is being drawn by a client, so one exists whatever the listing said:
+ * an empty list means the binding named a session that client is not on
+ * (`display-popup -t`), and a candidate that is not a device path means we
+ * cannot pass it on. Both leave a terminal we must not act around, which is a
+ * different thing to tell a caller than "there is nobody here".
  *
  * Inside a popup the guess is never the fallback: `#{client_tty}` resolves to
  * whichever OTHER attached client typed last (a popup's own keystrokes do not
@@ -263,8 +277,10 @@ export type ResolvedClientTty =
  * else, where the current client is unambiguous.
  *
  * The guess runs concurrently with the popup probes because it costs nothing
- * next to the round trip, and the whole resolve happens on the keypress rather
- * than at launch, so a client attaching or detaching mid-session is seen.
+ * next to the round trip, and under the same {@link PROBE_TIMEOUT_MS} budget,
+ * since a wedged `display-message` would otherwise hold the keypress open on
+ * its own. The whole resolve happens on the keypress rather than at launch, so
+ * a client attaching or detaching mid-session is seen.
  */
 export async function resolvePinnedTmuxClientTty(): Promise<ResolvedClientTty> {
   const captured = pinnedClientTty ?? process.env.CCMUX_CLIENT_TTY;
@@ -273,7 +289,7 @@ export async function resolvePinnedTmuxClientTty(): Promise<ResolvedClientTty> {
     return { tty: null, refusal: "malformed-capture" };
   }
   const [current, popup] = await Promise.all([
-    resolveCurrentTmuxClientTty(),
+    withTimeout(resolveCurrentTmuxClientTty(), PROBE_TIMEOUT_MS),
     resolvePopupClient({
       ...defaultPopupProbeDeps(),
       listSessionClientTtys: listTmuxClientTtys,
@@ -284,14 +300,18 @@ export async function resolvePinnedTmuxClientTty(): Promise<ResolvedClientTty> {
   }
   if (popup.kind === "clients") {
     // Count first, validate second: two clients are two clients whatever shape
-    // their ttys are in, and a lone candidate we cannot pass to `switch-client`
-    // leaves us with nobody to name rather than with a choice to make.
+    // their ttys are in, and only after ruling that out does one candidate's
+    // shape decide anything.
     if (popup.ttys.length > 1) {
       return { tty: null, refusal: "shared-session-popup" };
     }
     const only = popup.ttys[0];
     if (only && CLIENT_TTY_PATTERN.test(only)) return { tty: only };
-    return { tty: null, refusal: "no-client" };
+    // No usable candidate, but not NO client: a popup is on screen because a
+    // client is drawing it. Reported as unknown so `openDedupedCommandWindow`
+    // refuses instead of creating the agents window untargeted, which is the
+    // `cmd_find_best_session` placement this whole path exists to avoid.
+    return { tty: null, refusal: "popup-client-unknown" };
   }
   if (current && CLIENT_TTY_PATTERN.test(current)) return { tty: current };
   return { tty: null, refusal: "no-client" };

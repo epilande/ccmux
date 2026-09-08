@@ -192,7 +192,10 @@ describe("switchToPane", () => {
     }
   });
 
-  it("refuses inside a popup whose session nobody is attached to", async () => {
+  it("refuses inside a popup whose session lists no client", async () => {
+    // A popup is being drawn, so a client exists; an empty list only means the
+    // binding named a session it is not attached to. The toast has to say the
+    // launcher could not be worked out, not that nobody is here.
     const spawn = withSpawn([
       { stdout: "/dev/ttys011\n" },
       { stdout: "/dev/ttys002\n" },
@@ -204,7 +207,7 @@ describe("switchToPane", () => {
         withClientTty(undefined, () => switchToPane("%8")),
       );
 
-      expect(result).toBe("no-client");
+      expect(result).toBe("popup-client-unknown");
       expect(spawn.calls).toEqual(PROBE_CALLS);
     } finally {
       spawn.restore();

@@ -601,6 +601,36 @@ describe("openDedupedCommandWindow client pinning", () => {
     }
   });
 
+  it("refuses a popup whose session lists no client at all", async () => {
+    // The listing answered, and answered empty: reachable from a binding that
+    // targets a session the pressing client is not on. A client is still
+    // drawing the popup, so an untargeted window would be born in whichever
+    // session tmux picks. Nothing may be created.
+    const stubs = withTmuxStubs([
+      { stdout: "/dev/ttys010\n" },
+      { stdout: "/dev/ttys002\n" },
+      { stdout: "/dev/ttys099\n" },
+      { stdout: "" },
+    ]);
+    try {
+      const result = await withNoCapturedTty(() =>
+        openAgentsWindow("/tmp/proj"),
+      );
+
+      expect(result).toEqual({
+        ok: false,
+        error:
+          "could not work out which terminal opened this popup. Pass --client-tty in the tmux binding (see README)",
+      });
+      // The probes and nothing else: no listing, and above all no window.
+      expect(
+        stubs.calls.map((argv) => (argv[0] === "tty" ? "tty" : argv[1])),
+      ).toEqual(PROBE_VERBS);
+    } finally {
+      stubs.restore();
+    }
+  });
+
   it("refuses rather than switching when an existing window has no client", async () => {
     const stubs = withTmuxStubs([
       { exitCode: 1 },
