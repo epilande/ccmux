@@ -25,12 +25,14 @@ import {
   handoffBadge,
   HANDOFF_BADGE,
   ATTENTION_LABEL_MAX,
+  normalizePrompt,
   type ProjectCellDisplay,
 } from "./session-columns";
 import type { SubagentState } from "../../types";
 import { DEFAULT_BREAKPOINTS, type Responsive } from "../../lib/preferences";
 import { mockEnrichedSession } from "./test-helpers";
 import { displayWidth } from "../utils/format";
+import { formatHandoffHeader } from "../../daemon/handoff";
 
 /** A half of a surrogate pair with no partner: what a code-unit slice through
  *  an astral character leaves behind, rendered as `�`. */
@@ -397,6 +399,121 @@ describe("hasFieldData", () => {
     expect(hasFieldData(mockEnrichedSession({ paneCwd: "/a/b" }), "cwd")).toBe(
       true,
     );
+  });
+});
+
+describe("normalizePrompt", () => {
+  it("strips ANSI escapes from local-command-stdout", () => {
+    expect(
+      normalizePrompt(
+        "<local-command-stdout>\x1b[32mOK\x1b[0m</local-command-stdout>",
+      ),
+    ).toBe("OK");
+  });
+
+  it("strips private-mode CSI, OSC hyperlinks and a BEL from stdout", () => {
+    // What a real pane hands `<local-command-stdout>`: a cursor hide/show
+    // pair, an OSC 8 hyperlink around the text, and a stray BEL. None of it
+    // is plain CSI, so none of it may reach the cell as `[?25l` or `]8;;…`.
+    expect(
+      normalizePrompt(
+        "<local-command-stdout>" +
+          "\x1b[?25l\x1b]8;;https://example.com\x07green\x1b]8;;\x07\x07 file" +
+          "\x1b[0m\x1b[?25h" +
+          "</local-command-stdout>",
+      ),
+    ).toBe("green file");
+  });
+
+  it("strips ANSI from a `!` shell turn's bash-stdout", () => {
+    // The exact shape a live Claude 2.1.263 logged for
+    // `! printf '\033]8;;…\aLINKED\033]8;;\a \033[32mgreen\033[0m file'`.
+    expect(
+      normalizePrompt(
+        "<bash-stdout>\x1b]8;;https://example.com\x07LINKED\x1b]8;;\x07 " +
+          "\x1b[?25l\x1b[32mgreen\x1b[0m\x1b[?25h file</bash-stdout>" +
+          "<bash-stderr></bash-stderr>",
+      ),
+    ).toBe("LINKED green file");
+  });
+
+  it("falls back to bash-stderr when the command printed nothing", () => {
+    expect(
+      normalizePrompt(
+        "<bash-stdout></bash-stdout><bash-stderr>no such file</bash-stderr>",
+      ),
+    ).toBe("no such file");
+  });
+
+  it("drops a `!` shell turn that produced no output at all", () => {
+    expect(
+      normalizePrompt("<bash-stdout></bash-stdout><bash-stderr></bash-stderr>"),
+    ).toBe("");
+  });
+
+  it("restores the `!` on a bash-input turn", () => {
+    expect(normalizePrompt("<bash-input>ls -la</bash-input>")).toBe("! ls -la");
+  });
+
+  it("prefers bash-stdout over bash-input in one text", () => {
+    expect(
+      normalizePrompt(
+        "<bash-input>ls</bash-input><bash-stdout>README.md</bash-stdout>",
+      ),
+    ).toBe("README.md");
+  });
+
+  it("reduces a task notification to its summary", () => {
+    expect(
+      normalizePrompt(
+        "<task-notification><task-id>abc123</task-id>" +
+          "<status>completed</status>" +
+          "<summary>Agent finished the audit</summary>" +
+          "<result>full report text here</result></task-notification>",
+      ),
+    ).toBe("Agent finished the audit");
+  });
+
+  it("keeps the summary when the result quotes an inner tag", () => {
+    // `<task-notification>` is the outermost wrapper and its `<result>` is
+    // an agent's own prose, so it can quote any tag the later branches
+    // match. Tested last, the bash branch would answer with the quote.
+    expect(
+      normalizePrompt(
+        "<task-notification><task-id>abc123</task-id>" +
+          "<status>completed</status>" +
+          "<summary>Agent finished the audit</summary>" +
+          "<result>the cell painted <bash-stdout>x</bash-stdout> raw" +
+          "</result></task-notification>",
+      ),
+    ).toBe("Agent finished the audit");
+  });
+
+  it("drops a task notification with no summary", () => {
+    expect(
+      normalizePrompt(
+        "<task-notification><task-id>abc123</task-id>" +
+          "<status>completed</status></task-notification>",
+      ),
+    ).toBe("");
+  });
+
+  it("surfaces the payload of a relayed handoff, not the header", () => {
+    const header = formatHandoffHeader(
+      { sessionId: "sess-1", agentType: "codex", cwd: "/code/ccmux" },
+      new Date("2026-08-03T14:05:00"),
+    );
+    expect(normalizePrompt(`${header}\n\ntake it from here`)).toBe(
+      "take it from here",
+    );
+  });
+
+  it("drops a handoff header with no payload after it", () => {
+    const header = formatHandoffHeader(
+      { sessionId: "sess-1", agentType: "codex", cwd: "/code/ccmux" },
+      new Date("2026-08-03T14:05:00"),
+    );
+    expect(normalizePrompt(header)).toBe("");
   });
 });
 
