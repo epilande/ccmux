@@ -11,8 +11,10 @@ import { tmpdir } from "os";
 import { join } from "path";
 import {
   BUILD_IDENTITY,
+  IS_TRANSIENT_SOURCE_RUN,
   classifyDaemonBuild,
   computeBuildIdentity,
+  isTransientSourceRun,
   parseBuildIdentity,
   type BuildIdentity,
 } from "./build-identity";
@@ -191,5 +193,82 @@ describe("classifyDaemonBuild", () => {
 
   it("identical identity is current", () => {
     expect(classifyDaemonBuild({ ...cli }, cli)).toBe("current");
+  });
+});
+
+describe("isTransientSourceRun", () => {
+  // `exists` is injected, so these paths need not be on disk.
+  const bundleAt = (root: string) => (path: string) =>
+    path === join(root, "dist", "index.js");
+
+  it("source run of a checkout that holds a bundle is transient", () => {
+    expect(
+      isTransientSourceRun({
+        execPath: "/usr/local/bin/bun",
+        argv1: "/repo/src/index.ts",
+        version: "1",
+        exists: bundleAt("/repo"),
+      }),
+    ).toBe(true);
+  });
+
+  it("resolves a relative argv1 against cwd, the way bin/ccmux execs it", () => {
+    expect(
+      isTransientSourceRun({
+        execPath: "/usr/local/bin/bun",
+        argv1: "src/index.ts",
+        cwd: "/repo",
+        version: "1",
+        exists: bundleAt("/repo"),
+      }),
+    ).toBe(true);
+  });
+
+  it("running the bundle itself is not transient", () => {
+    expect(
+      isTransientSourceRun({
+        execPath: "/usr/local/bin/bun",
+        argv1: "/repo/dist/index.js",
+        version: "1",
+        exists: bundleAt("/repo"),
+      }),
+    ).toBe(false);
+  });
+
+  it("source run with NO bundle (a fresh clone) is not transient", () => {
+    expect(
+      isTransientSourceRun({
+        execPath: "/usr/local/bin/bun",
+        argv1: "/repo/src/index.ts",
+        version: "1",
+        exists: () => false,
+      }),
+    ).toBe(false);
+  });
+
+  it("a compiled standalone binary is never transient", () => {
+    expect(
+      isTransientSourceRun({
+        execPath: "/usr/local/bin/ccmux",
+        argv1: "/$bunfs/root/ccmux",
+        version: "1",
+        exists: () => true,
+      }),
+    ).toBe(false);
+  });
+
+  it("a sibling checkout's bundle does not make this one transient", () => {
+    expect(
+      isTransientSourceRun({
+        execPath: "/usr/local/bin/bun",
+        argv1: "/repo-a/src/index.ts",
+        version: "1",
+        exists: bundleAt("/repo-b"),
+      }),
+    ).toBe(false);
+  });
+
+  it("IS_TRANSIENT_SOURCE_RUN is a boolean computed at import", () => {
+    expect(typeof IS_TRANSIENT_SOURCE_RUN).toBe("boolean");
   });
 });

@@ -13,6 +13,7 @@ import {
   getDaemonUrl,
   DAEMON_PORT,
   HEALTH_CHECK_TIMEOUT_MS,
+  HEALTH_RETRY_TIMEOUT_MS,
   getPidFilePath,
 } from "../lib/config";
 
@@ -123,19 +124,61 @@ function removeStalePidFile(): void {
   if (existsSync(pidFile)) unlinkSync(pidFile);
 }
 
+/** One `/health` GET on its own budget. Injectable so tests need no network. */
+export type HealthFetch = (url: string, timeoutMs: number) => Promise<Response>;
+
+const defaultHealthFetch: HealthFetch = (url, timeoutMs) =>
+  fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+
+/**
+ * Whether a failed `/health` probe deserves one longer retry.
+ *
+ * Only a TIMEOUT does. A timeout means the connection was accepted and the
+ * answer did not arrive in budget, which is exactly what a daemon a few
+ * hundred milliseconds into boot looks like, and reading it as "no daemon"
+ * gets that healthy listener killed. Everything else must NOT retry: a
+ * refused connection (measured in Bun as a plain `Error` with
+ * `code: "ConnectionRefused"`, the same shape a DNS failure produces) is the
+ * ordinary no-daemon case on the picker's cold path, and doubling its cost
+ * would be paid on every cold start. An unrecognized shape is treated as a
+ * refusal for the same reason.
+ *
+ * `AbortSignal.timeout` rejects with a `TimeoutError` DOMException here;
+ * `AbortError` is accepted alongside it because nothing on this path aborts
+ * for any other reason, so a runtime that spells it that way still gets the
+ * retry rather than a kill.
+ */
+export function shouldRetryHealthProbe(error: unknown): boolean {
+  const name = (error as { name?: unknown } | null | undefined)?.name;
+  return name === "TimeoutError" || name === "AbortError";
+}
+
 /**
  * Liveness via HTTP /health, never the PID file alone: a dead daemon's PID can
  * be recycled by an unrelated process, a false positive that would suppress
  * auto-start (e.g. `ccmux picker`).
+ *
+ * A probe that TIMES OUT is retried once on a longer budget (see
+ * `shouldRetryHealthProbe`); a refused one is not, so the no-daemon path keeps
+ * its single short probe.
  */
-export async function isDaemonRunningAsync(): Promise<boolean> {
+export async function isDaemonRunningAsync(
+  healthFetch: HealthFetch = defaultHealthFetch,
+): Promise<boolean> {
+  const url = `${getDaemonUrl()}/health`;
   try {
-    const response = await fetch(`${getDaemonUrl()}/health`, {
-      signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS),
-    });
+    const response = await healthFetch(url, HEALTH_CHECK_TIMEOUT_MS);
     if (response.ok) return true;
-  } catch {
-    // daemon unreachable (fetch rejects) -> treat as not running
+  } catch (error) {
+    if (shouldRetryHealthProbe(error)) {
+      try {
+        const retried = await healthFetch(url, HEALTH_RETRY_TIMEOUT_MS);
+        if (retried.ok) return true;
+      } catch {
+        // still unreachable after the longer budget -> not running
+      }
+    }
+    // any other failure: daemon unreachable (fetch rejects) -> not running
   }
   cleanupStalePidFile();
   return false;

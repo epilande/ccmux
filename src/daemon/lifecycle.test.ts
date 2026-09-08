@@ -12,6 +12,8 @@ import {
   stopDaemonByPort,
   isStandaloneBinary,
   daemonSpawnArgv,
+  shouldRetryHealthProbe,
+  type HealthFetch,
 } from "./lifecycle";
 import { getPidFilePath } from "../lib/config";
 
@@ -415,5 +417,100 @@ describe("daemonSpawnArgv", () => {
       rmSync(root, { recursive: true, force: true });
       rmSync(caller, { recursive: true, force: true });
     }
+  });
+});
+
+describe("shouldRetryHealthProbe", () => {
+  it("retries a timeout (a listener accepted but answered late)", () => {
+    expect(
+      shouldRetryHealthProbe(
+        new DOMException("The operation timed out.", "TimeoutError"),
+      ),
+    ).toBe(true);
+    expect(
+      shouldRetryHealthProbe(new DOMException("aborted", "AbortError")),
+    ).toBe(true);
+  });
+
+  it("does NOT retry a refused connection, so the cold path stays fast", async () => {
+    // The real runtime shape, not a hand-built one: bind a port, close it,
+    // then probe it. Bun rejects with a plain Error, code ConnectionRefused.
+    const server = Bun.serve({ port: 0, fetch: () => new Response("ok") });
+    const url = `http://127.0.0.1:${server.port}/health`;
+    server.stop(true);
+    let refused: unknown;
+    try {
+      await fetch(url, { signal: AbortSignal.timeout(1000) });
+    } catch (error) {
+      refused = error;
+    }
+    expect(refused).toBeDefined();
+    expect((refused as { name?: string }).name).not.toBe("TimeoutError");
+    expect(shouldRetryHealthProbe(refused)).toBe(false);
+  });
+
+  it("does NOT retry an unknown error shape", () => {
+    expect(shouldRetryHealthProbe(new Error("boom"))).toBe(false);
+    expect(shouldRetryHealthProbe(new TypeError("fetch failed"))).toBe(false);
+    expect(shouldRetryHealthProbe(undefined)).toBe(false);
+    expect(shouldRetryHealthProbe(null)).toBe(false);
+    expect(shouldRetryHealthProbe("timed out")).toBe(false);
+  });
+});
+
+describe("isDaemonRunningAsync health retry", () => {
+  beforeEach(setupTempHome);
+  afterEach(teardown);
+
+  const timeout = () =>
+    new DOMException("The operation timed out.", "TimeoutError");
+
+  /** Records the budget of every probe and answers from a queue. */
+  function probes(answers: Array<"ok" | "timeout" | "refused">) {
+    const budgets: number[] = [];
+    const fetchHealth: HealthFetch = async (_url, timeoutMs) => {
+      budgets.push(timeoutMs);
+      const answer = answers.shift();
+      if (answer === "ok") return new Response("{}", { status: 200 });
+      if (answer === "timeout") throw timeout();
+      const error = new Error("Unable to connect.");
+      Object.assign(error, { code: "ConnectionRefused" });
+      throw error;
+    };
+    return { fetchHealth, budgets };
+  }
+
+  it("a daemon still booting: first probe times out, the retry answers", async () => {
+    const { fetchHealth, budgets } = probes(["timeout", "ok"]);
+    expect(await isDaemonRunningAsync(fetchHealth)).toBe(true);
+    expect(budgets).toEqual([100, 1000]);
+  });
+
+  it("two timeouts is not running", async () => {
+    const { fetchHealth, budgets } = probes(["timeout", "timeout"]);
+    expect(await isDaemonRunningAsync(fetchHealth)).toBe(false);
+    expect(budgets).toEqual([100, 1000]);
+  });
+
+  it("a refused connection probes exactly once", async () => {
+    const { fetchHealth, budgets } = probes(["refused"]);
+    expect(await isDaemonRunningAsync(fetchHealth)).toBe(false);
+    expect(budgets).toEqual([100]);
+  });
+
+  it("a healthy daemon probes exactly once", async () => {
+    const { fetchHealth, budgets } = probes(["ok"]);
+    expect(await isDaemonRunningAsync(fetchHealth)).toBe(true);
+    expect(budgets).toEqual([100]);
+  });
+
+  it("a non-ok response is not retried", async () => {
+    const budgets: number[] = [];
+    const fetchHealth: HealthFetch = async (_url, timeoutMs) => {
+      budgets.push(timeoutMs);
+      return new Response("nope", { status: 500 });
+    };
+    expect(await isDaemonRunningAsync(fetchHealth)).toBe(false);
+    expect(budgets).toEqual([100]);
   });
 });

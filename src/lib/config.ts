@@ -272,6 +272,18 @@ export const WATCHER_DEBOUNCE_MS = 200;
 export const HEARTBEAT_INTERVAL_MS = 15000;
 export const HEALTH_CHECK_TIMEOUT_MS = 100;
 /**
+ * Second, longer `/health` budget, used ONLY after the first probe timed out.
+ *
+ * A daemon roughly half a second into boot has already bound the port (the
+ * Server starts at the top of `Daemon.start()`) but is still migrating
+ * sessions and replaying markers, so it accepts the connection and answers
+ * later than 100ms. Reading that as "not running" makes the caller print
+ * "Starting daemon..." and SIGTERM a perfectly healthy listener. A timeout
+ * means something ACCEPTED, so it is worth waiting for; a refused connection
+ * is not retried at all and the no-daemon path stays as fast as it was.
+ */
+export const HEALTH_RETRY_TIMEOUT_MS = 1000;
+/**
  * Budget for the best-effort `/server-info` read that follows a successful
  * `/health` probe on the auto-start path. Longer than the liveness probe
  * because a slow answer here must never evict a live daemon: on timeout the
