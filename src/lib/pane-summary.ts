@@ -2,7 +2,7 @@ import { hostname } from "node:os";
 import { basename } from "node:path";
 import { BUILTIN_AGENTS } from "./agents";
 import type { SummaryTitleRule } from "./agents";
-import { stripAnsi } from "./strip-ansi";
+import { stripTerminalNoise } from "./strip-ansi";
 
 /**
  * Built once. The daemon asks for a session's summary on every enrich and
@@ -32,18 +32,13 @@ const HOSTNAME = hostname();
  * also unwraps Claude's `<command-name>` log markup, which is a property of
  * Claude's JSONL transcript and has no business being applied to a title.
  *
- * `stripAnsi` handles CSI only, so the control sweep after it is what catches
- * the rest: a lone ESC, a BEL, and the C1 block (U+0080-U+009F), which is the
- * practical residue once tmux's own title validation has had its say. Each
- * becomes a SPACE rather than nothing, so the `\s+` collapse behind it still
- * sees a separator: `\n` and `\t` fall under both rules, and deleting them
- * outright would weld two words together.
+ * The reduction itself is `stripTerminalNoise`, shared with the TUI's prompt
+ * cell, which faces the same escape-carrying free text; its own comment
+ * carries the why. A title's practical residue, once tmux's own validation
+ * has had its say, is the lone ESC and C1 end of what that helper sweeps.
  */
 function normalizeTitle(text: string): string {
-  return stripAnsi(text)
-    .replace(/[\x00-\x1F\x7F-\x9F]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return stripTerminalNoise(text);
 }
 
 /**
