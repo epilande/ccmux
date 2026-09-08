@@ -231,17 +231,23 @@ export type OpenAgentsResult =
   | { ok: true; clientSwitched: false; reason: ClientSwitchMiss }
   | { ok: false; error: string };
 
-/** The two resolver refusals that stop a launch before it creates anything.
- *  `"no-client"` is not among them: with nobody to move, an untargeted window
- *  is still the right outcome. */
+/** The resolver refusals that stop a launch before it creates anything.
+ *  `"no-client"` is not among them: it means no popup and no current client,
+ *  so with nobody to move an untargeted window is still the right outcome. A
+ *  client we merely could not NAME is a different case and does refuse, since
+ *  the window would be placed relative to whichever session tmux picks
+ *  instead. That is why the resolver never answers `"no-client"` from inside a
+ *  popup, where a client provably exists however the listing came back. */
 const WINDOW_LAUNCH_REFUSAL: Record<
   Exclude<ClientTtyRefusal, "no-client">,
   string
 > = {
   "malformed-capture":
     "captured client tty is malformed, check the tmux binding in the README",
-  "legacy-popup":
-    "no client tty was passed to this popup and several clients are attached, update the tmux binding (see README)",
+  "shared-session-popup":
+    "several terminals are attached to this tmux session, so ccmux cannot tell which one opened the popup. Pass --client-tty in the tmux binding (see README)",
+  "popup-client-unknown":
+    "could not work out which terminal opened this popup. Pass --client-tty in the tmux binding (see README)",
 };
 
 /**
@@ -351,11 +357,12 @@ async function findWindowIdByName(windowName: string): Promise<string | null> {
  * FIRST, before the dedupe listing and before anything is created:
  *  - A tty, captured or guessed: the window is placed in that client's session
  *    and the pinned switch moves it.
- *  - A malformed capture, or a legacy popup binding with several clients
- *    attached: REFUSE with `ok: false` and create nothing. Both mean the tty
- *    we would act on names the wrong terminal, and an untargeted window plus
- *    an unpinned switch is exactly the cross-session yank this path exists to
- *    remove. A toast the user can act on beats a silent fallback.
+ *  - A malformed capture, a popup whose session has several clients attached,
+ *    or a popup whose client could not be worked out: REFUSE with `ok: false`
+ *    and create nothing. All three mean we cannot name the terminal to act on
+ *    while one exists, and an untargeted window plus an unpinned switch is
+ *    exactly the cross-session yank this path exists to remove. A toast the
+ *    user can act on beats a silent fallback.
  *  - No client at all (nothing captured, tmux names none): open the window
  *    untargeted and move NOBODY, reporting `no-client-tty`. There is no client
  *    to misplace it relative to, and none to move into it.

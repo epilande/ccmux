@@ -35,7 +35,7 @@ export function createPickerCommand(): Command {
     .option("--no-persistent", "Close picker after switching sessions")
     .option(
       "--client-tty <tty>",
-      "tmux client tty to act on (set by the popup keybinding)",
+      "tmux client tty to act on (passed by the --client-tty popup binding, see README)",
     )
     .action(
       async (options: {
