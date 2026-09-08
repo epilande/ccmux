@@ -14,6 +14,7 @@ import {
 import { daemonBody } from "../lib/daemon-json";
 import {
   BUILD_IDENTITY,
+  IS_TRANSIENT_SOURCE_RUN,
   classifyDaemonBuild,
   parseBuildIdentity,
   type BuildIdentity,
@@ -86,6 +87,13 @@ export interface ReconcileDeps {
    */
   launch: (expectedPid?: number) => Promise<boolean>;
   cli: BuildIdentity;
+  /**
+   * True when this CLI is running a checkout's source while that checkout
+   * also holds a built bundle (`isTransientSourceRun`). An outdated daemon is
+   * then left alone: the rebuild is in flight and the next launch, from the
+   * bundle, does the one correct replacement.
+   */
+  transientSourceRun: boolean;
   /** Progress line channel ("Starting daemon...", "restarting..."). */
   log: (line: string) => void;
   /** Warning channel (outdated-but-busy). */
@@ -97,6 +105,7 @@ export type ReconcileOutcome =
   | "kept"
   | "restarted"
   | "busy"
+  | "deferred"
   | "raced";
 
 async function getDaemonJson(
@@ -122,6 +131,7 @@ export function defaultReconcileDeps(
     findListenPid: findDaemonPidByPort,
     launch: launchDaemon,
     cli: BUILD_IDENTITY,
+    transientSourceRun: IS_TRANSIENT_SOURCE_RUN,
     log: (line) => console.error(line),
     warn: (line) => console.error(line),
     ...overrides,
@@ -244,7 +254,8 @@ function describeBusy(busy: DaemonProbe["busy"]): string {
  * Act on a probe: start a missing daemon, replace an outdated idle one, warn
  * about an outdated busy one, leave a current or foreign one alone (foreign is
  * another checkout on the same version, or a newer daemon than this CLI;
- * see `build-identity.ts`).
+ * see `build-identity.ts`). An outdated daemon is also left alone, silently,
+ * when this CLI is a transient source run.
  */
 export async function settleDaemon(
   probe: DaemonProbe,
@@ -256,6 +267,12 @@ export async function settleDaemon(
     return "started";
   }
   if (probe.verdict !== "outdated") return "kept";
+  // A source run while a bundle exists is one half of a rebuild already under
+  // way (`isTransientSourceRun`). Replacing the daemon now, and again from the
+  // bundle a moment later, is two restarts for one edit. Silent on purpose:
+  // nothing is wrong and nothing is owed to the user, and the deferral is
+  // visible in `ccmux daemon status` for anyone who looks.
+  if (deps.transientSourceRun) return "deferred";
   if (!isIdle(probe.busy)) {
     deps.warn(
       `Daemon is outdated but busy (${describeBusy(probe.busy)}); ` +

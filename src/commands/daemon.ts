@@ -21,6 +21,7 @@ import { printDaemonHealth } from "./shared";
 import { daemonBody } from "../lib/daemon-json";
 import {
   BUILD_IDENTITY,
+  IS_TRANSIENT_SOURCE_RUN,
   classifyDaemonBuild,
   parseBuildIdentity,
   type BuildIdentity,
@@ -113,9 +114,13 @@ function printBuild(daemonBuild: unknown): void {
       `Build: foreign (${reason}); left alone, run ccmux daemon restart to switch`,
     );
   } else {
+    const head = `Build: OUTDATED (daemon ${daemon?.version ?? "unknown"}, cli ${cli.version}); `;
     console.log(
-      `Build: OUTDATED (daemon ${daemon?.version ?? "unknown"}, cli ${cli.version}); ` +
-        "replaced automatically when idle, or run ccmux daemon restart",
+      IS_TRANSIENT_SOURCE_RUN
+        ? head +
+            "deferred, this CLI runs from source beside a built bundle; " +
+            "the next launch from the bundle replaces it, or run ccmux daemon restart"
+        : head + "replaced automatically when idle, or run ccmux daemon restart",
     );
   }
 }

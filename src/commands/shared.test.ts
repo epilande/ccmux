@@ -28,6 +28,8 @@ function harness(
     routes?: Record<string, Route | Route[]>;
     /** Queue of LISTEN pids; last element repeats. Default is a stable pid. */
     listenPids?: Array<number | null>;
+    /** This CLI runs a checkout's source while its bundle exists. */
+    transientSourceRun?: boolean;
   } = {},
 ) {
   const launches: Array<number | undefined> = [];
@@ -59,6 +61,9 @@ function harness(
       return true;
     },
     cli,
+    // Pinned rather than inherited: under `bun test` the import-time value
+    // depends on where the test file sits, and every case below states it.
+    transientSourceRun: options.transientSourceRun ?? false,
     log: (line) => logs.push(line),
     warn: (line) => warns.push(line),
   });
@@ -396,5 +401,62 @@ describe("getDaemonJson plaintext 404", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+describe("transient source runs defer instead of evicting", () => {
+  it("outdated + idle daemon, CLI running from source while a bundle exists: deferred, silent, no launch", async () => {
+    const h = harness({
+      transientSourceRun: true,
+      routes: {
+        "/server-info": info(outdatedBuild, { invocations: 0, handoffs: 0 }),
+      },
+    });
+    expect(await reconcileDaemon(h.deps)).toBe("deferred");
+    expect(h.launches).toHaveLength(0);
+    expect(h.logs).toEqual([]);
+    expect(h.warns).toEqual([]);
+    // The deferral is decided from the probe alone; no confirm-time re-read.
+    expect(h.calls).toEqual(["/server-info"]);
+  });
+
+  it("outdated + BUSY daemon on a transient source run: still deferred, and not even the busy warning", async () => {
+    const h = harness({
+      transientSourceRun: true,
+      routes: {
+        "/server-info": info(outdatedBuild, { invocations: 2, handoffs: 0 }),
+      },
+    });
+    expect(await reconcileDaemon(h.deps)).toBe("deferred");
+    expect(h.launches).toHaveLength(0);
+    expect(h.warns).toEqual([]);
+  });
+
+  it("the same daemon from a dist run restarts as before", async () => {
+    const h = harness({
+      transientSourceRun: false,
+      routes: {
+        "/server-info": info(outdatedBuild, { invocations: 0, handoffs: 0 }),
+      },
+    });
+    expect(await reconcileDaemon(h.deps)).toBe("restarted");
+    expect(h.launches).toEqual([1001]);
+    expect(h.logs).toEqual(["Daemon is outdated; restarting..."]);
+  });
+
+  it("a current daemon is kept either way (the deferral only gates eviction)", async () => {
+    const h = harness({
+      transientSourceRun: true,
+      routes: { "/server-info": info(cli) },
+    });
+    expect(await reconcileDaemon(h.deps)).toBe("kept");
+    expect(h.launches).toHaveLength(0);
+  });
+
+  it("no daemon at all still starts one from the source run", async () => {
+    const h = harness({ transientSourceRun: true, alive: false });
+    expect(await reconcileDaemon(h.deps)).toBe("started");
+    expect(h.launches).toHaveLength(1);
+    expect(h.logs).toEqual(["Starting daemon..."]);
   });
 });

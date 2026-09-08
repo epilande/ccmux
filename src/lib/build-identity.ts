@@ -32,6 +32,12 @@
  * malformed one is `outdated`: the issue's rule is that a missing identity is
  * a mismatch, so such a daemon is replaced once, even from another checkout.
  *
+ * One verdict is not acted on: `isTransientSourceRun` marks a CLI that is
+ * running a checkout's SOURCE while that checkout also holds a built bundle.
+ * There, `bin/ccmux` is already rebuilding and the next launch runs the
+ * bundle, so an outdated daemon is left alone rather than replaced twice for
+ * one edit. See that function for the full reason.
+ *
  * `BUILD_IDENTITY` is computed at MODULE LOAD, not on demand. `bin/ccmux`
  * cds into the package root and execs `bun dist/index.js`, so `argv[1]` is
  * RELATIVE; the daemon later does `process.chdir("/")` and the sidebar and
@@ -39,8 +45,8 @@
  * those would stat the wrong file (or nothing). Import phase runs before any
  * command action, so the value is right for both the CLI and the daemon.
  */
-import { realpathSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { isStandaloneBinary } from "../daemon/lifecycle";
 import pkg from "../../package.json" with { type: "json" };
 
@@ -115,6 +121,59 @@ function computeOwnIdentity(): BuildIdentity {
 
 /** This process's identity, frozen at import (see the header). */
 export const BUILD_IDENTITY: BuildIdentity = computeOwnIdentity();
+
+/**
+ * A "transient source run": this CLI is executing a source file of a checkout
+ * that ALSO holds a built `dist/index.js`.
+ *
+ * `bin/ccmux` runs the bundle when it is current and otherwise runs
+ * `src/index.ts` while kicking off a background `bun run build`. So a single
+ * edit under `src/` produces two CLI runs with two different stamps: this
+ * source one, then a dist one once the rebuild lands. Letting the source run
+ * evict the daemon costs a restart that the very next launch immediately
+ * undoes, which is two daemon restarts (and two dropped SSE fleets) per edit
+ * instead of one. The source run therefore DEFERS: the rebuild is already in
+ * flight, and the dist run that follows does the single correct replacement.
+ *
+ * The predicate is deliberately about the executed file, not about the build
+ * lock: `bin/ccmux`'s one-minute stamp guard means the lock is usually gone
+ * while the source run is still the thing executing.
+ *
+ * Computed at MODULE LOAD for the same reason as `BUILD_IDENTITY` (see the
+ * header): `argv[1]` is relative and the process chdirs later.
+ */
+export function isTransientSourceRun(
+  inputs: BuildIdentityInputs & { exists?: (path: string) => boolean },
+): boolean {
+  const exists = inputs.exists ?? existsSync;
+  if (isStandaloneBinary(inputs.argv1, inputs.execPath)) return false;
+  const cwd = inputs.cwd ?? process.cwd();
+  const script = realpathOr(resolve(cwd, inputs.argv1 ?? ""));
+  // Same derivation as the identity's `artifact` for a `bun <script>` run.
+  const artifact = dirname(dirname(script));
+  const bundle = join(artifact, "dist", "index.js");
+  // Running the bundle itself is the settled state, not a transient one.
+  if (script === bundle) return false;
+  // No bundle at all (a fresh clone before its first build): there is nothing
+  // for a rebuild to land in, so no second run is coming and this one must
+  // not defer.
+  return exists(bundle);
+}
+
+function computeOwnTransientSourceRun(): boolean {
+  try {
+    return isTransientSourceRun({
+      execPath: process.execPath,
+      argv1: process.argv[1],
+      version: pkg.version,
+    });
+  } catch {
+    return false;
+  }
+}
+
+/** Whether THIS process is a transient source run, frozen at import. */
+export const IS_TRANSIENT_SOURCE_RUN: boolean = computeOwnTransientSourceRun();
 
 export type BuildVerdict = "current" | "outdated" | "foreign";
 
