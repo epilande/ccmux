@@ -131,11 +131,9 @@ export interface PairProcsOptions extends AncestryPairOptions {
  * subprocesses (`codex exec`, MCP servers) that discovery drops on purpose;
  * ancestry would happily bind them to whichever pane spawned them.
  *
- * The tty-claimed set is scoped to the `processes` argument, so a caller
- * that pre-filters (pane-tracked creation excludes hooks-mode Claude;
- * the Claude ladders pass Claude only) can ancestry-claim a pane that a
- * process it never saw owns by tty. Each site's claims stay internally
- * consistent; the scan, which sees every agent, is the one that arbitrates.
+ * Tty ownership is reserved even when the owner has no cwd. Callers should
+ * pass every process that can own a pane before filtering emitted matches;
+ * the tty-claimed set cannot account for processes absent from the input.
  */
 export function pairProcsWithPanes(
   processes: readonly ProcessInfo[],
@@ -143,9 +141,7 @@ export function pairProcsWithPanes(
   options: PairProcsOptions = {},
 ): ProcPaneMatch[] {
   const { processTree, requireCwd = true } = options;
-  const eligible = processes.filter(
-    (proc) => proc.tty && (!requireCwd || proc.cwd),
-  );
+  const withTty = processes.filter((proc) => proc.tty);
 
   const matches: ProcPaneMatch[] = [];
   const ttyClaimedPanes = new Set<string>();
@@ -160,19 +156,23 @@ export function pairProcsWithPanes(
     if (tty && !paneByTty.has(tty)) paneByTty.set(tty, pane);
   }
 
-  for (const proc of eligible) {
+  for (const proc of withTty) {
     const procTty = normalizeTty(proc.tty);
     const matchingPane = procTty ? paneByTty.get(procTty) : undefined;
     if (matchingPane) {
-      matches.push({ proc, pane: matchingPane, provenance: "tty" });
       ttyClaimedPanes.add(matchingPane.paneId);
       ttyPairedPids.add(proc.pid);
+      if (!requireCwd || proc.cwd) {
+        matches.push({ proc, pane: matchingPane, provenance: "tty" });
+      }
     }
   }
 
   if (!processTree) return matches;
 
-  const orphans = eligible.filter((proc) => !ttyPairedPids.has(proc.pid));
+  const orphans = withTty.filter(
+    (proc) => !ttyPairedPids.has(proc.pid) && (!requireCwd || proc.cwd),
+  );
   if (orphans.length === 0) return matches;
   const orphanPids = new Set(orphans.map((proc) => proc.pid));
 

@@ -751,18 +751,18 @@ export class Daemon {
     panes: TmuxPane[],
     processTree?: ProcessTree,
   ): Promise<void> {
-    const paneTrackedTargets = processes.filter((proc) => {
-      if (proc.agentType !== "claude") return true;
-      return this.claudeRuntimeMode === "claude-no-hooks";
-    });
     // The binder's shared pairing rather than a local tty map: tty first,
     // then ancestry for an agent a pty-allocating wrapper moved off the
     // pane's terminal (issue #193), and a pane a tty match already claimed is
     // never re-claimed. `requireCwd: false` keeps the pre-existing fallback
     // to the pane's own path for a process whose cwd could not be read.
-    const paneProcs = pairProcsWithPanes(paneTrackedTargets, panes, {
+    const paneProcs = pairProcsWithPanes(processes, panes, {
       processTree,
       requireCwd: false,
+    }).filter(({ proc }) => {
+      // Hooks-mode Claude still reserves its tty before creation excludes it.
+      if (proc.agentType !== "claude") return true;
+      return this.claudeRuntimeMode === "claude-no-hooks";
     });
     await Promise.all(
       paneProcs.map(async ({ proc, pane }) => {

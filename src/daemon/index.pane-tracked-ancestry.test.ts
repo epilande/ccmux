@@ -270,26 +270,18 @@ describe("per-tick sites agree on the wrapper shape (issue #193)", () => {
     });
   });
 
-  it("the scan stays SILENT where the pane-tracked pre-filter widens its view", async () => {
-    // Hooks-mode Claude owns the pane's tty, so pane-tracked creation never
-    // sees it and the pane looks unclaimed from there: the wrapper-hosted pi
-    // ancestry-binds to %1. The scan sees BOTH, so %1 is tty-claimed by
-    // claude and pi earns no ancestry pair. The two views differ — the point
-    // is that the scan then emits NOTHING for pi rather than a rival pid,
-    // so no session's pid ever alternates.
+  it("reserves hooks-mode Claude's tty before filtering pane-tracked agents", async () => {
     const claude = fakeClaudeProcess();
     const pi = fakePiProcess();
     const panes = [fakePane()];
 
-    // Site 3's own pre-filter drops hooks-mode Claude; pass both and let it.
     await internals.createOrUpdatePaneTrackedSessions(
       [claude, pi],
       panes,
       WRAPPER_TREE,
     );
-    const piSession = internals.sessionManager.getSession("pi_pane1");
-    expect(piSession?.tmuxPane).toBe("%1");
-    expect(piSession?.pid).toBe(AGENT_PID);
+    // The wrapped child has its own pty; input to this pane reaches Claude.
+    expect(internals.sessionManager.getSession("pi_pane1")).toBeUndefined();
     // Hooks-mode Claude got no pane-tracked row.
     expect(
       internals.sessionManager
@@ -305,17 +297,26 @@ describe("per-tick sites agree on the wrapper shape (issue #193)", () => {
       markerPidBySessionId: new Map(),
     });
 
-    // Silence, not a rival pid: the scan emits nothing at all here.
     expect(bindings).toEqual([]);
-    // And pi_pane1 keeps its pid: a second creation tick is a no-op.
     await internals.createOrUpdatePaneTrackedSessions(
       [claude, pi],
       panes,
       WRAPPER_TREE,
     );
-    expect(internals.sessionManager.getSession("pi_pane1")?.pid).toBe(
-      AGENT_PID,
+    expect(internals.sessionManager.getSession("pi_pane1")).toBeUndefined();
+  });
+
+  it("still creates a nested agent sharing hooks-mode Claude's tty", async () => {
+    await internals.createOrUpdatePaneTrackedSessions(
+      [fakeClaudeProcess(), fakePiProcess({ tty: "ttys039" })],
+      [fakePane()],
+      WRAPPER_TREE,
     );
+
+    expect(internals.sessionManager.getSession("pi_pane1")).toMatchObject({
+      tmuxPane: "%1",
+      pid: AGENT_PID,
+    });
   });
 
   it("both sites yield to the agent that owns the pane's tty", async () => {

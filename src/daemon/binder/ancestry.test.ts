@@ -132,6 +132,32 @@ describe("pairProcsWithPanes: ancestry fallback (issue #193)", () => {
     expect(matches[0].provenance).toBe("tty");
   });
 
+  it("reserves a tty owner's pane even when its cwd is unreadable", () => {
+    const ttyOwner = proc({ pid: 900, tty: "ttys039", cwd: null });
+    const processes = [ttyOwner, proc()];
+
+    expect(
+      pairProcsWithPanes(processes, [pane()], { processTree: WRAPPER_TREE }),
+    ).toEqual([]);
+    expect(
+      pairProcsWithPanes(processes, [pane()], {
+        processTree: WRAPPER_TREE,
+        requireCwd: false,
+      }),
+    ).toEqual([{ proc: ttyOwner, pane: pane(), provenance: "tty" }]);
+
+    // Even a marker-backed orphan cannot displace the actual tty owner.
+    expect(
+      decideScanBindings({
+        sessions: [slice({ pid: AGENT_PID })],
+        processes,
+        panes: [pane()],
+        processTree: WRAPPER_TREE,
+        markerPidBySessionId: new Map([["s1", AGENT_PID]]),
+      }),
+    ).toEqual([]);
+  });
+
   it("(d) never binds a process that has no tty at all", () => {
     // Pipe-stdio subprocesses (`codex exec`, MCP servers) are descendants of
     // the pane too; ancestry must not resurrect what discovery drops.
