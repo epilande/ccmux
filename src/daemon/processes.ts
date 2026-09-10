@@ -1,3 +1,4 @@
+import { readlink } from "fs/promises";
 import { join, sep } from "path";
 import type { ProcessInfo } from "../types/session";
 import type { AgentDef } from "../lib/agents";
@@ -142,27 +143,47 @@ export class ProcessDiscoveryError extends Error {
 }
 
 /**
- * What discovery asks its two subprocesses for. The `psColumns` list is the
- * single source of truth: omitting `tty` from it is what moves the tty to
- * lsof, and every column index is derived from it.
+ * What discovery asks its subprocesses for. The `psColumns` list is the single
+ * source of truth for the `ps` layout: omitting `tty` from it is what moves
+ * the tty to lsof, and every column index is derived from it.
+ *
+ * `cwdSource` is the other half, and it is the ONE place the platform choice
+ * lives: it names where each matched process's cwd comes from, and with it
+ * whether discovery shells out to lsof at all.
  */
-export interface DiscoveryPlatform {
+interface DiscoveryPlatformBase {
   /** `ps -eo` column list. `command` must be last (it contains spaces). */
   psColumns: string;
+}
+
+/** lsof supplies the cwd — and, where `ps` was not asked for it, the tty. */
+export interface LsofDiscoveryPlatform extends DiscoveryPlatformBase {
+  cwdSource: "lsof";
   /** lsof argv for one batch of pids. */
   lsofArgv(pidList: string): string[];
 }
+
+/** procfs supplies the cwd, one readlink per pid; the tty comes from `ps`. */
+export interface ProcfsDiscoveryPlatform extends DiscoveryPlatformBase {
+  cwdSource: "procfs";
+  /** Seam over `fs/promises.readlink`, so the resolver stays testable. */
+  readLink(path: string): Promise<string>;
+}
+
+export type DiscoveryPlatform = LsofDiscoveryPlatform | ProcfsDiscoveryPlatform;
 
 /**
  * macOS: leave `tty` out of `ps` and harvest it from lsof instead.
  *
  * The column costs BSD `ps` a full device-name table build — ~136ms with it
  * vs ~55ms without on a 1200-process machine, a fixed cost that restricting
- * to specific pids does not avoid. Discovery already runs lsof for cwd, and
- * the same call reports the pane tty as the name of fds 0/1/2 for ~free.
+ * to specific pids does not avoid. There is no procfs to read a cwd out of
+ * here either, so lsof runs regardless, and the same call reports the pane
+ * tty as the name of fds 0/1/2 for ~free.
  */
-export const FD_TTY_DISCOVERY: DiscoveryPlatform = {
+export const FD_TTY_DISCOVERY: LsofDiscoveryPlatform = {
   psColumns: "pid,ppid,etime,command",
+  cwdSource: "lsof",
   lsofArgv: (pidList) => [
     "lsof",
     "-a",
@@ -175,23 +196,29 @@ export const FD_TTY_DISCOVERY: DiscoveryPlatform = {
 };
 
 /**
- * Everywhere else: keep the `ps` column and leave lsof untightened.
+ * Everywhere else: keep the `ps` column and read each cwd straight out of
+ * procfs, so discovery never spawns lsof at all.
  *
- * Linux `ps` reads tty straight from procfs with no table build, so there is
- * nothing to win, and lsof builds differ across distros in how they honor
- * `-d`. A silent "no fds reported" would drop every session, so the harvest
- * would have to be verified per build before it could be trusted here.
+ * Linux `ps` reads tty from procfs with no device-table build, so moving the
+ * column would win nothing, and `/proc/<pid>/cwd` answers the only other
+ * question lsof was here for. That matters beyond the saved subprocess: lsof
+ * is not installed by default on several distros (observed live on Arch), and
+ * a missing one left every row with `cwd: null` — which the binder skips
+ * outright (`binder/primitives.ts` and `binder/migrate.ts` both `continue` on
+ * a cwd-less process), so the daemon tracked zero sessions indefinitely while
+ * agents ran in plain sight.
  */
-export const PS_TTY_DISCOVERY: DiscoveryPlatform = {
+export const PS_TTY_DISCOVERY: ProcfsDiscoveryPlatform = {
   psColumns: "pid,ppid,tty,etime,command",
-  lsofArgv: (pidList) => ["lsof", "-p", pidList, "-Ffn"],
+  cwdSource: "procfs",
+  readLink: (path) => readlink(path),
 };
 
 const PLATFORM: DiscoveryPlatform =
   process.platform === "darwin" ? FD_TTY_DISCOVERY : PS_TTY_DISCOVERY;
 
 /** True when lsof is the tty source, because `ps` was not asked for it. */
-function harvestsTtyFromFds(platform: DiscoveryPlatform): boolean {
+function harvestsTtyFromFds(platform: LsofDiscoveryPlatform): boolean {
   return !platform.psColumns.split(",").includes("tty");
 }
 
@@ -203,7 +230,8 @@ function normalizePsTty(tty: string | undefined): string | null {
 
 /**
  * Discover supported agent processes, resolving each one's tty and cwd.
- * Uses batched lsof to reduce subprocess spawning.
+ * The cwd comes from procfs, or from one batched lsof call where there is no
+ * procfs to read (see {@link DiscoveryPlatform}).
  *
  * THROWS {@link ProcessDiscoveryError} on a hard `ps` failure (spawn threw,
  * non-zero exit, or no output — `ps` always prints a header, so empty output
@@ -240,6 +268,20 @@ export async function discoverAgentProcessesOrThrow(
 
   const matched = parsePsOutput(output, agents, platform, Date.now());
   if (matched.length === 0) return [];
+
+  if (platform.cwdSource === "procfs") {
+    // `ps` settled the tty here, and `resolveDiscoveredProcesses` drops the
+    // tty-less rows regardless, so only the survivors are worth a readlink.
+    // Nothing in this arm can fail the scan: a pid we cannot read yields a
+    // null cwd exactly as a partial lsof result would, one row at a time.
+    return resolveDiscoveredProcesses(
+      matched,
+      await readProcfsCwds(
+        matched.filter((p) => p.tty).map((p) => p.pid),
+        platform.readLink,
+      ),
+    );
+  }
 
   const ttyFromFds = harvestsTtyFromFds(platform);
 
@@ -336,9 +378,10 @@ export function parsePsOutput(
 }
 
 /**
- * Fold agent-matched ps rows, tty already resolved, together with their lsof
- * cwds into the final process list. Pure, so the filter order it encodes is
- * testable; platform-blind, because the tty is settled before it runs.
+ * Fold agent-matched ps rows, tty already resolved, together with their
+ * resolved cwds into the final process list. Pure, so the filter order it
+ * encodes is testable; platform-blind, because both the tty and the cwd
+ * source are settled before it runs.
  *
  * That order is load-bearing:
  *
@@ -353,10 +396,10 @@ export function parsePsOutput(
  */
 export function resolveDiscoveredProcesses(
   matched: MatchedProcess[],
-  lsofByPid: Map<number, ProcessFdInfo>,
+  infoByPid: Map<number, ProcessFdInfo>,
 ): ProcessInfo[] {
   const withTty = matched.flatMap((p) =>
-    p.tty ? [{ ...p, tty: p.tty, cwd: lsofByPid.get(p.pid)?.cwd ?? null }] : [],
+    p.tty ? [{ ...p, tty: p.tty, cwd: infoByPid.get(p.pid)?.cwd ?? null }] : [],
   );
 
   const nonPluginHosts = withTty.filter(
@@ -399,6 +442,62 @@ export interface ProcessFdInfo {
   cwd: string | null;
   /** Normalized like the ps column ("ttys061"), or null if no fd holds a tty. */
   tty: string | null;
+}
+
+/**
+ * The kernel's marker for a cwd whose directory has been unlinked:
+ * `readlink("/proc/<pid>/cwd")` answers `/path/to/dir (deleted)`.
+ */
+const PROCFS_DELETED_SUFFIX = " (deleted)";
+
+/**
+ * Resolve each pid's cwd from procfs — the whole of cwd discovery on Linux,
+ * replacing what lsof was spawned for.
+ *
+ * Per-pid and fail-soft by construction: a process we cannot read yields a
+ * null cwd and never an error, so an exited pid (ENOENT), a zombie, or one
+ * owned by another user (EACCES) costs its own row and nothing else. There is
+ * no batch-level failure to fail closed on, which is the point — an absent
+ * lsof used to null EVERY cwd at once, and the binder skips a cwd-less
+ * process outright.
+ *
+ * A `(deleted)` suffix is stripped rather than dropped: the bare path is the
+ * one every consumer can use (`encodeProjectPath` for log paths, `basename`
+ * for the project name, an equality check against a transcript's cwd), and a
+ * directory that was removed and recreated at the same path — a git worktree
+ * cycled, a checkout re-cloned — keeps the process bindable. The kernel goes
+ * on reporting `(deleted)` for the lifetime of the process either way.
+ *
+ * The `tty` of every entry is null: on procfs platforms `ps` is the tty
+ * source, and nothing here may overwrite it.
+ */
+export async function readProcfsCwds(
+  pids: number[],
+  readLink: (path: string) => Promise<string>,
+): Promise<Map<number, ProcessFdInfo>> {
+  const results = new Map<number, ProcessFdInfo>();
+  await Promise.all(
+    pids.map(async (pid) => {
+      results.set(pid, { cwd: await readProcfsCwd(pid, readLink), tty: null });
+    }),
+  );
+  return results;
+}
+
+async function readProcfsCwd(
+  pid: number,
+  readLink: (path: string) => Promise<string>,
+): Promise<string | null> {
+  let target: string;
+  try {
+    target = await readLink(`/proc/${pid}/cwd`);
+  } catch {
+    return null;
+  }
+  const path = target.endsWith(PROCFS_DELETED_SUFFIX)
+    ? target.slice(0, -PROCFS_DELETED_SUFFIX.length)
+    : target;
+  return path || null;
 }
 
 /**
@@ -495,7 +594,8 @@ interface FdInfoBatch {
 
 /**
  * Batch-resolve cwd (and on macOS the tty) for multiple processes in a single
- * lsof call.
+ * lsof call. Only the lsof platforms reach here; procfs platforms resolve the
+ * cwd with {@link readProcfsCwds} and never spawn lsof.
  *
  * The `f` field selector is required: lsof 4.99+ (e.g. the Nix build) emits no
  * fd-type lines for a bare `-Fn`, so `fcwd` never appears and every cwd lookup
@@ -511,7 +611,7 @@ interface FdInfoBatch {
  */
 async function batchGetProcessFdInfo(
   pids: number[],
-  platform: DiscoveryPlatform,
+  platform: LsofDiscoveryPlatform,
 ): Promise<FdInfoBatch> {
   if (pids.length === 0) return { byPid: new Map(), hardFailed: false };
 
