@@ -77,6 +77,119 @@ describe("Preview", () => {
     expect(frame).toContain("~/Code/myapp");
   });
 
+  it("shows the session summary on its own header line", async () => {
+    const home = process.env.HOME || "";
+    const frame = await renderPreview(
+      mockEnrichedSession({
+        project: "myapp",
+        cwd: `${home}/Code/myapp`,
+        summary: "Detect themes across projects",
+        tmuxTarget: "dev:1",
+        tmuxPane: "%1",
+      }),
+    );
+    const lines = frame.split("\n");
+    const summaryLine = lines.findIndex((l) =>
+      l.includes("Detect themes across projects"),
+    );
+    expect(summaryLine).toBeGreaterThan(-1);
+    const projectLine = lines.findIndex((l) => l.includes("myapp"));
+    expect(projectLine).toBeGreaterThan(-1);
+    expect(projectLine).toBeLessThan(summaryLine);
+    expect(lines[summaryLine + 1]).toContain("~/Code/myapp");
+    const metadataLine = lines.findIndex((l) => l.includes("dev:1"));
+    expect(metadataLine).toBe(summaryLine + 2);
+    expect(lines[metadataLine + 1]).toContain("───");
+  });
+
+  it("keeps the four-row header when the agent publishes no summary", async () => {
+    const home = process.env.HOME || "";
+    const frame = await renderPreview(
+      mockEnrichedSession({
+        project: "myapp",
+        cwd: `${home}/Code/myapp`,
+        tmuxTarget: "dev:1",
+        tmuxPane: "%1",
+      }),
+    );
+    const lines = frame.split("\n");
+    const projectLine = lines.findIndex((l) => l.includes("myapp"));
+    expect(projectLine).toBeGreaterThan(-1);
+    expect(lines[projectLine + 1]).toContain("~/Code/myapp");
+    const metadataLine = lines.findIndex((l) => l.includes("dev:1"));
+    expect(metadataLine).toBe(projectLine + 2);
+    expect(lines[metadataLine + 1]).toContain("───");
+  });
+
+  it("renders a late-arriving summary in the header", async () => {
+    const home = process.env.HOME || "";
+    const [tick] = createSignal(0);
+    const [session, setSession] = createSignal<EnrichedSession>(
+      mockEnrichedSession({
+        project: "myapp",
+        cwd: `${home}/Code/myapp`,
+        tmuxTarget: "dev:1",
+        tmuxPane: "%1",
+      }),
+    );
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <Preview session={session()} width={40} />
+        </TickContext.Provider>
+      ),
+      { width: 100, height: 15 },
+    );
+    await setup.renderOnce();
+    setSession(
+      mockEnrichedSession({
+        project: "myapp",
+        cwd: `${home}/Code/myapp`,
+        summary: "Arrived-after-mount summary",
+        tmuxTarget: "dev:1",
+        tmuxPane: "%1",
+      }),
+    );
+    await setup.renderOnce();
+    const lines = setup.captureCharFrame().split("\n");
+    const summaryLine = lines.findIndex((l) =>
+      l.includes("Arrived-after-mount summary"),
+    );
+    expect(summaryLine).toBeGreaterThan(-1);
+    expect(lines[summaryLine + 1]).toContain("~/Code/myapp");
+    const metadataLine = lines.findIndex((l) => l.includes("dev:1"));
+    expect(metadataLine).toBe(summaryLine + 2);
+    expect(lines[metadataLine + 1]).toContain("───");
+  });
+
+  it("truncates a summary wider than the header instead of wrapping", async () => {
+    const home = process.env.HOME || "";
+    const long =
+      "Investigate why the flaky auth integration tests fail on windows runners";
+    const frame = await renderPreview(
+      mockEnrichedSession({
+        project: "myapp",
+        cwd: `${home}/Code/myapp`,
+        summary: long,
+        tmuxTarget: "dev:1",
+        tmuxPane: "%1",
+      }),
+      30,
+    );
+    const lines = frame.split("\n");
+    const summaryLine = lines.findIndex((l) =>
+      l.includes("Investigate why the flaky"),
+    );
+    expect(summaryLine).toBeGreaterThan(-1);
+    // Clipped, not wrapped: the tail renders nowhere, and the rows below
+    // the summary keep their slots.
+    expect(lines.some((l) => l.includes("windows runners"))).toBe(false);
+    expect(lines[summaryLine]).toContain("…");
+    expect(lines[summaryLine + 1]).toContain("~/Code/myapp");
+    const metadataLine = lines.findIndex((l) => l.includes("dev:1"));
+    expect(lines[metadataLine + 1]).toContain("───");
+  });
+
   it("shows metadata with branch and version", async () => {
     const frame = await renderPreview(
       mockEnrichedSession({

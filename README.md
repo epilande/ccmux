@@ -169,6 +169,8 @@ The daemon starts automatically the first time you run a ccmux command (picker, 
 
 Press <kbd>P</kbd> to split the picker and preview the highlighted session's live pane content side by side. Press <kbd>Tab</kbd> to focus the preview and act in place: your keystrokes go straight to that agent's pane, so you can approve a permission, answer a question, or type a follow-up without ever leaving ccmux.
 
+The preview header names the session: the project in bold, then the agent's own summary of the session on agents that publish one (Claude Code, OpenCode, Cursor, oh-my-pi, and Copilot do; on the rest the line is omitted), then the working directory and the branch/version/target metadata.
+
 When the session has agents running, an **Agents** section lists each one with its runtime. Finished agents drop off the list.
 
 https://github.com/user-attachments/assets/7e0d42b3-4e7b-43b8-8d06-72a2d69dd694
