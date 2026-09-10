@@ -95,8 +95,9 @@ function claudePairCost(
 export function decideNewSessionPane(
   obs: NewSessionPaneObservation,
 ): NewSessionPaneDecision {
-  const allProcPanes = pairProcsWithPanes(obs.processes, obs.panes);
-  const byCwd = buildProcPaneMapByEncodedCwd(obs.processes, obs.panes);
+  const pairing = { processTree: obs.processTree };
+  const allProcPanes = pairProcsWithPanes(obs.processes, obs.panes, pairing);
+  const byCwd = buildProcPaneMapByEncodedCwd(obs.processes, obs.panes, pairing);
   const matches = candidatesForSession(
     obs.transcriptCwd,
     obs.encodedProjectPath,
@@ -233,8 +234,13 @@ export function decideInitialClaudeBatch(
     return b.mtimeMs - a.mtimeMs;
   });
 
-  const allProcPanes = pairProcsWithPanes(obs.processes, obs.panes);
-  const cwdToProcsMap = buildProcPaneMapByEncodedCwd(obs.processes, obs.panes);
+  const pairing = { processTree: obs.processTree };
+  const allProcPanes = pairProcsWithPanes(obs.processes, obs.panes, pairing);
+  const cwdToProcsMap = buildProcPaneMapByEncodedCwd(
+    obs.processes,
+    obs.panes,
+    pairing,
+  );
   const claimedPaneIds = new Set<string>();
 
   // Working model of sessions, updated as the batch creates/replaces.

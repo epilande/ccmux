@@ -21,6 +21,7 @@ import {
   decideMigrationBindings,
   decideCodexRolloutLinks,
   decideMarkerLinks,
+  pairProcsWithPanes,
   resolveExistingLogPath,
   type CodexLinkCandidate,
 } from "./binder";
@@ -599,7 +600,11 @@ export class Daemon {
       this.bootPanesSnapshot = null;
       this.bootTreeSnapshot = null;
 
-      await this.createOrUpdatePaneTrackedSessions(processes, panes);
+      await this.createOrUpdatePaneTrackedSessions(
+        processes,
+        panes,
+        processTree,
+      );
       matchSessionsToPanes(this.sessionManager, processes, panes, processTree);
       this.stalePending = cleanupStaleSessions(
         this.sessionManager,
@@ -744,26 +749,23 @@ export class Daemon {
   private async createOrUpdatePaneTrackedSessions(
     processes: ProcessInfo[],
     panes: TmuxPane[],
+    processTree?: ProcessTree,
   ): Promise<void> {
-    const paneByTty = new Map<string, TmuxPane>();
-    for (const pane of panes) {
-      const tty = normalizeTty(pane.tty);
-      if (tty) {
-        paneByTty.set(tty, pane);
-      }
-    }
-
     const paneTrackedTargets = processes.filter((proc) => {
       if (proc.agentType !== "claude") return true;
       return this.claudeRuntimeMode === "claude-no-hooks";
     });
+    // The binder's shared pairing rather than a local tty map: tty first,
+    // then ancestry for an agent a pty-allocating wrapper moved off the
+    // pane's terminal (issue #193), and a pane a tty match already claimed is
+    // never re-claimed. `requireCwd: false` keeps the pre-existing fallback
+    // to the pane's own path for a process whose cwd could not be read.
+    const paneProcs = pairProcsWithPanes(paneTrackedTargets, panes, {
+      processTree,
+      requireCwd: false,
+    });
     await Promise.all(
-      paneTrackedTargets.map(async (proc) => {
-        const tty = normalizeTty(proc.tty);
-        if (!tty) return;
-        const pane = paneByTty.get(tty);
-        if (!pane) return;
-
+      paneProcs.map(async ({ proc, pane }) => {
         const cwd = proc.cwd ?? pane.currentPath;
         if (!cwd) return;
 
@@ -944,6 +946,11 @@ export class Daemon {
       const { bindings, warnings } = decideMigrationBindings({
         processes: claudeProcs,
         panes,
+        // A wrapper-hosted agent that predates the daemon is otherwise
+        // unreachable here (its tty belongs to no pane). Shares the boot
+        // snapshot with the marker replay rather than spawning a second
+        // `ps`: everything migration reconstructs predates that snapshot too.
+        processTree: await this.bootProcessTree(),
         markers: getAllSessionPidMarkers(),
         historyEntries: readClaudeHistory(),
         existingSessionIds: new Set(
@@ -1262,10 +1269,17 @@ export class Daemon {
         ? [...this.paneCache.values()]
         : await (this.bootPanesSnapshot ??= listTmuxPanes());
     if (panes.length === 0) return null;
-    const tree =
-      this.latestProcessTree ??
-      (await (this.bootTreeSnapshot ??= ProcessTree.build()));
+    const tree = this.latestProcessTree ?? (await this.bootProcessTree());
     return findPaneHostingPid(pid, panes, tree);
+  }
+
+  /**
+   * The memoized boot-window `ProcessTree` — one `ps` shared by everything
+   * that runs before the first scan (marker replay, session migration).
+   * The first scan drops it, so no later caller can be served stale.
+   */
+  private bootProcessTree(): Promise<ProcessTree> {
+    return (this.bootTreeSnapshot ??= ProcessTree.build());
   }
 
   /**

@@ -1,11 +1,10 @@
-import { normalizeTty } from "../pane-discovery";
 import type { ProcessInfo, TmuxPane } from "../../types/session";
-import { findSoftEvictTargets } from "./primitives";
+import { findSoftEvictTargets, pairProcsWithPanes } from "./primitives";
 import type {
   Binding,
+  ProcPaneMatch,
   ScanObservation,
   SessionSlice,
-  ProcessTreeLike,
 } from "./types";
 
 /**
@@ -118,25 +117,48 @@ function candidatesFor(
   );
 }
 
-function findAgentInTree(
-  panePid: number,
-  agentProcesses: readonly ProcessInfo[],
-  processTree: ProcessTreeLike,
-): ProcessInfo | null {
-  const agentPids = new Set(agentProcesses.map((p) => p.pid));
-  const foundPid = processTree.findAgentDescendant(panePid, agentPids);
-
-  if (foundPid !== null) {
-    return agentProcesses.find((p) => p.pid === foundPid) ?? null;
-  }
-  return null;
-}
-
 /** A pane resolved to its live agent process (tty join or ancestry). */
 interface PaneProc {
   pane: TmuxPane;
   proc: ProcessInfo;
   provenance: "tty" | "ancestry";
+}
+
+/**
+ * Reduce the shared pairing to at most ONE process per pane, which is what
+ * the ladder below decides over.
+ *
+ * The pairing is many-to-one on tty (nested agents share a pane's terminal),
+ * so the tie-breaks are preserved verbatim from the pre-helper loop: among
+ * tty pairs the LAST one wins (it was a `Map.set` keyed on tty), and an
+ * ancestry pair is taken only when no tty pair claimed the pane — which the
+ * pairing already guarantees, so the guard is a belt on a brace. Emission
+ * follows `panes` order, not process order, because the marker and heuristic
+ * passes walk this list and their `.find()` priorities are order-sensitive.
+ */
+function resolvePaneProcs(
+  pairs: readonly ProcPaneMatch[],
+  panes: readonly TmuxPane[],
+): PaneProc[] {
+  const byPane = new Map<string, ProcPaneMatch>();
+  for (const match of pairs) {
+    if (match.provenance === "tty" || !byPane.has(match.pane.paneId)) {
+      byPane.set(match.pane.paneId, match);
+    }
+  }
+
+  const paneProcs: PaneProc[] = [];
+  for (const pane of panes) {
+    const match = byPane.get(pane.paneId);
+    if (match) {
+      paneProcs.push({
+        pane: match.pane,
+        proc: match.proc,
+        provenance: match.provenance,
+      });
+    }
+  }
+  return paneProcs;
 }
 
 /**
@@ -161,40 +183,15 @@ export function decideScanBindings(obs: ScanObservation): Binding[] {
   }));
   const bindings: Binding[] = [];
 
-  // Pre-index processes by normalized TTY for O(1) lookup
-  const processByTty = new Map<string, ProcessInfo>();
-  for (const p of obs.processes) {
-    const tty = normalizeTty(p.tty);
-    if (tty) processByTty.set(tty, p);
-  }
-
-  // Resolve each pane's live agent process once.
-  const paneProcs: PaneProc[] = [];
-  for (const pane of obs.panes) {
-    const paneTty = normalizeTty(pane.tty);
-    if (!paneTty) continue;
-
-    const agentProcess = processByTty.get(paneTty);
-    if (agentProcess?.cwd) {
-      paneProcs.push({ pane, proc: agentProcess, provenance: "tty" });
-      continue;
-    }
-
-    if (!agentProcess && obs.processTree) {
-      const treeAgentProcess = findAgentInTree(
-        pane.panePid,
-        obs.processes,
-        obs.processTree,
-      );
-      if (treeAgentProcess?.cwd) {
-        paneProcs.push({
-          pane,
-          proc: treeAgentProcess,
-          provenance: "ancestry",
-        });
-      }
-    }
-  }
+  // Resolve each pane's live agent process once, through the SAME pairing
+  // every creation site uses — so a wrapper-hosted agent (issue #193) can
+  // never be bound to one pane at creation and another on the next scan.
+  const paneProcs = resolvePaneProcs(
+    pairProcsWithPanes(obs.processes, obs.panes, {
+      processTree: obs.processTree,
+    }),
+    obs.panes,
+  );
 
   // Sessions bound this scan never bind again. The working-model
   // updates make a re-match nearly impossible already; the guard closes the

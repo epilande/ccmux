@@ -930,6 +930,14 @@ ccmux deliberately does not install Copilot's `permissionRequest` hook: it is a 
 
 Without hooks, the daemon does not use historical session IDs to claim pane ownership. It creates pane-scoped sessions from live process + tmux discovery, then attaches agent log metadata only when it can safely tie a log to the running process.
 
+### Sandboxes and pty wrappers
+
+Agents launched through a **sandbox or a pty-allocating wrapper** (`nono run -- claude`, `fence`, `script -q /dev/null claude`) still get a row: the wrapper keeps the pane's terminal and moves the agent onto a pty of its own, and ccmux follows the pane's process tree down to the agent when the terminals don't match. Verified with Claude Code and pi.
+
+This works for agents ccmux recognizes by executable name (Claude Code, pi, codex, cursor, copilot). Gemini CLI, Antigravity and oh-my-pi are also matched by a path fragment of the full command line, so a wrapper whose own arguments spell that path (`script -q /dev/null /opt/homebrew/bin/gemini`) is itself detected as the agent, on the pane's tty, and the tree is never consulted. The row still appears and still points at the right pane; its PID is the wrapper's.
+
+Hook (native) tracking is a separate question. A sandbox must allow writes to `~/.config/ccmux` for the agent's hook to write its marker file. Denied, the row still appears and still binds to the right pane, but the authoritative per-turn hook signals are gone and status falls back to whatever the agent's own log says. For Claude that means the transcript alone, and it is worth knowing that a Claude row tracked this way gets no terminal-pattern fallback: its state changes when the transcript records the end of a turn, which can lag the visible answer on screen.
+
 ## 🧩 Custom Agents
 
 The built-in agents are the happy path: they ship with hook integration for authoritative session matching. If you run an agent ccmux doesn't support out of the box, you can teach it one in `~/.config/ccmux/ccmux.json`. Custom agents fall back to process matching plus terminal pattern scanning (no hooks), so detection is less precise than a built-in, but it gets unsupported agents onto the board.
