@@ -61,6 +61,10 @@ class Ccmux < Formula
   def install
     binary_name = stable.url.split("/").last
     bin.install binary_name => "ccmux"
+    # The release asset is a bare binary, downloaded as 0644. Homebrew only
+    # fixes bin/ permissions after `install` returns, so make it executable
+    # here or the completion step below fails with EACCES.
+    chmod 0755, bin/"ccmux"
 
     # \`ccmux completion <shell>\` only prints a static script: no daemon,
     # tmux, or HOME involved, so it is safe to run in the build sandbox.
