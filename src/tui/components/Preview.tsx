@@ -34,6 +34,7 @@ import {
   formatSubagentName,
   formatVersion,
   shortenCwd,
+  truncateText,
 } from "../utils/format";
 
 /**
@@ -413,6 +414,14 @@ export const Preview: Component<PreviewProps> = (props) => {
   const AGENTS_SHOWN_MAX = 4;
   const liveSubagents = () => props.session?.subagents ?? [];
 
+  /**
+   * The agent's own summary of what this session is doing
+   * (`EnrichedSession.summary`, derived daemon-side from the pane title),
+   * on the agents that publish one. Renders as its own header line so the
+   * preview names the session's work, not just the project it sits in.
+   */
+  const title = () => props.session?.summary ?? null;
+
   const metadataLine = () => {
     const s = props.session;
     if (!s) return "";
@@ -446,7 +455,7 @@ export const Preview: Component<PreviewProps> = (props) => {
         when={props.session}
         fallback={<text fg={theme.overlay}>Select a session to preview</text>}
       >
-        <box height={4} flexDirection="column">
+        <box height={title() ? 5 : 4} flexDirection="column">
           <box flexDirection="row">
             <box flexGrow={1}>
               <text fg={theme.text}>
@@ -456,6 +465,17 @@ export const Preview: Component<PreviewProps> = (props) => {
             <text fg={statusColor()}>
               {statusIcon()} {statusText()}
             </text>
+          </box>
+          {/* Stable wrapper: a summary can land after first render (enrich
+              arrives over SSE), and a bare <Show> mounted late would append
+              to the END of the parent box (opentui insertion anchor),
+              landing the title under the separator. The always-mounted box
+              pins its slot in the column order. Same fix pattern as the
+              transcript slot in BackgroundPeek. */}
+          <box flexDirection="column">
+            <Show when={title()}>
+              <text fg={theme.text}>{truncateText(title() ?? "", separatorWidth())}</text>
+            </Show>
           </box>
           <text fg={theme.subtext}>
             {shortenCwd(props.session!.paneCwd ?? props.session!.cwd)}
