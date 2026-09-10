@@ -75,10 +75,16 @@ export interface ScanObservation {
   markerPidBySessionId: ReadonlyMap<string, number | null>;
 }
 
-/** A process paired with the pane whose tty it owns. */
+/**
+ * A process paired with the pane that hosts it, and how the join was made:
+ * `tty` (the process owns the pane's terminal) or `ancestry` (a
+ * pty-allocating wrapper kept the tty, so the pane's own pid had to be
+ * walked down to the agent). See `pairProcsWithPanes`.
+ */
 export interface ProcPaneMatch {
   proc: ProcessInfo;
   pane: TmuxPane;
+  provenance: "tty" | "ancestry";
 }
 
 /**
@@ -104,6 +110,12 @@ export type NewSessionPaneDecision =
 export interface NewSessionPaneObservation {
   processes: readonly ProcessInfo[];
   panes: readonly TmuxPane[];
+  /**
+   * Enables the pairing's ancestry fallback (`pairProcsWithPanes`), which is
+   * the only way a wrapper-hosted agent (`script -q /dev/null claude`) is
+   * reachable here: its tty belongs to no pane. Omit for tty-only pairing.
+   */
+  processTree?: ProcessTreeLike;
   sessionId: string;
   encodedProjectPath: string;
   /** Raw cwd from the session's transcript entries, when known. */
@@ -175,6 +187,8 @@ export interface InitialBatchItem {
 export interface InitialBatchObservation {
   processes: readonly ProcessInfo[];
   panes: readonly TmuxPane[];
+  /** Enables the pairing's ancestry fallback; see `NewSessionPaneObservation`. */
+  processTree?: ProcessTreeLike;
   /** Existing sessions, manager order (mutated copies tracked internally). */
   sessions: readonly ReplaceableSessionSlice[];
   markerPidBySessionId: ReadonlyMap<string, number | null>;
@@ -252,6 +266,8 @@ export interface InitialBatchDecision {
 export interface MigrationObservation {
   processes: readonly ProcessInfo[];
   panes: readonly TmuxPane[];
+  /** Enables the pairing's ancestry fallback; see `NewSessionPaneObservation`. */
+  processTree?: ProcessTreeLike;
   /** All marker files (pid → session identity), boot snapshot. */
   markers: readonly { session_id: string; pid: number }[];
   /** Parsed history.jsonl entries (raw project paths). */

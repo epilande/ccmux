@@ -69,6 +69,20 @@ For panes no marker claims, each same-cwd group of sessions and candidate panes 
 
 "Pane timestamp" survives only as the boot-migration fallback (`migrate.ts`), for procs whose `ps etime` start time is unparseable. There is no "most recent file" arm.
 
+**Joining a process to a pane: tty, then ancestry.** `pairProcsWithPanes` (`binder/primitives.ts`) is the single process↔pane join, and every site goes through it: the per-scan re-bind, transcript-driven Claude creation, the initial batch, boot migration, marker resolution (`findPaneByMarker`'s third pass), and pane-tracked creation. Pass one matches the process's tty against the pane's, as it always did. Pass two exists for pty-allocating wrappers — `script -q /dev/null claude`, `nono run -- claude`, `fence` — which fork, keep the pane's tty for themselves, and `setsid` the agent onto a fresh pty that no pane owns; the agent was discovered, found no pane, and was discarded, so the row never appeared (issue #193). For those, the pane's own `panePid` is walked down through the `ProcessTree` to the agent.
+
+Ancestry is strictly subordinate to tty and never fires for a process without one:
+
+- A pane a tty match already claimed is never re-claimed by ancestry, so a wrapper-hosted agent will not evict the agent that genuinely owns the pane's terminal (it stays visibly unbound instead).
+- A process with no tty is skipped. Discovery already drops those rows (a pipe-stdio subprocess — `codex exec`, an MCP server), so this is a defensive restatement rather than the filter that does the work: it keeps the rule true for any caller that assembles its own process list.
+- One pane resolves at most one process by ancestry, and one process is claimed by at most one pane. A pane whose pid flip-flops between two candidates trips the pane-reuse identity reset every cycle (`processes.ts:dropWrapperParents`), which is also why the join is shared: creation and the per-scan re-bind cannot disagree about the same wrapper shape.
+
+**The accepted trade-off.** Ancestry binds ANY orphan pty that descends from a pane's shell, not only a wrapper's. Run `kitty &` (or `alacritty &`) from a pane and then start an agent inside that new window, and the agent's ppid chain still leads back to the launching pane, so its row is attributed there — a real window, the wrong pane. This is the cost of not requiring the wrapper to be recognizable: `script`, `nono` and `fence` match no agent def and share no tty with the agent, so ancestry is the only evidence left. Such a binding is not sticky: it drops the moment a real agent takes the pane's own tty (tty wins), and comes back when that agent exits.
+
+Tty ownership is reserved even when the owner's cwd cannot be read. Pane-tracked creation pairs all discovered agents before excluding hooks-mode Claude, so Claude still prevents an unrelated pty from claiming its terminal. The tty-claimed set is scoped to the supplied processes; the Claude-only ladders cannot account for other agents' tty claims. The creation sites build their own `ProcessTree` rather than reusing the scan's cached one: a marker fires the instant an agent starts, and a tree from up to one scan interval ago has no node for it. That is one `ps` per new session, never one per scan tick.
+
+If a sandbox denies writes to `~/.config/ccmux`, the agent cannot write its hook marker. Claude with hooks installed remains natively tracked and relies on its transcript for status, with no terminal-pattern fallback. Other agents retain their available log and terminal status sources.
+
 ## Log tree watching
 
 `log-tree-watcher.ts` is the recursive-`fs.watch`-backed substrate behind `LogWatcher` for the agent log trees (`~/.claude/projects`, `~/.codex/sessions`). It exists because chokidar arms one watcher per directory, and that setup alone cost seconds of daemon boot on session-heavy machines.

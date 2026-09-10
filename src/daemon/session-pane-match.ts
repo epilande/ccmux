@@ -2,7 +2,11 @@ import type { ProcessInfo, TmuxPane } from "../types/session";
 import { CLAUDE_AGENT_DEF } from "../lib/agents";
 import { ZOMBIE_STALE_MS } from "../lib/config";
 import { isBackgroundSession, type SessionManager } from "./sessions";
-import type { ProcessTree } from "./process-tree";
+import {
+  lazyProcessTree,
+  ProcessTree,
+  type ProcessTreeProvider,
+} from "./process-tree";
 import {
   getSessionTimestampsIn,
   readClaudeHistory,
@@ -15,6 +19,7 @@ import {
   decideScanBindings,
   decideNewSessionPane,
   decideStaleCleanup,
+  pairProcsWithPanes,
   type Binding,
   type NewSessionPaneDecision,
   type SessionSlice,
@@ -113,9 +118,23 @@ export function cleanupStaleSessions(
 /**
  * Find tmux pane using session PID marker (authoritative when hooks are configured)
  * Returns the pane matching the marker's PID/TTY, or null if no marker exists
+ *
+ * Three passes, each subordinate to the one before: the marker's own tty, the
+ * marker pid's process tty, then ancestry. The last exists because a
+ * pty-allocating wrapper (`script -q /dev/null claude`, `nono run -- claude`,
+ * `fence`) keeps the pane's tty for itself and setsid's the agent onto a
+ * fresh pty no pane owns, so both tty passes miss and the session was
+ * created unbound forever (issue #193). It runs the SAME pairing the scan
+ * and the other creation sites use, so all four agree on the wrapper shape.
+ *
+ * `getProcessTree` is a build-at-most-once supplier so a caller that also
+ * calls {@link findPaneForNewSession} pays for ONE `ps` across the pair
+ * (the rebind pass does exactly that, every 30s per unbound session). Left
+ * to itself, this function builds a tree only if it reaches pass 3.
  */
 export async function findPaneByMarker(
   sessionId: string,
+  getProcessTree: ProcessTreeProvider = lazyProcessTree(),
 ): Promise<TmuxPane | null> {
   const marker = getSessionPidMarker(sessionId);
   if (!marker) return null;
@@ -146,7 +165,17 @@ export async function findPaneByMarker(
     }
   }
 
-  return null;
+  // Last resort: ancestry. The tree is built HERE rather than reused from the
+  // scan because a marker fires the instant the agent starts — a tree from up
+  // to one scan interval ago has no node for it. The common (tty) case
+  // returns above and never pays for one.
+  if (!matchingProc) return null;
+  const processTree = await getProcessTree();
+  const ancestryMatch = pairProcsWithPanes(claudeProcs, panes, {
+    processTree,
+  }).find((m) => m.provenance === "ancestry" && m.proc.pid === marker.pid);
+
+  return ancestryMatch?.pane ?? null;
 }
 
 /**
@@ -166,10 +195,17 @@ export async function findPaneForNewSession(
   encodedProjectPath: string,
   sessionId: string,
   transcriptCwd: string | null,
+  getProcessTree: ProcessTreeProvider = lazyProcessTree(),
 ): Promise<NewSessionPaneDecision> {
-  const [claudeProcs, panes] = await Promise.all([
+  // A fresh tree, not the daemon's scan-cached one: this runs the moment a
+  // new transcript appears, which is typically before the next scan has seen
+  // the agent at all. The caller supplies a build-at-most-once provider, so
+  // the marker pass above and this one cost ONE `ps` between them — one per
+  // new session, and one per 30s rebind attempt, never one per scan tick.
+  const [claudeProcs, panes, processTree] = await Promise.all([
     discoverAgentProcesses([CLAUDE_AGENT_DEF]),
     listTmuxPanes(),
+    getProcessTree(),
   ]);
 
   const historyEntries = readClaudeHistory();
@@ -177,6 +213,7 @@ export async function findPaneForNewSession(
   return decideNewSessionPane({
     processes: claudeProcs,
     panes,
+    processTree,
     sessionId,
     encodedProjectPath,
     transcriptCwd,

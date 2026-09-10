@@ -31,6 +31,25 @@ export function shellCommKey(comm: string): string {
   return basename(unwrapped);
 }
 
+/**
+ * A `ProcessTree` supplier that builds at most once. Passing one through a
+ * sequence of resolvers lets them SHARE a tree without any of them paying for
+ * it when an earlier, cheaper pass already answered: the `ps` spawn happens on
+ * the first call and never again.
+ */
+export type ProcessTreeProvider = () => Promise<ProcessTree>;
+
+/**
+ * Make a {@link ProcessTreeProvider}. `build` is injectable so tests can count
+ * builds without spawning `ps`.
+ */
+export function lazyProcessTree(
+  build: () => Promise<ProcessTree> = () => ProcessTree.build(),
+): ProcessTreeProvider {
+  let pending: Promise<ProcessTree> | null = null;
+  return () => (pending ??= build());
+}
+
 export class ProcessTree {
   private processes = new Map<number, ProcessNode>();
   /** Map of ppid -> child pids (parent->children index) */

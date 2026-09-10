@@ -1,7 +1,7 @@
-import { normalizeTty } from "../pane-discovery";
 import { matchSessionToPaneByTimestampIn } from "../adapters/claude/history";
 import type { ProcessInfo, TmuxPane } from "../../types/session";
 import { assignGroup, forwardGapCost } from "./assign";
+import { pairProcsWithPanes } from "./primitives";
 import type { MigrationBinding, MigrationObservation } from "./types";
 
 interface ProcPane {
@@ -43,16 +43,12 @@ export function decideMigrationBindings(
   const warnings: string[] = [];
   const assignedSessionIds = new Set<string>();
 
-  const procPanes: ProcPane[] = [];
-  for (const proc of obs.processes) {
-    if (!proc.tty || !proc.cwd) continue;
-    const normalizedProcTty = normalizeTty(proc.tty);
-    const pane = obs.panes.find(
-      (p) => normalizeTty(p.tty) === normalizedProcTty,
-    );
-    if (!pane) continue;
-    procPanes.push({ proc, pane });
-  }
+  // The shared pairing (tty first, ancestry for a wrapper-hosted agent whose
+  // tty belongs to no pane); process order is preserved for the tty arm, so
+  // the priority walk below is unchanged.
+  const procPanes: ProcPane[] = pairProcsWithPanes(obs.processes, obs.panes, {
+    processTree: obs.processTree,
+  }).map(({ proc, pane }) => ({ proc, pane }));
 
   /**
    * Original drop semantics: a winner that is already assigned, lacks its
