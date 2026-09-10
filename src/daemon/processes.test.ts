@@ -9,10 +9,13 @@ import {
   discoverAgentProcesses,
   discoverAgentProcessesOrThrow,
   dropWrapperParents,
+  readProcfsCwds,
   resolveDiscoveredProcesses,
   ProcessDiscoveryError,
   FD_TTY_DISCOVERY,
   PS_TTY_DISCOVERY,
+  type DiscoveryPlatform,
+  type LsofDiscoveryPlatform,
   type MatchedProcess,
   type ProcessFdInfo,
 } from "./processes";
@@ -311,10 +314,78 @@ describe("parseLsofFdOutput", () => {
   });
 });
 
+describe("readProcfsCwds", () => {
+  /** A readlink rejection carrying an errno code, like the real one. */
+  const errno = (code: string) =>
+    Object.assign(new Error(`${code}: readlink`), { code });
+
+  it("reads each pid's cwd out of /proc/<pid>/cwd", async () => {
+    const asked: string[] = [];
+    const byPid = await readProcfsCwds([100, 101], async (path) => {
+      asked.push(path);
+      return path === "/proc/100/cwd" ? "/repo" : "/other";
+    });
+
+    expect(asked.sort()).toEqual(["/proc/100/cwd", "/proc/101/cwd"]);
+    expect(byPid.get(100)?.cwd).toBe("/repo");
+    expect(byPid.get(101)?.cwd).toBe("/other");
+  });
+
+  it("yields a null cwd, not an error, for a process it may not read", async () => {
+    // Another user's agent: readlink on /proc/<pid>/cwd needs ptrace access.
+    // One unreadable row must cost only itself — the whole point of moving
+    // off lsof was that a single failure stopped nulling EVERY cwd at once.
+    const byPid = await readProcfsCwds([100, 101], async (path) => {
+      if (path === "/proc/100/cwd") throw errno("EACCES");
+      return "/repo";
+    });
+
+    expect(byPid.get(100)?.cwd).toBeNull();
+    expect(byPid.get(101)?.cwd).toBe("/repo");
+  });
+
+  it("yields a null cwd for a pid that raced away or is a zombie", async () => {
+    // ENOENT covers both the pid vanishing between `ps` and here, and a
+    // zombie, whose /proc/<pid>/cwd link no longer resolves.
+    const byPid = await readProcfsCwds([100], async () => {
+      throw errno("ENOENT");
+    });
+
+    expect(byPid.get(100)?.cwd).toBeNull();
+  });
+
+  it("strips the kernel's (deleted) suffix", async () => {
+    // The bare path is the only form consumers can use (log-path encoding,
+    // the project basename, an equality check against a transcript cwd), and
+    // a worktree removed and recreated at the same path keeps its process
+    // bindable. The kernel keeps saying "(deleted)" for the process's life.
+    const byPid = await readProcfsCwds([100], async () => "/repo/wt (deleted)");
+
+    expect(byPid.get(100)?.cwd).toBe("/repo/wt");
+  });
+
+  it("never reports a tty", async () => {
+    // On procfs platforms `ps` is the tty source; nothing here may overwrite
+    // it, so the fold reads only the cwd off these entries.
+    const byPid = await readProcfsCwds([100], async () => "/repo");
+
+    expect(byPid.get(100)).toEqual({ cwd: "/repo", tty: null });
+  });
+
+  it("resolves to null through the real readlink for a pid that cannot exist", async () => {
+    // Exercises the platform record's own seam (no injection): above Linux's
+    // default pid_max, and there is no /proc at all on macOS, so this is
+    // ENOENT on either host.
+    const byPid = await readProcfsCwds([9_999_901], PS_TTY_DISCOVERY.readLink);
+
+    expect(byPid.get(9_999_901)?.cwd).toBeNull();
+  });
+});
+
 describe("discovery platforms", () => {
   // Both records are exercised regardless of the host, so CI (ubuntu-only)
   // still covers the macOS ps layout and the lsof flags it depends on.
-  it("pins the lsof invocation for each platform", () => {
+  it("pins the lsof invocation for the fd-tty platform", () => {
     // `-a` is what confines lsof to the requested pids: without it lsof ORs
     // `-p` and `-d` and enumerates every process on the machine, silently.
     expect(FD_TTY_DISCOVERY.lsofArgv("10,11")).toEqual([
@@ -326,12 +397,15 @@ describe("discovery platforms", () => {
       "cwd,0,1,2",
       "-Ffn",
     ]);
-    expect(PS_TTY_DISCOVERY.lsofArgv("10,11")).toEqual([
-      "lsof",
-      "-p",
-      "10,11",
-      "-Ffn",
-    ]);
+  });
+
+  it("states the cwd source once per platform, and only lsof carries an argv", () => {
+    // The whole platform choice: procfs platforms have no lsof invocation to
+    // pin because they never spawn one, and lsof is not installed by default
+    // on several Linux distros.
+    expect(FD_TTY_DISCOVERY.cwdSource).toBe("lsof");
+    expect(PS_TTY_DISCOVERY.cwdSource).toBe("procfs");
+    expect("lsofArgv" in PS_TTY_DISCOVERY).toBe(false);
   });
 
   it("puts command last and asks for tty only where ps is the source", () => {
@@ -558,21 +632,50 @@ describe("agent discovery failure semantics (fail-closed)", () => {
     ).resolves.toEqual([]);
   });
 
-  // Simulate `ps` producing `stdout` and `lsof -Ffn` producing `lsofStdout`,
-  // so cwd- and fd-dependent behavior can be exercised. Returns the argv of
-  // every spawn, so the exact invocations stay pinned.
-  function mockPsAndLsof(stdout: string, lsofStdout: string) {
+  // Script one whole discovery on the HOST platform: `ps` rows plus each
+  // process's cwd and tty, served through whichever source that platform
+  // uses — lsof records on macOS, procfs readlinks on Linux. Returns the argv
+  // of every spawn (so the invocations stay pinned) together with the platform
+  // record to hand discovery, which carries the procfs seam where there is
+  // one. Same fixture, same assertions, both platforms.
+  function mockDiscovery(psStdout: string, entries: FdEntry[]) {
     const spawned: string[][] = [];
+    const lsofStdout = lsofOutput(entries);
     Bun.spawn = ((cmd: string[]) => {
       spawned.push(cmd);
-      const out = cmd[0] === "ps" ? stdout : lsofStdout;
+      const out = cmd[0] === "ps" ? psStdout : lsofStdout;
       return {
         stdout: new Blob([out]).stream(),
         stderr: new Blob([""]).stream(),
         exited: Promise.resolve(0),
       };
     }) as unknown as typeof Bun.spawn;
-    return spawned;
+
+    const platform: DiscoveryPlatform =
+      HOST_PLATFORM.cwdSource === "procfs"
+        ? { ...HOST_PLATFORM, readLink: fixtureReadLink(entries) }
+        : HOST_PLATFORM;
+    return { spawned, platform };
+  }
+
+  /** procfs seam answering out of the same fixture the lsof records encode. */
+  function fixtureReadLink(entries: FdEntry[]) {
+    return async (path: string): Promise<string> => {
+      const pid = Number(/^\/proc\/(\d+)\/cwd$/.exec(path)?.[1]);
+      const cwd = entries.find((e) => e.pid === pid)?.cwd;
+      if (!cwd)
+        throw Object.assign(new Error("ENOENT: readlink"), {
+          code: "ENOENT",
+        });
+      return cwd;
+    };
+  }
+
+  /** The spawns discovery is expected to make beyond `ps`, on this host. */
+  function expectedExtraSpawns(pidList: string): string[][] {
+    return HOST_PLATFORM.cwdSource === "lsof"
+      ? [HOST_PLATFORM.lsofArgv(pidList)]
+      : [];
   }
 
   // These tests run against whichever platform record the host resolves to,
@@ -600,10 +703,15 @@ describe("agent discovery failure semantics (fail-closed)", () => {
     ].join("\n");
   }
 
+  /** One process's resolvable facts, whichever source discovery reads them from. */
+  interface FdEntry {
+    pid: number;
+    cwd?: string;
+    tty?: string;
+  }
+
   /** Realistic `lsof -Ffn` output: cwd, then the pane tty on fds 0/1/2. */
-  function lsofOutput(
-    entries: Array<{ pid: number; cwd?: string; tty?: string }>,
-  ): string {
+  function lsofOutput(entries: FdEntry[]): string {
     return entries
       .flatMap((e) => [
         `p${e.pid}`,
@@ -625,7 +733,7 @@ describe("agent discovery failure semantics (fail-closed)", () => {
   it("drops a wrapper parent during discovery", async () => {
     // The gemini brew wrapper and the binary it re-execs both match the
     // gemini def, so only the parent/child link separates them.
-    const spawned = mockPsAndLsof(
+    const { spawned, platform } = mockDiscovery(
       psOutput([
         {
           pid: 100,
@@ -642,26 +750,30 @@ describe("agent discovery failure semantics (fail-closed)", () => {
           command: "node /opt/homebrew/bin/gemini",
         },
       ]),
-      lsofOutput([
+      [
         { pid: 100, cwd: "/repo", tty: "ttys001" },
         { pid: 101, cwd: "/repo", tty: "ttys001" },
-      ]),
+      ],
     );
 
-    const processes = await discoverAgentProcessesOrThrow([GEMINI_AGENT_DEF]);
+    const processes = await discoverAgentProcessesOrThrow(
+      [GEMINI_AGENT_DEF],
+      platform,
+    );
     expect(processes.map((p) => p.pid)).toEqual([101]);
-    expect(processes[0].tty).toBe("ttys001");
+    expect(processes[0]).toMatchObject({ tty: "ttys001", cwd: "/repo" });
 
     // Discovery must run the host platform record's own invocations (the
-    // flags themselves are pinned per record in "discovery platforms").
+    // flags themselves are pinned per record in "discovery platforms"), and
+    // on a procfs platform that means `ps` and nothing else.
     expect(spawned[0]).toEqual(["ps", "-eo", HOST_PLATFORM.psColumns]);
-    expect(spawned[1]).toEqual(HOST_PLATFORM.lsofArgv("100,101"));
+    expect(spawned.slice(1)).toEqual(expectedExtraSpawns("100,101"));
   });
 
   it("drops an agent-matched process with no tty", async () => {
     // A subprocess-mode invoke (`codex exec` and friends) runs with piped
     // stdio and no controlling terminal; it must not become a session.
-    mockPsAndLsof(
+    const { platform } = mockDiscovery(
       psOutput([
         {
           pid: 200,
@@ -671,11 +783,11 @@ describe("agent discovery failure semantics (fail-closed)", () => {
           command: "claude -p 'do the thing'",
         },
       ]),
-      lsofOutput([{ pid: 200, cwd: "/repo" }]),
+      [{ pid: 200, cwd: "/repo" }],
     );
 
     await expect(
-      discoverAgentProcessesOrThrow([CLAUDE_AGENT_DEF]),
+      discoverAgentProcessesOrThrow([CLAUDE_AGENT_DEF], platform),
     ).resolves.toEqual([]);
   });
 
@@ -694,7 +806,7 @@ describe("agent discovery failure semantics (fail-closed)", () => {
       "1.0.793",
     );
 
-    mockPsAndLsof(
+    const { platform } = mockDiscovery(
       psOutput([
         {
           pid: 50,
@@ -719,13 +831,16 @@ describe("agent discovery failure semantics (fail-closed)", () => {
             "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient mcp",
         },
       ]),
-      lsofOutput([
+      [
         { pid: 60, cwd: realCwd, tty: "ttys077" },
         { pid: 61, cwd: pluginCwd, tty: "ttys077" },
-      ]),
+      ],
     );
 
-    const processes = await discoverAgentProcessesOrThrow([CODEX_AGENT_DEF]);
+    const processes = await discoverAgentProcessesOrThrow(
+      [CODEX_AGENT_DEF],
+      platform,
+    );
     expect(processes).toEqual([
       {
         pid: 60,
@@ -741,7 +856,7 @@ describe("agent discovery failure semantics (fail-closed)", () => {
   it("keeps the real codex process when its code-mode host shares its tty and is its child", async () => {
     const repo = join(homedir(), "Code", "myrepo");
 
-    mockPsAndLsof(
+    const { platform } = mockDiscovery(
       psOutput([
         {
           pid: 60,
@@ -758,13 +873,16 @@ describe("agent discovery failure semantics (fail-closed)", () => {
           command: "/opt/codex/bin/codex-code-mode-host",
         },
       ]),
-      lsofOutput([
+      [
         { pid: 60, cwd: repo, tty: "ttys077" },
         { pid: 61, cwd: repo, tty: "ttys077" },
-      ]),
+      ],
     );
 
-    const processes = await discoverAgentProcessesOrThrow([CODEX_AGENT_DEF]);
+    const processes = await discoverAgentProcessesOrThrow(
+      [CODEX_AGENT_DEF],
+      platform,
+    );
     expect(processes).toEqual([
       {
         pid: 60,
@@ -786,9 +904,10 @@ describe("agent discovery failure semantics (fail-closed)", () => {
 });
 
 /**
- * lsof failure semantics, run against BOTH platform records explicitly rather
- * than the host's, because the whole point is that they diverge: on the fd-tty
- * platform lsof is the only tty source, so losing it loses every row.
+ * lsof failure semantics, run against the fd-tty record explicitly rather than
+ * the host's, because there lsof is the only tty source and losing it loses
+ * every row. The procfs platforms have no such coupling — they never spawn
+ * lsof at all; see "procfs cwd resolution" below.
  */
 describe("lsof failure semantics", () => {
   const originalBunSpawn = Bun.spawn;
@@ -805,7 +924,7 @@ describe("lsof failure semantics", () => {
 
   /** Renders ps rows in `platform`'s column order and scripts lsof's reply. */
   function mockPsAndLsof(
-    platform: typeof FD_TTY_DISCOVERY,
+    platform: LsofDiscoveryPlatform,
     rows: Array<{
       pid: number;
       ppid: number;
@@ -938,39 +1057,116 @@ describe("lsof failure semantics", () => {
       ).resolves.toEqual([]);
     });
   });
+});
 
-  describe("ps-tty platform (Linux and friends)", () => {
-    it("survives a hard lsof failure, keeping every row with a null cwd", async () => {
-      // `ps` already supplied the tty here, so lsof only ever contributed the
-      // cwd. Losing it must not fail the scan.
-      mockPsAndLsof(PS_TTY_DISCOVERY, [claudeRow(100, "ttys001")], {
-        throwOnSpawn: true,
-      });
+/**
+ * The procfs arm of discovery, pinned against the ps-tty record explicitly so
+ * a macOS run covers it too. Its contract is the opposite of the lsof arm's:
+ * `ps` settles the tty, procfs settles the cwd one pid at a time, and no
+ * subprocess beyond `ps` is ever spawned.
+ */
+describe("procfs cwd resolution (Linux and friends)", () => {
+  const originalBunSpawn = Bun.spawn;
 
-      const processes = await discoverAgentProcessesOrThrow(
-        [CLAUDE_AGENT_DEF],
-        PS_TTY_DISCOVERY,
-      );
-      expect(processes).toMatchObject([
-        { pid: 100, tty: "ttys001", cwd: null },
-      ]);
-    });
+  afterEach(() => {
+    Bun.spawn = originalBunSpawn;
+  });
 
-    it("asks lsof only about rows that survived the tty filter", async () => {
-      // pid 101 has no controlling terminal, so it is dropped regardless;
-      // widening the lsof call to cover it would be pure cost.
-      const spawned = mockPsAndLsof(
-        PS_TTY_DISCOVERY,
-        [claudeRow(100, "ttys001"), claudeRow(101, "??")],
-        { stdout: lsofRecords([{ pid: 100, cwd: "/repo" }]) },
-      );
+  /** Renders ps rows in the procfs record's column order. */
+  function mockPs(
+    rows: Array<{
+      pid: number;
+      ppid: number;
+      tty: string;
+      etime: string;
+      command: string;
+    }>,
+  ): string[][] {
+    const columns = PS_TTY_DISCOVERY.psColumns.split(",");
+    const psStdout = [
+      columns.join(" ").toUpperCase(),
+      ...rows.map((r) =>
+        columns.map((c) => String(r[c as keyof typeof r])).join(" "),
+      ),
+    ].join("\n");
 
-      const processes = await discoverAgentProcessesOrThrow(
-        [CLAUDE_AGENT_DEF],
-        PS_TTY_DISCOVERY,
-      );
-      expect(processes.map((p) => p.pid)).toEqual([100]);
-      expect(spawned[1]).toEqual(PS_TTY_DISCOVERY.lsofArgv("100"));
-    });
+    const spawned: string[][] = [];
+    Bun.spawn = ((cmd: string[]) => {
+      spawned.push(cmd);
+      return {
+        stdout: new Blob([cmd[0] === "ps" ? psStdout : ""]).stream(),
+        stderr: new Blob([""]).stream(),
+        exited: Promise.resolve(0),
+      };
+    }) as unknown as typeof Bun.spawn;
+    return spawned;
+  }
+
+  const claudeRow = (pid: number, tty: string) => ({
+    pid,
+    ppid: 1,
+    tty,
+    etime: "00:05",
+    command: "claude",
+  });
+
+  /** A ps-tty platform whose procfs seam is scripted per pid. */
+  function withReadLink(
+    readLink: (path: string) => Promise<string>,
+  ): DiscoveryPlatform {
+    return { ...PS_TTY_DISCOVERY, readLink };
+  }
+
+  it("never spawns lsof, resolving every cwd from procfs instead", async () => {
+    // The regression this arm exists for: lsof is not installed by default on
+    // several distros, and when it was the only cwd source a missing binary
+    // left every row with `cwd: null` — which the binder skips outright, so
+    // the daemon tracked zero sessions while agents ran.
+    const spawned = mockPs([claudeRow(100, "ttys001")]);
+
+    const processes = await discoverAgentProcessesOrThrow(
+      [CLAUDE_AGENT_DEF],
+      withReadLink(async (path) =>
+        path === "/proc/100/cwd" ? "/repo" : "/elsewhere",
+      ),
+    );
+
+    expect(processes).toMatchObject([
+      { pid: 100, tty: "ttys001", cwd: "/repo" },
+    ]);
+    expect(spawned).toEqual([["ps", "-eo", PS_TTY_DISCOVERY.psColumns]]);
+  });
+
+  it("keeps a row whose cwd procfs could not read, with a null cwd", async () => {
+    // `ps` already supplied the tty, so an unreadable cwd costs that field
+    // and nothing else. It must never fail the scan.
+    mockPs([claudeRow(100, "ttys001")]);
+
+    const processes = await discoverAgentProcessesOrThrow(
+      [CLAUDE_AGENT_DEF],
+      withReadLink(async () => {
+        throw Object.assign(new Error("EACCES: readlink"), { code: "EACCES" });
+      }),
+    );
+
+    expect(processes).toMatchObject([{ pid: 100, tty: "ttys001", cwd: null }]);
+  });
+
+  it("reads procfs only for rows that survived the tty filter", async () => {
+    // pid 101 has no controlling terminal, so it is dropped regardless;
+    // reading its cwd would be pure cost.
+    const asked: string[] = [];
+    mockPs([claudeRow(100, "ttys001"), claudeRow(101, "??")]);
+
+    const processes = await discoverAgentProcessesOrThrow(
+      [CLAUDE_AGENT_DEF],
+      withReadLink(async (path) => {
+        asked.push(path);
+        return "/repo";
+      }),
+    );
+
+    expect(processes.map((p) => p.pid)).toEqual([100]);
+    expect(asked).toEqual(["/proc/100/cwd"]);
   });
 });
