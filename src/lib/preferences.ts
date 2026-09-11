@@ -313,6 +313,8 @@ export type ThemeConfig =
     };
 
 export interface Preferences {
+  /** Idle hours before rows fade; 0 disables. Default 24. */
+  ageFade?: { after?: number };
   showPreview?: boolean;
   iconStyle?: IconStyle;
   previewWidth?: number;

@@ -225,16 +225,16 @@ describe("resolveColumns defaults", () => {
     expect(fields).not.toContain("version");
   });
 
-  it("status mode cascades from icon to short to full", () => {
+  it("status remains one glyph at every breakpoint", () => {
     expect(
       resolveColumns(40).row1.left.find((e) => e.field === "status")?.mode,
     ).toBe("icon");
     expect(
       resolveColumns(60).row1.left.find((e) => e.field === "status")?.mode,
-    ).toBe("short");
+    ).toBe("icon");
     expect(
       resolveColumns(100).row1.left.find((e) => e.field === "status")?.mode,
-    ).toBe("full");
+    ).toBe("icon");
   });
 
   it("project mode shifts to full at md", () => {
@@ -273,7 +273,7 @@ describe("resolveColumns defaults", () => {
   it("custom breakpoints shift thresholds", () => {
     // Move md down to 60 so a width=60 viewport gets md-tier defaults
     const cols = resolveColumns(60, undefined, { md: 60 });
-    expect(cols.row1.left.find((e) => e.field === "status")?.mode).toBe("full");
+    expect(cols.row1.left.find((e) => e.field === "status")?.mode).toBe("icon");
   });
 });
 
@@ -523,9 +523,9 @@ describe("entryRightWidth", () => {
     expect(entryRightWidth({ field: "status", mode: "icon" })).toBe(1);
   });
 
-  it("returns 6 for status short, 9 for status full", () => {
-    expect(entryRightWidth({ field: "status", mode: "short" })).toBe(6);
-    expect(entryRightWidth({ field: "status", mode: "full" })).toBe(9);
+  it("keeps legacy status modes at one column", () => {
+    expect(entryRightWidth({ field: "status", mode: "short" })).toBe(1);
+    expect(entryRightWidth({ field: "status", mode: "full" })).toBe(1);
   });
 
   it("returns 2 for agent short, 8 for agent full or missing mode", () => {

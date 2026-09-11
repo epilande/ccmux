@@ -1023,7 +1023,10 @@ export class DaemonServer {
     return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
   }
 
-  private async enrichSession(session: Session): Promise<EnrichedSession> {
+  private async enrichSession(
+    session: Session,
+    localOnly = false,
+  ): Promise<EnrichedSession> {
     const paneCache = this.getPaneCache();
     const paneInfo = session.tmuxPane ? paneCache.get(session.tmuxPane) : null;
     const tmuxTarget = paneInfo?.target ?? null;
@@ -1033,7 +1036,9 @@ export class DaemonServer {
     const gitBranch = gitInfo.branch ?? session.gitBranch;
     // Synchronous cache read; the resolver refreshes in the background and
     // onBranchPRsChanged re-broadcasts when a lookup lands a new value.
-    const branchPRs = this.prResolver.get(effectiveCwd, gitBranch);
+    const branchPRs = localOnly
+      ? null
+      : this.prResolver.get(effectiveCwd, gitBranch);
     // Derived exactly like tmuxTarget, off the same paneInfo: a Claude
     // invoke runs inside a `ccmux-invoke-<id>` detached session, so the
     // pane's sessionName carries the invocation id. No cold-cache
@@ -1186,8 +1191,9 @@ export class DaemonServer {
 
   private async enrichSessions(
     sessions: Session[],
+    localOnly = false,
   ): Promise<EnrichedSession[]> {
-    return Promise.all(sessions.map((s) => this.enrichSession(s)));
+    return Promise.all(sessions.map((s) => this.enrichSession(s, localOnly)));
   }
 
   private resolveSession(id: string): Session | undefined {
@@ -1797,6 +1803,7 @@ export class DaemonServer {
     try {
       const sessions = await this.enrichSessions(
         this.sessionManager.getSessions(),
+        true,
       );
       const repoRoots = await this.worktreeRepoRoots(
         sessions,
@@ -1807,6 +1814,18 @@ export class DaemonServer {
       const response = await listAllWorktrees(repoRoots, {
         sessionsFor: (path) => byWorktree.get(path) ?? [],
       });
+      if (url.searchParams.get("localFacts") === "true") {
+        const scan = await scanRepos(repoRoots, {
+          localOnly: true,
+          sessionsFor: (path) => byWorktree.get(path) ?? [],
+        });
+        for (const repo of response.repos) {
+          repo.removable = scan.candidates.filter(
+            (candidate) =>
+              candidate.repoRoot === repo.repoRoot && !candidate.dirty,
+          ).length;
+        }
+      }
       return Response.json(response, { headers });
     } catch (err) {
       return Response.json(

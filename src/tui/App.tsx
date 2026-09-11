@@ -138,6 +138,7 @@ interface AppProps {
   columns?: ColumnsConfig;
   promptLines?: number;
   breakpoints?: BreakpointConfig;
+  ageFadeAfter?: number;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
   searchTranscript?: boolean;
@@ -269,6 +270,7 @@ export function App(props: AppProps) {
     columns: props.columns,
     promptLines: props.promptLines,
     breakpoints: props.breakpoints,
+    ageFadeAfter: props.ageFadeAfter,
     searchPaneContent: props.searchPaneContent,
     searchPaneLines: props.searchPaneLines,
     searchTranscript: props.searchTranscript,
@@ -4101,6 +4103,8 @@ export function App(props: AppProps) {
             activePaneId={store.state.activePaneId}
             activeSessionId={store.state.activeSessionId}
             columns={store.state.columns}
+            ageFadeAfter={store.state.ageFadeAfter}
+            connectionState={store.state.connectionState}
             promptLines={store.state.promptLines}
             // The same "a query is narrowing the list" the flat items are
             // built from, so the block yields exactly when rows carry

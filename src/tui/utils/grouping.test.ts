@@ -951,8 +951,8 @@ describe("buildFlatItems with pinnedGroups", () => {
       headers[2].type === "header"
     ) {
       // alphabetical regardless of status
-      expect(headers[0].label).toBe("alpha");
-      expect(headers[1].label).toBe("beta");
+      expect(headers[0].label).toBe("needs you");
+      expect(headers[1].label).toBe("alpha");
       expect(headers[2].label).toBe("charlie");
     }
   });

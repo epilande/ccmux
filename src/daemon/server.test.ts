@@ -7474,6 +7474,33 @@ describe("worktree list endpoint", () => {
     return (await res.json()) as ListBody;
   }
 
+  it("adds local removable facts without warming the PR resolver", async () => {
+    const { repo, worktree } = makeListFixture();
+    runFixtureGit(repo, "merge", "--no-ff", "-m", "merged", "feat/live");
+    const ctx = createServer();
+    const get = spyOn(ctx.internals.prResolver, "get").mockImplementation(
+      () => {
+        throw new Error("unexpected PR lookup");
+      },
+    );
+    try {
+      const body = await list(
+        ctx.internals,
+        `?localFacts=true&cwd=${encodeURIComponent(repo)}`,
+      );
+      expect(body.repos[0]).toMatchObject({ removable: 1 });
+      writeFileSync(join(worktree, "dirty.txt"), "untracked");
+      const dirty = await list(
+        ctx.internals,
+        `?localFacts=true&cwd=${encodeURIComponent(repo)}`,
+      );
+      expect(dirty.repos[0]).toMatchObject({ removable: 0 });
+      expect(get).not.toHaveBeenCalled();
+    } finally {
+      get.mockRestore();
+    }
+  });
+
   it("lists the main checkout and an in-flight worktree of a session's repo", async () => {
     const { repo, worktree } = makeListFixture();
     const ctx = createServer();

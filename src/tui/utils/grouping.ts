@@ -74,6 +74,7 @@ export type FlatItem =
       groupKey: string;
       label: string;
       count: number;
+      sharedBranch?: string;
       collapsed: boolean;
       /** Raw member references, not a precomputed summary. The status summary
        * is derived downstream in the header's own reactive scope so this memo
@@ -86,6 +87,8 @@ export type FlatItem =
       type: "session";
       groupKey: string;
       filteredSession: FilteredSession;
+      identity?: "branch" | "hidden";
+      sharedTmuxSession?: string;
     };
 
 /** A group of sessions keyed for sorting */
@@ -202,9 +205,15 @@ export function groupSessions(
   return [...groups.entries()].map(([key, members]) => ({ key, members }));
 }
 
+export const NEEDS_YOU_GROUP_KEY = "\0needs-you";
+
 /** Extract group keys from the header items in a flat item list */
 export function headerGroupKeys(items: FlatItem[]): string[] {
-  return items.flatMap((i) => (i.type === "header" ? [i.groupKey] : []));
+  return items.flatMap((i) =>
+    i.type === "header" && i.groupKey !== NEEDS_YOU_GROUP_KEY
+      ? [i.groupKey]
+      : [],
+  );
 }
 
 /**
@@ -263,23 +272,66 @@ export function buildFlatItems(
   isSearching: boolean,
   pinnedGroups: string[] = [],
 ): FlatItem[] {
-  if (groupBy === "none") {
-    return filtered.map((fs) => ({
-      type: "session" as const,
-      groupKey: "",
-      filteredSession: fs,
-    }));
+  const waiting = filtered
+    .filter((fs) => fs.session.status === "waiting")
+    .sort(
+      (a, b) =>
+        Date.parse(
+          a.session.statusChangedAt ?? a.session.lastActivityAt ?? "",
+        ) -
+        Date.parse(b.session.statusChangedAt ?? b.session.lastActivityAt ?? ""),
+    );
+  const rest = filtered.filter((fs) => fs.session.status !== "waiting");
+  const items: FlatItem[] = [];
+  if (waiting.length) {
+    items.push({
+      type: "header",
+      groupKey: NEEDS_YOU_GROUP_KEY,
+      label: "needs you",
+      count: waiting.length,
+      collapsed: false,
+      members: waiting,
+    });
+    for (const fs of waiting)
+      items.push({
+        type: "session",
+        groupKey: NEEDS_YOU_GROUP_KEY,
+        filteredSession: fs,
+      });
   }
-
+  if (groupBy === "none") {
+    return [
+      ...items,
+      ...rest.map(
+        (fs): FlatItem => ({
+          type: "session",
+          groupKey: "",
+          filteredSession: fs,
+        }),
+      ),
+    ];
+  }
   const sorted = sortGroups(
-    groupSessions(filtered, groupBy),
+    groupSessions(rest, groupBy),
     pinnedGroups,
     isSearching,
   );
-
-  const items: FlatItem[] = [];
   for (const { key, members } of sorted) {
     const isCollapsed = !isSearching && collapsed.has(key);
+    const branch = members[0]?.session.gitBranch;
+    const sharedBranch =
+      groupBy === "project" &&
+      branch &&
+      members.every((fs) => fs.session.gitBranch === branch)
+        ? branch
+        : undefined;
+    const tmuxName = (fs: FilteredSession) =>
+      fs.session.tmuxTarget?.split(":")[0];
+    const firstTmux = tmuxName(members[0]!);
+    const sharedTmuxSession =
+      firstTmux && members.every((fs) => tmuxName(fs) === firstTmux)
+        ? firstTmux
+        : undefined;
     items.push({
       type: "header",
       groupKey: key,
@@ -287,15 +339,22 @@ export function buildFlatItems(
       count: members.length,
       collapsed: isCollapsed,
       members,
+      sharedBranch,
     });
     if (!isCollapsed) {
-      for (const fs of members) {
+      for (const fs of members)
         items.push({
           type: "session",
           groupKey: key,
           filteredSession: fs,
+          identity:
+            groupBy === "project"
+              ? sharedBranch
+                ? "hidden"
+                : "branch"
+              : undefined,
+          sharedTmuxSession,
         });
-      }
     }
   }
 

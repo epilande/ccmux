@@ -68,12 +68,12 @@ describe("SessionItem live updates (no remount)", () => {
 
   it("updates the status badge when the session transitions idle -> working", async () => {
     const { setState } = await renderLive({ status: "idle" });
-    expect(setup.captureCharFrame()).toContain("idle");
+    expect(setup.captureCharFrame()).toContain("·");
 
     setState("session", "status", "working");
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("working");
+    expect(frame).toMatch(/[◐◓◑◒]/);
     expect(frame).not.toContain("idle");
   });
 

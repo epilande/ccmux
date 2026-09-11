@@ -1000,7 +1000,7 @@ describe("store", () => {
         attentionType: "permission",
       });
       expect(store.selectedSession()?.id).toBe("s2");
-      expect(store.selectedIndex()).toBe(0);
+      expect(store.selectedIndex()).toBe(1);
     });
 
     it("moveSelection should navigate correctly", () => {
@@ -1280,8 +1280,8 @@ describe("store", () => {
       });
       store.actions.setSessions([s1, s2]);
 
-      // Explicitly select s1 (waiting, at index 0)
-      store.actions.setSelectedIndex(0);
+      // The waiting row follows the band header.
+      store.actions.setSelectedIndex(1);
       expect(store.selectedSession()?.id).toBe("s1");
 
       // s1 transitions waiting → working (sort priority changes from 0 to 1)
@@ -1314,8 +1314,8 @@ describe("store", () => {
       });
       store.actions.setSessions([s1, s2]);
 
-      // Select s1 and enter preview focus (simulating user tabbing into preview)
-      store.actions.setSelectedIndex(0);
+      // Select the waiting row after the band header, then focus preview.
+      store.actions.setSelectedIndex(1);
       store.actions.enterPreviewFocus();
       expect(store.state.previewFocused).toBe(true);
       expect(store.selectedSession()?.id).toBe("s1");
@@ -2531,9 +2531,11 @@ describe("store", () => {
       ]);
 
       const headers = store.flatItems().filter((i) => i.type === "header");
-      // alphabetical: alpha before beta, regardless of status
-      expect(headers[0].type === "header" && headers[0].groupKey).toBe("alpha");
-      expect(headers[1].type === "header" && headers[1].groupKey).toBe("beta");
+      // The band precedes alphabetical groups; beta has no rows left.
+      expect(headers.map((header) => header.label)).toEqual([
+        "needs you",
+        "alpha",
+      ]);
     });
 
     it("should move a group multiple positions with repeated moves", () => {
@@ -4389,10 +4391,7 @@ describe("new session dialog origin marker", () => {
     // here would pass even if App dropped the field.
     const marker = store.state.newSession!.returnToSources!;
     store.actions.closeNewSessionDialog();
-    store.actions.showSourcePicker(
-      marker.repo,
-      sourcesReopenOptions(marker),
-    );
+    store.actions.showSourcePicker(marker.repo, sourcesReopenOptions(marker));
 
     expect(store.state.sourcePicker?.origin).toEqual(origin);
     expect(store.state.sourcePicker?.initialFilter).toBe("notif");

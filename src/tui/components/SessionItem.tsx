@@ -14,14 +14,13 @@ import type {
 import { DEFAULT_PROMPT_DISPLAY } from "../../lib/preferences";
 import { getAgentDisplayName, getAgentShortCode } from "../../lib/agents";
 import { HighlightedText } from "./HighlightedText";
-import { StatusBadge } from "./StatusBadge";
-import { InvokeStatusBadge, type InvokeStatus } from "./InvokeStatusBadge";
-import { BackgroundStatusBadge } from "./BackgroundStatusBadge";
+import { getStatusColor } from "./StatusBadge";
+import { useStatusIcon } from "../utils/useStatusIcon";
+import { getEffectiveStatus } from "../../daemon/status-machine";
 import {
   type ResolvedColumns,
   type ResolvedEntry,
   type ResolvedRow,
-  type StatusMode,
   resolveLayout,
   applyPromptDisplay,
   prLabel,
@@ -92,7 +91,12 @@ interface SessionItemProps {
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   dimmed?: boolean;
+  identity?: "branch" | "hidden";
+  identityWidth?: number;
+  sharedTmuxSession?: string;
+  ageFadeAfter?: number;
   sidebar?: boolean;
+  needsYou?: boolean;
   /** Prompt display mode for the fallback layout resolution (direct mounts /
    * tests). Ignored when `layout` is supplied pre-resolved by SessionList. */
   promptDisplay?: PromptDisplay;
@@ -117,6 +121,43 @@ export function abbreviateTarget(target: string, maxLen: number = 12): string {
   const availableLen = maxLen - displayWidth(suffix) - 1;
   if (availableLen <= 0) return sliceToWidth(target, maxLen - 1) + "~";
   return sliceToWidth(sessionName, availableLen) + "~" + suffix;
+}
+
+export function isAgeFaded(
+  session: EnrichedSession,
+  after: number,
+  now: number,
+): boolean {
+  return (
+    after > 0 &&
+    getEffectiveStatus(session).status === "idle" &&
+    now - Date.parse(session.statusChangedAt ?? session.lastActivityAt ?? "") >
+      after * 3_600_000
+  );
+}
+
+export function waitingIdentity(
+  session: EnrichedSession,
+  budget: number,
+): string {
+  const repo = pathTail(session.mainRepoRoot) ?? session.project;
+  const branch = session.gitBranch ?? pathTail(session.worktreeRoot) ?? "";
+  return truncateText(
+    `${repo}${branch ? ` ${branch}${session.isWorktree ? " +" : ""}` : ""}`,
+    budget,
+  );
+}
+
+export function groupedIdentity(
+  session: EnrichedSession,
+  budget: number,
+): string {
+  const identity =
+    session.gitBranch ?? pathTail(session.worktreeRoot) ?? session.project;
+  const marker = session.isWorktree ? " +" : "";
+  return (
+    truncateText(identity, Math.max(0, budget - displayWidth(marker))) + marker
+  );
 }
 
 interface ProjectPathParts {
@@ -303,7 +344,11 @@ interface FieldRenderContext {
   isActiveSession?: boolean;
   selected: boolean;
   dimmed?: boolean;
+  ageFaded?: boolean;
+  identity?: "branch" | "hidden";
+  identityWidth?: number;
   sidebar?: boolean;
+  needsYou?: boolean;
   transcriptSnippet?: string;
   matchSource?: MatchSource;
   agentColor: string;
@@ -330,7 +375,11 @@ interface FieldRenderContext {
 }
 
 function dimColor(ctx: FieldRenderContext, color?: string): string | undefined {
-  return ctx.dimmed ? theme.border : color;
+  return ctx.dimmed
+    ? theme.border
+    : ctx.ageFaded && color !== theme.overlay
+      ? theme.subtext
+      : color;
 }
 
 /**
@@ -446,9 +495,7 @@ const PromptCell: Component<{
             fallback={
               <Show
                 when={transcriptLine()}
-                fallback={
-                  <text fg={dimColor(ctx, theme.overlay)}>{text()}</text>
-                }
+                fallback={<text fg={dimColor(ctx, theme.text)}>{text()}</text>}
               >
                 <text fg={dimColor(ctx, theme.overlay)}>
                   {transcriptLine()}
@@ -490,6 +537,32 @@ function promptCellShowsMatch(ctx: FieldRenderContext): boolean {
   return src === "pane" || src === "transcript" || src === "cwd";
 }
 
+function attentionText(session: EnrichedSession): string {
+  const label = getAttentionLabel(session) ?? "";
+  return session.status === "waiting" &&
+    session.attentionType === "permission" &&
+    session.pendingTool
+    ? `Permission · ${label}`
+    : label;
+}
+
+const AttentionText: Component<{
+  ctx: FieldRenderContext;
+  row: 1 | 2;
+  children: import("solid-js").JSX.Element;
+}> = (props) => (
+  <Show when={getAttentionLabel(props.ctx.session)} fallback={props.children}>
+    <box flexGrow={1} flexShrink={1}>
+      <text fg={props.ctx.attentionColor}>
+        {truncateText(
+          attentionText(props.ctx.session),
+          props.ctx.maxFlexLen(props.row),
+        )}
+      </text>
+    </box>
+  </Show>
+);
+
 const FieldCell: Component<{
   entry: ResolvedEntry;
   ctx: FieldRenderContext;
@@ -514,54 +587,62 @@ const FieldCell: Component<{
         </box>
       );
     case "status": {
-      const mode = (entry.mode as StatusMode) ?? "icon";
-      // Read `originInvocationStatus` inside the <Show when> getter (not a
-      // captured const) so the cell re-renders when the store flips a
-      // synthetic invoke row to its terminal outcome via a fine-grained
-      // setState. `ctx.session` is a stable store proxy; pulling the read out
-      // into a local would freeze the badge on the running spinner.
+      const effective = () => getEffectiveStatus(ctx.session);
+      const spinner = useStatusIcon(
+        () => effective().status,
+        () => null,
+        () => "dot",
+      );
+      const glyph = () =>
+        effective().status === "waiting"
+          ? "◆"
+          : effective().status === "working"
+            ? spinner()
+            : "·";
       return (
-        <box width={width}>
-          <Show
-            when={ctx.session.originInvocationStatus}
-            fallback={
-              <Show
-                when={ctx.session.trackingMode === "background"}
-                fallback={
-                  <StatusBadge
-                    status={ctx.session.status}
-                    attentionType={ctx.session.attentionType}
-                    attentionState={ctx.session.attentionState}
-                    session={ctx.session}
-                    iconStyle={ctx.iconStyle}
-                    mode={mode}
-                    dimmed={ctx.dimmed}
-                  />
-                }
-              >
-                <BackgroundStatusBadge
-                  status={ctx.session.status}
-                  attentionType={ctx.session.attentionType}
-                  iconStyle={ctx.iconStyle}
-                  mode={mode}
-                  dimmed={ctx.dimmed}
-                />
-              </Show>
-            }
-          >
-            {(s: () => InvokeStatus) => (
-              <InvokeStatusBadge
-                status={s()}
-                iconStyle={ctx.iconStyle}
-                mode={mode}
-                dimmed={ctx.dimmed}
-              />
+        <box width={1}>
+          <text
+            fg={dimColor(
+              ctx,
+              getStatusColor(effective().status, effective().attentionType),
             )}
-          </Show>
+          >
+            {glyph()}
+          </text>
         </box>
       );
     }
     case "project": {
+      if (ctx.identity || ctx.needsYou) {
+        return (
+          <box
+            width={props.flexOnRow ? ctx.identityWidth : undefined}
+            flexGrow={props.flexOnRow ? 0 : 1}
+            flexShrink={0}
+          >
+            <Show when={ctx.identity !== "hidden"}>
+              <text fg={dimColor(ctx, theme.blue)}>
+                {ctx.needsYou
+                  ? waitingIdentity(
+                      ctx.session,
+                      Math.min(
+                        ctx.maxProjectLen,
+                        ctx.identityWidth ?? Infinity,
+                      ),
+                    )
+                  : groupedIdentity(
+                      ctx.session,
+                      Math.min(
+                        ctx.maxProjectLen,
+                        ctx.identityWidth ?? Infinity,
+                      ),
+                    )}
+              </text>
+            </Show>
+          </box>
+        );
+      }
+
       // A createMemo, not a plain const: this component body runs once per
       // mount and rows stay mounted across SSE deltas, so a const would freeze
       // the cell on its mount-time value. The memo instead recomputes reactively
@@ -686,7 +767,11 @@ const FieldCell: Component<{
         </box>
       );
     case "prompt":
-      return <PromptCell ctx={ctx} row={row} />;
+      return (
+        <AttentionText ctx={ctx} row={row}>
+          <PromptCell ctx={ctx} row={row} />
+        </AttentionText>
+      );
     case "summary": {
       // The agent's own summary of the session, or the prompt when its agent
       // writes none. One cell, one or the other, never both on a line.
@@ -707,14 +792,18 @@ const FieldCell: Component<{
       // it has something of its own to say.
       return (
         <Show
-          when={!deferToPrompt()}
-          fallback={<PromptCell ctx={ctx} row={row} />}
+          when={!deferToPrompt() && !getAttentionLabel(ctx.session)}
+          fallback={
+            <AttentionText ctx={ctx} row={row}>
+              <PromptCell ctx={ctx} row={row} />
+            </AttentionText>
+          }
         >
           <box flexGrow={1} flexShrink={1} flexDirection="row">
             <Show
               when={ctx.highlights?.summary}
               fallback={
-                <text fg={dimColor(ctx, theme.overlay)}>
+                <text fg={dimColor(ctx, theme.text)}>
                   {truncateText(summary() ?? "", ctx.maxFlexLen(row))}
                 </text>
               }
@@ -806,6 +895,15 @@ const RowRender: Component<{
   // so the standalone spacer would double up and split the space. Drop it, and
   // tell the project cell to give up its own flex-grow.
   const hasFlexText = createMemo(() => rowHasFlexText(props.row));
+  const visibleEntries = (entries: ResolvedEntry[]) =>
+    entries.filter(
+      (entry) =>
+        !(
+          entry.field === "project" &&
+          props.ctx.identity === "hidden" &&
+          hasFlexText()
+        ),
+    );
   // The project cell also flex-grows (when no flex cell shares its row), so it
   // is the filler and the standalone spacer is redundant. Rendering both splits
   // the slack and squeezes the project cell by ~1 column, which drops its `…`.
@@ -821,7 +919,7 @@ const RowRender: Component<{
       <Show when={(props.leadingIndent ?? 0) > 0}>
         <box width={props.leadingIndent} />
       </Show>
-      <For each={props.row.left}>
+      <For each={visibleEntries(props.row.left)}>
         {(entry) => (
           <FieldCell
             entry={entry}
@@ -860,23 +958,19 @@ const RowRender: Component<{
             when={!props.ctx.sidebar && subagentCountLabel(props.ctx.session)}
           >
             {(label: () => string) => (
-              <text fg={props.ctx.dimmed ? theme.border : theme.teal}>
-                {label()}
-              </text>
+              <text fg={dimColor(props.ctx, theme.teal)}>{label()}</text>
             )}
           </Show>
           {/* Last of the three, and the only one that is not about what the
               session is doing: a handoff waiting for this row to go idle. */}
           <Show when={handoffBadge(props.ctx.session)}>
             {(badge: () => string) => (
-              <text fg={props.ctx.dimmed ? theme.border : theme.mauve}>
-                {badge()}
-              </text>
+              <text fg={dimColor(props.ctx, theme.mauve)}>{badge()}</text>
             )}
           </Show>
         </box>
       </Show>
-      <For each={props.row.right}>
+      <For each={visibleEntries(props.row.right)}>
         {(entry) => (
           <FieldCell
             entry={entry}
@@ -931,9 +1025,17 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   // so an unlabeled row reserves nothing and its prompt runs to the right-side
   // metadata; a labeled row's prompt/project budgets subtract exactly this so
   // the truncation `…` lands right before the label.
-  const attentionWidth = createMemo(() =>
-    trailingLabelsWidth(props.session, !!props.sidebar),
-  );
+  const attentionWidth = createMemo(() => {
+    const width = trailingLabelsWidth(props.session, !!props.sidebar);
+    const label = getAttentionLabel(props.session);
+    const inFlex =
+      rowHasFlexText(columns().row1) || rowHasFlexText(columns().row2);
+    if (!label || !inFlex) return width;
+    const labelWidth = props.sidebar
+      ? 1
+      : Math.min(displayWidth(label), ATTENTION_LABEL_MAX);
+    return Math.max(0, width - labelWidth - (width > labelWidth ? 1 : 0));
+  });
 
   // The project cell renders inside SessionList's scrollbox, whose scrollbar
   // (and content inset) consume a couple of columns the terminal width does
@@ -1021,12 +1123,21 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
         e.field === "pr"
           ? prLabel(props.session, e.mode).length
           : e.field === "project"
-            ? projectCellWidth(
-                props.session,
-                e.mode,
-                maxProjectLen(),
-                maxBranchLen(),
-              )
+            ? (props.identityWidth ??
+              (props.needsYou
+                ? displayWidth(waitingIdentity(props.session, maxProjectLen()))
+                : props.identity
+                  ? props.identity === "hidden"
+                    ? 0
+                    : displayWidth(
+                        groupedIdentity(props.session, maxProjectLen()),
+                      )
+                  : projectCellWidth(
+                      props.session,
+                      e.mode,
+                      maxProjectLen(),
+                      maxBranchLen(),
+                    )))
             : entryRightWidth(e);
       return acc + (w > 0 ? w + 1 : 0); // +1 for the inter-cell gap
     }, 0);
@@ -1053,6 +1164,10 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   const maxFlexLen = (row: 1 | 2) =>
     row === 1 ? maxPromptLenRow1() : maxPromptLenRow2();
 
+  const ageFaded = createMemo(() => {
+    void tick();
+    return isAgeFaded(props.session, props.ageFadeAfter ?? 24, Date.now());
+  });
   const agentColor = () => agentColorFor(props.session.agentType);
 
   const bgColor = () =>
@@ -1104,6 +1219,18 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     get dimmed() {
       return props.dimmed;
     },
+    get ageFaded() {
+      return ageFaded();
+    },
+    get identityWidth() {
+      return props.identityWidth;
+    },
+    get identity() {
+      return props.identity;
+    },
+    get needsYou() {
+      return props.needsYou;
+    },
     get sidebar() {
       return props.sidebar;
     },
@@ -1120,11 +1247,20 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
       return props.dimmed ? theme.border : getAttentionColor(props.session);
     },
     get attentionLabel() {
-      return getAttentionLabel(props.session);
+      return rowHasFlexText(columns().row1) || rowHasFlexText(columns().row2)
+        ? null
+        : getAttentionLabel(props.session);
     },
     get paneInfo() {
       return props.session.tmuxTarget
-        ? abbreviateTarget(props.session.tmuxTarget, 12)
+        ? abbreviateTarget(
+            props.sharedTmuxSession
+              ? props.session.tmuxTarget.slice(
+                  props.sharedTmuxSession.length + 1,
+                )
+              : props.session.tmuxTarget,
+            12,
+          )
         : "";
     },
     get versionLabel() {
@@ -1169,7 +1305,13 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   // The shared empty array rather than a fresh `[]`, so a row with no block
   // reads the same reference every time and the `<For>` below stays still.
   const promptBlock = () => props.promptBlock ?? EMPTY_PROMPT_BLOCK;
-  const rowHeight = () => 1 + (row2HasContent() ? 1 : 0) + promptBlock().length;
+  const bandTarget = () =>
+    props.needsYou && props.sidebar && props.session.tmuxTarget;
+  const rowHeight = () =>
+    1 +
+    (row2HasContent() ? 1 : 0) +
+    promptBlock().length +
+    (bandTarget() ? 1 : 0);
 
   return (
     <box width="100%" height={rowHeight()} flexDirection="column">
@@ -1222,6 +1364,16 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
             left a list of rows hard to scan. The row now reads shortest to
             longest. Height is a sum, so neither `rowHeight` here nor
             SessionList's `sessionLines` changes. */}
+        <Show when={bandTarget()}>
+          <box paddingLeft={2} height={1}>
+            <text fg={dimColor(ctx, theme.subtext)}>
+              {abbreviateTarget(
+                props.session.tmuxTarget ?? "",
+                Math.max(1, effectiveWidth() - 7),
+              )}
+            </text>
+          </box>
+        </Show>
         <For each={promptBlock()}>
           {(line) => (
             <box flexDirection="row">

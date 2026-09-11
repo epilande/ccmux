@@ -1,3 +1,4 @@
+import { NEEDS_YOU_GROUP_KEY } from "../utils/grouping";
 import type {
   Responsive,
   BreakpointConfig,
@@ -165,7 +166,7 @@ const DEFAULT_COLUMNS: ColumnsConfig = {
   row1: {
     left: [
       "index",
-      { field: "status", mode: { default: "icon", sm: "short", md: "full" } },
+      "status",
       { field: "project", mode: { default: "dirname", md: "full" } },
     ],
     right: {
@@ -537,7 +538,10 @@ export function hasFieldData(
     case "time":
       return !!(session.lastUserInputAt ?? session.lastActivityAt);
     case "prompt":
-      return !!session.lastPrompt && normalizePrompt(session.lastPrompt) !== "";
+      return (
+        !!getAttentionLabel(session) ||
+        (!!session.lastPrompt && normalizePrompt(session.lastPrompt) !== "")
+      );
     case "cwd":
       return !!(session.paneCwd ?? session.cwd);
     case "branch":
@@ -966,7 +970,7 @@ export function fitProjectCell(
 export function entryRightWidth(entry: ResolvedEntry): number {
   switch (entry.field) {
     case "status":
-      return entry.mode === "full" ? 9 : entry.mode === "short" ? 6 : 1;
+      return 1;
     case "agent":
       return entry.mode === "short" ? 2 : 8;
     case "version":
@@ -983,3 +987,22 @@ export function entryRightWidth(entry: ResolvedEntry): number {
 }
 
 export type { StatusMode };
+
+/** A header may name several repos under tmux grouping: never guess which one's facts it means. */
+export function groupWorktreeFacts(
+  header: Extract<import("../utils/grouping").FlatItem, { type: "header" }>,
+  repos: import("../../daemon/worktree-list").WorktreeRepo[],
+): string | undefined {
+  if (header.groupKey === NEEDS_YOU_GROUP_KEY) return undefined;
+  const roots = new Set(
+    header.members.map(
+      ({ session }) => session.mainRepoRoot ?? session.worktreeRoot,
+    ),
+  );
+  if (roots.size !== 1) return undefined;
+  const repo = repos.find((repo) => roots.has(repo.repoRoot));
+  if (!repo) return undefined;
+  const linked = repo.worktrees.filter((tree) => !tree.isMain).length;
+  const main = repo.worktrees.some((tree) => tree.isMain);
+  return `${main ? "main + " : ""}${linked} worktree${linked === 1 ? "" : "s"}${repo.removable === undefined ? "" : ` · ${repo.removable} removable`}`;
+}

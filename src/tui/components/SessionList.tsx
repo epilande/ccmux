@@ -1,5 +1,18 @@
+import { getDaemonUrl } from "../../lib/config";
+import type {
+  WorktreeRepo,
+  WorktreeListResponse,
+} from "../../daemon/worktree-list";
+import { groupWorktreeFacts } from "./session-columns";
 import type { Component } from "solid-js";
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  Show,
+  onCleanup,
+} from "solid-js";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import type { EnrichedSession, TmuxSocketError } from "../../types";
@@ -12,14 +25,19 @@ import type {
 import { DEFAULT_PROMPT_DISPLAY } from "../../lib/preferences";
 import {
   type FlatItem,
+  NEEDS_YOU_GROUP_KEY,
   getSessionIndex,
   scrollTarget,
   toVisualLine,
 } from "../utils/grouping";
+import { displayWidth } from "../utils/format";
+import { groupedIdentity, waitingIdentity } from "./SessionItem";
 import { SessionItem } from "./SessionItem";
 import { GroupHeader } from "./GroupHeader";
 import type { ResolvedColumns } from "./session-columns";
 import {
+  prLabel,
+  rowHasFlexText,
   resolveLayout,
   applyPromptDisplay,
   rowHasContent,
@@ -45,6 +63,8 @@ interface SessionListProps {
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   dimmed?: boolean;
+  ageFadeAfter?: number;
+  connectionState?: string;
   sidebar?: boolean;
   /** Prompt display mode (cycled by the `p` key): inline, own row, or off. */
   promptDisplay?: PromptDisplay;
@@ -109,6 +129,44 @@ export const SessionList: Component<SessionListProps> = (props) => {
       ? Math.floor((dims().width * (100 - props.previewWidth)) / 100)
       : dims().width;
 
+  const [worktreeRepos, setWorktreeRepos] = createSignal<WorktreeRepo[]>([]);
+  const repoScope = createMemo(() =>
+    [
+      ...new Set(
+        props.items.flatMap((item) =>
+          item.type === "header"
+            ? item.members
+                .map(
+                  ({ session }) => session.mainRepoRoot ?? session.worktreeRoot,
+                )
+                .filter((root): root is string => !!root)
+            : [],
+        ),
+      ),
+    ]
+      .sort()
+      .join("\n"),
+  );
+  createEffect(() => {
+    const scope = repoScope();
+    const connected = props.connectionState;
+    setWorktreeRepos([]);
+    if (!scope || connected !== "connected") return;
+    const controller = new AbortController();
+    onCleanup(() => controller.abort());
+    fetch(`${getDaemonUrl()}/worktrees?localFacts=true`, {
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
+    })
+      .then((response) =>
+        response.ok ? (response.json() as Promise<WorktreeListResponse>) : null,
+      )
+      .then((response) => {
+        if (!controller.signal.aborted && response)
+          setWorktreeRepos(response.repos);
+      })
+      .catch(() => {});
+  });
+
   /**
    * Whether rows draw the wrapped block at all, decided ONCE for the list.
    *
@@ -144,6 +202,43 @@ export const SessionList: Component<SessionListProps> = (props) => {
       !!props.sidebar,
     );
   });
+
+  // A shared, bounded identity slot keeps branch lengths from moving every
+  // summary. Include the adjacent PR badge in the slot so it cannot break
+  // alignment either. Compact rows keep their natural full-width identity.
+  const identityWidths = createMemo(() => {
+    const widths = new Map<string, number>();
+    if (props.sidebar || !rowHasFlexText(layout().row1)) return widths;
+    const cap = Math.min(32, Math.floor(effectiveWidth() / 4));
+    for (const item of props.items) {
+      if (item.type !== "session" || !item.groupKey) continue;
+      const waiting = item.groupKey === NEEDS_YOU_GROUP_KEY;
+      if (!waiting && item.identity !== "branch") continue;
+      const session = item.filteredSession.session;
+      const text = waiting
+        ? waitingIdentity(session, cap)
+        : groupedIdentity(session, cap);
+      widths.set(
+        item.groupKey,
+        Math.min(
+          cap,
+          Math.max(widths.get(item.groupKey) ?? 0, displayWidth(text)),
+        ),
+      );
+    }
+    return widths;
+  });
+  const identityWidth = (item: Extract<FlatItem, { type: "session" }>) => {
+    if (!rowHasFlexText(rowLayout(item.filteredSession.session).row1))
+      return undefined;
+    const width = item.groupKey
+      ? identityWidths().get(item.groupKey)
+      : undefined;
+    if (width === undefined) return undefined;
+    const pr = layout().row1.left.find((entry) => entry.field === "pr");
+    const badge = pr ? prLabel(item.filteredSession.session, pr.mode) : "";
+    return Math.max(1, width - (badge ? displayWidth(badge) : 0));
+  };
 
   /**
    * The layout for a row whose block is drawn and whose agent DID write a
@@ -214,7 +309,10 @@ export const SessionList: Component<SessionListProps> = (props) => {
   const sessionLines = (session: EnrichedSession) =>
     1 +
     (rowHasContent(session, rowLayout(session).row2) ? 1 : 0) +
-    promptBlock(session).length;
+    promptBlock(session).length +
+    (props.sidebar && session.status === "waiting" && session.tmuxTarget
+      ? 1
+      : 0);
 
   createEffect(() => {
     // Re-run once the scrollbox gets real dimensions (and on later resizes).
@@ -283,12 +381,17 @@ export const SessionList: Component<SessionListProps> = (props) => {
         <>
           {index > 0 && (
             <box height={1} paddingLeft={1} paddingRight={1}>
-              <text fg={theme.border}>{"─".repeat(200)}</text>
+              <text fg={theme.border}>
+                {"─".repeat(Math.max(0, effectiveWidth() - 5))}
+              </text>
             </box>
           )}
           <GroupHeader
             label={item.label}
             count={item.count}
+            width={effectiveWidth() - 3}
+            sharedBranch={item.sharedBranch}
+            facts={groupWorktreeFacts(item, worktreeRepos())}
             collapsed={item.collapsed}
             selected={index === props.selectedIndex}
             members={item.members}
@@ -326,6 +429,11 @@ export const SessionList: Component<SessionListProps> = (props) => {
         promptBlock={promptBlock(item.filteredSession.session)}
         dimmed={props.dimmed}
         sidebar={props.sidebar}
+        identity={item.identity}
+        identityWidth={identityWidth(item)}
+        needsYou={item.groupKey === NEEDS_YOU_GROUP_KEY}
+        sharedTmuxSession={item.sharedTmuxSession}
+        ageFadeAfter={props.ageFadeAfter}
         onActivate={onActivate}
         onContextMenu={onContextMenu}
       />
