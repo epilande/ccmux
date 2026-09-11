@@ -1814,18 +1814,6 @@ export class DaemonServer {
       const response = await listAllWorktrees(repoRoots, {
         sessionsFor: (path) => byWorktree.get(path) ?? [],
       });
-      if (url.searchParams.get("localFacts") === "true") {
-        const scan = await scanRepos(repoRoots, {
-          localOnly: true,
-          sessionsFor: (path) => byWorktree.get(path) ?? [],
-        });
-        for (const repo of response.repos) {
-          repo.removable = scan.candidates.filter(
-            (candidate) =>
-              candidate.repoRoot === repo.repoRoot && !candidate.dirty,
-          ).length;
-        }
-      }
       return Response.json(response, { headers });
     } catch (err) {
       return Response.json(

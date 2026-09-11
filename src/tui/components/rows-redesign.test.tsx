@@ -212,7 +212,8 @@ describe("rows redesign", () => {
       frame = setup.captureCharFrame();
       expect(frame).not.toContain("needs you");
       expect(frame).toContain("alpha (2)");
-      expect(frame).toContain("main");
+      // A shared "main" is the default and never lifts to the header.
+      expect(frame).not.toContain("main");
     });
   }
 
@@ -258,12 +259,9 @@ describe("rows redesign", () => {
     const repo = {
       repoRoot: "/code/alpha",
       repoName: "alpha",
-      removable: 2,
       worktrees: [],
     };
-    expect(groupWorktreeFacts(header, [repo])).toBe(
-      "0 worktrees · 2 removable",
-    );
+    expect(groupWorktreeFacts(header, [repo])).toBeUndefined();
     expect(
       groupWorktreeFacts(
         { ...header, groupKey: NEEDS_YOU_GROUP_KEY, label: "needs you" },
@@ -288,7 +286,7 @@ describe("rows redesign", () => {
           selected={false}
           members={[]}
           sharedBranch="long-shared-branch"
-          facts="main + 10 worktrees · 3 removable"
+          facts="main + 10 worktrees and a long tail"
           width={28}
         />
       ),

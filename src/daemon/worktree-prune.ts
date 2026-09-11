@@ -482,9 +482,6 @@ export interface ScanDeps {
   openPR?: (cwd: string, branch: string) => PRState | null;
   /** Skip the per-repo `git fetch --prune` (tests, offline runs). */
   skipFetch?: boolean;
-  /** Read-only header facts: local refs only, no fetch, PR lookup or cache warm.
-   * Never used to authorize removal; the write endpoint reclassifies normally. */
-  localOnly?: boolean;
 }
 
 /** `N ignored <noun>s (a, b, c, +M more)`, or "" for an empty list. */
@@ -633,7 +630,7 @@ export async function scanRepo(
 
   // One network call per repo, not per worktree: this is what turns a branch
   // deleted on GitHub into a locally visible `[gone]`.
-  if (!deps.skipFetch && !deps.localOnly) await fetchPrune(repoRoot, git);
+  if (!deps.skipFetch) await fetchPrune(repoRoot, git);
 
   const [baseRefs, upstreams] = await Promise.all([
     resolveBaseRefs(repoRoot, git),
@@ -787,9 +784,7 @@ async function classifyOne(
     // its SESSIONS sit on, which is precisely this case. A miss still warms
     // the cache for the next scan (`PRResolver.get` refreshes in the
     // background), so the badge arrives a scan later rather than never.
-    const openPR = deps.localOnly
-      ? null
-      : (deps.openPR?.(path, branch) ?? null);
+    const openPR = deps.openPR?.(path, branch) ?? null;
     return {
       skip: { path, repoRoot, branch, reason },
       ...(openPR ? { open: { path, repoRoot, branch, pr: openPR } } : {}),
@@ -815,9 +810,7 @@ async function classifyOne(
   // An open PR means the work is still in flight, whatever the local refs
   // look like. Checked against the daemon's existing cache first so the
   // common case costs nothing.
-  const cachedPR = deps.localOnly
-    ? null
-    : (deps.openPR?.(path, branch) ?? null);
+  const cachedPR = deps.openPR?.(path, branch) ?? null;
   if (cachedPR) return { open: { path, repoRoot, branch, pr: cachedPR } };
 
   const mergedLocally = await isMergedInto(repoRoot, branch, ctx.baseRefs, git);
@@ -847,9 +840,7 @@ async function classifyOne(
   // either was never a candidate, gh or no gh, so it stays silent rather than
   // turning every in-flight worktree into a skip line on a broken machine.
   const lookupPR = deps.lookupPR ?? ghPRStateLookup;
-  const lookup = deps.localOnly
-    ? { ok: true as const, pr: null }
-    : await lookupPR(path, branch, ctx.hosting);
+  const lookup = await lookupPR(path, branch, ctx.hosting);
   if (!lookup.ok) {
     if (mergedLocally || upstream.gone) {
       return skip(`PR state could not be determined: ${lookup.error}`);
@@ -911,8 +902,6 @@ async function classifyEndIdle(
       reason: `an agent is ${sessions[0].status} here`,
     },
   };
-
-  if (deps.localOnly) return held;
 
   // The daemon's cache first: it is populated from the branches its SESSIONS
   // sit on, which is exactly this case, so the busy-branch answer is usually

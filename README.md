@@ -718,7 +718,7 @@ Pass an empty string to clear a side: `ccmux config set columns.row2.left ""`.
 | Field     | Modes                 | Default mode | Description                                                                              |
 | :-------- | :-------------------- | :----------- | :--------------------------------------------------------------------------------------- |
 | `index`   | —                     | —            | Row number (1–9)                                                                         |
-| `status`  | `icon` (legacy `short`/`full` accepted) | `icon`       | One glyph: `◆` waiting, animated `◐` working, dim `·` idle                                                                       |
+| `status`  | `icon` (legacy `short`/`full` accepted) | `icon`       | One glyph: `◆` waiting, animated `◐` working, dim `●` idle                                                                       |
 | `project` | `dirname`/`full`      | `dirname`    | Branch under project grouping (shared branches lift to the header); full path identity under other groupings |
 | `agent`   | `short`/`full`        | `full`       | Agent name (2-char code or full label)                                                   |
 | `version` | —                     | —            | Agent version                                                                            |
@@ -745,7 +745,7 @@ Under project grouping, the `project` cell shows only the branch or worktree nam
 
 Waiting sessions move into a pinned `needs you` band above the groups, oldest wait first. They appear once, retain repo and tmux session identity, and return to their group when the wait ends. The band disappears when empty and stays expanded through collapse-all. Search still filters sessions; `f` never removes a waiting row. Each header counts its own remaining rows.
 
-Headers belonging to one repo show `main + N worktrees · M removable`, based only on local worktrees and prune classification. Facts are omitted when the complete phrase cannot fit. Mixed-repo headers and the attention band have no repo facts. These read-only counts refresh on opening, reconnecting (`R`), or changing the displayed repo set. Local removable counts exclude dirty, locked, and occupied worktrees; the removal panel still rechecks remote PR state before offering deletion, so its count can differ.
+Headers belonging to one repo show `main + N worktrees`, based only on the local worktree list; a repo with only its main checkout shows nothing. Facts are omitted when the complete phrase cannot fit. Mixed-repo headers and the attention band have no repo facts. These read-only counts refresh on opening, reconnecting (`R`), or changing the displayed repo set.
 
 Rows idle longer than 24 hours use the dim text color. Set `ccmux config set ageFade.after 48` to change the threshold in hours, or `0` to disable fading. Active subagents keep their row bright.
 

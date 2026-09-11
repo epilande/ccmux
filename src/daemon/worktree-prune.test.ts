@@ -171,41 +171,6 @@ describe("parseWorktreeList", () => {
 });
 
 describe("scanRepo classification", () => {
-  it("local header scan never fetches or asks PR providers, and holds occupied worktrees", async () => {
-    const { repo } = await makeRepo("local-header");
-    const wt = await addWorktree(repo, "feat/done");
-    await git(repo, ["merge", "--no-ff", "-m", "merge", "feat/done"]);
-    const deps = {
-      localOnly: true,
-      git: (cwd: string, args: string[]) => {
-        expect(args[0]).not.toBe("fetch");
-        return runGit(cwd, args);
-      },
-      lookupPR: async (): Promise<PRLookupResult> => {
-        throw new Error("unexpected PR lookup");
-      },
-      openPR: (): PRState | null => {
-        throw new Error("unexpected cache warm");
-      },
-    };
-    const scan = await scanRepo(repo, deps);
-    expect(scan.candidates).toHaveLength(1);
-    expect(scan.candidates[0]).toMatchObject({
-      path: normalizePath(wt),
-      reason: "merged-locally",
-      dirty: false,
-    });
-    for (const status of ["idle", "working", "waiting"] as const) {
-      const occupied = await scanRepo(repo, {
-        ...deps,
-        sessionsFor: () => [session({ status })],
-      });
-      expect(occupied.candidates).toHaveLength(0);
-    }
-    await git(repo, ["worktree", "lock", wt]);
-    expect((await scanRepo(repo, deps)).candidates).toHaveLength(0);
-  });
-
   it("classifies a locally merged branch as merged-locally", async () => {
     const { repo } = await makeRepo("merged-locally");
     const wt = await addWorktree(repo, "feat/done");

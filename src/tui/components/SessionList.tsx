@@ -154,7 +154,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
     if (!scope || connected !== "connected") return;
     const controller = new AbortController();
     onCleanup(() => controller.abort());
-    fetch(`${getDaemonUrl()}/worktrees?localFacts=true`, {
+    fetch(`${getDaemonUrl()}/worktrees`, {
       signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
     })
       .then((response) =>

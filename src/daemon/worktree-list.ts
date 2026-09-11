@@ -82,8 +82,6 @@ export interface WorktreeRow {
 
 /** One repo's worktrees, main checkout first. */
 export interface WorktreeRepo {
-  /** Local classification count, present only when localFacts was requested. */
-  removable?: number;
   repoRoot: string;
   repoName: string;
   worktrees: WorktreeRow[];

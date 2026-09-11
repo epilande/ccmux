@@ -598,7 +598,7 @@ const FieldCell: Component<{
           ? "◆"
           : effective().status === "working"
             ? spinner()
-            : "·";
+            : "●";
       return (
         <box width={1}>
           <text

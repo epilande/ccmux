@@ -80,8 +80,8 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
       { text: `${indicator()} `, color: theme.overlay },
       { text: props.label, color: theme.text },
       { text: ` (${props.count})`, color: theme.overlay },
-      ...(props.sharedBranch &&
-      !(props.sharedBranch === "main" && props.facts?.startsWith("main + "))
+      // A shared "main" is the default and says nothing; only a non-default shared branch lifts up.
+      ...(props.sharedBranch && props.sharedBranch !== "main"
         ? [{ text: `   ${props.sharedBranch}`, color: theme.blue }]
         : []),
       ...(props.facts

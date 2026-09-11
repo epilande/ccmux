@@ -2002,7 +2002,7 @@ describe("App invoke row rendering", () => {
     });
     await setup.renderOnce();
     const doneFrame = setup.captureCharFrame();
-    expect(doneFrame).toContain("·");
+    expect(doneFrame).toContain("●");
     expect(doneFrame).not.toContain("done");
     expect(doneFrame).not.toContain("working");
   });

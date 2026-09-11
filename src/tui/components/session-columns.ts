@@ -1003,6 +1003,7 @@ export function groupWorktreeFacts(
   const repo = repos.find((repo) => roots.has(repo.repoRoot));
   if (!repo) return undefined;
   const linked = repo.worktrees.filter((tree) => !tree.isMain).length;
+  if (linked === 0) return undefined; // a repo with only its main checkout says nothing
   const main = repo.worktrees.some((tree) => tree.isMain);
-  return `${main ? "main + " : ""}${linked} worktree${linked === 1 ? "" : "s"}${repo.removable === undefined ? "" : ` · ${repo.removable} removable`}`;
+  return `${main ? "main + " : ""}${linked} worktree${linked === 1 ? "" : "s"}`;
 }

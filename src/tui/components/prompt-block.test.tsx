@@ -64,7 +64,7 @@ async function render(
 function identityLine(frame: string, n: number): number {
   return frame
     .split("\n")
-    .findIndex((l) => new RegExp(`^\\s*${n} [·◆◐◑◒◓]`).test(l));
+    .findIndex((l) => new RegExp(`^\\s*${n} [●◆◐◑◒◓]`).test(l));
 }
 
 /** Lines of the frame that carry any of the prompt's own words. */
@@ -119,7 +119,7 @@ describe("wrapped prompt block", () => {
     const W = 60;
     const items = [item("a", LONG), item("b", "SECOND")];
     const secondRow = (frame: string) =>
-      frame.split("\n").findIndex((l) => /^\s*2 [·◆◐◑◒◓]/.test(l));
+      frame.split("\n").findIndex((l) => /^\s*2 [●◆◐◑◒◓]/.test(l));
 
     const flat = await render(items, 0, W);
     const baseline = secondRow(flat);
@@ -137,8 +137,8 @@ describe("wrapped prompt block", () => {
   it("gives a session with no prompt no block at all", async () => {
     const frame = await render([item("a", null), item("b", "SECOND")], 4);
     const rows = frame.split("\n");
-    const first = rows.findIndex((l) => /^\s*1 [·◆◐◑◒◓]/.test(l));
-    const second = rows.findIndex((l) => /^\s*2 [·◆◐◑◒◓]/.test(l));
+    const first = rows.findIndex((l) => /^\s*1 [●◆◐◑◒◓]/.test(l));
+    const second = rows.findIndex((l) => /^\s*2 [●◆◐◑◒◓]/.test(l));
     expect(second - first).toBe(1);
   });
 
@@ -177,7 +177,7 @@ describe("wrapped prompt block", () => {
   it("caps a runaway prompt at the configured height", async () => {
     const huge = Array.from({ length: 400 }, (_, i) => `word${i}`).join(" ");
     const frame = await render([item("a", huge), item("b", "SECOND")], 3);
-    const second = frame.split("\n").findIndex((l) => /^\s*2 [·◆◐◑◒◓]/.test(l));
+    const second = frame.split("\n").findIndex((l) => /^\s*2 [●◆◐◑◒◓]/.test(l));
     // identity + 3 capped lines, no matter how long the prompt is.
     expect(second).toBe(4);
     expect(frame).toContain("…");

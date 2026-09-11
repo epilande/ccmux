@@ -210,7 +210,7 @@ describe("SessionItem", () => {
     const frame = await renderItem({
       session: mockEnrichedSession({ status: "idle" }),
     });
-    expect(frame).toContain("·");
+    expect(frame).toContain("●");
     expect(frame).not.toContain("idle");
   });
 
@@ -244,7 +244,7 @@ describe("SessionItem", () => {
         originInvocationStatus: "succeeded",
       }),
     });
-    expect(frame).toContain("·");
+    expect(frame).toContain("●");
     expect(frame).not.toContain("done");
   });
 
@@ -259,7 +259,7 @@ describe("SessionItem", () => {
         originInvocationStatus: "failed",
       }),
     });
-    expect(frame).toContain("·");
+    expect(frame).toContain("●");
     expect(frame).not.toContain("failed");
   });
 
