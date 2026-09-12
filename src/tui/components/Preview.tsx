@@ -33,7 +33,9 @@ import {
   formatRelativeTime,
   formatSubagentName,
   formatVersion,
+  displayWidth,
   shortenCwd,
+  truncateMiddle,
   truncateText,
 } from "../utils/format";
 
@@ -409,6 +411,22 @@ export const Preview: Component<PreviewProps> = (props) => {
     return s.status === "idle" && attn ? "done" : (eff?.status ?? "");
   };
 
+  /**
+   * What the project name may spend on the header's first row.
+   *
+   * Both cells of that row used to be unbounded, so Yoga's default shrink
+   * split the overflow between them and a long project name ate the status
+   * badge. The badge is the row's fixed part (it is what the row exists to
+   * report), so it keeps its width and the name truncates into whatever is
+   * left, one column of gap included. Every other header row is already
+   * truncated to `separatorWidth`; this is the one that was not.
+   */
+  const statusBadge = createMemo(() => `${statusIcon()} ${statusText()}`);
+
+  const projectWidth = createMemo(() =>
+    Math.max(1, separatorWidth() - displayWidth(statusBadge()) - 1),
+  );
+
   /** Live subagents for the Agents section; capped so a large fan-out
    * doesn't crowd out the pane content below. */
   const AGENTS_SHOWN_MAX = 4;
@@ -455,14 +473,19 @@ export const Preview: Component<PreviewProps> = (props) => {
         when={props.session}
         fallback={<text fg={theme.overlay}>Select a session to preview</text>}
       >
-        <box height={title() ? 5 : 4} flexDirection="column">
-          <box flexDirection="row">
+        {/* Each header field is one locked row. Directory and metadata used
+            to wrap inside a title()?5:4 budget; Yoga then shrank the
+            summary wrapper and the directory painted over the title
+            (`/tmp/.../apilayout`). Truncate to the column and pin
+            height=1 / flexShrink=0 so wrap cannot steal a neighbour. */}
+        <box height={title() ? 5 : 4} flexDirection="column" flexShrink={0}>
+          <box flexDirection="row" height={1} flexShrink={0}>
             <box flexGrow={1}>
-              <text fg={theme.text}>
-                <b>{props.session!.project}</b>
+              <text fg={theme.text} wrapMode="none">
+                <b>{truncateText(props.session!.project, projectWidth())}</b>
               </text>
             </box>
-            <text fg={statusColor()}>
+            <text fg={statusColor()} wrapMode="none" flexShrink={0}>
               {statusIcon()} {statusText()}
             </text>
           </box>
@@ -471,17 +494,31 @@ export const Preview: Component<PreviewProps> = (props) => {
               to the END of the parent box (opentui insertion anchor),
               landing the title under the separator. The always-mounted box
               pins its slot in the column order. Same fix pattern as the
-              transcript slot in BackgroundPeek. */}
-          <box flexDirection="column">
+              transcript slot in BackgroundPeek. height 0 when empty so the
+              four-row header does not keep a blank gap. */}
+          <box height={title() ? 1 : 0} flexDirection="column" flexShrink={0}>
             <Show when={title()}>
-              <text fg={theme.text}>{truncateText(title() ?? "", separatorWidth())}</text>
+              <text fg={theme.text} wrapMode="none">
+                {truncateText(title() ?? "", separatorWidth())}
+              </text>
             </Show>
           </box>
-          <text fg={theme.subtext}>
-            {shortenCwd(props.session!.paneCwd ?? props.session!.cwd)}
-          </text>
-          <text fg={theme.overlay}>{metadataLine()}</text>
-          <text fg={theme.border}>{"─".repeat(separatorWidth())}</text>
+          <box height={1} flexShrink={0}>
+            <text fg={theme.subtext} wrapMode="none">
+              {truncateMiddle(
+                shortenCwd(props.session!.paneCwd ?? props.session!.cwd),
+                separatorWidth(),
+              )}
+            </text>
+          </box>
+          <box height={1} flexShrink={0}>
+            <text fg={theme.overlay} wrapMode="none">
+              {truncateText(metadataLine(), separatorWidth())}
+            </text>
+          </box>
+          <box height={1} flexShrink={0}>
+            <text fg={theme.border}>{"─".repeat(separatorWidth())}</text>
+          </box>
         </box>
 
         <Show when={liveSubagents().length > 0}>
