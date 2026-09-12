@@ -11,6 +11,7 @@ import type {
 } from "../../daemon/worktree-list";
 import {
   SourcePicker,
+  type SourcePickerProps,
   sourcePickerLayout,
   sourceRowHeight,
 } from "./SourcePicker";
@@ -108,6 +109,10 @@ async function mount(
     initialFilter?: string;
     initialCursor?: string | null;
     compact?: boolean;
+    actions?: Pick<
+      SourcePickerProps,
+      "onReview" | "onKill" | "onRestart" | "onNew" | "onScope"
+    >;
   } = {},
 ) {
   // BEFORE `testRender`, so the component's first load cannot reach a real
@@ -117,6 +122,12 @@ async function mount(
   setup = await testRender(
     () => (
       <SourcePicker
+        activeSessionId="s1"
+        {...opts.actions}
+        effects={{
+          openUrl: () => true,
+          copyText: () => ({ osc52: true, local: false }),
+        }}
         repo={opts.repo ?? "/repo"}
         cwd="/repo"
         compact={opts.compact}
@@ -187,15 +198,15 @@ async function mountSettled(
 }
 
 describe("SourcePicker", () => {
-  it("lists both sources under their own headers, with counts", async () => {
+  it("lists both sources under one repo header with its count", async () => {
     const harness = await mountSettled({
       prs: [openPR()],
       issues: [openIssue()],
     });
     const frame = await harness.frame();
 
-    expect(frame).toContain("Pull requests 1");
-    expect(frame).toContain("Issues 1");
+    expect(frame).toContain("repo (2)");
+    expect(frame).toContain("#144");
     expect(frame).toContain("#156 park the renderer while hidden");
     expect(frame).toContain("#144 Notifications are swallowed");
     // The count sits against its own label: in this TUI `·` divides PEERS.
@@ -234,9 +245,9 @@ describe("SourcePicker", () => {
     });
     const frame = await harness.frame();
 
-    expect(frame).toContain("Pull requests 1");
-    expect(frame).toContain("checking GitHub");
-    expect(frame).not.toContain("Issues 0");
+    expect(frame).toContain("repo (1)");
+    expect(frame).toContain("Checking GitHub");
+    expect(frame).not.toContain("#144");
   });
 
   /**
@@ -259,7 +270,6 @@ describe("SourcePicker", () => {
     });
     const frame = await harness.frame();
 
-    expect(frame).toContain("Issues unavailable");
     expect(frame).toContain("ccmux daemon restart");
     // And it costs only its own section.
     expect(frame).toContain("#156 park the renderer while hidden");
@@ -270,7 +280,7 @@ describe("SourcePicker", () => {
       prs: [openPR()],
       worktrees: [worktreeRow({ name: "parking", tip: "sha-156" })],
     });
-    expect(await harness.frame()).toContain("checked out in parking");
+    expect(await harness.frame()).toContain("→ parking");
   });
 
   it("marks an issue whose worktree a previous spawn cut", async () => {
@@ -278,9 +288,7 @@ describe("SourcePicker", () => {
       issues: [openIssue()],
       worktrees: [worktreeRow({ name: "issue-144-notifications" })],
     });
-    expect(await harness.frame()).toContain(
-      "checked out in issue-144-notifications",
-    );
+    expect(await harness.frame()).toContain("→ issue-144");
   });
 });
 
@@ -646,8 +654,8 @@ describe("SourcePicker filter", () => {
 
     // A repo whose rows all failed to match keeps its headers and says zero,
     // which is the answer to "is it in this one".
-    expect(frame).toContain("Pull requests 0");
-    expect(frame).toContain("Issues 1");
+    expect(frame).not.toContain("#156");
+    expect(frame).toContain("#144");
   });
 
   it("says nothing matches rather than drawing an empty list", async () => {
@@ -698,14 +706,14 @@ describe("SourcePicker filter", () => {
       initialFilter: "park",
     });
     // A carried query opens in the filter, so the row is there to leave.
-    expect(await harness.frame()).toContain("Issues 0");
+    expect(await harness.frame()).not.toContain("#144");
 
     await harness.escape();
     const frame = await harness.frame();
 
     expect(frame).not.toContain("Filter pull requests");
     // The whole list is back, both sections restated.
-    expect(frame).toContain("Issues 1");
+    expect(frame).toContain("#144");
     expect(frame).toContain("#144");
     // And the first Esc did not close the surface.
     expect(harness.picked.closes).toBe(0);
@@ -1024,7 +1032,7 @@ describe("SourcePicker filter", () => {
     // Refresh: the issue read is in flight again, and the cursor's row is
     // gone with it. The hold must come back rather than the PR inheriting
     // the cursor.
-    harness.keys.pressKey("r");
+    harness.keys.pressKey("R");
     await harness.frame();
     harness.keys.pressEnter();
     await harness.frame();
@@ -1091,7 +1099,7 @@ describe("SourcePicker filter", () => {
     // landing on the PR that answered first.
     harness.keys.pressKey("j");
     await harness.frame();
-    harness.keys.pressKey("r");
+    harness.keys.pressKey("R");
     await harness.frame();
     harness.keys.pressEnter();
     await harness.frame();
@@ -1160,8 +1168,8 @@ describe("sourcePickerLayout", () => {
 
     // Line 0 is the PR header, so the PR row starts at 1 and is two lines
     // tall; the Issues header takes line 3 and its row starts at 4.
-    expect(layout.get("pr:/repo#156")).toEqual({ line: 1, height: 2 });
-    expect(layout.get("issue:/repo#144")).toEqual({ line: 4, height: 2 });
+    expect(layout.get("pr:/repo#156")).toEqual({ line: 0, height: 1 });
+    expect(layout.get("issue:/repo#144")).toEqual({ line: 1, height: 1 });
   });
 
   it("counts a repo header too, where one is drawn", () => {
@@ -1171,7 +1179,7 @@ describe("sourcePickerLayout", () => {
       (row) => sourceRowHeight(row),
       { repoHeaders: true },
     );
-    expect(withHeader.get("pr:/repo#156")?.line).toBe(2);
+    expect(withHeader.get("pr:/repo#156")?.line).toBe(1);
   });
 
   it("places a one-line row as one line", () => {
@@ -1184,6 +1192,103 @@ describe("sourcePickerLayout", () => {
     const layout = sourcePickerLayout(built, (row) => sourceRowHeight(row), {
       repoHeaders: false,
     });
-    expect(layout.get("issue:/repo#144")).toEqual({ line: 2, height: 1 });
+    expect(layout.get("issue:/repo#144")).toEqual({ line: 0, height: 1 });
   });
+});
+
+describe("Start key convergence", () => {
+  it("marks in the index column and kills attached sessions, never the source", async () => {
+    const killed: string[][] = [];
+    const harness = await mountSettled({
+      prs: [openPR()],
+      issues: [openIssue()],
+      worktrees: [
+        worktreeRow({
+          tip: "sha-156",
+          sessions: [
+            {
+              id: "s1",
+              agentType: "gemini",
+              status: "idle",
+              tmuxPane: "%1",
+              tmuxTarget: "test:1.0",
+              pid: 1,
+            },
+          ],
+        }),
+      ],
+      actions: { onKill: (ids) => killed.push(ids) },
+    });
+    harness.keys.pressKey(" ");
+    expect(await harness.frame()).toContain("▎✓ ●");
+    harness.keys.pressKey("j");
+    harness.keys.pressKey("x");
+    await harness.frame();
+    expect(killed).toEqual([["s1"]]);
+    harness.keys.pressKey("A", { shift: true });
+    harness.keys.pressKey("x");
+    expect(await harness.frame()).toContain("No attached sessions");
+    expect(killed).toHaveLength(1);
+  });
+  it("uses d for working-tree review, D for branch review and r for restart", async () => {
+    const reviews: boolean[] = [];
+    const restarts: string[] = [];
+    const harness = await mountSettled({
+      prs: [openPR()],
+      worktrees: [
+        worktreeRow({
+          tip: "sha-156",
+          sessions: [
+            {
+              id: "s1",
+              agentType: "gemini",
+              status: "idle",
+              tmuxPane: "%1",
+              tmuxTarget: "test:1.0",
+              pid: 1,
+            },
+          ],
+        }),
+      ],
+      actions: {
+        onReview: (target) => reviews.push(target.branch),
+        onRestart: (id) => restarts.push(id),
+      },
+    });
+    harness.keys.pressKey("d");
+    harness.keys.pressKey("D", { shift: true });
+    harness.keys.pressKey("r");
+    await harness.frame();
+    expect(reviews).toEqual([false, true]);
+    expect(restarts).toEqual(["s1"]);
+  });
+  it("lets Enter collapse a header and Space mark its group", async () => {
+    const harness = await mountSettled({
+      prs: [openPR()],
+      issues: [openIssue()],
+    });
+    harness.keys.pressKey("k");
+    harness.keys.pressKey(" ");
+    expect(
+      (await harness.frame()).split("\n").filter((l) => l.includes("✓")),
+    ).toHaveLength(2);
+    harness.keys.pressEnter();
+    expect(await harness.frame()).not.toContain("#156");
+    harness.keys.pressKey("z");
+    harness.keys.pressKey("r");
+    expect(await harness.frame()).toContain("#156");
+  });
+});
+
+it("keeps the PR number and checkout arrow readable in a compact overlay", async () => {
+  const h = await mountSettled({
+    width: 30,
+    height: 30,
+    compact: true,
+    prs: [openPR()],
+    worktrees: [worktreeRow({ tip: "sha-156" })],
+  });
+  const frame = await h.frame();
+  expect(frame).toContain("#156");
+  expect(frame).toContain("→ a");
 });

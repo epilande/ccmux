@@ -315,6 +315,8 @@ export type ThemeConfig =
 export interface Preferences {
   /** Idle hours before rows fade; 0 disables. Default 24. */
   ageFade?: { after?: number };
+  /** Show and refresh GitHub facts in session headers (default true). */
+  headerFacts?: { pr?: boolean };
   showPreview?: boolean;
   iconStyle?: IconStyle;
   previewWidth?: number;

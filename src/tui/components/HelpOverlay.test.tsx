@@ -25,13 +25,13 @@ describe("HelpOverlay", () => {
   it("renders Navigation section", async () => {
     const frame = await renderHelp();
     expect(frame).toContain("Navigation");
-    expect(frame).toContain("Navigate sessions");
+    expect(frame).toContain("Move cursor");
   });
 
   it("renders Actions section", async () => {
     const frame = await renderHelp();
     expect(frame).toContain("Actions");
-    expect(frame).toContain("Switch to session");
+    expect(frame).toContain("Go / toggle group");
     expect(frame).toContain("Enter");
   });
 
@@ -132,8 +132,8 @@ describe("HelpOverlay sidebar mode", () => {
 
   it("shows q without Esc for quit in sidebar mode", async () => {
     const frame = await renderSidebarHelp();
-    expect(frame).toContain("Quit");
-    expect(frame).not.toContain("q / Esc");
+    expect(frame).toContain("Back, then quit");
+    expect(frame).toContain("q / Esc");
   });
 
   it("shows scroll hint in close instruction", async () => {
@@ -168,7 +168,8 @@ describe("HelpOverlay reviewable", () => {
     expect(frame).toContain("Working tree / branch");
   });
 
-  it("keeps the last row visible with every Actions row present", async () => {
+  it("reaches the last action by scrolling with every action present", async () => {
+    let ref: ScrollBoxRenderable | undefined;
     // The tallest the two-column layout ever gets: `reviewable` adds `d` on
     // top of `n` and `F`. Overflow here is SILENT — the scrollbox scrolls,
     // the trailing section slides out of frame, and the overlay still looks
@@ -176,15 +177,23 @@ describe("HelpOverlay reviewable", () => {
     // the top. Two features have already had to raise these heights; this is
     // what turns the next overflow into a failing test instead of a bug
     // report about a missing Quit row.
-    setup = await testRender(() => <HelpOverlay reviewable />, {
-      width: 100,
-      height: 30,
-    });
+    setup = await testRender(
+      () => (
+        <HelpOverlay
+          reviewable
+          onScrollboxRef={(r) => {
+            ref = r;
+          }}
+        />
+      ),
+      { width: 100, height: 30 },
+    );
+    await setup.renderOnce();
+    ref!.scrollTo(1000);
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
     expect(frame).toContain("Fork session");
-    expect(frame).toContain("Other");
-    expect(frame).toContain("Quit");
+    expect(frame).toContain("Toggle hide idle");
   });
 
   it("omits the review diff row when not reviewable", async () => {

@@ -1,3 +1,11 @@
+import { useStatusIcon } from "../utils/useStatusIcon";
+import { GroupHeader } from "./GroupHeader";
+import { factsText } from "../utils/repo-facts";
+import type { ViewMemory } from "../actions";
+import type { RepoFactsResponse } from "../../daemon/repo-facts";
+import type { PanelEffects } from "./WorktreesPanel";
+import { useRenderer } from "@opentui/solid";
+import { displayWidth } from "../utils/format";
 import type { Component } from "solid-js";
 import {
   For,
@@ -6,6 +14,7 @@ import {
   createMemo,
   createSignal,
   onMount,
+  onCleanup,
 } from "solid-js";
 import { useKeyboard } from "@opentui/solid";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
@@ -19,18 +28,10 @@ import { theme } from "../theme";
 import { truncateText } from "../utils/format";
 import { fetchOpenIssues, fetchOpenPRs } from "../utils/source-lists";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
-import { useStatusIcon } from "../utils/useStatusIcon";
 import { fitHints } from "./Footer";
 import { isPRRowKey } from "./pr-rows";
+import { scrollTargetFor, type VisualLayout } from "./row-segments";
 import {
-  fitSegments,
-  scrollTargetFor,
-  type RowSegment,
-  type VisualLayout,
-} from "./row-segments";
-import {
-  ISSUES_SECTION,
-  PRS_SECTION,
   buildSourceRepos,
   checkedOutPathFor,
   emptyStateText,
@@ -38,8 +39,6 @@ import {
   hasRows,
   isIssueRowKey,
   pickerRows,
-  sectionText,
-  sourceDetailPhrases,
   sourceRowDim,
   sourceRowLabel,
   sourceRowMarker,
@@ -47,38 +46,23 @@ import {
   type SourceRow,
 } from "./source-picker-rows";
 
-/**
- * The source picker (issue #151): one filterable list of a repo's open pull
- * requests and open issues, whose only verb is Enter.
- *
- * It is the SOURCE SELECTOR for a spawn, in the daemon's own vocabulary
- * (`gh-spawn-source.ts`). Pick a row and the existing new-session dialog
- * opens in the matching mode to cut a worktree and start an agent in it; pick
- * one already checked out and it jumps to the checkout instead. It is not a
- * survey — that is the Worktrees panel's PR view — and it renders nothing
- * that view does not already know how to render.
- *
- * Both sources share ONE list rather than two tabs, and the filter is why:
- * typing `notif` should reach a PR and an issue at once, because a user
- * remembers the words and not whether the thing they remember was filed as
- * one or the other. A tab boundary would answer a question nobody asked, and
- * a match on the far side of it would read as "nothing matches".
- *
- * The surface opens in NAV mode and `/` starts the filter, rather than being
- * permanently in search mode. That is a deliberate reversal of the first
- * design: one key means one thing on every surface here, so `j`/`k` move and
- * `q` closes exactly as they do in the panel and the picker.
- *
- * The filter row follows the session picker's search row exactly, down to
- * Esc: it is DRAWN only while filtering, and leaving clears what was typed
- * (`exitSearchMode` in `store.ts`). Those two halves are one decision. A row
- * that hid while the query stayed applied would leave a list narrowed to
- * three of forty with nothing on screen saying why.
- */
+/** Start is one filterable list across PRs and issues. Enter starts work or
+ * opens the checkout already holding the source. `/` gives the input the
+ * keyboard; Esc clears it before returning to navigation. */
 
 /** Independent of the list read, so a slow GitHub cannot hold up the local
  *  worktrees that mark a row as already checked out. */
 const LIST_TIMEOUT_MS = 20_000;
+export function sourceAge(
+  createdAt: string | null | undefined,
+  now = Date.now(),
+): string {
+  if (!createdAt) return "";
+  const ms = now - Date.parse(createdAt);
+  if (!Number.isFinite(ms)) return "";
+  const days = Math.max(0, Math.floor(ms / 86_400_000));
+  return days ? `${days}d` : `${Math.max(0, Math.floor(ms / 3_600_000))}h`;
+}
 
 /** How the two GitHub reads are announced while they are in flight. */
 type LoadPhase = "loading" | "list" | "error";
@@ -91,6 +75,27 @@ export interface SourcePickerOrigin {
 }
 
 export interface SourcePickerProps {
+  activeSessionId?: string | null;
+  effects: PanelEffects;
+  facts?: RepoFactsResponse;
+  memory?: ViewMemory;
+  onRemember?: (memory: ViewMemory) => void;
+  embedded?: boolean;
+  enabled?: boolean;
+  onNavigate?: (event: KeyEvent, repo: string | null) => boolean;
+  onScope?: (repo: string | null) => void;
+  onRefresh?: () => void;
+  onNew?: (cwd: string) => void;
+  onRestart?: (id: string) => void;
+  onKill?: (ids: string[]) => void;
+  onReview?: (target: {
+    path: string;
+    sessionId: string | null;
+    branch: boolean;
+    cursor: string;
+    filter: string;
+  }) => void;
+
   /** Main checkout to scope to; null lists every known repo. */
   repo: string | null;
   /** The caller's directory, additive to `repo`, exactly as on `/worktrees`. */
@@ -128,15 +133,16 @@ export interface SourcePickerProps {
 }
 
 /** Columns before a row's content: a space, the marker, a space. */
-const ROW_GUTTER = 3;
+
 /** Columns the scrollbox keeps for its scrollbar. */
 const SCROLLBAR_GUTTER = 1;
 /** The separator between detail phrases, muted so the facts carry the line. */
-const PHRASE_SEPARATOR = " · ";
 
-/** How tall a row draws: one line, plus a detail line when it has one. */
+/** All source rows occupy one visual line. */
 export function sourceRowHeight(row: SourceRow, compact = false): number {
-  return 1 + (sourceDetailPhrases(row, { compact }).length > 0 ? 1 : 0);
+  void row;
+  void compact;
+  return 1;
 }
 
 /**
@@ -156,9 +162,11 @@ export function sourcePickerLayout(
   const layout: VisualLayout = new Map();
   let line = 0;
   for (const repo of repos) {
-    if (opts.repoHeaders) line += 1;
+    if (opts.repoHeaders) {
+      layout.set(`repo:${repo.repoRoot}`, { line, height: 1 });
+      line += 1;
+    }
     for (const section of [repo.prs, repo.issues]) {
-      line += 1; // the section header
       for (const row of section) {
         const height = heightOf(row);
         layout.set(row.key, { line, height });
@@ -169,13 +177,21 @@ export function sourcePickerLayout(
   return layout;
 }
 
-/** Repo headers are drawn only where there is more than one repo to name. */
+/** Even a single repository retains its group header. */
 export function showsRepoHeaders(repos: SourceRepo[]): boolean {
-  return repos.length > 1;
+  return repos.length > 0;
 }
 
 export const SourcePicker: Component<SourcePickerProps> = (props) => {
   const dims = useSharedTerminalDimensions();
+  const renderer = useRenderer();
+  const [scope, setScope] = createSignal(props.repo);
+  const [marks, setMarks] = createSignal(new Set<string>(props.memory?.marks));
+  const [collapsed, setCollapsed] = createSignal(
+    new Set<string>(props.memory?.collapsed),
+  );
+  let pendingG = false;
+  let pendingZ = false;
 
   const [phase, setPhase] = createSignal<LoadPhase>("loading");
   const [prs, setPrs] = createSignal<PRListResponse | null>(null);
@@ -186,7 +202,9 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     null,
   );
   const [error, setError] = createSignal<string | null>(null);
-  const [filter, setFilter] = createSignal(props.initialFilter ?? "");
+  const [filter, setFilter] = createSignal(
+    props.initialFilter ?? props.memory?.filter ?? "",
+  );
   /**
    * Whether the filter input has the keyboard. `/` enters, Esc leaves.
    *
@@ -195,10 +213,10 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
    * from a cancelled dialog restores the state the pick was made from.
    */
   const [filtering, setFiltering] = createSignal(
-    (props.initialFilter ?? "") !== "",
+    (props.initialFilter ?? props.memory?.filter ?? "") !== "",
   );
   const [cursorKey, setCursorKey] = createSignal<string | null>(
-    props.initialCursor ?? null,
+    props.initialCursor ?? props.memory?.cursor ?? null,
   );
   /**
    * Whether the user has typed into the filter. Releases the cursor hold
@@ -210,19 +228,31 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   const [filterEdited, setFilterEdited] = createSignal(false);
   const [note, setNote] = createSignal<string | null>(null);
   const [scrollboxLayout, setScrollboxLayout] = createSignal(0);
+  createEffect(() =>
+    props.onRemember?.({
+      scope: scope(),
+      cursor: cursorKey(),
+      marks: [...marks()],
+      collapsed: [...collapsed()],
+      filter: filter(),
+    }),
+  );
   let listBox: ScrollBoxRenderable | undefined;
   let loadGeneration = 0;
+  onCleanup(() => {
+    loadGeneration++;
+  });
   let activating = false;
 
   const width = () => dims().width;
   /** The box less its border and padding. */
-  const contentWidth = () => Math.max(8, width() - 4);
+  const contentWidth = () => Math.max(8, width() - (props.embedded ? 2 : 4));
   /** Inside the scrollbox, which keeps a column for its bar. */
   const listWidth = () => Math.max(4, contentWidth() - SCROLLBAR_GUTTER);
 
   function worktreesUrl(): URL {
     const listUrl = new URL(`${getDaemonUrl()}/worktrees`);
-    if (props.repo) listUrl.searchParams.set("repo", props.repo);
+    if (scope()) listUrl.searchParams.set("repo", scope()!);
     if (props.cwd) listUrl.searchParams.set("cwd", props.cwd);
     return listUrl;
   }
@@ -263,7 +293,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       });
 
     const query = {
-      repo: props.repo,
+      repo: scope(),
       cwd: props.cwd,
       refresh: opts.refresh,
     };
@@ -297,7 +327,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       issues: issues(),
       issueError: issueError(),
       worktrees: worktrees(),
-      home: props.repo,
+      home: scope(),
     }),
   );
 
@@ -313,7 +343,42 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   const visible = createMemo(() =>
     worktrees() === null ? [] : filterRepos(repos(), filter()),
   );
-  const rows = createMemo(() => pickerRows(visible()));
+  const rows = createMemo(() =>
+    pickerRows(visible().filter((r) => !collapsed().has(r.repoRoot))),
+  );
+  const navKeys = createMemo(() =>
+    visible()
+      .filter((r) => r.prs.length + r.issues.length > 0)
+      .flatMap((r) => [
+        `repo:${r.repoRoot}`,
+        ...(collapsed().has(r.repoRoot)
+          ? []
+          : [...r.prs, ...r.issues].map((row) => row.key)),
+      ]),
+  );
+  const headerRepo = () =>
+    visible().find((r) => `repo:${r.repoRoot}` === cursorKey());
+  const currentRepo = () =>
+    headerRepo()?.repoRoot ?? cursorRow()?.repoRoot ?? scope();
+  function toggleGroup(root: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(root)) next.delete(root);
+      else next.add(root);
+      return next;
+    });
+  }
+  function mark(keys: string[]) {
+    setMarks((prev) => {
+      const next = new Set(prev);
+      const remove = keys.every((k) => next.has(k));
+      for (const k of keys) {
+        if (remove) next.delete(k);
+        else next.add(k);
+      }
+      return next;
+    });
+  }
   const repoHeaders = createMemo(() => showsRepoHeaders(visible()));
 
   const cursorIndex = createMemo(() => {
@@ -340,7 +405,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
 
   /** The row a key acts on, or null while held — the no-row path Enter has. */
   const cursorRow = createMemo(() =>
-    cursorHeld() ? null : (rows()[cursorIndex()] ?? null),
+    cursorHeld() || headerRepo() ? null : (rows()[cursorIndex()] ?? null),
   );
 
   /**
@@ -372,7 +437,8 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     const live = rows();
     if (live.length === 0) return;
     const key = cursorKey();
-    if (key !== null && live.some((row) => row.key === key)) return;
+    if (key !== null && (headerRepo() || live.some((row) => row.key === key)))
+      return;
     // "Not delivered YET" is not "gone": the three reads land independently,
     // so a seeded key can be absent for reasons the filter had no part in.
     // Clobbering it is unrecoverable — the cursor then names a row that DOES
@@ -386,7 +452,11 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
 
   const layout = createMemo(() =>
     sourcePickerLayout(
-      visible(),
+      visible()
+        .filter((r) => r.prs.length + r.issues.length > 0)
+        .map((r) =>
+          collapsed().has(r.repoRoot) ? { ...r, prs: [], issues: [] } : r,
+        ),
       (row) => sourceRowHeight(row, props.compact === true),
       { repoHeaders: repoHeaders() },
     ),
@@ -421,13 +491,14 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   });
 
   function moveCursor(delta: number): void {
-    const live = rows();
-    if (live.length === 0) return;
-    // A held cursor sits BEFORE the list (`cursorIndex` says 0 for a key it
-    // cannot find), so the first movement lands on row one, not row two.
-    const base = cursorHeld() ? -1 : cursorIndex();
-    const next = Math.min(Math.max(base + delta, 0), live.length - 1);
-    setCursorKey(live[next]!.key);
+    const live = navKeys();
+    if (!live.length) return;
+    if (cursorHeld()) {
+      setCursorKey(rows()[0]?.key ?? null);
+      return;
+    }
+    const base = live.indexOf(cursorKey() ?? "");
+    setCursorKey(live[Math.min(Math.max(base + delta, 0), live.length - 1)]!);
   }
 
   /**
@@ -498,7 +569,9 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   }
 
   useKeyboard((event: KeyEvent) => {
+    if (props.enabled === false || event.defaultPrevented) return;
     const key = event.name;
+    if (key !== "g") pendingG = false;
 
     // FILTER mode. The input owns every text key, so only the keys handled
     // here may be preventDefault'd — a handler that defaults everything, the
@@ -541,6 +614,18 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     // NAV mode: one key, one meaning, the same as every other list here.
     event.preventDefault();
     setNote(null);
+    if (props.onNavigate?.(event, currentRepo())) return;
+    if (pendingZ) {
+      pendingZ = false;
+      if (key === "m") {
+        setCollapsed(new Set(visible().map((r) => r.repoRoot)));
+        return;
+      }
+      if (key === "r") {
+        setCollapsed(new Set<string>());
+        return;
+      }
+    }
     switch (key) {
       case "j":
       case "down":
@@ -552,6 +637,13 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         break;
       case "n":
         if (event.ctrl) moveCursor(1);
+        else
+          props.onNew?.(
+            cursorRow()?.checkedOutPath ??
+              currentRepo() ??
+              props.cwd ??
+              process.cwd(),
+          );
         break;
       case "p":
         if (event.ctrl) moveCursor(-1);
@@ -563,31 +655,143 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       case "R":
         // An explicit refresh, which is the only thing that skips the
         // daemon's TTL: a PR merged a moment ago still reads open.
-        load({ refresh: true });
+        if (key === "R" || event.shift) {
+          props.onRefresh?.();
+          load({ refresh: true });
+        } else {
+          const path = cursorRow()?.checkedOutPath;
+          const session = worktrees()
+            ?.repos.flatMap((r) => r.worktrees)
+            .find((w) => w.path === path)?.sessions[0];
+          if (session) props.onRestart?.(session.id);
+        }
         break;
       case "return":
       case "enter": {
+        const header = headerRepo();
+        if (header) {
+          toggleGroup(header.repoRoot);
+          break;
+        }
         const row = cursorRow();
         if (row) activate(row);
         break;
       }
+      case "s": {
+        const next = scope() ? null : currentRepo();
+        setScope(next);
+        props.onScope?.(next);
+        setMarks(new Set<string>());
+        setWorktrees(null);
+        load();
+        break;
+      }
+      case "space":
+      case " ": {
+        const header = headerRepo();
+        const row = cursorRow();
+        if (header) mark([...header.prs, ...header.issues].map((r) => r.key));
+        else if (row) mark([row.key]);
+        break;
+      }
+      case "a":
+      case "A":
+        setMarks(
+          new Set(key === "A" || event.shift ? [] : rows().map((r) => r.key)),
+        );
+        break;
+      case "x":
+      case "X": {
+        const header = headerRepo();
+        const selected =
+          key === "X" || event.shift
+            ? rows()
+            : marks().size
+              ? rows().filter((r) => marks().has(r.key))
+              : header
+                ? [...header.prs, ...header.issues]
+                : cursorRow()
+                  ? [cursorRow()!]
+                  : [];
+        const paths = new Set(
+          selected.map((r) => r.checkedOutPath).filter(Boolean),
+        );
+        const ids = [
+          ...new Set(
+            worktrees()
+              ?.repos.flatMap((r) => r.worktrees)
+              .filter((w) => paths.has(w.path))
+              .flatMap((w) => w.sessions.map((s) => s.id)) ?? [],
+          ),
+        ];
+        if (ids.length) props.onKill?.(ids);
+        else setNote("No attached sessions on the selected sources");
+        break;
+      }
+      case "d":
+      case "D": {
+        const row = cursorRow();
+        if (!row?.checkedOutPath) {
+          setNote("Check out this source before reviewing it");
+          break;
+        }
+        const checkout = worktrees()
+          ?.repos.flatMap((r) => r.worktrees)
+          .find((w) => w.path === row.checkedOutPath);
+        props.onReview?.({
+          path: row.checkedOutPath,
+          sessionId: checkout?.sessions[0]?.id ?? null,
+          branch: key === "D" || event.shift,
+          cursor: row.key,
+          filter: filter(),
+        });
+        break;
+      }
+      case "y":
+      case "o": {
+        const row = cursorRow();
+        if (row) {
+          const url = row.kind === "pr" ? row.pr.url : row.issue.url;
+          if (key === "o") props.effects.openUrl(url);
+          else props.effects.copyText(url, renderer);
+        }
+        break;
+      }
+      case "g":
+      case "G":
+        if (key === "G" || event.shift) setCursorKey(navKeys().at(-1) ?? null);
+        else if (pendingG) {
+          setCursorKey(navKeys()[0] ?? null);
+          pendingG = false;
+        } else pendingG = true;
+        break;
+      case "z":
+        pendingZ = true;
+        break;
+      case "-":
+        setCollapsed(new Set(visible().map((r) => r.repoRoot)));
+        break;
+      case "=":
+        setCollapsed(new Set<string>());
+        break;
       case "q":
       case "escape":
         close();
         break;
       default:
+        if (/^[1-9]$/.test(key)) {
+          const row = rows()[Number(key) - 1];
+          if (row) {
+            setCursorKey(row.key);
+            void activate(row);
+          }
+        }
         break;
     }
   });
 
-  const spinner = useStatusIcon(
-    () => (phase() === "loading" ? "working" : "idle"),
-    () => null,
-    () => props.iconStyle ?? "dot",
-  );
-
   const title = createMemo(() => {
-    const scoped = props.repo;
+    const scoped = scope();
     const name = scoped ? scoped.split("/").filter(Boolean).pop() : null;
     return truncateText(
       name ? `Start work · ${name}` : "Start work",
@@ -619,79 +823,106 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
             { text: "/ filter", rank: 3 },
             { text: "enter start", rank: 3 },
             { text: "j/k move", rank: 1 },
-            { text: "r refresh", rank: 1 },
+            { text: "R refresh", rank: 1 },
             { text: "q close", rank: 2 },
           ],
       contentWidth(),
     ),
   );
 
-  /** One row's bright line: the marker, then the label. */
-  const primarySegments = (row: SourceRow, isCursor: boolean): RowSegment[] => {
-    const fg = isCursor
-      ? theme.text
-      : sourceRowDim(row)
-        ? theme.subtext
-        : theme.text;
-    return fitSegments(
-      [
-        { text: " ", fg: theme.overlay },
-        {
-          text: sourceRowMarker(row),
-          fg: isCursor ? theme.mauve : theme.overlay,
-        },
-        { text: " ", fg: theme.overlay },
-        { text: sourceRowLabel(row), fg },
-      ],
-      listWidth(),
-    );
-  };
-
-  /** Its dim line, indented under the label. */
-  const detailSegments = (row: SourceRow): RowSegment[] => {
-    const phrases = sourceDetailPhrases(row, {
-      compact: props.compact === true,
-    });
-    if (phrases.length === 0) return [];
-    const segments: RowSegment[] = [
-      { text: " ".repeat(ROW_GUTTER + 1), fg: theme.overlay },
-    ];
-    phrases.forEach((phrase, index) => {
-      if (index > 0) {
-        segments.push({ text: PHRASE_SEPARATOR, fg: theme.overlay });
-      }
-      segments.push({ text: phrase.text, fg: phrase.fg });
-    });
-    return fitSegments(segments, listWidth());
-  };
-
+  const sourceNotice = () =>
+    prError() ??
+    issueError() ??
+    prs()?.errors[0]?.error ??
+    issues()?.errors[0]?.error ??
+    (prs() === null || issues() === null ? "Checking GitHub…" : null);
   const renderRow = (row: SourceRow) => {
-    const isCursor = createMemo(() => cursorKey() === row.key);
-    const detail = createMemo(() => detailSegments(row));
+    const isCursor = () => cursorKey() === row.key;
+    const index = () => rows().findIndex((r) => r.key === row.key) + 1;
+    const source = () => (row.kind === "pr" ? row.pr : row.issue);
+    const right = () =>
+      listWidth() < 50
+        ? ""
+        : truncateText(
+            [
+              source().author ? `@${source().author}` : "",
+              row.kind === "issue"
+                ? (row.issue.labels[0] ?? "")
+                : (row.pr.labels?.[0] ?? ""),
+              row.kind === "pr" && row.pr.ciStatus !== "none"
+                ? row.pr.ciStatus
+                : "",
+              sourceAge(source().createdAt),
+            ]
+              .filter(Boolean)
+              .join("  "),
+            Math.floor(listWidth() / 3),
+          );
+    const label = () => {
+      const budget = Math.max(1, listWidth() - 6 - displayWidth(right()));
+      const checkout = row.checkedOutName
+        ? truncateText(` → ${row.checkedOutName}`, Math.floor(budget / 2))
+        : "";
+      return (
+        truncateText(
+          `${sourceRowMarker(row)} ${sourceRowLabel(row)}`,
+          Math.max(1, budget - displayWidth(checkout)),
+        ) + checkout
+      );
+    };
+    const sessions = () =>
+      worktrees()
+        ?.repos.flatMap((r) => r.worktrees)
+        .find((w) => w.path === row.checkedOutPath)?.sessions ?? [];
+    const status = () =>
+      sessions().some((s) => s.status === "waiting")
+        ? "waiting"
+        : sessions().some((s) => s.status === "working")
+          ? "working"
+          : "idle";
+    const spinner = useStatusIcon(
+      status,
+      () => null,
+      () => "dot",
+    );
+    const glyph = () =>
+      !sessions().length
+        ? " "
+        : status() === "waiting"
+          ? "◆"
+          : status() === "working"
+            ? spinner()
+            : "●";
     return (
-      <box flexDirection="column">
-        <box
-          height={1}
-          width="100%"
-          flexDirection="row"
-          backgroundColor={isCursor() ? theme.surface : undefined}
+      <box
+        height={1}
+        width="100%"
+        flexDirection="row"
+        backgroundColor={isCursor() ? theme.surface : undefined}
+        onMouseDown={() => setCursorKey(row.key)}
+      >
+        <text fg={theme.mauve}>
+          {sessions().some((s) => s.id === props.activeSessionId) ? "▎" : " "}
+        </text>
+        <text
+          fg={theme.overlay}
+        >{`${marks().has(row.key) ? "✓" : index() <= 9 ? index() : " "} `}</text>
+        <text
+          fg={
+            status() === "waiting"
+              ? theme.red
+              : status() === "working"
+                ? theme.peach
+                : theme.overlay
+          }
         >
-          <For each={primarySegments(row, isCursor())}>
-            {(segment) => <text fg={segment.fg}>{segment.text}</text>}
-          </For>
-        </box>
-        <Show when={detail().length > 0}>
-          <box
-            height={1}
-            width="100%"
-            flexDirection="row"
-            backgroundColor={isCursor() ? theme.surface : undefined}
-          >
-            <For each={detail()}>
-              {(segment) => <text fg={segment.fg}>{segment.text}</text>}
-            </For>
-          </box>
-        </Show>
+          {glyph()}{" "}
+        </text>
+        <text fg={sourceRowDim(row) ? theme.subtext : theme.text}>
+          {label()}
+        </text>
+        <box flexGrow={1} />
+        <text fg={theme.overlay}>{right()}</text>
       </box>
     );
   };
@@ -699,22 +930,24 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   return (
     <box
       position="absolute"
-      top={0}
+      top={props.embedded ? 1 : 0}
       left={0}
       width="100%"
-      height="100%"
+      height={props.embedded ? dims().height - 1 : "100%"}
       backgroundColor={theme.base}
-      borderStyle="single"
-      borderColor={theme.border}
+      border={props.embedded ? false : true}
+      borderColor={props.embedded ? undefined : theme.border}
       flexDirection="column"
-      paddingLeft={1}
+      paddingLeft={0}
       paddingRight={1}
     >
-      <box width="100%" height={1} flexDirection="row">
-        <text fg={theme.text} attributes={1}>
-          {title()}
-        </text>
-      </box>
+      <Show when={!props.embedded}>
+        <box width="100%" height={1} flexDirection="row">
+          <text fg={theme.text} attributes={1}>
+            {title()}
+          </text>
+        </box>
+      </Show>
 
       {/* Drawn only while filtering, in the session picker's own shape: the
           `/ ` prefix, a placeholder, and no line at all until `/` is pressed.
@@ -751,7 +984,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
             <text fg={theme.red}>
               {truncateText(error() ?? "", contentWidth())}
             </text>
-            <text fg={theme.overlay}>r retry · q close</text>
+            <text fg={theme.overlay}>R retry · q close</text>
           </box>
         </Show>
 
@@ -775,38 +1008,35 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
                 r.content.on("resize", bump);
               }}
             >
-              <For each={visible()}>
+              <For
+                each={visible().filter(
+                  (r) => r.prs.length + r.issues.length > 0,
+                )}
+              >
                 {(repo) => (
                   <box flexDirection="column">
-                    <Show when={repoHeaders()}>
-                      <box height={1} width="100%">
-                        <text fg={theme.mauve} attributes={1}>
-                          {truncateText(repo.repoName, listWidth())}
-                        </text>
-                      </box>
+                    <GroupHeader
+                      label={repo.repoName}
+                      count={repo.prs.length + repo.issues.length}
+                      width={listWidth()}
+                      facts={factsText(
+                        props.facts?.repos.find(
+                          (r) => r.repoRoot === repo.repoRoot,
+                        ),
+                      )}
+                      collapsed={collapsed().has(repo.repoRoot)}
+                      selected={headerRepo()?.repoRoot === repo.repoRoot}
+                      members={[]}
+                      onActivate={() => {
+                        setCursorKey(`repo:${repo.repoRoot}`);
+                        toggleGroup(repo.repoRoot);
+                      }}
+                    />
+                    <Show when={!collapsed().has(repo.repoRoot)}>
+                      <For each={[...repo.prs, ...repo.issues]}>
+                        {renderRow}
+                      </For>
                     </Show>
-                    <box height={1} width="100%">
-                      <text fg={theme.overlay}>
-                        {truncateText(
-                          sectionText(PRS_SECTION, repo.prSection, spinner()),
-                          listWidth(),
-                        )}
-                      </text>
-                    </box>
-                    <For each={repo.prs}>{renderRow}</For>
-                    <box height={1} width="100%">
-                      <text fg={theme.overlay}>
-                        {truncateText(
-                          sectionText(
-                            ISSUES_SECTION,
-                            repo.issueSection,
-                            spinner(),
-                          ),
-                          listWidth(),
-                        )}
-                      </text>
-                    </box>
-                    <For each={repo.issues}>{renderRow}</For>
                   </box>
                 )}
               </For>
@@ -817,7 +1047,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
 
       <box width="100%" height={1} flexDirection="row">
         <text fg={note() ? theme.yellow : theme.overlay}>
-          {truncateText(note() ?? hints(), contentWidth())}
+          {truncateText(note() ?? sourceNotice() ?? hints(), contentWidth())}
         </text>
       </box>
     </box>

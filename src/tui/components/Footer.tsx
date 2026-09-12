@@ -152,6 +152,9 @@ export function defaultHints(props: {
     // falls out of display order rather than being stated, so a reshuffle of
     // this array is a reshuffle of the drop order too.
     { text: "j/k nav", rank: 3 },
+    { text: "h/l views", rank: 2 },
+    { text: "s scope", rank: 2 },
+    { text: "space mark", rank: 2 },
     { text: `enter ${props.persistent ? "switch" : "select"}`, rank: 4 },
     { text: "n new", rank: 3 },
     { text: "/ search", rank: 2 },

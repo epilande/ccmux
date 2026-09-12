@@ -1,18 +1,7 @@
-import { getDaemonUrl } from "../../lib/config";
-import type {
-  WorktreeRepo,
-  WorktreeListResponse,
-} from "../../daemon/worktree-list";
-import { groupWorktreeFacts } from "./session-columns";
+import type { RepoFactsResponse } from "../../daemon/repo-facts";
+import { branchPR, factsText } from "../utils/repo-facts";
 import type { Component } from "solid-js";
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  For,
-  Show,
-  onCleanup,
-} from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import type { EnrichedSession, TmuxSocketError } from "../../types";
@@ -50,6 +39,8 @@ import { socketErrorMessage } from "../../lib/tmux-socket";
 
 interface SessionListProps {
   items: FlatItem[];
+  repoFacts?: RepoFactsResponse;
+  marks?: Set<string>;
   selectedIndex: number;
   iconStyle?: IconStyle;
   showPreview?: boolean;
@@ -125,44 +116,6 @@ export const SessionList: Component<SessionListProps> = (props) => {
       ? Math.floor((dims().width * (100 - props.previewWidth)) / 100)
       : dims().width;
 
-  const [worktreeRepos, setWorktreeRepos] = createSignal<WorktreeRepo[]>([]);
-  const repoScope = createMemo(() =>
-    [
-      ...new Set(
-        props.items.flatMap((item) =>
-          item.type === "header"
-            ? item.members
-                .map(
-                  ({ session }) => session.mainRepoRoot ?? session.worktreeRoot,
-                )
-                .filter((root): root is string => !!root)
-            : [],
-        ),
-      ),
-    ]
-      .sort()
-      .join("\n"),
-  );
-  createEffect(() => {
-    const scope = repoScope();
-    const connected = props.connectionState;
-    setWorktreeRepos([]);
-    if (!scope || connected !== "connected") return;
-    const controller = new AbortController();
-    onCleanup(() => controller.abort());
-    fetch(`${getDaemonUrl()}/worktrees`, {
-      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
-    })
-      .then((response) =>
-        response.ok ? (response.json() as Promise<WorktreeListResponse>) : null,
-      )
-      .then((response) => {
-        if (!controller.signal.aborted && response)
-          setWorktreeRepos(response.repos);
-      })
-      .catch(() => {});
-  });
-
   /**
    * Whether rows draw the wrapped block at all, decided ONCE for the list.
    *
@@ -198,6 +151,13 @@ export const SessionList: Component<SessionListProps> = (props) => {
       !!props.sidebar,
     );
   });
+
+  function enriched(item: Extract<FlatItem, { type: "session" }>) {
+    const session = item.filteredSession.session;
+    if (!props.repoFacts) return session;
+    const pr = props.repoFacts.headerPR ? branchPR(session, props.repoFacts.repos) : null;
+    return { ...session, branchPRs: pr ? [pr] : [] };
+  }
 
   /**
    * The layout for a row whose block is drawn and whose agent DID write a
@@ -327,6 +287,17 @@ export const SessionList: Component<SessionListProps> = (props) => {
     };
   };
 
+  const headerFacts = (item: Extract<FlatItem, { type: "header" }>) => {
+    const root = item.repoRoot;
+    if (
+      !root ||
+      !item.members.every(
+        (m) => (m.session.mainRepoRoot ?? m.session.worktreeRoot) === root,
+      )
+    )
+      return undefined;
+    return props.repoFacts?.repos.find((r) => r.repoRoot === root);
+  };
   const renderItem = (item: FlatItem, index: number) => {
     const onActivate = props.onActivate
       ? () => props.onActivate!(item, index)
@@ -349,7 +320,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
             label={item.label}
             count={item.count}
             width={effectiveWidth() - 3}
-            facts={groupWorktreeFacts(item, worktreeRepos())}
+            facts={factsText(headerFacts(item))}
             collapsed={item.collapsed}
             selected={index === props.selectedIndex}
             members={item.members}
@@ -363,7 +334,8 @@ export const SessionList: Component<SessionListProps> = (props) => {
     }
     return (
       <SessionItem
-        session={item.filteredSession.session}
+        session={enriched(item)}
+        marked={props.marks?.has(item.filteredSession.session.id)}
         selected={index === props.selectedIndex}
         index={getSessionIndex(props.items, index)}
         highlights={item.filteredSession.highlights}

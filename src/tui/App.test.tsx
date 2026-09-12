@@ -594,7 +594,7 @@ describe("App", () => {
 
   it("updates session count in header after SSE init", async () => {
     await renderApp();
-    expect(setup.captureCharFrame()).toContain("(0)");
+    expect(setup.captureCharFrame()).toContain("Sessions 0");
 
     sseCallbacks!.onInit(
       [
@@ -604,7 +604,7 @@ describe("App", () => {
       null,
     );
     await setup.renderOnce();
-    expect(setup.captureCharFrame()).toContain("(2)");
+    expect(setup.captureCharFrame()).toContain("Sessions 2");
   });
 
   it("flashes pane on Enter selection in persistent picker mode", async () => {
@@ -686,14 +686,14 @@ describe("App", () => {
       groupBy: "project",
       tmuxPane: "%5",
     });
-    expect(setup.captureCharFrame()).toContain("▼ myapp");
+    expect(setup.captureCharFrame()).toContain("▾ myapp");
 
     await setup.mockMouse.click(5, FIRST_CONTENT_ROW_Y);
     await setup.renderOnce();
 
     const after = setup.captureCharFrame();
-    expect(after).toContain("▶ myapp");
-    expect(after).not.toContain("▼ myapp");
+    expect(after).toContain("▸ myapp");
+    expect(after).not.toContain("▾ myapp");
   });
 
   it("ignores row clicks while help overlay is open", async () => {
@@ -1111,40 +1111,46 @@ describe("App sidebar mode", () => {
   });
 
   it("debounces flash during rapid navigation", async () => {
-    await renderApp(30, 20, { sidebar: true });
-    sseCallbacks!.onInit(
-      [
-        mockEnrichedSession({
-          id: "s1",
-          project: "alpha",
-          cwd: "/code/alpha",
-          tmuxPane: "%10",
-        }),
-        mockEnrichedSession({
-          id: "s2",
-          project: "alpha",
-          cwd: "/code/alpha",
-          tmuxPane: "%20",
-        }),
-      ],
-      null,
-    );
-    await setup.renderOnce();
-    flashPaneSpy.mockClear();
-    isPaneInCurrentWindowSpy.mockClear();
+    const hydration = mockSidebarStateFetch({});
+    try {
+      await renderApp(30, 20, { sidebar: true });
+      await hydration.getPromise();
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%20",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      flashPaneSpy.mockClear();
+      isPaneInCurrentWindowSpy.mockClear();
 
-    // Rapid navigation: j then j again within the debounce window
-    setup.mockInput.pressKey("j");
-    await setup.renderOnce();
-    setup.mockInput.pressKey("j");
-    await setup.renderOnce();
+      // Rapid navigation: j then j again within the debounce window
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
 
-    // Wait for debounce to fire
-    await new Promise((r) => setTimeout(r, 100));
+      // Wait for debounce to fire
+      await new Promise((r) => setTimeout(r, 100));
 
-    // Should only flash the final destination pane, not intermediate ones
-    expect(flashPaneSpy).toHaveBeenCalledTimes(1);
-    expect(flashPaneSpy).toHaveBeenCalledWith("%20");
+      // Should only flash the final destination pane, not intermediate ones
+      expect(flashPaneSpy).toHaveBeenCalledTimes(1);
+      expect(flashPaneSpy).toHaveBeenCalledWith("%20");
+    } finally {
+      hydration.restore();
+    }
   });
 
   it("ignores stale sidebar state echo-back via version", async () => {
@@ -7661,6 +7667,35 @@ describe("App worktrees panel (W)", () => {
   // `initialView` reads the return cursor to pick the view. While that
   // branch sent the worktree's PATH, cancelling the dialog came back to the
   // Worktrees view, where the adjacent not-checked-out row came back right.
+  it("cycles persistent views, retains worktree marks and shares scope", async () => {
+    const { restore, frame } = await openPanel([WORKTREE_ROW]);
+    try {
+      setup.mockInput.pressKey(" ");
+      expect(await frame()).toContain(" ✓");
+      setup.mockInput.pressKey("s");
+      expect(await frame()).toContain("all repos");
+      setup.mockInput.pressKey(" ");
+      await frame();
+      setup.mockInput.pressKey("h");
+      expect(await frame()).not.toContain("x remove");
+      expect(await frame()).toContain("all repos");
+      setup.mockInput.pressKey("l");
+      expect(await frame()).toContain(" ✓");
+      setup.mockInput.pressKey("l");
+      expect(await frame()).toContain("/ filter");
+      setup.mockInput.pressKey("h");
+      expect(await frame()).toContain(" ✓");
+      setup.mockInput.pressKey("?");
+      expect(await frame()).toContain("Keyboard Shortcuts");
+      setup.mockInput.pressKey("x");
+      expect(await frame()).not.toContain("Delete");
+      deliverEscape(setup.renderer);
+      expect(await frame()).toContain("x remove");
+    } finally {
+      restore();
+    }
+  });
+
   it("returns to the PR view after cancelling out of a checked-out PR", async () => {
     const held = {
       ...WORKTREE_ROW,
@@ -7693,7 +7728,7 @@ describe("App worktrees panel (W)", () => {
       setup.mockInput.pressKey("l");
       const prs = await frame();
       expect(prs).toContain("#7 seven");
-      expect(prs).toContain("checked out in pr-7");
+      expect(prs).toContain("→ pr-7");
 
       setup.mockInput.pressEnter();
       expect(await frame()).toContain("New session in worktree");
@@ -7704,7 +7739,7 @@ describe("App worktrees panel (W)", () => {
 
       // The PR VIEW, on the PR row — not the Worktrees view on the path.
       expect(back).toContain("#7 seven");
-      expect(back).toContain("checked out in pr-7");
+      expect(back).toContain("→ pr-7");
       expect(back).not.toContain("main checkout");
     } finally {
       restore();
@@ -7778,7 +7813,7 @@ describe("App worktrees panel (W)", () => {
       expect(switchToPaneSpy.mock.calls[0]?.[0]).toBe("%1");
       // Closed BEFORE acting, so the pane switch is not happening under a
       // full-screen overlay.
-      expect(shown).not.toContain("Worktrees");
+      expect(shown).not.toContain("x remove");
     } finally {
       restoreExit();
       restore();
@@ -7882,7 +7917,7 @@ describe("App worktrees panel (W)", () => {
       },
     ]);
     try {
-      setup.mockInput.pressKey("d");
+      setup.mockInput.pressKey("D", { shift: true });
       // The merge-base resolves first, so the review starts a tick later.
       const duringReview = await frame();
       expect(runHunkReviewSpy).toHaveBeenCalledTimes(1);
@@ -7894,7 +7929,7 @@ describe("App worktrees panel (W)", () => {
         target: "base-sha",
       });
       // Gone while the review is still running, not merely afterwards.
-      expect(duringReview).not.toContain("Worktrees");
+      expect(duringReview).not.toContain("x remove");
 
       resolveReview({ ok: true, notes: reviewNotes });
       const afterReview = squish(await frame());
@@ -8072,9 +8107,12 @@ describe("App worktrees panel (W)", () => {
       // row text in the char frame; the head is the part that stays whole.
       expect(squish(shown)).toContain(squish("review note captured"));
       expect(shown).toContain("Worktrees");
-      const lines = shown.split("\n");
-      expect(lines.find((l) => l.includes("bravo"))).toContain("┃");
-      expect(lines.find((l) => l.includes("feature"))).not.toContain("┃");
+      setup.mockInput.pressKey("y");
+      await frame();
+      expect(liveEffects.copyText).toHaveBeenCalledWith(
+        "/code/myapp/wt/bravo",
+        setup.renderer,
+      );
     } finally {
       restore();
     }
@@ -8106,7 +8144,7 @@ describe("App worktrees panel (W)", () => {
       const confirmUp = await frame();
       expect(squish(confirmUp)).toContain(squish("Send review comments"));
       // Not back yet: reopening here would bury the dialog on screen.
-      expect(confirmUp).not.toContain("Worktrees");
+      expect(confirmUp).not.toContain("x remove");
       // Cancel is a resolution too; the notes are dropped, the panel is not.
       setup.mockInput.pressKey("n");
       const after = await frame();
@@ -8130,7 +8168,7 @@ describe("App worktrees panel (W)", () => {
     };
     const { restore, frame } = await openPanel([WORKTREE_ROW, bravo]);
     try {
-      // bravo sorts first (same bucket, name order), so j lands on feature.
+      // Local list order stays stable as classification arrives; j lands on bravo.
       setup.mockInput.pressKey("j");
       setup.mockInput.pressEnter();
       const dialog = await frame();
@@ -8140,11 +8178,14 @@ describe("App worktrees panel (W)", () => {
       deliverEscape(setup.renderer);
       await new Promise((r) => setTimeout(r, 0));
       const shown = await frame();
-      expect(shown).toContain("Pull Requests");
+      expect(shown).toContain("x remove");
       expect(squish(shown)).not.toContain(squish("New session in worktree"));
-      const lines = shown.split("\n");
-      expect(lines.find((l) => l.includes("feature"))).toContain("┃");
-      expect(lines.find((l) => l.includes("bravo"))).not.toContain("┃");
+      setup.mockInput.pressKey("y");
+      await frame();
+      expect(liveEffects.copyText).toHaveBeenCalledWith(
+        "/code/myapp/wt/bravo",
+        setup.renderer,
+      );
     } finally {
       restore();
     }
@@ -8153,7 +8194,7 @@ describe("App worktrees panel (W)", () => {
   // Tab's rescope is panel-local, so the return must carry it in the action
   // payload: reading the store reopened a widened panel back on its narrow
   // opening repo (wrong scope, lost cursor, cache miss, one wrong capture).
-  it("keeps a Tab-widened scope across the dialog round trip", async () => {
+  it("keeps a s-widened scope across the dialog round trip", async () => {
     const urls: string[] = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = ((input: string | URL | Request) => {
@@ -8201,7 +8242,7 @@ describe("App worktrees panel (W)", () => {
       await setup.renderOnce();
       // The scoped open filtered by repo; Tab widens and refetches without.
       expect(urls.some((u) => u.includes("repo="))).toBe(true);
-      setup.mockInput.pressTab();
+      setup.mockInput.pressKey("s");
       await new Promise((r) => setTimeout(r, 0));
       await setup.renderOnce();
 

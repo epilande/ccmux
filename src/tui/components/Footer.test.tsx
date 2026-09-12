@@ -258,11 +258,11 @@ describe("fitHints", () => {
     // one after that Restart. (Listed in display order, which is what the
     // helper reads them off in — Restart sits left of Kill on the line, and
     // both sit left of Worktrees.)
-    expect(dropped(132)).toEqual(["W worktrees"]);
-    expect(dropped(118)).toEqual(["x kill", "W worktrees"]);
-    expect(dropped(106)).toEqual(["r restart", "x kill", "W worktrees"]);
+    expect(dropped(167)).toEqual(["W worktrees"]);
+    expect(dropped(153)).toEqual(["x kill", "W worktrees"]);
+    expect(dropped(141)).toEqual(["r restart", "x kill", "W worktrees"]);
     // Both gone while everything they were ranked against is still there.
-    const line = fitHints(hints(), 106);
+    const line = fitHints(hints(), 141);
     expect(line).toContain("/ search");
     expect(line).toContain("d/D review");
     expect(line).toContain("P preview");
@@ -275,7 +275,7 @@ describe("fitHints", () => {
     // The width is the narrowest that still holds the two toggles, so it
     // tracks the line's length: it moved from 100 when `d review` became
     // `d/D review`.
-    const line = fitHints(hints(), 102);
+    const line = fitHints(hints(), 137);
     expect(line).not.toContain("x kill");
     expect(line).not.toContain("r restart");
     expect(line).toContain("P preview");

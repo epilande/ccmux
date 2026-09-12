@@ -500,6 +500,8 @@ interface TUIState {
   promptDisplay: PromptDisplay;
   previewFocused: boolean;
   showHelp: boolean;
+  scope: string | null;
+  markedSessions: Set<string>;
   /**
    * The Worktrees panel, or null when closed. `repo` scopes it to one main
    * checkout (opened from a group header) and is null for the global
@@ -965,6 +967,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     promptDisplay: options.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
     previewFocused: false,
     showHelp: false,
+    scope: null,
+    markedSessions: new Set<string>(),
     worktrees: null,
     sourcePicker: null,
     notice: null,
@@ -1135,7 +1139,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
   // Derived: status-filtered sessions (hide idle toggle, keeps unread/read visible)
   const statusFilteredSessions = trackedMemo("statusFilteredSessions", () => {
-    const sorted = sortedSessions();
+    const all = sortedSessions();
+    const sorted = state.scope
+      ? all.filter((s) => (s.mainRepoRoot ?? s.worktreeRoot) === state.scope)
+      : all;
     if (!state.hideIdle) return sorted;
     const filtered = sorted.filter(
       (s) => s.status !== "idle" || s.attentionState !== null,
@@ -2454,6 +2461,27 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("showHelp", false);
     },
 
+    setScope(repo: string | null) {
+      setState("scope", repo);
+      if (state.sourcePicker) setState("sourcePicker", "repo", repo);
+    },
+    markSessions(ids: string[], clear = false) {
+      setState("markedSessions", (prev) => {
+        const next = new Set(prev);
+        const remove = clear || ids.every((id) => next.has(id));
+        for (const id of ids) {
+          if (remove) next.delete(id);
+          else next.add(id);
+        }
+        return next;
+      });
+    },
+    markAllSessions(clear = false) {
+      setState(
+        "markedSessions",
+        new Set(clear ? [] : filteredSessions().map((s) => s.session.id)),
+      );
+    },
     showWorktrees(
       repo: string | null,
       opts: {
@@ -2462,6 +2490,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         startWidened?: boolean;
       } = {},
     ) {
+      setState("scope", opts.startWidened ? null : repo);
+      setState("sourcePicker", null);
       setState("worktrees", {
         repo,
         initialCursor: opts.initialCursor ?? null,
@@ -2482,6 +2512,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         origin?: SourcePickerOrigin | null;
       } = {},
     ) {
+      setState("scope", repo);
+      setState("worktrees", null);
       setState("sourcePicker", {
         repo,
         initialCursor: opts.initialCursor ?? null,

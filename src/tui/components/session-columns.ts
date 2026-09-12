@@ -506,7 +506,7 @@ export function prColorState(session: EnrichedSession): PRColorState | null {
 export function prLabel(session: EnrichedSession, mode?: string): string {
   const prs = sessionPRs(session);
   if (prs.length === 0) return "";
-  const ids = prs.map((p) => `#${p.id}`).join(" ");
+  const ids = prs.map((p) => `#${p.id}${p.stale ? " ~" : ""}`).join(" ");
   return mode === "short" ? ids : `PR ${ids}`;
 }
 

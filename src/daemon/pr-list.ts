@@ -58,11 +58,15 @@ const PR_LIST_FIELDS = [
   "statusCheckRollup",
   "headRefName",
   "headRefOid",
+  "createdAt",
+  "labels",
 ].join(",");
 
 /** One open pull request, flattened to what a row shows. */
 export interface OpenPR {
   number: number;
+  createdAt?: string | null;
+  labels?: string[];
   /** Control characters already stripped; see {@link stripControlChars}. */
   title: string;
   url: string;
@@ -153,7 +157,13 @@ function readPR(raw: unknown): OpenPR | null {
   }
   return {
     number,
-    // Sanitized HERE, at the boundary GitHub's text enters through, rather
+    createdAt: readString(row, "createdAt"),
+    labels: Array.isArray(row.labels)
+      ? row.labels.flatMap((label) => {
+          const name = nestedString(label, "name");
+          return name ? [stripControlChars(name)] : [];
+        })
+      : [], // Sanitized HERE, at the boundary GitHub's text enters through, rather
     // than at each of the places it renders: a title reaches a TUI row, the
     // new-session dialog's note and (through `seedPrompt`) an agent's opening
     // message, and only one of those would have thought to strip it.
