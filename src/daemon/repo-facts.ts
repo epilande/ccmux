@@ -1,6 +1,7 @@
 import type { RepoSourceCounts } from "./repo-source-counts";
 import { basename } from "node:path";
-import type { OpenPR } from "./pr-list";
+import { PR_LIST_LIMIT, type OpenPR } from "./pr-list";
+import type { BranchPR } from "../types/session";
 import type { OpenIssue } from "./issue-list";
 import type { SourceResult } from "./gh-spawn-source";
 import type { WorktreeRepo } from "./worktree-list";
@@ -18,6 +19,7 @@ export interface RepoFacts {
   prs?: RepoFact<OpenPR[]>;
   issues?: RepoFact<OpenIssue[]>;
   counts?: RepoFact<RepoSourceCounts>;
+  branchPRs?: Record<string, RepoFact<BranchPR[]>>;
 }
 export interface RepoFactsResponse {
   repos: RepoFacts[];
@@ -32,6 +34,7 @@ interface Dependencies {
     refresh: boolean,
   ) => Promise<SourceResult<OpenIssue[]>>;
   counts?: (root: string) => Promise<SourceResult<RepoSourceCounts>>;
+  branchPRs?: (root: string, branch: string) => Promise<SourceResult<OpenPR[]>>;
   headerPR: () => Promise<boolean>;
   now?: () => number;
 }
@@ -85,7 +88,7 @@ export class RepoFactsCache {
     const headerPR = await this.deps.headerPR();
     await mapWithConcurrency([...new Set(roots)], 3, async (root) => {
       if (sources) this.requestedSources.set(root, this.now() + 10_000);
-      const facts = this.facts.get(root) ?? {
+      const facts: RepoFacts = this.facts.get(root) ?? {
         repoRoot: root,
         repoName: basename(root),
       };
@@ -133,6 +136,57 @@ export class RepoFactsCache {
             ]
           : []),
       ]);
+      if (headerPR || (this.requestedSources.get(root) ?? 0) > this.now()) {
+        const branches = [
+          ...new Set(
+            facts.worktrees?.value.worktrees
+              .map((tree) => tree.branch)
+              .filter(
+                (branch): branch is string => !!branch && branch !== "HEAD",
+              ) ?? [],
+          ),
+        ];
+        await mapWithConcurrency(branches, 3, (branch) =>
+          this.run(`${root}\nbranch:${branch}`, force, async () => {
+            const previous = facts.branchPRs?.[branch];
+            try {
+              const all = facts.prs;
+              if (!all || all.stale) throw new Error("unavailable");
+              // A full repo snapshot can answer every branch without another
+              // request. At the display cap, query the branch independently so
+              // older PRs on an active checkout cannot disappear from badges.
+              const complete =
+                all.value.length < PR_LIST_LIMIT ||
+                (facts.counts &&
+                  !facts.counts.stale &&
+                  facts.counts.value.prs <= all.value.length);
+              const result = complete
+                ? {
+                    ok: true as const,
+                    value: all.value.filter((pr) => pr.headRefName === branch),
+                  }
+                : await this.deps.branchPRs?.(root, branch);
+              if (!result?.ok) throw new Error("unavailable");
+              const value = result.value.map((pr) => ({
+                id: String(pr.number),
+                href: pr.url,
+                ciStatus: pr.ciStatus,
+                reviewDecision: pr.reviewDecision,
+              }));
+              facts.branchPRs = {
+                ...facts.branchPRs,
+                [branch]: { value, updatedAt: this.now(), stale: false },
+              };
+            } catch {
+              if (previous)
+                facts.branchPRs = {
+                  ...facts.branchPRs,
+                  [branch]: { ...previous, stale: true },
+                };
+            }
+          }),
+        );
+      }
     });
   }
   private run(

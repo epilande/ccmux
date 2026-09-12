@@ -661,6 +661,7 @@ export class DaemonServer {
     local: (root) => listRepoWorktrees(root),
     counts: (root) => readRepoSourceCounts(root),
     prs: (root, refresh) => this.openPRsFor(root, refresh),
+    branchPRs: (root, branch) => listOpenPRs(root, undefined, branch),
     issues: (root, refresh) => this.openIssuesFor(root, refresh),
     headerPR: async () => {
       this.headerPR = (await getPreferences()).headerFacts?.pr !== false;

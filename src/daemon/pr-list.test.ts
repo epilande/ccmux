@@ -257,7 +257,10 @@ describe("listOpenPRs", () => {
       "/repo",
       ghAnswering({
         stdout: JSON.stringify([
-          { ...PR_ROW, title: "family \ud83d\udc68\u200d\ud83d\udc69 and \u200cnb" },
+          {
+            ...PR_ROW,
+            title: "family \ud83d\udc68\u200d\ud83d\udc69 and \u200cnb",
+          },
         ]),
       }),
     );
@@ -330,4 +333,19 @@ describe("listOpenPRs", () => {
       expect(found.error).toContain("did not return valid JSON");
     }
   });
+});
+
+it("can query an active branch beyond the repository list cap", async () => {
+  let args: string[] = [];
+  await listOpenPRs(
+    "/repo",
+    async (_cwd, argv) => {
+      args = argv;
+      return { exitCode: 0, stdout: "[]", stderr: "" };
+    },
+    "old-feature",
+  );
+  expect(
+    args.slice(args.indexOf("--head"), args.indexOf("--head") + 2),
+  ).toEqual(["--head", "old-feature"]);
 });

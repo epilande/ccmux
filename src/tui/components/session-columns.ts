@@ -200,7 +200,7 @@ const DEFAULT_COLUMNS: ColumnsConfig = {
  */
 export const SIDEBAR_DEFAULT_COLUMNS: ColumnsConfig = {
   row1: {
-    left: ["status", "project"],
+    left: ["index", "status", "project"],
     right: ["pr:short", "agent:short"],
   },
   row2: {
@@ -466,7 +466,7 @@ export function sessionPRs(session: EnrichedSession): BranchPR[] {
  * color rather than picking a traffic-light hue. */
 export type PRColorState = "red" | "green" | "yellow";
 
-function prColorOf(pr: BranchPR): PRColorState | null {
+export function prColorOf(pr: BranchPR): PRColorState | null {
   // Background-agent PRs have neither field → neutral. (gh-resolved PRs
   // always carry both, even if null, so `undefined` distinguishes them.)
   if (pr.reviewDecision === undefined && pr.ciStatus === undefined) return null;

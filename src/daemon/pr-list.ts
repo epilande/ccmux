@@ -45,7 +45,7 @@ import {
  * silently lose its oldest open PRs with nothing on screen to say so. 50 is
  * more rows than the panel can usefully show and still one request.
  */
-const PR_LIST_LIMIT = 50;
+export const PR_LIST_LIMIT = 50;
 
 /** The `--json` fields the section renders, in the order gh takes them. */
 const PR_LIST_FIELDS = [
@@ -97,12 +97,14 @@ export interface OpenPR {
 export async function listOpenPRs(
   cwd: string,
   run: GhRun = runGh,
+  head?: string,
 ): Promise<SourceResult<OpenPR[]>> {
   const result = await run(cwd, [
     "pr",
     "list",
     "--state",
     "open",
+    ...(head ? ["--head", head] : []),
     "--limit",
     String(PR_LIST_LIMIT),
     "--json",

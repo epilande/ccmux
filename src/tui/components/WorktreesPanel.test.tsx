@@ -579,3 +579,54 @@ it("reserves the bar for the active session while the cursor can move elsewhere"
   h.keys.pressKey("y");
   expect(h.copies).toEqual(["/repo"]);
 });
+
+it("keeps tracking, locks, dirty counts and all attached agents on one row", async () => {
+  const h = await mount({
+    width: 160,
+    rows: [
+      mainRow(),
+      row({
+        locked: true,
+        dirty: { dirty: true, modified: 2, untracked: 1 },
+        upstream: {
+          upstream: "origin/alpha",
+          gone: false,
+          ahead: 3,
+          behind: 2,
+        },
+        sessions: [
+          session(),
+          session({ id: "s2", status: "waiting" }),
+          session({ id: "s3", status: "working" }),
+        ],
+      }),
+    ],
+    scan: async () => ({ candidates: [], skipped: [] }),
+  });
+  const frame = await h.frame();
+  const line = frame.split("\n").find((l) => l.includes("alpha +")) ?? "";
+  for (const field of [
+    "locked",
+    "2 modified",
+    "1 untracked",
+    "↑3",
+    "↓2",
+    "3 agents, 1 waiting",
+  ])
+    expect(line).toContain(field);
+});
+
+it("preserves dirty and session facts from classification while the local snapshot catches up", async () => {
+  const h = await mount({
+    width: 160,
+    scan: async () => ({
+      candidates: [candidate({ dirty: true, sessions: [session()] })],
+      skipped: [],
+    }),
+  });
+  const line =
+    (await h.frame()).split("\n").find((l) => l.includes("alpha +")) ?? "";
+  expect(line).toContain("uncommitted work");
+  expect(line).toContain("Claude");
+  expect(line).not.toContain("ends it");
+});

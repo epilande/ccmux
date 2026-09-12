@@ -1021,7 +1021,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
       cells +
       (attn > 0 ? attn + 1 : 0) +
       promptFloor +
-      2 + // small margin so the truncated content sits inside its flex box
+      (props.sidebar ? 0 : 2) + // the narrow sidebar spends this margin on its index
       scrollbarReserve(); // scrollbox eats width the terminal size hides
     return Math.max(12, effectiveWidth() - reserved);
   });

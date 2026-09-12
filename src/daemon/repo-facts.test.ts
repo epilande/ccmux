@@ -163,3 +163,94 @@ describe("repo facts", () => {
     expect(calls).toBe(stopped);
   });
 });
+
+describe("branch facts", () => {
+  const localRepo: WorktreeRepo = {
+    ...repo,
+    worktrees: [
+      {
+        repoRoot: "/repo",
+        repoName: "repo",
+        path: "/repo/wt",
+        name: "wt",
+        branch: "feature",
+        tip: "local-ahead",
+        detached: false,
+        isMain: false,
+        locked: false,
+        dirty: { dirty: false, modified: 0, untracked: 0 },
+        upstream: null,
+        sessions: [],
+      },
+    ],
+  };
+  it("keeps every branch PR when the checkout has local commits ahead of GitHub", async () => {
+    const cache = new RepoFactsCache({
+      roots: async () => ["/repo"],
+      headerPR: async () => true,
+      local: async () => localRepo,
+      prs: async () => ({ ok: true, value: [pr, { ...pr, number: 3 }] }),
+      issues: async () => failed,
+    });
+    await cache.refresh(["/repo"]);
+    expect(
+      cache.snapshot(["/repo"])[0]?.branchPRs?.feature?.value.map((p) => p.id),
+    ).toEqual(["2", "3"]);
+  });
+  it("looks beyond a capped repository snapshot, retains stale branch results, then clears a closed PR", async () => {
+    let now = 0;
+    let branchAnswer: SourceResult<OpenPR[]> = { ok: true, value: [pr] };
+    let branchReads = 0;
+    const cache = new RepoFactsCache({
+      now: () => now,
+      roots: async () => ["/repo"],
+      headerPR: async () => true,
+      local: async () => localRepo,
+      prs: async () => ({
+        ok: true,
+        value: Array.from({ length: 50 }, (_, i) => ({
+          ...pr,
+          number: i + 100,
+          headRefName: "other",
+        })),
+      }),
+      issues: async () => failed,
+      branchPRs: async (root, branch) => {
+        expect([root, branch]).toEqual(["/repo", "feature"]);
+        branchReads++;
+        return branchAnswer;
+      },
+    });
+    await cache.refresh(["/repo"]);
+    expect(cache.snapshot(["/repo"])[0]?.branchPRs?.feature?.value[0]?.id).toBe(
+      "2",
+    );
+    expect(branchReads).toBe(1);
+    branchAnswer = failed;
+    now = 60_001;
+    await cache.refresh(["/repo"]);
+    expect(cache.snapshot(["/repo"])[0]?.branchPRs?.feature?.stale).toBe(true);
+    expect(
+      cache.snapshot(["/repo"])[0]?.branchPRs?.feature?.value,
+    ).toHaveLength(1);
+    branchAnswer = { ok: true, value: [] };
+    now += 60_001;
+    await cache.refresh(["/repo"]);
+    expect(cache.snapshot(["/repo"])[0]?.branchPRs?.feature).toEqual({
+      value: [],
+      updatedAt: now,
+      stale: false,
+    });
+  });
+  it("leaves branch facts absent when GitHub has never answered", async () => {
+    const cache = new RepoFactsCache({
+      roots: async () => ["/repo"],
+      headerPR: async () => true,
+      local: async () => localRepo,
+      prs: async () => failed,
+      issues: async () => failed,
+    });
+    await cache.refresh(["/repo"]);
+    expect(cache.snapshot(["/repo"])[0]?.branchPRs).toBeUndefined();
+  });
+});

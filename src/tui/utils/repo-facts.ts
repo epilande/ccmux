@@ -1,4 +1,6 @@
 import { createEffect, createSignal, onCleanup } from "solid-js";
+import { prColorOf } from "../components/session-columns";
+import { theme } from "../theme";
 import { getDaemonUrl } from "../../lib/config";
 import type { RepoFactsResponse, RepoFacts } from "../../daemon/repo-facts";
 import type { BranchPR, EnrichedSession } from "../../types/session";
@@ -46,29 +48,40 @@ export function createRepoFacts(options: {
   });
   return { data, refresh };
 }
+/** Branch badges describe association; checkout routing separately requires SHA proof. */
+export function branchPRs(
+  session: Pick<
+    EnrichedSession,
+    "mainRepoRoot" | "worktreeRoot" | "gitBranch" | "branchPRs"
+  >,
+  facts: RepoFacts[],
+): BranchPR[] {
+  const repo = facts.find(
+    (r) => r.repoRoot === (session.mainRepoRoot ?? session.worktreeRoot),
+  );
+  const cached = session.gitBranch
+    ? repo?.branchPRs?.[session.gitBranch]
+    : undefined;
+  if (cached) return cached.value.map((pr) => ({ ...pr, stale: cached.stale }));
+  const fromList = repo?.prs?.value
+    .filter((pr) => pr.headRefName === session.gitBranch)
+    .map((pr) => ({
+      id: String(pr.number),
+      href: pr.url,
+      ciStatus: pr.ciStatus,
+      reviewDecision: pr.reviewDecision,
+      stale: repo.prs?.stale,
+    }));
+  // An older daemon or a partial repo snapshot must not erase a known row PR.
+  const known = new Map((session.branchPRs ?? []).map((pr) => [pr.id, pr]));
+  for (const pr of fromList ?? []) known.set(pr.id, pr);
+  return [...known.values()];
+}
 export function branchPR(
   session: EnrichedSession,
   facts: RepoFacts[],
 ): BranchPR | null {
-  const repo = facts.find(
-    (r) => r.repoRoot === (session.mainRepoRoot ?? session.worktreeRoot),
-  );
-  const checkout = repo?.worktrees?.value.worktrees.find(
-    (w) => w.path === session.worktreeRoot,
-  );
-  if (!checkout?.tip) return null;
-  const pr = repo?.prs?.value.find(
-    (p) => p.headRefOid === checkout.tip && p.headRefName === session.gitBranch,
-  );
-  return pr
-    ? {
-        id: String(pr.number),
-        href: pr.url,
-        ciStatus: pr.ciStatus,
-        reviewDecision: pr.reviewDecision,
-        stale: repo?.prs?.stale,
-      }
-    : null;
+  return branchPRs(session, facts)[0] ?? null;
 }
 export function factsText(facts: RepoFacts | undefined): string {
   const count =
@@ -87,5 +100,22 @@ export function badgeText(pr: BranchPR | null, stale = false): string {
         : pr.ciStatus === "pending"
           ? " ◐"
           : "";
-  return `PR #${pr.id}${check}${stale ? " ~" : ""}`;
+  const review =
+    pr.reviewDecision === "CHANGES_REQUESTED"
+      ? " changes"
+      : pr.reviewDecision === "APPROVED"
+        ? " approved"
+        : "";
+  return `PR #${pr.id}${check}${review}${stale || pr.stale ? " ~" : ""}`;
+}
+
+export function badgeColor(prs: BranchPR[]): string {
+  const states = prs.map(prColorOf);
+  return states.includes("red")
+    ? theme.red
+    : states.includes("yellow")
+      ? theme.yellow
+      : states.includes("green")
+        ? theme.green
+        : theme.mauve;
 }

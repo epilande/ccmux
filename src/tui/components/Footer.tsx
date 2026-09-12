@@ -146,11 +146,8 @@ export function defaultHints(props: {
     // itself, hint and all. The footer taught them when it was the only thing
     // that did; a second, discoverable home is what buys the columns back.
     //
-    // Ties drop RIGHTMOST first (see `fitHints`), so within rank 1 the order
-    // is kill, restart, preview, group — the two menu-backed actions before
-    // the two view toggles, which have no home but this line and `?`. That
-    // falls out of display order rather than being stated, so a reshuffle of
-    // this array is a reshuffle of the drop order too.
+    // Ties drop rightmost first. The grouping label stays visible because it
+    // identifies which interpretation of Sessions is currently on screen.
     { text: "j/k nav", rank: 3 },
     { text: "h/l views", rank: 2 },
     { text: "s scope", rank: 2 },
@@ -158,7 +155,7 @@ export function defaultHints(props: {
     { text: `enter ${props.persistent ? "switch" : "select"}`, rank: 4 },
     { text: "n new", rank: 3 },
     { text: "/ search", rank: 2 },
-    { text: `b group:${props.groupBy ?? DEFAULT_GROUP_BY}`, rank: 1 },
+    { text: `b group:${props.groupBy ?? DEFAULT_GROUP_BY}`, rank: 4 },
     { text: "P preview", rank: 1 },
     { text: "r restart", rank: 1 },
     { text: "x kill", rank: 1 },

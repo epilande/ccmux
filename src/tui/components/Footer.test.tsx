@@ -110,7 +110,7 @@ describe("Footer", () => {
   });
 
   it("shows the review hint when reviewable", async () => {
-    const frame = await renderFooter({ reviewable: true });
+    const frame = await renderFooter({ reviewable: true, width: 160 });
     expect(frame).toContain("d/D review");
   });
 

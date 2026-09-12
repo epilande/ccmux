@@ -1166,8 +1166,7 @@ describe("sourcePickerLayout", () => {
       repoHeaders: false,
     });
 
-    // Line 0 is the PR header, so the PR row starts at 1 and is two lines
-    // tall; the Issues header takes line 3 and its row starts at 4.
+    // PRs and issues share one list, with compact metadata on the same line.
     expect(layout.get("pr:/repo#156")).toEqual({ line: 0, height: 1 });
     expect(layout.get("issue:/repo#144")).toEqual({ line: 1, height: 1 });
   });
@@ -1291,4 +1290,51 @@ it("keeps the PR number and checkout arrow readable in a compact overlay", async
   const frame = await h.frame();
   expect(frame).toContain("#156");
   expect(frame).toContain("→ a");
+});
+
+it("preserves branch, draft, review, checks and every label at picker width", async () => {
+  const h = await mountSettled({
+    width: 160,
+    prs: [
+      openPR({
+        headRefName: "feature/metadata",
+        isDraft: true,
+        reviewDecision: "CHANGES_REQUESTED",
+        ciStatus: "failing",
+        labels: ["bug", "frontend"],
+      }),
+    ],
+    issues: [openIssue({ labels: ["help wanted", "ux"] })],
+  });
+  const frame = await h.frame();
+  for (const field of [
+    "feature/metadata",
+    "draft",
+    "changes",
+    "CI ✗",
+    "bug,frontend",
+    "help wanted,ux",
+    "@epilande",
+  ])
+    expect(frame).toContain(field);
+  const lines = frame.split("\n");
+  const title = lines.findIndex((line) => line.includes("#156"));
+  expect(lines[title]).toContain("CI ✗");
+  expect(lines[title]).toContain("feature/metadata");
+});
+
+it("keeps failing checks ahead of a long author and branch in compact Start", async () => {
+  const h = await mountSettled({
+    width: 30,
+    compact: true,
+    prs: [
+      openPR({
+        author: "a-very-long-github-login",
+        headRefName: "a-very-long-branch-name",
+        ciStatus: "failing",
+      }),
+    ],
+    issues: [],
+  });
+  expect(await h.frame()).toContain("CI ✗");
 });

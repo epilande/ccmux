@@ -79,22 +79,23 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
 
   const parts = createMemo(() => {
     let left = Math.max(0, (props.width ?? dims().width) - 2);
-    const activity = props.collapsed && !props.hideStatusSummary
-      ? [
-          ...(summary().working
-            ? [
-                {
-                  text: ` ${workingIcon()} ${summary().working}`,
-                  color: theme.peach,
-                },
-              ]
-            : []),
-          ...dots().map((dot) => ({
-            text: ` ${dot.icon} ${dot.count}`,
-            color: dot.color,
-          })),
-        ]
-      : [];
+    const activity =
+      props.collapsed && !props.hideStatusSummary
+        ? [
+            ...(summary().working
+              ? [
+                  {
+                    text: ` ${workingIcon()} ${summary().working}`,
+                    color: theme.peach,
+                  },
+                ]
+              : []),
+            ...dots().map((dot) => ({
+              text: ` ${dot.icon} ${dot.count}`,
+              color: dot.color,
+            })),
+          ]
+        : [];
     const count = ` (${props.count})`;
     // Keep the count and collapsed activity visible before spending space on
     // a long group name or optional repository facts.
@@ -111,9 +112,16 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
       { text: count, color: theme.overlay },
       ...activity,
       ...(props.sharedBranch && props.sharedBranch !== "main"
-        ? [{ text: `   ${props.sharedBranch}`, color: theme.blue }] : []),
+        ? [{ text: `   ${props.sharedBranch}`, color: theme.blue }]
+        : []),
       ...(props.prBadge
-        ? [{ text: `   ${props.prBadge}`, color: props.prBadgeColor ?? theme.mauve }] : []),
+        ? [
+            {
+              text: `   ${props.prBadge}`,
+              color: props.prBadgeColor ?? theme.mauve,
+            },
+          ]
+        : []),
       ...(props.facts
         ? [{ text: `   ${props.facts}`, color: theme.subtext }]
         : []),

@@ -29,8 +29,14 @@ import { truncateText } from "../utils/format";
 import { fetchOpenIssues, fetchOpenPRs } from "../utils/source-lists";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { fitHints } from "./Footer";
-import { isPRRowKey } from "./pr-rows";
-import { scrollTargetFor, type VisualLayout } from "./row-segments";
+import { describeChecks, describeReview, isPRRowKey } from "./pr-rows";
+import {
+  fitSegments,
+  oneLine,
+  scrollTargetFor,
+  type Phrase,
+  type VisualLayout,
+} from "./row-segments";
 import {
   buildSourceRepos,
   checkedOutPathFor,
@@ -132,16 +138,11 @@ export interface SourcePickerProps {
   }) => void;
 }
 
-/** Columns before a row's content: a space, the marker, a space. */
-
 /** Columns the scrollbox keeps for its scrollbar. */
 const SCROLLBAR_GUTTER = 1;
-/** The separator between detail phrases, muted so the facts carry the line. */
 
-/** All source rows occupy one visual line. */
-export function sourceRowHeight(row: SourceRow, compact = false): number {
-  void row;
-  void compact;
+/** One row in both overlays and the persistent Start view. */
+export function sourceRowHeight(_row: SourceRow, _compact = false): number {
   return 1;
 }
 
@@ -840,32 +841,61 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     const isCursor = () => cursorKey() === row.key;
     const index = () => rows().findIndex((r) => r.key === row.key) + 1;
     const source = () => (row.kind === "pr" ? row.pr : row.issue);
-    const right = () =>
-      listWidth() < 50
-        ? ""
-        : truncateText(
-            [
-              source().author ? `@${source().author}` : "",
-              row.kind === "issue"
-                ? (row.issue.labels[0] ?? "")
-                : (row.pr.labels?.[0] ?? ""),
-              row.kind === "pr" && row.pr.ciStatus !== "none"
-                ? row.pr.ciStatus
-                : "",
-              sourceAge(source().createdAt),
-            ]
-              .filter(Boolean)
-              .join("  "),
-            Math.floor(listWidth() / 3),
-          );
+    const metadata = () => {
+      const phrases: Phrase[] = [];
+      if (row.kind === "pr") {
+        const checks = describeChecks(row.pr);
+        const review = describeReview(row.pr);
+        if (checks)
+          phrases.push({
+            ...checks,
+            text: `CI ${row.pr.ciStatus === "passing" ? "✓" : row.pr.ciStatus === "failing" ? "✗" : "◐"}`,
+          });
+        if (review)
+          phrases.push({
+            ...review,
+            text:
+              row.pr.reviewDecision === "CHANGES_REQUESTED"
+                ? "changes"
+                : "approved",
+          });
+        if (row.pr.isDraft) phrases.push({ text: "draft", fg: theme.subtext });
+      }
+      const labels = row.kind === "pr" ? row.pr.labels : row.issue.labels;
+      if (labels?.length)
+        phrases.push({ text: labels.join(","), fg: theme.subtext });
+      if (row.kind === "pr" && row.pr.headRefName)
+        phrases.push({ text: row.pr.headRefName, fg: theme.blue });
+      if (source().author && listWidth() >= 96)
+        phrases.push({ text: `@${source().author}`, fg: theme.overlay });
+      const age = sourceAge(source().createdAt);
+      if (age) phrases.push({ text: age, fg: theme.overlay });
+      // Status gets the first columns; author and long branch names yield
+      // before a check result. Fit before painting to prevent wrapping.
+      return fitSegments(
+        phrases.map((phrase, index) => ({
+          ...phrase,
+          text: `${index ? " · " : ""}${oneLine(phrase.text)}`,
+        })),
+        Math.max(
+          0,
+          Math.floor((listWidth() - 6) * (listWidth() < 50 ? 0.3 : 0.55)),
+        ),
+      );
+    };
+    const rightWidth = () =>
+      metadata().reduce((sum, phrase) => sum + displayWidth(phrase.text), 0);
     const label = () => {
-      const budget = Math.max(1, listWidth() - 6 - displayWidth(right()));
+      const budget = Math.max(1, listWidth() - 6 - rightWidth());
       const checkout = row.checkedOutName
-        ? truncateText(` → ${row.checkedOutName}`, Math.floor(budget / 2))
+        ? truncateText(
+            ` → ${row.checkedOutName}${row.kind === "issue" && row.siblings ? ` (+${row.siblings} more)` : ""}`,
+            Math.floor(budget / 2),
+          )
         : "";
       return (
         truncateText(
-          `${sourceRowMarker(row)} ${sourceRowLabel(row)}`,
+          `${sourceRowMarker(row)} ${oneLine(sourceRowLabel(row))}`,
           Math.max(1, budget - displayWidth(checkout)),
         ) + checkout
       );
@@ -922,7 +952,9 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
           {label()}
         </text>
         <box flexGrow={1} />
-        <text fg={theme.overlay}>{right()}</text>
+        <For each={metadata()}>
+          {(phrase) => <text fg={phrase.fg}>{phrase.text}</text>}
+        </For>
       </box>
     );
   };

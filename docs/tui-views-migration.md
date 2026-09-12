@@ -16,4 +16,6 @@ Space marks a row or a header's group in every view. `a` marks all visible rows;
 
 `?` is scrollable and generated from the action registry. `headerFacts.pr` defaults on; set it to false to hide header/session PR badges and stop background source polling. GitHub unavailability stays silent in the strip and headers until a lookup has succeeded; only a later failure marks a cached value stale. Start still loads sources when opened.
 
+Start also keeps one-line rows. Compact `CI ✓`/`CI ✗`/`CI ◐` marks show checks; `changes` means changes requested in review. Draft, labels and branch follow, with author and age where space permits. The sidebar now includes the index so marks remain visible. Session row identity and the needs-you band remain available in every `b` grouping.
+
 Per-view previews and the `:` palette are coming in PR 3.

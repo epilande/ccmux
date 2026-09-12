@@ -1,5 +1,5 @@
 import type { RepoFactsResponse } from "../../daemon/repo-facts";
-import { branchPR, factsText } from "../utils/repo-facts";
+import { branchPRs, factsText } from "../utils/repo-facts";
 import type { Component } from "solid-js";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
@@ -155,8 +155,12 @@ export const SessionList: Component<SessionListProps> = (props) => {
   function enriched(item: Extract<FlatItem, { type: "session" }>) {
     const session = item.filteredSession.session;
     if (!props.repoFacts) return session;
-    const pr = props.repoFacts.headerPR ? branchPR(session, props.repoFacts.repos) : null;
-    return { ...session, branchPRs: pr ? [pr] : [] };
+    return {
+      ...session,
+      branchPRs: props.repoFacts.headerPR
+        ? branchPRs(session, props.repoFacts.repos)
+        : [],
+    };
   }
 
   /**

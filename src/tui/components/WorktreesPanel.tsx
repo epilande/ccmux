@@ -1,5 +1,10 @@
 import { GroupHeader } from "./GroupHeader";
-import { factsText, badgeText } from "../utils/repo-facts";
+import {
+  factsText,
+  badgeText,
+  branchPRs,
+  badgeColor,
+} from "../utils/repo-facts";
 import { getAgentDisplayName } from "../../lib/agents";
 import type { ViewMemory } from "../actions";
 import type { RepoFactsResponse } from "../../daemon/repo-facts";
@@ -204,6 +209,38 @@ function prColor(pr: PRState): string {
     default:
       return unhandled(pr.state, theme.subtext);
   }
+}
+
+export function formatTracking(row: WorktreeRow): string {
+  if (!row.upstream) return "";
+  if (row.upstream.gone) return "branch gone";
+  return [
+    row.upstream.ahead ? `↑${row.upstream.ahead}` : "",
+    row.upstream.behind ? `↓${row.upstream.behind}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function rowSessions(entry: WorktreePanelRow): WorktreeSession[] {
+  return entry.row.sessions.length
+    ? entry.row.sessions
+    : (entry.candidate?.sessions ?? []);
+}
+
+export function describeSessions(
+  sessions: WorktreeSession[],
+  compact = false,
+): string {
+  if (!sessions.length) return "";
+  if (sessions.length === 1) return getAgentDisplayName(sessions[0]!.agentType);
+  const status = leadStatus(sessions);
+  const count = sessions.filter((session) => session.status === status).length;
+  if (compact)
+    return `${sessions.length} (${count}${status === "waiting" ? "◆" : status === "working" ? "◐" : "●"})`;
+  return count === sessions.length
+    ? `${count} agents ${status}`
+    : `${sessions.length} agents, ${count} ${status}`;
 }
 
 export const DIRTY_UNCOUNTED = "uncommitted work";
@@ -977,38 +1014,50 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         }
     }
   });
-  const groupBranch = (root: string) => {
-    const rows = groups().find((g) => g.repoRoot === root)?.rows ?? [];
-    const branch = rows[0]?.row.branch;
-    return branch &&
-      branch !== "main" &&
-      rows.every((r) => r.row.branch === branch)
-      ? branch
-      : undefined;
-  };
   const facts = (root: string) =>
     props.facts?.repos.find((r) => r.repoRoot === root);
-  const cachedBadge = (entry: WorktreePanelRow) => {
-    const repo = facts(entry.row.repoRoot);
-    const pr = entry.row.tip
-      ? repo?.prs?.value.find((p) => p.headRefOid === entry.row.tip)
-      : undefined;
-    return pr
-      ? badgeText(
-          { id: String(pr.number), href: pr.url, ciStatus: pr.ciStatus },
-          repo?.prs?.stale,
-        )
-      : "";
+  const cachedPRs = (entry: WorktreePanelRow) =>
+    branchPRs(
+      {
+        mainRepoRoot: entry.row.repoRoot,
+        worktreeRoot: entry.row.path,
+        gitBranch: entry.row.branch,
+      },
+      props.facts?.repos ?? [],
+    );
+  const cachedBadge = (entry: WorktreePanelRow) =>
+    cachedPRs(entry)
+      .map((pr) => badgeText(pr))
+      .join(" ");
+  const groupBranch = (root: string) => {
+    const group = groups().find((g) => g.repoRoot === root);
+    const rows = group?.rows ?? [];
+    const first = rows[0];
+    const branch = first?.row.branch;
+    if (
+      props.facts?.headerPR === false ||
+      !group ||
+      !first ||
+      !branch ||
+      branch === "main" ||
+      !rows.every((r) => r.row.branch === branch)
+    )
+      return undefined;
+    // Lift only when the header can carry the identity and badge in full;
+    // otherwise their row positions remain visible on compact surfaces.
+    const badge = cachedBadge(first) || (first.pr ? describePR(first.pr) : "");
+    const header = `▾ ${group.repoName} (${rows.length})   ${branch}${badge ? `   ${badge}` : ""}`;
+    return displayWidth(header) <= width() - 2 ? branch : undefined;
   };
   const renderRow = (entry: WorktreePanelRow) => {
-    const status = () => leadStatus(entry.row.sessions);
+    const status = () => leadStatus(rowSessions(entry));
     const spinner = useStatusIcon(
       () => status(),
       () => null,
       () => "dot",
     );
     const glyph = () =>
-      !entry.row.sessions.length
+      !rowSessions(entry).length
         ? " "
         : status() === "waiting"
           ? "◆"
@@ -1018,40 +1067,82 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const index = () => rows().findIndex((r) => r.key === entry.key) + 1;
     const right = () =>
       truncateText(
-        entry.row.sessions
-          .map((s) => getAgentDisplayName(s.agentType))
-          .join(" · "),
+        describeSessions(rowSessions(entry), width() < 100),
         Math.floor(width() / 3),
       );
-    const segments = () =>
-      fitSegments(
+    const segments = () => {
+      const dirty = dirtyPhrases(entry.row);
+      const skip = entry.skip?.reason;
+      const metadata = [
+        ...(entry.candidate
+          ? [{ text: `  ${describeReason(entry.candidate)}`, fg: theme.yellow }]
+          : !groupBranch(entry.row.repoRoot) && cachedBadge(entry)
+            ? [
+                {
+                  text: `  ${cachedBadge(entry)}`,
+                  fg: badgeColor(cachedPRs(entry)),
+                },
+              ]
+            : entry.pr && !groupBranch(entry.row.repoRoot)
+              ? [{ text: `  ${describePR(entry.pr)}`, fg: prColor(entry.pr) }]
+              : []),
+        ...(dirty.length
+          ? dirty
+          : entry.candidate?.dirty
+            ? [DIRTY_UNCOUNTED]
+            : []
+        ).map((text) => ({
+          text: `  ${text}`,
+          fg: entry.candidate ? theme.yellow : theme.subtext,
+        })),
+        ...(entry.row.locked ? [{ text: "  locked", fg: theme.yellow }] : []),
+        ...(skip &&
+        !(entry.row.locked && skip === "locked") &&
+        !(entry.row.detached && skip === "detached HEAD") &&
+        !(rowSessions(entry).length && /^an agent is /.test(skip))
+          ? [
+              {
+                text: `  ${skip.replace(/^an agent is /, "agent ")}`,
+                fg: theme.subtext,
+              },
+            ]
+          : []),
+        ...(!entry.candidate && formatTracking(entry.row)
+          ? [{ text: `  ${formatTracking(entry.row)}`, fg: theme.blue }]
+          : []),
+      ];
+      const budget = Math.max(1, width() - 6 - displayWidth(right()));
+      const wanted = metadata.reduce(
+        (n, part) => n + displayWidth(part.text),
+        0,
+      );
+      const identityBudget = Math.max(10, budget - wanted);
+      const identity = fitSegments(
         [
           {
-            text: entry.row.isMain ? "⌂ main checkout" : `${entry.row.name} +`,
+            text: entry.row.isMain
+              ? "⌂ main checkout"
+              : `${truncateText(entry.row.name, identityBudget - 2)} +`,
             fg: entry.row.isMain ? theme.text : theme.blue,
           },
           ...(!groupBranch(entry.row.repoRoot) && rowBranch(entry)
             ? [{ text: `  ${rowBranch(entry)}`, fg: theme.subtext }]
             : []),
-          ...(entry.candidate
-            ? [
-                {
-                  text: `  ${describeReason(entry.candidate)}`,
-                  fg: theme.yellow,
-                },
-              ]
-            : !groupBranch(entry.row.repoRoot) && cachedBadge(entry)
-              ? [{ text: `  ${cachedBadge(entry)}`, fg: theme.green }]
-              : entry.pr && !groupBranch(entry.row.repoRoot)
-                ? [{ text: `  ${describePR(entry.pr)}`, fg: prColor(entry.pr) }]
-                : []),
-          ...dirtyPhrases(entry.row).map((text) => ({
-            text: `  ${text}`,
-            fg: theme.yellow,
-          })),
         ],
-        Math.max(1, width() - 6 - displayWidth(right())),
+        identityBudget,
       );
+      return [
+        ...identity,
+        ...fitSegments(
+          metadata,
+          Math.max(
+            0,
+            budget -
+              identity.reduce((n, part) => n + displayWidth(part.text), 0),
+          ),
+        ),
+      ];
+    };
     return (
       <box
         height={1}
@@ -1061,7 +1152,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         onMouseDown={() => setCursor(entry.key)}
       >
         <text fg={theme.mauve}>
-          {entry.row.sessions.some((s) => s.id === props.activeSessionId)
+          {rowSessions(entry).some((s) => s.id === props.activeSessionId)
             ? "▎"
             : " "}
         </text>
@@ -1154,9 +1245,19 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                     width={width()}
                     sharedBranch={groupBranch(item.repoRoot)}
                     facts={factsText(facts(item.repoRoot))}
+                    prBadgeColor={
+                      item.rows[0]
+                        ? cachedPRs(item.rows[0]).length
+                          ? badgeColor(cachedPRs(item.rows[0]))
+                          : item.rows[0].pr
+                            ? prColor(item.rows[0].pr)
+                            : undefined
+                        : undefined
+                    }
                     prBadge={
                       groupBranch(item.repoRoot) && item.rows[0]
-                        ? cachedBadge(item.rows[0])
+                        ? cachedBadge(item.rows[0]) ||
+                          (item.rows[0].pr ? describePR(item.rows[0].pr) : "")
                         : ""
                     }
                     collapsed={collapsed().has(item.repoRoot)}
