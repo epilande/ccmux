@@ -1,11 +1,17 @@
 import type { ScrollBoxRenderable } from "@opentui/core";
 import type { Component, JSX, ParentComponent } from "solid-js";
+import { createMemo } from "solid-js";
 import { theme } from "../theme";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
+import { truncateText, wrapText } from "../utils/format";
 
 const KEY_COL_WIDTH = 14;
 const COL_WIDTH = 38;
 const COL_GAP = 3;
-const MAX_WIDTH = COL_WIDTH * 2 + COL_GAP + 4 + 2; // cols + padding(2+2) + border(2)
+const PAD_X = 4; // picker paddingLeft + paddingRight
+const SIDEBAR_PAD_X = 2;
+const BORDER = 2;
+const MAX_WIDTH = COL_WIDTH * 2 + COL_GAP + PAD_X + BORDER; // cols + padding + border
 
 type Group = { section: string; items: { key: string; desc: string }[] };
 
@@ -41,8 +47,8 @@ const leftGroups = (reviewable?: boolean): Group[] => [
       // uncommitted, `D` what the branch changed), so naming the two diffs
       // in key order says it without a second row - which Actions has no
       // height for anyway (see `keeps the last row visible`). The
-      // description sits inside the column's budget, COL_WIDTH minus
-      // KEY_COL_WIDTH.
+      // description sits inside the column's budget, KEY_COL_WIDTH plus
+      // whatever remains; wrapText below spends extra rows when it cannot.
       ...(reviewable ? [{ key: "d / D", desc: "Working tree / branch" }] : []),
     ],
   },
@@ -88,8 +94,38 @@ const rightGroups = (sidebar?: boolean): Group[] => [
   },
 ];
 
-const renderColumn = (columnGroups: Group[]): JSX.Element => (
-  <box flexDirection="column" width={COL_WIDTH}>
+/**
+ * A shortcut row whose description is pre-wrapped to `descWidth`.
+ *
+ * The wrap happens here rather than in the renderer because the row height
+ * IS the line count: a renderer wrap past a height-1 box clips the tail
+ * (or paints it over the next shortcut). Lines from wrapText already fit,
+ * so nothing can wrap a second time.
+ */
+const renderShortcut = (
+  item: { key: string; desc: string },
+  colWidth: number,
+): JSX.Element => {
+  const descWidth = Math.max(1, colWidth - KEY_COL_WIDTH);
+  const descLines = wrapText(item.desc, descWidth);
+  return (
+    <box height={descLines.length} flexDirection="row" flexShrink={0}>
+      <box width={KEY_COL_WIDTH} height={1} flexShrink={0}>
+        <text fg={theme.mauve}>{item.key.padEnd(KEY_COL_WIDTH)}</text>
+      </box>
+      <box flexDirection="column" width={descWidth} flexShrink={0}>
+        {descLines.map((line) => (
+          <box height={1}>
+            <text fg={theme.subtext}>{line}</text>
+          </box>
+        ))}
+      </box>
+    </box>
+  );
+};
+
+const renderColumn = (columnGroups: Group[], colWidth: number): JSX.Element => (
+  <box flexDirection="column" width={colWidth}>
     {columnGroups.map((group, gi) => (
       <>
         {gi > 0 && <box height={1} />}
@@ -98,14 +134,7 @@ const renderColumn = (columnGroups: Group[]): JSX.Element => (
             <strong>{group.section}</strong>
           </text>
         </box>
-        {group.items.map((item) => (
-          <box height={1} flexDirection="row">
-            <box width={KEY_COL_WIDTH}>
-              <text fg={theme.mauve}>{item.key.padEnd(KEY_COL_WIDTH)}</text>
-            </box>
-            <text fg={theme.subtext}>{item.desc}</text>
-          </box>
-        ))}
+        {group.items.map((item) => renderShortcut(item, colWidth))}
       </>
     ))}
   </box>
@@ -120,8 +149,15 @@ const renderColumn = (columnGroups: Group[]): JSX.Element => (
  * of a full-height rail — silently, since the scrollbox simply scrolls. The
  * alternating mauve key and dim description are what separate one entry from
  * the next; the air was costing a third of the overlay to say the same thing.
+ *
+ * Descriptions wrap to `contentWidth` with one row per line, same reason as
+ * {@link renderShortcut}: a height-1 box at 30 columns clips
+ * "Cycle prompt (inline/row/off)".
  */
-const renderCompactColumn = (columnGroups: Group[]): JSX.Element => (
+const renderCompactColumn = (
+  columnGroups: Group[],
+  contentWidth: number,
+): JSX.Element => (
   <box flexDirection="column">
     {columnGroups.map((group, gi) => (
       <>
@@ -131,16 +167,21 @@ const renderCompactColumn = (columnGroups: Group[]): JSX.Element => (
             <strong>{group.section}</strong>
           </text>
         </box>
-        {group.items.map((item) => (
-          <>
-            <box height={1}>
-              <text fg={theme.mauve}>{item.key}</text>
-            </box>
-            <box height={1}>
-              <text fg={theme.subtext}>{item.desc}</text>
-            </box>
-          </>
-        ))}
+        {group.items.map((item) => {
+          const descLines = wrapText(item.desc, contentWidth);
+          return (
+            <>
+              <box height={1}>
+                <text fg={theme.mauve}>{item.key}</text>
+              </box>
+              {descLines.map((line) => (
+                <box height={1}>
+                  <text fg={theme.subtext}>{line}</text>
+                </box>
+              ))}
+            </>
+          );
+        })}
       </>
     ))}
   </box>
@@ -164,7 +205,7 @@ const HelpLayout: ParentComponent<{
       {props.children}
     </scrollbox>
 
-    <box justifyContent="center" width="100%" height={1}>
+    <box justifyContent="center" width="100%" height={1} flexShrink={0}>
       <text fg={theme.overlay}>{props.hint}</text>
     </box>
   </>
@@ -177,15 +218,56 @@ interface HelpOverlayProps {
 }
 
 export const HelpOverlay: Component<HelpOverlayProps> = (props) => {
+  const dims = useSharedTerminalDimensions();
+
   const filteredRightGroups = () =>
     props.sidebar
       ? rightGroups(props.sidebar).filter((g) => g.section !== "Preview")
       : rightGroups(props.sidebar);
 
-  const groups = leftGroups(props.reviewable);
+  const groups = () => leftGroups(props.reviewable);
+
+  /**
+   * Inner columns of the picker modal: the overlay is `min(term, MAX_WIDTH)`
+   * minus border and horizontal padding. Two fixed COL_WIDTH columns plus
+   * the gap need 79 of those; a 60-column picker only has 54, so the
+   * ordinary two-column grid clips the right-hand descriptions off the
+   * edge. One stacked column uses the full inner width instead.
+   */
+  const innerWidth = createMemo(() =>
+    Math.max(1, Math.min(dims().width, MAX_WIDTH) - BORDER - PAD_X),
+  );
+
+  const twoColumns = createMemo(
+    () => innerWidth() >= COL_WIDTH * 2 + COL_GAP,
+  );
+
+  const columnWidth = createMemo(() =>
+    twoColumns()
+      ? Math.floor((innerWidth() - COL_GAP) / 2)
+      : innerWidth(),
+  );
+
+  const compactWidth = createMemo(() =>
+    Math.max(1, dims().width - BORDER - SIDEBAR_PAD_X),
+  );
+
+  const pickerHint = createMemo(() =>
+    truncateText("j/k scroll · ? or Esc to close", innerWidth()),
+  );
+
+  const sidebarHint = createMemo(() =>
+    truncateText("j/k scroll · ? close", compactWidth()),
+  );
+
+  const pickerColumns = createMemo((): Group[][] => {
+    const left = groups();
+    const right = filteredRightGroups();
+    return twoColumns() ? [left, right] : [[...left, ...right]];
+  });
 
   if (props.sidebar) {
-    const allGroups = [...groups, ...filteredRightGroups()];
+    const allGroups = [...groups(), ...filteredRightGroups()];
     return (
       <box
         position="absolute"
@@ -199,11 +281,11 @@ export const HelpOverlay: Component<HelpOverlayProps> = (props) => {
         flexDirection="column"
       >
         <HelpLayout
-          hint="j/k scroll · ? close"
+          hint={sidebarHint()}
           onScrollboxRef={props.onScrollboxRef}
         >
           <box flexDirection="column" paddingLeft={1} paddingRight={1}>
-            {renderCompactColumn(allGroups)}
+            {renderCompactColumn(allGroups, compactWidth())}
           </box>
         </HelpLayout>
       </box>
@@ -234,14 +316,17 @@ export const HelpOverlay: Component<HelpOverlayProps> = (props) => {
         paddingBottom={1}
       >
         <HelpLayout
-          hint="j/k scroll · ? or Esc to close"
+          hint={pickerHint()}
           onScrollboxRef={props.onScrollboxRef}
         >
           <box height={1} />
           <box flexDirection="row">
-            {renderColumn(groups)}
-            <box width={COL_GAP} />
-            {renderColumn(filteredRightGroups())}
+            {pickerColumns().map((column, i) => (
+              <>
+                {i > 0 && <box width={COL_GAP} />}
+                {renderColumn(column, columnWidth())}
+              </>
+            ))}
           </box>
         </HelpLayout>
       </box>
