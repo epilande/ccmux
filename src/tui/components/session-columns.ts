@@ -1,3 +1,4 @@
+import { NEEDS_YOU_GROUP_KEY } from "../utils/grouping";
 import type {
   Responsive,
   BreakpointConfig,
@@ -983,3 +984,24 @@ export function entryRightWidth(entry: ResolvedEntry): number {
 }
 
 export type { StatusMode };
+
+/** Repository facts belong to project headers, never to cwd or tmux groups. */
+export function groupWorktreeFacts(
+  header: Extract<import("../utils/grouping").FlatItem, { type: "header" }>,
+  repos: import("../../daemon/worktree-list").WorktreeRepo[],
+): string | undefined {
+  if (!header.repoRoot || header.groupKey === NEEDS_YOU_GROUP_KEY)
+    return undefined;
+  const roots = new Set(
+    header.members.map(
+      ({ session }) => session.mainRepoRoot ?? session.worktreeRoot,
+    ),
+  );
+  if (roots.size !== 1 || !roots.has(header.repoRoot)) return undefined;
+  const repo = repos.find((repo) => roots.has(repo.repoRoot));
+  if (!repo) return undefined;
+  const linked = repo.worktrees.filter((tree) => !tree.isMain).length;
+  if (linked === 0) return undefined; // a repo with only its main checkout says nothing
+  const main = repo.worktrees.some((tree) => tree.isMain);
+  return `${main ? "main + " : ""}${linked} worktree${linked === 1 ? "" : "s"}`;
+}

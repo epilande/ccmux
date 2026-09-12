@@ -1,5 +1,18 @@
+import { getDaemonUrl } from "../../lib/config";
+import type {
+  WorktreeRepo,
+  WorktreeListResponse,
+} from "../../daemon/worktree-list";
+import { groupWorktreeFacts } from "./session-columns";
 import type { Component } from "solid-js";
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  Show,
+  onCleanup,
+} from "solid-js";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import type { EnrichedSession, TmuxSocketError } from "../../types";
@@ -12,6 +25,7 @@ import type {
 import { DEFAULT_PROMPT_DISPLAY } from "../../lib/preferences";
 import {
   type FlatItem,
+  NEEDS_YOU_GROUP_KEY,
   getSessionIndex,
   scrollTarget,
   toVisualLine,
@@ -45,6 +59,8 @@ interface SessionListProps {
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   dimmed?: boolean;
+  ageFadeAfter?: number;
+  connectionState?: string;
   sidebar?: boolean;
   /** Prompt display mode (cycled by the `p` key): inline, own row, or off. */
   promptDisplay?: PromptDisplay;
@@ -108,6 +124,44 @@ export const SessionList: Component<SessionListProps> = (props) => {
     props.showPreview
       ? Math.floor((dims().width * (100 - props.previewWidth)) / 100)
       : dims().width;
+
+  const [worktreeRepos, setWorktreeRepos] = createSignal<WorktreeRepo[]>([]);
+  const repoScope = createMemo(() =>
+    [
+      ...new Set(
+        props.items.flatMap((item) =>
+          item.type === "header"
+            ? item.members
+                .map(
+                  ({ session }) => session.mainRepoRoot ?? session.worktreeRoot,
+                )
+                .filter((root): root is string => !!root)
+            : [],
+        ),
+      ),
+    ]
+      .sort()
+      .join("\n"),
+  );
+  createEffect(() => {
+    const scope = repoScope();
+    const connected = props.connectionState;
+    setWorktreeRepos([]);
+    if (!scope || connected !== "connected") return;
+    const controller = new AbortController();
+    onCleanup(() => controller.abort());
+    fetch(`${getDaemonUrl()}/worktrees`, {
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
+    })
+      .then((response) =>
+        response.ok ? (response.json() as Promise<WorktreeListResponse>) : null,
+      )
+      .then((response) => {
+        if (!controller.signal.aborted && response)
+          setWorktreeRepos(response.repos);
+      })
+      .catch(() => {});
+  });
 
   /**
    * Whether rows draw the wrapped block at all, decided ONCE for the list.
@@ -214,7 +268,10 @@ export const SessionList: Component<SessionListProps> = (props) => {
   const sessionLines = (session: EnrichedSession) =>
     1 +
     (rowHasContent(session, rowLayout(session).row2) ? 1 : 0) +
-    promptBlock(session).length;
+    promptBlock(session).length +
+    (props.sidebar && session.status === "waiting" && session.tmuxTarget
+      ? 1
+      : 0);
 
   createEffect(() => {
     // Re-run once the scrollbox gets real dimensions (and on later resizes).
@@ -283,12 +340,16 @@ export const SessionList: Component<SessionListProps> = (props) => {
         <>
           {index > 0 && (
             <box height={1} paddingLeft={1} paddingRight={1}>
-              <text fg={theme.border}>{"─".repeat(200)}</text>
+              <text fg={theme.border}>
+                {"─".repeat(Math.max(0, effectiveWidth() - 5))}
+              </text>
             </box>
           )}
           <GroupHeader
             label={item.label}
             count={item.count}
+            width={effectiveWidth() - 3}
+            facts={groupWorktreeFacts(item, worktreeRepos())}
             collapsed={item.collapsed}
             selected={index === props.selectedIndex}
             members={item.members}
@@ -326,6 +387,9 @@ export const SessionList: Component<SessionListProps> = (props) => {
         promptBlock={promptBlock(item.filteredSession.session)}
         dimmed={props.dimmed}
         sidebar={props.sidebar}
+        needsYou={item.groupKey === NEEDS_YOU_GROUP_KEY}
+        sharedTmuxSession={item.sharedTmuxSession}
+        ageFadeAfter={props.ageFadeAfter}
         onActivate={onActivate}
         onContextMenu={onContextMenu}
       />

@@ -50,6 +50,7 @@ import { isSameServerCached } from "./utils/server-guard";
 import { stripAnsi } from "../lib/strip-ansi";
 import {
   buildFlatItems,
+  NEEDS_YOU_GROUP_KEY,
   getGroupKey,
   groupSessions,
   headerGroupKeys,
@@ -649,6 +650,7 @@ interface TUIState {
   columns?: ColumnsConfig;
   promptLines?: number;
   breakpoints?: BreakpointConfig;
+  ageFadeAfter?: number;
   groupBy: GroupBy;
   hideIdle: boolean;
 }
@@ -661,6 +663,7 @@ interface TUIStoreOptions {
   columns?: ColumnsConfig;
   promptLines?: number;
   breakpoints?: BreakpointConfig;
+  ageFadeAfter?: number;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
   /** TTL (ms) for the search pane-content cache (issue #55). Defaults to
@@ -980,6 +983,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     columns: options.columns,
     promptLines: options.promptLines,
     breakpoints: options.breakpoints,
+    ageFadeAfter: options.ageFadeAfter,
     groupBy: options.groupBy ?? DEFAULT_GROUP_BY,
     hideIdle: options.hideIdle ?? false,
   });
@@ -1439,12 +1443,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   // Derived: sessions belonging to the selected group
   const selectedGroupSessions = createMemo(() => {
     const header = selectedGroupHeader();
-    if (!header || state.groupBy === "none") return [];
-    return filteredSessions()
-      .filter(
-        (fs) => getGroupKey(fs.session, state.groupBy) === header.groupKey,
-      )
-      .map((fs) => fs.session);
+    return header?.members.map((fs) => fs.session) ?? [];
   });
 
   /** Stable identity for a flat row. Used to find a pre-kill predecessor in
@@ -2578,6 +2577,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     toggleGroupCollapse(groupKey: string) {
+      if (groupKey === NEEDS_YOU_GROUP_KEY) return;
       setCollapsedGroups((prev) => {
         const next = new Set(prev);
         if (next.has(groupKey)) {
@@ -2589,7 +2589,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
             const session = state.sessions.find(
               (s) => s.id === state.selectedSessionId,
             );
-            if (session && getGroupKey(session, state.groupBy) === groupKey) {
+            if (
+              session &&
+              session.status !== "waiting" &&
+              getGroupKey(session, state.groupBy) === groupKey
+            ) {
               setState("selectedSessionId", null);
               setSelectedHeaderKey(groupKey);
             }
@@ -2626,6 +2630,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         (s) => s.id === state.selectedSessionId,
       );
       if (!session) return;
+      if (session.status === "waiting") return;
       const groupKey = getGroupKey(session, state.groupBy);
       if (state.groupBy === "none" || !groupKey) return;
       setState("selectedSessionId", null);

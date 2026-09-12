@@ -162,6 +162,7 @@ export function createSidebarCommand(): Command {
           columns: prefs.sidebar?.columns ?? prefs.columns,
           promptLines: prefs.sidebar?.promptLines ?? prefs.promptLines,
           breakpoints: prefs.breakpoints,
+          ageFadeAfter: prefs.ageFade?.after,
           searchPaneContent: prefs.searchPaneContent,
           searchPaneLines: prefs.searchPaneLines,
           searchTranscript: prefs.searchTranscript,

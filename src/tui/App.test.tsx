@@ -7418,10 +7418,14 @@ describe("App hand off to", () => {
     });
     try {
       await renderRows([{}, { status: "waiting" }]);
+      // Skip the band header and target row to keep s1 as the source.
+      await press("j");
+      await press("j");
       await sendPick();
       const frame = squish(setup.captureCharFrame());
       expect(frame).toContain("Handoffrefused:");
-      expect(frame).toContain("Sessions2hasapendingprompt");
+      expect(frame).toContain("Sessions2hasa");
+      expect(frame).toContain("pendingprompt.Ahandoffisneverusedtoanswerone");
     } finally {
       restore();
     }
@@ -7570,9 +7574,7 @@ describe("App worktrees panel (W)", () => {
             }
           : url.includes("/prs")
             ? {
-                repos: [
-                  { repoRoot: "/code/myapp", repoName: "myapp", prs },
-                ],
+                repos: [{ repoRoot: "/code/myapp", repoName: "myapp", prs }],
                 errors: [],
               }
             : {};

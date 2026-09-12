@@ -1,5 +1,5 @@
 import type { Component } from "solid-js";
-import { createMemo, Show } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
 import { WAITING_SUBTYPES, computeStatusSummary } from "../utils/grouping";
 import type { FilteredSession, StatusSummary } from "../utils/grouping";
 import type { IconStyle } from "../../lib/icons";
@@ -7,11 +7,15 @@ import { getStatusIcon } from "../../lib/icons";
 import { getStatusColor } from "./StatusBadge";
 import { useStatusIcon } from "../utils/useStatusIcon";
 import { MouseButton, type MouseEvent } from "@opentui/core";
+import { displayWidth, truncateText } from "../utils/format";
+import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { theme } from "../theme";
 
 interface GroupHeaderProps {
   label: string;
   count: number;
+  width?: number;
+  facts?: string;
   collapsed: boolean;
   selected: boolean;
   members: FilteredSession[];
@@ -51,6 +55,7 @@ function staticDots(
 }
 
 export const GroupHeader: Component<GroupHeaderProps> = (props) => {
+  const dims = useSharedTerminalDimensions();
   const c = (color: string) => (props.dimmed ? theme.border : color);
   const bgColor = () =>
     props.selected && !props.dimmed ? theme.surface : undefined;
@@ -68,6 +73,58 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
 
   const dots = () => staticDots(summary(), props.iconStyle, props.dimmed);
 
+  const parts = createMemo(() => {
+    let left = Math.max(0, (props.width ?? dims().width) - 2);
+    const activity = props.collapsed
+      ? [
+          ...(summary().working
+            ? [
+                {
+                  text: ` ${workingIcon()} ${summary().working}`,
+                  color: theme.peach,
+                },
+              ]
+            : []),
+          ...dots().map((dot) => ({
+            text: ` ${dot.icon} ${dot.count}`,
+            color: dot.color,
+          })),
+        ]
+      : [];
+    const count = ` (${props.count})`;
+    // Keep the count and collapsed activity visible before spending space on
+    // a long group name or optional repository facts.
+    const labelWidth = Math.max(
+      1,
+      left -
+        2 -
+        displayWidth(count) -
+        activity.reduce((width, part) => width + displayWidth(part.text), 0),
+    );
+    const segments = [
+      { text: `${indicator()} `, color: theme.overlay },
+      { text: truncateText(props.label, labelWidth), color: theme.text },
+      { text: count, color: theme.overlay },
+      ...activity,
+      ...(props.facts
+        ? [{ text: `   ${props.facts}`, color: theme.subtext }]
+        : []),
+    ];
+    return segments.flatMap((segment) => {
+      // Facts are useful as complete phrases; do not leave a dangling
+      // "main +…" in a narrow sidebar. The identity may still truncate.
+      if (
+        segment.text === `   ${props.facts}` &&
+        displayWidth(segment.text) > left
+      )
+        return [];
+      if (left <= 0) return [];
+      const text = truncateText(segment.text, left);
+      left -= displayWidth(text);
+      return text.trim() ? [{ text, color: c(segment.color) }] : [];
+    });
+  });
+
   return (
     <box
       width="100%"
@@ -83,29 +140,17 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         }
       }}
     >
-      <box flexDirection="row" gap={1} width="100%">
-        <text fg={c(theme.overlay)}>{indicator()}</text>
-        <text fg={c(theme.text)}>
-          <Show when={props.selected} fallback={<>{props.label}</>}>
-            <b>{props.label}</b>
-          </Show>
-        </text>
-        <text fg={c(theme.subtext)}>({props.count})</text>
-        <Show when={props.collapsed}>
-          <box flexDirection="row" gap={1}>
-            <Show when={summary().working > 0}>
-              <text fg={c(theme.peach)}>
-                {workingIcon()} {summary().working}
-              </text>
-            </Show>
-            {dots().map((dot) => (
-              <text fg={dot.color}>
-                {dot.icon} {dot.count}
-              </text>
-            ))}
-          </box>
-        </Show>
-      </box>
+      <text>
+        <For each={parts()}>
+          {(part) => (
+            <span style={{ fg: part.color }}>
+              <Show when={props.selected} fallback={part.text}>
+                <b>{part.text}</b>
+              </Show>
+            </span>
+          )}
+        </For>
+      </text>
     </box>
   );
 };
