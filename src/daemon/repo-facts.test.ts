@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { RepoFactsCache } from "./repo-facts";
 import type { WorktreeRepo } from "./worktree-list";
-import type { OpenPR } from "./pr-list";
+import { associatedBranchPRs, type OpenPR } from "./pr-list";
 import type { SourceResult } from "./gh-spawn-source";
 
 const repo: WorktreeRepo = {
@@ -19,6 +19,7 @@ const pr: OpenPR = {
   ciStatus: "passing",
   headRefName: "feature",
   headRefOid: "abc",
+  headRepository: { owner: "o", name: "r" },
 };
 const failed = { ok: false as const, error: "gh unavailable" };
 function harness() {
@@ -184,12 +185,28 @@ describe("branch facts", () => {
       },
     ],
   };
-  it("keeps every branch PR when the checkout has local commits ahead of GitHub", async () => {
+  it("keeps matching upstream PRs when local-ahead, excluding namesake forks", async () => {
     const cache = new RepoFactsCache({
+      associate: (root, branch, prs) =>
+        associatedBranchPRs(root, branch, prs, async (_cwd, args) => ({
+          exitCode: 0,
+          stderr: "",
+          stdout:
+            args[0] === "for-each-ref"
+              ? `refs/heads/${branch}\tlocal-ahead\torigin\trefs/heads/${branch}\n`
+              : "git@github.com:o/r.git\n",
+        })),
       roots: async () => ["/repo"],
       headerPR: async () => true,
       local: async () => localRepo,
-      prs: async () => ({ ok: true, value: [pr, { ...pr, number: 3 }] }),
+      prs: async () => ({
+        ok: true,
+        value: [
+          pr,
+          { ...pr, number: 3 },
+          { ...pr, number: 4, headRepository: { owner: "fork", name: "r" } },
+        ],
+      }),
       issues: async () => failed,
     });
     await cache.refresh(["/repo"]);
@@ -199,10 +216,25 @@ describe("branch facts", () => {
   });
   it("looks beyond a capped repository snapshot, retains stale branch results, then clears a closed PR", async () => {
     let now = 0;
-    let branchAnswer: SourceResult<OpenPR[]> = { ok: true, value: [pr] };
+    let branchAnswer: SourceResult<OpenPR[]> = {
+      ok: true,
+      value: [
+        pr,
+        { ...pr, number: 4, headRepository: { owner: "fork", name: "r" } },
+      ],
+    };
     let branchReads = 0;
     const cache = new RepoFactsCache({
       now: () => now,
+      associate: (root, branch, prs) =>
+        associatedBranchPRs(root, branch, prs, async (_cwd, args) => ({
+          exitCode: 0,
+          stderr: "",
+          stdout:
+            args[0] === "for-each-ref"
+              ? `refs/heads/${branch}\tlocal-ahead\torigin\trefs/heads/${branch}\n`
+              : "git@github.com:o/r.git\n",
+        })),
       roots: async () => ["/repo"],
       headerPR: async () => true,
       local: async () => localRepo,
@@ -225,6 +257,9 @@ describe("branch facts", () => {
     expect(cache.snapshot(["/repo"])[0]?.branchPRs?.feature?.value[0]?.id).toBe(
       "2",
     );
+    expect(
+      cache.snapshot(["/repo"])[0]?.branchPRs?.feature?.value,
+    ).toHaveLength(1);
     expect(branchReads).toBe(1);
     branchAnswer = failed;
     now = 60_001;
@@ -252,6 +287,15 @@ describe("branch facts", () => {
         ],
       };
       const cache = new RepoFactsCache({
+        associate: (root, branch, prs) =>
+          associatedBranchPRs(root, branch, prs, async (_cwd, args) => ({
+            exitCode: 0,
+            stderr: "",
+            stdout:
+              args[0] === "for-each-ref"
+                ? `refs/heads/${branch}\tlocal-ahead\torigin\trefs/heads/${branch}\n`
+                : "git@github.com:o/r.git\n",
+          })),
         roots: async () => ["/repo"],
         headerPR: async () => true,
         local: async () => local,
@@ -271,6 +315,15 @@ describe("branch facts", () => {
   }
   it("leaves branch facts absent when GitHub has never answered", async () => {
     const cache = new RepoFactsCache({
+      associate: (root, branch, prs) =>
+        associatedBranchPRs(root, branch, prs, async (_cwd, args) => ({
+          exitCode: 0,
+          stderr: "",
+          stdout:
+            args[0] === "for-each-ref"
+              ? `refs/heads/${branch}\tlocal-ahead\torigin\trefs/heads/${branch}\n`
+              : "git@github.com:o/r.git\n",
+        })),
       roots: async () => ["/repo"],
       headerPR: async () => true,
       local: async () => localRepo,

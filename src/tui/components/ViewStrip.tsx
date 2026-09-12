@@ -40,10 +40,10 @@ export const ViewStrip: Component<{
     `${view === "sessions" ? "Sessions" : view === "worktrees" ? "Worktrees" : "Start"}${count(view) === undefined ? "" : ` ${count(view)}${stale(view) ? " ~" : ""}`}`;
   const scope = () => {
     const left = VIEWS.reduce((n, v) => n + displayWidth(label(v)) + 3, 0);
-    return truncateText(
-      props.scope?.split("/").pop() ?? "all repos",
-      Math.max(0, dims().width - left - 3),
-    );
+    const budget = dims().width - left - 3;
+    if (budget <= 0) return "";
+    if (budget === 1) return "…";
+    return truncateText(props.scope?.split("/").pop() ?? "all repos", budget);
   };
   return (
     <box

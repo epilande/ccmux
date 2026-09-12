@@ -4664,3 +4664,57 @@ describe("search over the agent's summary", () => {
     expect(row.primarySource).toBe("prompt");
   });
 });
+
+describe("scope selection and mark lifetime", () => {
+  for (const via of ["scope", "worktrees", "start"] as const) {
+    it(`reconciles hidden selection when ${via} changes repository`, () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", mainRepoRoot: "/a" }),
+        createMockSession({ id: "b", mainRepoRoot: "/b" }),
+      ]);
+      store.actions.setSelectedSessionId("a");
+      if (via === "scope") store.actions.setScope("/b");
+      else if (via === "worktrees") store.actions.showWorktrees("/b");
+      else store.actions.showSourcePicker("/b");
+      expect(store.selectedSession()?.id).toBe("b");
+      expect(store.selectedFlatItem()?.type).toBe("session");
+      expect(store.state.selectedSessionId).toBeNull();
+      store.actions.setSelectedSessionId("b");
+      store.actions.setScope(null);
+      expect(store.selectedSession()?.id).toBe("b");
+    });
+  }
+  it("drops a hidden header and does not revive it when widening", () => {
+    const store = createTUIStore({ groupBy: "project" });
+    store.actions.setSessions([
+      createMockSession({ id: "a", project: "a", mainRepoRoot: "/a" }),
+      createMockSession({ id: "b", project: "b", mainRepoRoot: "/b" }),
+    ]);
+    store.actions.setSelectedIndex(0);
+    expect(store.selectedHeaderKey()).not.toBeNull();
+    store.actions.setScope("/b");
+    expect(store.selectedHeaderKey()).toBeNull();
+    expect(store.selectedGroupSessions().map((s) => s.id)).toEqual(["b"]);
+  });
+  it("removal clears only that row's mark before its ID can be reused", () => {
+    const store = createTUIStore({ groupBy: "none" });
+    const a = createMockSession({ id: "a" });
+    store.actions.setSessions([a, createMockSession({ id: "b" })]);
+    store.actions.markSessions(["a", "b"]);
+    store.actions.removeSession("a");
+    store.actions.addSession(a);
+    expect([...store.state.markedSessions]).toEqual(["b"]);
+  });
+});
+
+it("clears marks for sessions removed by an authoritative reconnect snapshot", () => {
+  const store = createTUIStore();
+  store.actions.setSessions([
+    createMockSession({ id: "a" }),
+    createMockSession({ id: "b" }),
+  ]);
+  store.actions.markSessions(["a", "b"]);
+  store.actions.setSessions([createMockSession({ id: "b" })]);
+  expect([...store.state.markedSessions]).toEqual(["b"]);
+});

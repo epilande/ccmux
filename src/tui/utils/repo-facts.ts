@@ -15,8 +15,11 @@ export function createRepoFacts(options: {
     headerPR: true,
   });
   let generation = 0;
+  let requestId = 0;
+  let appliedRequest = 0;
   async function refresh(force = false) {
     const current = generation;
+    const request = ++requestId;
     const url = new URL(
       `${getDaemonUrl()}/repo-facts${force ? "/refresh" : ""}`,
     );
@@ -29,7 +32,14 @@ export function createRepoFacts(options: {
       });
       if (!response.ok) return;
       const next = (await response.json()) as RepoFactsResponse;
-      if (current === generation && Array.isArray(next.repos)) setData(next);
+      if (
+        current === generation &&
+        request > appliedRequest &&
+        Array.isArray(next.repos)
+      ) {
+        appliedRequest = request;
+        setData(next);
+      }
     } catch {
       /* An old or unreachable daemon contributes no facts. */
     }
@@ -38,13 +48,13 @@ export function createRepoFacts(options: {
     const connected = options.connected();
     void options.sources();
     generation++;
+    onCleanup(() => {
+      generation++;
+    });
     if (!connected) return;
     void refresh();
     const timer = setInterval(() => void refresh(), 2_000);
-    onCleanup(() => {
-      generation++;
-      clearInterval(timer);
-    });
+    onCleanup(() => clearInterval(timer));
   });
   return { data, refresh };
 }
@@ -66,19 +76,9 @@ export function branchPRs(
       ? repo.branchPRs[session.gitBranch]
       : undefined;
   if (cached) return cached.value.map((pr) => ({ ...pr, stale: cached.stale }));
-  const fromList = repo?.prs?.value
-    .filter((pr) => pr.headRefName === session.gitBranch)
-    .map((pr) => ({
-      id: String(pr.number),
-      href: pr.url,
-      ciStatus: pr.ciStatus,
-      reviewDecision: pr.reviewDecision,
-      stale: repo.prs?.stale,
-    }));
-  // An older daemon or a partial repo snapshot must not erase a known row PR.
-  const known = new Map((session.branchPRs ?? []).map((pr) => [pr.id, pr]));
-  for (const pr of fromList ?? []) known.set(pr.id, pr);
-  return [...known.values()];
+  // A repo-wide list cannot prove which fork a namesake branch belongs to.
+  // Keep the daemon's existing associations until branch facts answer.
+  return session.branchPRs ?? [];
 }
 export function branchPR(
   session: EnrichedSession,

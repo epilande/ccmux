@@ -1554,6 +1554,39 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     invokeRemovalTimers.set(invocationId, timer);
   }
 
+  function forgetSessionMark(id: string) {
+    if (!state.markedSessions.has(id)) return;
+    setState("markedSessions", (prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }
+
+  function changeScope(repo: string | null) {
+    if (repo === state.scope) return;
+    batch(() => {
+      setState("scope", repo);
+      if (
+        state.selectedSessionId &&
+        !filteredSessions().some(
+          (s) => s.session.id === state.selectedSessionId,
+        )
+      ) {
+        setState("selectedSessionId", null);
+      }
+      const header = selectedHeaderKey();
+      if (
+        header &&
+        !flatItems().some(
+          (item) => item.type === "header" && item.groupKey === header,
+        )
+      ) {
+        setSelectedHeaderKey(null);
+      }
+    });
+  }
+
   /**
    * Immediately drop a synthetic invoke row (no outcome to show), clearing
    * any armed linger timer and the selection if it pointed at the row.
@@ -1566,6 +1599,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       clearTimeout(existing);
       invokeRemovalTimers.delete(invocationId);
     }
+    forgetSessionMark(invocationId);
     setState("sessions", (s) =>
       s.filter((session) => session.id !== invocationId),
     );
@@ -1680,6 +1714,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       const merged =
         synthetic.length > 0 ? [...sessions, ...synthetic] : sessions;
       setState("sessions", merged);
+      const survivingIds = new Set(merged.map((session) => session.id));
+      for (const id of state.markedSessions) {
+        if (!survivingIds.has(id)) forgetSessionMark(id);
+      }
       if (
         state.selectedSessionId &&
         !merged.some((s) => s.id === state.selectedSessionId)
@@ -1731,6 +1769,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           ? flatItems().slice(0, killedIndex).map(flatItemIdentity)
           : [];
       batch(() => {
+        forgetSessionMark(sessionId);
         setState("sessions", (s) =>
           s.filter((session) => session.id !== sessionId),
         );
@@ -2462,7 +2501,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     setScope(repo: string | null) {
-      setState("scope", repo);
+      changeScope(repo);
       if (state.sourcePicker) setState("sourcePicker", "repo", repo);
     },
     markSessions(ids: string[], clear = false) {
@@ -2490,7 +2529,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         startWidened?: boolean;
       } = {},
     ) {
-      setState("scope", opts.startWidened ? null : repo);
+      changeScope(opts.startWidened ? null : repo);
       setState("sourcePicker", null);
       setState("worktrees", {
         repo,
@@ -2512,7 +2551,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         origin?: SourcePickerOrigin | null;
       } = {},
     ) {
-      setState("scope", repo);
+      changeScope(repo);
       setState("worktrees", null);
       setState("sourcePicker", {
         repo,

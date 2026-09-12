@@ -901,6 +901,8 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     if (props.enabled === false || event.defaultPrevented) return;
     event.preventDefault();
     const key = event.name;
+    const armedZ = pendingZ;
+    pendingZ = false;
     if (key !== "g") pendingG = false;
     if (phase() === "running") return;
     if (phase() === "dirty") {
@@ -932,8 +934,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     }
     if (phase() === "error") return;
     const item = current();
-    if (pendingZ) {
-      pendingZ = false;
+    if (armedZ) {
       if (key === "m") {
         setCollapsed(new Set(groups().map((g) => g.repoRoot)));
         return;

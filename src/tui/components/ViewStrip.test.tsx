@@ -87,3 +87,25 @@ it("scopes totals to the repo and shows its name at the right edge", async () =>
   expect(setup.captureCharFrame()).toContain("Start 3");
   expect(setup.captureCharFrame().trimEnd().endsWith("repo")).toBe(true);
 });
+
+for (const width of [35, 36, 37]) {
+  it(`fits the scope into a ${width - 36}-column budget`, async () => {
+    setup = await testRender(
+      () => (
+        <ViewStrip
+          view="sessions"
+          scope="/scope"
+          sessions={2}
+          facts={[]}
+          onView={() => {}}
+        />
+      ),
+      { width, height: 2 },
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("s…");
+    expect(frame.split("\n")[1]?.trim()).toBe("");
+    expect(frame.includes("…")).toBe(width === 37);
+  });
+}

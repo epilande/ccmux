@@ -3516,6 +3516,8 @@ export function App(props: AppProps) {
     if (visibility && !visibility.visible()) visibility.refresh();
 
     const key = event.name;
+    const armedZ = pendingZ;
+    pendingZ = false;
 
     // First, and it swallows the key that dismissed it. This is raised over
     // whatever was already on screen (including the new-session dialog, which
@@ -3684,8 +3686,7 @@ export function App(props: AppProps) {
     if (key !== "g" && pendingG) {
       pendingG = false;
     }
-    if (pendingZ) {
-      pendingZ = false;
+    if (armedZ) {
       if (key === "m" && store.state.groupBy !== "none") {
         store.actions.collapseAll();
         event.preventDefault();

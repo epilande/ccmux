@@ -369,3 +369,21 @@ describe("store invoke reconcile (reconnect)", () => {
     expect(store.invocationInFlightCount()).toBe(0);
   });
 });
+
+it("does not transfer a mark to an invocation ID reused after reconciliation removes it", () => {
+  const store = createTUIStore({ groupBy: "none" });
+  store.actions.startInvocation(startEvent());
+  store.actions.markSessions(["inv_abcd"]);
+  store.actions.reconcileInvocations([]);
+  store.actions.startInvocation(startEvent());
+  expect(store.state.markedSessions.has("inv_abcd")).toBe(false);
+});
+
+it("drops a mark when a finished invocation's linger ends", async () => {
+  const store = createTUIStore({ groupBy: "none", invokeFinishedLingerMs: 10 });
+  store.actions.startInvocation(startEvent());
+  store.actions.markSessions(["inv_abcd"]);
+  store.actions.finishInvocation(finishEvent());
+  await wait(40);
+  expect(store.state.markedSessions.size).toBe(0);
+});

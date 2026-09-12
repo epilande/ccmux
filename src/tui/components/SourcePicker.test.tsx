@@ -11,6 +11,7 @@ import type {
 } from "../../daemon/worktree-list";
 import {
   SourcePicker,
+  sourceAge,
   type SourcePickerProps,
   sourcePickerLayout,
   sourceRowHeight,
@@ -111,7 +112,7 @@ async function mount(
     compact?: boolean;
     actions?: Pick<
       SourcePickerProps,
-      "onReview" | "onKill" | "onRestart" | "onNew" | "onScope"
+      "onReview" | "onKill" | "onRestart" | "onNew" | "onScope" | "onNavigate"
     >;
   } = {},
 ) {
@@ -1369,4 +1370,42 @@ it("x retains marked sources inside collapsed groups while X only uses expanded 
   expect(kills).toEqual([]);
   await h.keys.pressKey("x");
   expect(kills).toEqual([["attached"]]);
+});
+
+it("omits missing, invalid and future ages without hiding valid zero-hour ages", () => {
+  const now = Date.parse("2024-01-15T12:00:00Z");
+  for (const value of [undefined, null, "nonsense", "2024-01-15T12:00:01Z"])
+    expect(sourceAge(value, now)).toBe("");
+  expect(sourceAge("2024-01-15T12:00:00Z", now)).toBe("0h");
+  expect(sourceAge("2024-01-14T12:00:00Z", now)).toBe("1d");
+});
+
+it("opening help consumes a pending z prefix before the next restart", async () => {
+  const restarted: string[] = [];
+  const h = await mountSettled({
+    prs: [openPR()],
+    worktrees: [
+      worktreeRow({
+        tip: "sha-156",
+        sessions: [
+          {
+            id: "s1",
+            agentType: "claude",
+            status: "idle",
+            tmuxPane: "%1",
+            tmuxTarget: "s:0.1",
+            pid: 1,
+          },
+        ],
+      }),
+    ],
+    actions: {
+      onNavigate: (event) => event.name === "?",
+      onRestart: (id) => restarted.push(id),
+    },
+  });
+  await h.keys.pressKey("z");
+  await h.keys.pressKey("?");
+  await h.keys.pressKey("r");
+  expect(restarted).toEqual(["s1"]);
 });

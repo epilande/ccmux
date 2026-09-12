@@ -1,6 +1,6 @@
 import type { RepoSourceCounts } from "./repo-source-counts";
 import { basename } from "node:path";
-import { PR_LIST_LIMIT, type OpenPR } from "./pr-list";
+import { associatedBranchPRs, PR_LIST_LIMIT, type OpenPR } from "./pr-list";
 import type { BranchPR } from "../types/session";
 import type { OpenIssue } from "./issue-list";
 import type { SourceResult } from "./gh-spawn-source";
@@ -35,6 +35,7 @@ interface Dependencies {
   ) => Promise<SourceResult<OpenIssue[]>>;
   counts?: (root: string) => Promise<SourceResult<RepoSourceCounts>>;
   branchPRs?: (root: string, branch: string) => Promise<SourceResult<OpenPR[]>>;
+  associate?: typeof associatedBranchPRs;
   headerPR: () => Promise<boolean>;
   now?: () => number;
 }
@@ -170,7 +171,11 @@ export class RepoFactsCache {
                   }
                 : await this.deps.branchPRs?.(root, branch);
               if (!result?.ok) throw new Error("unavailable");
-              const value = result.value.map((pr) => ({
+              const associated = await (
+                this.deps.associate ?? associatedBranchPRs
+              )(root, branch, result.value);
+              if (!associated.ok) throw new Error("unavailable");
+              const value = associated.value.map((pr) => ({
                 id: String(pr.number),
                 href: pr.url,
                 ciStatus: pr.ciStatus,

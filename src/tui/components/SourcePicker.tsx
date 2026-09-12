@@ -66,7 +66,7 @@ export function sourceAge(
 ): string {
   if (!createdAt) return "";
   const ms = now - Date.parse(createdAt);
-  if (!Number.isFinite(ms)) return "";
+  if (!Number.isFinite(ms) || ms < 0) return "";
   const days = Math.max(0, Math.floor(ms / 86_400_000));
   return days ? `${days}d` : `${Math.max(0, Math.floor(ms / 3_600_000))}h`;
 }
@@ -595,6 +595,8 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   useKeyboard((event: KeyEvent) => {
     if (props.enabled === false || event.defaultPrevented) return;
     const key = event.name;
+    const armedZ = pendingZ;
+    pendingZ = false;
     if (key !== "g") pendingG = false;
 
     // FILTER mode. The input owns every text key, so only the keys handled
@@ -639,8 +641,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     event.preventDefault();
     setNote(null);
     if (props.onNavigate?.(event, currentRepo())) return;
-    if (pendingZ) {
-      pendingZ = false;
+    if (armedZ) {
       if (key === "m") {
         setCollapsed(new Set(visible().map((r) => r.repoRoot)));
         return;

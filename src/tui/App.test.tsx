@@ -7866,6 +7866,39 @@ describe("App worktrees panel (W)", () => {
     });
   }
 
+  for (const view of ["sessions", "worktrees"]) {
+    it(`${view} does not carry z through help into the next restart`, async () => {
+      const { restore, frame } = await openPanel([
+        {
+          ...WORKTREE_ROW,
+          sessions: [
+            {
+              id: "s1",
+              agentType: "claude",
+              status: "idle",
+              tmuxPane: "%1",
+              tmuxTarget: "w:0.1",
+              pid: 1,
+            },
+          ],
+        },
+      ]);
+      try {
+        if (view === "sessions") setup.mockInput.pressKey("h");
+        await frame();
+        setup.mockInput.pressKey("z");
+        setup.mockInput.pressKey("?");
+        await frame();
+        deliverEscape(setup.renderer);
+        await frame();
+        setup.mockInput.pressKey("r");
+        expect(squish(await frame())).toContain("RestartSession?");
+      } finally {
+        restore();
+      }
+    });
+  }
+
   it("keeps the strip from switching views during removal confirmation", async () => {
     const { restore, frame } = await openPanel([WORKTREE_ROW]);
     const savedFetch = globalThis.fetch;
