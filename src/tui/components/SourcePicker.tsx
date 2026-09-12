@@ -14,6 +14,7 @@ import {
   createMemo,
   createSignal,
   onMount,
+  on,
   onCleanup,
 } from "solid-js";
 import { useKeyboard } from "@opentui/solid";
@@ -90,6 +91,8 @@ export interface SourcePickerProps {
   enabled?: boolean;
   onNavigate?: (event: KeyEvent, repo: string | null) => boolean;
   onScope?: (repo: string | null) => void;
+  /** Shared App scope; standalone overlays may manage scope locally. */
+  scope?: string | null;
   onRefresh?: () => void;
   onNew?: (cwd: string) => void;
   onRestart?: (id: string) => void;
@@ -186,7 +189,9 @@ export function showsRepoHeaders(repos: SourceRepo[]): boolean {
 export const SourcePicker: Component<SourcePickerProps> = (props) => {
   const dims = useSharedTerminalDimensions();
   const renderer = useRenderer();
-  const [scope, setScope] = createSignal(props.repo);
+  const [scope, setScope] = createSignal(
+    props.scope !== undefined ? props.scope : props.repo,
+  );
   const [marks, setMarks] = createSignal(new Set<string>(props.memory?.marks));
   const [collapsed, setCollapsed] = createSignal(
     new Set<string>(props.memory?.collapsed),
@@ -319,6 +324,24 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   }
 
   onMount(() => load());
+
+  function rescope(next: string | null) {
+    if (next === scope()) return;
+    setScope(next);
+    setMarks(new Set<string>());
+    setWorktrees(null);
+    load();
+  }
+  // Same-view W/N keeps this component mounted. Only external scope is a
+  // dependency: cursor, fetched rows and local s changes must not re-fetch.
+  createEffect(
+    on(
+      () => props.scope,
+      (next) => {
+        if (next !== undefined) rescope(next);
+      },
+    ),
+  );
 
   /** Every repo in scope, with each source's rows and state. */
   const repos = createMemo(() =>
@@ -680,11 +703,8 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       }
       case "s": {
         const next = scope() ? null : currentRepo();
-        setScope(next);
+        rescope(next);
         props.onScope?.(next);
-        setMarks(new Set<string>());
-        setWorktrees(null);
-        load();
         break;
       }
       case "space":
@@ -708,7 +728,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
           key === "X" || event.shift
             ? rows()
             : marks().size
-              ? rows().filter((r) => marks().has(r.key))
+              ? pickerRows(visible()).filter((r) => marks().has(r.key))
               : header
                 ? [...header.prs, ...header.issues]
                 : cursorRow()

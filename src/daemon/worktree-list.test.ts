@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listAllWorktrees, listRepoWorktrees } from "./worktree-list";
+import {
+  listAllWorktrees,
+  listRepoWorktrees,
+  listRepoWorktreeInventory,
+} from "./worktree-list";
 import type { WorktreeRow } from "./worktree-list";
 import type { WorktreeSession } from "./worktree-prune";
 import { normalizePath, runGit } from "./worktree-git";
@@ -291,4 +295,25 @@ describe("listAllWorktrees", () => {
 
     expect(repos.map((r) => r.repoName)).toEqual(["proj"]);
   });
+});
+
+it("reads header inventory without status, tracking, or per-worktree Git commands", async () => {
+  const repo = await makeRepo("inventory");
+  const wt = await addWorktree(repo, "feature");
+  writeFileSync(join(wt, "dirty.txt"), "uncommitted");
+  const calls: string[][] = [];
+  const inventory = await listRepoWorktreeInventory(repo, async (cwd, args) => {
+    calls.push(args);
+    return runGit(cwd, args);
+  });
+  expect(inventory?.worktrees).toEqual([
+    { path: normalizePath(repo), branch: "main", isMain: true },
+    { path: normalizePath(wt), branch: "feature", isMain: false },
+  ]);
+  expect(calls).toEqual([["worktree", "list", "--porcelain"]]);
+  expect(
+    (await listRepoWorktrees(repo))?.worktrees.find(
+      (w) => w.path === normalizePath(wt),
+    )?.dirty.untracked,
+  ).toBe(1);
 });

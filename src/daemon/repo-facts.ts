@@ -4,7 +4,7 @@ import { PR_LIST_LIMIT, type OpenPR } from "./pr-list";
 import type { BranchPR } from "../types/session";
 import type { OpenIssue } from "./issue-list";
 import type { SourceResult } from "./gh-spawn-source";
-import type { WorktreeRepo } from "./worktree-list";
+import type { WorktreeInventory } from "./worktree-list";
 import { mapWithConcurrency } from "../lib/concurrency";
 
 export interface RepoFact<T> {
@@ -15,7 +15,7 @@ export interface RepoFact<T> {
 export interface RepoFacts {
   repoRoot: string;
   repoName: string;
-  worktrees?: RepoFact<WorktreeRepo>;
+  worktrees?: RepoFact<WorktreeInventory>;
   prs?: RepoFact<OpenPR[]>;
   issues?: RepoFact<OpenIssue[]>;
   counts?: RepoFact<RepoSourceCounts>;
@@ -27,7 +27,7 @@ export interface RepoFactsResponse {
 }
 interface Dependencies {
   roots: () => Promise<string[]>;
-  local: (root: string) => Promise<WorktreeRepo | null>;
+  local: (root: string) => Promise<WorktreeInventory | null>;
   prs: (root: string, refresh: boolean) => Promise<SourceResult<OpenPR[]>>;
   issues: (
     root: string,
@@ -148,7 +148,10 @@ export class RepoFactsCache {
         ];
         await mapWithConcurrency(branches, 3, (branch) =>
           this.run(`${root}\nbranch:${branch}`, force, async () => {
-            const previous = facts.branchPRs?.[branch];
+            const previous =
+              facts.branchPRs && Object.hasOwn(facts.branchPRs, branch)
+                ? facts.branchPRs[branch]
+                : undefined;
             try {
               const all = facts.prs;
               if (!all || all.stale) throw new Error("unavailable");

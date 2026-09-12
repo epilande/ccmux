@@ -61,3 +61,25 @@ describe("repo fact presentation", () => {
     );
   });
 });
+
+for (const name of ["constructor", "toString", "__proto__"]) {
+  it(`ignores inherited branch properties for ${name}, but accepts a real cached answer`, () => {
+    const session = {
+      mainRepoRoot: "/repo",
+      worktreeRoot: "/repo",
+      gitBranch: name,
+    };
+    const repo = { repoRoot: "/repo", repoName: "repo", branchPRs: {} };
+    expect(branchPRs(session, [repo])).toEqual([]);
+    repo.branchPRs = JSON.parse(
+      JSON.stringify({
+        [name]: {
+          value: [{ id: "7", href: "https://github.com/o/r/pull/7" }],
+          stale: false,
+          updatedAt: 1,
+        },
+      }),
+    );
+    expect(branchPRs(session, [repo]).map((pr) => pr.id)).toEqual(["7"]);
+  });
+}

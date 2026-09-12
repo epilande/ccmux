@@ -137,7 +137,7 @@ import {
 } from "./worktree-prune";
 import { fetchPrune, listWorktrees, normalizePath } from "./worktree-git";
 import { RepoFactsCache } from "./repo-facts";
-import { listRepoWorktrees, listAllWorktrees } from "./worktree-list";
+import { listRepoWorktreeInventory, listAllWorktrees } from "./worktree-list";
 import { listOpenPRs, type OpenPR, type PRListResponse } from "./pr-list";
 import {
   listOpenIssues,
@@ -658,7 +658,7 @@ export class DaemonServer {
       this.sessionRepoRoots(
         await this.enrichSessions(this.sessionManager.getSessions(), true),
       ),
-    local: (root) => listRepoWorktrees(root),
+    local: (root) => listRepoWorktreeInventory(root),
     counts: (root) => readRepoSourceCounts(root),
     prs: (root, refresh) => this.openPRsFor(root, refresh),
     branchPRs: (root, branch) => listOpenPRs(root, undefined, branch),

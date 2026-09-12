@@ -59,9 +59,12 @@ export function branchPRs(
   const repo = facts.find(
     (r) => r.repoRoot === (session.mainRepoRoot ?? session.worktreeRoot),
   );
-  const cached = session.gitBranch
-    ? repo?.branchPRs?.[session.gitBranch]
-    : undefined;
+  const cached =
+    session.gitBranch &&
+    repo?.branchPRs &&
+    Object.hasOwn(repo.branchPRs, session.gitBranch)
+      ? repo.branchPRs[session.gitBranch]
+      : undefined;
   if (cached) return cached.value.map((pr) => ({ ...pr, stale: cached.stale }));
   const fromList = repo?.prs?.value
     .filter((pr) => pr.headRefName === session.gitBranch)

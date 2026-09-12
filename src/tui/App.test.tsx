@@ -1480,7 +1480,7 @@ describe("App kill/restart dispatch routing", () => {
     }
   });
 
-  it("kill-all delegates invoke teardown to the daemon (client fires only /sessions/kill-all)", async () => {
+  it("X cancels displayed invokes without sweeping undisplayed workers", async () => {
     const { calls, restore } = captureFetch();
     try {
       await renderApp(120, 20, { groupBy: "none" });
@@ -1497,10 +1497,8 @@ describe("App kill/restart dispatch routing", () => {
       );
       // A subprocess invoke (fabricates a row + counts in flight) and a Claude
       // invoke (counts in flight with NO row until its session_created lands).
-      // The client no longer reaps these per-id: the daemon owns invoke
-      // teardown on kill-all (its in-flight set is authoritative, while the
-      // client's is a lossy mirror). So the client must fire ONLY the single
-      // /sessions/kill-all and never a per-invoke cancel.
+      // X targets displayed rows. The Claude worker has no displayed session
+      // yet, so it must not be swept into the confirmation's target set.
       sseCallbacks!.onInvocationStarted!({
         type: "invocation_started",
         timestamp: "2024-01-15T12:00:00Z",
@@ -1523,16 +1521,21 @@ describe("App kill/restart dispatch routing", () => {
       setup.mockInput.pressKey("y"); // confirm -> confirmDialogAction
       await setup.renderOnce();
       expect(calls.some((c) => c.url.includes("/sessions/kill-all"))).toBe(
-        true,
+        false,
       );
-      // Daemon reaps the invokes; the client never fires a per-invoke cancel.
-      expect(calls.some((c) => c.url.includes("/invoke/"))).toBe(false);
+      expect(calls.some((c) => c.url.includes("/sessions/s1/kill"))).toBe(true);
+      expect(
+        calls.some((c) => c.url.includes("/invoke/inv_codex/cancel")),
+      ).toBe(true);
+      expect(calls.some((c) => c.url.includes("/invoke/inv_claude/"))).toBe(
+        false,
+      );
     } finally {
       restore();
     }
   });
 
-  it("kill-all with no in-flight invokes only hits /sessions/kill-all", async () => {
+  it("X kills only the sessions in its confirmation", async () => {
     const { calls, restore } = captureFetch();
     try {
       await renderApp(120, 20, { groupBy: "none" });
@@ -1553,9 +1556,106 @@ describe("App kill/restart dispatch routing", () => {
       setup.mockInput.pressKey("y"); // confirm -> confirmDialogAction
       await setup.renderOnce();
       expect(calls.some((c) => c.url.includes("/sessions/kill-all"))).toBe(
-        true,
+        false,
       );
+      expect(calls.some((c) => c.url.includes("/sessions/s1/kill"))).toBe(true);
       expect(calls.some((c) => c.url.includes("/invoke/"))).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it("scoped X freezes the count and targets, excluding other repos and later arrivals", async () => {
+    const { calls, restore } = captureFetch();
+    try {
+      await renderApp(120, 20, { groupBy: "none" });
+      const sessions = [
+        mockEnrichedSession({
+          id: "s1",
+          mainRepoRoot: "/code/a",
+          cwd: "/code/a",
+          tmuxPane: "%1",
+        }),
+        mockEnrichedSession({
+          id: "s2",
+          mainRepoRoot: "/code/b",
+          cwd: "/code/b",
+          tmuxPane: "%2",
+        }),
+      ];
+      sseCallbacks!.onInit(sessions, null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("s");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("X");
+      await setup.renderOnce();
+      const confirmation = setup.captureCharFrame();
+      expect(confirmation).toContain("1 session");
+      sseCallbacks!.onInit(
+        [
+          ...sessions,
+          mockEnrichedSession({
+            id: "s3",
+            mainRepoRoot: "/code/a",
+            cwd: "/code/a",
+            tmuxPane: "%3",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("1 session");
+      setup.mockInput.pressKey("y");
+      await setup.renderOnce();
+      expect(
+        calls
+          .filter((c) => c.url.endsWith("/kill"))
+          .map((c) => new URL(c.url).pathname),
+      ).toEqual(["/sessions/s1/kill"]);
+      expect(calls.some((c) => c.url.includes("kill-all"))).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it("X excludes collapsed session groups, matching Worktrees and Start", async () => {
+    const { calls, restore } = captureFetch();
+    try {
+      await renderApp(120, 20, { groupBy: "project" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "a",
+            mainRepoRoot: "/code/a",
+            cwd: "/code/a",
+            tmuxPane: "%1",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "b",
+            mainRepoRoot: "/code/b",
+            cwd: "/code/b",
+            tmuxPane: "%2",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      setup.mockInput.pressKey("g");
+      setup.mockInput.pressKey("g");
+      setup.mockInput.pressEnter();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("X");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("1 session");
+      setup.mockInput.pressKey("y");
+      await setup.renderOnce();
+      expect(
+        calls
+          .filter((c) => c.url.endsWith("/kill"))
+          .map((c) => new URL(c.url).pathname),
+      ).toEqual(["/sessions/s2/kill"]);
     } finally {
       restore();
     }
@@ -7667,6 +7767,152 @@ describe("App worktrees panel (W)", () => {
   // `initialView` reads the return cursor to pick the view. While that
   // branch sent the worktree's PATH, cancelling the dialog came back to the
   // Worktrees view, where the adjacent not-checked-out row came back right.
+  for (const key of ["W", "N"]) {
+    it(`same-view ${key} reloads the advertised scope after widening`, async () => {
+      const original = globalThis.fetch;
+      const reads: URL[] = [];
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        const url = new URL(
+          input instanceof Request ? input.url : String(input),
+        );
+        reads.push(url);
+        const roots = ["/code/myapp", "/code/other"].filter(
+          (root) =>
+            !url.searchParams.get("repo") ||
+            root === url.searchParams.get("repo"),
+        );
+        if (url.pathname === "/worktrees")
+          return Response.json({
+            repos: roots.map((root) => ({
+              repoRoot: root,
+              repoName: root.split("/").pop(),
+              worktrees: [
+                {
+                  ...WORKTREE_ROW,
+                  repoRoot: root,
+                  path: root + "/wt/feature",
+                  name: root === "/code/other" ? "other-checkout" : "feature",
+                },
+              ],
+            })),
+          });
+        if (url.pathname === "/prs")
+          return Response.json({
+            repos: roots.map((root) => ({
+              repoRoot: root,
+              repoName: root.split("/").pop(),
+              prs: [
+                {
+                  number: 7,
+                  title: root === "/code/other" ? "other-source" : "my-source",
+                  url: "https://github.com/o/r/pull/7",
+                  author: "owner",
+                  headRefName: "feat/x",
+                  headRefOid: "sha7",
+                  isDraft: false,
+                  reviewDecision: null,
+                  ciStatus: null,
+                },
+              ],
+            })),
+            errors: [],
+          });
+        if (url.pathname.includes("prune-candidates"))
+          return Response.json({ candidates: [], skipped: [] });
+        return Response.json({ repos: [], errors: [], headerPR: true });
+      }) as typeof fetch;
+      try {
+        await renderApp(120, 24, { groupBy: "none" });
+        sseCallbacks!.onInit(
+          [
+            mockEnrichedSession({
+              id: "s1",
+              cwd: "/code/myapp",
+              mainRepoRoot: "/code/myapp",
+              tmuxPane: "%1",
+            }),
+          ],
+          null,
+        );
+        const frame = async () => {
+          await new Promise((done) => setTimeout(done, 0));
+          await setup.renderOnce();
+          return setup.captureCharFrame();
+        };
+        await frame();
+        setup.mockInput.pressKey(key);
+        await frame();
+        setup.mockInput.pressKey("s");
+        const wide = await frame();
+        expect(wide).toContain("all repos");
+        const other = key === "W" ? "other-checkout" : "other-source";
+        expect(wide).toContain(other);
+        const before = reads.length;
+        setup.mockInput.pressKey(key);
+        const narrow = await frame();
+        expect(narrow).not.toContain("all repos");
+        expect(narrow).not.toContain(other);
+        expect(
+          reads
+            .slice(before)
+            .filter((u) => u.pathname === "/worktrees")
+            .map((u) => u.searchParams.get("repo")),
+        ).toEqual(["/code/myapp"]);
+        setup.mockInput.pressKey("R");
+        expect(await frame()).not.toContain(other);
+      } finally {
+        globalThis.fetch = original;
+      }
+    });
+  }
+
+  it("keeps the strip from switching views during removal confirmation", async () => {
+    const { restore, frame } = await openPanel([WORKTREE_ROW]);
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      if (String(input).includes("prune-candidates"))
+        return Response.json({
+          candidates: [
+            {
+              ...WORKTREE_ROW,
+              dirty: false,
+              modified: 0,
+              untracked: 0,
+              ignoredFiles: [],
+              ignoredDirs: [],
+              reason: "pr-merged",
+              detail: "PR #7 merged",
+              pr: null,
+              branchDeletion: "force",
+              adminDir: null,
+            },
+          ],
+          skipped: [],
+        });
+      return savedFetch(input, init);
+    }) as typeof fetch;
+    try {
+      setup.mockInput.pressKey("R");
+      await frame();
+      setup.mockInput.pressKey("x");
+      expect(await frame()).toContain("Remove worktrees?");
+      await setup.mockMouse.click(3, 0);
+      expect(await frame()).toContain("Remove worktrees?");
+      setup.mockInput.pressKey("l");
+      expect(await frame()).toContain("Remove worktrees?");
+      deliverEscape(setup.renderer);
+      await frame();
+      await setup.mockMouse.click(3, 0);
+      expect(await frame()).not.toContain("x remove");
+    } finally {
+      globalThis.fetch = savedFetch;
+      restore();
+    }
+  });
+
   it("cycles persistent views, retains worktree marks and shares scope", async () => {
     const { restore, frame } = await openPanel([WORKTREE_ROW]);
     try {

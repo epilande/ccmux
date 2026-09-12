@@ -1352,6 +1352,7 @@ export function App(props: AppProps) {
    * checkout, which is exactly what the panel keys off. Null lists every
    * known repo.
    */
+  const [worktreeModal, setWorktreeModal] = createSignal(false);
   let worktreeMemory: ViewMemory | undefined;
   let sourceMemory: ViewMemory | undefined;
   const view = (): View =>
@@ -1368,6 +1369,7 @@ export function App(props: AppProps) {
   function switchMainView(next: View) {
     if (
       next === view() ||
+      worktreeModal() ||
       store.state.newSession ||
       store.state.confirmMode ||
       store.state.showHelp
@@ -3160,11 +3162,7 @@ export function App(props: AppProps) {
       if (pending?.sessionId === sessionId) {
         void deliverReviewNotes(sessionId, pending.notes, "confirm");
       }
-    } else if (action === "kill-all") {
-      // The daemon reaps in-flight invoke workers itself (it owns the
-      // authoritative in-flight set); the client only needs to ask once.
-      fetch(`${getDaemonUrl()}/sessions/kill-all`, { method: "POST" });
-    } else if (action === "kill-group") {
+    } else if (action === "kill-all" || action === "kill-group") {
       for (const id of store.state.confirmSessionIds) {
         killOrCancelSession(id);
       }
@@ -3817,8 +3815,13 @@ export function App(props: AppProps) {
       case "X":
       case "x":
         if (key === "X" || event.shift) {
-          if (store.filteredSessions().length > 0) {
-            store.actions.showConfirmDialog(null, "kill-all");
+          const ids = store
+            .flatItems()
+            .flatMap((item) =>
+              item.type === "session" ? [item.filteredSession.session.id] : [],
+            );
+          if (ids.length > 0) {
+            store.actions.showConfirmDialog(null, "kill-all", ids);
           }
         } else {
           const marked = store
@@ -4195,6 +4198,8 @@ export function App(props: AppProps) {
         <Show when={store.state.worktrees}>
           {(panel: () => NonNullable<typeof store.state.worktrees>) => (
             <WorktreesPanel
+              onModalChange={setWorktreeModal}
+              scope={store.state.scope}
               activeSessionId={store.state.activeSessionId}
               facts={repoFacts.data()}
               memory={
@@ -4253,6 +4258,7 @@ export function App(props: AppProps) {
         <Show when={store.state.sourcePicker}>
           {(picker: () => NonNullable<typeof store.state.sourcePicker>) => (
             <SourcePicker
+              scope={store.state.scope}
               activeSessionId={store.state.activeSessionId}
               effects={liveEffects}
               facts={repoFacts.data()}
@@ -4328,7 +4334,8 @@ export function App(props: AppProps) {
             sessionCount={
               store.state.confirmAction === "send-review"
                 ? pendingReviewNoteCount()
-                : store.state.confirmAction === "kill-group"
+                : store.state.confirmAction === "kill-group" ||
+                    store.state.confirmAction === "kill-all"
                   ? store.state.confirmSessionIds.length
                   : store.filteredSessions().length
             }

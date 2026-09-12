@@ -1338,3 +1338,35 @@ it("keeps failing checks ahead of a long author and branch in compact Start", as
   });
   expect(await h.frame()).toContain("CI ✗");
 });
+
+it("x retains marked sources inside collapsed groups while X only uses expanded rows", async () => {
+  const kills: string[][] = [];
+  const h = await mountSettled({
+    prs: [openPR()],
+    worktrees: [
+      worktreeRow({
+        tip: "sha-156",
+        sessions: [
+          {
+            id: "attached",
+            status: "idle",
+            agentType: "claude",
+            tmuxPane: "%1",
+            tmuxTarget: "test:0.1",
+            pid: null,
+          },
+        ],
+      }),
+    ],
+    actions: { onKill: (ids) => kills.push(ids) },
+  });
+  await h.keys.pressKey(" ");
+  await h.keys.pressKey("g");
+  await h.keys.pressKey("g");
+  await h.keys.pressEnter();
+  expect(await h.frame()).not.toContain("#156");
+  await h.keys.pressKey("X");
+  expect(kills).toEqual([]);
+  await h.keys.pressKey("x");
+  expect(kills).toEqual([["attached"]]);
+});

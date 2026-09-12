@@ -242,6 +242,33 @@ describe("branch facts", () => {
       stale: false,
     });
   });
+  for (const name of ["constructor", "toString", "__proto__"]) {
+    it(`does not fabricate stale facts for an unanswered ${name} branch`, async () => {
+      const local = {
+        ...localRepo,
+        worktrees: [
+          localRepo.worktrees[0]!,
+          { ...localRepo.worktrees[0]!, branch: name },
+        ],
+      };
+      const cache = new RepoFactsCache({
+        roots: async () => ["/repo"],
+        headerPR: async () => true,
+        local: async () => local,
+        prs: async () => ({
+          ok: true,
+          value: Array.from({ length: 50 }, () => pr),
+        }),
+        issues: async () => failed,
+        branchPRs: async (_root, branch) =>
+          branch === name ? failed : { ok: true, value: [pr] },
+      });
+      await cache.refresh(["/repo"]);
+      const branches = cache.snapshot(["/repo"])[0]!.branchPRs!;
+      expect(Object.hasOwn(branches, "feature")).toBe(true);
+      expect(Object.hasOwn(branches, name)).toBe(false);
+    });
+  }
   it("leaves branch facts absent when GitHub has never answered", async () => {
     const cache = new RepoFactsCache({
       roots: async () => ["/repo"],

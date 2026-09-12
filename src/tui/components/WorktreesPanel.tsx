@@ -1,3 +1,4 @@
+import { wrapText } from "../utils/format";
 import { GroupHeader } from "./GroupHeader";
 import {
   factsText,
@@ -16,6 +17,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  on,
   onCleanup,
   onMount,
 } from "solid-js";
@@ -108,7 +110,10 @@ interface WorktreesPanelProps {
   enabled?: boolean;
   onNavigate?: (event: KeyEvent, repo: string | null) => boolean;
   onScope?: (repo: string | null) => void;
+  /** Shared App scope; standalone overlays may manage scope locally. */
+  scope?: string | null;
   onRefresh?: () => void;
+  onModalChange?: (active: boolean) => void;
   onNew?: (cwd: string) => void;
   onRestart?: (id: string) => void;
   onKillAll?: (ids: string[]) => void;
@@ -402,12 +407,18 @@ const RemovalConfirm: Component<{
   headline: string;
   details: string[];
   destructive: boolean;
+  confirmLabel?: string;
+  cancelLabel?: string;
   width: number;
   onConfirm: () => void;
   onCancel: () => void;
 }> = (props) => {
   const boxWidth = () => Math.max(24, Math.min(56, props.width));
-  const boxHeight = () => 7 + props.details.length;
+  const headline = createMemo(() => wrapText(props.headline, boxWidth() - 2));
+  const details = createMemo(() =>
+    props.details.flatMap((line) => wrapText(line, boxWidth() - 2)),
+  );
+  const boxHeight = () => 6 + headline().length + details().length;
   return (
     <box
       position="absolute"
@@ -430,13 +441,13 @@ const RemovalConfirm: Component<{
       <box height={1} />
       {/* Red only when uncommitted work is actually going, so the one
           irreversible case does not read like the routine one. */}
-      <text fg={props.destructive ? theme.red : theme.subtext}>
-        {truncateText(props.headline, boxWidth() - 2)}
-      </text>
-      <For each={props.details}>
+      <For each={headline()}>
         {(line) => (
-          <text fg={theme.overlay}>{truncateText(line, boxWidth() - 2)}</text>
+          <text fg={props.destructive ? theme.red : theme.subtext}>{line}</text>
         )}
+      </For>
+      <For each={details()}>
+        {(line) => <text fg={theme.overlay}>{line}</text>}
       </For>
       <box height={1} />
       <box flexDirection="row">
@@ -449,7 +460,7 @@ const RemovalConfirm: Component<{
           <text fg={theme.green}>
             <strong>Y</strong>
           </text>
-          <text fg={theme.overlay}> confirm </text>
+          <text fg={theme.overlay}> {props.confirmLabel ?? "confirm"} </text>
         </box>
         <box
           flexDirection="row"
@@ -460,7 +471,7 @@ const RemovalConfirm: Component<{
           <text fg={theme.red}>
             <strong>N</strong>
           </text>
-          <text fg={theme.overlay}> cancel</text>
+          <text fg={theme.overlay}> {props.cancelLabel ?? "cancel"}</text>
         </box>
       </box>
     </box>
@@ -568,7 +579,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const [scan, setScan] = createSignal<PruneScan | null>(null);
   const [scanError, setScanError] = createSignal<string | null>(null);
   const [scope, setScope] = createSignal(
-    props.startWidened ? null : props.repo,
+    props.scope !== undefined
+      ? props.scope
+      : props.startWidened
+        ? null
+        : props.repo,
   );
   const [cursor, setCursor] = createSignal<string | null>(
     props.initialCursor ?? props.memory?.cursor ?? null,
@@ -591,14 +606,20 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       collapsed: [...collapsed()],
     }),
   );
+  createEffect(() =>
+    props.onModalChange?.(["dirty", "confirm", "running"].includes(phase())),
+  );
   let listBox: ScrollBoxRenderable | undefined;
   let resultsBox: ScrollBoxRenderable | undefined;
+  let noteTimer: ReturnType<typeof setTimeout> | undefined;
   let generation = 0;
   let loadedOnce = false;
   let pendingG = false;
   let pendingZ = false;
   onCleanup(() => {
     generation++;
+    clearTimeout(noteTimer);
+    props.onModalChange?.(false);
   });
   const width = () => Math.max(4, dims().width - (props.embedded ? 2 : 4));
   const groups = createMemo(() => {
@@ -674,7 +695,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     );
     if (target !== null) listBox.scrollTo(target);
   });
+  function flash(message: string) {
+    clearTimeout(noteTimer);
+    setNote(message);
+    noteTimer = setTimeout(() => setNote(""), 2_000);
+  }
   function load(refresh = false) {
+    clearTimeout(noteTimer);
     const gen = ++generation;
     const seedFromCache = props.isReturn && !loadedOnce;
     loadedOnce = true;
@@ -727,6 +754,24 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       });
   }
   onMount(() => load());
+
+  function rescope(next: string | null) {
+    if (next === scope()) return;
+    setScope(next);
+    setRepos([]);
+    setMarks(new Set<string>());
+    load();
+  }
+  // Same-view W/N keeps this component mounted. Only external scope is a
+  // dependency: cursor, fetched rows and local s changes must not re-fetch.
+  createEffect(
+    on(
+      () => props.scope,
+      (next) => {
+        if (next !== undefined) rescope(next);
+      },
+    ),
+  );
   function move(delta: number) {
     const live = items();
     const index = live.findIndex((r) => r.key === cursor());
@@ -925,11 +970,8 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         break;
       case "s": {
         const next = scope() ? null : currentRepo();
-        setScope(next);
+        rescope(next);
         props.onScope?.(next);
-        setRepos([]);
-        setMarks(new Set<string>());
-        load();
         break;
       }
       case "space":
@@ -970,19 +1012,32 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         break;
       case "y":
         if (item?.kind === "worktree") {
-          props.effects.copyText(item.row.path, renderer);
-          setNote(`copied ${item.row.name}`);
+          const copied = props.effects.copyText(item.row.path, renderer);
+          flash(
+            copied.osc52 || copied.local
+              ? `copied ${item.row.name}`
+              : "copy needs OSC 52 or pbcopy",
+          );
         }
         break;
       case "o":
         if (item?.kind === "worktree") {
           const url =
-            props.facts?.repos
-              .find((r) => r.repoRoot === item.row.repoRoot)
-              ?.prs?.value.find((pr) => pr.headRefOid === item.row.tip)?.url ??
-            rowPRUrl(item);
-          if (url) props.effects.openUrl(url);
-          else setNote("No GitHub PR on this row");
+            branchPRs(
+              {
+                mainRepoRoot: item.row.repoRoot,
+                worktreeRoot: item.row.path,
+                gitBranch: item.row.branch,
+              },
+              props.facts?.repos ?? [],
+            )[0]?.href ?? rowPRUrl(item);
+          if (url)
+            flash(
+              props.effects.openUrl(url)
+                ? `opened ${url}`
+                : "no browser opener here",
+            );
+          else flash("No GitHub PR on this row");
         }
         break;
       case "g":
@@ -1300,12 +1355,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         {(candidate: () => PruneCandidate) => (
           <RemovalConfirm
             headline="Delete uncommitted work?"
+            confirmLabel="include"
+            cancelLabel="skip"
             details={[
               basename(candidate().path),
               candidate().modified || candidate().untracked
                 ? `${candidate().modified} modified · ${candidate().untracked} untracked`
                 : "Uncommitted work",
-              "Y includes it · N skips it",
               "Esc cancels removal",
             ]}
             destructive

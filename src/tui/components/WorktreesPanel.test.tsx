@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { createSignal } from "solid-js";
+import type { RepoFactsResponse } from "../../daemon/repo-facts";
 import { testRender } from "@opentui/solid";
 import { createMockKeys } from "@opentui/core/testing";
 import { deliverEscape } from "./test-helpers";
@@ -7,6 +9,8 @@ import type {
   PruneCandidate,
   WorktreeSession,
   ScanResponse,
+  PruneOutcome,
+  PruneRunResult,
 } from "../../daemon/worktree-prune";
 import {
   WorktreesPanel,
@@ -15,6 +19,8 @@ import {
   copyToClipboard,
   partitionSelection,
   resetScanCache,
+  pruneFullySucceeded,
+  cachedScanFor,
 } from "./WorktreesPanel";
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup | undefined;
@@ -316,6 +322,13 @@ async function mount(
   opts: {
     rows?: WorktreeRow[];
     scan?: () => Promise<ScanResponse>;
+    list?: (url: URL) => Promise<Response>;
+    run?: () => Promise<Response>;
+    repo?: string | null;
+    isReturn?: boolean;
+    facts?: RepoFactsResponse;
+    copyResult?: { osc52: boolean; local: boolean };
+    openResult?: boolean;
     cursor?: string;
     width?: number;
     height?: number;
@@ -333,6 +346,11 @@ async function mount(
     urls: string[] = [];
   let scanCalls = 0,
     refreshes = 0;
+  const [sharedScope, setSharedScope] = createSignal<string | null | undefined>(
+    undefined,
+  );
+  const reads: URL[] = [];
+  fetchSpy?.mockRestore();
   const worktrees = opts.rows ?? [mainRow(), row()];
   fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
     input: unknown,
@@ -341,8 +359,12 @@ async function mount(
     const url = String(input);
     if (init?.method === "POST") {
       posts.push(JSON.parse(String(init.body)));
-      return Response.json({ outcomes: [], cleanedState: [] });
+      return (
+        opts.run?.() ??
+        Response.json({ outcomes: [], state: [], dryRun: false })
+      );
     }
+    reads.push(new URL(url));
     if (url.includes("prune-candidates")) {
       scanCalls++;
       return Response.json(
@@ -350,6 +372,7 @@ async function mount(
           Promise.resolve({ candidates: [candidate()], skipped: [] })),
       );
     }
+    if (opts.list) return opts.list(new URL(url));
     return Response.json({
       repos: [{ repoRoot: "/repo", repoName: "repo", worktrees }],
     });
@@ -358,7 +381,10 @@ async function mount(
     () => (
       <WorktreesPanel
         activeSessionId={opts.activeSessionId}
-        repo={null}
+        repo={opts.repo ?? null}
+        scope={sharedScope()}
+        isReturn={opts.isReturn}
+        facts={opts.facts}
         cwd="/repo"
         initialCursor={opts.cursor}
         embedded={opts.embedded}
@@ -373,11 +399,11 @@ async function mount(
         effects={{
           openUrl: (url) => {
             urls.push(url);
-            return true;
+            return opts.openResult ?? true;
           },
           copyText: (text) => {
             copies.push(text);
-            return { local: true, osc52: true };
+            return opts.copyResult ?? { local: true, osc52: true };
           },
         }}
       />
@@ -401,6 +427,8 @@ async function mount(
     jumps,
     newDirs,
     urls,
+    reads,
+    setScope: setSharedScope,
     scanCalls: () => scanCalls,
     refreshes: () => refreshes,
   };
@@ -474,6 +502,7 @@ describe("Worktrees view", () => {
     });
     await h.keys.pressKey("x");
     expect(await h.frame()).toContain("Delete uncommitted work");
+    expect(await h.frame()).toContain("Y include N skip");
     expect(h.posts).toEqual([]);
     await h.keys.pressKey("y");
     expect(await h.frame()).toContain("ending 1 idle agent session");
@@ -629,4 +658,402 @@ it("preserves dirty and session facts from classification while the local snapsh
   expect(line).toContain("uncommitted work");
   expect(line).toContain("Claude");
   expect(line).not.toContain("ends it");
+});
+
+function outcome(overrides: Partial<PruneOutcome> = {}): PruneOutcome {
+  return {
+    path: row().path,
+    repoRoot: "/repo",
+    branch: "feat/alpha",
+    reason: "pr-merged",
+    removed: true,
+    trashPath: null,
+    branchDeleted: true,
+    panesClosed: [],
+    steps: [{ step: "remove worktree", ok: true, detail: "removed" }],
+    ...overrides,
+  };
+}
+function runResult(outcomes: PruneOutcome[]): PruneRunResult {
+  return { outcomes, state: [], dryRun: false };
+}
+function listResponse(rows: WorktreeRow[]) {
+  return Response.json({
+    repos: [...new Set(rows.map((r) => r.repoRoot))].map((root) => ({
+      repoRoot: root,
+      repoName: root.split("/").pop(),
+      worktrees: rows.filter((r) => r.repoRoot === root),
+    })),
+  });
+}
+function destroyPanel() {
+  setup?.renderer.destroy();
+  setup = undefined;
+}
+
+describe("Worktrees read and effect regressions", () => {
+  it("keeps local rows actionable after classification fails, and R retries both reads", async () => {
+    let fail = true;
+    const h = await mount({
+      cursor: row().path,
+      scan: async () => {
+        if (fail) throw new Error("classification unavailable");
+        return { candidates: [candidate()], skipped: [] };
+      },
+    });
+    expect(await h.frame()).toContain("classification unavailable");
+    await h.keys.pressEnter();
+    expect(h.newDirs).toEqual([row().path]);
+    await h.keys.pressKey("x");
+    expect(h.posts).toEqual([]);
+    fail = false;
+    await h.keys.pressKey("R");
+    expect(await h.frame()).not.toContain("classification unavailable");
+    expect(h.reads.filter((u) => u.pathname === "/worktrees")).toHaveLength(2);
+    expect(h.scanCalls()).toBe(2);
+    await h.keys.pressKey("x");
+    expect(await h.frame()).toContain("Delete 1 worktree");
+  });
+  for (const status of [404, 500]) {
+    it(`surfaces a local ${status} failure and recovers on R`, async () => {
+      let fail = true;
+      const h = await mount({
+        list: async () =>
+          fail ? new Response("", { status }) : listResponse([row()]),
+      });
+      expect(await h.frame()).not.toContain("alpha +");
+      expect(await h.frame()).toContain(status === 404 ? "daemon" : "500");
+      fail = false;
+      await h.keys.pressKey("R");
+      expect(await h.frame()).toContain("alpha +");
+      expect(h.scanCalls()).toBe(2);
+    });
+  }
+  for (const change of ["refresh", "scope"]) {
+    it(`ignores stale local and classification responses after ${change}`, async () => {
+      let oldList!: (value: Response) => void;
+      let oldScan!: (value: ScanResponse) => void;
+      let lists = 0,
+        scans = 0;
+      const fresh = row({
+        name: "fresh",
+        path: "/other/fresh",
+        repoRoot: "/other",
+        branch: "fresh",
+      });
+      const h = await mount({
+        list: () =>
+          ++lists === 1
+            ? new Promise((resolve) => {
+                oldList = resolve;
+              })
+            : Promise.resolve(listResponse([fresh])),
+        scan: () =>
+          ++scans === 1
+            ? new Promise((resolve) => {
+                oldScan = resolve;
+              })
+            : Promise.resolve({ candidates: [], skipped: [] }),
+      });
+      if (change === "refresh") await h.keys.pressKey("R");
+      else h.setScope("/other");
+      expect(await h.frame()).toContain("fresh +");
+      oldList(listResponse([row()]));
+      oldScan({ candidates: [candidate()], skipped: [] });
+      const frame = await h.frame();
+      expect(frame).toContain("fresh +");
+      expect(frame).not.toContain("alpha +");
+      expect(frame).not.toContain("merged");
+      if (change === "scope")
+        expect(
+          h.reads
+            .slice(-2)
+            .every((u) => u.searchParams.get("repo") === "/other"),
+        ).toBe(true);
+    });
+  }
+  it("keeps a path cursor across a reordered reload and reseeds when that path disappears", async () => {
+    const beta = row({ path: "/repo/beta", name: "beta" });
+    let rows = [row(), beta];
+    const h = await mount({
+      cursor: beta.path,
+      list: async () => listResponse(rows),
+    });
+    rows = [beta, row()];
+    await h.keys.pressKey("R");
+    await h.frame();
+    await h.keys.pressKey("y");
+    expect(h.copies).toEqual([beta.path]);
+    rows = [row()];
+    await h.keys.pressKey("R");
+    await h.frame();
+    await h.keys.pressKey("y");
+    expect(h.copies).toEqual([beta.path, row().path]);
+  });
+  for (const copied of [
+    { local: false, osc52: false },
+    { local: true, osc52: false },
+    { local: false, osc52: true },
+  ]) {
+    it(`reports actual clipboard outcome ${JSON.stringify(copied)}`, async () => {
+      const h = await mount({ cursor: row().path, copyResult: copied });
+      await h.keys.pressKey("y");
+      expect(await h.frame()).toContain(
+        copied.local || copied.osc52
+          ? "copied alpha"
+          : "copy needs OSC 52 or pbcopy",
+      );
+      expect(h.copies).toEqual([row().path]);
+    });
+  }
+  for (const opened of [true, false]) {
+    it(`opens the cached branch PR despite a different local tip, reporting ${opened}`, async () => {
+      const href = "https://github.com/o/r/pull/7";
+      const h = await mount({
+        cursor: row().path,
+        rows: [row({ tip: "local-ahead" })],
+        openResult: opened,
+        facts: {
+          headerPR: true,
+          repos: [
+            {
+              repoRoot: "/repo",
+              repoName: "repo",
+              branchPRs: {
+                "feat/alpha": {
+                  value: [{ id: "7", href }],
+                  stale: false,
+                  updatedAt: 1,
+                },
+              },
+            },
+          ],
+        },
+      });
+      await h.keys.pressKey("o");
+      expect(h.urls).toEqual([href]);
+      expect(await h.frame()).toContain(
+        opened ? `opened ${href}` : "no browser opener here",
+      );
+    });
+  }
+  it("does not invoke the browser when no PR is known", async () => {
+    const h = await mount({ cursor: row().path });
+    await h.keys.pressKey("o");
+    expect(h.urls).toEqual([]);
+    expect(await h.frame()).toContain("No GitHub PR on this row");
+  });
+});
+
+describe("Worktrees removal outcomes and cache", () => {
+  it("requires a nonempty run with every removal and step successful", () => {
+    expect(
+      pruneFullySucceeded(runResult([outcome(), outcome({ path: "/other" })])),
+    ).toBe(true);
+    for (const results of [
+      [],
+      [outcome({ removed: false })],
+      [outcome({ error: "refused" })],
+      [
+        outcome({
+          steps: [
+            { step: "delete branch", ok: false, detail: "branch refused" },
+          ],
+        }),
+      ],
+    ]) {
+      expect(pruneFullySucceeded(runResult(results))).toBe(false);
+    }
+  });
+  it("reuses cached classification only in its exact scope", () => {
+    const scan = { candidates: [candidate()], skipped: [], open: [] };
+    expect(cachedScanFor(null, null)).toBeNull();
+    expect(cachedScanFor({ scope: "/repo", scan }, "/repo")).toBe(scan);
+    expect(cachedScanFor({ scope: "/repo", scan }, null)).toBeNull();
+    expect(cachedScanFor({ scope: null, scan }, "/repo")).toBeNull();
+    expect(cachedScanFor({ scope: null, scan }, null)).toBe(scan);
+  });
+  for (const isReturn of [true, false]) {
+    it(`${isReturn ? "reuses" : "ignores"} completed classification on ${isReturn ? "return" : "plain"} open`, async () => {
+      await mount();
+      destroyPanel();
+      const h = await mount({
+        isReturn,
+        cursor: row().path,
+        scan: () => new Promise(() => {}),
+      });
+      expect(h.scanCalls()).toBe(isReturn ? 0 : 1);
+      await h.keys.pressKey("x");
+      expect((await h.frame()).includes("Delete 1 worktree")).toBe(isReturn);
+      if (isReturn) {
+        deliverEscape(setup!.renderer);
+        await h.keys.pressKey("R");
+        await h.frame();
+        expect(h.scanCalls()).toBe(1);
+      }
+    });
+  }
+  it("does not reuse a failed scan or a successful scan from another scope", async () => {
+    await mount({
+      scan: async () => {
+        throw new Error("failed scan");
+      },
+    });
+    destroyPanel();
+    const retry = await mount({ isReturn: true, repo: "/repo" });
+    expect(retry.scanCalls()).toBe(1);
+    destroyPanel();
+    const other = await mount({ isReturn: true, repo: "/other" });
+    expect(other.scanCalls()).toBe(1);
+  });
+  it("does not let an unmounted read replace the return cache", async () => {
+    let finish!: (value: ScanResponse) => void;
+    await mount({
+      repo: "/old",
+      scan: () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    });
+    destroyPanel();
+    await mount({ repo: "/new" });
+    finish({ candidates: [], skipped: [] });
+    await new Promise((done) => setTimeout(done, 0));
+    destroyPanel();
+    const h = await mount({ repo: "/new", isReturn: true });
+    expect(h.scanCalls()).toBe(0);
+  });
+  it("reloads after full success, keeps the success notice, and invalidates cached classification", async () => {
+    let scans = 0,
+      removed = false;
+    const h = await mount({
+      cursor: row().path,
+      list: async () =>
+        listResponse(removed ? [mainRow()] : [mainRow(), row()]),
+      scan: () =>
+        ++scans === 1
+          ? Promise.resolve({ candidates: [candidate()], skipped: [] })
+          : new Promise(() => {}),
+      run: async () => {
+        removed = true;
+        return Response.json(runResult([outcome()]));
+      },
+    });
+    await h.keys.pressKey("x");
+    await h.keys.pressKey("y");
+    const frame = await h.frame();
+    expect(frame).toContain("removed 1 worktree");
+    expect(frame).not.toContain("alpha +");
+    expect(h.refreshes()).toBe(1);
+    destroyPanel();
+    const returned = await mount({
+      isReturn: true,
+      scan: () => new Promise(() => {}),
+    });
+    expect(returned.scanCalls()).toBe(1);
+  });
+  for (const result of [
+    runResult([]),
+    runResult([
+      outcome(),
+      outcome({
+        path: "/repo/blocked",
+        removed: false,
+        error: "worktree became busy",
+        steps: [{ step: "recheck", ok: false, detail: "active agent" }],
+      }),
+    ]),
+  ]) {
+    it(`retains the outcome screen for ${result.outcomes.length ? "partial failure" : "an empty run"} until explicitly reloaded`, async () => {
+      const h = await mount({
+        cursor: row().path,
+        run: async () => Response.json(result),
+      });
+      await h.keys.pressKey("x");
+      await h.keys.pressKey("y");
+      const frame = await h.frame();
+      expect(frame).toContain("Enter returns");
+      if (result.outcomes.length) {
+        expect(frame).toContain("worktree became busy");
+        expect(frame).toContain("active agent");
+      }
+      expect(h.scanCalls()).toBe(1);
+      await h.keys.pressEnter();
+      await h.frame();
+      expect(h.scanCalls()).toBe(2);
+    });
+  }
+  it("reports a failed removal request and allows an explicit retry of the reads", async () => {
+    const h = await mount({
+      cursor: row().path,
+      run: async () =>
+        Response.json({ error: "recheck refused" }, { status: 409 }),
+    });
+    await h.keys.pressKey("x");
+    await h.keys.pressKey("y");
+    expect(await h.frame()).toContain("recheck refused");
+    expect(h.refreshes()).toBe(0);
+    await h.keys.pressKey("R");
+    expect(await h.frame()).toContain("alpha +");
+  });
+  it("sends exact scoped paths, caller context and empty consent for an agent-free clean row", async () => {
+    const previous = process.env.TMUX_PANE;
+    process.env.TMUX_PANE = "%987";
+    try {
+      const h = await mount({ repo: "/repo", cursor: row().path });
+      await h.keys.pressKey("x");
+      await h.keys.pressKey("y");
+      await h.frame();
+      expect(h.posts).toEqual([
+        {
+          paths: [row().path],
+          allowDirty: [],
+          allowEndIdle: [],
+          source: "picker",
+          repo: "/repo",
+          cwd: "/repo",
+          callerPane: "%987",
+        },
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env.TMUX_PANE;
+      else process.env.TMUX_PANE = previous;
+    }
+  });
+  it("omits caller pane when not running inside tmux", async () => {
+    const previous = process.env.TMUX_PANE;
+    delete process.env.TMUX_PANE;
+    try {
+      const h = await mount({ cursor: row().path });
+      await h.keys.pressKey("x");
+      await h.keys.pressKey("y");
+      await h.frame();
+      expect(Object.hasOwn(h.posts[0]!, "callerPane")).toBe(false);
+    } finally {
+      if (previous !== undefined) process.env.TMUX_PANE = previous;
+    }
+  });
+  it("keeps dirty and session consequences readable at sidebar width", async () => {
+    const c = candidate({
+      dirty: true,
+      modified: 1,
+      sessions: [session()],
+      ignoredFiles: [".env"],
+    });
+    const h = await mount({
+      width: 30,
+      height: 30,
+      cursor: c.path,
+      scan: async () => ({ candidates: [c], skipped: [] }),
+    });
+    await h.keys.pressKey("x");
+    expect((await h.frame()).replace(/│/g, " ").replace(/\s+/g, " ")).toContain(
+      "Delete uncommitted work?",
+    );
+    await h.keys.pressKey("y");
+    const frame = (await h.frame()).replace(/│/g, " ").replace(/\s+/g, " ");
+    expect(frame).toContain("1 idle agent session");
+    expect(frame).toContain("1 ignored file");
+    expect(h.posts).toEqual([]);
+  });
 });
