@@ -2,6 +2,34 @@ import type { ScrollBoxRenderable } from "@opentui/core";
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { HelpOverlay } from "./HelpOverlay";
+import { squish } from "./test-helpers";
+
+function escapeRe(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Key as its own column, not a letter inside "Jump" / "group". */
+function lineHasKey(line: string, key: string): boolean {
+  const inner = line.replace(/[│┌┐└┘─█▀▄]/g, " ");
+  if (inner.replace(/\s+/g, " ").trim() === key) return true;
+  return new RegExp(`(?:^|\\s{2,})${escapeRe(key)}\\s{2,}`).test(inner);
+}
+
+/** The description is on the key's row or the next few (wrap / compact). */
+function expectHelpEntry(frame: string, key: string, desc: string): void {
+  const lines = frame.split("\n");
+  const keyLine = lines.findIndex((l) => lineHasKey(l, key));
+  expect(keyLine).toBeGreaterThan(-1);
+  const window = lines.slice(keyLine, keyLine + 5).join("\n");
+  // Words in order: two-column rows interleave the other column between
+  // wrapped desc lines, so a squished window is not contiguous.
+  let from = 0;
+  for (const word of desc.split(/\s+/)) {
+    const idx = window.indexOf(word, from);
+    expect(idx).toBeGreaterThan(-1);
+    from = idx + word.length;
+  }
+}
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup;
@@ -195,5 +223,132 @@ describe("HelpOverlay reviewable", () => {
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
     expect(frame).not.toContain("Working tree / branch");
+  });
+});
+
+describe("HelpOverlay narrow and wide picker (issue #200)", () => {
+  it("keeps complete descriptions at 60x24 in a single column", async () => {
+    setup = await testRender(() => <HelpOverlay />, {
+      width: 60,
+      height: 24,
+    });
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    const lines = frame.split("\n");
+    const nav = lines.find((l) => l.includes("Navigation"));
+    expect(nav).toBeDefined();
+    // Two-column clip: Preview sat on the Navigation row and lost its
+    // descriptions off the right edge. One column stacks the sections.
+    expect(nav!).not.toContain("Preview");
+    expectHelpEntry(frame, "j/k ↑/↓", "Navigate sessions");
+    expectHelpEntry(frame, "gg / G", "Jump to first / last");
+    expectHelpEntry(frame, "1-9", "Jump to session N");
+    expectHelpEntry(frame, "Enter", "Switch to session");
+    // Longer than the old 24-column description budget; must wrap, not clip.
+    expectHelpEntry(frame, "p", "Cycle prompt (inline/row/off)");
+    expect(squish(frame)).toContain(squish("j/k scroll · ? or Esc to close"));
+  });
+
+  it("reveals complete Preview entries after scrolling at 60x24", async () => {
+    let ref: ScrollBoxRenderable | undefined;
+    setup = await testRender(
+      () => <HelpOverlay onScrollboxRef={(r) => (ref = r)} />,
+      { width: 60, height: 24 },
+    );
+    await setup.renderOnce();
+    expect(ref).toBeDefined();
+    // Single-column content is taller than 24 rows; the right-hand
+    // section is below the fold instead of clipped beside Navigation.
+    ref!.scrollBy(20);
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expectHelpEntry(frame, "P", "Toggle preview");
+    expectHelpEntry(frame, "Ctrl+D/U", "Scroll preview");
+    expectHelpEntry(frame, "Alt+H/L", "Resize preview");
+    expectHelpEntry(frame, "Tab", "Focus preview");
+  });
+
+  it("keeps two columns and complete descriptions at 120x35", async () => {
+    setup = await testRender(() => <HelpOverlay />, {
+      width: 120,
+      height: 35,
+    });
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    const nav = frame.split("\n").find((l) => l.includes("Navigation"));
+    expect(nav).toBeDefined();
+    expect(nav!).toContain("Preview");
+    expectHelpEntry(frame, "j/k ↑/↓", "Navigate sessions");
+    expectHelpEntry(frame, "P", "Toggle preview");
+    expectHelpEntry(frame, "Ctrl+D/U", "Scroll preview");
+    expectHelpEntry(frame, "Alt+H/L", "Resize preview");
+    expectHelpEntry(frame, "Tab", "Focus preview");
+    expectHelpEntry(frame, "h / l", "Collapse / expand group");
+    expectHelpEntry(frame, "p", "Cycle prompt (inline/row/off)");
+    expect(squish(frame)).toContain(squish("j/k scroll · ? or Esc to close"));
+  });
+
+  it("switches between one and two columns when the picker is resized", async () => {
+    setup = await testRender(() => <HelpOverlay />, {
+      width: 60,
+      height: 24,
+    });
+    await setup.renderOnce();
+    const narrow = setup.captureCharFrame();
+    expect(
+      narrow.split("\n").find((l) => l.includes("Navigation")),
+    ).not.toContain("Preview");
+    expectHelpEntry(narrow, "p", "Cycle prompt (inline/row/off)");
+
+    setup.resize(120, 35);
+    await setup.renderOnce();
+    const wide = setup.captureCharFrame();
+    expect(wide.split("\n").find((l) => l.includes("Navigation"))).toContain(
+      "Preview",
+    );
+    expectHelpEntry(wide, "P", "Toggle preview");
+    expectHelpEntry(wide, "p", "Cycle prompt (inline/row/off)");
+
+    setup.resize(60, 24);
+    await setup.renderOnce();
+    const again = setup.captureCharFrame();
+    expect(
+      again.split("\n").find((l) => l.includes("Navigation")),
+    ).not.toContain("Preview");
+    expectHelpEntry(again, "p", "Cycle prompt (inline/row/off)");
+  });
+});
+
+describe("HelpOverlay sidebar compact wrap (issue #200)", () => {
+  it("keeps compact help readable at 30x35", async () => {
+    setup = await testRender(() => <HelpOverlay sidebar />, {
+      width: 30,
+      height: 35,
+    });
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("Preview");
+    expect(frame).not.toContain("Toggle preview");
+    expectHelpEntry(frame, "j/k ↑/↓", "Navigate sessions");
+    expectHelpEntry(frame, "gg / G", "Jump to first / last");
+    expectHelpEntry(frame, "Enter", "Switch to session");
+    // Compact is key-above-description; the key and its first desc
+    // line are consecutive, not sharing a two-column row with Groups.
+    const lines = frame.split("\n");
+    const keyLine = lines.findIndex((l) => l.includes("j/k ↑/↓"));
+    expect(keyLine).toBeGreaterThan(-1);
+    expect(lines[keyLine]!).not.toContain("Navigate sessions");
+    expect(lines[keyLine + 1]!).toContain("Navigate sessions");
+    expect(squish(frame)).toContain(squish("j/k scroll · ? close"));
+  });
+
+  it("wraps the cycle-prompt description instead of clipping it", async () => {
+    setup = await testRender(() => <HelpOverlay sidebar />, {
+      width: 30,
+      height: 70,
+    });
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expectHelpEntry(frame, "p", "Cycle prompt (inline/row/off)");
   });
 });

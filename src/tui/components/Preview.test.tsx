@@ -337,6 +337,94 @@ describe("Preview", () => {
   });
 });
 
+describe("Preview header rows (issue #200)", () => {
+  const AUDIT = {
+    project: "api",
+    summary: "Improve narrow terminal layout",
+    cwd: "/tmp/ccmux-tui-audit/api",
+    gitBranch: "feature/worktree-cleanup-5",
+    version: "2.1.263",
+    tmuxTarget: "audit:0.0",
+    tmuxPane: "%1",
+    status: "waiting" as const,
+  };
+
+  async function renderAudit(termWidth: number, previewPct = 40) {
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <Preview session={mockEnrichedSession(AUDIT)} width={previewPct} />
+        </TickContext.Provider>
+      ),
+      { width: termWidth, height: 30 },
+    );
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  }
+
+  function expectDistinctHeaderRows(frame: string): void {
+    const lines = frame.split("\n");
+    const projectLine = lines.findIndex((l) => /api\b/.test(l) && l.includes("waiting"));
+    const summaryLine = lines.findIndex((l) =>
+      l.includes("Improve narrow"),
+    );
+    const dirLine = lines.findIndex((l) => l.includes("/tmp/ccmux-tui-audit"));
+    // At 80×40% the header is ~29 columns, so the "-5" suffix is the
+    // first thing truncateText clips. The branch name still identifies
+    // the row.
+    const metaLine = lines.findIndex((l) =>
+      l.includes("feature/worktree-cleanup"),
+    );
+    const sepLine = lines.findIndex((l) => l.includes("───"));
+    expect(projectLine).toBeGreaterThan(-1);
+    expect(summaryLine).toBeGreaterThan(-1);
+    expect(dirLine).toBeGreaterThan(-1);
+    expect(metaLine).toBeGreaterThan(-1);
+    expect(sepLine).toBeGreaterThan(-1);
+    expect(projectLine).toBeLessThan(summaryLine);
+    expect(summaryLine).toBeLessThan(dirLine);
+    expect(dirLine).toBeLessThan(metaLine);
+    expect(metaLine).toBeLessThan(sepLine);
+    // Adjacent, not overlapping: each field owns the next row.
+    expect(summaryLine).toBe(projectLine + 1);
+    expect(dirLine).toBe(summaryLine + 1);
+    expect(metaLine).toBe(dirLine + 1);
+    expect(sepLine).toBe(metaLine + 1);
+    // The reported mashup: directory painted over the title suffix.
+    expect(lines[dirLine]!).not.toContain("layout");
+    expect(lines[dirLine]!).not.toContain("apilayout");
+    expect(lines[summaryLine]!).not.toContain("/tmp/");
+    expect(lines[metaLine]!).not.toContain("───");
+    expect(lines[sepLine]!).not.toContain("feature/worktree");
+  }
+
+  it("keeps title, directory, and metadata on distinct rows at 80/100/120 with 40% preview", async () => {
+    for (const width of [80, 100, 120]) {
+      const frame = await renderAudit(width);
+      expectDistinctHeaderRows(frame);
+      setup.renderer.destroy();
+    }
+  });
+
+  it("does not wrap metadata over the title at the 100x30 40% reproduction", async () => {
+    const frame = await renderAudit(100);
+    expect(frame).not.toContain("apilayout");
+    expectDistinctHeaderRows(frame);
+    const lines = frame.split("\n");
+    const dirLine = lines.find((l) => l.includes("/tmp/ccmux-tui-audit"));
+    expect(dirLine).toContain("/tmp/ccmux-tui-audit/api");
+    // Long metadata is clipped to the header width, not wrapped onto
+    // the separator (the wrap that used to steal the title's row).
+    const metaLine = lines.find((l) =>
+      l.includes("feature/worktree-cleanup"),
+    );
+    expect(metaLine).toBeDefined();
+    expect(metaLine!).toContain("…");
+    expect(metaLine!).not.toContain("1.263");
+  });
+});
+
 describe("Preview pane capture", () => {
   async function renderReactive(initial: EnrichedSession) {
     const [session, setSession] = createSignal<EnrichedSession>(initial);
