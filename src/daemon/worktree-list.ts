@@ -87,6 +87,32 @@ export interface WorktreeRepo {
   worktrees: WorktreeRow[];
 }
 
+/** Counts and branch association need inventory, not per-checkout status. */
+export interface WorktreeInventory {
+  repoRoot: string;
+  repoName: string;
+  worktrees: Pick<WorktreeRow, "path" | "branch" | "isMain">[];
+}
+
+export async function listRepoWorktreeInventory(
+  repoRoot: string,
+  git: GitRun = runGit,
+): Promise<WorktreeInventory | null> {
+  const entries = (await listWorktrees(repoRoot, git)).filter(
+    (entry) => !entry.bare && existsSync(entry.path),
+  );
+  if (!entries.length) return null;
+  return {
+    repoRoot,
+    repoName: basename(repoRoot),
+    worktrees: entries.map(({ path, branch, isMain }) => ({
+      path,
+      branch,
+      isMain,
+    })),
+  };
+}
+
 /** Body of `GET /worktrees`. */
 export interface WorktreeListResponse {
   repos: WorktreeRepo[];

@@ -1,3 +1,4 @@
+import { helpGroups } from "../actions";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import type { Component, JSX, ParentComponent } from "solid-js";
 import { createMemo } from "solid-js";
@@ -13,86 +14,9 @@ const SIDEBAR_PAD_X = 2;
 const BORDER = 2;
 const MAX_WIDTH = COL_WIDTH * 2 + COL_GAP + PAD_X + BORDER; // cols + padding + border
 
+const RIGHT_SECTIONS = new Set(["Groups", "Preview", "Other"]);
+
 type Group = { section: string; items: { key: string; desc: string }[] };
-
-const leftGroups = (reviewable?: boolean): Group[] => [
-  {
-    section: "Navigation",
-    items: [
-      { key: "j/k ↑/↓", desc: "Navigate sessions" },
-      { key: "gg / G", desc: "Jump to first / last" },
-      { key: "1-9", desc: "Jump to session N" },
-    ],
-  },
-  {
-    section: "Actions",
-    items: [
-      { key: "Enter", desc: "Switch to session" },
-      { key: "m", desc: "Row menu (j/k, Enter)" },
-      { key: "y", desc: "Copy last response" },
-      { key: "n", desc: "New session" },
-      // Directly under `n`, because the mnemonic is the pair: `n` starts
-      // something new from nothing, `N` starts it from a PR or an issue.
-      { key: "N", desc: "Start from a PR or issue" },
-      { key: "/", desc: "Search" },
-      { key: "f", desc: "Toggle hide idle" },
-      { key: "F", desc: "Fork session" },
-      { key: "p", desc: "Cycle prompt (inline/row/off)" },
-      { key: "b", desc: "Cycle group-by mode" },
-      { key: "r", desc: "Restart session" },
-      { key: "R", desc: "Reconnect" },
-      { key: "x / X", desc: "Kill session / all" },
-      { key: "W", desc: "Worktrees" },
-      // One row, not two: the keys are a fixed pair (`d` what is
-      // uncommitted, `D` what the branch changed), so naming the two diffs
-      // in key order says it without a second row - which Actions has no
-      // height for anyway (see `keeps the last row visible`). The
-      // description sits inside the column's budget, KEY_COL_WIDTH plus
-      // whatever remains; wrapText below spends extra rows when it cannot.
-      ...(reviewable ? [{ key: "d / D", desc: "Working tree / branch" }] : []),
-    ],
-  },
-];
-
-/**
- * `sidebar` reaches this column because "Other" lives here now.
- *
- * It moved off the left one when the row-menu key was added: Actions had
- * grown to thirteen rows against the right column's nine, and at the 30-row
- * terminal the overflow test pins, the left column had no room left. Moving
- * the two shortest rows across buys four (two items, a heading and the blank
- * above it) and evens the two columns out at the same time. Overflow here is
- * silent — the scrollbox just scrolls the tail out of frame — so this is the
- * kind of thing only that test notices.
- */
-const rightGroups = (sidebar?: boolean): Group[] => [
-  {
-    section: "Preview",
-    items: [
-      { key: "P", desc: "Toggle preview" },
-      { key: "Ctrl+D/U", desc: "Scroll preview" },
-      { key: "Alt+H/L", desc: "Resize preview" },
-      { key: "Tab", desc: "Focus preview" },
-    ],
-  },
-  {
-    section: "Groups",
-    items: [
-      { key: "h / l", desc: "Collapse / expand group" },
-      { key: "Space", desc: "Toggle group" },
-      { key: "J / K", desc: "Move group down / up" },
-      { key: "< / >", desc: "Move to top / bottom" },
-      { key: "- / =", desc: "Collapse / expand all" },
-    ],
-  },
-  {
-    section: "Other",
-    items: [
-      { key: "?", desc: "Help" },
-      { key: sidebar ? "q" : "q / Esc", desc: "Quit" },
-    ],
-  },
-];
 
 /**
  * A shortcut row whose description is pre-wrapped to `descWidth`.
@@ -151,8 +75,8 @@ const renderColumn = (columnGroups: Group[], colWidth: number): JSX.Element => (
  * the next; the air was costing a third of the overlay to say the same thing.
  *
  * Descriptions wrap to `contentWidth` with one row per line, same reason as
- * {@link renderShortcut}: a height-1 box at 30 columns clips
- * "Cycle prompt (inline/row/off)".
+ * {@link renderShortcut}: a height-1 box at 30 columns clips a long
+ * description such as "Copy response / path / URL".
  */
 const renderCompactColumn = (
   columnGroups: Group[],
@@ -220,12 +144,17 @@ interface HelpOverlayProps {
 export const HelpOverlay: Component<HelpOverlayProps> = (props) => {
   const dims = useSharedTerminalDimensions();
 
-  const filteredRightGroups = () =>
-    props.sidebar
-      ? rightGroups(props.sidebar).filter((g) => g.section !== "Preview")
-      : rightGroups(props.sidebar);
+  const grouped = () =>
+    helpGroups(props.sidebar, props.reviewable === true);
 
-  const groups = () => leftGroups(props.reviewable);
+  const groups = () => grouped().filter((g) => !RIGHT_SECTIONS.has(g.section));
+
+  const filteredRightGroups = () =>
+    grouped().filter((g) =>
+      props.sidebar
+        ? g.section !== "Preview" && RIGHT_SECTIONS.has(g.section)
+        : RIGHT_SECTIONS.has(g.section),
+    );
 
   /**
    * Inner columns of the picker modal: the overlay is `min(term, MAX_WIDTH)`

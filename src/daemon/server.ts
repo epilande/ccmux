@@ -1,3 +1,4 @@
+import { readRepoSourceCounts } from "./repo-source-counts";
 import { statSync } from "node:fs";
 import { basename, relative, isAbsolute, resolve } from "node:path";
 import {
@@ -135,7 +136,8 @@ import {
   type WorktreeSession,
 } from "./worktree-prune";
 import { fetchPrune, listWorktrees, normalizePath } from "./worktree-git";
-import { listAllWorktrees } from "./worktree-list";
+import { RepoFactsCache } from "./repo-facts";
+import { listRepoWorktreeInventory, listAllWorktrees } from "./worktree-list";
 import { listOpenPRs, type OpenPR, type PRListResponse } from "./pr-list";
 import {
   listOpenIssues,
@@ -650,7 +652,27 @@ export class DaemonServer {
   /** Reads the daemon's live scan-health snapshot. Follows the getPaneCache /
    *  getAgentByType accessor pattern so the server never imports daemon state. */
   private getScanHealth: () => DaemonHealth;
-  /** When each repo last had `git fetch --prune` run for a prune scan. */
+  private headerPR = true;
+  private repoFacts = new RepoFactsCache({
+    roots: async () =>
+      this.sessionRepoRoots(
+        await this.enrichSessions(this.sessionManager.getSessions(), true),
+      ),
+    local: (root) => listRepoWorktreeInventory(root),
+    counts: (root) => readRepoSourceCounts(root),
+    prs: (root, refresh) => this.openPRsFor(root, refresh),
+    branchPRs: (root, branch) => listOpenPRs(root, undefined, branch),
+    issues: (root, refresh) => this.openIssuesFor(root, refresh),
+    headerPR: async () => {
+      this.headerPR = (await getPreferences()).headerFacts?.pr !== false;
+      return this.headerPR;
+    },
+  });
+
+  startRepoFacts(): void {
+    this.repoFacts.start();
+  }
+
   private worktreeFetchedAt = new Map<string, number>();
   /**
    * One repo's open-PR answer, keyed by repo root.
@@ -806,6 +828,7 @@ export class DaemonServer {
    * clears a cold cache much faster than that.
    */
   private sweepBranchPRs(): void {
+    if (!this.headerPR) return;
     const paneCache = this.getPaneCache();
     const sessions = this.sessionManager
       .getSessions()
@@ -1036,9 +1059,10 @@ export class DaemonServer {
     const gitBranch = gitInfo.branch ?? session.gitBranch;
     // Synchronous cache read; the resolver refreshes in the background and
     // onBranchPRsChanged re-broadcasts when a lookup lands a new value.
-    const branchPRs = localOnly
-      ? null
-      : this.prResolver.get(effectiveCwd, gitBranch);
+    const branchPRs =
+      localOnly || !this.headerPR
+        ? null
+        : this.prResolver.get(effectiveCwd, gitBranch);
     // Derived exactly like tmuxTarget, off the same paneInfo: a Claude
     // invoke runs inside a `ccmux-invoke-<id>` detached session, so the
     // pane's sessionName carries the invocation id. No cold-cache
@@ -1244,6 +1268,7 @@ export class DaemonServer {
   }
 
   stop(): void {
+    this.repoFacts.stop();
     this.removePaneFocusHook();
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
@@ -1378,6 +1403,35 @@ export class DaemonServer {
 
     if (path === "/issues" && req.method === "GET") {
       return await this.handleIssueList(url, corsHeaders);
+    }
+
+    if (
+      (path === "/repo-facts" && req.method === "GET") ||
+      (path === "/repo-facts/refresh" && req.method === "POST")
+    ) {
+      const sessions = await this.enrichSessions(
+        this.sessionManager.getSessions(),
+        true,
+      );
+      const roots = await this.worktreeRepoRoots(
+        sessions,
+        url.searchParams.get("repo"),
+        url.searchParams.get("cwd"),
+      );
+      void this.repoFacts
+        .refresh(
+          roots,
+          req.method === "POST",
+          url.searchParams.get("sources") === "1",
+        )
+        .catch(() => {});
+      return Response.json(
+        {
+          repos: this.repoFacts.snapshot(roots),
+          headerPR: (await getPreferences()).headerFacts?.pr !== false,
+        },
+        { headers: corsHeaders },
+      );
     }
 
     if (path === "/worktrees" && req.method === "GET") {

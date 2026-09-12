@@ -1,0 +1,31 @@
+# PR 2 Worktrees regression audit
+
+Compared against corrected PR 1 (`f70bfc0`), the original PR 2 rewrite reduced WorktreesPanel from 3,779 to 1,342 lines and its test file from 278 to 38 static test declarations. The removal was broader than the approved layout changes: required behavior lost coverage, and some behavior regressed. Passing the reduced suite did not establish parity.
+
+## What stays changed
+
+| PR 1 machinery                                                                                                   | PR 2 replacement and coverage                                                                                                                                                                                                                                                                       |
+| ---------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Worktrees/PR tabs, tab fitting, independent tab cursors, PR placeholder rows                                     | App's persistent Sessions/Worktrees/Start views and ViewStrip. App tests cover switching, memory and modal guards; SourcePicker tests cover delayed PR/issue answers and cursor holds. Old placeholder navigation and panel PR-tab tests are obsolete.                                              |
+| Removable bucket sorting, divider, rails, checkbox-only candidates, aligned branch column, two-line row geometry | Stable local-list ordering, shared active/index/state prefix, all-row marks, one-line worktree rows and repo headers. Worktrees component tests cover arrival without cursor movement, marks, collapse, identity, tracking, dirty fallback, locked/skip facts, attached-agent totals and scrolling. |
+| Header zones, scan spinner and panel-specific counts                                                             | Single view strip from daemon facts; classification availability stays in the panel footer. ViewStrip and repo-facts tests own counts/stale/absent behavior. Old spinner and tab-width geometry is not a contract of the new strip.                                                                 |
+| `Tab` scope, `r` refresh, `D` dirty opt-in, `n` Source picker                                                    | `s`, `R`, confirmation-phase dirty consent, `N` Start. Tests assert current keys and their action payloads. Old key assertions must not be restored verbatim.                                                                                                                                       |
+| Idle-session and dirty-file consequences on row detail lines                                                     | Separate dirty question and final consequence confirmation. Rows remain one line by owner choice; confirmation text wraps at 30 columns.                                                                                                                                                            |
+| Panel-local PR presentation and checkout routing                                                                 | Start's one-line compact metadata and SHA-based checkout proof. SourcePicker/source-picker-rows tests cover routing, source failures, filter/reseed and delayed scroll. pr-rows tests restore direct key/SHA/tie-break/check-state coverage.                                                        |
+
+## Required behaviors retained or restored
+
+- Local list and classification remain independent. A failed classification leaves navigation usable; failed local reads and outdated-daemon responses are visible and retryable. Refresh/scope/unmount generation tests prevent obsolete reads from replacing current data or the return cache.
+- The cursor stays attached to a worktree path across reload ordering and reseeds only when that path disappears. Source's two cursor effects remain intact. App covers dialog/review return context and view memory.
+- Removal refuses mixed eligible/ineligible selections; dirty consent is per attempt, and cancellation does not carry consent forward. Requests contain exact paths, `allowDirty`, `allowEndIdle`, scope, additive cwd and optional caller pane. The existing daemon suites remain the authority for live eligibility rechecks and execution.
+- Full removal success reloads with a notice. Empty/partial/failed runs retain results; HTTP errors remain retryable. Cache tests cover successful return reuse, plain opens, scope mismatches, failed/unmounted reads, explicit refresh and post-removal invalidation.
+- Copy reports actual OSC 52/local-helper outcomes. Browser opening reports success/failure and resolves the same branch association as the visible badge, even when the checkout has local commits ahead.
+- Width/scroll helpers again have direct tests for wide glyphs, one-line external errors and visual-line boundaries. Existing path-containment and clipboard helper tests remain.
+
+The audit also found that the old panel's modal mouse guard had been lost when tabs moved into App. The shared strip now respects removal confirmation/running state, with an App mouse regression test.
+
+## Additional review findings
+
+All five were confirmed and corrected: scoped `X` reaching the global kill endpoint; same-view `W`/`N` changing only advertised scope; collapsed Start groups hiding marked action targets; inherited branch-name properties crashing cache rendering; and minute refreshes running full dirty scans. Their tests exercise target isolation and late arrivals, same-view requests and rows, collapsed marks, prototype-name success/failure, and the exact lightweight Git command. The daemon's global kill endpoint remains available to its other callers.
+
+Validation counts, captures and the per-case PR 1 test catalog are recorded with the correction's verification artifacts. This audit groups coverage by behavior; it does not claim one replacement test for every deleted declaration or complete parity with obsolete layouts.

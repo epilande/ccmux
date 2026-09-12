@@ -16,6 +16,10 @@ interface GroupHeaderProps {
   count: number;
   width?: number;
   facts?: string;
+  sharedBranch?: string;
+  prBadge?: string;
+  prBadgeColor?: string;
+  hideStatusSummary?: boolean;
   collapsed: boolean;
   selected: boolean;
   members: FilteredSession[];
@@ -59,7 +63,7 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
   const c = (color: string) => (props.dimmed ? theme.border : color);
   const bgColor = () =>
     props.selected && !props.dimmed ? theme.surface : undefined;
-  const indicator = () => (props.collapsed ? "▶" : "▼");
+  const indicator = () => (props.collapsed ? "▸" : "▾");
 
   // Derived here (not in the flat-item memo) so a subagent-driven status
   // change re-renders only this header, not the whole row list.
@@ -75,22 +79,23 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
 
   const parts = createMemo(() => {
     let left = Math.max(0, (props.width ?? dims().width) - 2);
-    const activity = props.collapsed
-      ? [
-          ...(summary().working
-            ? [
-                {
-                  text: ` ${workingIcon()} ${summary().working}`,
-                  color: theme.peach,
-                },
-              ]
-            : []),
-          ...dots().map((dot) => ({
-            text: ` ${dot.icon} ${dot.count}`,
-            color: dot.color,
-          })),
-        ]
-      : [];
+    const activity =
+      props.collapsed && !props.hideStatusSummary
+        ? [
+            ...(summary().working
+              ? [
+                  {
+                    text: ` ${workingIcon()} ${summary().working}`,
+                    color: theme.peach,
+                  },
+                ]
+              : []),
+            ...dots().map((dot) => ({
+              text: ` ${dot.icon} ${dot.count}`,
+              color: dot.color,
+            })),
+          ]
+        : [];
     const count = ` (${props.count})`;
     // Keep the count and collapsed activity visible before spending space on
     // a long group name or optional repository facts.
@@ -106,6 +111,17 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
       { text: truncateText(props.label, labelWidth), color: theme.text },
       { text: count, color: theme.overlay },
       ...activity,
+      ...(props.sharedBranch && props.sharedBranch !== "main"
+        ? [{ text: `   ${props.sharedBranch}`, color: theme.blue }]
+        : []),
+      ...(props.prBadge
+        ? [
+            {
+              text: `   ${props.prBadge}`,
+              color: props.prBadgeColor ?? theme.mauve,
+            },
+          ]
+        : []),
       ...(props.facts
         ? [{ text: `   ${props.facts}`, color: theme.subtext }]
         : []),

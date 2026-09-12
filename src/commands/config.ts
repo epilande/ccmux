@@ -174,6 +174,7 @@ export function completableConfigKeys(): string[] {
   return [
     ...Object.keys(KNOWN_KEYS),
     "ageFade.after",
+    "headerFacts.pr",
     "sidebar.width",
     "sidebar.position",
     "sidebar.promptLines",
@@ -318,6 +319,15 @@ export function createConfigCommand(): Command {
         return;
       }
 
+      if (key === "headerFacts.pr") {
+        if (value !== "true" && value !== "false") {
+          console.error("headerFacts.pr must be true or false");
+          process.exit(1);
+        }
+        await setPreferences({ headerFacts: { pr: value === "true" } });
+        console.log(`${key} = ${value}`);
+        return;
+      }
       if (key === "ageFade.after") {
         const after = Number(value);
         if (!value.trim() || !Number.isFinite(after) || after < 0) {

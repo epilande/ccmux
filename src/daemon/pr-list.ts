@@ -22,6 +22,7 @@
  * collapsing them costs.
  */
 
+import { runGit, type GitRun } from "./worktree-git";
 import type { BranchPR } from "../types/session";
 import {
   foldChecks,
@@ -29,6 +30,8 @@ import {
   type RollupEntry,
 } from "./pr-resolver";
 import {
+  parseRepoSlug,
+  sameRepo,
   ghProblem,
   readString,
   runGh,
@@ -45,7 +48,7 @@ import {
  * silently lose its oldest open PRs with nothing on screen to say so. 50 is
  * more rows than the panel can usefully show and still one request.
  */
-const PR_LIST_LIMIT = 50;
+export const PR_LIST_LIMIT = 50;
 
 /** The `--json` fields the section renders, in the order gh takes them. */
 const PR_LIST_FIELDS = [
@@ -58,11 +61,17 @@ const PR_LIST_FIELDS = [
   "statusCheckRollup",
   "headRefName",
   "headRefOid",
+  "headRepository",
+  "headRepositoryOwner",
+  "createdAt",
+  "labels",
 ].join(",");
 
 /** One open pull request, flattened to what a row shows. */
 export interface OpenPR {
   number: number;
+  createdAt?: string | null;
+  labels?: string[];
   /** Control characters already stripped; see {@link stripControlChars}. */
   title: string;
   url: string;
@@ -72,11 +81,14 @@ export interface OpenPR {
   reviewDecision: BranchPR["reviewDecision"];
   ciStatus: NonNullable<BranchPR["ciStatus"]>;
   headRefName: string;
+  /** Source repository identity, distinct from the PR author and base repo. */
+  headRepository?: { owner: string; name: string } | null;
   /**
    * SHA of the PR's head commit, or null when gh did not report one.
    *
-   * The ONLY thing that proves a local branch is this PR's. Never match a PR
-   * to a checkout by branch NAME: `gh pr list --head patch-1` on `cli/cli`
+   * For Start's checkout routing, only an exact SHA proves the destination.
+   * Badges can also use configured upstream identity via associatedBranchPRs.
+   * Never match a PR to a checkout by branch NAME: `gh pr list --head patch-1` on `cli/cli`
    * returns 25 PRs from 25 different forks, which is the namesake trap
    * `selectPRForBranch` exists to document.
    */
@@ -93,12 +105,14 @@ export interface OpenPR {
 export async function listOpenPRs(
   cwd: string,
   run: GhRun = runGh,
+  head?: string,
 ): Promise<SourceResult<OpenPR[]>> {
   const result = await run(cwd, [
     "pr",
     "list",
     "--state",
     "open",
+    ...(head ? ["--head", head] : []),
     "--limit",
     String(PR_LIST_LIMIT),
     "--json",
@@ -153,7 +167,13 @@ function readPR(raw: unknown): OpenPR | null {
   }
   return {
     number,
-    // Sanitized HERE, at the boundary GitHub's text enters through, rather
+    createdAt: readString(row, "createdAt"),
+    labels: Array.isArray(row.labels)
+      ? row.labels.flatMap((label) => {
+          const name = nestedString(label, "name");
+          return name ? [stripControlChars(name)] : [];
+        })
+      : [], // Sanitized HERE, at the boundary GitHub's text enters through, rather
     // than at each of the places it renders: a title reaches a TUI row, the
     // new-session dialog's note and (through `seedPrompt`) an agent's opening
     // message, and only one of those would have thought to strip it.
@@ -172,6 +192,11 @@ function readPR(raw: unknown): OpenPR | null {
     // rollup, an empty rollup is `"none"` rather than `"passing"`, and
     // CANCELLED counts as failing by design. See `pr-resolver.ts`.
     ciStatus: foldChecks(readRollup(row.statusCheckRollup)),
+    headRepository: (() => {
+      const owner = nestedString(row.headRepositoryOwner, "login");
+      const name = nestedString(row.headRepository, "name");
+      return owner && name ? { owner, name } : null;
+    })(),
     headRefName: readString(row, "headRefName") ?? "",
     headRefOid: readString(row, "headRefOid"),
   };
@@ -245,4 +270,58 @@ export type PRListBody = Partial<PRListResponse>;
 
 export function normalizePRList(data: PRListBody): PRListResponse {
   return { repos: data.repos ?? [], errors: data.errors ?? [] };
+}
+
+/** Badges allow local-ahead commits when the upstream identifies the PR.
+ * Without that identity, only an exact local tip is evidence of association.
+ * These are local ref/config reads; never fetch or inspect dirty files. */
+export async function associatedBranchPRs(
+  cwd: string,
+  branch: string,
+  prs: OpenPR[],
+  git: GitRun = runGit,
+): Promise<SourceResult<OpenPR[]>> {
+  if (!prs.length) return { ok: true, value: [] };
+  const ref = `refs/heads/${branch}`;
+  const refs = await git(cwd, [
+    "for-each-ref",
+    "--format=%(refname)%09%(objectname)%09%(upstream:remotename)%09%(upstream:remoteref)",
+    ref,
+  ]);
+  if (refs.exitCode !== 0)
+    return { ok: false, error: "Cannot read branch identity" };
+  // for-each-ref also lists descendants of the supplied ref prefix.
+  const row = refs.stdout
+    .split("\n")
+    .map((line) => line.split("\t"))
+    .find(([name]) => name === ref);
+  if (!row) return { ok: true, value: [] };
+  const [, tip, remote, merge] = row;
+  let remoteRepo = null;
+  if (remote && remote !== "." && merge) {
+    const url = await git(cwd, ["remote", "get-url", "--", remote]);
+    if (url.exitCode !== 0)
+      return { ok: false, error: "Cannot read branch remote" };
+    remoteRepo = parseRepoSlug(url.stdout);
+  }
+  return {
+    ok: true,
+    value: prs.filter((pr) => {
+      if (!remoteRepo) return !!tip && pr.headRefOid === tip;
+      const base = parseRepoSlug(pr.url);
+      if (merge === `refs/pull/${pr.number}/head`)
+        return sameRepo(remoteRepo, base);
+      const head =
+        base && pr.headRepository
+          ? {
+              host: base.host,
+              owner: pr.headRepository.owner.toLowerCase(),
+              repo: pr.headRepository.name.toLowerCase(),
+            }
+          : null;
+      return (
+        merge === `refs/heads/${pr.headRefName}` && sameRepo(remoteRepo, head)
+      );
+    }),
+  };
 }
