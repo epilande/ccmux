@@ -30,14 +30,10 @@ import {
   scrollTarget,
   toVisualLine,
 } from "../utils/grouping";
-import { displayWidth } from "../utils/format";
-import { groupedIdentity, waitingIdentity } from "./SessionItem";
 import { SessionItem } from "./SessionItem";
 import { GroupHeader } from "./GroupHeader";
 import type { ResolvedColumns } from "./session-columns";
 import {
-  prLabel,
-  rowHasFlexText,
   resolveLayout,
   applyPromptDisplay,
   rowHasContent,
@@ -203,43 +199,6 @@ export const SessionList: Component<SessionListProps> = (props) => {
     );
   });
 
-  // A shared, bounded identity slot keeps branch lengths from moving every
-  // summary. Include the adjacent PR badge in the slot so it cannot break
-  // alignment either. Compact rows keep their natural full-width identity.
-  const identityWidths = createMemo(() => {
-    const widths = new Map<string, number>();
-    if (props.sidebar || !rowHasFlexText(layout().row1)) return widths;
-    const cap = Math.min(32, Math.floor(effectiveWidth() / 4));
-    for (const item of props.items) {
-      if (item.type !== "session" || !item.groupKey) continue;
-      const waiting = item.groupKey === NEEDS_YOU_GROUP_KEY;
-      if (!waiting && item.identity !== "branch") continue;
-      const session = item.filteredSession.session;
-      const text = waiting
-        ? waitingIdentity(session, cap)
-        : groupedIdentity(session, cap);
-      widths.set(
-        item.groupKey,
-        Math.min(
-          cap,
-          Math.max(widths.get(item.groupKey) ?? 0, displayWidth(text)),
-        ),
-      );
-    }
-    return widths;
-  });
-  const identityWidth = (item: Extract<FlatItem, { type: "session" }>) => {
-    if (!rowHasFlexText(rowLayout(item.filteredSession.session).row1))
-      return undefined;
-    const width = item.groupKey
-      ? identityWidths().get(item.groupKey)
-      : undefined;
-    if (width === undefined) return undefined;
-    const pr = layout().row1.left.find((entry) => entry.field === "pr");
-    const badge = pr ? prLabel(item.filteredSession.session, pr.mode) : "";
-    return Math.max(1, width - (badge ? displayWidth(badge) : 0));
-  };
-
   /**
    * The layout for a row whose block is drawn and whose agent DID write a
    * summary: the block renders the same text a `prompt` cell would, so that
@@ -390,7 +349,6 @@ export const SessionList: Component<SessionListProps> = (props) => {
             label={item.label}
             count={item.count}
             width={effectiveWidth() - 3}
-            sharedBranch={item.sharedBranch}
             facts={groupWorktreeFacts(item, worktreeRepos())}
             collapsed={item.collapsed}
             selected={index === props.selectedIndex}
@@ -429,8 +387,6 @@ export const SessionList: Component<SessionListProps> = (props) => {
         promptBlock={promptBlock(item.filteredSession.session)}
         dimmed={props.dimmed}
         sidebar={props.sidebar}
-        identity={item.identity}
-        identityWidth={identityWidth(item)}
         needsYou={item.groupKey === NEEDS_YOU_GROUP_KEY}
         sharedTmuxSession={item.sharedTmuxSession}
         ageFadeAfter={props.ageFadeAfter}

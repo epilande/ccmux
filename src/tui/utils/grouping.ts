@@ -74,7 +74,8 @@ export type FlatItem =
       groupKey: string;
       label: string;
       count: number;
-      sharedBranch?: string;
+      /** Present only when a project header unambiguously names one repository. */
+      repoRoot?: string;
       collapsed: boolean;
       /** Raw member references, not a precomputed summary. The status summary
        * is derived downstream in the header's own reactive scope so this memo
@@ -87,7 +88,6 @@ export type FlatItem =
       type: "session";
       groupKey: string;
       filteredSession: FilteredSession;
-      identity?: "branch" | "hidden";
       sharedTmuxSession?: string;
     };
 
@@ -318,18 +318,24 @@ export function buildFlatItems(
   );
   for (const { key, members } of sorted) {
     const isCollapsed = !isSearching && collapsed.has(key);
-    const branch = members[0]?.session.gitBranch;
-    const sharedBranch =
+    const root =
+      members[0]?.session.mainRepoRoot ?? members[0]?.session.worktreeRoot;
+    const repoRoot =
       groupBy === "project" &&
-      branch &&
-      members.every((fs) => fs.session.gitBranch === branch)
-        ? branch
+      root &&
+      members.every(
+        ({ session }) =>
+          (session.mainRepoRoot ?? session.worktreeRoot) === root,
+      )
+        ? root
         : undefined;
     const tmuxName = (fs: FilteredSession) =>
       fs.session.tmuxTarget?.split(":")[0];
     const firstTmux = tmuxName(members[0]!);
     const sharedTmuxSession =
-      firstTmux && members.every((fs) => tmuxName(fs) === firstTmux)
+      (groupBy === "session" || groupBy === "window") &&
+      firstTmux &&
+      members.every((fs) => tmuxName(fs) === firstTmux)
         ? firstTmux
         : undefined;
     items.push({
@@ -339,7 +345,7 @@ export function buildFlatItems(
       count: members.length,
       collapsed: isCollapsed,
       members,
-      sharedBranch,
+      repoRoot,
     });
     if (!isCollapsed) {
       for (const fs of members)
@@ -347,12 +353,6 @@ export function buildFlatItems(
           type: "session",
           groupKey: key,
           filteredSession: fs,
-          identity:
-            groupBy === "project"
-              ? sharedBranch
-                ? "hidden"
-                : "branch"
-              : undefined,
           sharedTmuxSession,
         });
     }

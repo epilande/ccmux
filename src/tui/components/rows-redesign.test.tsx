@@ -70,37 +70,14 @@ describe("rows redesign", () => {
         "new",
         "idle",
       ]);
-      expect(rows[0].identity).toBeUndefined();
       expect(rows[0].sharedTmuxSession).toBeUndefined();
-      expect(rows[2].identity).toBe(
-        groupBy === "project" ? "hidden" : undefined,
+      expect(rows[2].sharedTmuxSession).toBe(
+        groupBy === "session" || groupBy === "window" ? "dev" : undefined,
       );
       if (groupBy !== "none")
         expect(items.filter((item) => item.type === "header")[1].count).toBe(1);
     });
   }
-
-  it("lifts only a branch shared by every remaining project row", () => {
-    const items = buildFlatItems(
-      [make("a"), make("b", { gitBranch: "topic" })],
-      "project",
-      new Set(),
-      false,
-    );
-    expect(items[0]).toMatchObject({ sharedBranch: undefined, count: 2 });
-    expect(items[1]).toMatchObject({
-      identity: "branch",
-      sharedTmuxSession: "dev",
-    });
-    const shared = buildFlatItems(
-      [make("a"), make("b")],
-      "project",
-      new Set(),
-      false,
-    );
-    expect(shared[0]).toMatchObject({ sharedBranch: "main" });
-    expect(shared[1]).toMatchObject({ identity: "hidden" });
-  });
 
   it("keeps the selected session across band moves and hide-idle, with factual group actions", () => {
     const store = createTUIStore({ groupBy: "project" });
@@ -141,12 +118,12 @@ describe("rows redesign", () => {
     ).toBe(false);
   });
 
-  it("actually paints old row text in the dim color", async () => {
+  it("fades task text while retaining identity and agent colors", async () => {
     setup = await testRender(
       () => (
         <TickContext.Provider value={{ tick: () => 0 }}>
           <SessionItem
-            session={make("old").session}
+            session={make("old", { summary: "Old task" }).session}
             selected={false}
             index={0}
             previewWidth={30}
@@ -158,10 +135,20 @@ describe("rows redesign", () => {
     await setup.renderOnce();
     const frame = setup.captureSpans();
     const label = frame.lines[0].spans.find((span) =>
-      span.text.includes("alpha"),
+      span.text.includes("Old task"),
     );
     expect(label).toBeDefined();
     expect(label!.fg.toInts()).toEqual(RGBA.fromHex(theme.subtext).toInts());
+    const identity = frame.lines[0].spans.find((span) =>
+      span.text.includes("alpha"),
+    );
+    expect(identity!.fg.toInts()).not.toEqual(
+      RGBA.fromHex(theme.subtext).toInts(),
+    );
+    const agent = frame.lines[0].spans.find((span) =>
+      span.text.includes("Claude"),
+    );
+    expect(agent!.fg.toInts()).toEqual(RGBA.fromHex(theme.peach).toInts());
   });
 
   for (const [width, height, sidebar] of [
@@ -169,7 +156,7 @@ describe("rows redesign", () => {
     [96, 30, false],
     [30, 30, true],
   ] as const) {
-    it(`renders the band, project suppression and sidebar target at ${width} columns`, async () => {
+    it(`renders the band, row identity and sidebar target at ${width} columns`, async () => {
       const [rows, setRows] = createSignal([
         make("wait", {
           status: "waiting",
@@ -195,14 +182,13 @@ describe("rows redesign", () => {
       await setup.renderOnce();
       let frame = setup.captureCharFrame();
       expect(frame).toContain("needs you (1)");
-      expect(frame).toContain("◆ alpha");
+      expect(frame).toContain("alpha:topic");
       expect(frame).toContain("dev:1.2");
       expect(frame).toContain("alpha (1)");
-      expect(frame).not.toContain("idle");
-      expect(frame).not.toContain("waiting");
+      if (!sidebar) expect(frame).toContain("idle");
       expect(frame).not.toContain("Worktrees");
       expect(
-        frame.split("\n").filter((line) => line.includes("◆")),
+        frame.split("\n").filter((line) => line.includes("■")),
       ).toHaveLength(1);
       setRows([
         make("wait", { summary: "Finished" }),
@@ -212,46 +198,137 @@ describe("rows redesign", () => {
       frame = setup.captureCharFrame();
       expect(frame).not.toContain("needs you");
       expect(frame).toContain("alpha (2)");
-      // A shared "main" is the default and never lifts to the header.
-      expect(frame).not.toContain("main");
+      expect(frame).toContain("alpha:main");
     });
   }
 
-  for (const width of [160, 96]) {
-    it(`aligns mixed branch lengths and PR badges at ${width} columns`, async () => {
+  for (const groupBy of [
+    "project",
+    "cwd",
+    "session",
+    "window",
+    "none",
+  ] as GroupBy[]) {
+    for (const width of [160, 96, 30]) {
+      it(`preserves checkout, branch and PR identity in ${groupBy} at ${width} columns`, async () => {
+        const rows = [
+          make("tree", {
+            cwd: "/code/alpha/.claude/worktrees/wt",
+            paneCwd: "/code/alpha/.claude/worktrees/wt",
+            worktreeRoot: "/code/alpha/.claude/worktrees/wt",
+            isWorktree: true,
+            gitBranch: "fix",
+            summary: "Repair rendering",
+            branchPRs: [{ id: "25", href: "https://github.com/x/y/pull/25" }],
+          }),
+        ];
+        setup = await testRender(
+          () => (
+            <TickContext.Provider value={{ tick: () => 0 }}>
+              <SessionList
+                items={buildFlatItems(rows, groupBy, new Set(), false)}
+                selectedIndex={groupBy === "none" ? 0 : 1}
+                sidebar={width === 30}
+                previewWidth={30}
+              />
+            </TickContext.Provider>
+          ),
+          { width, height: 10 },
+        );
+        await setup.renderOnce();
+        const frame = setup.captureCharFrame();
+        expect(frame).toContain("wt:fix+");
+        expect(frame).toContain("#25");
+        if (width > 30) {
+          expect(frame).toContain("Repair rendering");
+          if (groupBy === "project" || groupBy === "cwd" || groupBy === "none")
+            expect(frame).toContain("dev:1.2");
+        }
+      });
+    }
+  }
+
+  for (const width of [160, 96, 30]) {
+    it(`keeps invoke outcomes and background identity distinct at ${width} columns`, async () => {
       const rows = [
-        make("short", {
-          gitBranch: "main",
-          summary: "Short summary",
-          branchPRs: [{ id: "25", href: "https://github.com/x/y/pull/25" }],
+        make("done", {
+          originInvocationId: "i1",
+          originInvocationStatus: "succeeded",
         }),
-        make("long", {
-          gitBranch: "a-very-long-branch-that-must-leave-room-for-the-summary",
-          summary: "Long summary",
+        make("failed", {
+          originInvocationId: "i2",
+          originInvocationStatus: "failed",
         }),
+        make("cancel", {
+          originInvocationId: "i3",
+          originInvocationStatus: "cancelled",
+        }),
+        make("background", { trackingMode: "background" }),
+        make("complete", { attentionState: "unread" }),
       ];
       setup = await testRender(
         () => (
           <TickContext.Provider value={{ tick: () => 0 }}>
             <SessionList
-              items={buildFlatItems(rows, "project", new Set(), false)}
-              selectedIndex={1}
+              items={buildFlatItems(rows, "none", new Set(), false)}
+              selectedIndex={0}
+              sidebar={width === 30}
               previewWidth={30}
             />
           </TickContext.Provider>
         ),
-        { width, height: 10 },
+        { width, height: 12 },
       );
       await setup.renderOnce();
-      const lines = setup.captureCharFrame().split("\n");
-      const short = lines.find((line) => line.includes("Short summary"))!;
-      const long = lines.find((line) => line.includes("Long summary"))!;
-      expect(short).toBeDefined();
-      expect(long).toBeDefined();
-      expect(short.indexOf("Short summary")).toBe(long.indexOf("Long summary"));
-      expect(long).toContain("…");
+      const frame = setup.captureCharFrame();
+      for (const icon of ["✓", "✗", "⊘", "◇"]) expect(frame).toContain(icon);
+      if (width > 30) {
+        expect(frame).toContain("done");
+        expect(frame).toContain("failed");
+        expect(frame).toContain("cancel");
+      }
+      const spans = setup.captureSpans().lines.flatMap((line) => line.spans);
+      expect(
+        spans.find((span) => span.text.includes("✗"))!.fg.toInts(),
+      ).toEqual(RGBA.fromHex(theme.red).toInts());
+      expect(
+        spans.find((span) => span.text.includes("✓"))!.fg.toInts(),
+      ).toEqual(RGBA.fromHex(theme.green).toInts());
+      expect(
+        spans.find((span) => span.text.includes("●"))!.fg.toInts(),
+      ).toEqual(RGBA.fromHex(theme.green).toInts());
     });
   }
+
+  it("retains a waiting task summary and its search evidence alongside the reason", async () => {
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionItem
+            session={
+              make("wait", {
+                status: "waiting",
+                attentionType: "permission",
+                pendingTool: "Read",
+                summary: "Fix grouped rows",
+              }).session
+            }
+            selected={false}
+            index={0}
+            previewWidth={30}
+            matchSource="transcript"
+            transcriptSnippet="cursor evidence"
+          />
+        </TickContext.Provider>
+      ),
+      { width: 160, height: 4 },
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Read");
+    expect(frame).toContain("cursor evidence");
+    expect(frame).toContain("[transcript]");
+  });
 
   it("fits header facts without wrapping, and omits them for mixed repos or the band", async () => {
     const header = buildFlatItems([make("a")], "project", new Set(), false)[0];
@@ -262,6 +339,11 @@ describe("rows redesign", () => {
       worktrees: [],
     };
     expect(groupWorktreeFacts(header, [repo])).toBeUndefined();
+    for (const groupBy of ["cwd", "session", "window"] as GroupBy[]) {
+      const nonRepo = buildFlatItems([make("a")], groupBy, new Set(), false)[0];
+      if (nonRepo.type !== "header") throw new Error("missing header");
+      expect(nonRepo.repoRoot).toBeUndefined();
+    }
     expect(
       groupWorktreeFacts(
         { ...header, groupKey: NEEDS_YOU_GROUP_KEY, label: "needs you" },
@@ -282,10 +364,9 @@ describe("rows redesign", () => {
         <GroupHeader
           label="長いプロジェクト"
           count={42}
-          collapsed={false}
+          collapsed={true}
           selected={false}
-          members={[]}
-          sharedBranch="long-shared-branch"
+          members={[make("idle"), make("work", { status: "working" })]}
           facts="main + 10 worktrees and a long tail"
           width={28}
         />
@@ -293,6 +374,11 @@ describe("rows redesign", () => {
       { width: 30, height: 3 },
     );
     await setup.renderOnce();
-    expect(setup.captureCharFrame().split("\n")[1].trim()).toBe("");
+    const lines = setup.captureCharFrame().split("\n");
+    expect(lines[1].trim()).toBe("");
+    expect(lines[0]).toContain("(42)");
+    expect(lines[0]).toMatch(/[●◐◓◑◒] 1/);
+    expect(lines[0]).toContain("● 1");
+    expect(lines[0]).not.toContain("worktrees");
   });
 });

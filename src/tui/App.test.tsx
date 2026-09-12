@@ -1989,7 +1989,7 @@ describe("App invoke row rendering", () => {
     });
     await setup.renderOnce();
     const runningFrame = setup.captureCharFrame();
-    expect(runningFrame).toMatch(/[◐◓◑◒]/);
+    expect(runningFrame).toContain("working");
     expect(runningFrame).not.toContain("✓");
 
     sseCallbacks!.onInvocationFinished!({
@@ -2002,8 +2002,8 @@ describe("App invoke row rendering", () => {
     });
     await setup.renderOnce();
     const doneFrame = setup.captureCharFrame();
-    expect(doneFrame).toContain("●");
-    expect(doneFrame).not.toContain("done");
+    expect(doneFrame).toContain("✓");
+    expect(doneFrame).toContain("done");
     expect(doneFrame).not.toContain("working");
   });
 });

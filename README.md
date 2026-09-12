@@ -681,8 +681,8 @@ ccmux config list
 
 | Key                          | Values                                                                       | Default            | Description                                                                                                                        |
 | :--------------------------- | :--------------------------------------------------------------------------- | :----------------- | :--------------------------------------------------------------------------------------------------------------------------------- |
-| `iconStyle`                  | `dot`, `emoji`, `nerdfont`, `none`                                           | `dot`              | Icon style outside the fixed session-row glyph                                                                                                                  |
-| `ageFade.after` | Nonnegative hours (`0` disables) | `24` | Dim rows after this many hours continuously idle |
+| `iconStyle`                  | `dot`, `emoji`, `nerdfont`, `none`                                           | `dot`              | Icon style for status badges                                                                                                                  |
+| `ageFade.after` | Nonnegative hours (`0` disables) | `24` | Dim task text after this many hours continuously idle |
 | `theme`                      | `catppuccin-*`, `tokyo-night*`, `dracula`, `gruvbox-*`, `nord`, `rose-pine*` | `catppuccin-mocha` | TUI color theme (resolved at launch; see [Theme](#-theme))                                                                         |
 | `showPreview`                | `true`, `false`                                                              | `false`            | Show preview panel on launch                                                                                                       |
 | `previewWidth`               | `20`–`80`                                                                    | `40`               | Preview panel width (percentage)                                                                                                   |
@@ -718,8 +718,8 @@ Pass an empty string to clear a side: `ccmux config set columns.row2.left ""`.
 | Field     | Modes                 | Default mode | Description                                                                              |
 | :-------- | :-------------------- | :----------- | :--------------------------------------------------------------------------------------- |
 | `index`   | —                     | —            | Row number (1–9)                                                                         |
-| `status`  | `icon` (legacy `short`/`full` accepted) | `icon`       | One glyph: `◆` waiting, animated `◐` working, dim `●` idle                                                                       |
-| `project` | `dirname`/`full`      | `dirname`    | Branch under project grouping (shared branches lift to the header); full path identity under other groupings |
+| `status`  | `icon`/`short`/`full` | Responsive | Status badge, including completion and invoke outcomes; icon only on narrow screens |
+| `project` | `dirname`/`full`      | `dirname`    | Checkout path and branch in every grouping; `+` marks linked worktrees |
 | `agent`   | `short`/`full`        | `full`       | Agent name (2-char code or full label)                                                   |
 | `version` | —                     | —            | Agent version                                                                            |
 | `pane`    | —                     | —            | Tmux pane target (session:window.pane)                                                   |
@@ -741,13 +741,15 @@ ccmux config set sidebar.columns.row2.left prompt
 
 Both cells flex to fill their row, so they share one budget — put at most one of them on a row.
 
-Under project grouping, the `project` cell shows only the branch or worktree name, with `+` marking a worktree. When every remaining row shares a branch, it appears on the header and the rows leave identity empty. Other grouping modes (`cwd`, `session`, `window`, `none`) keep the full `path:branch` identity, including `<repo>/<worktree>` for linked checkouts. Inline rows align their summaries after a bounded identity column, so long branch names leave room for the task. Pane targets omit the tmux session name when every row in a group shares it.
+The `project` cell keeps the checkout path and branch in every grouping, including `<repo>/<worktree>` for linked checkouts. Pressing `b` changes the headers and ordering while preserving row identity. Shared branches stay on the rows. Pane targets omit the tmux session name only under tmux session/window grouping, where the header already names it.
+
+Status badges keep completion, invoke success/failure/cancellation, background agents, and subagent activity distinct. `iconStyle` and the `status` column's `icon`, `short`, and `full` modes remain supported; defaults expand with the available width. Attention reasons sit beside the task text, so a pending permission does not replace the summary or search match.
 
 Waiting sessions move into a pinned `needs you` band above the groups, oldest wait first. They appear once, retain repo and tmux session identity, and return to their group when the wait ends. The band disappears when empty and stays expanded through collapse-all. Search still filters sessions; `f` never removes a waiting row. Each header counts its own remaining rows.
 
-Headers belonging to one repo show `main + N worktrees`, based only on the local worktree list; a repo with only its main checkout shows nothing. Facts are omitted when the complete phrase cannot fit. Mixed-repo headers and the attention band have no repo facts. These read-only counts refresh on opening, reconnecting (`R`), or changing the displayed repo set.
+Project headers that unambiguously identify one repo show `main + N worktrees`, based only on the local worktree list; a repo with only its main checkout shows nothing. Facts are omitted when the complete phrase cannot fit. Cwd/tmux groups, mixed-repo headers, and the attention band have no repo facts. Collapsed activity counts take priority over optional facts when space is tight. These read-only counts refresh on opening, reconnecting (`R`), or changing the displayed repo set.
 
-Rows idle longer than 24 hours use the dim text color. Set `ccmux config set ageFade.after 48` to change the threshold in hours, or `0` to disable fading. Active subagents keep their row bright.
+Task text on rows idle longer than 24 hours uses the dim text color; identity, status, agent, PR, and handoff colors retain their meaning. Set `ccmux config set ageFade.after 48` to change the threshold in hours, or `0` to disable fading. Active subagents keep their row bright.
 
 ### Wrapped prompt block
 

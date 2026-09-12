@@ -210,8 +210,7 @@ describe("SessionItem", () => {
     const frame = await renderItem({
       session: mockEnrichedSession({ status: "idle" }),
     });
-    expect(frame).toContain("●");
-    expect(frame).not.toContain("idle");
+    expect(frame).toContain("● idle");
   });
 
   it("renders the invoke badge for a running subprocess invoke row", async () => {
@@ -227,8 +226,7 @@ describe("SessionItem", () => {
     // A running invoke renders the active "working" badge (matching a normal
     // working session by design). It is not a terminal outcome, so it shows no
     // ✓/✗; the succeeded/failed cases below assert the invoke-specific path.
-    expect(frame).toMatch(/[◐◓◑◒]/);
-    expect(frame).not.toContain("working");
+    expect(frame).toContain("working");
     expect(frame).not.toContain("✓");
     expect(frame).not.toContain("✗");
   });
@@ -244,8 +242,8 @@ describe("SessionItem", () => {
         originInvocationStatus: "succeeded",
       }),
     });
-    expect(frame).toContain("●");
-    expect(frame).not.toContain("done");
+    expect(frame).toContain("✓");
+    expect(frame).toContain("done");
   });
 
   it("renders the invoke badge for a failed invoke row", async () => {
@@ -259,8 +257,8 @@ describe("SessionItem", () => {
         originInvocationStatus: "failed",
       }),
     });
-    expect(frame).toContain("●");
-    expect(frame).not.toContain("failed");
+    expect(frame).toContain("✗");
+    expect(frame).toContain("failed");
   });
 
   it("uses the normal status badge for a real session (no invoke status)", async () => {
@@ -268,8 +266,7 @@ describe("SessionItem", () => {
       session: mockEnrichedSession({ status: "working" }),
     });
     // Normal working badge, not the invoke spinner/labels
-    expect(frame).toMatch(/[◐◓◑◒]/);
-    expect(frame).not.toContain("working");
+    expect(frame).toContain("working");
     expect(frame).not.toContain("✓");
     expect(frame).not.toContain("✗");
   });
@@ -293,10 +290,11 @@ describe("SessionItem", () => {
       }),
     });
     expect(frame).toContain("Edit");
-    expect(frame).toContain("Permission ·");
+    // pendingTool takes priority over "Permission"
+    expect(frame).not.toContain("Permission");
   });
 
-  it("puts attention in the flexible text slot before agent metadata", async () => {
+  it("right-aligns attention label adjacent to agent column", async () => {
     const width = 160;
     const frame = await renderItem(
       {
@@ -312,10 +310,11 @@ describe("SessionItem", () => {
     expect(line).toBeDefined();
     const permIdx = line!.indexOf("Permission");
     const claudeIdx = line!.indexOf("Claude");
-    expect(permIdx).toBeLessThan(width / 2);
-    // Agent metadata keeps its right alignment.
+    // Permission must sit in the right half (not pinned to project column)
+    expect(permIdx).toBeGreaterThan(width / 2);
+    // Permission must be immediately before the agent column (small gap)
     expect(claudeIdx).toBeGreaterThan(permIdx);
-    expect(claudeIdx).toBeGreaterThan(width / 2);
+    expect(claudeIdx - (permIdx + "Permission".length)).toBeLessThan(5);
   });
 
   it("renders subagent count", async () => {
@@ -389,7 +388,7 @@ describe("SessionItem", () => {
     );
   });
 
-  it("uses the flexible slot for the full attention reason when it fits", async () => {
+  it("ellipsizes an attention label longer than the cap", async () => {
     const frame = await renderItem(
       {
         session: mockEnrichedSession({
@@ -400,7 +399,9 @@ describe("SessionItem", () => {
       },
       160,
     );
-    expect(frame).toContain("Bash(git status --porcelain)");
+    // Capped to 12 chars with an ellipsis; the full tool string never shows.
+    expect(frame).toContain("…");
+    expect(frame).not.toContain("Bash(git status --porcelain)");
   });
 
   it("ellipsizes a long path instead of clipping it mid-word", async () => {
@@ -646,7 +647,7 @@ describe("SessionItem sidebar mode", () => {
     expect(lines[1].trim()).toBe("");
   });
 
-  it("shows attention in the sidebar flexible slot", async () => {
+  it("shows ! for attention instead of full label", async () => {
     const frame = await renderItem(
       {
         session: mockEnrichedSession({
@@ -657,26 +658,33 @@ describe("SessionItem sidebar mode", () => {
       },
       30,
     );
-    expect(frame).not.toContain("!");
-    expect(frame).toContain("Permission");
+    expect(frame).toContain("!");
+    expect(frame).not.toContain("Permission");
   });
 
-  it("keeps the agent on row 1 and attention on row 2 in the sidebar", async () => {
+  it("right-aligns ! adjacent to agent short code in sidebar", async () => {
+    const width = 30;
     const frame = await renderItem(
       {
-        sidebar: true,
         session: mockEnrichedSession({
           status: "waiting",
           attentionType: "permission",
           agentType: "claude",
         }),
+        sidebar: true,
       },
-      30,
+      width,
     );
-    const lines = frame.split("\n");
-    expect(lines[0]).toContain("◆");
-    expect(lines[0]).toContain("cc");
-    expect(lines[1]).toContain("Permission");
+    const line = frame
+      .split("\n")
+      .find((l) => l.includes("!") && l.includes("cc"));
+    expect(line).toBeDefined();
+    const exclamIdx = line!.indexOf("!");
+    const ccIdx = line!.indexOf("cc");
+    // ! sits in the right half, immediately before the agent code
+    expect(exclamIdx).toBeGreaterThan(width / 2);
+    expect(ccIdx).toBeGreaterThan(exclamIdx);
+    expect(ccIdx - (exclamIdx + 1)).toBeLessThan(5);
   });
 
   it("shows active indicator for active session", async () => {
@@ -1320,7 +1328,7 @@ describe("SessionItem right-aligned fields", () => {
       },
       120,
     );
-    expect(frame).toContain("please refactor the entire authent…");
+    expect(frame).toContain("please refactor the entire…");
   });
 
   it("reserves the columns a short wide-glyph prompt needs on row 1", async () => {

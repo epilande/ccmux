@@ -15,7 +15,6 @@ interface GroupHeaderProps {
   label: string;
   count: number;
   width?: number;
-  sharedBranch?: string;
   facts?: string;
   collapsed: boolean;
   selected: boolean;
@@ -76,32 +75,39 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
 
   const parts = createMemo(() => {
     let left = Math.max(0, (props.width ?? dims().width) - 2);
+    const activity = props.collapsed
+      ? [
+          ...(summary().working
+            ? [
+                {
+                  text: ` ${workingIcon()} ${summary().working}`,
+                  color: theme.peach,
+                },
+              ]
+            : []),
+          ...dots().map((dot) => ({
+            text: ` ${dot.icon} ${dot.count}`,
+            color: dot.color,
+          })),
+        ]
+      : [];
+    const count = ` (${props.count})`;
+    // Keep the count and collapsed activity visible before spending space on
+    // a long group name or optional repository facts.
+    const labelWidth = Math.max(
+      1,
+      left -
+        2 -
+        displayWidth(count) -
+        activity.reduce((width, part) => width + displayWidth(part.text), 0),
+    );
     const segments = [
       { text: `${indicator()} `, color: theme.overlay },
-      { text: props.label, color: theme.text },
-      { text: ` (${props.count})`, color: theme.overlay },
-      // A shared "main" is the default and says nothing; only a non-default shared branch lifts up.
-      ...(props.sharedBranch && props.sharedBranch !== "main"
-        ? [{ text: `   ${props.sharedBranch}`, color: theme.blue }]
-        : []),
+      { text: truncateText(props.label, labelWidth), color: theme.text },
+      { text: count, color: theme.overlay },
+      ...activity,
       ...(props.facts
         ? [{ text: `   ${props.facts}`, color: theme.subtext }]
-        : []),
-      ...(props.collapsed
-        ? [
-            ...(summary().working
-              ? [
-                  {
-                    text: ` ${workingIcon()} ${summary().working}`,
-                    color: theme.peach,
-                  },
-                ]
-              : []),
-            ...dots().map((dot) => ({
-              text: ` ${dot.icon} ${dot.count}`,
-              color: dot.color,
-            })),
-          ]
         : []),
     ];
     return segments.flatMap((segment) => {
