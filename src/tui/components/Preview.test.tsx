@@ -365,10 +365,10 @@ describe("Preview header rows (issue #200)", () => {
 
   function expectDistinctHeaderRows(frame: string): void {
     const lines = frame.split("\n");
-    const projectLine = lines.findIndex((l) => /api\b/.test(l) && l.includes("waiting"));
-    const summaryLine = lines.findIndex((l) =>
-      l.includes("Improve narrow"),
+    const projectLine = lines.findIndex(
+      (l) => /api\b/.test(l) && l.includes("waiting"),
     );
+    const summaryLine = lines.findIndex((l) => l.includes("Improve narrow"));
     const dirLine = lines.findIndex((l) => l.includes("/tmp/ccmux-tui-audit"));
     // At 80×40% the header is ~29 columns, so the "-5" suffix is the
     // first thing truncateText clips. The branch name still identifies
@@ -416,12 +416,42 @@ describe("Preview header rows (issue #200)", () => {
     expect(dirLine).toContain("/tmp/ccmux-tui-audit/api");
     // Long metadata is clipped to the header width, not wrapped onto
     // the separator (the wrap that used to steal the title's row).
-    const metaLine = lines.find((l) =>
-      l.includes("feature/worktree-cleanup"),
-    );
+    const metaLine = lines.find((l) => l.includes("feature/worktree-cleanup"));
     expect(metaLine).toBeDefined();
     expect(metaLine!).toContain("…");
     expect(metaLine!).not.toContain("1.263");
+  });
+
+  it("truncates a long project name instead of shrinking the status badge", async () => {
+    // Both cells of the first header row were unbounded, so a 40-column
+    // project name shrank the badge and clipped "waiting" off the end.
+    const longProject = "ccmux-worktree-with-a-really-long-name-x";
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <Preview
+            session={mockEnrichedSession({
+              ...AUDIT,
+              project: longProject,
+            })}
+            width={40}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 30 },
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    const headerRow = frame
+      .split("\n")
+      .find((l) => l.includes("ccmux-worktree"));
+    expect(headerRow).toBeDefined();
+    // Icon and word both intact at the end of the row.
+    expect(headerRow!).toMatch(/\S waiting\s*$/);
+    // The name is what gives instead.
+    expect(headerRow!).toContain("…");
+    expect(headerRow!).not.toContain(longProject);
   });
 });
 

@@ -33,6 +33,7 @@ import {
   formatRelativeTime,
   formatSubagentName,
   formatVersion,
+  displayWidth,
   shortenCwd,
   truncateMiddle,
   truncateText,
@@ -410,6 +411,22 @@ export const Preview: Component<PreviewProps> = (props) => {
     return s.status === "idle" && attn ? "done" : (eff?.status ?? "");
   };
 
+  /**
+   * What the project name may spend on the header's first row.
+   *
+   * Both cells of that row used to be unbounded, so Yoga's default shrink
+   * split the overflow between them and a long project name ate the status
+   * badge. The badge is the row's fixed part (it is what the row exists to
+   * report), so it keeps its width and the name truncates into whatever is
+   * left, one column of gap included. Every other header row is already
+   * truncated to `separatorWidth`; this is the one that was not.
+   */
+  const statusBadge = createMemo(() => `${statusIcon()} ${statusText()}`);
+
+  const projectWidth = createMemo(() =>
+    Math.max(1, separatorWidth() - displayWidth(statusBadge()) - 1),
+  );
+
   /** Live subagents for the Agents section; capped so a large fan-out
    * doesn't crowd out the pane content below. */
   const AGENTS_SHOWN_MAX = 4;
@@ -465,10 +482,10 @@ export const Preview: Component<PreviewProps> = (props) => {
           <box flexDirection="row" height={1} flexShrink={0}>
             <box flexGrow={1}>
               <text fg={theme.text} wrapMode="none">
-                <b>{props.session!.project}</b>
+                <b>{truncateText(props.session!.project, projectWidth())}</b>
               </text>
             </box>
-            <text fg={statusColor()} wrapMode="none">
+            <text fg={statusColor()} wrapMode="none" flexShrink={0}>
               {statusIcon()} {statusText()}
             </text>
           </box>

@@ -15,20 +15,47 @@ function lineHasKey(line: string, key: string): boolean {
   return new RegExp(`(?:^|\\s{2,})${escapeRe(key)}\\s{2,}`).test(inner);
 }
 
-/** The description is on the key's row or the next few (wrap / compact). */
-function expectHelpEntry(frame: string, key: string, desc: string): void {
+/**
+ * The key's line index, plus the two-line window a description may occupy:
+ * the key's own row (picker, where key and desc share a row) or the row
+ * right below it (sidebar compact, which stacks desc under key).
+ *
+ * Joining the window with "\n" keeps `toContain` contiguous per line, since
+ * no description contains a newline. That is the point of these helpers: a
+ * clipped "Toggle prev" must not pass because a later row says "Scroll
+ * preview".
+ */
+function keyWindow(
+  frame: string,
+  key: string,
+): { lines: string[]; at: number } {
   const lines = frame.split("\n");
-  const keyLine = lines.findIndex((l) => lineHasKey(l, key));
-  expect(keyLine).toBeGreaterThan(-1);
-  const window = lines.slice(keyLine, keyLine + 5).join("\n");
-  // Words in order: two-column rows interleave the other column between
-  // wrapped desc lines, so a squished window is not contiguous.
-  let from = 0;
-  for (const word of desc.split(/\s+/)) {
-    const idx = window.indexOf(word, from);
-    expect(idx).toBeGreaterThan(-1);
-    from = idx + word.length;
-  }
+  const at = lines.findIndex((l) => lineHasKey(l, key));
+  expect(at).toBeGreaterThan(-1);
+  return { lines, at };
+}
+
+/** The FULL description sits on one line: the key's row or the next. */
+function expectHelpEntry(frame: string, key: string, desc: string): void {
+  const { lines, at } = keyWindow(frame, key);
+  expect(lines.slice(at, at + 2).join("\n")).toContain(desc);
+}
+
+/**
+ * A description that legitimately wraps at the tested width: `head` on the
+ * key's row or the next, `tail` contiguous on one of the three rows after
+ * whichever row held `head`.
+ */
+function expectWrappedHelpEntry(
+  frame: string,
+  key: string,
+  head: string,
+  tail: string,
+): void {
+  const { lines, at } = keyWindow(frame, key);
+  expect(lines.slice(at, at + 2).join("\n")).toContain(head);
+  const headLine = lines[at]!.includes(head) ? at : at + 1;
+  expect(lines.slice(headLine + 1, headLine + 4).join("\n")).toContain(tail);
 }
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
@@ -244,7 +271,7 @@ describe("HelpOverlay narrow and wide picker (issue #200)", () => {
     expectHelpEntry(frame, "gg / G", "Jump to first / last");
     expectHelpEntry(frame, "1-9", "Jump to session N");
     expectHelpEntry(frame, "Enter", "Switch to session");
-    // Longer than the old 24-column description budget; must wrap, not clip.
+    // 29 columns against a 40-column single-column budget: one line, whole.
     expectHelpEntry(frame, "p", "Cycle prompt (inline/row/off)");
     expect(squish(frame)).toContain(squish("j/k scroll · ? or Esc to close"));
   });
@@ -284,7 +311,8 @@ describe("HelpOverlay narrow and wide picker (issue #200)", () => {
     expectHelpEntry(frame, "Alt+H/L", "Resize preview");
     expectHelpEntry(frame, "Tab", "Focus preview");
     expectHelpEntry(frame, "h / l", "Collapse / expand group");
-    expectHelpEntry(frame, "p", "Cycle prompt (inline/row/off)");
+    // 29 columns against the two-column budget of 24: wraps, never clips.
+    expectWrappedHelpEntry(frame, "p", "Cycle prompt", "(inline/row/off)");
     expect(squish(frame)).toContain(squish("j/k scroll · ? or Esc to close"));
   });
 
@@ -307,7 +335,7 @@ describe("HelpOverlay narrow and wide picker (issue #200)", () => {
       "Preview",
     );
     expectHelpEntry(wide, "P", "Toggle preview");
-    expectHelpEntry(wide, "p", "Cycle prompt (inline/row/off)");
+    expectWrappedHelpEntry(wide, "p", "Cycle prompt", "(inline/row/off)");
 
     setup.resize(60, 24);
     await setup.renderOnce();
@@ -349,6 +377,6 @@ describe("HelpOverlay sidebar compact wrap (issue #200)", () => {
     });
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
-    expectHelpEntry(frame, "p", "Cycle prompt (inline/row/off)");
+    expectWrappedHelpEntry(frame, "p", "Cycle prompt", "(inline/row/off)");
   });
 });
