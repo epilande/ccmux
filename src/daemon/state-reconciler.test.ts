@@ -2369,6 +2369,33 @@ describe("reconcileAll", () => {
       expect(session.status).toBe("idle");
     });
 
+    it("native: keeps working when the pane still shows a working spinner", async () => {
+      mockDetectPaneState = async () => ({
+        state: "working",
+        attentionType: null,
+        pendingTool: null,
+      });
+
+      const id = makeSession(sessionManager, {
+        status: "working",
+        trackingMode: "native",
+        pid: 12345,
+        tmuxPane: "%1",
+        lastActivityAt: TWO_MINUTES_AGO,
+      });
+
+      await reconcileAll(
+        makeDeps(sessionManager),
+        makeSnapshot({
+          processes: [fakeProcess()],
+          panes: [fakePane()],
+        }),
+      );
+
+      const session = sessionManager.getSession(id)!;
+      expect(session.status).toBe("working");
+    });
+
     it("pane-tracked Claude: active state has no explicit handling (no update)", async () => {
       mockDetectPaneState = async () => ({
         state: "active",

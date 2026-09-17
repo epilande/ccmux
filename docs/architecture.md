@@ -475,7 +475,7 @@ Section and repo headers are LINES the cursor never stops on, but lines `sourceP
 | Regex on pane content                                                                                                   | `src/daemon/terminal-detector.ts`             |
 | Recursive log-tree watcher                                                                                              | `src/daemon/log-tree-watcher.ts`              |
 | Log tailing, offsets, stat-poll for open-fd appends                                                                     | `src/daemon/watcher.ts`                       |
-| Pane title / state heuristic (`classifyPaneTitle`, Braille spinner / `✳`; `detectPaneState` for Claude pane inspection) | `src/daemon/pane-classify.ts`                 |
+| Pane title / state heuristic (`classifyPaneTitle`: Braille / ◐◑ working, static ✳ unknown; content spinner status line; `detectPaneState` for Claude pane inspection) | `src/daemon/pane-classify.ts`                 |
 | `tmux capture-pane` wrapper                                                                                             | `src/daemon/pane-io.ts`                       |
 | Tmux pane listing, PID-to-pane                                                                                          | `src/daemon/pane-discovery.ts`                |
 | Which tmux server to talk to (precedence, per-process rule, label to path)                                              | `src/lib/tmux-socket.ts`                      |

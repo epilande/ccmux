@@ -1,13 +1,16 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import { CLAUDE_AGENT_DEF } from "../lib/agents";
+import type { TmuxPane } from "../types/session";
 import {
   classifyClaudePromptPane,
   classifyPaneContent,
   classifyPaneTitle,
+  detectPaneState,
   isNonAgentCommand,
   isShellCommand,
   showsIdleClaudeComposer,
 } from "./pane-classify";
+import * as paneIo from "./pane-io";
 
 describe("classifyPaneTitle", () => {
   it("should detect working from braille spinner chars", () => {
@@ -26,9 +29,21 @@ describe("classifyPaneTitle", () => {
     expect(classifyPaneTitle(String.fromCodePoint(0x2900))).toBe("unknown");
   });
 
-  it("should detect not_working from ✳ prefix", () => {
-    expect(classifyPaneTitle("✳ Claude Code")).toBe("not_working");
-    expect(classifyPaneTitle("✳")).toBe("not_working");
+  // Claude Code ≥2.1.236 writes a static ✳ title under tmux for the whole
+  // turn (tengu_static_title_under_mux). Treating it as idle is what fired
+  // false Finished notifications on JSONL gaps (issue #204).
+  it("treats a static ✳ title as no information, not idle", () => {
+    expect(classifyPaneTitle("✳ Claude Code")).toBe("unknown");
+    expect(classifyPaneTitle("✳")).toBe("unknown");
+    expect(classifyPaneTitle("✳ can continue")).toBe("unknown");
+  });
+
+  it("detects working from half-circle busy-spinner title glyphs", () => {
+    // Claude Code 2.1.228 swapped Braille for these outside a multiplexer.
+    expect(classifyPaneTitle("◐ Wire up the summary column")).toBe("working");
+    expect(classifyPaneTitle("◑ Wire up the summary column")).toBe("working");
+    expect(classifyPaneTitle("◓")).toBe("working");
+    expect(classifyPaneTitle("◒")).toBe("working");
   });
 
   it("should return unknown for other titles", () => {
@@ -151,6 +166,92 @@ Enter to select · ↑/↓ to navigate · Esc to cancel`;
       attentionType: null,
       pendingTool: null,
     });
+  });
+
+  // Issue #204: mid-turn JSONL silence plus a static ✳ title used to map
+  // this pane to idle because classifyPaneContent had no working signal.
+  it("detects working from a Claude spinner status line with elapsed time", () => {
+    const content = [
+      "⏺ I'll keep going.",
+      "",
+      "  Running tests…",
+      "",
+      "· Mustering… (9m 19s · ↓ 23.1k tokens)",
+      "",
+      "────────────────────────────────────────────",
+      "❯ ",
+    ].join("\n");
+    expect(classifyPaneContent(content)).toEqual({
+      state: "working",
+      attentionType: null,
+      pendingTool: null,
+    });
+  });
+
+  it("detects working from each Claude spinner glyph plus a duration", () => {
+    for (const glyph of ["·", "✢", "✳", "✶", "✻", "✽"]) {
+      expect(classifyPaneContent(`${glyph} Thinking… (12s)`).state).toBe(
+        "working",
+      );
+    }
+  });
+
+  it("still detects working when the duration wraps onto the next line", () => {
+    expect(
+      classifyPaneContent("✶ Whisking…\n(1m 3s · ↓ 4.2k tokens)").state,
+    ).toBe("working");
+  });
+
+  it("does not treat a finished 'Baked for' line as still working", () => {
+    expect(classifyPaneContent("✻ Baked for 28s").state).toBe("active");
+  });
+
+  it("lets a waiting prompt win over a leftover spinner line higher in the pane", () => {
+    const content = [
+      "· Mustering… (12s)",
+      "Permission rule Bash(git push:*) requires confirmation for this command.",
+      "Do you want to proceed?",
+      "❯ 1. Yes",
+      "  2. No",
+      "Esc to cancel · Tab to amend · ctrl+e to explain",
+    ].join("\n");
+    expect(classifyPaneContent(content).state).toBe("waiting");
+  });
+});
+
+function fakeClassifyPane(overrides: Partial<TmuxPane> = {}): TmuxPane {
+  return {
+    paneId: "%1",
+    panePid: 1000,
+    sessionName: "ccmux",
+    windowIndex: 0,
+    paneIndex: 0,
+    target: "ccmux:0.1",
+    tty: "ttys001",
+    startTime: null,
+    windowActivity: null,
+    paneTitle: "✳ can continue",
+    currentCommand: "claude",
+    currentPath: "/tmp/proj",
+    ...overrides,
+  };
+}
+
+describe("detectPaneState", () => {
+  it("keeps a session working when the title is static ✳ and the pane still shows a spinner", async () => {
+    const capture = spyOn(paneIo, "capturePane").mockResolvedValue(
+      [
+        "⏺ I'll keep going.",
+        "· Mustering… (9m 19s · ↓ 23.1k tokens)",
+        "❯ ",
+      ].join("\n"),
+    );
+    try {
+      const result = await detectPaneState("%1", fakeClassifyPane());
+      expect(result.state).toBe("working");
+    } finally {
+      capture.mockRestore();
+    }
   });
 });
 

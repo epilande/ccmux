@@ -23,17 +23,19 @@ function paneDetectionResult(
 /**
  * Classify pane title using universal agent status signals.
  *
+ * Title can prove working, never idle. Claude Code ≥2.1.236 writes a static
+ * ✳ title under a multiplexer for the whole turn, so a leading ✳ is no
+ * information (issue #204). Positive working signals:
+ *
  * - Braille spinner (U+2800-U+28FF) as first char → "working"
- * - ✳ (U+2733) as first char → "not_working"
- * - Otherwise → "unknown"
+ * - Half-circle busy glyphs ◐◑◓◒ (U+25D0-U+25D3) as first char → "working"
+ * - Otherwise, including ✳ (U+2733) → "unknown"
  */
-export function classifyPaneTitle(
-  title: string | null,
-): "working" | "not_working" | "unknown" {
+export function classifyPaneTitle(title: string | null): "working" | "unknown" {
   if (!title || title.length === 0) return "unknown";
   const cp = title.codePointAt(0)!;
   if (cp >= 0x2800 && cp <= 0x28ff) return "working";
-  if (cp === 0x2733) return "not_working";
+  if (cp >= 0x25d0 && cp <= 0x25d3) return "working";
   return "unknown";
 }
 
@@ -249,6 +251,21 @@ export function showsIdleClaudeComposer(
 }
 
 /**
+ * Claude's in-turn status line: a spinner glyph from the
+ * `·✢✳✶✻✽` cycle plus elapsed time in parentheses, e.g.
+ * `· Mustering… (9m 19s · ↓ 23.1k tokens)`. The post-turn
+ * `✻ Baked for 28s` has no parenthesized duration and must not match.
+ * `[\s\S]{0,80}?` lets a wrap sit between the glyph and the duration.
+ */
+const WORKING_STATUS_RE = /[·✢✳✶✻✽][\s\S]{0,80}?\(\s*\d+\s*[hms]\b/;
+
+function hasWorkingStatusLine(content: string): boolean {
+  const text = stripAnsi(content).replace(/\n+$/, "");
+  const window = text.split("\n").slice(-15).join("\n");
+  return WORKING_STATUS_RE.test(window);
+}
+
+/**
  * Classify pane content into a PaneState based on visible patterns.
  */
 export function classifyPaneContent(content: string): PaneDetectionResult {
@@ -265,6 +282,10 @@ export function classifyPaneContent(content: string): PaneDetectionResult {
     );
   }
 
+  if (hasWorkingStatusLine(content)) {
+    return paneDetectionResult("working");
+  }
+
   return paneDetectionResult("active");
 }
 
@@ -272,9 +293,11 @@ export function classifyPaneContent(content: string): PaneDetectionResult {
  * Detect pane state using tiered signals:
  *
  * 1. Shell/editor foreground command → idle (Claude not running)
- * 2. Braille spinner in pane title → working
- * 3. ✳ in pane title → idle unless content shows waiting/plan approval
- * 4. Unknown title or no pane data → fall back to content capture
+ * 2. Braille / ◐◑ title spinner → working
+ * 3. Unknown title (including static ✳ under tmux) or no pane data →
+ *    content capture: waiting/plan, else a spinner status line → working,
+ *    else active. Title never proves idle; an `active` result is the
+ *    native reconciler's cue to idle a stale working session.
  */
 export async function detectPaneState(
   paneId: string,
@@ -288,13 +311,6 @@ export async function detectPaneState(
     const titleState = classifyPaneTitle(pane.paneTitle);
     if (titleState === "working") {
       return paneDetectionResult("working");
-    }
-
-    if (titleState === "not_working") {
-      const detection = classifyPaneContent(await capturePane(paneId, 20));
-      return detection.state === "active"
-        ? paneDetectionResult("idle")
-        : detection;
     }
   }
 
