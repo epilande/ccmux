@@ -217,6 +217,96 @@ Enter to select · ↑/↓ to navigate · Esc to cancel`;
     ].join("\n");
     expect(classifyPaneContent(content).state).toBe("waiting");
   });
+
+  // `·` is Claude's universal chrome separator, so a duration anywhere on a
+  // line is not a working signal. Only a glyph at column 0 followed by a space
+  // is the status line; assistant text and tool output are indented by two.
+  it("ignores a duration on a line that is not the status line", () => {
+    for (const line of [
+      "  · build (2m 3s)",
+      "  ⎿  Ran 12 tests · 3 files (4s)",
+      "⏺ Ran the suite · 3 files (4s)",
+    ]) {
+      expect(classifyPaneContent(line).state).toBe("active");
+    }
+  });
+
+  it("ignores near misses on the duration itself", () => {
+    for (const line of [
+      // The real 2.1.274 post-turn line: no parenthesized duration.
+      "✻ Brewed for 53s · done 12:42 AM",
+      // Fractional seconds are tool-output timings, not the status line.
+      "✻ Thinking… (1.2s)",
+      "· Ran in (0.4s)",
+      // A parenthesized hint with no digits at all.
+      "✻ Thinking… (esc to interrupt)",
+    ]) {
+      expect(classifyPaneContent(line).state).toBe("active");
+    }
+  });
+
+  // Real Claude Code 2.1.274 panes under tmux (160x40), captured with
+  // `tmux capture-pane -p | sed 's/[[:space:]]*$//' | grep -v '^$' | tail -10`:
+  // blank lines are stripped and trailing whitespace removed, which is why the
+  // composer box below reads as rule / ❯ / rule with nothing between, and why
+  // the foreground-tool capture's harness header line is dropped. The
+  // 160-column rules are written as `RULE` rather than pasted: their LENGTH
+  // is the load-bearing part, since it keeps the statusline's own `(2h17m)`
+  // more than 80 characters away from the post-turn glyph above it.
+  const RULE = "─".repeat(160);
+
+  const WORKING_2_1_274 = [
+    "⏺ Sleeping for 45 seconds",
+    "  ⎿  $ sleep 45",
+    "✶ Noodling… (4s · ↓ 116 tokens · thinking with medium effort)",
+    "                                                                                          Advisor Tool (experimental) is on and may use more tokens · /advisor",
+    RULE,
+    "❯",
+    RULE,
+    "  🌿 main* │ 🤖 Fable 5.1 │ 🧠 4% │ 🔄 37% (2h18m) │ 📅 22% │ 💰 $0.72 │ 📦 v2.1.274 │ 📝 +0/-0",
+    "  💬 Run `sleep 45` with the Bash tool, wait for it to finish, then reply with the si...",
+    "  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+  ].join("\n");
+
+  const FOREGROUND_TOOL_2_1_274 = [
+    "⏺ Running the requested filesystem scan now.",
+    "⏺ Searching whole filesystem for a nonexistent filename, then printing marker",
+    "✳ Ruminating… (5s · ↓ 158 tokens)",
+    "                                                                                          Advisor Tool (experimental) is on and may use more tokens · /advisor",
+    RULE,
+    "❯",
+    RULE,
+    "  🤖 Fable 5.1 │ 🧠 4% │ 🔄 49% (2h8m) │ 📅 23% │ 💰 $0.40 │ 📦 v2.1.274 │ 📝 +0/-0",
+    "  💬 Run this exact command with the Bash tool in the foreground and wait for it: fin...",
+    "  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+  ].join("\n");
+
+  const POST_TURN_2_1_274 = [
+    "     [exited with code 0]",
+    '⏺ Background command "Sleep for 45 seconds in the background" completed (exit code 0)',
+    "⏺ done",
+    "✻ Brewed for 53s · done 12:42 AM",
+    RULE,
+    "❯",
+    RULE,
+    "  🌿 main* │ 🤖 Fable 5.1 │ 🧠 4% │ 🔄 38% (2h17m) │ 📅 22% │ 💰 $0.82 │ 📦 v2.1.274 │ 📝 +0/-0",
+    "  💬 Run `sleep 45` with the Bash tool, wait for it to finish, then reply with the si...",
+    "  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+  ].join("\n");
+
+  it("classifies the live 2.1.274 working capture as working", () => {
+    expect(classifyPaneContent(WORKING_2_1_274).state).toBe("working");
+  });
+
+  // The reporter's gap type: a long foreground tool call, where the JSONL goes
+  // silent for the whole call while the title stays a static ✳.
+  it("classifies the live 2.1.274 foreground-tool capture as working", () => {
+    expect(classifyPaneContent(FOREGROUND_TOOL_2_1_274).state).toBe("working");
+  });
+
+  it("classifies the live 2.1.274 post-turn capture as active", () => {
+    expect(classifyPaneContent(POST_TURN_2_1_274).state).toBe("active");
+  });
 });
 
 function fakeClassifyPane(overrides: Partial<TmuxPane> = {}): TmuxPane {
@@ -463,6 +553,21 @@ describe("showsIdleClaudeComposer", () => {
 
   it("accepts an empty composer with only chrome under it", () => {
     expect(idleComposer(COMPOSER)).toBe(true);
+  });
+
+  // Finding 3: `classifyPaneContent` can now answer `working`, and a
+  // spinner-shaped line under the composer is chrome, not a prompt. Treating
+  // it as a live prompt would pin the row at `waiting` on a stale
+  // `waiting_permission` marker no hook will ever retire.
+  it("accepts a spinner-shaped status line below an empty composer", () => {
+    expect(idleComposer("❯ \n· foo (45m)")).toBe(true);
+  });
+
+  // The same 2.1.222 fixture read by the content classifier: an idle composer
+  // is `active`, not `working` — the post-turn "Baked for 28s" line carries
+  // no parenthesized duration.
+  it("reads as active content, not a working spinner", () => {
+    expect(classifyPaneContent(COMPOSER).state).toBe("active");
   });
 
   // The regression that matters: a live prompt must keep its waiting row.

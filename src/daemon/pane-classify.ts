@@ -233,8 +233,13 @@ export function showsIdleClaudeComposer(
   // of which covers the others.
   //
   // The terminal rules catch the pickers, whose widget strings no other prompt
-  // carries.
-  if (classifyPaneContent(below).state !== "active") return false;
+  // carries. `active` and `working` both mean "nothing prompt-shaped below":
+  // a spinner status line under the composer (a user statusline carrying a
+  // duration, or Claude's own line rendered below an empty prompt) is chrome,
+  // not a live prompt, and must not hold a stale `waiting_permission` marker.
+  // Only `waiting`/`plan_approval` are evidence of a prompt.
+  const belowState = classifyPaneContent(below).state;
+  if (belowState !== "active" && belowState !== "working") return false;
   // The terminator plus its option block catches the permission and plan
   // prompts, which match no rule at all.
   if (classifyClaudePromptPane(below) !== null) return false;
@@ -256,8 +261,16 @@ export function showsIdleClaudeComposer(
  * `· Mustering… (9m 19s · ↓ 23.1k tokens)`. The post-turn
  * `✻ Baked for 28s` has no parenthesized duration and must not match.
  * `[\s\S]{0,80}?` lets a wrap sit between the glyph and the duration.
+ *
+ * Anchored to the start of a line (`^` under `/m`) with a following space,
+ * because that is where Claude renders BOTH the spinner line and the
+ * post-turn line (column 0 in the 2.1.274 capture; assistant text and tool
+ * output are indented by two). Without the anchor `·` — Claude's universal
+ * chrome separator — matches ordinary output such as
+ * `⎿  Ran 12 tests · 3 files (4s)` or a user statusline, which would pin a
+ * finished session at `working` and swallow its Finished notification.
  */
-const WORKING_STATUS_RE = /[·✢✳✶✻✽][\s\S]{0,80}?\(\s*\d+\s*[hms]\b/;
+const WORKING_STATUS_RE = /^[·✢✳✶✻✽] [\s\S]{0,80}?\(\s*\d+\s*[hms]\b/m;
 
 function hasWorkingStatusLine(content: string): boolean {
   const text = stripAnsi(content).replace(/\n+$/, "");
@@ -296,8 +309,14 @@ export function classifyPaneContent(content: string): PaneDetectionResult {
  * 2. Braille / ◐◑ title spinner → working
  * 3. Unknown title (including static ✳ under tmux) or no pane data →
  *    content capture: waiting/plan, else a spinner status line → working,
- *    else active. Title never proves idle; an `active` result is the
- *    native reconciler's cue to idle a stale working session.
+ *    else active.
+ *
+ * Title never proves idle, so `active` ("Claude is up, nothing in flight") is
+ * what both consumers read as the end of a turn: the native stale-pane loop
+ * (`resolveNativeClaudeStates`) idles a stale `working` session on it, and
+ * `reconcilePaneTrackedClaudeSession` idles a `working` or `waiting`
+ * pane-tracked row on it — for that arm this is the ONLY idle source, since
+ * the watcher is a deliberate no-op for Claude in `claude-no-hooks` mode.
  */
 export async function detectPaneState(
   paneId: string,
