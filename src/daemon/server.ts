@@ -135,7 +135,11 @@ import {
   type WorktreeSession,
 } from "./worktree-prune";
 import { fetchPrune, listWorktrees, normalizePath } from "./worktree-git";
-import { listAllWorktrees } from "./worktree-list";
+import {
+  countRepoWorktrees,
+  listAllWorktrees,
+  type WorktreeCount,
+} from "./worktree-list";
 import { listOpenPRs, type OpenPR, type PRListResponse } from "./pr-list";
 import {
   listOpenIssues,
@@ -652,6 +656,11 @@ export class DaemonServer {
   private getScanHealth: () => DaemonHealth;
   /** When each repo last had `git fetch --prune` run for a prune scan. */
   private worktreeFetchedAt = new Map<string, number>();
+  /** Share overlapping header reads; completed counts are not cached. */
+  private worktreeCountsInflight = new Map<
+    string,
+    Promise<WorktreeCount | null>
+  >();
   /**
    * One repo's open-PR answer, keyed by repo root.
    *
@@ -1384,6 +1393,10 @@ export class DaemonServer {
       return await this.handleWorktreeList(url, corsHeaders);
     }
 
+    if (path === "/worktrees/counts" && req.method === "GET") {
+      return await this.handleWorktreeCounts(url, corsHeaders);
+    }
+
     if (path === "/worktrees/prune-candidates" && req.method === "GET") {
       return await this.handlePruneCandidates(url, corsHeaders);
     }
@@ -1784,6 +1797,46 @@ export class DaemonServer {
       sessionsFor: (path) => byWorktree.get(path) ?? [],
       openPR: (dir, branch) => cachedOpenPR(this.prResolver.get(dir, branch)),
     });
+  }
+
+  private async handleWorktreeCounts(
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    const roots = [
+      ...new Set(
+        url.searchParams.getAll("repo").filter(Boolean).map(normalizePath),
+      ),
+    ];
+    // Unlike the panel listing, omitted scope must never scan every session's repo.
+    if (roots.length === 0) {
+      return Response.json(
+        { error: "repo is required" },
+        { status: 400, headers },
+      );
+    }
+    try {
+      const counts = await mapWithConcurrency(roots, 3, (root) => {
+        const existing = this.worktreeCountsInflight.get(root);
+        if (existing) return existing;
+        const pending = countRepoWorktrees(root).finally(() => {
+          this.worktreeCountsInflight.delete(root);
+        });
+        this.worktreeCountsInflight.set(root, pending);
+        return pending;
+      });
+      const repos = counts.filter(
+        (count): count is WorktreeCount =>
+          count !== null &&
+          normalizePath(count.repoRoot) !== normalizePath(this.homeDir),
+      );
+      return Response.json({ repos }, { headers });
+    } catch (err) {
+      return Response.json(
+        { error: `Failed to count worktrees: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
+    }
   }
 
   /**

@@ -1,7 +1,7 @@
 import { getDaemonUrl } from "../../lib/config";
 import type {
-  WorktreeRepo,
-  WorktreeListResponse,
+  WorktreeCount,
+  WorktreeCountsResponse,
 } from "../../daemon/worktree-list";
 import { groupWorktreeFacts } from "./session-columns";
 import type { Component } from "solid-js";
@@ -125,36 +125,34 @@ export const SessionList: Component<SessionListProps> = (props) => {
       ? Math.floor((dims().width * (100 - props.previewWidth)) / 100)
       : dims().width;
 
-  const [worktreeRepos, setWorktreeRepos] = createSignal<WorktreeRepo[]>([]);
+  const [worktreeRepos, setWorktreeRepos] = createSignal<WorktreeCount[]>([]);
   const repoScope = createMemo(() =>
-    [
-      ...new Set(
-        props.items.flatMap((item) =>
-          item.type === "header"
-            ? item.members
-                .map(
-                  ({ session }) => session.mainRepoRoot ?? session.worktreeRoot,
-                )
-                .filter((root): root is string => !!root)
-            : [],
+    JSON.stringify(
+      [
+        ...new Set(
+          props.items.flatMap((item) =>
+            item.type === "header" && item.repoRoot ? [item.repoRoot] : [],
+          ),
         ),
-      ),
-    ]
-      .sort()
-      .join("\n"),
+      ].sort(),
+    ),
   );
   createEffect(() => {
-    const scope = repoScope();
+    const roots: string[] = JSON.parse(repoScope());
     const connected = props.connectionState;
     setWorktreeRepos([]);
-    if (!scope || connected !== "connected") return;
+    if (roots.length === 0 || connected !== "connected") return;
+    const query = new URLSearchParams();
+    for (const root of roots) query.append("repo", root);
     const controller = new AbortController();
     onCleanup(() => controller.abort());
-    fetch(`${getDaemonUrl()}/worktrees`, {
+    fetch(`${getDaemonUrl()}/worktrees/counts?${query}`, {
       signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
     })
       .then((response) =>
-        response.ok ? (response.json() as Promise<WorktreeListResponse>) : null,
+        response.ok
+          ? (response.json() as Promise<WorktreeCountsResponse>)
+          : null,
       )
       .then((response) => {
         if (!controller.signal.aborted && response)

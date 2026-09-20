@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import { createSignal } from "solid-js";
@@ -9,13 +9,16 @@ import {
   emptySummary,
   membersFromSummary,
 } from "./test-helpers";
-import type { FlatItem } from "../utils/grouping";
+import { buildFlatItems, type FlatItem } from "../utils/grouping";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup;
+let fetchSpy: ReturnType<typeof spyOn> | undefined;
 
 afterEach(() => {
   setup?.renderer.destroy();
+  fetchSpy?.mockRestore();
+  fetchSpy = undefined;
 });
 
 function makeHeader(label: string, count: number, groupKey?: string): FlatItem {
@@ -43,6 +46,179 @@ function makeSessionItem(
     },
   };
 }
+
+describe("SessionList worktree counts", () => {
+  async function renderSettled() {
+    // Drain fetch/json continuations before capturing the rendered facts.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await setup.renderOnce();
+  }
+
+  const rows = (roots: string[]) =>
+    roots.map((root, index) => ({
+      session: mockEnrichedSession({
+        id: root,
+        project: `project-${index}`,
+        cwd: root,
+        mainRepoRoot: root,
+        tmuxTarget: "dev:1.0",
+      }),
+      highlights: null,
+    }));
+
+  it("renders scoped metadata counts and refreshes only on scope or connection changes", async () => {
+    const [sessions, setSessions] = createSignal(rows(["/code/a", "/code/b"]));
+    const [connection, setConnection] = createSignal("connected");
+    const requests: URL[] = [];
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+      input: string | URL | Request,
+    ) => {
+      const url = new URL(
+        input instanceof Request ? input.url : input.toString(),
+      );
+      requests.push(url);
+      return Response.json({
+        repos: url.searchParams
+          .getAll("repo")
+          .map((repoRoot) => ({ repoRoot, hasMain: true, linked: 2 })),
+      });
+    }) as unknown as typeof fetch);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={buildFlatItems(sessions(), "project", new Set(), false)}
+            selectedIndex={0}
+            previewWidth={30}
+            connectionState={connection()}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 120, height: 20 },
+    );
+    await renderSettled();
+    expect(requests).toHaveLength(1);
+    expect(requests[0].pathname).toBe("/worktrees/counts");
+    expect(requests[0].searchParams.getAll("repo")).toEqual([
+      "/code/a",
+      "/code/b",
+    ]);
+    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
+
+    setSessions(rows(["/code/a", "/code/b"]));
+    await renderSettled();
+    expect(requests).toHaveLength(1);
+    setSessions(rows(["/code/a"]));
+    await renderSettled();
+    expect(requests).toHaveLength(2);
+    expect(requests[1].searchParams.getAll("repo")).toEqual(["/code/a"]);
+    setConnection("disconnected");
+    await renderSettled();
+    expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+    setConnection("connected");
+    await renderSettled();
+    expect(requests).toHaveLength(3);
+    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
+  });
+
+  it("does not request facts for cwd, tmux, mixed-repo, or attention-only headers", async () => {
+    const [items, setItems] = createSignal<FlatItem[]>([]);
+    fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ repos: [] }),
+    );
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={items()}
+            selectedIndex={0}
+            previewWidth={30}
+            connectionState="connected"
+          />
+        </TickContext.Provider>
+      ),
+      { width: 120, height: 20 },
+    );
+    for (const groupBy of ["cwd", "session", "window", "none"] as const) {
+      setItems(buildFlatItems(rows(["/code/a"]), groupBy, new Set(), false));
+      await renderSettled();
+    }
+    setItems(
+      buildFlatItems(
+        rows(["/code/a"]).map((row) => ({
+          ...row,
+          session: { ...row.session, status: "waiting" },
+        })),
+        "project",
+        new Set(),
+        false,
+      ),
+    );
+    await renderSettled();
+    setItems(
+      buildFlatItems(
+        rows(["/code/a", "/code/b"]).map((row) => ({
+          ...row,
+          session: { ...row.session, project: "same-name" },
+        })),
+        "project",
+        new Set(),
+        false,
+      ),
+    );
+    await renderSettled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("aborts obsolete reads and prevents stale counts from replacing a new answer", async () => {
+    const [sessions, setSessions] = createSignal(rows(["/code/a", "/code/b"]));
+    const pending: Array<{
+      response: ReturnType<typeof Promise.withResolvers<Response>>;
+      signal?: AbortSignal | null;
+    }> = [];
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(((
+      _input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const response = Promise.withResolvers<Response>();
+      pending.push({ response, signal: init?.signal });
+      return response.promise;
+    }) as unknown as typeof fetch);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={buildFlatItems(sessions(), "project", new Set(), false)}
+            selectedIndex={0}
+            previewWidth={30}
+            connectionState="connected"
+          />
+        </TickContext.Provider>
+      ),
+      { width: 120, height: 20 },
+    );
+    await renderSettled();
+    setSessions(rows(["/code/a"]));
+    await renderSettled();
+    expect(pending).toHaveLength(2);
+    expect(pending[0].signal?.aborted).toBe(true);
+    pending[1].response.resolve(
+      Response.json({
+        repos: [{ repoRoot: "/code/a", hasMain: true, linked: 2 }],
+      }),
+    );
+    await renderSettled();
+    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
+    pending[0].response.resolve(
+      Response.json({
+        repos: [{ repoRoot: "/code/a", hasMain: true, linked: 99 }],
+      }),
+    );
+    await renderSettled();
+    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
+    expect(setup.captureCharFrame()).not.toContain("99 worktrees");
+  });
+});
 
 async function renderList(
   items: FlatItem[],

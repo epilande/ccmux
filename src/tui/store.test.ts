@@ -1,5 +1,5 @@
 import { describe, it, expect, mock } from "bun:test";
-import type { FlatItem } from "./utils/grouping";
+import { getGroupKey, type FlatItem } from "./utils/grouping";
 import { mockEnrichedSession } from "./components/test-helpers";
 import { MAX_TURNS } from "../daemon/transcript-read";
 
@@ -1001,6 +1001,73 @@ describe("store", () => {
       });
       expect(store.selectedSession()?.id).toBe("s2");
       expect(store.selectedIndex()).toBe(1);
+    });
+
+    for (const groupBy of ["project", "cwd", "session", "window"] as const) {
+      for (const delivery of ["update", "snapshot"] as const) {
+        for (const status of ["working", "idle"] as const) {
+          it(`keeps a selected wait visible when returning to collapsed ${groupBy} via ${delivery} as ${status}`, () => {
+            const waiting = createMockSession({
+              id: "selected-wait",
+              status: "waiting",
+              project: "alpha",
+              cwd: "/code/alpha",
+              tmuxTarget: "dev:1.0",
+            });
+            const groupKey = getGroupKey(waiting, groupBy);
+            const store = createTUIStore({
+              groupBy,
+              collapsedGroups: [groupKey, "untouched"],
+            });
+            store.actions.setSessions([waiting]);
+            store.actions.setSelectedIndex(1);
+            const returned = { ...waiting, status };
+            if (delivery === "update") store.actions.updateSession(returned);
+            else store.actions.setSessions([returned]);
+
+            expect(store.collapsedGroups().has(groupKey)).toBe(false);
+            expect(store.collapsedGroups().has("untouched")).toBe(true);
+            expect(store.selectedFlatItem()).toMatchObject({
+              type: "session",
+              groupKey,
+              filteredSession: { session: { id: waiting.id, status } },
+            });
+            expect(store.selectedSession()?.id).toBe(waiting.id);
+          });
+        }
+      }
+    }
+
+    it("leaves an unselected wait's destination collapsed", () => {
+      const waiting = createMockSession({
+        id: "wait",
+        status: "waiting",
+        project: "alpha",
+      });
+      const store = createTUIStore({
+        groupBy: "project",
+        collapsedGroups: ["alpha"],
+      });
+      store.actions.setSessions([waiting]);
+      store.actions.setSelectedIndex(0);
+      store.actions.updateSession({ ...waiting, status: "working" });
+      expect(store.collapsedGroups().has("alpha")).toBe(true);
+      expect(store.selectedSession()).toBeNull();
+    });
+
+    it("clears the hidden action target when hide-idle filters a returning wait", () => {
+      const waiting = createMockSession({
+        id: "wait",
+        status: "waiting",
+        attentionState: null,
+      });
+      const store = createTUIStore({ groupBy: "project", hideIdle: true });
+      store.actions.setSessions([waiting]);
+      store.actions.setSelectedIndex(1);
+      store.actions.updateSession({ ...waiting, status: "idle" });
+      expect(store.state.selectedSessionId).toBeNull();
+      expect(store.selectedSession()).toBeNull();
+      expect(store.selectedFlatItem()).toBeNull();
     });
 
     it("moveSelection should navigate correctly", () => {
