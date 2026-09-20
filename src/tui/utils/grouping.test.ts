@@ -567,7 +567,7 @@ describe("toVisualLine", () => {
     expect(toVisualLine(items, 2)).toBe(4);
   });
 
-  it("counts first header as 1 line, subsequent headers as 2", () => {
+  it("counts every header as 1 line (the header draws its own rule)", () => {
     const items = buildFlatItems(
       [
         toFiltered(mockSession({ id: "a", project: "alpha" })),
@@ -579,12 +579,12 @@ describe("toVisualLine", () => {
       false,
     );
     // items: [header(alpha), session(a), session(b), header(beta), session(c)]
-    // visual: 0(header), 1-2(a), 3-4(b), 5-6(header beta), 7-8(c)
-    expect(toVisualLine(items, 0)).toBe(0); // header(alpha) - first header, no divider
+    // visual: 0(header), 1-2(a), 3-4(b), 5(header beta), 6-7(c)
+    expect(toVisualLine(items, 0)).toBe(0); // header(alpha)
     expect(toVisualLine(items, 1)).toBe(1); // session(a) - 2 lines
     expect(toVisualLine(items, 2)).toBe(3); // session(b) - 2 lines
-    expect(toVisualLine(items, 3)).toBe(5); // header(beta) - has divider above
-    expect(toVisualLine(items, 4)).toBe(7); // session(c) - after 2-line header
+    expect(toVisualLine(items, 3)).toBe(5); // header(beta) - 1 line, no divider
+    expect(toVisualLine(items, 4)).toBe(6); // session(c)
   });
 
   it("handles collapsed groups correctly", () => {
@@ -599,10 +599,10 @@ describe("toVisualLine", () => {
       false,
     );
     // items: [header(alpha, collapsed), header(beta), session(c)]
-    // visual: 0(header), 1-2(header beta), 3-4(c)
+    // visual: 0(header), 1(header beta), 2-3(c)
     expect(toVisualLine(items, 0)).toBe(0); // header(alpha)
-    expect(toVisualLine(items, 1)).toBe(1); // header(beta) - has divider
-    expect(toVisualLine(items, 2)).toBe(3); // session(c) - 2 lines
+    expect(toVisualLine(items, 1)).toBe(1); // header(beta)
+    expect(toVisualLine(items, 2)).toBe(2); // session(c) - 2 lines
   });
 
   it("accumulates offset across three or more groups", () => {
@@ -617,13 +617,13 @@ describe("toVisualLine", () => {
       false,
     );
     // items: [header(alpha), session(a), header(beta), session(b), header(charlie), session(c)]
-    // visual: 0(header), 1-2(a), 3-4(header beta), 5-6(b), 7-8(header charlie), 9-10(c)
+    // visual: 0(header), 1-2(a), 3(header beta), 4-5(b), 6(header charlie), 7-8(c)
     expect(toVisualLine(items, 0)).toBe(0); // header(alpha)
     expect(toVisualLine(items, 1)).toBe(1); // session(a) - 2 lines
     expect(toVisualLine(items, 2)).toBe(3); // header(beta)
-    expect(toVisualLine(items, 3)).toBe(5); // session(b) - 2 lines
-    expect(toVisualLine(items, 4)).toBe(7); // header(charlie)
-    expect(toVisualLine(items, 5)).toBe(9); // session(c) - 2 lines
+    expect(toVisualLine(items, 3)).toBe(4); // session(b) - 2 lines
+    expect(toVisualLine(items, 4)).toBe(6); // header(charlie)
+    expect(toVisualLine(items, 5)).toBe(7); // session(c) - 2 lines
   });
 
   it("returns 0 for index 0", () => {
@@ -653,7 +653,7 @@ describe("itemVisualHeight", () => {
     expect(itemVisualHeight(items, 2)).toBe(2);
   });
 
-  it("returns 1 for first header (no divider)", () => {
+  it("returns 1 for the first header", () => {
     const items = buildFlatItems(
       [toFiltered(mockSession({ id: "a", project: "alpha" }))],
       "project",
@@ -663,7 +663,7 @@ describe("itemVisualHeight", () => {
     expect(itemVisualHeight(items, 0)).toBe(1);
   });
 
-  it("returns 2 for non-first headers (divider + header)", () => {
+  it("returns 1 for later headers too: the header is its own rule", () => {
     const items = buildFlatItems(
       [
         toFiltered(mockSession({ id: "a", project: "alpha" })),
@@ -675,7 +675,7 @@ describe("itemVisualHeight", () => {
     );
     // items: [header(alpha), session(a), header(beta), session(b)]
     expect(itemVisualHeight(items, 0)).toBe(1); // first header
-    expect(itemVisualHeight(items, 2)).toBe(2); // second header
+    expect(itemVisualHeight(items, 2)).toBe(1); // second header
   });
 });
 
@@ -685,8 +685,8 @@ describe("scrollTarget", () => {
   //   0: header(alpha) [1 line]
   //   1-2: session(a) [2 lines]
   //   3-4: session(b) [2 lines]
-  //   5-6: header(beta) [2 lines: divider + header]
-  //   7-8: session(c) [2 lines]
+  //   5: header(beta) [1 line]
+  //   6-7: session(c) [2 lines]
   const items = buildFlatItems(
     [
       toFiltered(mockSession({ id: "a", project: "alpha" })),
@@ -709,22 +709,20 @@ describe("scrollTarget", () => {
   });
 
   it("scrolls down for a session below viewport", () => {
-    // viewport shows lines 0-2, selecting session(c) at visual line 7
-    // lastLine = 7 + 2 - 1 = 8, scrollTop = 8 - 3 + 1 = 6
-    expect(scrollTarget(items, 4, 0, 3)).toBe(6);
+    // viewport shows lines 0-2, selecting session(c) at visual line 6
+    // lastLine = 6 + 2 - 1 = 7, scrollTop = 7 - 3 + 1 = 5
+    expect(scrollTarget(items, 4, 0, 3)).toBe(5);
   });
 
-  it("scrolls down to show full header including divider", () => {
-    // viewport shows lines 0-5, selecting header(beta) at visual line 5
-    // header(beta) has divider at line 5 and header at line 6 (lastLine = 6)
-    // scrollTop = 6 - 6 + 1 = 1
-    expect(scrollTarget(items, 3, 0, 6)).toBe(1);
+  it("scrolls down to a header just past the viewport", () => {
+    // viewport shows lines 0-4, selecting header(beta) at visual line 5
+    // scrollTop = 5 - 5 + 1 = 1
+    expect(scrollTarget(items, 3, 0, 5)).toBe(1);
   });
 
-  it("does not scroll when full header fits in viewport", () => {
-    // viewport shows lines 0-8, selecting header(beta)
-    // divider at 5, header at 6, both visible in viewport of height 9
-    expect(scrollTarget(items, 3, 0, 9)).toBeNull();
+  it("does not scroll when the header fits in viewport", () => {
+    // viewport shows lines 0-5, header(beta) sits on line 5
+    expect(scrollTarget(items, 3, 0, 6)).toBeNull();
   });
 });
 
@@ -786,7 +784,7 @@ describe("itemVisualHeight with lineCount", () => {
     );
     // items: [header(alpha), session(a), header(beta), session(b)]
     expect(itemVisualHeight(items, 0, () => 1)).toBe(1); // first header
-    expect(itemVisualHeight(items, 2, () => 1)).toBe(2); // second header
+    expect(itemVisualHeight(items, 2, () => 1)).toBe(1); // second header
   });
 });
 
@@ -826,7 +824,7 @@ describe("toVisualLine with mixed session heights", () => {
     expect(toVisualLine(items, 2, lineCount)).toBe(3);
   });
 
-  it("accounts for header divider lines with 1-line sessions", () => {
+  it("counts headers as one line among 1-line sessions", () => {
     const items = buildFlatItems(
       [
         toFiltered(
@@ -839,12 +837,12 @@ describe("toVisualLine with mixed session heights", () => {
       false,
     );
     // items: [header(alpha), session(a), header(beta), session(b)]
-    // visual: 0(header), 1(a=1), 2-3(header beta), 4(b=1)
+    // visual: 0(header), 1(a=1), 2(header beta), 3(b=1)
     const lineCount = () => 1;
     expect(toVisualLine(items, 0, lineCount)).toBe(0);
     expect(toVisualLine(items, 1, lineCount)).toBe(1);
     expect(toVisualLine(items, 2, lineCount)).toBe(2);
-    expect(toVisualLine(items, 3, lineCount)).toBe(4);
+    expect(toVisualLine(items, 3, lineCount)).toBe(3);
   });
 });
 

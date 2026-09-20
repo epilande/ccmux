@@ -434,6 +434,28 @@ async function mount(
   };
 }
 describe("Worktrees view", () => {
+  it("ends the group header's rule on the rows' last column", async () => {
+    // Rows in this panel run to the scrollbox viewport's last column (they
+    // have no right padding), so the rule must too. Both shells: the picker
+    // view (no border, one cell of panel padding on the right) and the
+    // sidebar overlay (a border cell on each side plus that padding).
+    for (const [embedded, lastColumn] of [
+      [true, 80 - 1],
+      [false, 80 - 1 - 1],
+    ] as const) {
+      const h = await mount({ width: 80, embedded });
+      // The viewport measurement lands the frame after the first layout.
+      await h.frame();
+      const lines = (await h.frame()).split("\n");
+      const header = lines.find((l) => /▾ repo \(2\) ─+/.test(l));
+      expect(header).toBeDefined();
+      const rule = header!.replace(/[│█\s]+$/, "");
+      expect(rule.endsWith("─")).toBe(true);
+      expect(rule.length).toBe(lastColumn);
+      setup?.renderer.destroy();
+    }
+  });
+
   it("paints local rows before classification and keeps the path cursor as it arrives", async () => {
     let finish!: (scan: ScanResponse) => void;
     const h = await mount({

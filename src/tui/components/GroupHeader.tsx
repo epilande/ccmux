@@ -25,6 +25,12 @@ interface GroupHeaderProps {
   members: FilteredSession[];
   iconStyle?: IconStyle;
   dimmed?: boolean;
+  /**
+   * Run the rule to the last column of `width` instead of leaving the
+   * one-cell right margin. For lists whose rows have no right padding of
+   * their own (the Worktrees panel), so the rule still ends where the rows do.
+   */
+  flushRight?: boolean;
   onActivate?: () => void;
   onContextMenu?: (event: MouseEvent) => void;
 }
@@ -64,6 +70,7 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
   const bgColor = () =>
     props.selected && !props.dimmed ? theme.surface : undefined;
   const indicator = () => (props.collapsed ? "▸" : "▾");
+  const paddingRight = () => (props.flushRight ? 0 : 1);
 
   // Derived here (not in the flat-item memo) so a subagent-driven status
   // change re-renders only this header, not the whole row list.
@@ -78,7 +85,7 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
   const dots = () => staticDots(summary(), props.iconStyle, props.dimmed);
 
   const parts = createMemo(() => {
-    let left = Math.max(0, (props.width ?? dims().width) - 2);
+    let left = Math.max(0, (props.width ?? dims().width) - 1 - paddingRight());
     const activity =
       props.collapsed && !props.hideStatusSummary
         ? [
@@ -126,7 +133,7 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         ? [{ text: `   ${props.facts}`, color: theme.subtext }]
         : []),
     ];
-    return segments.flatMap((segment) => {
+    const drawn = segments.flatMap((segment) => {
       // Facts are useful as complete phrases; do not leave a dangling
       // "main +…" in a narrow sidebar. The identity may still truncate.
       if (
@@ -139,6 +146,13 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
       left -= displayWidth(text);
       return text.trim() ? [{ text, color: c(segment.color) }] : [];
     });
+    // The header IS the divider: a rule fills what the label leaves, so a
+    // group boundary costs one line, not a rule line plus a label line. The
+    // gap rides on the rule text because a segment of its own would be
+    // trimmed away above.
+    if (left >= 2)
+      drawn.push({ text: ` ${"─".repeat(left - 1)}`, color: theme.border });
+    return drawn;
   });
 
   return (
@@ -146,7 +160,7 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
       width="100%"
       height={1}
       paddingLeft={1}
-      paddingRight={1}
+      paddingRight={paddingRight()}
       backgroundColor={bgColor()}
       onMouseDown={(event) => {
         if (event.button === MouseButton.LEFT) {

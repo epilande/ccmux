@@ -284,21 +284,12 @@ export const SessionList: Component<SessionListProps> = (props) => {
    * scroll offset and plus the viewport's own origin — so the answer is in
    * the absolute screen coordinates a mouse event would have carried, which
    * is what `ContextMenu` clamps against.
-   *
-   * A non-first header draws a divider line above itself and `toVisualLine`
-   * counts it, so the header's own row is one line further down; anchoring on
-   * the divider would open the menu a row above the thing it belongs to.
    */
   const rowAnchor: RowAnchor = (index) => {
     const scrollbox = scrollboxRef;
     if (!scrollbox || index < 0 || index >= props.items.length) return null;
-    const item = props.items[index];
-    if (!item) return null;
-    const divider = item.type === "header" && index > 0 ? 1 : 0;
     const line =
-      toVisualLine(props.items, index, sessionLines) -
-      scrollbox.scrollTop +
-      divider;
+      toVisualLine(props.items, index, sessionLines) - scrollbox.scrollTop;
     return {
       // Indented off the list's left edge: the menu covers the row it belongs
       // to either way, and leaving the selection marker and status glyph
@@ -330,17 +321,12 @@ export const SessionList: Component<SessionListProps> = (props) => {
     if (item.type === "header") {
       return (
         <>
-          {index > 0 && (
-            <box height={1} paddingLeft={1} paddingRight={1}>
-              <text fg={theme.border}>
-                {"─".repeat(Math.max(0, effectiveWidth() - 5))}
-              </text>
-            </box>
-          )}
           <GroupHeader
             label={item.label}
             count={item.count}
-            width={effectiveWidth() - 3}
+            // The viewport's real width, so the header's rule ends on the
+            // column the rows' last cell does, scrollbar or not.
+            width={effectiveWidth() - viewportInset()}
             facts={factsText(headerFacts(item))}
             collapsed={item.collapsed}
             selected={index === props.selectedIndex}

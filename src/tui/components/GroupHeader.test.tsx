@@ -56,6 +56,20 @@ describe("GroupHeader", () => {
     expect(frame).toContain("(4)");
   });
 
+  it("fills the rest of the line with a rule, one space after the label", async () => {
+    // The header is the group divider: no separate rule line above it.
+    const frame = await renderHeader({ label: "ccmux", count: 4 });
+    const line = frame.split("\n")[0];
+    expect(line).toMatch(/^ ▾ ccmux \(4\) ─+ $/);
+    // width 80, one cell of padding each side
+    expect(line.trimEnd().length).toBe(79);
+  });
+
+  it("drops the rule when the label leaves no room for it", async () => {
+    const frame = await renderHeader({ label: "x".repeat(200), count: 4 });
+    expect(frame.split("\n")[0]).not.toContain("─");
+  });
+
   it("shows status dots when collapsed", async () => {
     const frame = await renderHeader({
       collapsed: true,

@@ -339,7 +339,7 @@ describe("SessionList", () => {
     ]);
   });
 
-  it("renders separator between groups but not before first", async () => {
+  it("draws every group header as a one-line rule, with no divider row", async () => {
     const items: FlatItem[] = [
       makeHeader("group1", 1),
       makeSessionItem("s1", "group1"),
@@ -347,21 +347,27 @@ describe("SessionList", () => {
       makeSessionItem("s2", "group2"),
     ];
     const frame = await renderList(items);
-    // Both groups render
-    expect(frame).toContain("group1");
-    expect(frame).toContain("group2");
-    // Separator exists between groups (the ─ character)
-    expect(frame).toContain("─");
-    // Verify separator is between groups by checking line order
     const lines = frame.split("\n");
     const group1Line = lines.findIndex((l) => l.includes("group1"));
-    const separatorLine = lines.findIndex(
-      (l, i) => i > group1Line && l.includes("─"),
-    );
     const group2Line = lines.findIndex((l) => l.includes("group2"));
     expect(group1Line).toBeGreaterThanOrEqual(0);
-    expect(separatorLine).toBeGreaterThan(group1Line);
-    expect(group2Line).toBeGreaterThan(separatorLine);
+    expect(group2Line).toBeGreaterThan(group1Line);
+    // The header line carries the rule itself...
+    expect(lines[group1Line]).toMatch(/group1 \(1\) ─+/);
+    expect(lines[group2Line]).toMatch(/group2 \(1\) ─+/);
+    // ...so no line between the groups is a bare rule.
+    for (let i = group1Line + 1; i < group2Line; i++) {
+      expect(lines[i].trim()).not.toMatch(/^─+$/);
+    }
+    // The rule ends on the column the rows' last cell does: the header is
+    // sized from the scrollbox viewport, not a guess at the scrollbar. The
+    // viewport inset lands the frame after the first layout, as in the app.
+    await setup.renderOnce();
+    const settled = setup.captureCharFrame().split("\n");
+    const header = settled[group1Line].replace(/█\s*$/, "").trimEnd();
+    const row = settled[group1Line + 1].replace(/█\s*$/, "").trimEnd();
+    expect(header).toMatch(/─$/);
+    expect(header.length).toBe(row.length);
   });
 });
 
