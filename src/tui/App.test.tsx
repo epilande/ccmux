@@ -594,7 +594,7 @@ describe("App", () => {
 
   it("updates session count in header after SSE init", async () => {
     await renderApp();
-    expect(setup.captureCharFrame()).toContain("Sessions 0");
+    expect(setup.captureCharFrame()).toContain("Sessions ·0");
 
     sseCallbacks!.onInit(
       [
@@ -604,7 +604,7 @@ describe("App", () => {
       null,
     );
     await setup.renderOnce();
-    expect(setup.captureCharFrame()).toContain("Sessions 2");
+    expect(setup.captureCharFrame()).toContain("Sessions ·2");
   });
 
   it("flashes pane on Enter selection in persistent picker mode", async () => {

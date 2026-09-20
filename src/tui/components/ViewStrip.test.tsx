@@ -8,7 +8,10 @@ import { theme } from "../theme";
 
 let setup: Awaited<ReturnType<typeof testRender>>;
 afterEach(() => setup?.renderer.destroy());
-it("paints one chip and fills unknown counts only when facts arrive", async () => {
+
+const hex = (c: string) => RGBA.fromHex(c).toInts();
+
+it("draws a titled rule, marks the active view with the accent stub, and fills counts only when facts arrive", async () => {
   const [facts, setFacts] = createSignal<RepoFacts[]>([
     { repoRoot: "/repo", repoName: "repo" },
   ]);
@@ -25,16 +28,22 @@ it("paints one chip and fills unknown counts only when facts arrive", async () =
     { width: 96, height: 2 },
   );
   await setup.renderOnce();
-  expect(setup.captureCharFrame()).toContain("Sessions 2   Worktrees   Start");
-  expect(
-    setup.captureCharFrame().split("\n")[0]?.trimEnd().endsWith("all repos"),
-  ).toBe(true);
+  const line = setup.captureCharFrame().split("\n")[0]!;
+  expect(line).toContain("── Sessions ·2 ━━ Worktrees ── Start ─");
+  expect(line.trimEnd().endsWith(" scope: all repos ──")).toBe(true);
+  // The rule runs edge to edge inside the one-column padding.
+  expect(line.trimEnd().length).toBe(95);
   const spans = setup.captureSpans().lines[0]!.spans;
-  const chip = spans.find((s) => s.text.includes("Worktrees"));
-  expect(chip?.bg.toInts()).toEqual(RGBA.fromHex(theme.surface).toInts());
-  expect(
-    spans.find((s) => s.text.includes("Sessions"))?.bg.toInts(),
-  ).not.toEqual(chip?.bg.toInts());
+  const stub = spans.find((s) => s.text.startsWith("━━"));
+  expect(stub?.fg.toInts()).toEqual(hex(theme.blue));
+  const active = spans.find((s) => s.text.includes("Worktrees"));
+  expect(active?.fg.toInts()).toEqual(hex(theme.text));
+  const idle = spans.find((s) => s.text.includes("Sessions"));
+  expect(idle?.fg.toInts()).toEqual(hex(theme.subtext));
+  // No chip: nothing on the line carries a surface background.
+  for (const s of spans) {
+    expect(s.bg.toInts()).not.toEqual(hex(theme.surface));
+  }
   setFacts([
     {
       repoRoot: "/repo",
@@ -48,10 +57,11 @@ it("paints one chip and fills unknown counts only when facts arrive", async () =
     },
   ]);
   await setup.renderOnce();
-  expect(setup.captureCharFrame()).toContain("Worktrees 0   Start 82");
+  expect(setup.captureCharFrame()).toContain("Worktrees ·0 ── Start ·82");
   expect(setup.captureCharFrame().split("\n")[1]?.trim()).toBe("");
 });
-it("scopes totals to the repo and shows its name at the right edge", async () => {
+
+it("scopes totals to the repo and names it, colored, at the right edge", async () => {
   setup = await testRender(
     () => (
       <ViewStrip
@@ -84,12 +94,27 @@ it("scopes totals to the repo and shows its name at the right edge", async () =>
     { width: 96, height: 1 },
   );
   await setup.renderOnce();
-  expect(setup.captureCharFrame()).toContain("Start 3");
-  expect(setup.captureCharFrame().trimEnd().endsWith("repo")).toBe(true);
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("Start ·3");
+  expect(frame.trimEnd().endsWith(" scope: repo ──")).toBe(true);
+  const scope = setup
+    .captureSpans()
+    .lines[0]!.spans.find((s) => s.text === "repo");
+  expect(scope?.fg.toInts()).toEqual(hex(theme.blue));
 });
 
-for (const width of [35, 36, 37]) {
-  it(`fits the scope into a ${width - 36}-column budget`, async () => {
+// Tabs cost 37 columns here (`── Sessions ·2 ── Worktrees ── Start `), the
+// padding 2 and the scope dressing 11: the scope's name gets `width - 50`.
+// Below the tabs' own width the strip CLIPS (line 2 must stay blank: OpenTUI
+// wraps an overflowing row onto the next line, which here is the head line).
+for (const [width, expected] of [
+  [36, null],
+  [39, null],
+  [51, null],
+  [52, "s…"],
+  [56, "scope"],
+] as const) {
+  it(`fits the scope into a ${width - 50}-column budget`, async () => {
     setup = await testRender(
       () => (
         <ViewStrip
@@ -104,8 +129,16 @@ for (const width of [35, 36, 37]) {
     );
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
-    expect(frame).not.toContain("s…");
+    const line = frame.split("\n")[0]!.trimEnd();
+    if (expected === null) {
+      // A one-column budget would draw a lone `…`; the scope is dropped and
+      // the rule runs to the edge instead (or the tabs are clipped).
+      expect(line).not.toContain("scope:");
+      expect(line.length).toBeLessThanOrEqual(width); // clipped, not wrapped
+    } else {
+      expect(line.endsWith(` scope: ${expected} ──`)).toBe(true);
+      expect(line.length).toBe(width - 1);
+    }
     expect(frame.split("\n")[1]?.trim()).toBe("");
-    expect(frame.includes("…")).toBe(width === 37);
   });
 }
