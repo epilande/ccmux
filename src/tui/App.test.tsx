@@ -250,7 +250,11 @@ async function renderApp(
   height = 20,
   props: Record<string, unknown> = {},
 ) {
-  setup = await testRender(() => <App {...props} />, { width, height });
+  // The column-header line is on by default for `groupBy: "none"` and would
+  // push every row down one line under the pointer coordinates these tests
+  // aim at; they opt out the way a user can. Its own tests pass the mode.
+  const withDefaults = { columnHeader: "never" as const, ...props };
+  setup = await testRender(() => <App {...withDefaults} />, { width, height });
   await setup.renderOnce();
   return setup.captureCharFrame();
 }
@@ -655,6 +659,42 @@ describe("App", () => {
     flashPaneSpy.mockClear();
     flashPaneDetachedSpy.mockClear();
   }
+
+  it("draws the column header above a flat list by default, and not a grouped one", async () => {
+    const seed = async (props: Record<string, unknown>) => {
+      await renderApp(120, 20, props);
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%5",
+          }),
+        ],
+        null,
+      );
+      // One frame to lay the list out, one more for the header to read the
+      // scrollbox inset it pads by (see the SessionList header test).
+      await setup.renderOnce();
+      await setup.renderOnce();
+      return setup.captureCharFrame().split("\n");
+    };
+
+    const flat = await seed({ groupBy: "none", columnHeader: undefined });
+    expect(flat[FIRST_CONTENT_ROW_Y]).toContain("pane");
+    expect(flat[FIRST_CONTENT_ROW_Y]).toContain("age");
+    expect(flat[FIRST_CONTENT_ROW_Y + 1]).toContain("myapp");
+    setup.renderer.destroy();
+
+    const grouped = await seed({ groupBy: "project", columnHeader: undefined });
+    expect(grouped.join("\n")).not.toContain("version");
+    expect(grouped[FIRST_CONTENT_ROW_Y]).toContain("myapp");
+    setup.renderer.destroy();
+
+    const forced = await seed({ groupBy: "project", columnHeader: "always" });
+    expect(forced[FIRST_CONTENT_ROW_Y]).toContain("version");
+  });
 
   it("flashes pane on click of session row in persistent picker mode", async () => {
     await setupPersistentPickerWithSession({

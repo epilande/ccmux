@@ -380,3 +380,74 @@ describe("isActivePaneRow", () => {
     expect(isActivePaneRow({ tmuxPane: "%1" }, null)).toBe(false);
   });
 });
+
+describe("SessionList column header", () => {
+  async function renderHeaderCase(opts: {
+    columnHeader: boolean;
+    width?: number;
+    sidebar?: boolean;
+  }) {
+    const [tick] = createSignal(0);
+    const items = [
+      makeSessionItem("s1", "g", {
+        tmuxTarget: "main:1.1",
+        tmuxPane: "%1",
+        agentType: "claude",
+      }),
+    ];
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items}
+            selectedIndex={0}
+            previewWidth={30}
+            columnHeader={opts.columnHeader}
+            sidebar={opts.sidebar}
+          />
+        </TickContext.Provider>
+      ),
+      { width: opts.width ?? 100, height: 8 },
+    );
+    await setup.renderOnce();
+    // The header pads its right edge by the scrollbox's measured inset, which
+    // the scrollbox reports from its first layout; the frame that reads it
+    // is the next one, exactly as in the live picker.
+    await setup.renderOnce();
+    return setup.captureCharFrame().split("\n");
+  }
+
+  it("draws the labels above the rows when asked, at md and up", async () => {
+    const lines = await renderHeaderCase({ columnHeader: true });
+    const header = lines.find((l) => l.includes("pane") && l.includes("age"));
+    expect(header).toBeDefined();
+    expect(header).toContain("status");
+    expect(header).toContain("project");
+    expect(header).toContain("agent");
+    expect(header).toContain("version");
+  });
+
+  it("ends each right-side label on the column its cell ends on", async () => {
+    const lines = await renderHeaderCase({ columnHeader: true });
+    const header = lines.find((l) => l.includes("pane") && l.includes("age"))!;
+    const row = lines.find((l) => l.includes("main:1.1"))!;
+    // `age` is the last cell on both lines, right-aligned to the same edge.
+    expect(header.trimEnd().length).toBe(row.trimEnd().length);
+    // The pane target is right-aligned in its 12-column cell, so its last
+    // character sits under the last character of `pane`.
+    const paneEnd = header.indexOf("pane") + "pane".length;
+    const targetEnd = row.indexOf("main:1.1") + "main:1.1".length;
+    expect(paneEnd).toBe(targetEnd);
+    // The status glyph and the label share a start column.
+    expect(header.indexOf("status")).toBe(row.search(/[●○◐◯◌]/));
+  });
+
+  it("stays off when not asked, in the sidebar, and below md", async () => {
+    const off = await renderHeaderCase({ columnHeader: false });
+    expect(off.some((l) => l.includes("version"))).toBe(false);
+    const sidebar = await renderHeaderCase({ columnHeader: true, sidebar: true });
+    expect(sidebar.some((l) => l.includes("version"))).toBe(false);
+    const narrow = await renderHeaderCase({ columnHeader: true, width: 79 });
+    expect(narrow.some((l) => l.includes("version"))).toBe(false);
+  });
+});
