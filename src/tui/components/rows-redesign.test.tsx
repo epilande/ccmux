@@ -335,8 +335,8 @@ describe("rows redesign", () => {
     if (header.type !== "header") throw new Error("missing header");
     const repo = {
       repoRoot: "/code/alpha",
-      repoName: "alpha",
-      worktrees: [],
+      hasMain: true,
+      linked: 0,
     };
     expect(groupWorktreeFacts(header, [repo])).toBeUndefined();
     for (const groupBy of ["cwd", "session", "window"] as GroupBy[]) {

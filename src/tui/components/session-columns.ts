@@ -1093,7 +1093,7 @@ export function showColumnHeader(
 /** Repository facts belong to project headers, never to cwd or tmux groups. */
 export function groupWorktreeFacts(
   header: Extract<import("../utils/grouping").FlatItem, { type: "header" }>,
-  repos: import("../../daemon/worktree-list").WorktreeRepo[],
+  repos: import("../../daemon/worktree-list").WorktreeCount[],
 ): string | undefined {
   if (!header.repoRoot || header.groupKey === NEEDS_YOU_GROUP_KEY)
     return undefined;
@@ -1105,8 +1105,7 @@ export function groupWorktreeFacts(
   if (roots.size !== 1 || !roots.has(header.repoRoot)) return undefined;
   const repo = repos.find((repo) => roots.has(repo.repoRoot));
   if (!repo) return undefined;
-  const linked = repo.worktrees.filter((tree) => !tree.isMain).length;
+  const linked = repo.linked;
   if (linked === 0) return undefined; // a repo with only its main checkout says nothing
-  const main = repo.worktrees.some((tree) => tree.isMain);
-  return `${main ? "main + " : ""}${linked} worktree${linked === 1 ? "" : "s"}`;
+  return `${repo.hasMain ? "main + " : ""}${linked} worktree${linked === 1 ? "" : "s"}`;
 }
