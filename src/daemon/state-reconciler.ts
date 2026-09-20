@@ -734,6 +734,18 @@ async function reconcilePaneTrackedSessions(
  * (not `genericMarkerSource`) because Claude's `Notification` hook does not
  * write `pending_tool`; the log-derived value must survive a
  * `waiting_permission` overlay, matching the prior read-time behavior.
+ *
+ * Pane detection is this arm's ONLY state source in `claude-no-hooks` runtime
+ * mode: the watcher is a deliberate no-op for Claude there (`watcher.ts`,
+ * "pane tracking owns session creation / updates"), so nothing else ever
+ * clears a `working` or `waiting` row. That is why `active` — Claude is up
+ * with nothing in flight — idles the row here, mirroring the native
+ * stale-pane loop's `active && wasWorking -> idle` net and restoring what
+ * `detectPaneState` did before #205, when it mapped a static ✳ title plus
+ * active content to `idle`. The transition is gated on the CURRENT status so an
+ * already-idle row takes no write: this arm re-detects every tick past the
+ * 30s guard, and an unconditional `updateSession` on idle rows would churn
+ * the picker's `lastActivityAt` sort.
  */
 async function reconcilePaneTrackedClaudeSession(
   deps: ReconcilerDeps,
@@ -809,6 +821,22 @@ async function reconcilePaneTrackedClaudeSession(
       status: "working",
       attentionType: null,
       pendingTool: null,
+    });
+    return;
+  }
+
+  // `active` = the turn ended (or the permission was answered) and the pane
+  // shows a live Claude with nothing in flight. Only `working`/`waiting` rows
+  // are downgraded; an already-idle row gets no write at all.
+  if (
+    state === "active" &&
+    (session.status === "working" || session.status === "waiting")
+  ) {
+    deps.sessionManager.updateSession(session.id, {
+      status: "idle",
+      attentionType: null,
+      pendingTool: null,
+      inPlanMode: false,
     });
     return;
   }

@@ -4,6 +4,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  countRepoWorktrees,
   listAllWorktrees,
   listRepoWorktrees,
   listRepoWorktreeInventory,
@@ -79,6 +80,49 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
+});
+
+describe("countRepoWorktrees", () => {
+  it("counts present checkouts using only worktree metadata", async () => {
+    const repo = await makeRepo("counts");
+    await addWorktree(repo, "live");
+    const missing = await addWorktree(repo, "missing");
+    await rm(missing, { recursive: true });
+    const calls: string[][] = [];
+    const count = await countRepoWorktrees(repo, async (cwd, args) => {
+      calls.push(args);
+      return runGit(cwd, args);
+    });
+    expect(count).toEqual({
+      repoRoot: normalizePath(repo),
+      hasMain: true,
+      linked: 1,
+    });
+    expect(calls).toEqual([["worktree", "list", "--porcelain"]]);
+  });
+
+  it("counts linked checkouts without presenting a bare repo as main", async () => {
+    const bare = join(root, "bare.git");
+    const linked = join(root, "linked");
+    await mkdir(bare);
+    await mkdir(linked);
+    const count = await countRepoWorktrees(bare, async () => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: `worktree ${bare}\nbare\n\nworktree ${linked}\nHEAD abc\ndetached\n\n`,
+    }));
+    expect(count).toEqual({ repoRoot: bare, hasMain: false, linked: 1 });
+  });
+
+  it("omits failed metadata reads", async () => {
+    expect(
+      await countRepoWorktrees(root, async () => ({
+        exitCode: 128,
+        stderr: "not a repo",
+        stdout: "",
+      })),
+    ).toBeNull();
+  });
 });
 
 describe("listRepoWorktrees", () => {

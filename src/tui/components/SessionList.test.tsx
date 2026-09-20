@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import { createSignal } from "solid-js";
@@ -9,13 +9,16 @@ import {
   emptySummary,
   membersFromSummary,
 } from "./test-helpers";
-import type { FlatItem } from "../utils/grouping";
+import { buildFlatItems, type FlatItem } from "../utils/grouping";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup;
+let fetchSpy: ReturnType<typeof spyOn> | undefined;
 
 afterEach(() => {
   setup?.renderer.destroy();
+  fetchSpy?.mockRestore();
+  fetchSpy = undefined;
 });
 
 function makeHeader(label: string, count: number, groupKey?: string): FlatItem {
@@ -43,6 +46,133 @@ function makeSessionItem(
     },
   };
 }
+
+describe("SessionList shared repository facts", () => {
+  const rows = (roots: string[]) =>
+    roots.map((root, index) => ({
+      session: mockEnrichedSession({
+        id: root,
+        project: `project-${index}`,
+        cwd: root,
+        mainRepoRoot: root,
+        tmuxTarget: "dev:1.0",
+      }),
+      highlights: null,
+    }));
+  const facts: import("../../daemon/repo-facts").RepoFactsResponse = {
+    headerPR: true,
+    repos: [
+      {
+        repoRoot: "/code/a",
+        repoName: "a",
+        worktrees: {
+          updatedAt: 1,
+          stale: false,
+          value: {
+            repoRoot: "/code/a",
+            repoName: "a",
+            worktrees: [
+              { path: "/code/a", branch: "main", isMain: true },
+              { path: "/code/a-one", branch: "one", isMain: false },
+              { path: "/code/a-two", branch: "two", isMain: false },
+            ],
+          },
+        },
+      },
+    ],
+  };
+
+  it("renders updated shared counts without starting a second worktree request", async () => {
+    const [data, setData] = createSignal<typeof facts>({
+      repos: [],
+      headerPR: true,
+    });
+    fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ repos: [] }),
+    );
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={buildFlatItems(
+              rows(["/code/a"]),
+              "project",
+              new Set(),
+              false,
+            )}
+            repoFacts={data()}
+            selectedIndex={0}
+            previewWidth={30}
+            connectionState="connected"
+          />
+        </TickContext.Provider>
+      ),
+      { width: 120, height: 20 },
+    );
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+    setData(facts);
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
+    setData({ repos: [], headerPR: true });
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("omits shared facts for cwd, tmux, mixed-repo, or attention-only headers", async () => {
+    const [items, setItems] = createSignal<FlatItem[]>([]);
+    fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ repos: [] }),
+    );
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={items()}
+            repoFacts={facts}
+            selectedIndex={0}
+            previewWidth={30}
+            connectionState="connected"
+          />
+        </TickContext.Provider>
+      ),
+      { width: 120, height: 20 },
+    );
+    for (const groupBy of ["cwd", "session", "window", "none"] as const) {
+      setItems(buildFlatItems(rows(["/code/a"]), groupBy, new Set(), false));
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+    }
+    setItems(
+      buildFlatItems(
+        rows(["/code/a"]).map((row) => ({
+          ...row,
+          session: { ...row.session, status: "waiting" },
+        })),
+        "project",
+        new Set(),
+        false,
+      ),
+    );
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+    setItems(
+      buildFlatItems(
+        rows(["/code/a", "/code/b"]).map((row) => ({
+          ...row,
+          session: { ...row.session, project: "same-name" },
+        })),
+        "project",
+        new Set(),
+        false,
+      ),
+    );
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
 
 async function renderList(
   items: FlatItem[],

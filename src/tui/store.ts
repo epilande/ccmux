@@ -1525,6 +1525,27 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     persistUIState({ collapsedGroups: pruned });
   }
 
+  /** Keep the action target aligned with the row returning from the band. */
+  function reconcileWaitingSelection(wasWaiting: boolean) {
+    if (!wasWaiting || !state.selectedSessionId) return;
+    const selected = state.sessions.find(
+      (s) => s.id === state.selectedSessionId,
+    );
+    if (!selected || selected.status === "waiting") return;
+    if (!filteredSessions().some((fs) => fs.session.id === selected.id)) {
+      setState("selectedSessionId", null);
+      setSelectedHeaderKey(null);
+      setState("previewFocused", false);
+      return;
+    }
+    const key = getGroupKey(selected, state.groupBy);
+    if (state.groupBy === "none" || !collapsedGroups().has(key)) return;
+    const expanded = new Set(collapsedGroups());
+    expanded.delete(key);
+    setCollapsedGroups(expanded);
+    persistCollapsedGroups(expanded);
+  }
+
   /**
    * Flip a synthetic subprocess invoke row to its terminal outcome and arm
    * the ~6s linger removal. Shared by `finishInvocation` (live finish) and
@@ -1713,20 +1734,24 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       );
       const merged =
         synthetic.length > 0 ? [...sessions, ...synthetic] : sessions;
-      setState("sessions", merged);
-      const survivingIds = new Set(merged.map((session) => session.id));
-      for (const id of state.markedSessions) {
-        if (!survivingIds.has(id)) forgetSessionMark(id);
-      }
-      if (
-        state.selectedSessionId &&
-        !merged.some((s) => s.id === state.selectedSessionId)
-      ) {
-        if (state.previewFocused) {
-          setState("previewFocused", false);
+      const wasWaiting = selectedSession()?.status === "waiting";
+      batch(() => {
+        setState("sessions", merged);
+        const survivingIds = new Set(merged.map((session) => session.id));
+        for (const id of state.markedSessions) {
+          if (!survivingIds.has(id)) forgetSessionMark(id);
         }
-        setState("selectedSessionId", null);
-      }
+        if (
+          state.selectedSessionId &&
+          !merged.some((s) => s.id === state.selectedSessionId)
+        ) {
+          if (state.previewFocused) {
+            setState("previewFocused", false);
+          }
+          setState("selectedSessionId", null);
+        }
+        reconcileWaitingSelection(wasWaiting);
+      });
     },
 
     addSession(session: EnrichedSession) {
@@ -1747,7 +1772,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     updateSession(session: EnrichedSession) {
       const idx = state.sessions.findIndex((s) => s.id === session.id);
       if (idx !== -1) {
-        setState("sessions", idx, reconcile(session));
+        const wasWaiting =
+          state.selectedSessionId === session.id &&
+          state.sessions[idx]?.status === "waiting";
+        batch(() => {
+          setState("sessions", idx, reconcile(session));
+          reconcileWaitingSelection(wasWaiting);
+        });
       }
     },
 
