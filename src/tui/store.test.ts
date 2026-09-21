@@ -2364,7 +2364,11 @@ describe("store", () => {
         const store = createTUIStore({ groupBy: "project" });
         store.actions.setSessions([
           createMockSession({ id: "selected", project: "alpha", status }),
-          createMockSession({ id: "sibling", project: "alpha", status: "idle" }),
+          createMockSession({
+            id: "sibling",
+            project: "alpha",
+            status: "idle",
+          }),
           createMockSession({ id: "other", project: "beta", status: "idle" }),
         ]);
         store.actions.setSelectedSessionId("selected");
@@ -2465,6 +2469,77 @@ describe("store", () => {
       await waitForDebounce();
       expect(persisted).toContainEqual({ collapsedGroups: [] });
     });
+
+    for (const groupBy of ["project", "cwd", "session", "window"] as const) {
+      const alpha = createMockSession({
+        id: "a",
+        project: "alpha",
+        cwd: "/alpha",
+        tmuxTarget: "alpha:0.0",
+        status: "waiting",
+      });
+      const beta = createMockSession({
+        id: "b",
+        project: "beta",
+        cwd: "/beta",
+        tmuxTarget: "beta:0.0",
+        status: "waiting",
+      });
+      const alphaKey = getGroupKey(alpha, groupBy);
+      const betaKey = getGroupKey(beta, groupBy);
+
+      it(`preserves an all-waiting ${groupBy} group across persistence and reload`, async () => {
+        let saved: string[] | undefined;
+        const store = createTUIStore({
+          groupBy,
+          collapsedGroups: [alphaKey, betaKey, "stale"],
+          onPersistState: (updates) => {
+            saved = updates.collapsedGroups;
+          },
+        });
+        store.actions.setSessions([{ ...alpha }, { ...beta }]);
+        store.actions.setSelectedSessionId("b");
+        store.actions.updateSession({ ...beta, status: "working" });
+        await waitForDebounce();
+
+        expect(saved).toEqual([alphaKey]);
+        store.actions.reloadUIState({ collapsedGroups: saved });
+        store.actions.updateSession({ ...alpha, status: "working" });
+        expect(store.collapsedGroups().has(alphaKey)).toBe(true);
+        expect(
+          store
+            .flatItems()
+            .some(
+              (item) =>
+                item.type === "session" &&
+                item.filteredSession.session.id === "a",
+            ),
+        ).toBe(false);
+      });
+
+      it(`collapseAll includes an all-waiting ${groupBy} group`, () => {
+        const store = createTUIStore({ groupBy });
+        store.actions.setSessions([{ ...alpha }, { ...beta, status: "idle" }]);
+        expect(
+          store.state.sessions.find((session) => session.id === "a")?.status,
+        ).toBe("waiting");
+        store.actions.setSelectedSessionId("b");
+        store.actions.collapseAll();
+        expect([...store.collapsedGroups()].sort()).toEqual(
+          [alphaKey, betaKey].sort(),
+        );
+        store.actions.updateSession({ ...alpha, status: "working" });
+        expect(
+          store
+            .flatItems()
+            .some(
+              (item) =>
+                item.type === "session" &&
+                item.filteredSession.session.id === "a",
+            ),
+        ).toBe(false);
+      });
+    }
 
     it("should persist collapsed groups on collapseParent", async () => {
       const persisted: Record<string, unknown>[] = [];
