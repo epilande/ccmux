@@ -1132,6 +1132,25 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
   );
 
+  /**
+   * Every session, wrapped as a `FilteredSession` but never filtered.
+   *
+   * The worktree-counts scope in `SessionList` needs a membership that no
+   * user-facing filter can move: each change costs an aborted fetch, a
+   * `git worktree list` per repo on the daemon, and a restarted refresh
+   * interval, so deriving it from `filteredSessions()` made every keystroke
+   * of a search that changed the matching project set pay for a refetch.
+   * Built on `sortedSessions`, whose identity-preserving equality means this
+   * array is rebuilt only when membership or ordering actually changes.
+   */
+  const unfilteredSessions = trackedMemo("unfilteredSessions", () =>
+    sortedSessions().map((session) => ({
+      session,
+      highlights: null,
+      paneMatch: false,
+    })),
+  );
+
   // Derived: status-filtered sessions (hide idle toggle, keeps unread/read visible)
   const statusFilteredSessions = trackedMemo("statusFilteredSessions", () => {
     const sorted = sortedSessions();
@@ -2789,6 +2808,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   return {
     state,
     sortedSessions,
+    unfilteredSessions,
     filteredSessions,
     flatItems,
     invocationInFlightCount,

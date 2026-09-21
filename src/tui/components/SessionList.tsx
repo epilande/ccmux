@@ -54,7 +54,15 @@ import { socketErrorMessage } from "../../lib/tmux-socket";
 
 interface SessionListProps {
   items: FlatItem[];
-  /** Membership before waiting rows are moved out of their home groups. */
+  /**
+   * Full session membership: before the search and status filters that shape
+   * `items`, and before waiting rows are moved out of their home groups.
+   *
+   * Only the worktree-counts scope below reads it. That scope costs a
+   * `git worktree list` per repo on the daemon, so it must change when
+   * sessions come and go and stay put while the user is only narrowing what
+   * is displayed.
+   */
   sessions?: FilteredSession[];
   groupBy?: GroupBy;
   selectedIndex: number;

@@ -157,6 +157,129 @@ describe("SessionList worktree counts", () => {
     expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
   });
 
+  it("holds the counts scope while a search filter narrows the visible rows", async () => {
+    const all = rows(["/code/a", "/code/b"]);
+    const [visible, setVisible] = createSignal(all);
+    const requests = mockCountsFetch((url) =>
+      Response.json({
+        repos: url.searchParams
+          .getAll("repo")
+          .map((repoRoot) => ({ repoRoot, hasMain: true, linked: 2 })),
+      }),
+    );
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={buildFlatItems(visible(), "project", new Set(), false)}
+            // The full membership, exactly as App hands it over: a query
+            // shapes `items` and must leave the counts scope alone.
+            sessions={all}
+            groupBy="project"
+            selectedIndex={0}
+            previewWidth={30}
+            connectionState="connected"
+            searchActive={false}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 120, height: 20 },
+    );
+    await renderSettled();
+    expect(requests).toHaveLength(1);
+    expect(requests[0].searchParams.getAll("repo")).toEqual([
+      "/code/a",
+      "/code/b",
+    ]);
+
+    setVisible(all.slice(0, 1));
+    await renderSettled();
+    expect(requests).toHaveLength(1);
+    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
+  });
+
+  it("holds the counts scope while a status filter hides rows", async () => {
+    const all = rows(["/code/a", "/code/b"]).map((row, index) => ({
+      ...row,
+      session: {
+        ...row.session,
+        status: index === 0 ? ("idle" as const) : ("waiting" as const),
+      },
+    }));
+    const [visible, setVisible] = createSignal(all);
+    const requests = mockCountsFetch((url) =>
+      Response.json({
+        repos: url.searchParams
+          .getAll("repo")
+          .map((repoRoot) => ({ repoRoot, hasMain: true, linked: 2 })),
+      }),
+    );
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={buildFlatItems(visible(), "project", new Set(), false)}
+            sessions={all}
+            groupBy="project"
+            selectedIndex={0}
+            previewWidth={30}
+            connectionState="connected"
+          />
+        </TickContext.Provider>
+      ),
+      { width: 120, height: 20 },
+    );
+    await renderSettled();
+    expect(requests).toHaveLength(1);
+
+    // hide-idle drops the idle row; the repo it belongs to is still a repo
+    // this picker is showing sessions for.
+    setVisible(all.filter((row) => row.session.status !== "idle"));
+    await renderSettled();
+    expect(requests).toHaveLength(1);
+    expect(requests[0].searchParams.getAll("repo")).toEqual([
+      "/code/a",
+      "/code/b",
+    ]);
+  });
+
+  it("refetches when a session from a new repo appears", async () => {
+    const [sessions, setSessions] = createSignal(rows(["/code/a", "/code/b"]));
+    const requests = mockCountsFetch((url) =>
+      Response.json({
+        repos: url.searchParams
+          .getAll("repo")
+          .map((repoRoot) => ({ repoRoot, hasMain: true, linked: 2 })),
+      }),
+    );
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={buildFlatItems(sessions(), "project", new Set(), false)}
+            sessions={sessions()}
+            groupBy="project"
+            selectedIndex={0}
+            previewWidth={30}
+            connectionState="connected"
+          />
+        </TickContext.Provider>
+      ),
+      { width: 120, height: 20 },
+    );
+    await renderSettled();
+    expect(requests).toHaveLength(1);
+
+    setSessions(rows(["/code/a", "/code/b", "/code/c"]));
+    await renderSettled();
+    expect(requests).toHaveLength(2);
+    expect(requests[1].searchParams.getAll("repo")).toEqual([
+      "/code/a",
+      "/code/b",
+      "/code/c",
+    ]);
+  });
+
   it("does not request facts for cwd, tmux, flat, or mixed-repo groups", async () => {
     const [sessions, setSessions] = createSignal(rows(["/code/a"]));
     const [groupBy, setGroupBy] = createSignal<GroupBy>("none");

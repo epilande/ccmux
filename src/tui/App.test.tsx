@@ -8513,3 +8513,91 @@ describe("App worktrees panel (W)", () => {
     }
   });
 });
+
+/**
+ * The counts scope is the one place a list prop must NOT be the filtered
+ * list: every change to it aborts an in-flight read and costs a
+ * `git worktree list` per repo on the daemon. `SessionList` owns the memo,
+ * but only App decides what it is handed, so the guard lives here.
+ */
+describe("App worktree counts scope", () => {
+  function mockCountsFetch() {
+    const originalFetch = globalThis.fetch;
+    const requests: URL[] = [];
+    globalThis.fetch = ((input: string | URL | Request) => {
+      const url = new URL(
+        input instanceof Request ? input.url : input.toString(),
+      );
+      if (url.pathname !== "/worktrees/counts")
+        return Promise.resolve(Response.json({}));
+      requests.push(url);
+      return Promise.resolve(
+        Response.json({
+          repos: url.searchParams
+            .getAll("repo")
+            .map((repoRoot) => ({ repoRoot, hasMain: true, linked: 2 })),
+        }),
+      );
+    }) as unknown as typeof fetch;
+    return {
+      requests,
+      restore: () => {
+        globalThis.fetch = originalFetch;
+      },
+    };
+  }
+
+  it("does not refetch counts while a search or hide-idle narrows the list", async () => {
+    const { requests, restore } = mockCountsFetch();
+    try {
+      await renderApp(120, 20, { groupBy: "project" });
+      sseCallbacks!.onConnectionStateChange?.("connected");
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            mainRepoRoot: "/code/alpha",
+            status: "idle",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            mainRepoRoot: "/code/beta",
+            status: "waiting",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await setup.renderOnce();
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.searchParams.getAll("repo")).toEqual([
+        "/code/alpha",
+        "/code/beta",
+      ]);
+
+      // hide-idle drops the alpha row, leaving one of the two repos with
+      // nothing visible.
+      setup.mockInput.pressKey("f");
+      await setup.renderOnce();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await setup.renderOnce();
+      expect(requests).toHaveLength(1);
+
+      // A query that matches only beta narrows it again.
+      setup.mockInput.pressKey("/");
+      await setup.renderOnce();
+      await setup.mockInput.typeText("beta");
+      await setup.renderOnce();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await setup.renderOnce();
+      expect(requests).toHaveLength(1);
+    } finally {
+      restore();
+    }
+  });
+});

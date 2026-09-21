@@ -657,6 +657,61 @@ describe("store", () => {
     });
   });
 
+  describe("unfilteredSessions", () => {
+    it("keeps its identity across search and hide-idle changes", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "alpha",
+          project: "alpha",
+          status: "idle",
+          mainRepoRoot: "/code/alpha",
+        }),
+        createMockSession({
+          id: "beta",
+          project: "beta",
+          status: "waiting",
+          mainRepoRoot: "/code/beta",
+        }),
+      ]);
+
+      const before = store.unfilteredSessions();
+      expect(before.map((fs) => fs.session.id).sort()).toEqual([
+        "alpha",
+        "beta",
+      ]);
+
+      store.actions.setSearchQuery("alpha");
+      expect(store.filteredSessions().length).toBe(1);
+      expect(store.unfilteredSessions()).toBe(before);
+
+      store.actions.setSearchQuery("");
+      store.actions.toggleHideIdle();
+      expect(store.filteredSessions().length).toBe(1);
+      expect(store.unfilteredSessions()).toBe(before);
+    });
+
+    it("rebuilds when session membership changes", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "alpha", mainRepoRoot: "/code/alpha" }),
+      ]);
+      const before = store.unfilteredSessions();
+
+      store.actions.setSessions([
+        createMockSession({ id: "alpha", mainRepoRoot: "/code/alpha" }),
+        createMockSession({ id: "gamma", mainRepoRoot: "/code/gamma" }),
+      ]);
+      const after = store.unfilteredSessions();
+
+      expect(after).not.toBe(before);
+      expect(after.map((fs) => fs.session.mainRepoRoot).sort()).toEqual([
+        "/code/alpha",
+        "/code/gamma",
+      ]);
+    });
+  });
+
   describe("hideIdle", () => {
     it("should default to false", () => {
       const store = createTUIStore();

@@ -4107,7 +4107,10 @@ export function App(props: AppProps) {
         <box flexDirection="row" flexGrow={1}>
           <SessionList
             items={store.flatItems()}
-            sessions={store.filteredSessions()}
+            // Deliberately NOT the filtered list: the only thing reading it
+            // is the worktree-counts scope, which must not move when a
+            // search query or the hide-idle toggle changes.
+            sessions={store.unfilteredSessions()}
             groupBy={store.state.groupBy}
             selectedIndex={store.selectedIndex()}
             iconStyle={store.state.iconStyle}
