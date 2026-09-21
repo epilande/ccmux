@@ -1,5 +1,9 @@
 import { describe, it, expect, mock } from "bun:test";
-import { getGroupKey, type FlatItem } from "./utils/grouping";
+import {
+  getGroupKey,
+  NEEDS_YOU_GROUP_KEY,
+  type FlatItem,
+} from "./utils/grouping";
 import { mockEnrichedSession } from "./components/test-helpers";
 import { MAX_TURNS } from "../daemon/transcript-read";
 
@@ -2598,6 +2602,78 @@ describe("store", () => {
       await waitForDebounce();
       expect(persisted).toContainEqual({ collapsedGroups: ["alpha"] });
     });
+
+    it("keeps band preview members but refuses a band bulk-kill", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha", status: "waiting" }),
+        createMockSession({ id: "b", project: "beta", status: "waiting" }),
+      ]);
+      store.actions.moveSelection(-999);
+      expect(store.selectedGroupHeader()?.groupKey).toBe(NEEDS_YOU_GROUP_KEY);
+      expect(store.selectedGroupSessions()).toHaveLength(2);
+      store.actions.showGroupKillDialog(NEEDS_YOU_GROUP_KEY);
+      expect(store.state.confirmMode).toBe(false);
+      // Explicit selections in other views are independent of this header.
+      store.actions.showConfirmDialog(null, "kill-group", ["a"]);
+      expect(store.state.confirmMode).toBe(true);
+      expect(store.state.confirmSessionIds).toEqual(["a"]);
+    });
+
+    it("collapse-all skips the band when leaving a non-waiting row", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha", status: "waiting" }),
+        createMockSession({ id: "b", project: "beta", status: "working" }),
+      ]);
+      store.actions.setSelectedSessionId("b");
+      store.actions.collapseAll();
+      expect(store.selectedGroupHeader()?.groupKey).toBe("beta");
+      expect(store.selectedGroupSessions().map((s) => s.id)).toEqual(["b"]);
+    });
+
+    it.each(["project", "cwd", "session", "window"] as const)(
+      "moves a hidden waiting home group and persists its %s order",
+      async (groupBy) => {
+        const persisted: unknown[] = [];
+        const store = createTUIStore({
+          groupBy,
+          onPersistState: (s) => {
+            persisted.push(s);
+          },
+        });
+        const sessions = ["alpha", "beta", "charlie"].map((project) =>
+          createMockSession({
+            id: project,
+            project,
+            cwd: `/code/${project}`,
+            tmuxTarget: `${project}:0.0`,
+            status: "waiting",
+          }),
+        );
+        store.actions.setSessions(sessions.map((s) => ({ ...s })));
+        store.actions.setSelectedSessionId("beta");
+        const keys = sessions.map((s) => getGroupKey(s, groupBy));
+        store.actions.moveGroupDown(keys[1]!, "beta");
+        expect(store.pinnedGroups()).toEqual([keys[0], keys[2], keys[1]]);
+        expect(store.selectedSession()?.id).toBe("beta");
+        expect(headerLabels(store.flatItems())).toEqual(["needs you"]);
+        await waitForDebounce();
+        expect(persisted).toContainEqual({
+          pinnedGroups: [keys[0], keys[2], keys[1]],
+        });
+        store.actions.setSessions(
+          sessions.map((s) => ({ ...s, status: "working" })),
+        );
+        expect(
+          store
+            .flatItems()
+            .filter((i) => i.type === "header")
+            .map((i) => i.groupKey),
+        ).toEqual([keys[0], keys[2], keys[1]]);
+        expect(store.selectedSession()?.id).toBe("beta");
+      },
+    );
 
     it("should move group up by swapping with group above", () => {
       const store = createTUIStore({ groupBy: "project" });

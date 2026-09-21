@@ -22,7 +22,7 @@
  * collapsing them costs.
  */
 
-import { runGit, type GitRun } from "./worktree-git";
+import { runMetadataGit, type GitRun } from "./worktree-git";
 import type { BranchPR } from "../types/session";
 import {
   foldChecks,
@@ -279,7 +279,7 @@ export async function associatedBranchPRs(
   cwd: string,
   branch: string,
   prs: OpenPR[],
-  git: GitRun = runGit,
+  git: GitRun = runMetadataGit,
 ): Promise<SourceResult<OpenPR[]>> {
   if (!prs.length) return { ok: true, value: [] };
   const ref = `refs/heads/${branch}`;
