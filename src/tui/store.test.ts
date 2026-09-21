@@ -2358,6 +2358,35 @@ describe("store", () => {
       expect(store.flatItems()).toHaveLength(4);
     });
 
+    it.each(["waiting", "working", "idle"] as const)(
+      "collapseAll preserves only a waiting selection: %s",
+      (status) => {
+        const store = createTUIStore({ groupBy: "project" });
+        store.actions.setSessions([
+          createMockSession({ id: "selected", project: "alpha", status }),
+          createMockSession({ id: "sibling", project: "alpha", status: "idle" }),
+          createMockSession({ id: "other", project: "beta", status: "idle" }),
+        ]);
+        store.actions.setSelectedSessionId("selected");
+
+        store.actions.collapseAll();
+
+        expect([...store.collapsedGroups()].sort()).toEqual(["alpha", "beta"]);
+        const selectedItem = store.flatItems()[store.selectedIndex()];
+        if (status === "waiting") {
+          expect(store.selectedSession()?.id).toBe("selected");
+          expect(store.selectedHeaderKey()).toBeNull();
+          expect(selectedItem?.type).toBe("session");
+          if (selectedItem?.type === "session") {
+            expect(selectedItem.filteredSession.session.id).toBe("selected");
+          }
+        } else {
+          expect(store.state.selectedSessionId).toBeNull();
+          expect(selectedItem?.type).toBe("header");
+        }
+      },
+    );
+
     it("should collapse parent group from session", () => {
       const store = createTUIStore({ groupBy: "project" });
       store.actions.setSessions([
