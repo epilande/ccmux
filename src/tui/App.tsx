@@ -4096,6 +4096,8 @@ export function App(props: AppProps) {
         <box flexDirection="row" flexGrow={1}>
           <SessionList
             items={store.flatItems()}
+            sessions={store.filteredSessions()}
+            groupBy={store.state.groupBy}
             selectedIndex={store.selectedIndex()}
             iconStyle={store.state.iconStyle}
             showPreview={store.state.showPreview}

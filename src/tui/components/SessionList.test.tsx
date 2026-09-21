@@ -9,7 +9,7 @@ import {
   emptySummary,
   membersFromSummary,
 } from "./test-helpers";
-import { buildFlatItems, type FlatItem } from "../utils/grouping";
+import { buildFlatItems, type FlatItem, type GroupBy } from "../utils/grouping";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup;
@@ -48,6 +48,26 @@ function makeSessionItem(
 }
 
 describe("SessionList worktree counts", () => {
+  function mockCountsFetch(
+    answer: (url: URL, init?: RequestInit) => Response | Promise<Response>,
+  ): URL[] {
+    const requests: URL[] = [];
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(((
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const url = new URL(
+        input instanceof Request ? input.url : input.toString(),
+      );
+      // Store tests can leave debounced sidebar-state broadcasts pending.
+      if (url.pathname !== "/worktrees/counts")
+        return Promise.resolve(Response.json({}));
+      requests.push(url);
+      return Promise.resolve(answer(url, init));
+    }) as unknown as typeof fetch);
+    return requests;
+  }
+
   async function renderSettled() {
     // Drain fetch/json continuations before capturing the rendered facts.
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -66,28 +86,23 @@ describe("SessionList worktree counts", () => {
       highlights: null,
     }));
 
-  it("renders scoped metadata counts and refreshes only on scope or connection changes", async () => {
+  it("keeps counts and request scope stable as solo-project sessions enter and leave waiting", async () => {
     const [sessions, setSessions] = createSignal(rows(["/code/a", "/code/b"]));
     const [connection, setConnection] = createSignal("connected");
-    const requests: URL[] = [];
-    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
-      input: string | URL | Request,
-    ) => {
-      const url = new URL(
-        input instanceof Request ? input.url : input.toString(),
-      );
-      requests.push(url);
+    const requests = mockCountsFetch((url) => {
       return Response.json({
         repos: url.searchParams
           .getAll("repo")
           .map((repoRoot) => ({ repoRoot, hasMain: true, linked: 2 })),
       });
-    }) as unknown as typeof fetch);
+    });
     setup = await testRender(
       () => (
         <TickContext.Provider value={{ tick: () => 0 }}>
           <SessionList
             items={buildFlatItems(sessions(), "project", new Set(), false)}
+            sessions={sessions()}
+            groupBy="project"
             selectedIndex={0}
             previewWidth={30}
             connectionState={connection()}
@@ -108,29 +123,51 @@ describe("SessionList worktree counts", () => {
     setSessions(rows(["/code/a", "/code/b"]));
     await renderSettled();
     expect(requests).toHaveLength(1);
+    setSessions(
+      rows(["/code/a", "/code/b"]).map((row, index) => ({
+        ...row,
+        session: { ...row.session, status: index === 0 ? "waiting" : "idle" },
+      })),
+    );
+    await renderSettled();
+    expect(requests).toHaveLength(1);
+    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
+    setSessions(
+      rows(["/code/a", "/code/b"]).map((row) => ({
+        ...row,
+        session: { ...row.session, status: "waiting" },
+      })),
+    );
+    await renderSettled();
+    expect(requests).toHaveLength(1);
+    setSessions(rows(["/code/a", "/code/b"]));
+    await renderSettled();
+    expect(requests).toHaveLength(1);
+    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
     setSessions(rows(["/code/a"]));
     await renderSettled();
     expect(requests).toHaveLength(2);
     expect(requests[1].searchParams.getAll("repo")).toEqual(["/code/a"]);
     setConnection("disconnected");
     await renderSettled();
-    expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
     setConnection("connected");
     await renderSettled();
     expect(requests).toHaveLength(3);
     expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
   });
 
-  it("does not request facts for cwd, tmux, mixed-repo, or attention-only headers", async () => {
-    const [items, setItems] = createSignal<FlatItem[]>([]);
-    fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
-      Response.json({ repos: [] }),
-    );
+  it("does not request facts for cwd, tmux, flat, or mixed-repo groups", async () => {
+    const [sessions, setSessions] = createSignal(rows(["/code/a"]));
+    const [groupBy, setGroupBy] = createSignal<GroupBy>("none");
+    const requests = mockCountsFetch(() => Response.json({ repos: [] }));
     setup = await testRender(
       () => (
         <TickContext.Provider value={{ tick: () => 0 }}>
           <SessionList
-            items={items()}
+            items={buildFlatItems(sessions(), groupBy(), new Set(), false)}
+            sessions={sessions()}
+            groupBy={groupBy()}
             selectedIndex={0}
             previewWidth={30}
             connectionState="connected"
@@ -139,35 +176,124 @@ describe("SessionList worktree counts", () => {
       ),
       { width: 120, height: 20 },
     );
-    for (const groupBy of ["cwd", "session", "window", "none"] as const) {
-      setItems(buildFlatItems(rows(["/code/a"]), groupBy, new Set(), false));
+    for (const mode of ["cwd", "session", "window", "none"] as const) {
+      setGroupBy(mode);
       await renderSettled();
     }
-    setItems(
-      buildFlatItems(
-        rows(["/code/a"]).map((row) => ({
-          ...row,
-          session: { ...row.session, status: "waiting" },
-        })),
-        "project",
-        new Set(),
-        false,
+    setSessions(
+      rows(["/code/a", "/code/b"]).map((row) => ({
+        ...row,
+        session: { ...row.session, project: "same-name" },
+      })),
+    );
+    setGroupBy("project");
+    await renderSettled();
+    expect(requests).toHaveLength(0);
+  });
+
+  it("drops cached facts when full project membership becomes ambiguous", async () => {
+    const [sessions, setSessions] = createSignal(rows(["/code/a"]));
+    const requests = mockCountsFetch(() =>
+      Response.json({
+        repos: [{ repoRoot: "/code/a", hasMain: true, linked: 2 }],
+      }),
+    );
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={buildFlatItems(sessions(), "project", new Set(), false)}
+            sessions={sessions()}
+            groupBy="project"
+            selectedIndex={0}
+            previewWidth={30}
+            connectionState="connected"
+          />
+        </TickContext.Provider>
       ),
+      { width: 120, height: 20 },
     );
     await renderSettled();
-    setItems(
-      buildFlatItems(
-        rows(["/code/a", "/code/b"]).map((row) => ({
-          ...row,
-          session: { ...row.session, project: "same-name" },
-        })),
-        "project",
-        new Set(),
-        false,
-      ),
+    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
+    setSessions(
+      rows(["/code/a", "/code/b"]).map((row, index) => ({
+        ...row,
+        session: {
+          ...row.session,
+          project: "project-0",
+          status: index === 0 ? "idle" : "waiting",
+        },
+      })),
     );
     await renderSettled();
-    expect(fetchSpy).not.toHaveBeenCalled();
+    // The remaining ordinary header still names /code/a, but the full
+    // project spans two roots and is no longer eligible for scoped facts.
+    expect(setup.captureCharFrame()).toContain("project-0");
+    expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("refreshes unchanged scope after worktree changes without blanking the previous counts", async () => {
+    const sessions = rows(["/code/a"]);
+    const pending: Array<ReturnType<typeof Promise.withResolvers<Response>>> =
+      [];
+    mockCountsFetch(() => {
+      const response = Promise.withResolvers<Response>();
+      pending.push(response);
+      return response.promise;
+    });
+    let refresh: (() => void) | undefined;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const nativeSetInterval = globalThis.setInterval;
+    const intervalSpy = spyOn(globalThis, "setInterval").mockImplementation(((
+      ...args: Parameters<typeof setInterval>
+    ) => {
+      const handle = nativeSetInterval(...args);
+      if (args[1] === 30_000) {
+        timer = handle;
+        refresh = () => args[0](...args.slice(2));
+      }
+      return handle;
+    }) as typeof setInterval);
+    const clearSpy = spyOn(globalThis, "clearInterval");
+    const answer = (linked: number) =>
+      Response.json({
+        repos: [{ repoRoot: "/code/a", hasMain: true, linked }],
+      });
+    try {
+      setup = await testRender(
+        () => (
+          <TickContext.Provider value={{ tick: () => 0 }}>
+            <SessionList
+              items={buildFlatItems(sessions, "project", new Set(), false)}
+              sessions={sessions}
+              groupBy="project"
+              selectedIndex={0}
+              previewWidth={30}
+              connectionState="connected"
+            />
+          </TickContext.Provider>
+        ),
+        { width: 120, height: 20 },
+      );
+      pending[0].resolve(answer(2));
+      await renderSettled();
+      expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
+      expect(refresh).toBeDefined();
+      refresh!();
+      await renderSettled();
+      expect(pending).toHaveLength(2);
+      expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
+      pending[1].resolve(answer(1));
+      await renderSettled();
+      expect(setup.captureCharFrame()).toContain("main + 1 worktree");
+      expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+      setup.renderer.destroy();
+      expect(clearSpy).toHaveBeenCalledWith(timer);
+    } finally {
+      intervalSpy.mockRestore();
+      clearSpy.mockRestore();
+    }
   });
 
   it("aborts obsolete reads and prevents stale counts from replacing a new answer", async () => {
@@ -176,19 +302,18 @@ describe("SessionList worktree counts", () => {
       response: ReturnType<typeof Promise.withResolvers<Response>>;
       signal?: AbortSignal | null;
     }> = [];
-    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(((
-      _input: string | URL | Request,
-      init?: RequestInit,
-    ) => {
+    mockCountsFetch((_url, init) => {
       const response = Promise.withResolvers<Response>();
       pending.push({ response, signal: init?.signal });
       return response.promise;
-    }) as unknown as typeof fetch);
+    });
     setup = await testRender(
       () => (
         <TickContext.Provider value={{ tick: () => 0 }}>
           <SessionList
             items={buildFlatItems(sessions(), "project", new Set(), false)}
+            sessions={sessions()}
+            groupBy="project"
             selectedIndex={0}
             previewWidth={30}
             connectionState="connected"

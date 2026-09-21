@@ -25,6 +25,10 @@ import type {
 import { DEFAULT_PROMPT_DISPLAY } from "../../lib/preferences";
 import {
   type FlatItem,
+  type FilteredSession,
+  type GroupBy,
+  groupSessions,
+  groupRepoRoot,
   NEEDS_YOU_GROUP_KEY,
   getSessionIndex,
   scrollTarget,
@@ -50,6 +54,9 @@ import { socketErrorMessage } from "../../lib/tmux-socket";
 
 interface SessionListProps {
   items: FlatItem[];
+  /** Membership before waiting rows are moved out of their home groups. */
+  sessions?: FilteredSession[];
+  groupBy?: GroupBy;
   selectedIndex: number;
   iconStyle?: IconStyle;
   showPreview?: boolean;
@@ -114,6 +121,7 @@ export function isActivePaneRow(
 /** Columns a keyboard-opened row menu is inset from the list's left edge, so
  *  the row it belongs to is still identifiable underneath it. */
 const ROW_MENU_INDENT = 2;
+const WORKTREE_REFRESH_MS = 30_000;
 
 export const SessionList: Component<SessionListProps> = (props) => {
   let scrollboxRef: ScrollBoxRenderable | undefined;
@@ -130,8 +138,11 @@ export const SessionList: Component<SessionListProps> = (props) => {
     JSON.stringify(
       [
         ...new Set(
-          props.items.flatMap((item) =>
-            item.type === "header" && item.repoRoot ? [item.repoRoot] : [],
+          groupSessions(props.sessions ?? [], props.groupBy ?? "none").flatMap(
+            ({ members }) => {
+              const root = groupRepoRoot(members, props.groupBy ?? "none");
+              return root ? [root] : [];
+            },
           ),
         ),
       ].sort(),
@@ -140,25 +151,46 @@ export const SessionList: Component<SessionListProps> = (props) => {
   createEffect(() => {
     const roots: string[] = JSON.parse(repoScope());
     const connected = props.connectionState;
-    setWorktreeRepos([]);
+    const scope = new Set(roots);
+    setWorktreeRepos((repos) =>
+      repos.filter((repo) => scope.has(repo.repoRoot)),
+    );
     if (roots.length === 0 || connected !== "connected") return;
     const query = new URLSearchParams();
     for (const root of roots) query.append("repo", root);
     const controller = new AbortController();
-    onCleanup(() => controller.abort());
-    fetch(`${getDaemonUrl()}/worktrees/counts?${query}`, {
-      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
-    })
-      .then((response) =>
-        response.ok
-          ? (response.json() as Promise<WorktreeCountsResponse>)
-          : null,
-      )
-      .then((response) => {
-        if (!controller.signal.aborted && response)
-          setWorktreeRepos(response.repos);
+    let latestRequest = 0;
+    const refresh = () => {
+      const request = ++latestRequest;
+      return fetch(`${getDaemonUrl()}/worktrees/counts?${query}`, {
+        signal: AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(15_000),
+        ]),
       })
-      .catch(() => {});
+        .then((response) =>
+          response.ok
+            ? (response.json() as Promise<WorktreeCountsResponse>)
+            : null,
+        )
+        .then((response) => {
+          if (
+            !controller.signal.aborted &&
+            request === latestRequest &&
+            response
+          )
+            setWorktreeRepos(response.repos);
+        })
+        .catch(() => {});
+    };
+    void refresh();
+    // Worktrees can change through another picker or the CLI without any
+    // session membership changing. Keep the last answer until a refresh lands.
+    const timer = setInterval(() => void refresh(), WORKTREE_REFRESH_MS);
+    onCleanup(() => {
+      clearInterval(timer);
+      controller.abort();
+    });
   });
 
   /**
