@@ -1522,9 +1522,17 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     return null;
   }
 
-  /** Persist collapsed groups, pruning keys that no longer match active groups */
+  function activeGroupKeys(): Set<string> {
+    return new Set(
+      state.groupBy === "none"
+        ? []
+        : state.sessions.map((session) => getGroupKey(session, state.groupBy)),
+    );
+  }
+
+  /** A waiting-only group is still active even while its header is absent. */
   function persistCollapsedGroups(collapsed: Set<string>) {
-    const activeKeys = new Set(headerGroupKeys(flatItems()));
+    const activeKeys = activeGroupKeys();
     const pruned = [...collapsed].filter((k) => activeKeys.has(k));
     persistUIState({ collapsedGroups: pruned });
   }
@@ -2712,7 +2720,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     collapseAll() {
       const items = flatItems();
-      const keys = new Set(headerGroupKeys(items));
+      const keys = activeGroupKeys();
       setCollapsedGroups(keys);
       persistCollapsedGroups(keys);
       // Waiting rows remain visible outside the collapsed groups.
