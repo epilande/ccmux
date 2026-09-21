@@ -10,7 +10,6 @@ import {
   scrollTarget,
   sortGroups,
   groupSessions,
-  headerGroupKeys,
   type FilteredSession,
   type GroupEntry,
 } from "./grouping";
@@ -182,47 +181,6 @@ describe("groupSessions", () => {
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.key === "dev")?.members).toHaveLength(2);
     expect(groups.find((g) => g.key === "work")?.members).toHaveLength(1);
-  });
-});
-
-describe("headerGroupKeys", () => {
-  it("extracts group keys from header items", () => {
-    const items = buildFlatItems(
-      [
-        toFiltered(mockSession({ id: "a", project: "alpha" })),
-        toFiltered(mockSession({ id: "b", project: "beta" })),
-      ],
-      "project",
-      new Set(),
-      false,
-    );
-    expect(headerGroupKeys(items)).toEqual(["alpha", "beta"]);
-  });
-
-  it("returns empty array when no headers (groupBy none)", () => {
-    const items = buildFlatItems(
-      [toFiltered(mockSession({ id: "a" }))],
-      "none",
-      new Set(),
-      false,
-    );
-    expect(headerGroupKeys(items)).toEqual([]);
-  });
-
-  it("skips session items", () => {
-    const items = buildFlatItems(
-      [
-        toFiltered(mockSession({ id: "a", project: "alpha" })),
-        toFiltered(mockSession({ id: "b", project: "alpha" })),
-        toFiltered(mockSession({ id: "c", project: "alpha" })),
-      ],
-      "project",
-      new Set(),
-      false,
-    );
-    // 1 header + 3 sessions = 4 items, but only 1 group key
-    expect(items).toHaveLength(4);
-    expect(headerGroupKeys(items)).toEqual(["alpha"]);
   });
 });
 

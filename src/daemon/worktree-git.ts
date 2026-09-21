@@ -45,20 +45,48 @@ export type GitRun = (cwd: string, args: string[]) => Promise<GitResult>;
 /**
  * Default runner. A spawn failure (git missing, cwd deleted between listing
  * and running) is reported as a non-zero exit rather than a throw, so one
- * unreachable repo can't abort a scan over every other repo.
+ * unreachable repo can't abort a scan over every other repo. Read-only callers
+ * can bound both output reads and process exit. Mutation callers leave the
+ * deadline unset: killing git does not stop a hook that is still mutating.
+ * Timeout results discard partial data.
  */
-export const runGit: GitRun = async (cwd, args) => {
+export async function runGit(
+  cwd: string,
+  args: string[],
+  timeoutMs?: number,
+): Promise<GitResult> {
   try {
     const proc = Bun.spawn(["git", "-C", cwd, ...args], {
       stdout: "pipe",
       stderr: "pipe",
     });
-    const [stdout, stderr, exitCode] = await Promise.all([
+    const result = Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited,
-    ]);
-    return { exitCode, stdout, stderr };
+    ]).then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }));
+    if (timeoutMs === undefined) return await result;
+
+    let timer: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<GitResult>((resolve) => {
+      timer = setTimeout(() => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // The process can exit before inherited output pipes close.
+        }
+        resolve({
+          exitCode: 124,
+          stdout: "",
+          stderr: `git timed out after ${timeoutMs}ms`,
+        });
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([result, timeout]);
+    } finally {
+      clearTimeout(timer!);
+    }
   } catch (err) {
     return {
       exitCode: 127,
@@ -66,7 +94,10 @@ export const runGit: GitRun = async (cwd, args) => {
       stderr: err instanceof Error ? err.message : String(err),
     };
   }
-};
+}
+
+/** Bound coalesced metadata reads without timing out git mutations. */
+export const runMetadataGit: GitRun = (cwd, args) => runGit(cwd, args, 30_000);
 
 /** One row of `git worktree list --porcelain`. */
 export interface WorktreeEntry {
