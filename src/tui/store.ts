@@ -53,7 +53,6 @@ import {
   NEEDS_YOU_GROUP_KEY,
   getGroupKey,
   groupSessions,
-  headerGroupKeys,
   sortGroups,
   VALID_GROUP_BY,
   DEFAULT_GROUP_BY,
@@ -1519,6 +1518,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     );
   }
 
+  /** Include waiting-only home groups even while their headers are absent. */
+  function orderedGroupKeys(): string[] {
+    return sortGroups(
+      groupSessions(filteredSessions(), state.groupBy),
+      pinnedGroups(),
+      state.searchQuery.trim().length > 0,
+    ).map((group) => group.key);
+  }
+
   /** A waiting-only group is still active even while its header is absent. */
   function persistCollapsedGroups(collapsed: Set<string>) {
     const activeKeys = activeGroupKeys();
@@ -1954,6 +1962,21 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     setError(error: string | null) {
       setState("error", error);
+    },
+
+    showGroupKillDialog(groupKey: string) {
+      // The attention band spans repositories; its members are preview data,
+      // never a bulk-kill target. Individual rows remain killable.
+      if (groupKey === NEEDS_YOU_GROUP_KEY) return;
+      const header = flatItems().find(
+        (item) => item.type === "header" && item.groupKey === groupKey,
+      );
+      if (header?.type !== "header" || header.members.length === 0) return;
+      this.showConfirmDialog(
+        null,
+        "kill-group",
+        header.members.map((fs) => fs.session.id),
+      );
     },
 
     showConfirmDialog(
@@ -2651,7 +2674,9 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       // Waiting rows remain visible outside the collapsed groups.
       if (state.selectedSessionId && selectedSession()?.status !== "waiting") {
         setState("selectedSessionId", null);
-        const firstHeader = items.find((i) => i.type === "header");
+        const firstHeader = items.find(
+          (i) => i.type === "header" && i.groupKey !== NEEDS_YOU_GROUP_KEY,
+        );
         if (firstHeader?.type === "header") {
           setSelectedHeaderKey(firstHeader.groupKey);
         }
@@ -2714,7 +2739,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     moveGroup(groupKey: string, direction: -1 | 1, sessionId?: string) {
       if (state.groupBy === "none") return;
 
-      const groupOrder = headerGroupKeys(flatItems());
+      const groupOrder = orderedGroupKeys();
       const idx = groupOrder.indexOf(groupKey);
       const targetIdx = idx + direction;
       if (idx === -1 || targetIdx < 0 || targetIdx >= groupOrder.length) return;
@@ -2739,7 +2764,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     ) {
       if (state.groupBy === "none") return;
 
-      const groupOrder = headerGroupKeys(flatItems());
+      const groupOrder = orderedGroupKeys();
       const idx = groupOrder.indexOf(groupKey);
       if (idx === -1) return;
 

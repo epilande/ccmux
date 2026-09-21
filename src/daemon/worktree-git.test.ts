@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  spyOn,
+} from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -55,6 +63,37 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
+});
+
+describe("runGit deadlines", () => {
+  it.each([false, true])(
+    "bounds hung reads even if the process exited: %s",
+    async (exited) => {
+      const kill = mock(() => {});
+      const output = new ReadableStream<Uint8Array>();
+      const error = new ReadableStream<Uint8Array>();
+      const spawn = spyOn(Bun, "spawn").mockImplementation((() => ({
+        stdout: output,
+        stderr: error,
+        exited: exited ? Promise.resolve(0) : new Promise<number>(() => {}),
+        kill,
+      })) as unknown as typeof Bun.spawn);
+      try {
+        expect(
+          await runGit(root, ["worktree", "list", "--porcelain"], 10),
+        ).toEqual({
+          exitCode: 124,
+          stdout: "",
+          stderr: "git timed out after 10ms",
+        });
+        expect(kill).toHaveBeenCalledWith("SIGKILL");
+      } finally {
+        spawn.mockRestore();
+      }
+      // A later call is independent of the timed-out read.
+      expect((await runGit(root, ["--version"])).exitCode).toBe(0);
+    },
+  );
 });
 
 describe("parseUpstreamTrack", () => {

@@ -28,6 +28,7 @@ import {
   readSymlinkDirectories,
   readUpstreamStates,
   runGit,
+  runMetadataGit,
   type GitRun,
   type UpstreamState,
 } from "./worktree-git";
@@ -106,7 +107,7 @@ export interface WorktreeCountsResponse {
 /** Header facts need only metadata, never dirty state or upstream scans. */
 export async function countRepoWorktrees(
   repoRoot: string,
-  git: GitRun = runGit,
+  git: GitRun = runMetadataGit,
 ): Promise<WorktreeCount | null> {
   const entries = await listWorktrees(repoRoot, git);
   const main = entries.find((entry) => entry.isMain);

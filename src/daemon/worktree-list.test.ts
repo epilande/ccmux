@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  spyOn,
+} from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -82,6 +90,39 @@ afterEach(() => {
 });
 
 describe("countRepoWorktrees", () => {
+  it("times out a stuck default metadata read and allows a later retry", async () => {
+    const repo = await makeRepo("counts-timeout");
+    const kill = mock(() => {});
+    const spawn = spyOn(Bun, "spawn").mockImplementation((() => ({
+      stdout: new ReadableStream<Uint8Array>(),
+      stderr: new ReadableStream<Uint8Array>(),
+      exited: new Promise<number>(() => {}),
+      kill,
+    })) as unknown as typeof Bun.spawn);
+    const originalSetTimeout = globalThis.setTimeout;
+    const deadlines: number[] = [];
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(((
+      callback: () => void,
+      ms: number,
+    ) => {
+      deadlines.push(ms);
+      return originalSetTimeout(callback, ms === 30_000 ? 5 : ms);
+    }) as typeof setTimeout);
+    try {
+      expect(await countRepoWorktrees(repo)).toBeNull();
+      expect(kill).toHaveBeenCalledWith("SIGKILL");
+      expect(deadlines).toContain(30_000);
+    } finally {
+      timer.mockRestore();
+      spawn.mockRestore();
+    }
+    expect(await countRepoWorktrees(repo)).toEqual({
+      repoRoot: normalizePath(repo),
+      hasMain: true,
+      linked: 0,
+    });
+  });
+
   it("counts present checkouts using only worktree metadata", async () => {
     const repo = await makeRepo("counts");
     await addWorktree(repo, "live");

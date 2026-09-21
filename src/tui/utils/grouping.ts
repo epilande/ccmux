@@ -223,15 +223,6 @@ export function groupRepoRoot(
 
 export const NEEDS_YOU_GROUP_KEY = "\0needs-you";
 
-/** Extract group keys from the header items in a flat item list */
-export function headerGroupKeys(items: FlatItem[]): string[] {
-  return items.flatMap((i) =>
-    i.type === "header" && i.groupKey !== NEEDS_YOU_GROUP_KEY
-      ? [i.groupKey]
-      : [],
-  );
-}
-
 /**
  * Sort groups: pinned groups first (in pinned order), then unpinned
  * groups sorted alphabetically.

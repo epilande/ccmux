@@ -115,7 +115,12 @@ import type {
   PromptDisplay,
   Preferences,
 } from "../lib/preferences";
-import type { FlatItem, GroupBy } from "./utils/grouping";
+import {
+  getGroupKey,
+  NEEDS_YOU_GROUP_KEY,
+  type FlatItem,
+  type GroupBy,
+} from "./utils/grouping";
 import {
   createSidebarWidthPersister,
   WIDTH_SETTLE_MS,
@@ -1387,11 +1392,8 @@ export function App(props: AppProps) {
   function groupContextMenuKill() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
-    const ids = store.selectedGroupSessions().map((s) => s.id);
     store.actions.hideGroupContextMenu();
-    if (ids.length > 0) {
-      store.actions.showConfirmDialog(null, "kill-group", ids);
-    }
+    store.actions.showGroupKillDialog(cm.groupKey);
   }
 
   /**
@@ -2165,7 +2167,7 @@ export function App(props: AppProps) {
   function groupMenuItems(): ContextMenuItem[] {
     const cm = store.state.groupContextMenu;
     const isCollapsed = cm ? store.collapsedGroups().has(cm.groupKey) : false;
-    return [
+    const items: ContextMenuItem[] = [
       {
         // One id for both labels: it is one action whose name reflects the
         // group's current state, and a highlight must not drop off it because
@@ -2212,6 +2214,9 @@ export function App(props: AppProps) {
         action: groupContextMenuKill,
       },
     ];
+    return cm?.groupKey === NEEDS_YOU_GROUP_KEY
+      ? items.filter((item) => item.id !== "kill-group")
+      : items;
   }
 
   /** Kill a normal session, but cancel an invoke-driven row cleanly
@@ -3490,8 +3495,13 @@ export function App(props: AppProps) {
   /** Extract group context from the selected item for group move operations */
   const getGroupMoveContext = (item: FlatItem | null) => {
     if (!item?.groupKey) return null;
+    if (item.type === "header" && item.groupKey === NEEDS_YOU_GROUP_KEY)
+      return null;
     return {
-      groupKey: item.groupKey,
+      groupKey:
+        item.type === "session"
+          ? getGroupKey(item.filteredSession.session, store.state.groupBy)
+          : item.groupKey,
       sessionId:
         item.type === "session" ? item.filteredSession.session.id : undefined,
     };
@@ -3796,8 +3806,9 @@ export function App(props: AppProps) {
           if (sessionToKill) {
             store.actions.showConfirmDialog(sessionToKill.id, "kill");
           } else if (store.selectedGroupHeader()) {
-            const ids = store.selectedGroupSessions().map((s) => s.id);
-            store.actions.showConfirmDialog(null, "kill-group", ids);
+            store.actions.showGroupKillDialog(
+              store.selectedGroupHeader()!.groupKey,
+            );
           }
         }
         event.preventDefault();

@@ -1234,6 +1234,49 @@ describe("App sidebar mode", () => {
   });
 });
 
+describe("App waiting-row group movement", () => {
+  for (const hasSibling of [false, true]) {
+    it.each([
+      ["J", ["alpha", "charlie", "beta"]],
+      ["K", ["beta", "alpha"]],
+      ["<", ["beta", "alpha"]],
+      [">", ["alpha", "charlie", "beta"]],
+    ] as const)(
+      `%s moves the original group (visible sibling: ${hasSibling})`,
+      async (key, pins) => {
+        await renderApp(120, 24, { groupBy: "project" });
+        sseCallbacks!.onInit(
+          [
+            mockEnrichedSession({ id: "a", project: "alpha" }),
+            mockEnrichedSession({
+              id: "b",
+              project: "beta",
+              status: "waiting",
+            }),
+            mockEnrichedSession({ id: "c", project: "charlie" }),
+            ...(hasSibling
+              ? [mockEnrichedSession({ id: "b2", project: "beta" })]
+              : []),
+          ],
+          null,
+        );
+        await setup.renderOnce();
+        for (const press of ["g", "g", "j", key]) {
+          setup.mockInput.pressKey(press);
+          await setup.renderOnce();
+        }
+        await Bun.sleep(350);
+        expect(uiStateWrites).toContainEqual({ pinnedGroups: [...pins] });
+        // Cursor stays on the waiting session: x still names a single session.
+        setup.mockInput.pressKey("x");
+        await setup.renderOnce();
+        expect(setup.captureCharFrame()).toContain("Kill Session?");
+        expect(setup.captureCharFrame()).not.toContain("Kill Group?");
+      },
+    );
+  }
+});
+
 describe("App kill/restart dispatch routing", () => {
   // Capture the daemon URL each action fetches. The pure killActionPath /
   // restartActionPath helpers are unit-tested; this covers the App wiring that
@@ -1430,6 +1473,90 @@ describe("App kill/restart dispatch routing", () => {
       expect(
         calls.some((c) => c.url.includes("/sessions/claude_sess/kill")),
       ).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it("refuses band bulk-kill after collapse-all but still kills an individual waiting row", async () => {
+    const { calls, restore } = captureFetch();
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "a",
+            project: "alpha",
+            status: "waiting",
+            tmuxPane: "%1",
+          }),
+          mockEnrichedSession({
+            id: "b",
+            project: "beta",
+            status: "waiting",
+            tmuxPane: "%2",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      for (const key of ["g", "g", "z", "m", "x"]) {
+        setup.mockInput.pressKey(key);
+        await setup.renderOnce();
+      }
+      expect(setup.captureCharFrame()).not.toContain("Kill Group?");
+      expect(calls.some((c) => c.url.endsWith("/kill"))).toBe(false);
+      setup.mockInput.pressKey("m");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Kill group");
+      await deliverEscape(setup.renderer);
+      await setup.renderOnce();
+      for (const key of ["j", "x"]) {
+        setup.mockInput.pressKey(key);
+        await setup.renderOnce();
+      }
+      expect(setup.captureCharFrame()).toContain("Kill Session?");
+      setup.mockInput.pressKey("y");
+      await setup.renderOnce();
+      expect(
+        calls
+          .filter((c) => c.url.endsWith("/kill"))
+          .map((c) => c.url.split("/sessions/")[1]),
+      ).toEqual(["a/kill"]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("collapse-all then x targets a real group instead of waiting sessions across repos", async () => {
+    const { calls, restore } = captureFetch();
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({ id: "a", project: "alpha", status: "waiting" }),
+          mockEnrichedSession({ id: "b", project: "beta", status: "working" }),
+          mockEnrichedSession({
+            id: "c",
+            project: "charlie",
+            status: "waiting",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      for (const key of ["G", "z", "m", "x"]) {
+        setup.mockInput.pressKey(key);
+        await setup.renderOnce();
+      }
+      expect(setup.captureCharFrame()).toContain("Kill Group?");
+      setup.mockInput.pressKey("y");
+      await setup.renderOnce();
+      expect(
+        calls
+          .filter((c) => c.url.endsWith("/kill"))
+          .map((c) => c.url.split("/sessions/")[1]),
+      ).toEqual(["b/kill"]);
     } finally {
       restore();
     }
