@@ -2711,8 +2711,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       const keys = new Set(headerGroupKeys(items));
       setCollapsedGroups(keys);
       persistCollapsedGroups(keys);
-      // Select the first header if a session was selected
-      if (state.selectedSessionId) {
+      // Waiting rows remain visible outside the collapsed groups.
+      if (state.selectedSessionId && selectedSession()?.status !== "waiting") {
         setState("selectedSessionId", null);
         const firstHeader = items.find((i) => i.type === "header");
         if (firstHeader?.type === "header") {
