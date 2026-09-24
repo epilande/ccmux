@@ -63,7 +63,7 @@ describe("rows redesign", () => {
         ["alpha"],
       );
       expect(items[0]).toMatchObject({
-        label: "needs you",
+        label: "needs attention",
         count: 2,
         collapsed: false,
       });
@@ -100,7 +100,7 @@ describe("rows redesign", () => {
           : item.filteredSession.session.id,
       ),
     ).toEqual([
-      "header:needs you:1",
+      "header:needs attention:1",
       "wait",
       `header:${SESSIONS_GROUP_LABEL}:2`,
       "idle",
@@ -174,13 +174,13 @@ describe("rows redesign", () => {
       );
       await setup.renderOnce();
       const lines = setup.captureCharFrame().split("\n");
-      const band = lines.findIndex((line) => line.includes("needs you (1)"));
+      const band = lines.findIndex((line) => line.includes("needs attention (1)"));
       const rest = lines.findIndex((line) => line.includes("sessions (2)"));
       expect(band).toBeGreaterThanOrEqual(0);
       expect(rest).toBeGreaterThan(band);
       // Same header shape as the band, with the divider every later header gets.
       expect(lines[rest]!.indexOf("sessions")).toBe(
-        lines[band]!.indexOf("needs you"),
+        lines[band]!.indexOf("needs attention"),
       );
       expect(lines[rest - 1]).toContain("───");
     });
@@ -288,7 +288,7 @@ describe("rows redesign", () => {
       );
       await setup.renderOnce();
       let frame = setup.captureCharFrame();
-      expect(frame).toContain("needs you (1)");
+      expect(frame).toContain("needs attention (1)");
       expect(frame).toContain("alpha:topic");
       expect(frame).toContain("dev:1.2");
       expect(frame).toContain("alpha (1)");
@@ -303,7 +303,7 @@ describe("rows redesign", () => {
       ]);
       await setup.renderOnce();
       frame = setup.captureCharFrame();
-      expect(frame).not.toContain("needs you");
+      expect(frame).not.toContain("needs attention");
       expect(frame).toContain("alpha (2)");
       expect(frame).toContain("alpha:main");
     });
@@ -453,7 +453,7 @@ describe("rows redesign", () => {
     }
     expect(
       groupWorktreeFacts(
-        { ...header, groupKey: NEEDS_YOU_GROUP_KEY, label: "needs you" },
+        { ...header, groupKey: NEEDS_YOU_GROUP_KEY, label: "needs attention" },
         [repo],
       ),
     ).toBeUndefined();

@@ -2687,7 +2687,7 @@ describe("store", () => {
         store.actions.moveGroupDown(keys[1]!, "beta");
         expect(store.pinnedGroups()).toEqual([keys[0], keys[2], keys[1]]);
         expect(store.selectedSession()?.id).toBe("beta");
-        expect(headerLabels(store.flatItems())).toEqual(["needs you"]);
+        expect(headerLabels(store.flatItems())).toEqual(["needs attention"]);
         await waitForDebounce();
         expect(persisted).toContainEqual({
           pinnedGroups: [keys[0], keys[2], keys[1]],
@@ -2810,7 +2810,7 @@ describe("store", () => {
       const headers = store.flatItems().filter((i) => i.type === "header");
       // The band precedes alphabetical groups; beta has no rows left.
       expect(headers.map((header) => header.label)).toEqual([
-        "needs you",
+        "needs attention",
         "alpha",
       ]);
     });
