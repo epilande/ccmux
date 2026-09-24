@@ -495,7 +495,7 @@ verified. Adding another is one config line once you have checked it yourself
 
 ### Views and Worktrees
 
-The picker starts with **Sessions · Worktrees · Start** on its first line. <kbd>h</kbd>/<kbd>l</kbd> cycle views; <kbd>s</kbd> switches between all repos and the cursor's repo. <kbd>W</kbd> and <kbd>N</kbd> jump to Worktrees or Start already narrowed. The sidebar keeps compact overlays for those shortcuts.
+The picker starts with **Sessions · Worktrees · Start** on its first line. <kbd>h</kbd>/<kbd>l</kbd> cycle views; <kbd>s</kbd> switches between all repos and the cursor's repo. <kbd>W</kbd> and <kbd>N</kbd> jump to Worktrees or Start already narrowed. The sidebar keeps compact overlays for those shortcuts. The right end of that line carries the scope, plus a few signals that appear only when something needs noticing: `● reconnecting` when the daemon connection drops, `▲ degraded` when daemon scans keep failing, `N invoking` while `ccmux invoke` workers run, and `active` while <kbd>f</kbd> hides idle sessions (the Sessions count then reads `n/total`, as it does under a search). Narrow terminals drop the scope first; the connection and degraded marks are never dropped.
 
 Worktrees shows one line per checkout: its name and branch, PR or removal reason, dirty counts, and attached agents. <kbd>Enter</kbd> goes to its agent, or opens a new-session dialog there. <kbd>d</kbd> reviews uncommitted work; <kbd>D</kbd> reviews the branch against its base. <kbd>y</kbd> copies the path; <kbd>o</kbd> opens its PR on GitHub.
 
@@ -611,7 +611,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)                                                                                    |
 | Move group top/bottom | <kbd><</kbd> / <kbd>></kbd>                                                        | Pin group to top / bottom                                                                                              |
 | Collapse/expand all   | <kbd>z</kbd><kbd>m</kbd> / <kbd>z</kbd><kbd>r</kbd> or <kbd>-</kbd> / <kbd>=</kbd> | Collapse or expand all groups                                                                                          |
-| Hide idle             | <kbd>f</kbd>                                                                       | Toggle hiding idle sessions; the `needs you` band stays visible                                                        |
+| Hide idle             | <kbd>f</kbd>                                                                       | Toggle hiding idle sessions (the strip shows `n/total` and `active`); the `needs you` band stays visible               |
 | Cycle prompt          | <kbd>p</kbd>                                                                       | Prompt display for the `summary`/`prompt` cell: inline → own row → off                                                 |
 | Cycle group-by        | <kbd>b</kbd>                                                                       | Cycle through group-by modes                                                                                           |
 | Help                  | <kbd>?</kbd>                                                                       | Scroll the action registry's keyboard reference                                                                        |
@@ -750,9 +750,9 @@ The `project` cell keeps the checkout path and branch in every grouping, includi
 
 Status badges keep completion, invoke success/failure/cancellation, background agents, and subagent activity distinct. `iconStyle` and the `status` column's `icon`, `short`, and `full` modes remain supported; defaults expand with the available width. Attention reasons sit beside the task text, so a pending permission does not replace the summary or search match.
 
-Waiting sessions move into a pinned `needs you` band above the groups, oldest wait first. They appear once, retain repo and tmux session identity, and return to their group when the wait ends. The band disappears when empty and stays expanded through collapse-all. Search still filters sessions; `f` never removes a waiting row. Each header counts its own remaining rows.
+Waiting sessions move into a pinned `needs you` band above the groups, oldest wait first. They appear once, retain repo and tmux session identity, and return to their group when the wait ends. The band disappears when empty and stays expanded through collapse-all. With grouping off, a `sessions` header ends the band so the rows below it do not read as waiting. Search still filters sessions; `f` never removes a waiting row. Each header counts its own remaining rows.
 
-Project headers that unambiguously identify one repo show `main + N worktrees`, based only on the local worktree list; a repo with only its main checkout shows nothing. Facts are omitted when the complete phrase cannot fit. Cwd/tmux groups, mixed-repo headers, and the attention band have no repo facts. Collapsed activity counts take priority over optional facts when space is tight. These read-only counts refresh on opening, reconnecting (`R`), or changing the displayed repo set.
+Project headers that unambiguously identify one repo show `main + N worktrees`, based only on the local worktree list; a repo with only its main checkout shows nothing. Facts are omitted when the complete phrase cannot fit. Cwd/tmux groups, mixed-repo headers, and the attention band have no repo facts. Collapsed activity counts take priority over optional facts when space is tight. These read-only counts come from the same daemon cache as the strip counts, refreshed on a timer and with <kbd>R</kbd>; a refresh that fails keeps the previous count, marked `~`.
 
 #### Column header
 

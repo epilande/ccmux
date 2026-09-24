@@ -103,7 +103,6 @@ describe("SessionList shared repository facts", () => {
             repoFacts={data()}
             selectedIndex={0}
             previewWidth={30}
-            connectionState="connected"
           />
         </TickContext.Provider>
       ),
@@ -133,7 +132,6 @@ describe("SessionList shared repository facts", () => {
             repoFacts={facts}
             selectedIndex={0}
             previewWidth={30}
-            connectionState="connected"
           />
         </TickContext.Provider>
       ),

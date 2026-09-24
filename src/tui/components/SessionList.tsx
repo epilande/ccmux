@@ -57,7 +57,6 @@ interface SessionListProps {
   breakpoints?: BreakpointConfig;
   dimmed?: boolean;
   ageFadeAfter?: number;
-  connectionState?: string;
   sidebar?: boolean;
   /**
    * Draw the column-header line above the rows. The list still withholds it

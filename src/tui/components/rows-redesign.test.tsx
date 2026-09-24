@@ -8,7 +8,10 @@ import { GroupHeader } from "./GroupHeader";
 import { TickContext, createTUIStore } from "../store";
 import {
   buildFlatItems,
+  getSessionIndex,
   NEEDS_YOU_GROUP_KEY,
+  SESSIONS_GROUP_KEY,
+  SESSIONS_GROUP_LABEL,
   type FilteredSession,
 } from "../utils/grouping";
 import { groupWorktreeFacts } from "./session-columns";
@@ -76,6 +79,113 @@ describe("rows redesign", () => {
       );
       if (groupBy !== "none")
         expect(items.filter((item) => item.type === "header")[1].count).toBe(1);
+    });
+  }
+
+  it("ends the band with a sessions header only in a flat list with rows after it", () => {
+    const flat = buildFlatItems(
+      [
+        make("idle"),
+        make("wait", { status: "waiting" }),
+        make("work", { status: "working" }),
+      ],
+      "none",
+      new Set(),
+      false,
+    );
+    expect(
+      flat.map((item) =>
+        item.type === "header"
+          ? `header:${item.label}:${item.count}`
+          : item.filteredSession.session.id,
+      ),
+    ).toEqual([
+      "header:needs you:1",
+      "wait",
+      `header:${SESSIONS_GROUP_LABEL}:2`,
+      "idle",
+      "work",
+    ]);
+    expect(flat[2]).toMatchObject({
+      groupKey: SESSIONS_GROUP_KEY,
+      collapsed: false,
+    });
+    // Rows after it stay ungrouped, and 1-9 numbering still counts only rows.
+    expect(flat[3]!.groupKey).toBe("");
+    expect([1, 3, 4].map((i) => getSessionIndex(flat, i))).toEqual([0, 1, 2]);
+
+    // No band: the flat list is exactly the rows, as before the band existed.
+    const noBand = buildFlatItems(
+      [make("idle"), make("work", { status: "working" })],
+      "none",
+      new Set(),
+      false,
+    );
+    expect(noBand.every((item) => item.type === "session")).toBe(true);
+    // Nothing after the band: no header to end it.
+    const onlyBand = buildFlatItems(
+      [make("wait", { status: "waiting" })],
+      "none",
+      new Set(),
+      false,
+    );
+    expect(onlyBand.map((item) => item.groupKey)).toEqual([
+      NEEDS_YOU_GROUP_KEY,
+      NEEDS_YOU_GROUP_KEY,
+    ]);
+    // Grouped modes: the next real group header already ends the band.
+    for (const groupBy of ["project", "cwd", "session", "window"] as GroupBy[])
+      expect(
+        buildFlatItems(
+          [make("idle"), make("wait", { status: "waiting" })],
+          groupBy,
+          new Set(),
+          false,
+        ).some((item) => item.groupKey === SESSIONS_GROUP_KEY),
+      ).toBe(false);
+  });
+
+  for (const [width, height, sidebar] of [
+    [96, 30, false],
+    [30, 30, true],
+  ] as const) {
+    it(`draws the sessions header as a sibling of the band at ${width} columns`, async () => {
+      setup = await testRender(
+        () => (
+          <TickContext.Provider value={{ tick: () => 0 }}>
+            <SessionList
+              items={buildFlatItems(
+                [
+                  make("wait", { status: "waiting" }),
+                  make("work", { status: "working" }),
+                  make("idle"),
+                ],
+                "none",
+                new Set(),
+                false,
+              )}
+              selectedIndex={1}
+              sidebar={sidebar}
+              previewWidth={30}
+            />
+          </TickContext.Provider>
+        ),
+        { width, height },
+      );
+      await setup.renderOnce();
+      const lines = setup.captureCharFrame().split("\n");
+      const band = lines.findIndex((line) => line.includes("needs you (1)"));
+      const rest = lines.findIndex((line) => line.includes("sessions (2)"));
+      expect(band).toBeGreaterThanOrEqual(0);
+      expect(rest).toBeGreaterThan(band);
+      // Same one-line header shape as the band: its own rule, and no divider
+      // row above it (the line before is the band's last row).
+      expect(lines[rest]!.indexOf("sessions")).toBe(
+        lines[band]!.indexOf("needs you"),
+      );
+      expect(lines[rest]).toContain("sessions (2) ───");
+      expect(lines[band]).toContain("needs you (1) ───");
+      expect(lines[rest - 1]).not.toMatch(/^[\s─█]*$/);
     });
   }
 

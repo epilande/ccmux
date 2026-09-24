@@ -2,6 +2,7 @@ import { describe, it, expect, mock } from "bun:test";
 import {
   getGroupKey,
   NEEDS_YOU_GROUP_KEY,
+  SESSIONS_GROUP_KEY,
   type FlatItem,
 } from "./utils/grouping";
 import { mockEnrichedSession } from "./components/test-helpers";
@@ -2618,6 +2619,35 @@ describe("store", () => {
       store.actions.showConfirmDialog(null, "kill-group", ["a"]);
       expect(store.state.confirmMode).toBe(true);
       expect(store.state.confirmSessionIds).toEqual(["a"]);
+    });
+
+    it("makes the flat list's band-ending header inert to group actions", async () => {
+      const persisted: Record<string, unknown>[] = [];
+      const store = createTUIStore({
+        groupBy: "none",
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
+      });
+      store.actions.setSessions([
+        createMockSession({ id: "a", status: "waiting" }),
+        createMockSession({ id: "b", status: "working" }),
+        createMockSession({ id: "c", status: "idle" }),
+      ]);
+      // band header, a, sessions header, b, c
+      store.actions.setSelectedIndex(2);
+      expect(store.selectedGroupHeader()?.groupKey).toBe(SESSIONS_GROUP_KEY);
+      expect(store.selectedGroupSessions().map((s) => s.id)).toEqual([
+        "b",
+        "c",
+      ]);
+      store.actions.showGroupKillDialog(SESSIONS_GROUP_KEY);
+      expect(store.state.confirmMode).toBe(false);
+      store.actions.toggleGroupCollapse(SESSIONS_GROUP_KEY);
+      expect(store.collapsedGroups().size).toBe(0);
+      expect(store.flatItems()).toHaveLength(5);
+      await waitForDebounce();
+      expect(persisted.some((u) => "collapsedGroups" in u)).toBe(false);
     });
 
     it("collapse-all skips the band when leaving a non-waiting row", () => {
