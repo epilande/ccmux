@@ -1422,7 +1422,7 @@ export function App(props: AppProps) {
   }
 
   function selectedRepoRoot(): string | null {
-    // A synthetic header (the `needs you` band, the flat list's `sessions`
+    // A synthetic header (the `needs attention` band, the flat list's `sessions`
     // header) spans repositories, so its first member's repo would be an
     // arbitrary pick: `s`, `W` and `N` from one stay global.
     const header = store.selectedGroupHeader();
