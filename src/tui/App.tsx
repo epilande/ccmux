@@ -117,7 +117,7 @@ import type {
 } from "../lib/preferences";
 import {
   getGroupKey,
-  NEEDS_YOU_GROUP_KEY,
+  isSyntheticGroupKey,
   type FlatItem,
   type GroupBy,
 } from "./utils/grouping";
@@ -2214,7 +2214,7 @@ export function App(props: AppProps) {
         action: groupContextMenuKill,
       },
     ];
-    return cm?.groupKey === NEEDS_YOU_GROUP_KEY
+    return cm && isSyntheticGroupKey(cm.groupKey)
       ? items.filter((item) => item.id !== "kill-group")
       : items;
   }
@@ -3495,7 +3495,7 @@ export function App(props: AppProps) {
   /** Extract group context from the selected item for group move operations */
   const getGroupMoveContext = (item: FlatItem | null) => {
     if (!item?.groupKey) return null;
-    if (item.type === "header" && item.groupKey === NEEDS_YOU_GROUP_KEY)
+    if (item.type === "header" && isSyntheticGroupKey(item.groupKey))
       return null;
     return {
       groupKey:
