@@ -222,10 +222,10 @@ export function groupRepoRoot(
 }
 
 export const NEEDS_YOU_GROUP_KEY = "\0needs-you";
-export const NEEDS_YOU_GROUP_LABEL = "needs you";
+export const NEEDS_YOU_GROUP_LABEL = "needs attention";
 
 /**
- * The header that ENDS the `needs you` band in the flat (`none`) grouping.
+ * The header that ENDS the `needs attention` band in the flat (`none`) grouping.
  * Grouped modes need no such thing because the next real group header already
  * closes the band; a flat list has no next header, so without this every
  * ordinary row reads as a member of the band. Like the band it is synthetic:
