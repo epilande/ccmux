@@ -607,6 +607,52 @@ describe("App", () => {
     expect(setup.captureCharFrame()).toContain("Sessions 2");
   });
 
+  it("carries connection, health, invokes and hide-idle on the view strip", async () => {
+    await renderApp(120, 20);
+    const strip = () => setup.captureCharFrame().split("\n")[0]!;
+    sseCallbacks!.onConnectionStateChange!("connected");
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({ id: "s1", project: "a", cwd: "/a" }),
+        mockEnrichedSession({
+          id: "s2",
+          project: "b",
+          cwd: "/b",
+          status: "working",
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    expect(strip()).toContain("Sessions 2 ");
+    for (const quiet of ["●", "▲", "invoking", "active"])
+      expect(strip()).not.toContain(quiet);
+
+    setup.mockInput.pressKey("f");
+    await setup.renderOnce();
+    expect(strip()).toContain("Sessions 1/2 ");
+    expect(strip()).toContain("active");
+
+    sseCallbacks!.onDaemonHealth!({
+      degraded: true,
+      reason: "ps spawn failed",
+      since: "2024-01-15T12:00:00Z",
+    });
+    sseCallbacks!.onInvocationStarted!({
+      type: "invocation_started",
+      timestamp: "2024-01-15T12:00:00Z",
+      invocationId: "inv_x",
+      agent: "codex",
+      cwd: "/a",
+      startedAt: "2024-01-15T12:00:00Z",
+    });
+    sseCallbacks!.onConnectionStateChange!("reconnecting");
+    await setup.renderOnce();
+    expect(strip()).toContain(
+      "● reconnecting · ▲ degraded · 1 invoking · active",
+    );
+  });
+
   it("flashes pane on Enter selection in persistent picker mode", async () => {
     await renderApp(80, 20, { persistent: true, groupBy: "none" });
     sseCallbacks!.onInit(

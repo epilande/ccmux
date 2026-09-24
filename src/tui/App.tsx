@@ -4072,6 +4072,16 @@ export function App(props: AppProps) {
               view={view()}
               scope={store.state.scope}
               sessions={store.filteredSessions().length}
+              total={
+                store.state.hideIdle ||
+                (store.state.searchMode && store.state.searchQuery)
+                  ? store.sortedSessions().length
+                  : undefined
+              }
+              hideIdle={store.state.hideIdle}
+              connectionState={store.state.connectionState}
+              daemonDegraded={store.state.daemonHealth.degraded}
+              invokeInFlight={store.invocationInFlightCount()}
               facts={repoFacts.data().repos}
               onView={switchMainView}
             />
@@ -4144,7 +4154,6 @@ export function App(props: AppProps) {
             activeSessionId={store.state.activeSessionId}
             columns={store.state.columns}
             ageFadeAfter={store.state.ageFadeAfter}
-            connectionState={store.state.connectionState}
             promptLines={store.state.promptLines}
             // The same "a query is narrowing the list" the flat items are
             // built from, so the block yields exactly when rows carry

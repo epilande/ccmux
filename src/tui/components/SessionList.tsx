@@ -51,7 +51,6 @@ interface SessionListProps {
   breakpoints?: BreakpointConfig;
   dimmed?: boolean;
   ageFadeAfter?: number;
-  connectionState?: string;
   sidebar?: boolean;
   /** Prompt display mode (cycled by the `p` key): inline, own row, or off. */
   promptDisplay?: PromptDisplay;
