@@ -206,6 +206,23 @@ export function groupSessions(
 }
 
 export const NEEDS_YOU_GROUP_KEY = "\0needs-you";
+export const NEEDS_YOU_GROUP_LABEL = "needs you";
+
+/**
+ * The header that ENDS the `needs you` band in the flat (`none`) grouping.
+ * Grouped modes need no such thing because the next real group header already
+ * closes the band; a flat list has no next header, so without this every
+ * ordinary row reads as a member of the band. Like the band it is synthetic:
+ * selectable, but guarded out of every group action (kill, move, collapse).
+ */
+export const SESSIONS_GROUP_KEY = "\0sessions";
+export const SESSIONS_GROUP_LABEL = "sessions";
+
+/** A header ccmux synthesizes rather than one a real group owns. Group actions
+ *  (bulk kill, move, pin, collapse and its persistence) must never reach one. */
+export function isSyntheticGroupKey(key: string): boolean {
+  return key === NEEDS_YOU_GROUP_KEY || key === SESSIONS_GROUP_KEY;
+}
 
 /**
  * Sort groups: pinned groups first (in pinned order), then unpinned
@@ -278,7 +295,7 @@ export function buildFlatItems(
     items.push({
       type: "header",
       groupKey: NEEDS_YOU_GROUP_KEY,
-      label: "needs you",
+      label: NEEDS_YOU_GROUP_LABEL,
       count: waiting.length,
       collapsed: false,
       members: waiting,
@@ -291,6 +308,16 @@ export function buildFlatItems(
       });
   }
   if (groupBy === "none") {
+    if (waiting.length && rest.length) {
+      items.push({
+        type: "header",
+        groupKey: SESSIONS_GROUP_KEY,
+        label: SESSIONS_GROUP_LABEL,
+        count: rest.length,
+        collapsed: false,
+        members: rest,
+      });
+    }
     return [
       ...items,
       ...rest.map(

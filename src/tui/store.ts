@@ -50,7 +50,7 @@ import { isSameServerCached } from "./utils/server-guard";
 import { stripAnsi } from "../lib/strip-ansi";
 import {
   buildFlatItems,
-  NEEDS_YOU_GROUP_KEY,
+  isSyntheticGroupKey,
   getGroupKey,
   groupSessions,
   sortGroups,
@@ -2011,9 +2011,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     showGroupKillDialog(groupKey: string) {
-      // The attention band spans repositories; its members are preview data,
-      // never a bulk-kill target. Individual rows remain killable.
-      if (groupKey === NEEDS_YOU_GROUP_KEY) return;
+      // The attention band spans repositories, and the flat list's `sessions`
+      // header spans every other row; their members are preview data, never a
+      // bulk-kill target. Individual rows remain killable.
+      if (isSyntheticGroupKey(groupKey)) return;
       const header = flatItems().find(
         (item) => item.type === "header" && item.groupKey === groupKey,
       );
@@ -2710,7 +2711,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     toggleGroupCollapse(groupKey: string) {
-      if (groupKey === NEEDS_YOU_GROUP_KEY) return;
+      if (isSyntheticGroupKey(groupKey)) return;
       setCollapsedGroups((prev) => {
         const next = new Set(prev);
         if (next.has(groupKey)) {
@@ -2746,7 +2747,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       if (state.selectedSessionId && selectedSession()?.status !== "waiting") {
         setState("selectedSessionId", null);
         const firstHeader = items.find(
-          (i) => i.type === "header" && i.groupKey !== NEEDS_YOU_GROUP_KEY,
+          (i) => i.type === "header" && !isSyntheticGroupKey(i.groupKey),
         );
         if (firstHeader?.type === "header") {
           setSelectedHeaderKey(firstHeader.groupKey);

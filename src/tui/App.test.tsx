@@ -1580,6 +1580,91 @@ describe("App kill/restart dispatch routing", () => {
     }
   });
 
+  it("keeps the flat list's sessions header inert: x, the menu, and Enter reach no group action", async () => {
+    const { calls, restore } = captureFetch();
+    try {
+      await renderApp(120, 24, { groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({ id: "a", status: "waiting", tmuxPane: "%1" }),
+          mockEnrichedSession({ id: "b", status: "working", tmuxPane: "%2" }),
+          mockEnrichedSession({ id: "c", status: "idle", tmuxPane: "%3" }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("sessions (2)");
+      // band header, a, sessions header
+      for (const key of ["g", "g", "j", "j", "x"]) {
+        setup.mockInput.pressKey(key);
+        await setup.renderOnce();
+      }
+      let frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Kill Group?");
+      expect(frame).not.toContain("Kill Session?");
+      expect(frame).not.toContain("Kill All");
+      setup.mockInput.pressKey("m");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Kill group");
+      await deliverEscape(setup.renderer);
+      await setup.renderOnce();
+      // Enter is the header's collapse verb (space marks its rows here).
+      setup.mockInput.pressEnter();
+      await setup.renderOnce();
+      frame = setup.captureCharFrame();
+      expect(frame).toContain("sessions (2)");
+      // Still expanded and still numbered from the band on.
+      expect(frame).toMatch(/ 2 \S working/);
+      await Bun.sleep(350);
+      expect(
+        uiStateWrites.some(
+          (u) => typeof u === "object" && u !== null && "collapsedGroups" in u,
+        ),
+      ).toBe(false);
+      expect(calls.some((c) => c.url.endsWith("/kill"))).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps s on a synthetic header global instead of scoping to its first member's repo", async () => {
+    const { restore } = captureFetch();
+    try {
+      await renderApp(120, 24, { groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "a",
+            status: "waiting",
+            tmuxPane: "%1",
+            mainRepoRoot: "/code/alpha",
+          }),
+          mockEnrichedSession({
+            id: "b",
+            status: "working",
+            tmuxPane: "%2",
+            mainRepoRoot: "/code/beta",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      // The band header, then the `sessions` header below its one row.
+      for (const key of ["g", "g", "s", "j", "j", "s"]) {
+        setup.mockInput.pressKey(key);
+        await setup.renderOnce();
+        expect(setup.captureCharFrame()).toContain("all repos");
+      }
+      // A real row still scopes to its own repo.
+      setup.mockInput.pressKey("j");
+      setup.mockInput.pressKey("s");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("all repos");
+    } finally {
+      restore();
+    }
+  });
+
   it("collapse-all then x targets a real group instead of waiting sessions across repos", async () => {
     const { calls, restore } = captureFetch();
     try {
@@ -7697,14 +7782,19 @@ describe("App hand off to", () => {
     });
     try {
       await renderRows([{}, { status: "waiting" }]);
-      // Skip the band header and target row to keep s1 as the source.
+      // Skip the band header, the target row, and the `sessions` header that
+      // ends the band, to keep s1 as the source.
+      await press("j");
       await press("j");
       await press("j");
       await sendPick();
       const frame = squish(setup.captureCharFrame());
       expect(frame).toContain("Handoffrefused:");
       expect(frame).toContain("Sessions2hasa");
-      expect(frame).toContain("pendingprompt.Ahandoffisneverusedtoanswerone");
+      // Matched per wrapped line: the toast overlays the list, so a row drawn
+      // left of its second line lands between the two halves once squished.
+      expect(frame).toContain("pendingprompt.Ahandoffisnever");
+      expect(frame).toContain("usedtoanswerone");
     } finally {
       restore();
     }

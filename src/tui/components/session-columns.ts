@@ -1,4 +1,4 @@
-import { NEEDS_YOU_GROUP_KEY } from "../utils/grouping";
+import { isSyntheticGroupKey } from "../utils/grouping";
 import type {
   Responsive,
   BreakpointConfig,
@@ -990,7 +990,7 @@ export function groupWorktreeFacts(
   header: Extract<import("../utils/grouping").FlatItem, { type: "header" }>,
   repos: import("../../daemon/worktree-list").WorktreeCount[],
 ): string | undefined {
-  if (!header.repoRoot || header.groupKey === NEEDS_YOU_GROUP_KEY)
+  if (!header.repoRoot || isSyntheticGroupKey(header.groupKey))
     return undefined;
   const roots = new Set(
     header.members.map(
