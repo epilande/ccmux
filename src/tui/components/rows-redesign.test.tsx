@@ -184,7 +184,7 @@ describe("rows redesign", () => {
         lines[band]!.indexOf("needs attention"),
       );
       expect(lines[rest]).toContain("sessions (2) ───");
-      expect(lines[band]).toContain("needs you (1) ───");
+      expect(lines[band]).toContain("needs attention (1) ───");
       expect(lines[rest - 1]).not.toMatch(/^[\s─█]*$/);
     });
   }
